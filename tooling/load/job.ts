@@ -417,7 +417,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
  * The connections a job may hold: the clean-up's four workers and two to spare, what job.db.test.ts runs on. A step
  * asking for more queues rather than being refused by a server the API is also using (run day 5, S167).
  */
-const JOB_CONNECTIONS = 6;
+export const JOB_CONNECTIONS = 6;
 
 export const jobConnection = <T extends object>(connection: T): T & { readonly maxConnections: number } => ({
   ...connection,

@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { STAGE_G_HEAVY_EVERY, STAGE_G_LIGHT_EVERY } from './plan.ts';
-import { cohortKindOf, pooled, stageGKindAt, stageGOrgId } from './stageg-seed.ts';
+import { cohortKindOf, pooled, stageGKindAt, stageGOrgId, stageGSeedWorkers } from './stageg-seed.ts';
 
 describe('stageGKindAt', () => {
   it('makes the first the long chain, about 0.5% heavy, about 2% light and the rest idle', () => {
@@ -80,5 +80,13 @@ describe('cohortKindOf', () => {
     expect(cohortKindOf('heavy', 'neighbours', 1)).toBe('neighbour-stuck');
     expect(cohortKindOf('heavy', 'neighbours', 2)).toBeUndefined();
     expect(cohortKindOf('huge-chain', 'neighbours', 0)).toBeUndefined();
+  });
+});
+
+describe('stageGSeedWorkers', () => {
+  it("leaves one connection of the budget spare: the load job's six give five workers", () => {
+    expect(stageGSeedWorkers()).toBe(5);
+    expect(stageGSeedWorkers(9)).toBe(8);
+    expect(stageGSeedWorkers(1)).toBe(1);
   });
 });

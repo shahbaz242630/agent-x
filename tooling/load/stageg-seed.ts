@@ -9,13 +9,17 @@
 // makes only what is missing; growing a seeded set (100, then 1,000, 3,000...)
 // is the same call with a larger count. An idle organisation is made in one
 // transaction, so it is there whole or not at all; an active one takes several,
-// and one found half-made is reported (`incomplete`), never made twice.
+// and one found half-made is reported (`incomplete`), never made twice: finishing
+// it would mean knowing which of world()'s dozen transactions it stopped after.
+// The long chain is the exception, its refreshes counted, so a re-run adds only
+// the missing ones.
 //
 // The active cohort (stageGCohort) is read back from the database by the same
 // IDs, never sent in a request: only its agents get keys (seed.ts's rekeyed).
 import { createHash } from 'node:crypto';
 
 import { withSignedStates } from '../../packages/core/src/modules/audit/index.ts';
+import { sourceOf, updateFromPartner } from '../../packages/core/src/modules/funding-sources/index.ts';
 import { addMembership, userForSubject } from '../../packages/core/src/modules/identity/index.ts';
 import { setPolicy } from '../../packages/core/src/modules/mandates/index.ts';
 import { createOrganization } from '../../packages/core/src/modules/organizations/index.ts';
@@ -36,7 +40,15 @@ import {
   STAGE_G_HUGE_CHAIN_EVENTS,
   STAGE_G_LIGHT_EVERY,
 } from './plan.ts';
+import { JOB_CONNECTIONS } from './job.ts';
 import { AMPLE_TERMS } from './seed.ts';
+
+/**
+ * The seed's workers for a connection budget: each worker holds one connection
+ * at a time, and one is left for the pool's other reads. The default is the
+ * load job's budget (job.ts), so on Azure the seed takes no more than any step.
+ */
+export const stageGSeedWorkers = (connections: number = JOB_CONNECTIONS): number => Math.max(1, connections - 1);
 
 /** What an organisation of the seed is: most idle; a few light-active, fewer heavy; the first has the long chain. */
 export type StageGOrgKind = 'idle' | 'light' | 'heavy' | 'huge-chain';
@@ -100,8 +112,24 @@ export interface StageGSeeded {
   readonly seconds: Readonly<Record<StageGOrgKind, number>>;
   /** Active organisations found half-made (an execution stopped inside one): left out of the cohort. */
   readonly incomplete: readonly number[];
+  /** The long chain's refreshes added to a chain an earlier execution left short. */
+  readonly refreshesAdded: number;
   readonly elapsedSeconds: number;
 }
+
+/** The long chain's refreshes so far: one count, through its wall. */
+const refreshesOf = (database: Database<MandateWorldTables>, orgId: string): Promise<number> =>
+  withTenant(database, orgId, async (tx) =>
+    Number(
+      (
+        await tx
+          .selectFrom('audit.events')
+          .select((eb) => eb.fn.countAll<string>().as('n'))
+          .where('action', '=', 'funding_source.partner_changed')
+          .executeTakeFirstOrThrow()
+      ).n,
+    ),
+  );
 
 const byKind = (): Record<StageGOrgKind, number> => ({ idle: 0, light: 0, heavy: 0, 'huge-chain': 0 });
 
@@ -226,15 +254,41 @@ function makers(options: StageGSeedOptions) {
     for (let at = 1; at < agentsOfKind(kind); at += 1) {
       await shared.inForce(registry, await shared.anotherAgent(w), AMPLE_TERMS);
     }
-    if (kind !== 'huge-chain') return;
-    // After the link's own time, a millisecond apart: each answer newer than the last, so each is kept.
-    const linked = w.state.statusChangedAt.getTime();
-    for (let at = 1; at <= hugeChainEvents; at += 1) {
-      await shared.partnerSays(w, { statusChangedAt: new Date(linked + at) });
+    if (kind === 'huge-chain') await refreshed(orgId, w.source, hugeChainEvents);
+  }
+
+  /**
+   * The source refreshed from the partner `times` times, each a signed change
+   * of its own: the answer as held, a millisecond newer than the last, so each
+   * is kept, and a re-run carries on from wherever the chain stopped.
+   */
+  async function refreshed(orgId: string, sourceId: string, times: number): Promise<void> {
+    const key = { orgId, id: sourceId };
+    for (let at = 0; at < times; at += 1) {
+      await withSignedStates(database, orgId, services, async (tx, states) => {
+        const read = await sourceOf(tx, states, key, 'change');
+        if (read.outcome !== 'found') throw new Error(`The long chain's funding source was ${read.outcome}.`);
+        const { source } = read;
+        await updateFromPartner(tx, states, key, read, {
+          state: {
+            organizationId: orgId,
+            externalRef: source.externalRef,
+            accountConsentId: source.accountConsentId,
+            replacesConsentId: source.replacesConsentId,
+            availability: source.availability,
+            consentStatus: source.consentStatus,
+            statusChangedAt: new Date(source.partnerChangedAt.getTime() + 1),
+            consentExpiresAt: source.consentExpiresAt,
+            controls: source.controls,
+            summary: { ...source.summary, currency: source.controls.currency },
+          },
+          actor: OPERATOR,
+        });
+      });
     }
   }
 
-  return { idle, active };
+  return { idle, active, refreshed, hugeChainEvents };
 }
 
 /** Whether the organisation is there: read through its own tenant wall, as only it can be. */
@@ -272,23 +326,43 @@ export async function stageGSeed(options: StageGSeedOptions): Promise<StageGSeed
   const seconds = byKind();
   const incomplete: number[] = [];
   let found = 0;
+  let refreshesAdded = 0;
+
+  /** An organisation already there: found when whole, its long chain finished first; otherwise incomplete. */
+  async function settle(index: number, orgId: string, kind: StageGOrgKind): Promise<void> {
+    if (!ACTIVE_KINDS.has(kind)) {
+      found += 1;
+      return;
+    }
+    const rows = await agentsInForce(database, orgId);
+    const [row] = rows;
+    if (row === undefined || rows.length !== agentsOfKind(kind)) {
+      incomplete.push(index);
+      return;
+    }
+    if (kind === 'huge-chain') {
+      const missing = Math.max(0, make.hugeChainEvents - (await refreshesOf(database, orgId)));
+      await make.refreshed(orgId, row.funding_source_id, missing);
+      refreshesAdded += missing;
+    }
+    found += 1;
+  }
+
   const indexes = Array.from({ length: options.orgs }, (_, index) => index);
   await pooled(indexes, options.workers, async (index) => {
     const orgId = stageGOrgId(runId, index);
     const kind = stageGKindAt(index);
     if (await exists(database, orgId)) {
-      const whole = !ACTIVE_KINDS.has(kind) || (await agentsInForce(database, orgId)).length === agentsOfKind(kind);
-      if (whole) found += 1;
-      else incomplete.push(index);
+      await settle(index, orgId, kind);
       return;
     }
     const at = performance.now();
     try {
       await (kind === 'idle' ? make.idle(orgId) : make.active(orgId, kind));
     } catch (error) {
-      // Made by another execution at the same moment: its, not a failure. Anything else is.
+      // Made by another execution at the same moment: judged as any organisation found. Anything else is a failure.
       if (!isUniqueViolation(error) || !(await exists(database, orgId))) throw error;
-      found += 1;
+      await settle(index, orgId, kind);
       return;
     }
     made[kind] += 1;
@@ -300,6 +374,7 @@ export async function stageGSeed(options: StageGSeedOptions): Promise<StageGSeed
     made,
     seconds,
     incomplete: incomplete.toSorted((a, b) => a - b),
+    refreshesAdded,
     elapsedSeconds: (performance.now() - started) / 1000,
   };
 }
@@ -340,15 +415,20 @@ export async function stageGCohort({
   readonly mix: StageGMix;
 }): Promise<CohortAgent[]> {
   const agents: CohortAgent[] = [];
+  const incomplete: number[] = [];
+  // Whole heavy organisations only: a half-made one is never the busy or the stuck one.
   let heavyAt = 0;
   for (let index = 0; index < orgs; index += 1) {
     const kind = stageGKindAt(index);
     const cohortKind = cohortKindOf(kind, mix, heavyAt);
-    if (kind === 'heavy') heavyAt += 1;
     if (cohortKind === undefined) continue;
     const orgId = stageGOrgId(runId, index);
     const rows = await agentsInForce(database, orgId);
-    if (rows.length !== agentsOfKind(kind)) continue;
+    if (rows.length !== agentsOfKind(kind)) {
+      incomplete.push(index);
+      continue;
+    }
+    if (kind === 'heavy') heavyAt += 1;
     for (const row of rows) {
       agents.push({
         kind: cohortKind,
@@ -364,8 +444,12 @@ export async function stageGCohort({
   const needed = mix === 'steady' ? ['ample'] : ['neighbour-calm', 'neighbour-busy', 'neighbour-stuck'];
   const missing = needed.filter((kind) => !sends(kind as SeededAgent['kind']));
   if (missing.length > 0) {
+    const half =
+      incomplete.length === 0
+        ? 'seed more organisations first.'
+        : `organisations ${incomplete.join(', ')} are half-made (an execution stopped inside each) and left out. A re-run can't finish them and their audit chains can't be removed: seed more organisations, so whole ones take their place, or seed under a new run ID.`;
     throw new Error(
-      `The ${mix} cohort of run ${runId}'s first ${String(orgs)} organisations has no ${missing.join(', ')} agent: seed more organisations first.`,
+      `The ${mix} cohort of run ${runId}'s first ${String(orgs)} organisations has no ${missing.join(', ')} agent: ${half}`,
     );
   }
   return agents;

@@ -7,6 +7,7 @@ import { withSignedStates } from '../../packages/core/src/modules/audit/index.ts
 import { createOrganization, OrganizationRefused } from '../../packages/core/src/modules/organizations/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
 import { createDatabase, type Database, withTenant } from '../../packages/platform/src/db/index.ts';
+import type { KeyProvider } from '../../packages/platform/src/keys/index.ts';
 import {
   createTestDatabase,
   type TestDatabase,
@@ -33,8 +34,8 @@ afterAll(async () => {
   await database.drop();
 });
 
-const seeded = (runId: string, orgs: number, workers = 3) =>
-  stageGSeed({ database: app, keyring: keys, runId, orgs, workers, hugeChainEvents: 5 });
+const seeded = (runId: string, orgs: number, workers = 3, hugeChainEvents = 5, keyring: KeyProvider = keys) =>
+  stageGSeed({ database: app, keyring, runId, orgs, workers, hugeChainEvents });
 
 const eventsOf = (orgId: string, action: string) =>
   withTenant(app, orgId, async (tx) =>
@@ -81,7 +82,34 @@ describe('stageGSeed', () => {
     });
   });
 
-  it('counts an organisation another execution made at the same moment as found, never a failure', async () => {
+  it('finishes a long chain an earlier execution stopped short, to the exact length', async () => {
+    await seeded('chain', 1, 1, 3);
+    expect(await eventsOf(stageGOrgId('chain', 0), 'funding_source.partner_changed')).toBe(3);
+    expect(await seeded('chain', 1, 1, 5)).toMatchObject({ found: 1, refreshesAdded: 2, incomplete: [] });
+    expect(await eventsOf(stageGOrgId('chain', 0), 'funding_source.partner_changed')).toBe(5);
+    expect(await seeded('chain', 1, 1, 5)).toMatchObject({ found: 1, refreshesAdded: 0 });
+    expect(await eventsOf(stageGOrgId('chain', 0), 'funding_source.partner_changed')).toBe(5);
+  });
+
+  it('leaves no trace of an idle organisation that failed inside its transaction, and makes it whole on a re-run', async () => {
+    await seeded('idle-fail', 3);
+    // The supplier's contact is the idle organisation's one encryption, after it is founded, joined and capped.
+    const failing = new Proxy(keys, {
+      get: (target, name, receiver) =>
+        name === 'encrypt'
+          ? () => {
+              throw new Error('no encryption key');
+            }
+          : (Reflect.get(target, name, receiver) as unknown),
+    });
+    await expect(seeded('idle-fail', 4, 1, 5, failing)).rejects.toThrow('no encryption key');
+    expect(await eventsOf(stageGOrgId('idle-fail', 3), 'organization.created')).toBe(0);
+    expect(await eventsOf(stageGOrgId('idle-fail', 3), 'membership.created')).toBe(0);
+    expect(await seeded('idle-fail', 4)).toMatchObject({ found: 3, made: { idle: 1 }, incomplete: [] });
+    expect(await eventsOf(stageGOrgId('idle-fail', 3), 'supplier.verify')).toBe(1);
+  });
+
+  it('judges an organisation another execution made at the same moment as any found: here half-made', async () => {
     const orgId = stageGOrgId('race', 0);
     const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
     const { promise: release, resolve: lets } = Promise.withResolvers<undefined>();
@@ -99,7 +127,8 @@ describe('stageGSeed', () => {
       lets(undefined);
       await holder;
     }
-    expect(await seeding).toMatchObject({ found: 1, made: { 'huge-chain': 0 }, incomplete: [] });
+    // The other execution founded it and stopped: no agent, so it is incomplete, never counted found.
+    expect(await seeding).toMatchObject({ found: 0, made: { 'huge-chain': 0 }, incomplete: [0] });
   });
 
   it('reports an active organisation found half-made, and leaves it out of the cohort', async () => {
@@ -107,9 +136,20 @@ describe('stageGSeed', () => {
     const seed = await seeded('half', 3);
     expect(seed).toMatchObject({ found: 0, made: { light: 0, heavy: 1, 'huge-chain': 1 }, incomplete: [2] });
     await expect(stageGCohort({ database: app, runId: 'half', orgs: 3, mix: 'steady' })).rejects.toThrow(
-      "The steady cohort of run half's first 3 organisations has no ample agent: seed more organisations first.",
+      "The steady cohort of run half's first 3 organisations has no ample agent: organisations 2 are half-made (an execution stopped inside each) and left out. A re-run can't finish them and their audit chains can't be removed: seed more organisations, so whole ones take their place, or seed under a new run ID.",
     );
   });
+
+  it(
+    'never makes a half-made heavy organisation the busy one: the next whole one is',
+    { timeout: 120_000 },
+    async () => {
+      await bareOrganisation(stageGOrgId('heavy', 1), 'heavy');
+      expect(await seeded('heavy', 202, 5)).toMatchObject({ made: { heavy: 1 }, incomplete: [1] });
+      const cohort = stageGCohort({ database: app, runId: 'heavy', orgs: 202, mix: 'neighbours' });
+      await expect(cohort).rejects.toThrow('has no neighbour-stuck agent: organisations 1 are half-made');
+    },
+  );
 
   it('throws what failed: a name no organisation may have', async () => {
     await expect(
