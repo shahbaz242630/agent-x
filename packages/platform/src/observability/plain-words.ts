@@ -28,6 +28,12 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'load.stageg_refused': {
+    happened: 'A load test job refused to start, before it changed anything.',
+    broke:
+      'That step of the load test did not run. Usually its database is not a marked throwaway copy, or its request is wrong.',
+    next: 'Read the reason on the line, then fix the copy, its mark or the request and run the step again.',
+  },
   'jobs.not_leading': {
     happened: 'This copy of the API has gone too long without the right to run the background jobs.',
     broke: 'Unless another copy has it, the tamper checks, payment hand-offs and sweeps are not running.',

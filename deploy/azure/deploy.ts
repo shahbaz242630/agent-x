@@ -68,6 +68,7 @@ const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()]
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { deploymentSnapshot, environmentSnapshot, inCopy } from './snapshot.ts';
+import { throwawayHost, throwawayIdOf, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
 
 const ENVIRONMENT = 'staging';
 const REGION = 'uaenorth';
@@ -181,7 +182,11 @@ const LEAST_DISK_GB = 32;
  * staging.apps.bicepparam's load run and the load image's digest (D2c): always
  * set by apps, the run only with --load-run, so a plain apps puts the API back.
  */
-export const LOAD_VARIABLES = { run: 'AGENTX_AZURE_LOAD_RUN', digest: 'AGENTX_AZURE_LOAD_IMAGE_DIGEST' } as const;
+export const LOAD_VARIABLES = {
+  run: 'AGENTX_AZURE_LOAD_RUN',
+  digest: 'AGENTX_AZURE_LOAD_IMAGE_DIGEST',
+  database: 'AGENTX_AZURE_LOAD_DATABASE_HOST',
+} as const;
 
 /** Every variable that carries a secret: the ones the policy check replaces with stand-ins. */
 const SECRET_VARIABLES: ReadonlySet<string> = new Set(Object.values(VAULT_SECRETS).map((secret) => secret.variable));
@@ -209,6 +214,8 @@ export type Request =
       readonly commit: string | undefined;
       readonly keepRunning: boolean;
       readonly loadRun: boolean;
+      /** Stage G's throwaway copy (tooling/load/throwaway.ts), by its server's name: only with `loadRun`. */
+      readonly loadDatabase?: string;
     }
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
@@ -226,32 +233,64 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
   node deploy/azure/deploy.ts secrets --keys
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]]
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
   node deploy/azure/deploy.ts certificates`;
 
 /** `apps`'s options, each at most once, in either order. */
 function parseApps(options: readonly string[]): Request {
-  let commit: string | undefined;
-  let keepRunning = false;
-  let loadRun = false;
+  const asked: AppsAsked = { keepRunning: false, loadRun: false };
   for (let at = 0; at < options.length; at += 1) {
-    const option = options[at];
-    if (option === '--keep-running' && !keepRunning) {
-      keepRunning = true;
-    } else if (option === '--load-run' && !loadRun) {
-      loadRun = true;
-    } else if (option === '--commit' && commit === undefined && COMMIT.test(options[at + 1] ?? '')) {
-      commit = options[at + 1];
-      at += 1;
-    } else {
-      throw new UsageError(
-        'apps takes --keep-running, --load-run, and --commit with one full 40-hex commit, each at most once',
-      );
-    }
+    at += appsOption(asked, options[at], options[at + 1] ?? '');
   }
-  return { command: 'apps', commit, keepRunning, loadRun };
+  const { commit, keepRunning, loadRun, loadDatabase } = asked;
+  if (loadDatabase !== undefined && !loadRun) {
+    throw new UsageError("--load-database is Stage G's load run alone: give --load-run with it");
+  }
+  return { command: 'apps', commit, keepRunning, loadRun, ...(loadDatabase === undefined ? {} : { loadDatabase }) };
+}
+
+/** What `apps` was asked so far. */
+interface AppsAsked {
+  commit?: string;
+  keepRunning: boolean;
+  loadRun: boolean;
+  loadDatabase?: string;
+}
+
+/** One of apps's options taken into `asked`, each at most once: how many words past it were its value. */
+function appsOption(asked: AppsAsked, option: string | undefined, value: string): number {
+  if (option === '--keep-running' && !asked.keepRunning) {
+    asked.keepRunning = true;
+    return 0;
+  }
+  if (option === '--load-run' && !asked.loadRun) {
+    asked.loadRun = true;
+    return 0;
+  }
+  if (option === '--commit' && asked.commit === undefined && COMMIT.test(value)) {
+    asked.commit = value;
+    return 1;
+  }
+  if (option === '--load-database' && asked.loadDatabase === undefined && /^[^-]/.test(value)) {
+    asked.loadDatabase = loadDatabaseOf(value);
+    return 1;
+  }
+  throw new UsageError(
+    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit, each at most once',
+  );
+}
+
+/** The copy's host as apps.bicep takes it, or empty: only ever a copy's, as parseApps refused any other name. */
+const loadDatabaseHostOf = (loadDatabase: string | undefined): string =>
+  loadDatabase === undefined ? '' : throwawayHost(loadDatabase);
+
+/** Stage G's throwaway copy, by its name alone: anything else, staging's own server above all, is refused here. */
+function loadDatabaseOf(name: string): string {
+  const problem = throwawayServerProblem(name);
+  if (problem !== undefined) throw new UsageError(problem);
+  return name;
 }
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
@@ -1045,6 +1084,12 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
   return 1;
 }
 
+/** The restore drill's copy (apps.bicep `drillDatabaseHost`): beside staging's server only while a drill runs. */
+const DRILL_SERVER = 'psql-agentx-stg-drill';
+
+/** Whether a server in the group is staging's own: not the drill's copy nor a Stage G copy, which sit beside it a while. */
+const isOwnServer = (name: string): boolean => name !== DRILL_SERVER && throwawayIdOf(name) === undefined;
+
 /**
  * The disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so sending the
  * first size would ask Azure to shrink it, which it refuses, and no foundation could run. A first deploy has no
@@ -1060,8 +1105,8 @@ function diskNow(steps: Steps, subscription: string): number {
       subscription,
       '--resource-group',
       RESOURCE_GROUP,
-    ]) as readonly { storage?: { storageSizeGb?: unknown } }[];
-    const size = servers[0]?.storage?.storageSizeGb;
+    ]) as readonly { name?: unknown; storage?: { storageSizeGb?: unknown } }[];
+    const size = servers.find(({ name }) => isOwnServer(text(name)))?.storage?.storageSizeGb;
     return typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
   } catch {
     return LEAST_DISK_GB;
@@ -1159,12 +1204,24 @@ function settleDatabase(steps: Steps, subscription: string, host: string, loadSi
   return false;
 }
 
-/** The live database's connection limit, as Azure has it now, and whether a change of it waits on a restart. */
-function liveConnectionLimit(steps: Steps, subscription: string): { limit: number; waiting: boolean } {
+/**
+ * The resource group's database servers by name, and of them staging's own: the one that is neither the restore
+ * drill's copy nor a Stage G copy (tooling/load/throwaway.ts), both of which sit beside it only for a while.
+ */
+function databaseServers(steps: Steps, subscription: string): { names: readonly string[]; staging: string } {
   const where = ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
-  const servers = azJson(steps.az, ['postgres', 'flexible-server', 'list', ...where]) as readonly { name?: unknown }[];
-  const server = servers.length === 1 ? text(servers[0]?.name) : '';
-  if (server === '') throw new Error(`${RESOURCE_GROUP} holds ${String(servers.length)} database servers, not one`);
+  const listed = azJson(steps.az, ['postgres', 'flexible-server', 'list', ...where]) as readonly { name?: unknown }[];
+  const names = listed.map(({ name }) => text(name));
+  const own = names.filter(isOwnServer);
+  if (own.length !== 1) {
+    throw new Error(`${RESOURCE_GROUP} holds ${String(own.length)} database servers of its own, not one`);
+  }
+  return { names, staging: own[0] ?? '' };
+}
+
+/** A database's connection limit, as Azure has it now, and whether a change of it waits on a restart. */
+function liveConnectionLimit(steps: Steps, subscription: string, server: string): { limit: number; waiting: boolean } {
+  const where = ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
   const shown = azJson(steps.az, [
     'postgres',
     'flexible-server',
@@ -1184,12 +1241,18 @@ function liveConnectionLimit(steps: Steps, subscription: string): { limit: numbe
  * load size's limit, which only `foundation --load-size` sets, and only once its restart has taken. A smaller limit,
  * one still waiting, or one that can't be read stops the run, as the API would be refused connections (S167).
  */
-function confirmLoadServer(steps: Steps, subscription: string): void {
-  const next = `Run node deploy/azure/deploy.ts foundation --load-size first (it restarts the server), then apps --load-run again. Nothing was deployed.`;
+function confirmLoadServer(steps: Steps, subscription: string, loadDatabase: string | undefined): void {
+  const next =
+    loadDatabase === undefined
+      ? `Run node deploy/azure/deploy.ts foundation --load-size first (it restarts the server), then apps --load-run again. Nothing was deployed.`
+      : `Make Stage G's copy at the load size (deploy/azure/stage-g.ts create), then apps --load-run --load-database ${loadDatabase} again. Nothing was deployed.`;
   let live: { limit: number; waiting: boolean };
   try {
-    live = liveConnectionLimit(steps, subscription);
+    const { names, staging } = databaseServers(steps, subscription);
+    if (loadDatabase !== undefined) confirmThrowaway(loadDatabase, names);
+    live = liveConnectionLimit(steps, subscription, loadDatabase ?? staging);
   } catch (error) {
+    if (error instanceof ThrowawayRefused) throw error;
     throw new Error(
       `The database's connection limit couldn't be read (${error instanceof Error ? error.message : String(error)}), and the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}. ${next}`,
       { cause: error },
@@ -1199,6 +1262,26 @@ function confirmLoadServer(steps: Steps, subscription: string): void {
   if (Number.isNaN(live.limit) || live.limit < LOAD_SERVER_CONNECTIONS || live.waiting) {
     throw new Error(
       `The database allows ${String(live.limit)} connections${live.waiting ? ', and a change of it waits on a restart' : ''}, but the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}: the API would be refused connections. ${next}`,
+    );
+  }
+  if (loadDatabase !== undefined) {
+    steps.terminal.say(
+      `Stage G's run: the API, its jobs app and the load jobs reach ${loadDatabase}, never staging's own database, and keep its anchors in its own container; email, the activity downloads and the second-factor resets are off on it. Every other job stays on staging's server.`,
+    );
+  }
+}
+
+/** Stage G's copy refused before anything is sent: one Azure doesn't list. */
+class ThrowawayRefused extends Error {}
+
+/**
+ * Stage G's copy among the group's servers (4D2e): there before anything is sent. Its name was checked already
+ * (parseApps), which staging's own server can never fit (tooling/load/throwaway.ts).
+ */
+function confirmThrowaway(loadDatabase: string, names: readonly string[]): void {
+  if (!names.includes(loadDatabase)) {
+    throw new ThrowawayRefused(
+      `${RESOURCE_GROUP} holds no server ${loadDatabase}: make Stage G's copy first (deploy/azure/stage-g.ts create). Nothing was deployed.`,
     );
   }
 }
@@ -1887,7 +1970,7 @@ function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean)
   // A deployment only adds and changes (incremental): it never removes the load test's jobs.
   if (!loadRun && jobsLeft.some((each) => text(each.name).startsWith('job-agentx-stg-load-'))) {
     steps.terminal.say(
-      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+      "The load test's jobs are still there (PL-38's, and Stage G's where its run left them): load.ts finish removes them (D2c).",
     );
   }
   return appsLeft.map((each) => text(each.name));
@@ -1935,14 +2018,14 @@ const REMOVAL_READS = 60;
 
 async function deployApps(
   steps: Steps,
-  { commit, keepRunning, loadRun }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
+  { commit, keepRunning, loadRun, loadDatabase }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
 ): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   if (loadRun) {
-    confirmLoadServer(steps, subscription);
+    confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
   }
   // Before anything else is asked: the API reads its client secret from the vault.
@@ -1994,6 +2077,7 @@ async function deployApps(
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
     [LOAD_VARIABLES.run]: loadRun ? 'true' : 'false',
     [LOAD_VARIABLES.digest]: loadDigest,
+    [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
   };
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return 1;

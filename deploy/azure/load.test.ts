@@ -9,7 +9,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
-import { jobName, LOAD_JOBS, type LoadJob, type LogLine } from './jobs.ts';
+import { jobName, LOAD_JOBS, type LoadJob, type LogLine, STAGE_G_JOBS, type StageGJob } from './jobs.ts';
 import { load, type LoadSteps, NO_REQUEST, parseArguments, printedLines } from './load.ts';
 import { printedEnd } from '../../tooling/load/table-growth.ts';
 
@@ -116,6 +116,9 @@ interface World {
   apiLinesLate?: number;
   /** Azure refuses to remove this job. */
   deleteRefused?: LoadJob;
+  /** Stage G's jobs (4D2e) are there, as its run on a copy leaves them, and this one has a run still going. */
+  stageG?: boolean;
+  stageGGoing?: StageGJob;
   /** Azure refuses the API's restart. */
   restartRefused?: boolean;
   /** The API's replica's state, once restarted. */
@@ -142,7 +145,7 @@ class FakeAzure implements Az {
   readonly runs: { name: string; job: LoadJob; request: Record<string, string>; status: string; lines: unknown[] }[] =
     [];
   readonly restarted: string[] = [];
-  readonly deleted: LoadJob[] = [];
+  readonly deleted: (LoadJob | StageGJob)[] = [];
   apiReadings = 0;
   readonly apiQueries: string[] = [];
   /** How many times each run's lines have been read. */
@@ -170,6 +173,12 @@ class FakeAzure implements Az {
     if (args[0] === 'account') return json({ name: 'Azure subscription 1', id: SUBSCRIPTION });
     if (args[0] === 'rest') return this.#rest(args);
     const name = args[args.indexOf('--name') + 1] ?? '';
+    const stageG = STAGE_G_JOBS.find((each) => jobName(each) === name);
+    if (stageG !== undefined && args.slice(0, 4).join(' ') === 'containerapp job execution list') {
+      return json(
+        this.#world.stageGGoing === stageG ? [{ name: `${name}-s1`, properties: { status: 'Running' } }] : [],
+      );
+    }
     const job = LOAD_JOBS.find((each) => jobName(each) === name);
     if (job === undefined) throw new Error(`unexpected az ${args.join(' ')}`);
     switch (args.slice(0, 4).join(' ')) {
@@ -213,6 +222,8 @@ class FakeAzure implements Az {
     const url = args[args.indexOf('--url') + 1] ?? '';
     const job = LOAD_JOBS.find((each) => url.includes(`/Microsoft.App/jobs/${jobName(each)}?`));
     if (job !== undefined) return this.#jobRest(job, method, args);
+    const stageG = STAGE_G_JOBS.find((each) => url.includes(`/Microsoft.App/jobs/${jobName(each)}?`));
+    if (stageG !== undefined) return this.#stageGRest(stageG, method);
     if (url.includes('/containerApps/ca-agentx-stg-api/revisions/api--r7/restart')) {
       if (this.#world.restartRefused === true) return { status: 1, stdout: '', stderr: 'ERROR: Bad Request' };
       this.restarted.push('api--r7');
@@ -268,6 +279,14 @@ class FakeAzure implements Az {
     this.written.push({ job, value });
     if (this.#world.slowChange === true) this.#pending.set(job, { value, readings: 2 });
     else this.#take(job, value);
+    return json({});
+  }
+
+  /** One of Stage G's jobs read or removed: there only while the world says so, until removed. */
+  #stageGRest(job: StageGJob, method: string | undefined): AzResult {
+    const there = this.#world.stageG === true && !this.deleted.includes(job);
+    if (!there) return { status: 3, stdout: '', stderr: 'ERROR: (ResourceNotFound)' };
+    if (method === 'delete') this.deleted.push(job);
     return json({});
   }
 
@@ -805,6 +824,24 @@ describe('finish', () => {
     expect(az.deleted).toEqual([...LOAD_JOBS]);
   });
 
+  it("removes Stage G's jobs too where its run left them (4D2e), never while a run of one goes", async () => {
+    const going = new FakeAzure({ stageG: true, stageGGoing: 'load-step' });
+    const refused = await run(['finish'], going);
+    expect(refused.error).toMatchObject({
+      message:
+        'job-agentx-stg-load-step has runs still going (job-agentx-stg-load-step-s1 (Running)): wait for them, then load.ts finish again.',
+    });
+    expect(going.deleted).toEqual([]);
+    const az = new FakeAzure({ stageG: true });
+    const status = await run(['status'], az);
+    expect(status.said).toEqual(
+      expect.arrayContaining(['  job-agentx-stg-load-mark: there', '  job-agentx-stg-load-check: there']),
+    );
+    expect((await run(['finish'], az)).status).toBe(0);
+    expect(az.deleted).toEqual([...LOAD_JOBS, ...STAGE_G_JOBS]);
+    expect((await run(['status'], az)).said).toContain('  job-agentx-stg-load-step: not there');
+  });
+
   it('keeps the jobs and the open run when the clean-up leaves work undone', async () => {
     mkdirSync(path.join(dir, '.out'), { recursive: true });
     writeFileSync(
@@ -858,6 +895,10 @@ describe('status', () => {
       '  job-agentx-stg-load-first: there',
       '  job-agentx-stg-load-second: there',
       '  job-agentx-stg-load-cleanup: not there',
+      // Stage G's (4D2e), there only on its copy's run.
+      '  job-agentx-stg-load-mark: not there',
+      '  job-agentx-stg-load-step: not there',
+      '  job-agentx-stg-load-check: not there',
       '  The API: 0.5 CPUs, scales to zero.',
       '  The database: Standard_B1ms (Burstable).',
       '  No run is left open.',

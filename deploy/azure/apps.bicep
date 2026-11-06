@@ -137,6 +137,10 @@ param loadImageRepository string
 @maxLength(71)
 param loadImageDigest string
 
+@description('Stage G\'s throwaway copy of staging\'s database (4D2e, tooling/load/throwaway.ts), by its host: `psql-agentx-stg-g-<8 lower-case letters or digits>.postgres.database.azure.com`, which `apps --load-run --load-database <name>` alone sets and checks; empty otherwise. Read only in a load run: the API, its jobs app and the load jobs then reach that copy and keep its anchors in its own container, never staging\'s.')
+@maxLength(80)
+param loadDatabaseHost string = ''
+
 @description('The anchor key\'s public halves, `<version>:<key>` comma-separated, as the API\'s `api.starting` line shows them (4D2e E9): the operator checks the anchors\' store with them alone. Empty until set: a chain recovery plan is then refused.')
 @maxLength(1000)
 param anchorPublicKeys string = ''
@@ -158,6 +162,17 @@ var names = resourceNames(environment, nameSuffix)
 // all (unset), holding the jobs and scaling to zero, so a quiet staging costs
 // nothing more (StageD-Design: a `jobs` app on staging would pass the $60 alarm).
 var split = loadRun || environment == 'production'
+
+// Stage G's run on its throwaway copy (4D2e; tooling/load/throwaway.ts): only in
+// a load run, so a plain apps can never carry it. The copy is a restore of
+// staging's server in the same subnet and private zone; the API, its jobs app
+// and the load jobs reach it, every other job staging's own server. Its anchors
+// go to a container of its own (`throwawayAnchors`): the copy holds staging's
+// organisations, so its anchors in staging's container would read to staging as
+// chains wound back, a false tamper alarm there.
+var throwaway = loadRun && !empty(loadDatabaseHost)
+var appDatabaseHost = throwaway ? loadDatabaseHost : names.databaseHost
+var throwawayAnchorsName = 'audit-anchors-g-${last(sys.split(first(sys.split(loadDatabaseHost, '.')), '-'))}'
 
 // The restore drill's copy (S78): a point-in-time restore made under this name,
 // in the same subnet and private zone, which the operator's restore check reads
@@ -256,7 +271,7 @@ var emailSettings = [
 // What every container of ours is told, wherever it runs: which environment
 // this is, which build it is, and where the database is. Each job adds the
 // role it logs in as and the file its login is in.
-var ourSettings = [
+func ourSettingsOn(environment string, release string, host string) array => [
   {
     name: 'AGENTX_ENV'
     value: environment
@@ -267,13 +282,19 @@ var ourSettings = [
   }
   {
     name: 'AGENTX_DB_HOST'
-    value: names.databaseHost
+    value: host
   }
   {
     name: 'AGENTX_DB_NAME'
     value: 'agentx'
   }
 ]
+
+var ourSettings = ourSettingsOn(environment, release, names.databaseHost)
+
+// The same for the API, its jobs app and the load jobs: on Stage G's copy in its
+// run, staging's own server otherwise.
+var appOurSettings = ourSettingsOn(environment, release, appDatabaseHost)
 
 // Zitadel's own connection, as its own role and as its own "admin": the role and
 // the database exist before it runs (db-setup makes them), so Zitadel never
@@ -581,6 +602,9 @@ var anchorEpochSetting = {
 
 var anchorsUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${anchorContainerName()}'
 
+// Stage G's copy keeps its anchors here (`throwaway`), made with the run below.
+var throwawayAnchorsUrl = 'https://${evidenceAccountName(shortName(environment), nameSuffix)}.blob.${az.environment().suffixes.storage}/${throwawayAnchorsName}'
+
 // Where the app that holds the jobs keeps the audit chains' anchors (4D2e E,
 // PL-58; D13): the write-once store's second container, as its own identity.
 // Kept apart by identity as the downloads' settings are.
@@ -600,7 +624,7 @@ var jobsAnchorSettings = [
   anchorEpochSetting
   {
     name: 'AGENTX_AUDIT_ANCHORS_URL'
-    value: anchorsUrl
+    value: throwaway ? throwawayAnchorsUrl : anchorsUrl
   }
   {
     name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID'
@@ -892,7 +916,7 @@ var jobs = concat([
       ]
     )
   }
-], loadRun ? loadJobs : [])
+], loadRun ? loadJobs : [], throwaway ? stageGJobs : [])
 
 // The load test's run request (D2c): what changes from one run to the next (the
 // run's ID, then its agents and phase 1's count), written onto each job by
@@ -903,6 +927,40 @@ var loadRequest = {
   name: 'load-request'
   value: '{}'
 }
+
+// What every load job shares: the load image by its digest, the database it
+// reaches (Stage G's copy in its run, staging's own server otherwise) and where
+// its request is.
+var loadImage = '${loadImageRepository}@${loadImageDigest}'
+
+var loadDatabaseSetting = {
+  name: 'AGENTX_LOAD_DB_HOST'
+  value: appDatabaseHost
+}
+
+var loadRequestSetting = {
+  name: 'AGENTX_LOAD_REQUEST_FILE'
+  value: '${secretsPath}/${loadRequest.name}'
+}
+
+// What a load job that sends traffic reads: the app's login, every key but the
+// operator's own, and its public half instead (PL-57).
+var loadFiles = concat(
+  [
+    {
+      reads: 'db-app-password'
+      setting: 'AGENTX_DB_PASSWORD_FILE'
+    }
+  ],
+  map(filter(appKeys, key => !operatorOnly(key)), key => {
+    reads: key
+    setting: ''
+  }),
+  map(publicHalves, half => {
+    reads: half
+    setting: ''
+  })
+)
 
 // The load test's three jobs (D2c, PL-38; tooling/load/job.ts), only with
 // `loadRun`: seed and k6's phase 1, then new keys, k6's phase 2, the checks and
@@ -936,7 +994,7 @@ var loadJobs = map(
   load => {
     workload: 'load-${load.part}'
     runsAs: 'api'
-    image: '${loadImageRepository}@${loadImageDigest}'
+    image: loadImage
     command: ['node', 'tooling/load/job.ts']
     args: [load.part]
     timeoutSeconds: load.timeoutSeconds
@@ -944,40 +1002,98 @@ var loadJobs = map(
     memory: load.callsApi ? '4Gi' : '1Gi'
     callsApi: load.callsApi
     evidence: false
-    files: concat(
-      [
-        {
-          reads: 'db-app-password'
-          setting: 'AGENTX_DB_PASSWORD_FILE'
-        }
-      ],
-      // Every key but the operator's own, and its public half instead (PL-57).
-      map(filter(appKeys, key => !operatorOnly(key)), key => {
-        reads: key
-        setting: ''
-      }),
-      map(publicHalves, half => {
-        reads: half
-        setting: ''
-      })
-    )
+    files: loadFiles
     held: [loadRequest]
-    settings: concat(ourSettings, [
+    settings: concat(appOurSettings, [
       {
         name: 'AGENTX_KEYS_DIR'
         value: secretsPath
       }
-      {
-        name: 'AGENTX_LOAD_DB_HOST'
-        value: names.databaseHost
-      }
-      {
-        name: 'AGENTX_LOAD_REQUEST_FILE'
-        value: '${secretsPath}/${loadRequest.name}'
-      }
+      loadDatabaseSetting
+      loadRequestSetting
     ])
   }
 )
+
+// Stage G's three jobs (4D2e; tooling/load/stageg-job.ts), only on its throwaway
+// copy (`throwaway`), every one reaching that copy alone. Each refuses to start
+// unless its host is a copy's by name, and the step and check unless the copy
+// carries the sentinel naming it, which load-mark alone writes:
+// - load-mark: the sentinel, as the copy's owner (a restore keeps staging's
+//   passwords), as the set-up job's identity, which reads that login already
+// - load-step: the seed's growth, or one step (its cohort, new keys, k6), as the
+//   app with its keys, as the API's identity, as PL-38's jobs; one step a run,
+//   up to the soak's full hour and its margin (stageg.ts STAGE_G_JOB_SECONDS)
+// - load-check: the step's checks, past the tenant walls as the backup role
+//   (stageg-checks.ts) and through them as the app, as the set-up job's identity,
+//   the one that reads the backup role's login: no new grant, no secrets run
+// The step and check read their command from the run's request, held as
+// PL-38's (`loadRequest`); the mark asks nothing.
+var stageGJobs = [
+  {
+    workload: 'load-mark'
+    // Accepted debt (S175): the set-up job's identity can also read db-admin-password; these two jobs exist only during a Stage G run and load.ts finish removes them; a dedicated identity before production.
+    runsAs: 'db-setup'
+    image: loadImage
+    command: ['node', 'tooling/load/stageg-job.ts']
+    args: ['mark']
+    timeoutSeconds: 900
+    evidence: false
+    files: [
+      {
+        reads: 'db-owner-password'
+        setting: 'AGENTX_DB_PASSWORD_FILE'
+      }
+    ]
+    held: []
+    settings: concat(appOurSettings, [loadDatabaseSetting])
+  }
+  {
+    workload: 'load-step'
+    runsAs: 'api'
+    image: loadImage
+    command: ['node', 'tooling/load/stageg-job.ts']
+    args: ['step']
+    timeoutSeconds: 4500
+    // k6's room, as PL-38's traffic jobs: the API's size, so k6 is never what is measured.
+    cpu: '2'
+    memory: '4Gi'
+    callsApi: true
+    evidence: false
+    files: loadFiles
+    held: [loadRequest]
+    settings: concat(appOurSettings, [
+      {
+        name: 'AGENTX_KEYS_DIR'
+        value: secretsPath
+      }
+      loadDatabaseSetting
+      loadRequestSetting
+    ])
+  }
+  {
+    workload: 'load-check'
+    // Accepted debt (S175), as load-mark's above.
+    runsAs: 'db-setup'
+    image: loadImage
+    command: ['node', 'tooling/load/stageg-job.ts']
+    args: ['check']
+    timeoutSeconds: 1800
+    evidence: false
+    files: [
+      {
+        reads: 'db-app-password'
+        setting: 'AGENTX_DB_APP_PASSWORD_FILE'
+      }
+      {
+        reads: 'db-backup-password'
+        setting: 'AGENTX_DB_BACKUP_PASSWORD_FILE'
+      }
+    ]
+    held: [loadRequest]
+    settings: concat(appOurSettings, [loadDatabaseSetting, loadRequestSetting])
+  }
+]
 
 // The API's limits in the load run (D2c), as the laptop's run sets them
 // (tooling/load/compose.load.yaml): every client's, person's and agent's allowance
@@ -1044,13 +1160,19 @@ var apiFiles = concat(
       reads: 'api-oidc-client-secret'
       setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
     }
-    // B6-3c: Zitadel's token for removing a person's second factors once
-    // a reset has cooled off, its own service user's (Org User Manager).
-    {
-      reads: 'zitadel-reset-token'
-      setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
-    }
   ],
+  // B6-3c: Zitadel's token for removing a person's second factors once a reset
+  // has cooled off, its own service user's (Org User Manager). Never on Stage G's
+  // copy: it holds staging's resets, which the copy's jobs would carry out
+  // against the real login service a second time.
+  throwaway
+    ? []
+    : [
+        {
+          reads: 'zitadel-reset-token'
+          setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
+        }
+      ],
   // B5-3: the email service's key, copied in by the secrets deployment,
   // and Zitadel's read-only token for the admins' addresses. The four
   // email settings are all or none, so neither in the load run.
@@ -1179,7 +1301,9 @@ var jobsApp = {
   zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
   sendsEmail: !loadRun
   signsIn: true
-  keepsDownloads: true
+  // Not on Stage G's copy: it holds staging's downloads under way, which its jobs
+  // would write over in staging's container.
+  keepsDownloads: !throwaway
   keepsAnchors: true
   minReplicas: 1
   maxReplicas: 1
@@ -1190,7 +1314,7 @@ var jobsApp = {
   memory: loadRun ? '2Gi' : '1Gi'
   files: apiFiles
   settings: concat(
-    ourSettings,
+    appOurSettings,
     [
       keysDirectorySetting
       appRoleSetting
@@ -1233,8 +1357,9 @@ var apps = concat([
     // and each notice would end as a warning. Zitadel stays its one origin.
     sendsEmail: !loadRun
     signsIn: true
-    // Keeps the activity log's background downloads (`apiDownloadsSettings`).
-    keepsDownloads: true
+    // Keeps the activity log's background downloads (`apiDownloadsSettings`), but
+    // on Stage G's copy, as its jobs app doesn't (`jobsApp`).
+    keepsDownloads: !throwaway
     // Keeps the audit chains' anchors (`apiAnchorSettings`) where it holds the
     // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13).
     keepsAnchors: !split
@@ -1252,7 +1377,7 @@ var apps = concat([
     memory: loadRun ? '4Gi' : '1Gi'
     files: apiFiles
     settings: concat(
-      ourSettings,
+      appOurSettings,
       [
         keysDirectorySetting
         {
@@ -1401,6 +1526,47 @@ func secretsOf(job object) array =>
 // version within 30 minutes and restarts what reads it (Microsoft).
 resource vault 'Microsoft.KeyVault/vaults@2025-05-01' existing = {
   name: names.vault
+}
+
+// Stage G's copy's own anchors (`throwaway`): a container of its own in the
+// write-once store, beside staging's, and the anchors' role on it for the jobs
+// app alone, which keeps them in a load run (4D2e D13), as modules/evidence.bicep
+// gives staging's. Made with the run, never on a plain apps, and named from the
+// copy's ID, so each copy starts with no anchors: one copy's would read to the
+// next as chains wound back. The store keeps each file for its days (Unlocked on
+// staging), so the container can be removed only once its last file's time is up.
+resource evidenceStore 'Microsoft.Storage/storageAccounts@2025-01-01' existing = {
+  name: evidenceAccountName(shortName(environment), nameSuffix)
+}
+
+resource evidenceBlobs 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01' existing = {
+  parent: evidenceStore
+  name: 'default'
+}
+
+resource throwawayAnchors 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = if (throwaway) {
+  parent: evidenceBlobs
+  name: throwawayAnchorsName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// The anchors' custom role, as modules/evidence.bicep names it: add a new file, read and list; never overwrite or delete.
+var anchorRoleId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  guid(resourceGroup().id, 'audit-anchors')
+)
+
+resource throwawayAnchorsKept 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (throwaway) {
+  scope: throwawayAnchors
+  name: guid(throwawayAnchors.id, jobsIdentity.id, anchorRoleId)
+  properties: {
+    roleDefinitionId: anchorRoleId
+    principalId: jobsIdentity!.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'jobs keeps Stage G copy audit anchors (deploy/azure/apps.bicep)'
+  }
 }
 
 resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [

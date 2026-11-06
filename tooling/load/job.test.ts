@@ -4,6 +4,8 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { API_PURPOSES } from '../../packages/platform/src/keys/index.ts';
+import { writeTestKeys } from '../../packages/testing/src/index.ts';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import { agentsOf, jobConnection, main, type PrintedAgent, requestOf, runK6 } from './job.ts';
@@ -109,6 +111,38 @@ describe('the command line and settings', () => {
       ).rejects.toThrow('AGENTX_LOAD_RUN_ID is not set.');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("refuses phase 1's count when it is no count, before any query (a connection is opened only when first used)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-request-'));
+    const keys = writeTestKeys(API_PURPOSES);
+    try {
+      const login = path.join(dir, 'db-app-login');
+      const request = path.join(dir, 'load-request');
+      writeFileSync(login, 'stand-in');
+      const settings = {
+        AGENTX_LOAD_DB_HOST: 'db.example.invalid',
+        AGENTX_DB_PASSWORD_FILE: login,
+        AGENTX_LOAD_REQUEST_FILE: request,
+        AGENTX_KEYS_DIR: keys.directory,
+        AGENTX_LOAD_API: 'https://api.internal.example',
+      };
+      for (const count of ['-1', 'twelve', '1.5']) {
+        writeFileSync(
+          request,
+          JSON.stringify({
+            AGENTX_LOAD_RUN_ID: 'r1',
+            AGENTX_LOAD_SEEDED: JSON.stringify([AGENT]),
+            AGENTX_LOAD_CREATED_FIRST: count,
+          }),
+        );
+        await expect(main(['second'], settings)).rejects.toThrow(
+          "AGENTX_LOAD_CREATED_FIRST must be phase 1's count of new requests.",
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      keys.remove();
     }
   });
 });
