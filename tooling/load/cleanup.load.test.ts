@@ -5,7 +5,7 @@
 import { afterAll, expect, it } from 'vitest';
 
 import { createDatabase, withTenant } from '../../packages/platform/src/db/index.ts';
-import { loadKeys } from '../../packages/platform/src/keys/index.ts';
+import { API_PURPOSES, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
@@ -14,7 +14,7 @@ import { APP_KEYS_DIR, loadConnection, orgsOf, readSeeded } from './plan.ts';
 
 const database = createDatabase<MandateWorldTables>(loadConnection(), testLogger());
 const orgIds = orgsOf(readSeeded().agents);
-const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} });
+const keyring = loadKeys({ directory: APP_KEYS_DIR, current: {} }, API_PURPOSES, OPERATOR_ONLY);
 
 afterAll(() => database.destroy());
 

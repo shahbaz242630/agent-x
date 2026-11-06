@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { afterAll, expect, it } from 'vitest';
 
 import { createDatabase } from '../../packages/platform/src/db/index.ts';
-import { loadKeys } from '../../packages/platform/src/keys/index.ts';
+import { API_PURPOSES, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
 import type { MandateWorldTables } from '../../apps/api/src/mandate-world.helper.test.ts';
@@ -21,7 +21,7 @@ afterAll(() => database.destroy());
 it('seeds the ample agents, the capped one and the two crowds', { timeout: 600_000 }, async () => {
   const seeded = await seedRun({
     database,
-    keyring: loadKeys({ directory: APP_KEYS_DIR, current: {} }),
+    keyring: loadKeys({ directory: APP_KEYS_DIR, current: {} }, API_PURPOSES, OPERATOR_ONLY),
     runId: process.env.AGENTX_LOAD_RUN_ID ?? 'local',
   });
   mkdirSync(OUT_DIR, { recursive: true });
