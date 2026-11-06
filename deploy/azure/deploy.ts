@@ -1970,7 +1970,7 @@ function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean)
   // A deployment only adds and changes (incremental): it never removes the load test's jobs.
   if (!loadRun && jobsLeft.some((each) => text(each.name).startsWith('job-agentx-stg-load-'))) {
     steps.terminal.say(
-      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+      "The load test's jobs are still there (PL-38's, and Stage G's where its run left them): load.ts finish removes them (D2c).",
     );
   }
   return appsLeft.map((each) => text(each.name));

@@ -1956,7 +1956,7 @@ describe('deploy apps', () => {
     const plain = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ jobs }) });
     expect(plain.status).toBe(0);
     expect(plain.terminal.said).toContain(
-      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+      "The load test's jobs are still there (PL-38's, and Stage G's where its run left them): load.ts finish removes them (D2c).",
     );
     const loadRun = await run(['apps', '--load-run'], {
       answers,
