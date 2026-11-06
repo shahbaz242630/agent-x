@@ -964,8 +964,8 @@ export const PLAIN_WORDS = {
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
-    broke: "Nothing was changed: the organisation or its first admin's invitation already exists from an earlier run.",
-    next: 'Nothing to fix. Make sure the finished request is not left on the job to run again.',
+    broke: 'Nothing was changed: an earlier run with the same ID, named in the line, already did it.',
+    next: "Nothing to fix. The earlier run's own lines say how it ended. Don't leave the finished request on the job.",
   },
   'operator.export_unwritten': {
     happened: 'An export of an audit or activity log for a case was recorded, but its file was not saved to storage.',
