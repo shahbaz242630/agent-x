@@ -14,12 +14,20 @@ import { orgsOf, type SeededAgent } from './plan.ts';
 /** The statuses that hold money before a hand-off: a reservation HELD and an order claim open. */
 const HOLDING = ['APPROVED', 'APPROVAL_REQUIRED'] as const;
 
+/** An agent as the checks read it: a seeded one, or one of Stage G's cohort (stageg-seed.ts), which has no key. */
+type CheckedAgent = Omit<SeededAgent, 'key'>;
+
 export interface LoadCheck {
   readonly name: string;
+  /**
+   * Compares the whole run's count with what the agents' organisations hold: true for PL-38's run only. A Stage G
+   * cohort's organisations hold every earlier step's requests too, so stageg-checks.ts counts the step's own instead.
+   */
+  readonly countsTheRun?: true;
   /** What it found wrong, in plain words: none when the check holds. */
   readonly run: (
     database: Database<MandateWorldTables>,
-    agents: readonly SeededAgent[],
+    agents: readonly CheckedAgent[],
     created: number,
   ) => Promise<string[]>;
 }
@@ -37,6 +45,7 @@ async function eachOrg<T>(items: readonly T[], read: (item: T) => Promise<string
 export const LOAD_CHECKS: readonly LoadCheck[] = [
   {
     name: 'recorded each request k6 was answered 201 for, once',
+    countsTheRun: true,
     async run(database, agents, created) {
       // One organisation at a time: all at once took ten connections while the API held twenty, and the
       // server refused the rest, which ended the run before any check reported (run day 5, S167).
