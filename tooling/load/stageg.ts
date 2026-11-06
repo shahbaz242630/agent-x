@@ -130,7 +130,10 @@ const BREAKING = { factor: 10, climbSeconds: 1800 } as const;
  * The climb stops at the Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500) or 1% failed answers,
  * in any 30 s window: about 1% of the climb's 30 minutes, short enough to name the rate, long enough for a p95.
  */
-const BREAKING_ABORT: AbortRule = { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 };
+/** The Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500): a request's p95 under this. */
+export const REQUEST_P95_MS = 500;
+
+const BREAKING_ABORT: AbortRule = { p95Ms: REQUEST_P95_MS, errorShare: 0.01, windowSeconds: 30 };
 
 /** Overload: half again the measured breaking rate (top of the table's 1.2-1.5×) for 10 minutes, then 30 back at the target. */
 const OVERLOAD = { factor: 1.5, riseSeconds: 60, peakSeconds: 600, recoverySeconds: 1800 } as const;
@@ -148,7 +151,7 @@ export const STAGE_G_JOB_MARGIN_SECONDS = 300;
 const SOAK = { segments: 4, segmentSeconds: 3600, laterRampSeconds: 60 } as const;
 
 /** Failed answers below 1% (Azure's example criterion). */
-const MAX_ERROR_SHARE = 0.01;
+export const MAX_ERROR_SHARE = 0.01;
 
 /** More than 15% off the baseline is worth investigating (AWS). */
 const CALM_MARGIN = 0.15;

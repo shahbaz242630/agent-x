@@ -10,8 +10,10 @@ import {
   breakingRate,
   judgeStep,
   type K6Stages,
+  MAX_ERROR_SHARE,
   type Profile,
   rateAt,
+  REQUEST_P95_MS,
   type StepMeasured,
   type StepRun,
   stagesSeconds,
@@ -74,11 +76,8 @@ export interface StageGReportInput {
 /** The kind a step is judged by, as plain.k6.js's judgedKind names it. */
 const JUDGED: Readonly<Record<Profile['mix'], string>> = { steady: 'steady', neighbours: 'calm' };
 
-/** Back to the base load's latency: a window's p95 within this much of the base hold's slowest window's. */
+/** Back to the base load's latency: a window's p95 within this much of the base hold's median. */
 const RECOVERED_MARGIN = 0.15;
-
-/** Back means failed answers below the target's 1% too (stageg.ts's MAX_ERROR_SHARE), where a step has no rule of its own. */
-const RECOVERED_FAILED_SHARE = 0.01;
 
 const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, failedAnswers: 0, p95Ms: 0 };
 
@@ -90,13 +89,34 @@ const percent = (share: number): string => `${share >= 0 ? '+' : ''}${(share * 1
 
 const secondsOf = (duration: string): number => Number.parseInt(duration, 10);
 
+/** Where a surge's windows lie: its base hold's, and the first and last after the surge ends. */
+function surgeWindows(stages: K6Stages, windowSeconds: number) {
+  // A surge's stages end rise, peak, fall, recovery (stageg.ts's k6Stages): before them, the ramp and the base hold.
+  const opening = stages.stages.slice(0, -4).map(({ duration }) => secondsOf(duration));
+  const baseTo = opening.reduce((sum, seconds) => sum + seconds, 0);
+  const baseFrom = opening.length > 1 ? (opening[0] ?? 0) : 0;
+  const surgeEnd = stagesSeconds(stages) - secondsOf(stages.stages.at(-1)?.duration ?? '0s');
+  const span = (first: number, last: number) =>
+    Array.from({ length: Math.max(0, last - first + 1) }, (_, i) => first + i);
+  return {
+    base: span(Math.ceil(baseFrom / windowSeconds), Math.floor(baseTo / windowSeconds) - 1),
+    after: span(Math.floor(surgeEnd / windowSeconds), Math.ceil(stagesSeconds(stages) / windowSeconds) - 1),
+    surgeEnd,
+  };
+}
+
+/** The middle value, the lower of the two middles for an even count. */
+const median = (values: readonly number[]): number =>
+  values.toSorted((a, b) => a - b)[Math.floor((values.length - 1) / 2)] ?? 0;
+
 /**
  * Seconds from a surge's end to the start of the first window after which
  * every window is back: its p95 within RECOVERED_MARGIN of the base hold's
- * slowest window and its failed share below `maxFailedShare`. Counted from the
- * last bad window, so a relapse after a good one counts. Null if the last
- * window is still bad, or no window was in the base hold to compare with.
- * A surge's stages end rise, peak, fall, recovery (stageg.ts's k6Stages).
+ * median (capped at the request target, so a base already slow can't lower the
+ * bar) and its failed share below `maxFailedShare`. Every window after the
+ * surge must be there: a missing one is not back. Counted from the last bad
+ * window, so a relapse restarts it. Null if the last window is not back, or no
+ * window of the base hold has numbers.
  */
 export function recoverySeconds(
   stages: K6Stages,
@@ -104,20 +124,37 @@ export function recoverySeconds(
   windows: readonly WindowNumbers[],
   maxFailedShare: number,
 ): number | null {
-  const opening = stages.stages.slice(0, -4).map(({ duration }) => secondsOf(duration));
-  const baseTo = opening.reduce((sum, seconds) => sum + seconds, 0);
-  const baseFrom = opening.length > 1 ? (opening[0] ?? 0) : 0;
-  const surgeEnd = stagesSeconds(stages) - secondsOf(stages.stages.at(-1)?.duration ?? '0s');
-  const startOf = ({ window }: WindowNumbers) => window * windowSeconds;
-  const base = windows.filter((each) => startOf(each) >= baseFrom && startOf(each) + windowSeconds <= baseTo);
-  if (base.length === 0) return null;
-  const limit = Math.max(...base.map(({ p95Ms }) => p95Ms)) * (1 + RECOVERED_MARGIN);
-  const after = windows
-    .filter((each) => startOf(each) + windowSeconds > surgeEnd)
-    .toSorted((a, b) => a.window - b.window);
-  const lastBad = after.findLastIndex(({ p95Ms, failedShare }) => p95Ms > limit || failedShare >= maxFailedShare);
+  const { base, after, surgeEnd } = surgeWindows(stages, windowSeconds);
+  const byWindow = new Map(windows.map((each) => [each.window, each]));
+  const baseP95s = base.flatMap((window) => byWindow.get(window)?.p95Ms ?? []);
+  if (baseP95s.length === 0) return null;
+  const limit = Math.min(median(baseP95s), REQUEST_P95_MS) * (1 + RECOVERED_MARGIN);
+  const isBack = (window: number) => {
+    const numbers = byWindow.get(window);
+    return numbers !== undefined && numbers.p95Ms <= limit && numbers.failedShare < maxFailedShare;
+  };
+  const lastBad = after.findLastIndex((window) => !isBack(window));
   const back = after[lastBad + 1];
-  return back === undefined ? null : Math.max(0, startOf(back) - surgeEnd);
+  return back === undefined ? null : Math.max(0, back * windowSeconds - surgeEnd);
+}
+
+/** The base hold before a surge judged by the target's rules: what the surge must come back to must itself be right. */
+export function baseHoldFailures(stages: K6Stages, windowSeconds: number, windows: readonly WindowNumbers[]): string[] {
+  const byWindow = new Map(windows.map((each) => [each.window, each]));
+  return surgeWindows(stages, windowSeconds).base.flatMap((window) => {
+    const numbers = byWindow.get(window);
+    if (numbers === undefined) {
+      return [
+        `Window ${String(window)} of the base load before the surge has no numbers: there is nothing sure to come back to.`,
+      ];
+    }
+    const { p95Ms, failedShare } = numbers;
+    return p95Ms < REQUEST_P95_MS && failedShare < MAX_ERROR_SHARE
+      ? []
+      : [
+          `The base load before the surge already missed the target in window ${String(window)}: p95 ${ms(p95Ms)} ms (under ${String(REQUEST_P95_MS)}), ${(failedShare * 100).toFixed(2)}% failed (under ${String(MAX_ERROR_SHARE * 100)}%).`,
+        ];
+  });
 }
 
 const isSurge = (run: StepRun): boolean => run.test === 'spike' || run.test === 'overload';
@@ -130,7 +167,7 @@ const isSurge = (run: StepRun): boolean => run.test === 'spike' || run.test === 
 const measuredRecovery = ({ run, summary }: StageGStepResult, rules: Profile['rules']): number | null | undefined =>
   run.windowSeconds === null || summary.windows === null
     ? undefined
-    : recoverySeconds(run, run.windowSeconds, summary.windows, rules.maxErrorShare ?? RECOVERED_FAILED_SHARE);
+    : recoverySeconds(run, run.windowSeconds, summary.windows, rules.maxErrorShare ?? MAX_ERROR_SHARE);
 
 /** Every reason a step failed, in plain words: its rules, its checks, its background work and its replicas. */
 function stepFailures(input: StageGReportInput, result: StageGStepResult, baselineP95Ms: number | undefined): string[] {
@@ -159,6 +196,9 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
         ]
       : []),
     ...(unmeasured ? ['The recovery after the surge was not measured: k6 gave no window numbers for this step.'] : []),
+    ...(isSurge(run) && run.windowSeconds !== null && summary.windows !== null
+      ? baseHoldFailures(run, run.windowSeconds, summary.windows)
+      : []),
     ...result.databaseFailures,
     ...backgroundFailures(result.background, REFUSALS_EXPECTED.has(run.test)),
     ...(restarts !== null && restarts.after > restarts.before
