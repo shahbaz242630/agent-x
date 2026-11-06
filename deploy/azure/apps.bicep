@@ -1032,6 +1032,7 @@ var loadJobs = map(
 var stageGJobs = [
   {
     workload: 'load-mark'
+    // Accepted debt (S175): the set-up job's identity can also read db-admin-password; these two jobs exist only during a Stage G run and load.ts finish removes them; a dedicated identity before production.
     runsAs: 'db-setup'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
@@ -1072,6 +1073,7 @@ var stageGJobs = [
   }
   {
     workload: 'load-check'
+    // Accepted debt (S175), as load-mark's above.
     runsAs: 'db-setup'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
