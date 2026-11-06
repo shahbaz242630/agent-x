@@ -1,0 +1,257 @@
+// Stage G's profiles (stageg.ts): the research table's rates and holds, the
+// stages k6 is handed for each shape, and how a step's result is judged.
+import { describe, expect, it } from 'vitest';
+
+import { POLICY_P95_MS } from './plan.ts';
+import {
+  judgeStep,
+  k6Stages,
+  type PassRules,
+  rateAt,
+  STAGE_G_TESTS,
+  stageGProfile,
+  stagesSeconds,
+  type Step,
+  type StepMeasured,
+  type StepRun,
+  stepRun,
+} from './stageg.ts';
+
+/** A step's stages as `rate@seconds`, easy to read against the research table. */
+const shape = (step: Step): string[] => {
+  const { startRate, stages } = k6Stages(step);
+  return [`start ${String(startRate)}`, ...stages.map(({ target, duration }) => `${String(target)}@${duration}`)];
+};
+
+const steps = (test: Parameters<typeof stageGProfile>[0], breakingRate?: number): readonly Step[] =>
+  stageGProfile(test, breakingRate).steps;
+
+/** What k6 is handed for each of a test's steps. */
+const runs = (test: Parameters<typeof stageGProfile>[0]): StepRun[] => {
+  const profile = stageGProfile(test);
+  return profile.steps.map((step) => stepRun(profile, step));
+};
+
+/** An hour's job, less five minutes for starting, the summary and the checks. */
+const JOB_SECONDS = 3600;
+
+describe("Stage G's profiles, as the research table sets them", () => {
+  it('smokes at 100 organisations, 2 a second, for 2 minutes, straight at the rate', () => {
+    expect(steps('smoke').map((step) => [step.label, step.orgs, shape(step)])).toEqual([
+      ['smoke', 100, ['start 2', '2@120s']],
+    ]);
+  });
+
+  it('steps the organisations 100, 1k, 3k, 10k at 170/s: 5 minutes up, 15 held, 30 at 10k', () => {
+    expect(steps('orgs').map((step) => [step.label, step.orgs, shape(step)])).toEqual([
+      ['orgs-100', 100, ['start 0', '170@300s', '170@900s']],
+      ['orgs-1000', 1000, ['start 0', '170@300s', '170@900s']],
+      ['orgs-3000', 3000, ['start 0', '170@300s', '170@900s']],
+      ['orgs-10000', 10_000, ['start 0', '170@300s', '170@1800s']],
+    ]);
+  });
+
+  it('holds the target, past 10k and the HA run at 170/s for 30 minutes, at 10k, 30k and 10k organisations', () => {
+    for (const [test, orgs] of [
+      ['target', 10_000],
+      ['past10k', 30_000],
+      ['ha', 10_000],
+    ] as const) {
+      expect(steps(test).map((step) => [step.label, step.orgs, shape(step)])).toEqual([
+        [test, orgs, ['start 0', '170@300s', '170@1800s']],
+      ]);
+    }
+  });
+
+  it('steps the rate 43, 85, 170, 255, 340 a second, 10 minutes each after a minute up', () => {
+    expect(steps('rates').map((step) => [step.label, step.orgs, shape(step)])).toEqual(
+      [43, 85, 170, 255, 340].map((rate) => [
+        `rate-${String(rate)}`,
+        10_000,
+        ['start 0', `${String(rate)}@60s`, `${String(rate)}@600s`],
+      ]),
+    );
+  });
+
+  it('spikes from 170/s to three times within 10 s for 3 minutes, back to 170/s and holds 15 minutes', () => {
+    expect(steps('spike').map(shape)).toEqual([
+      ['start 0', '170@300s', '170@300s', '510@10s', '510@180s', '170@10s', '170@900s'],
+    ]);
+  });
+
+  it('runs the neighbours beside the calm organisations at the target, with phase 5 offenders', () => {
+    expect(steps('neighbours').map(shape)).toEqual([['start 0', '170@300s', '170@900s']]);
+    expect(runs('neighbours')).toMatchObject([{ mix: 'neighbours', neighbours: { busyRate: 25, stuckRate: 5 } }]);
+  });
+
+  it('climbs smoothly from 170/s to ten times over 30 minutes, stopped at p95 500 ms or 1% failed', () => {
+    expect(steps('breaking').map(shape)).toEqual([['start 0', '170@300s', '170@300s', '1700@1800s']]);
+    expect(runs('breaking').map(({ abort }) => abort)).toEqual([{ p95Ms: 500, errorShare: 0.01 }]);
+  });
+
+  it('overloads to one and a half times the measured breaking rate for 10 minutes, then 30 back at 170/s', () => {
+    expect(steps('overload', 401).map(shape)).toEqual([
+      ['start 0', '170@300s', '170@300s', '602@60s', '602@600s', '170@60s', '170@1800s'],
+    ]);
+  });
+
+  it('refuses an overload with no measured breaking rate, saying to run the breaking test first', () => {
+    for (const rate of [undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => stageGProfile('overload', rate)).toThrow(/run "breaking" first/);
+    }
+  });
+
+  it('soaks four hours as four one-hour runs, the first ramped 5 minutes and the rest one', () => {
+    expect(steps('soak').map((step) => [step.label, step.shape, shape(step)])).toEqual([
+      ['soak-1', { kind: 'soak', segment: 1, segments: 4 }, ['start 0', '170@300s', '170@3300s']],
+      ['soak-2', { kind: 'soak', segment: 2, segments: 4 }, ['start 0', '170@60s', '170@3540s']],
+      ['soak-3', { kind: 'soak', segment: 3, segments: 4 }, ['start 0', '170@60s', '170@3540s']],
+      ['soak-4', { kind: 'soak', segment: 4, segments: 4 }, ['start 0', '170@60s', '170@3540s']],
+    ]);
+  });
+
+  it('gives every test a profile, its steps labelled apart, each no longer than an hour', () => {
+    for (const test of STAGE_G_TESTS) {
+      const profile = stageGProfile(test, 400);
+      expect(profile.test).toBe(test);
+      const labels = profile.steps.map(({ label }) => label);
+      expect(new Set(labels).size).toBe(labels.length);
+      for (const step of profile.steps) expect(stagesSeconds(k6Stages(step))).toBeLessThanOrEqual(JOB_SECONDS);
+    }
+  });
+
+  it('judges the target by the decision p95 limit, errors below 1% and nothing unsent', () => {
+    expect(stageGProfile('target').rules).toEqual({
+      decisionP95Ms: POLICY_P95_MS,
+      maxErrorShare: 0.01,
+      droppedAllowed: false,
+      calmMargin: null,
+      calmNeverLimited: false,
+      recoveryWithinSeconds: null,
+    });
+    expect(stageGProfile('smoke').rules).toEqual(stageGProfile('target').rules);
+    expect(stageGProfile('soak').rules).toEqual(stageGProfile('target').rules);
+  });
+
+  it('compares the organisations steps and the neighbours with a baseline, and only the neighbours forbid 429s', () => {
+    expect(stageGProfile('orgs').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: false });
+    expect(stageGProfile('neighbours').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: true });
+  });
+
+  it('reports the rate steps, the breaking point and the overload apart from the limits they would break by design', () => {
+    expect(stageGProfile('rates').rules).toMatchObject({
+      decisionP95Ms: null,
+      maxErrorShare: 0.01,
+      droppedAllowed: false,
+    });
+    expect(stageGProfile('breaking').rules).toMatchObject({
+      decisionP95Ms: null,
+      maxErrorShare: null,
+      droppedAllowed: true,
+    });
+    expect(stageGProfile('overload', 400).rules).toMatchObject({
+      decisionP95Ms: null,
+      maxErrorShare: null,
+      droppedAllowed: true,
+      recoveryWithinSeconds: 300,
+    });
+    expect(stageGProfile('spike').rules).toMatchObject({
+      decisionP95Ms: null,
+      maxErrorShare: 0.01,
+      droppedAllowed: false,
+      recoveryWithinSeconds: 60,
+    });
+  });
+});
+
+describe('what k6 is handed for one step', () => {
+  it('names the test, the step, its organisations and VUs for half a second of its peak, at least 10, five times at most', () => {
+    expect(runs('smoke')).toEqual([
+      {
+        test: 'smoke',
+        label: 'smoke',
+        orgs: 100,
+        mix: 'steady',
+        startRate: 2,
+        stages: [{ target: 2, duration: '120s' }],
+        vus: { pre: 10, max: 50 },
+        abort: null,
+        neighbours: null,
+      },
+    ]);
+    expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 1275 }]);
+  });
+
+  it('works out the rate asked at any second, so a stopped climb names its breaking rate', () => {
+    // Halfway up the ramp, at the hold, halfway up the climb, and long after it ended.
+    const seconds = [0, 150, 450, 600 + 900, 99_999];
+    expect(runs('breaking').map((climb) => seconds.map((at) => rateAt(climb, at)))).toEqual([[0, 85, 170, 935, 1700]]);
+  });
+});
+
+describe("judging a step's measured result", () => {
+  const target = stageGProfile('target').rules;
+  const good: StepMeasured = {
+    decisionP95Ms: 120,
+    requests: 10_000,
+    serverErrors: 50,
+    rateLimited: 49,
+    dropped: 0,
+    calmP95Ms: 80,
+    recoverySeconds: 30,
+  };
+
+  it('passes a step inside every rule', () => {
+    expect(judgeStep(target, good)).toEqual({ passed: true, failures: [] });
+  });
+
+  it('fails the decision p95 over its limit, a 1% error share and any request never sent, each in plain words', () => {
+    expect(judgeStep(target, { ...good, decisionP95Ms: 150.1, serverErrors: 51, dropped: 3 })).toEqual({
+      passed: false,
+      failures: [
+        "The decisions' p95 was 150.1 ms, over the 150.0 ms limit.",
+        '1.00% of answers were server errors or refusals for rate, not below 1%.',
+        '3 requests were never sent (k6 had no free VU): the step carried less load than it says.',
+      ],
+    });
+  });
+
+  it('fails a step that sent nothing, rather than pass it on no numbers', () => {
+    expect(judgeStep(target, { ...good, requests: 0, serverErrors: 0, rateLimited: 0 }).failures).toEqual([
+      'The step sent no request, so nothing could be judged.',
+    ]);
+  });
+
+  it('ignores the limits a profile leaves null', () => {
+    const none: PassRules = { ...target, decisionP95Ms: null, maxErrorShare: null, droppedAllowed: true };
+    expect(judgeStep(none, { ...good, decisionP95Ms: 9_999, serverErrors: 9_000, dropped: 70 }).passed).toBe(true);
+  });
+
+  it("holds the calm p95 within 15% of the baseline step's, failing without a baseline", () => {
+    const orgs = stageGProfile('orgs').rules;
+    expect(judgeStep(orgs, { ...good, calmP95Ms: 92 }, 80).passed).toBe(true);
+    expect(judgeStep(orgs, { ...good, calmP95Ms: 92.1 }, 80).failures).toEqual([
+      "The p95 was 92.1 ms, more than 15% above the baseline step's 80.0 ms.",
+    ]);
+    expect(judgeStep(orgs, good).failures).toEqual(['No baseline step was given to compare the p95 with.']);
+  });
+
+  it('fails the neighbours when a calm organisation was refused for rate at all', () => {
+    const neighbours = stageGProfile('neighbours').rules;
+    expect(judgeStep(neighbours, { ...good, rateLimited: 0 }, 80).passed).toBe(true);
+    expect(judgeStep(neighbours, { ...good, rateLimited: 1 }, 80).failures).toEqual([
+      'The calm organisations were refused for rate 1 times: only the offender may be.',
+    ]);
+  });
+
+  it('holds a surge to its recovery window, and fails one that never recovered', () => {
+    const spike = stageGProfile('spike').rules;
+    expect(judgeStep(spike, { ...good, recoverySeconds: 60 }).passed).toBe(true);
+    expect(judgeStep(spike, { ...good, recoverySeconds: 61 }).failures).toEqual([
+      'Latency took 61 s to come back after the surge, over the 60 s window.',
+    ]);
+    expect(judgeStep(spike, { ...good, recoverySeconds: null }).failures).toEqual([
+      "Latency never came back to the base load's after the surge.",
+    ]);
+  });
+});
