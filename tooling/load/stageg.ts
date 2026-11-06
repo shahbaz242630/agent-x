@@ -130,7 +130,10 @@ const BREAKING = { factor: 10, climbSeconds: 1800 } as const;
  * The climb stops at the Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500) or 1% failed answers,
  * in any 30 s window: about 1% of the climb's 30 minutes, short enough to name the rate, long enough for a p95.
  */
-const BREAKING_ABORT: AbortRule = { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 };
+/** The Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500): a request's p95 under this. */
+export const REQUEST_P95_MS = 500;
+
+const BREAKING_ABORT: AbortRule = { p95Ms: REQUEST_P95_MS, errorShare: 0.01, windowSeconds: 30 };
 
 /** Overload: half again the measured breaking rate (top of the table's 1.2-1.5×) for 10 minutes, then 30 back at the target. */
 const OVERLOAD = { factor: 1.5, riseSeconds: 60, peakSeconds: 600, recoverySeconds: 1800 } as const;
@@ -148,7 +151,7 @@ export const STAGE_G_JOB_MARGIN_SECONDS = 300;
 const SOAK = { segments: 4, segmentSeconds: 3600, laterRampSeconds: 60 } as const;
 
 /** Failed answers below 1% (Azure's example criterion). */
-const MAX_ERROR_SHARE = 0.01;
+export const MAX_ERROR_SHARE = 0.01;
 
 /** More than 15% off the baseline is worth investigating (AWS). */
 const CALM_MARGIN = 0.15;
@@ -363,7 +366,12 @@ export function rateAt({ startRate, stages }: K6Stages, atSeconds: number): numb
 export interface WindowNumbers {
   readonly window: number;
   readonly p95Ms: number;
+  /** Every answer but a 2xx or 3xx, refusals for rate included. */
   readonly failedShare: number;
+  /** Refused for rate (429), as a share of the window's answers. */
+  readonly refusedShare: number;
+  /** The window's answers. */
+  readonly requests: number;
 }
 
 /**
@@ -387,7 +395,18 @@ export interface StepRun extends K6Stages {
   readonly mix: Profile['mix'];
   readonly vus: { readonly pre: number; readonly max: number };
   readonly abort: AbortRule | null;
+  /** The judged traffic's window, for a climb's abort rule and a surge's recovery; null for a step timed whole. */
+  readonly windowSeconds: number | null;
   readonly neighbours: typeof NEIGHBOUR_RATES | null;
+}
+
+/** A surge's recovery read window by window: as long as the climb's, so a minute's rule is two windows. */
+const RECOVERY_WINDOW_SECONDS = 30;
+
+/** The window a step is timed by, if any. */
+function windowSecondsOf({ shape }: Step): number | null {
+  if (shape.kind === 'breaking') return shape.abort.windowSeconds;
+  return shape.kind === 'spike' || shape.kind === 'overload' ? RECOVERY_WINDOW_SECONDS : null;
 }
 
 /** One step of a profile as stage-g.k6.js runs it. */
@@ -403,6 +422,7 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     ...stages,
     vus: { pre, max: pre * VU_HEADROOM },
     abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
+    windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,
   };
 }
@@ -436,7 +456,7 @@ const RULES: readonly Rule[] = [
   ({ maxErrorShare }, { requests, serverErrors, rateLimited }) => {
     const share = (serverErrors + rateLimited) / requests;
     return maxErrorShare !== null && share >= maxErrorShare
-      ? `${(share * 100).toFixed(2)}% of answers were server errors or refusals for rate, not below ${String(maxErrorShare * 100)}%.`
+      ? `${(share * 100).toFixed(2)}% of answers failed (not 2xx: a server error, busy, refused for rate or any other), not below ${String(maxErrorShare * 100)}%.`
       : undefined;
   },
   ({ droppedAllowed }, { dropped }) =>

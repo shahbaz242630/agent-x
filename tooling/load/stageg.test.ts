@@ -188,10 +188,29 @@ describe('what k6 is handed for one step', () => {
         stages: [{ target: 2, duration: '120s' }],
         vus: { pre: 10, max: 50 },
         abort: null,
+        windowSeconds: null,
         neighbours: null,
       },
     ]);
     expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 1275 }]);
+    // Timed by 30 s windows: the climb for its abort rule, the surges for their recovery; the rest whole.
+    const windowed = STAGE_G_TESTS.map((test) => [
+      test,
+      stageGProfile(test, 400).steps.map((step) => stepRun(stageGProfile(test, 400), step).windowSeconds)[0],
+    ]);
+    expect(Object.fromEntries(windowed)).toEqual({
+      smoke: null,
+      orgs: null,
+      target: null,
+      rates: null,
+      spike: 30,
+      neighbours: null,
+      breaking: 30,
+      overload: 30,
+      soak: null,
+      past10k: null,
+      ha: null,
+    });
   });
 
   it('works out the rate asked at any second, so a stopped climb names its breaking rate', () => {
@@ -216,7 +235,13 @@ describe("naming a climb's breaking rate from its windows", () => {
     const times = Array.from({ length: 80 }, (_, window) =>
       answers(window < KNEE ? 0 : Math.min(100, 60 + (window - KNEE) * 10)),
     );
-    const windows: WindowNumbers[] = times.map((each, window) => ({ window, p95Ms: p95(each), failedShare: 0 }));
+    const windows: WindowNumbers[] = times.map((each, window) => ({
+      window,
+      p95Ms: p95(each),
+      failedShare: 0,
+      refusedShare: 0,
+      requests: 1000,
+    }));
     // At 40 windows of 30 s, 1,200 s in: 170/s plus a third of the climb to 1,700/s.
     expect(breakingRate(climb, abort, windows)).toBe(680);
     expect(rateAt(climb, KNEE * 30)).toBe(680);
@@ -225,7 +250,13 @@ describe("naming a climb's breaking rate from its windows", () => {
   });
 
   it('breaks on the failed share alone, at the limit, and names no rate for a climb that never broke', () => {
-    const calm = (window: number): WindowNumbers => ({ window, p95Ms: 120, failedShare: 0.002 });
+    const calm = (window: number): WindowNumbers => ({
+      window,
+      p95Ms: 120,
+      failedShare: 0.002,
+      refusedShare: 0,
+      requests: 1000,
+    });
     expect(breakingRate(climb, abort, [calm(0), calm(30), { ...calm(31), failedShare: 0.01 }, calm(32)])).toBe(
       rateAt(climb, 31 * 30),
     );
@@ -257,7 +288,7 @@ describe("judging a step's measured result", () => {
       passed: false,
       failures: [
         "The decisions' p95 was 150.1 ms, over the 150.0 ms limit.",
-        '1.00% of answers were server errors or refusals for rate, not below 1%.',
+        '1.00% of answers failed (not 2xx: a server error, busy, refused for rate or any other), not below 1%.',
         '3 requests were never sent (k6 had no free VU): the step carried less load than it says.',
       ],
     });

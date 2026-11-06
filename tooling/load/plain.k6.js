@@ -23,7 +23,18 @@ export const namedOnly = (kinds, metric, rule) =>
 /** The traffic each mix times and counts apart: the first is the one a step is judged by. */
 const KINDS = { steady: ['steady'], neighbours: ['calm', 'busy', 'stuck'] };
 
-const STEP_FIELDS = ['test', 'label', 'orgs', 'mix', 'startRate', 'stages', 'vus', 'abort', 'neighbours'];
+const STEP_FIELDS = [
+  'test',
+  'label',
+  'orgs',
+  'mix',
+  'startRate',
+  'stages',
+  'vus',
+  'abort',
+  'windowSeconds',
+  'neighbours',
+];
 
 /** Lowercase words and dashes, short: it goes into every order reference (100 characters at most). */
 const isLabel = (value) => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(value);
@@ -62,6 +73,12 @@ const STEP_PARTS = [
         isWhole(step.abort.windowSeconds) &&
         isPositive(step.abort.errorShare) &&
         step.abort.errorShare < 1),
+  ],
+  [
+    'windows',
+    (step) =>
+      (step.windowSeconds === null || isWhole(step.windowSeconds)) &&
+      (step.abort === null || step.abort.windowSeconds === step.windowSeconds),
   ],
   [
     'neighbours',
@@ -106,10 +123,10 @@ export const stepSeconds = (step) => step.stages.reduce((sum, stage) => sum + Nu
 /** A step's k6 options: its stages for the judged traffic, the duplicates, replays and any neighbours beside them. */
 export function stageGOptions(step) {
   const seconds = stepSeconds(step);
-  const judged = judgedKind(step);
   const kinds = kindsOf(step);
   return {
-    summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max'],
+    // `count` for a window's answers, so its shares weigh as much as it carried.
+    summaryTrendStats: ['med', 'p(95)', 'p(99)', 'max', 'count'],
     // Every metric carries its step, so a step's numbers are never another's.
     tags: { test: step.test, step: step.label },
     scenarios: {
@@ -137,7 +154,8 @@ export function stageGOptions(step) {
       ...namedOnly(kinds, 'http_reqs', 'count>=0'),
       ...namedOnly(kinds, 'server_errors', 'count>=0'),
       ...namedOnly(kinds, 'rate_limited', 'count>=0'),
-      ...(step.abort === null ? {} : abortThresholds(step, judged)),
+      ...namedOnly(kinds, 'failed_answers', 'count>=0'),
+      ...(step.abort === null ? {} : abortThresholds(step)),
     },
   };
 }
@@ -146,41 +164,60 @@ export function stageGOptions(step) {
 const ABORT_AFTER = '60s';
 
 /**
- * Which window of a climb a request falls in, counted from `t0` (setup's):
- * judged window by window, a knee shows in its own window, where the whole
- * run's p95 would hide it under every faster request before it.
+ * Which window of a step a request falls in, counted from `t0` (setup's):
+ * judged window by window, a knee or a recovery shows in its own window,
+ * where the whole run's p95 would hide it under every other request.
  */
 export const windowOf = (t0, now, windowSeconds) => Math.max(0, Math.floor((now - t0) / (windowSeconds * 1000)));
 
 /** How many windows a windowed step's stages span, the last one maybe short. */
-export const windowCount = (step) => Math.ceil(stepSeconds(step) / step.abort.windowSeconds);
+export const windowCount = (step) => Math.ceil(stepSeconds(step) / step.windowSeconds);
 
-/** A metric of the judged traffic in one window, named the same in the thresholds and the summary. */
-const inWindow = (metric, judged, window) => `${metric}{kind:${judged},window:${window}}`;
+/**
+ * The judged traffic's metrics of one window, stage-g.k6.js's own: a custom
+ * metric is in the summary with no threshold, where a tagged one is there only
+ * if a threshold names it, so only a climb's windows carry thresholds.
+ */
+export const windowMetrics = (window) => ({
+  ms: `window_ms_${window}`,
+  failed: `window_failed_${window}`,
+  refused: `window_refused_${window}`,
+});
 
 const windows = (step) => Array.from({ length: windowCount(step) }, (_, window) => window);
 
 /** The breaking-point climb stops itself in the first window whose p95 or failed share passes its rule. */
-const abortThresholds = (step, judged) => {
+const abortThresholds = (step) => {
   const { p95Ms, errorShare } = step.abort;
   const stop = (threshold) => [{ threshold, abortOnFail: true, delayAbortEval: ABORT_AFTER }];
   return Object.fromEntries(
-    windows(step).flatMap((window) => [
-      [inWindow('http_req_duration', judged, window), stop(`p(95)<${p95Ms}`)],
-      [inWindow('http_req_failed', judged, window), stop(`rate<${errorShare}`)],
-    ]),
+    windows(step).flatMap((window) => {
+      const { ms, failed } = windowMetrics(window);
+      return [
+        [ms, stop(`p(95)<${p95Ms}`)],
+        [failed, stop(`rate<${errorShare}`)],
+      ];
+    }),
   );
 };
 
-/** Each window's p95 and failed share, for the windows that saw an answer: stageg.ts's breakingRate reads them. */
-const windowNumbers = (step, metrics) => {
-  const judged = judgedKind(step);
-  return windows(step).flatMap((window) => {
-    const p95Ms = metrics[inWindow('http_req_duration', judged, window)]?.values['p(95)'];
-    const failedShare = metrics[inWindow('http_req_failed', judged, window)]?.values.rate ?? 0;
-    return p95Ms === undefined ? [] : [{ window, p95Ms, failedShare }];
+/** Each window's p95 and failed share, for the windows that saw an answer: a climb's breaking rate, a surge's recovery. */
+const windowNumbers = (step, metrics) =>
+  windows(step).flatMap((window) => {
+    const { ms, failed, refused } = windowMetrics(window);
+    const times = metrics[ms]?.values;
+    if (times === undefined) return [];
+    return [
+      {
+        window,
+        p95Ms: times['p(95)'],
+        failedShare: metrics[failed]?.values.rate ?? 0,
+        // 429s apart from the rest: a surge means to cause them, and only during the surge.
+        refusedShare: metrics[refused]?.values.rate ?? 0,
+        requests: times.count ?? 0,
+      },
+    ];
   });
-};
 
 /** A count k6 summed up, 0 when nothing was counted. */
 export const countOf = (metrics, name) => metrics[name]?.values.count ?? 0;
@@ -204,6 +241,7 @@ export function kindNumbers(metrics, kind) {
     requests: count('http_reqs'),
     serverErrors: count('server_errors'),
     rateLimited: count('rate_limited'),
+    failedAnswers: count('failed_answers'),
     p95Ms: times?.['p(95)'] ?? 0,
   };
 }
@@ -219,7 +257,7 @@ export function runWindow(state, endedAt = Date.now()) {
 /** Whether any window's p95 or failed-share rule failed, which is what stops a climb (abortOnFail). */
 const windowRuleBroken = (metrics) =>
   Object.entries(metrics).some(
-    ([name, metric]) => name.includes(',window:') && Object.values(metric.thresholds ?? {}).some(({ ok }) => !ok),
+    ([name, metric]) => name.startsWith('window_') && Object.values(metric.thresholds ?? {}).some(({ ok }) => !ok),
   );
 
 /** A Stage G step's numbers, as stage-g.k6.js prints them (load.stageg_summary) for the runner and the report. */
@@ -239,7 +277,7 @@ export function stageGSummary(step, { metrics, state }, endedAt = Date.now()) {
     kinds: Object.fromEntries(kindsOf(step).map((kind) => [kind, kindNumbers(metrics, kind)])),
     // Only a climb's own window rule stops a run: k6 can end a few ms short of its stages, which is no abort (S175).
     aborted: step.abort !== null && windowRuleBroken(metrics),
-    windows: step.abort === null ? null : windowNumbers(step, metrics),
+    windows: step.windowSeconds === null ? null : windowNumbers(step, metrics),
     thresholds: thresholdResults(metrics),
     durationMs: state.testRunDurationMs,
     ...runWindow(state, endedAt),
