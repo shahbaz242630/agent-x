@@ -265,13 +265,14 @@ interface Context {
 async function seedCommand(app: Database<LoadTables>, { env, runId, make }: Context, orgs: number): Promise<number> {
   const keyring = make.keyring(needed(env, 'AGENTX_KEYS_DIR'));
   const workers = stageGSeedWorkers();
+  const { hugeChainEvents } = make;
   const seeded = await stageGSeed({
     database: app,
     keyring,
     runId,
     orgs,
     workers,
-    hugeChainEvents: make.hugeChainEvents,
+    ...(hugeChainEvents === undefined ? {} : { hugeChainEvents }),
   });
   make.print({ event: 'load.stageg_seeded', runId, ...seeded });
   return 0;
