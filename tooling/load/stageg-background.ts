@@ -13,7 +13,7 @@ export interface StepWindow {
 }
 
 /** A count at the step's first reading and its last. */
-export interface Trend {
+interface Trend {
   readonly first: number;
   readonly last: number;
 }
@@ -36,7 +36,7 @@ export interface BackgroundHealth {
 }
 
 /** The jobs-stopped alert's window (environment.bicep): no pulse this long is down. */
-export const PULSE_GAP_MINUTES = 15;
+const PULSE_GAP_MINUTES = 15;
 
 const MINUTE_MS = 60_000;
 

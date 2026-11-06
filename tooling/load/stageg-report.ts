@@ -261,10 +261,12 @@ export function renderStageG(input: StageGReportInput): string {
         ? '**Passed: every step.**'
         : `**Not finished: ${String(steps.length)} of ${String(profile.steps.length)} steps ran, each passing.**`
       : `**Failed at step ${stopped}.** The climb stops there: fix it, then resume with \`--from ${stopped}\`.`;
+  const baselineStep =
+    input.baselineP95Ms === undefined ? 'the first step, ' + String(steps[0]?.run.label) : 'the target step';
   const baseline =
     baselineP95Ms === undefined
       ? 'No step had a p95 to set as the baseline.'
-      : `Baseline: ${input.baselineP95Ms === undefined ? `the first step, ${String(steps[0]?.run.label)}` : 'the target step'}, p95 ${ms(baselineP95Ms)} ms.` +
+      : `Baseline: ${baselineStep}, p95 ${ms(baselineP95Ms)} ms.` +
         (profile.rules.calmMargin === null
           ? ''
           : ` A step's p95 more than ${String(profile.rules.calmMargin * 100)}% above it fails (AWS's investigation threshold).`);
