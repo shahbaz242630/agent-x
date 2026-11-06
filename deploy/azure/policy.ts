@@ -2127,7 +2127,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       url: 'AGENTX_EVIDENCE_CONTAINER_URL',
       clientId: 'AGENTX_EVIDENCE_CLIENT_ID',
       accounts,
-      container: EVIDENCE_CONTAINER,
+      container: () => EVIDENCE_CONTAINER,
       holders: (workload) => (isJobOf(workload, STORE_WRITERS) ? ownOf(workload, writers) : undefined),
       holder: "the operator's and the chain repair's jobs write to the store",
       store: 'store',
@@ -2411,7 +2411,7 @@ interface StoreSettings {
   /** The store's account by name; the URL must name the one there is. */
   readonly accounts: readonly PredictedResource[];
   /** The container a workload's URL must name. */
-  readonly container: string | ((workload: PredictedResource) => string);
+  readonly container: (workload: PredictedResource) => string;
   /** The identities a workload may name, those its store's role is given to; undefined for one never told of the store. */
   readonly holders: (workload: PredictedResource) => readonly PredictedResource[] | undefined;
   /** Who alone is told, and what a problem calls the store. */
@@ -2461,7 +2461,7 @@ function storeSettingsProblems(
         continue;
       }
       const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
-      const containerName = typeof wanted.container === 'string' ? wanted.container : wanted.container(workload);
+      const containerName = wanted.container(workload);
       if (!storeSettingsSound(wanted, names, values, containerName, holders)) {
         problem(
           workload.name,
@@ -2613,7 +2613,7 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       url: 'AGENTX_ACTIVITY_DOWNLOADS_URL',
       clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       accounts,
-      container: DOWNLOADS_CONTAINER,
+      container: () => DOWNLOADS_CONTAINER,
       // Not on Stage G's copy (4D2e): it holds staging's downloads under way, which it would write over.
       holders: (workload) => (runsApi(workload) && copy === undefined ? ownOf(workload, keepers) : undefined),
       holder: `the apps that run the API keep the activity downloads${copy === undefined ? '' : ", and never on Stage G's copy"}`,

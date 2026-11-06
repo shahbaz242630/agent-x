@@ -1260,6 +1260,11 @@ function confirmLoadServer(steps: Steps, subscription: string, loadDatabase: str
       `The database allows ${String(live.limit)} connections${live.waiting ? ', and a change of it waits on a restart' : ''}, but the load run is counted against ${String(LOAD_SERVER_CONNECTIONS)}: the API would be refused connections. ${next}`,
     );
   }
+  if (loadDatabase !== undefined) {
+    steps.terminal.say(
+      `Stage G's run: the API, its jobs app and the load jobs reach ${loadDatabase}, never staging's own database, and keep its anchors in its own container; email, the activity downloads and the second-factor resets are off on it. Every other job stays on staging's server.`,
+    );
+  }
 }
 
 /** Stage G's copy refused before anything is sent: one Azure doesn't list. */
@@ -2045,11 +2050,6 @@ async function deployApps(
   }
   steps.terminal.say('Verified.');
   const loadDigest = loadRun ? await verifiedLoadImage(steps, images, release) : '';
-  if (loadDatabase !== undefined) {
-    steps.terminal.say(
-      `Stage G's run: the API, its jobs app and the load jobs reach ${loadDatabase}, never staging's own database, and keep its anchors in its own container; email, the activity downloads and the second-factor resets are off on it. Every other job stays on staging's server.`,
-    );
-  }
   steps.terminal.say(
     keepRunning
       ? 'Each app will keep one replica running, billed, until apps runs again without --keep-running.'
