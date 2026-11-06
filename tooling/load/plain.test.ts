@@ -256,13 +256,30 @@ describe("the summaries' numbers", () => {
     });
   });
 
-  it('says a run stopped short of its stages was aborted, and has no times when the judged traffic got no answer', () => {
+  it('says a climb its window rule stopped was aborted, and has no times when the judged traffic got no answer', () => {
+    const broken = { values: { rate: 0.2 }, thresholds: { 'rate<0.01': { ok: false } } };
     const summary = plain.stageGSummary(
       runOf('breaking'),
-      { metrics: { http_reqs: { values: { count: 0 } } }, state: { testRunDurationMs: 1_000_000 } },
+      {
+        metrics: { http_reqs: { values: { count: 0 } }, 'http_req_failed{kind:steady,window:3}': broken },
+        state: { testRunDurationMs: 1_000_000 },
+      },
       ended,
     );
-    expect(summary).toMatchObject({ aborted: true, asksMs: null, checksFailed: 0, windows: [] });
+    expect(summary).toMatchObject({ aborted: true, asksMs: null, checksFailed: 0 });
+  });
+
+  it('never calls a run aborted for ending a few ms short, or for a failed rule outside the windows (S175 smoke)', () => {
+    const failedOutside = {
+      http_reqs: { values: { count: 721 } },
+      checks: { values: { fails: 1 }, thresholds: { 'rate==1': { ok: false } } },
+    };
+    const short = { testRunDurationMs: 119_985 };
+    expect(plain.stageGSummary(runOf('smoke'), { metrics: failedOutside, state: short }, ended).aborted).toBe(false);
+    const heldWindow = {
+      'http_req_failed{kind:steady,window:0}': { values: { rate: 0 }, thresholds: { 'rate<0.01': { ok: true } } },
+    };
+    expect(plain.stageGSummary(runOf('breaking'), { metrics: heldWindow, state: short }, ended).aborted).toBe(false);
   });
 
   it("gives a climb's p95 and failed share window by window, for the windows that saw an answer", () => {

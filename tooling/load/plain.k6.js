@@ -216,6 +216,12 @@ export function runWindow(state, endedAt = Date.now()) {
   };
 }
 
+/** Whether any window's p95 or failed-share rule failed, which is what stops a climb (abortOnFail). */
+const windowRuleBroken = (metrics) =>
+  Object.entries(metrics).some(
+    ([name, metric]) => name.includes(',window:') && Object.values(metric.thresholds ?? {}).some(({ ok }) => !ok),
+  );
+
 /** A Stage G step's numbers, as stage-g.k6.js prints them (load.stageg_summary) for the runner and the report. */
 export function stageGSummary(step, { metrics, state }, endedAt = Date.now()) {
   const judged = metrics[`http_req_duration{kind:${judgedKind(step)}}`]?.values;
@@ -231,8 +237,8 @@ export function stageGSummary(step, { metrics, state }, endedAt = Date.now()) {
     dropped: countOf(metrics, 'dropped_iterations'),
     asksMs: judged === undefined ? null : trendMs(judged),
     kinds: Object.fromEntries(kindsOf(step).map((kind) => [kind, kindNumbers(metrics, kind)])),
-    // A climb its abort rule stopped ran short of its stages; its breaking rate comes from the windows.
-    aborted: state.testRunDurationMs < stepSeconds(step) * 1000,
+    // Only a climb's own window rule stops a run: k6 can end a few ms short of its stages, which is no abort (S175).
+    aborted: step.abort !== null && windowRuleBroken(metrics),
     windows: step.abort === null ? null : windowNumbers(step, metrics),
     thresholds: thresholdResults(metrics),
     durationMs: state.testRunDurationMs,
