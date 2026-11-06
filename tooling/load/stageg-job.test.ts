@@ -113,6 +113,7 @@ describe("the run's request", () => {
 describe('the commands each part takes', () => {
   it('load-step: seed --to <organisations>, or step <STEP json>', () => {
     expect(commandOf(['seed', '--to', '1000'], 'step')).toEqual({ kind: 'seed', orgs: 1000 });
+    expect(commandOf(['pause'], 'step')).toEqual({ kind: 'pause' });
     expect(commandOf(['step', JSON.stringify(STEP)], 'step')).toEqual({ kind: 'step', step: STEP });
   });
 
@@ -135,20 +136,23 @@ describe('the commands each part takes', () => {
     [['step']],
     [['check', JSON.stringify(STEP), JSON.stringify(CHECKED)]],
     [['mark']],
+    [['pause', 'now']],
   ])('load-step refuses %j', (words) => {
     expect(() => commandOf(words, 'step')).toThrow(
-      `load-step takes seed --to <1 to 100000 organisations> or step <STEP json>, not ${words.join(' ')}.`,
+      `load-step takes pause, seed --to <1 to 100000 organisations> or step <STEP json>, not ${words.join(' ')}.`,
     );
   });
 
-  it.each([[['seed', '--to', '100']], [['step', JSON.stringify(STEP)]], [['check', JSON.stringify(STEP)]]])(
-    'load-check refuses %j',
-    (words) => {
-      expect(() => commandOf(words, 'check')).toThrow(
-        `load-check takes check <STEP json> <CHECKED json>, not ${words.join(' ')}.`,
-      );
-    },
-  );
+  it.each([
+    [['seed', '--to', '100']],
+    [['step', JSON.stringify(STEP)]],
+    [['check', JSON.stringify(STEP)]],
+    [['pause']],
+  ])('load-check refuses %j', (words) => {
+    expect(() => commandOf(words, 'check')).toThrow(
+      `load-check takes check <STEP json> <CHECKED json>, not ${words.join(' ')}.`,
+    );
+  });
 
   it.each([
     ['not JSON', '{step'],

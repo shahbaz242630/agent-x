@@ -84,23 +84,25 @@ const withoutKey = ({ key: _key, ...agent }: SeededAgent): PrintedAgent => agent
  * bank (PL-46); when not, said. `tampered` counts as not: nothing is believed.
  */
 async function handoffsPaused(steps: JobSteps, when: string): Promise<boolean> {
-  const reason = await notPaused(steps.database, steps.keyring, when);
-  if (reason === undefined) return true;
-  steps.print({ event: 'load.refused', reason });
+  const outcome = await pauseOutcome(steps.database, steps.keyring);
+  if (outcome === 'paused') return true;
+  // PL-38's run is on staging's own database, which the operator's handoff-pause moves.
+  steps.print({
+    event: 'load.refused',
+    reason: `hand-offs are ${outcome} ${when}, not paused: pause them (handoff-pause), so no request of the run can reach the bank`,
+  });
   return false;
 }
 
-/** Why the run may not send now, unless every hand-off is paused (PL-46): Stage G's job (stageg-job.ts) asks it too. */
-export async function notPaused(
-  database: Database<LoadTables>,
-  keyring: KeyProvider,
-  when: string,
-): Promise<string | undefined> {
+/**
+ * The platform's hand-off pause as the database it is read on holds it (PL-46):
+ * `paused`, or what it is instead (`tampered` counts as not: nothing is
+ * believed). Stage G's job (stageg-job.ts) reads it on its copy.
+ */
+export async function pauseOutcome(database: Database<LoadTables>, keyring: KeyProvider): Promise<string> {
   const logger = createStartupLogger({ service: 'load' });
   const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys: keyring, logger }));
-  return pause.outcome === 'paused'
-    ? undefined
-    : `hand-offs are ${pause.outcome} ${when}, not paused: pause them (handoff-pause), so no request of the run can reach the bank`;
+  return pause.outcome;
 }
 
 /**

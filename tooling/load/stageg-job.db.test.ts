@@ -191,14 +191,27 @@ describe("Stage G's jobs on a database", () => {
     expect(await organisations()).toBe(3);
   });
 
-  it('refuses a step while hand-offs are not paused, sending nothing', async () => {
+  it('refuses a step while the copy’s hand-offs are not paused, sending nothing, and says to pause staging first', async () => {
     await pauseMoved(false);
-    const { make, sent } = makers();
+    const { make, sent, printed } = makers();
     await expect(main(['step'], settings(['step', JSON.stringify(STEP)]), make)).rejects.toThrow(
-      /^Nothing was changed: hand-offs are .* before the step, not paused/,
+      "Nothing was changed: the copy's hand-offs are running before the step, not paused: hand-offs must be paused on staging BEFORE stage-g.ts create, so the copy inherits the pause; a copy made unpaused must be deleted and made again.",
     );
     expect(sent).toEqual([]);
+    // The runner's check right after the copy is made says the same, and ends 1.
+    expect(await main(['step'], settings(['pause']), make)).toBe(1);
+    expect(printed).toEqual([
+      {
+        event: 'load.stageg_pause',
+        runId: RUN,
+        outcome: 'running',
+        next: 'hand-offs must be paused on staging BEFORE stage-g.ts create, so the copy inherits the pause; a copy made unpaused must be deleted and made again',
+      },
+    ]);
     await pauseMoved(true);
+    const paused = makers();
+    expect(await main(['step'], settings(['pause']), paused.make)).toBe(0);
+    expect(paused.printed).toEqual([{ event: 'load.stageg_pause', runId: RUN, outcome: 'paused' }]);
   });
 
   it("sends the step as the cohort's agents, each newly keyed, and says k6 ran to the end", async () => {
@@ -241,7 +254,9 @@ describe("Stage G's jobs on a database", () => {
       expect.objectContaining({
         event: 'load.stageg_stepped',
         finished: true,
-        notPaused: expect.stringMatching(/after the step, not paused/) as unknown,
+        notPaused: expect.stringMatching(
+          /^the copy's hand-offs are running after the step, not paused: hand-offs must be paused on staging BEFORE/,
+        ) as unknown,
       }),
     ]);
   });

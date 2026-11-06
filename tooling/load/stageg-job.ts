@@ -31,7 +31,7 @@ import { API_PURPOSES, type KeyProvider, loadKeys, OPERATOR_ONLY } from '../../p
 import { createStartupLogger, type Logger } from '../../packages/platform/src/observability/index.ts';
 import { testLogger } from '../../packages/testing/src/index.ts';
 
-import { jobConnection, k6Ran, type LoadTables, notPaused, type PrintedLine, withSeedFile } from './job.ts';
+import { jobConnection, k6Ran, type LoadTables, pauseOutcome, type PrintedLine, withSeedFile } from './job.ts';
 import { loadConnection, type Seeded } from './plan.ts';
 import { rekeyed } from './seed.ts';
 import { type StageGCheckedStep, stageGChecks } from './stageg-checks.ts';
@@ -66,6 +66,7 @@ const LABEL = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export type StageGCommand =
   | { readonly kind: 'seed'; readonly orgs: number }
+  | { readonly kind: 'pause' }
   | { readonly kind: 'step'; readonly step: StepRun }
   | { readonly kind: 'check'; readonly step: StepRun; readonly checked: StageGCheckedStep };
 
@@ -159,6 +160,7 @@ export function commandOf(words: readonly string[], part: 'step' | 'check'): Sta
     const orgs = Number(rest[1]);
     if (/^\d+$/.test(rest[1] ?? '') && wholeIn(orgs, 1, MOST_ORGS)) return { kind: 'seed', orgs };
   }
+  if (part === 'step' && first === 'pause' && rest.length === 0) return { kind: 'pause' };
   if (part === 'step' && first === 'step' && rest.length === 1) return { kind: 'step', step: stepOf(rest[0] ?? '') };
   if (part === 'check' && first === 'check' && rest.length === 2) {
     const step = stepOf(rest[0] ?? '');
@@ -166,7 +168,7 @@ export function commandOf(words: readonly string[], part: 'step' | 'check'): Sta
   }
   throw new StageGRefused(
     part === 'step'
-      ? `load-step takes seed --to <1 to ${String(MOST_ORGS)} organisations> or step <STEP json>, not ${words.join(' ')}.`
+      ? `load-step takes pause, seed --to <1 to ${String(MOST_ORGS)} organisations> or step <STEP json>, not ${words.join(' ')}.`
       : `load-check takes check <STEP json> <CHECKED json>, not ${words.join(' ')}.`,
   );
 }
@@ -279,6 +281,38 @@ async function seedCommand(app: Database<LoadTables>, { env, runId, make }: Cont
 }
 
 /**
+ * What to do about a copy whose hand-offs aren't paused: the copy is a restore,
+ * so its pause is staging's at the moment it was made, and the operator's
+ * handoff-pause moves staging's alone, never the copy's.
+ */
+const PAUSE_ON_STAGING_FIRST =
+  'hand-offs must be paused on staging BEFORE stage-g.ts create, so the copy inherits the pause; a copy made unpaused must be deleted and made again';
+
+/** Why the copy's hand-offs refuse a step, or undefined while they are paused. */
+async function notPausedOnCopy(app: Database<LoadTables>, keyring: KeyProvider, when: string) {
+  const outcome = await pauseOutcome(app, keyring);
+  return outcome === 'paused'
+    ? undefined
+    : `the copy's hand-offs are ${outcome} ${when}, not paused: ${PAUSE_ON_STAGING_FIRST}`;
+}
+
+/**
+ * load-step's pause: the copy's hand-off pause, read as the step reads it, for
+ * the runner to check right after the copy is made, before any seed (a copy
+ * holds staging's pause from its restore point, the one that counts). 0 when paused.
+ */
+async function pauseCommand(app: Database<LoadTables>, { env, runId, make }: Context): Promise<number> {
+  const outcome = await pauseOutcome(app, make.keyring(needed(env, 'AGENTX_KEYS_DIR')));
+  make.print({
+    event: 'load.stageg_pause',
+    runId,
+    outcome,
+    ...(outcome === 'paused' ? {} : { next: PAUSE_ON_STAGING_FIRST }),
+  });
+  return outcome === 'paused' ? 0 : 1;
+}
+
+/**
  * load-step's step, while every hand-off is paused: the cohort read from the
  * copy, new keys for its agents alone, k6 (the stuck organisation's suppliers
  * held locked for a neighbours step, stuck.ts). 0 when k6 ran to the end and
@@ -287,13 +321,13 @@ async function seedCommand(app: Database<LoadTables>, { env, runId, make }: Cont
 async function stepCommand(app: Database<LoadTables>, { env, runId, make }: Context, step: StepRun): Promise<number> {
   const keyring = make.keyring(needed(env, 'AGENTX_KEYS_DIR'));
   const send = make.k6(needed(env, 'AGENTX_LOAD_API'));
-  const before = await notPaused(app, keyring, 'before the step');
+  const before = await notPausedOnCopy(app, keyring, 'before the step');
   if (before !== undefined) throw new StageGRefused(`Nothing was changed: ${before}.`);
   const cohort = await stageGCohort({ database: app, runId, orgs: step.orgs, mix: step.mix });
   const keyed = await rekeyed(app, keyring, { agents: cohort });
   const run = () => send(step, keyed);
   const finished = step.mix === 'neighbours' ? await whileStuck(app, keyed.agents, run) : await run();
-  const after = await notPaused(app, keyring, 'after the step');
+  const after = await notPausedOnCopy(app, keyring, 'after the step');
   make.print({
     event: 'load.stageg_stepped',
     runId,
@@ -347,6 +381,8 @@ export async function main(
     switch (command.kind) {
       case 'seed':
         return seedCommand(app, context, command.orgs);
+      case 'pause':
+        return pauseCommand(app, context);
       case 'step':
         return stepCommand(app, context, command.step);
       case 'check':
