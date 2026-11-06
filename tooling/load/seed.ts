@@ -21,6 +21,13 @@ import {
   type SeededAgent,
 } from './plan.ts';
 
+/**
+ * The steady traffic's mandate terms. The split check off: on, it adds up an agent's AED 1 to 9 to one supplier and
+ * past AED 5 sends nearly every request to a person (S164: 24 of 6,777 allowed). Off, about half are allowed and half
+ * wait, as the traffic means.
+ */
+export const AMPLE_TERMS = { approvalThreshold: AED(APPROVAL_THRESHOLD_MINOR), splitCheck: false };
+
 /** The seeded world's helpers for one run's seed or keys: the API's clock is the real one, and sealed times are Postgres's. */
 function worldOf(database: Database<MandateWorldTables>, keyring: KeyProvider) {
   const clock = new FixedClock(new Date());
@@ -51,9 +58,6 @@ export async function seedRun({
 }): Promise<Seeded> {
   const { clock, shared } = worldOf(database, keyring);
   const registry = createMandateRegistry({ database, keys: keyring, ids: uuidV7Ids, clock, logger: testLogger() });
-  // The split check off: on, it adds up an agent's AED 1 to 9 to one supplier and past AED 5 sends nearly every
-  // request to a person (S164: 24 of 6,777 allowed). Off, about half are allowed and half wait, as the traffic means.
-  const ampleTerms = { approvalThreshold: AED(APPROVAL_THRESHOLD_MINOR), splitCheck: false };
 
   async function verifiedWorld(suppliers: number) {
     const w = await shared.world({ suppliers, orgName: loadOrgName(runId) });
@@ -91,14 +95,14 @@ export async function seedRun({
     for (let at = 0; at < CROWD_AGENTS; at += 1) {
       const theirs = at === 0 ? w : await shared.anotherAgent(w);
       const suppliers = own ? w.suppliers.slice(at * 3, at * 3 + 3) : w.suppliers;
-      made.push(await madeAgent(kind, theirs, ampleTerms, suppliers));
+      made.push(await madeAgent(kind, theirs, AMPLE_TERMS, suppliers));
     }
     return made;
   }
 
   const agents: SeededAgent[] = [];
   for (let at = 0; at < AMPLE_AGENTS; at += 1)
-    agents.push(await madeAgent('ample', await verifiedWorld(3), ampleTerms));
+    agents.push(await madeAgent('ample', await verifiedWorld(3), AMPLE_TERMS));
   const capped = AED(CAPPED_MONTHLY_MINOR);
   agents.push(
     await madeAgent('capped', await verifiedWorld(3), {
@@ -109,7 +113,7 @@ export async function seedRun({
   );
   agents.push(...(await crowded('crowd-own')), ...(await crowded('crowd-shared')));
   for (let at = 0; at < CROWD_AGENTS; at += 1)
-    agents.push(await madeAgent('neighbour-calm', await verifiedWorld(3), ampleTerms));
+    agents.push(await madeAgent('neighbour-calm', await verifiedWorld(3), AMPLE_TERMS));
   agents.push(...(await crowded('neighbour-busy')), ...(await crowded('neighbour-stuck')));
   return { agents };
 }
