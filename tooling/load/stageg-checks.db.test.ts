@@ -118,6 +118,7 @@ async function aStep() {
     created: 8,
     startedAt,
     endedAt: new Date(clock.now().getTime() + 1000).toISOString(),
+    since: startedAt,
   };
   return { a, b, step, cohort: [a.agent, b.agent] };
 }
@@ -135,7 +136,7 @@ const ELSEWHERE = 'put no row in another organisation';
 const LIMITS = 'kept every month the step touched within its agent’s limit';
 const HOLDINGS =
   'holds exactly one reservation and one open claim for each request holding money, and none for one that ended';
-const HOLDS = 'put no organisation on an integrity hold since the step began';
+const HOLDS = 'put no organisation on an integrity hold since the run’s first step began';
 
 /** A change by the tables' owner with their guards off, in the organisation's rows: as only something past the app could. */
 async function pastTheApp(org: string, change: (owner: TestClient) => Promise<unknown>): Promise<void> {
@@ -345,9 +346,25 @@ describe("Stage G's checks over the whole copy (4D2e item 8)", () => {
     const { a, step, cohort } = await aStep();
     await holdOrganisation(app, a.w.org, { keys, ids, logger: testLogger() }, 'planted by the Stage G checks test');
     const found = await byName(step, cohort);
-    expect(found[HOLDS]).toEqual([`Organisation ${a.w.org} was put on an integrity hold during the step.`]);
+    expect(found[HOLDS]).toEqual([
+      `Organisation ${a.w.org} was put on an integrity hold since the run's first step began.`,
+    ]);
     expect(found['the active cohort: put no organisation on an integrity hold']).toEqual([
       `Organisation ${a.w.org} was put on an integrity hold.`,
     ]);
+  });
+
+  it('catch a hold set since the run’s first step in an organisation outside the cohort, before this step', async () => {
+    const since = clock.now().toISOString();
+    const { w } = await shared.ready();
+    await holdOrganisation(app, w.org, { keys, ids, logger: testLogger() }, 'planted by the Stage G checks test');
+    const { step, cohort } = await aStep();
+    // This step's own start after the hold: a check from it alone, or of the cohort alone, finds nothing.
+    const later = { ...step, startedAt: new Date(Date.now() + 1000).toISOString(), since };
+    const found = await byName(later, cohort);
+    expect(found[HOLDS]).toEqual([
+      `Organisation ${w.org} was put on an integrity hold since the run's first step began.`,
+    ]);
+    expect(found['the active cohort: put no organisation on an integrity hold']).toEqual([]);
   });
 });

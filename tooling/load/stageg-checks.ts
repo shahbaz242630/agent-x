@@ -3,8 +3,8 @@
 // organisation at a time as checks.ts goes, which at 10,000 organisations would
 // be 10,000 transactions a check. Each request of the step recorded once, none
 // lost, no row in another organisation, every month the step touched within
-// its limit, holdings exactly matching decisions, no integrity hold since the
-// step began. Then checks.ts's per-organisation checks on the active cohort
+// its limit, holdings exactly matching decisions, no integrity hold in any
+// organisation since the run's first step began. Then checks.ts's per-organisation checks on the active cohort
 // only, through each one's tenant wall as the app's role.
 //
 // The set-based statements read every organisation, so they need a role past
@@ -23,6 +23,8 @@ export interface StageGCheckedStep {
   readonly created: number;
   readonly startedAt: string;
   readonly endedAt: string;
+  /** When the run's first step began on this copy: a hold set any time since, in any organisation, fails the step. */
+  readonly since: string;
 }
 
 export interface StageGCheckResult {
@@ -301,18 +303,21 @@ const SET_CHECKS: readonly SetCheck[] = [
     },
   },
   {
-    name: 'put no organisation on an integrity hold since the step began',
+    name: 'put no organisation on an integrity hold since the run’s first step began',
     async run(tx, step) {
       const held = await tx
         .selectFrom('audit.events as e')
         .select((eb) => ['e.org_id', eb.fn.countAll<string>().over().as('total')])
         .where('e.action', '=', 'integrity_hold.set')
-        .where('e.recorded_at', '>=', new Date(step.startedAt))
+        .where('e.recorded_at', '>=', new Date(step.since))
         .groupBy('e.org_id')
         .orderBy('e.org_id')
         .limit(EXAMPLES)
         .execute();
-      return said(held, ({ org_id }) => `Organisation ${org_id} was put on an integrity hold during the step.`);
+      return said(
+        held,
+        ({ org_id }) => `Organisation ${org_id} was put on an integrity hold since the run's first step began.`,
+      );
     },
   },
 ];
