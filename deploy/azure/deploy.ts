@@ -240,33 +240,46 @@ export const USAGE = `Usage, from your own terminal window:
 
 /** `apps`'s options, each at most once, in either order. */
 function parseApps(options: readonly string[]): Request {
-  let commit: string | undefined;
-  let keepRunning = false;
-  let loadRun = false;
-  let loadDatabase: string | undefined;
+  const asked: AppsAsked = { keepRunning: false, loadRun: false };
   for (let at = 0; at < options.length; at += 1) {
-    const option = options[at];
-    const value = options[at + 1] ?? '';
-    if (option === '--keep-running' && !keepRunning) {
-      keepRunning = true;
-    } else if (option === '--load-run' && !loadRun) {
-      loadRun = true;
-    } else if (option === '--commit' && commit === undefined && COMMIT.test(value)) {
-      commit = value;
-      at += 1;
-    } else if (option === '--load-database' && loadDatabase === undefined && /^[^-]/.test(value)) {
-      loadDatabase = loadDatabaseOf(value);
-      at += 1;
-    } else {
-      throw new UsageError(
-        'apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit, each at most once',
-      );
-    }
+    at += appsOption(asked, options[at], options[at + 1] ?? '');
   }
+  const { commit, keepRunning, loadRun, loadDatabase } = asked;
   if (loadDatabase !== undefined && !loadRun) {
     throw new UsageError("--load-database is Stage G's load run alone: give --load-run with it");
   }
   return { command: 'apps', commit, keepRunning, loadRun, ...(loadDatabase === undefined ? {} : { loadDatabase }) };
+}
+
+/** What `apps` was asked so far. */
+interface AppsAsked {
+  commit?: string;
+  keepRunning: boolean;
+  loadRun: boolean;
+  loadDatabase?: string;
+}
+
+/** One of apps's options taken into `asked`, each at most once: how many words past it were its value. */
+function appsOption(asked: AppsAsked, option: string | undefined, value: string): number {
+  if (option === '--keep-running' && !asked.keepRunning) {
+    asked.keepRunning = true;
+    return 0;
+  }
+  if (option === '--load-run' && !asked.loadRun) {
+    asked.loadRun = true;
+    return 0;
+  }
+  if (option === '--commit' && asked.commit === undefined && COMMIT.test(value)) {
+    asked.commit = value;
+    return 1;
+  }
+  if (option === '--load-database' && asked.loadDatabase === undefined && /^[^-]/.test(value)) {
+    asked.loadDatabase = loadDatabaseOf(value);
+    return 1;
+  }
+  throw new UsageError(
+    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit, each at most once',
+  );
 }
 
 /** Stage G's throwaway copy, by its name alone: anything else, staging's own server above all, is refused here. */

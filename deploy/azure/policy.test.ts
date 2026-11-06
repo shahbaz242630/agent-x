@@ -6191,9 +6191,9 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
       brokenRules(onCopy(JOB('load-mark'), (job) => (containerOf(job).command = ['node', 'tooling/load/job.ts']))),
     ).toEqual(['load-database']);
     // Stage G's jobs beside a load run on staging's own server.
-    const mark = copy.together.predictedResources.find(JOB('load-mark'));
+    const mark = copy.together.predictedResources.filter(JOB('load-mark'));
     const onStaging: Snapshot = {
-      predictedResources: [...plainLoad.together.predictedResources, mark!],
+      predictedResources: [...plainLoad.together.predictedResources, ...mark],
       diagnostics: [],
     };
     expect(said(onStaging)).toContain(
@@ -6265,7 +6265,7 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     expect(said(onCopy(APP('api'), (app) => settingsOf(app).push(...structuredClone(downloads))))).toEqual([
       "activity-downloads ca-agentx-stg-api: sets AGENTX_ACTIVITY_DOWNLOADS_URL, AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: only the apps that run the API keep the activity downloads, and never on Stage G's copy",
     ]);
-    const token = secretNamed(plainApi as unknown as Mutable, 'zitadel-reset-token');
+    const token = secretNamed(plainApi, 'zitadel-reset-token');
     expect(
       brokenRules(
         onCopy(APP('jobs'), (app) =>

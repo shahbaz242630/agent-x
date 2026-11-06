@@ -610,12 +610,11 @@ const LOAD_RUN = {
  * runs as and what it reads. The mark and the checks as the set-up job's identity, which reads those logins already,
  * so no grant is added; the step as PL-38's jobs. Each reads a part of its identity's own (a test holds it to GRANTS).
  */
-export const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> =
-  {
-    'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
-    'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
-    'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
-  };
+const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
+  'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
+  'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
+  'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
+};
 
 const isStageGJob = (workload: string): boolean => Object.hasOwn(STAGE_G_JOBS, workload);
 
@@ -2420,6 +2419,26 @@ interface StoreSettings {
   readonly store: string;
 }
 
+/** Whether a workload's settings of a store are its URL to `container` and the client ID of one of `holders`, alone. */
+function storeSettingsSound(
+  wanted: StoreSettings,
+  names: readonly string[],
+  values: ReadonlyMap<string, string>,
+  container: string,
+  holders: readonly PredictedResource[],
+): boolean {
+  const url = STORE_URL.exec(values.get(wanted.url) ?? '');
+  const client = CLIENT_ID_OF.exec(values.get(wanted.clientId) ?? '');
+  return (
+    names.toSorted().join() === [wanted.url, wanted.clientId].toSorted().join() &&
+    wanted.accounts.length === 1 &&
+    url !== null &&
+    url[1] === wanted.accounts[0]?.name &&
+    url[2] === container &&
+    holders.some((holder) => holder.id === client?.[1])
+  );
+}
+
 /**
  * Where a store's one workload reads and writes, a part of `evidence-store`
  * (E10c-3b-2) and `activity-downloads`: this deployment's one store and its
@@ -2442,17 +2461,8 @@ function storeSettingsProblems(
         continue;
       }
       const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
-      const url = STORE_URL.exec(values.get(wanted.url) ?? '');
       const containerName = typeof wanted.container === 'string' ? wanted.container : wanted.container(workload);
-      const client = CLIENT_ID_OF.exec(values.get(wanted.clientId) ?? '');
-      const sound =
-        names.toSorted().join() === [wanted.url, wanted.clientId].toSorted().join() &&
-        wanted.accounts.length === 1 &&
-        url !== null &&
-        url[1] === wanted.accounts[0]?.name &&
-        url[2] === containerName &&
-        holders.some((holder) => holder.id === client?.[1]);
-      if (!sound) {
+      if (!storeSettingsSound(wanted, names, values, containerName, holders)) {
         problem(
           workload.name,
           `must set ${wanted.url} to this deployment's ${wanted.store}'s ${containerName} container, and ${wanted.clientId} to the client ID of the identity its role is given to, each once as a value, and no other ${wanted.prefix} setting`,

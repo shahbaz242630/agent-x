@@ -15,8 +15,8 @@
 import { commentOnDatabase, type Database, databaseComment } from '../../packages/platform/src/db/index.ts';
 
 /** The copy's name: staging's prefix, `g-`, and an ID of exactly THROWAWAY_ID_LENGTH lower-case letters or digits. */
-export const THROWAWAY_PREFIX = 'psql-agentx-stg-g-';
-export const THROWAWAY_ID_LENGTH = 8;
+const THROWAWAY_PREFIX = 'psql-agentx-stg-g-';
+const THROWAWAY_ID_LENGTH = 8;
 const THROWAWAY_SERVER = /^psql-agentx-stg-g-([a-z0-9]{8})$/;
 
 /** Where Azure names a server in a private network (names.bicep `databaseHost`), the copy's as staging's. */
@@ -67,7 +67,7 @@ export const sentinelOf = (server: string): string => `agentx-stage-g-throwaway 
 export async function sentinelProblem<T>(db: Database<T>, server: string): Promise<string | undefined> {
   const comment = await databaseComment(db);
   if (comment === sentinelOf(server)) return undefined;
-  return comment === null || !comment.startsWith(sentinelOf(''))
+  return !comment?.startsWith(sentinelOf(''))
     ? `The database at ${server} carries no Stage G sentinel, so it may be staging's own: nothing was changed. Run the load-mark job on the copy first.`
     : `The database at ${server} is marked as another copy (${comment}), so it isn't the one named: nothing was changed.`;
 }

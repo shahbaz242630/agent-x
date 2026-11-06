@@ -11,13 +11,13 @@ import { markThrowaway, sentinelProblem } from './throwaway.ts';
 const server = inject('postgres');
 const COPY = 'psql-agentx-stg-g-a1b2c3d4';
 let database: TestDatabase;
-let owner: Database<unknown>;
-let app: Database<unknown>;
+let owner: Database;
+let app: Database;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  owner = createDatabase<unknown>(database.connection('owner'), testLogger());
-  app = createDatabase<unknown>(database.connection('app'), testLogger());
+  owner = createDatabase(database.connection('owner'), testLogger());
+  app = createDatabase(database.connection('app'), testLogger());
 });
 
 afterAll(async () => {

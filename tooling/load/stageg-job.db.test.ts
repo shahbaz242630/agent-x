@@ -131,8 +131,15 @@ async function openTransactions(): Promise<number> {
   }
 }
 
-const SMOKE = stageGProfile('smoke');
-const STEP: StepRun = { ...stepRun(SMOKE, SMOKE.steps[0]!), orgs: 3 };
+/** A test's one step as the runner hands it, over `orgs` organisations. */
+function onlyStep(test: 'smoke' | 'neighbours', orgs: number): StepRun {
+  const profile = stageGProfile(test);
+  const [step] = profile.steps;
+  if (step === undefined) throw new Error(`${test} has no step`);
+  return { ...stepRun(profile, step), orgs };
+}
+
+const STEP = onlyStep('smoke', 3);
 
 describe("Stage G's jobs on a database", () => {
   it('refuses a seed, a step or a check on a database with no sentinel, as staging’s, changing nothing', async () => {
@@ -220,8 +227,7 @@ describe("Stage G's jobs on a database", () => {
     'holds the stuck organisation for a neighbours step, its cohort the calm, busy and stuck agents',
     { timeout: 600_000 },
     async () => {
-      const NEIGHBOURS = stageGProfile('neighbours');
-      const step: StepRun = { ...stepRun(NEIGHBOURS, NEIGHBOURS.steps[0]!), orgs: 3 };
+      const step = onlyStep('neighbours', 3);
       const few = makers();
       // One heavy organisation of three: no stuck one, so no cohort can be made and nothing is sent.
       await expect(main(['step'], settings(['step', JSON.stringify(step)]), few.make)).rejects.toThrow(

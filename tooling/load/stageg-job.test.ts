@@ -25,7 +25,8 @@ import { stageGProfile, stepRun } from './stageg.ts';
 
 const COPY = 'psql-agentx-stg-g-a1b2c3d4';
 const HOST = `${COPY}.postgres.database.azure.com`;
-const STEP = stepRun(stageGProfile('smoke'), stageGProfile('smoke').steps[0]!);
+const SMOKE = stageGProfile('smoke');
+const STEP = stepRun(SMOKE, SMOKE.steps[0] ?? SMOKE.steps.at(-1) ?? ({} as never));
 const CHECKED = {
   created: 12,
   startedAt: '2026-11-06T10:00:00.000Z',

@@ -14,8 +14,18 @@ export async function databaseComment<Schema>(db: Kysely<Schema>): Promise<strin
   return rows[0]?.comment ?? null;
 }
 
-/** Sets the connected database's comment, which only its owner may. */
+/**
+ * Sets the connected database's comment, which only its owner may. COMMENT takes
+ * no parameter, so the text goes in as one (a setting of this transaction alone)
+ * and the server quotes it (format's %L): nothing is spliced into SQL here.
+ */
 export async function commentOnDatabase<Schema>(db: Kysely<Schema>, comment: string): Promise<void> {
-  const { rows } = await sql<{ name: string }>`select pg_catalog.current_database() as name`.execute(db);
-  await sql`comment on database ${sql.id(rows[0]?.name ?? '')} is ${sql.lit(comment)}`.execute(db);
+  await db.transaction().execute(async (tx) => {
+    // eslint-disable-next-line agentx/tenant-setting-only-in-with-tenant -- Transaction-local (is_local true) in its own transaction, the comment's text as a parameter: no tenant, nothing left on the connection.
+    await sql`select pg_catalog.set_config('agentx.database_comment', ${comment}, true)`.execute(tx);
+    await sql`do $$ begin
+      execute pg_catalog.format('comment on database %I is %L', pg_catalog.current_database(),
+        pg_catalog.current_setting('agentx.database_comment'));
+    end $$`.execute(tx);
+  });
 }

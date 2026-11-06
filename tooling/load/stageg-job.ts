@@ -46,7 +46,7 @@ import {
   throwawayServerOfHost,
 } from './throwaway.ts';
 
-export const STAGE_G_PARTS = ['mark', 'step', 'check'] as const;
+const STAGE_G_PARTS = ['mark', 'step', 'check'] as const;
 export type StageGPart = (typeof STAGE_G_PARTS)[number];
 
 /** A refusal in the job's own words: it has changed nothing. */
@@ -103,7 +103,7 @@ export function stageGRequestOf(text: string): StageGRequest {
       'The run request must be {"runId": "<the run>", "command": [<its words>]} and nothing else: ask the runner (deploy/azure/stage-g.ts).',
     );
   }
-  return { runId, command: command as string[] };
+  return { runId, command };
 }
 
 const wholeIn = (value: unknown, least: number, most: number): value is number =>
