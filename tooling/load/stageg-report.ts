@@ -19,7 +19,14 @@ import {
   stagesSeconds,
   type WindowNumbers,
 } from './stageg.ts';
-import { CROWD_AGENTS, STAGE_G_HEAVY_EVERY, STAGE_G_HUGE_CHAIN_EVENTS, STAGE_G_LIGHT_EVERY } from './plan.ts';
+import type { StageGCheckResult } from './stageg-checks.ts';
+import {
+  type LoadSite,
+  CROWD_AGENTS,
+  STAGE_G_HEAVY_EVERY,
+  STAGE_G_HUGE_CHAIN_EVENTS,
+  STAGE_G_LIGHT_EVERY,
+} from './plan.ts';
 
 /** One kind of traffic's numbers in a step, as plain.k6.js's kindNumbers gives them. */
 interface KindNumbers {
@@ -59,13 +66,15 @@ export interface StageGStepResult {
   readonly background: BackgroundHealth;
   /** The API replicas' restarts summed, before the step and after; null when they couldn't be read. */
   readonly restarts: { readonly before: number; readonly after: number } | null;
-  /** What stageg-checks.ts found wrong after the step: none on a clean one. */
-  readonly databaseFailures: readonly string[];
+  /** Each of stageg-checks.ts's checks after the step, with what it found: none run fails the step. */
+  readonly databaseChecks: readonly StageGCheckResult[];
   /** For the soak: the API's memory and the database's connections at the segment's end, where they were read. */
   readonly resources?: { readonly memoryMb: number | null; readonly connections: number | null };
 }
 
 export interface StageGReportInput {
+  /** On Azure every step must read its replicas' restarts: one not read can't rule a crash out. */
+  readonly site: LoadSite;
   readonly profile: Profile;
   /** The steps that ran, in order: a climb stopped at its first failed step has fewer than its profile. */
   readonly steps: readonly StageGStepResult[];
@@ -199,14 +208,30 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
     ...(isSurge(run) && run.windowSeconds !== null && summary.windows !== null
       ? baseHoldFailures(run, run.windowSeconds, summary.windows)
       : []),
-    ...result.databaseFailures,
+    ...databaseFailures(result.databaseChecks),
     ...backgroundFailures(result.background, REFUSALS_EXPECTED.has(run.test)),
-    ...(restarts !== null && restarts.after > restarts.before
-      ? [
-          `The API's replicas restarted ${String(restarts.after - restarts.before)} time(s) during the step: a crash, or a replica killed for memory.`,
-        ]
-      : []),
+    ...restartFailures(restarts, input.site),
   ];
+}
+
+/** What the database checks found, and a failure of its own when none ran: no check is not a clean check. */
+const databaseFailures = (checks: readonly StageGCheckResult[]): readonly string[] =>
+  checks.length === 0
+    ? ['The database checks never ran after the step, so nothing says its rows are right.']
+    : checks.flatMap(({ failures }) => failures);
+
+/** A replica restarted is a crash; on Azure, restarts not read can't rule one out. */
+function restartFailures(restarts: StageGStepResult['restarts'], site: LoadSite): string[] {
+  if (restarts === null) {
+    return site === 'azure'
+      ? ["The API's replica restarts were not read, so a crash during the step can't be ruled out."]
+      : [];
+  }
+  return restarts.after > restarts.before
+    ? [
+        `The API's replicas restarted ${String(restarts.after - restarts.before)} time(s) during the step: a crash, or a replica killed for memory.`,
+      ]
+    : [];
 }
 
 const timesCell = (summary: StageGSummary): string => {

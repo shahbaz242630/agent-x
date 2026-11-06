@@ -19,6 +19,12 @@ const CALM: BackgroundHealth = {
   longestPulseGapMinutes: 1.2,
 };
 
+/** The checks as stageg-checks.ts returns them after a clean step. */
+const CLEAN_CHECKS = [
+  { name: 'lost no request', failures: [] },
+  { name: 'put no row in another organisation', failures: [] },
+];
+
 const summaryOf = (label: string, orgs: number, p95: number, more: Partial<StageGSummary> = {}): StageGSummary => ({
   test: 'orgs',
   step: label,
@@ -54,7 +60,7 @@ const stepOf = (
     decisionP95Ms: 60,
     background: CALM,
     restarts: { before: 0, after: 0 },
-    databaseFailures: [],
+    databaseChecks: CLEAN_CHECKS,
     ...rest,
   };
 };
@@ -77,6 +83,7 @@ const ASSUMPTIONS =
 describe("the report's Stage G section", () => {
   it('sets a passing climb’s steps side by side against the first', () => {
     const text = renderStageG({
+      site: 'azure',
       profile: orgs,
       steps: [stepOf(orgs, 0, 40), stepOf(orgs, 1, 42), stepOf(orgs, 2, 44.8), stepOf(orgs, 3, 45.6)],
     });
@@ -108,6 +115,7 @@ describe("the report's Stage G section", () => {
 
   it('names each reason a failing climb stopped where it did, and how to resume it', () => {
     const text = renderStageG({
+      site: 'azure',
       profile: orgs,
       steps: [
         stepOf(orgs, 0, 40),
@@ -120,8 +128,13 @@ describe("the report's Stage G section", () => {
           decisionP95Ms: 160,
           background: { ...CALM, failed: 1, stalled: ['anchor-check'], unchecked: null, errors: { 'job.stalled': 1 } },
           restarts: { before: 1, after: 2 },
-          databaseFailures: [
-            'The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
+          databaseChecks: [
+            {
+              name: 'lost no request',
+              failures: [
+                'The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
+              ],
+            },
           ],
         }),
       ],
@@ -185,7 +198,11 @@ const spikeWindows = (after: Windows, base: readonly [number, number] = [40, 0])
 describe('a bad run never passes for what the error share left out (review S175)', () => {
   const failing = (test: 'orgs' | 'spike', kinds: StageGSummary['kinds'], checksFailed = 0) => {
     const profile = test === 'orgs' ? orgs : stageGProfile('spike');
-    return renderStageG({ profile, steps: [stepOf(profile, 0, 40, { summary: { kinds, checksFailed } })] });
+    return renderStageG({
+      site: 'azure',
+      profile,
+      steps: [stepOf(profile, 0, 40, { summary: { kinds, checksFailed } })],
+    });
   };
   const steady = (failedAnswers: number, rateLimited: number) => ({
     steady: { requests: 10_000, serverErrors: 0, rateLimited, failedAnswers, p95Ms: 40 },
@@ -262,7 +279,7 @@ describe('the recovery after a surge, from its windows', () => {
   it('judges each surge against its own window: the spike 60 s, the overload 300 s', () => {
     const report = (profile: typeof spike, windows: WindowNumbers[]) => {
       const step = stepOf(profile, 0, 40);
-      return renderStageG({ profile, steps: [{ ...step, summary: { ...step.summary, windows } }] });
+      return renderStageG({ site: 'azure', profile, steps: [{ ...step, summary: { ...step.summary, windows } }] });
     };
     const inTime = report(spike, spikeWindows({ 26: [300, 0], 27: [45, 0] }));
     expect(inTime).toContain(
@@ -293,7 +310,11 @@ describe('the recovery after a surge, from its windows', () => {
   it('fails a surge whose base hold missed the target, or has a window with no numbers', () => {
     const report = (windows: WindowNumbers[]) => {
       const step = stepOf(spike, 0, 40);
-      return renderStageG({ profile: spike, steps: [{ ...step, summary: { ...step.summary, windows } }] });
+      return renderStageG({
+        site: 'azure',
+        profile: spike,
+        steps: [{ ...step, summary: { ...step.summary, windows } }],
+      });
     };
     const slowBase = report(spikeWindows({ 11: [600, 0], 12: [40, 0.02] }));
     expect(slowBase).toContain(
@@ -308,7 +329,7 @@ describe('the recovery after a surge, from its windows', () => {
   });
 
   it('says a surge k6 gave no windows for was not measured, never that it never recovered', () => {
-    const unmeasured = renderStageG({ profile: spike, steps: [stepOf(spike, 0, 40)] });
+    const unmeasured = renderStageG({ site: 'azure', profile: spike, steps: [stepOf(spike, 0, 40)] });
     expect(unmeasured).toContain('Recovery: not measured, k6 gave no window numbers for this step.');
     expect(unmeasured).toContain(
       '- spike: The recovery after the surge was not measured: k6 gave no window numbers for this step.',
@@ -321,7 +342,11 @@ describe("the report's tests apart from the climb", () => {
   it('names the rate a breaking-point climb broke at, or the ceiling it reached', () => {
     const breaking = stageGProfile('breaking');
     const broke = (windows: readonly WindowNumbers[] | null) =>
-      renderStageG({ profile: breaking, steps: [stepOf(breaking, 0, 40, { summary: { windows, aborted: true } })] });
+      renderStageG({
+        site: 'azure',
+        profile: breaking,
+        steps: [stepOf(breaking, 0, 40, { summary: { windows, aborted: true } })],
+      });
     expect(broke(windowsOf({ 29: 300, 30: 600 }))).toContain(
       '### The breaking point\n\nThe climb broke at 425 requests a second: the first 30 s window whose p95 reached 500 ms or whose failed share reached 1%. The overload test is sized from this rate.',
     );
@@ -334,6 +359,7 @@ describe("the report's tests apart from the climb", () => {
   it('sets the soak’s segments in a row, with what was and wasn’t measured', () => {
     const soak = stageGProfile('soak');
     const text = renderStageG({
+      site: 'azure',
       profile: soak,
       steps: [
         stepOf(soak, 0, 40, { resources: { memoryMb: 410, connections: 18 } }),
@@ -359,9 +385,9 @@ describe("the report's tests apart from the climb", () => {
       ].join('\n'),
     );
     expect(text).toContain('| soak-3 | 10000 | 153000 | 152100 | none | none | none |');
-    expect(renderStageG({ profile: soak, steps: [stepOf(soak, 0, 0, { summary: { asksMs: null } })] })).toContain(
-      'p95 from 0.0 ms in the first segment to 0.0 ms in the last (not compared).',
-    );
+    expect(
+      renderStageG({ site: 'azure', profile: soak, steps: [stepOf(soak, 0, 0, { summary: { asksMs: null } })] }),
+    ).toContain('p95 from 0.0 ms in the first segment to 0.0 ms in the last (not compared).');
   });
 
   it('compares the neighbours with the target’s p95, judged by the calm organisations only', () => {
@@ -372,6 +398,7 @@ describe("the report's tests apart from the climb", () => {
       stuck: { requests: 3000, serverErrors: 2, rateLimited: 0, failedAnswers: 2, p95Ms: 4000 },
     };
     const text = renderStageG({
+      site: 'azure',
       profile: neighbours,
       baselineP95Ms: 45,
       steps: [stepOf(neighbours, 0, 50, { summary: { kinds } })],
@@ -386,21 +413,34 @@ describe("the report's tests apart from the climb", () => {
   it('names each busy line a step was allowed, with its count, and fails one logged where nothing is meant busy', () => {
     const busy = { ...CALM, warnings: { 'spend_request.platform_full': 12 } };
     const spikeStep = stepOf(spike, 0, 40, { background: busy });
-    expect(renderStageG({ profile: spike, steps: [spikeStep] })).toContain(
+    expect(renderStageG({ site: 'azure', profile: spike, steps: [spikeStep] })).toContain(
       'Busy lines allowed in spike: spend_request.platform_full 12.',
     );
-    const calm = renderStageG({ profile: orgs, steps: [stepOf(orgs, 0, 40, { background: busy })] });
+    const calm = renderStageG({ site: 'azure', profile: orgs, steps: [stepOf(orgs, 0, 40, { background: busy })] });
     expect(calm).not.toContain('Busy lines allowed');
     expect(calm).toContain(
       '- orgs-100: The API logged spend_request.platform_full 12 warning(s) in the step: only the busy lines of a step meant to overload are allowed.',
     );
   });
 
+  it('fails a step whose database checks never ran, and one whose restarts were not read on Azure only', () => {
+    const run = (site: 'local' | 'azure', more: Parameters<typeof stepOf>[3]) =>
+      renderStageG({ site, profile: orgs, steps: [stepOf(orgs, 0, 40, more)] });
+    expect(run('azure', { databaseChecks: [] })).toContain(
+      '- orgs-100: The database checks never ran after the step, so nothing says its rows are right.',
+    );
+    expect(run('azure', { restarts: null })).toContain(
+      "- orgs-100: The API's replica restarts were not read, so a crash during the step can't be ruled out.",
+    );
+    expect(run('local', { restarts: null })).toContain('**Not finished: 1 of 4 steps ran, each passing.**');
+  });
+
   it('says a climb not yet finished, and a step with no p95 has no baseline', () => {
-    expect(renderStageG({ profile: orgs, steps: [stepOf(orgs, 0, 40)] })).toContain(
+    expect(renderStageG({ site: 'azure', profile: orgs, steps: [stepOf(orgs, 0, 40)] })).toContain(
       '**Not finished: 1 of 4 steps ran, each passing.**',
     );
     const none = renderStageG({
+      site: 'azure',
       profile: orgs,
       steps: [stepOf(orgs, 0, 0, { summary: { asksMs: null, kinds: {} }, restarts: null })],
     });
@@ -409,7 +449,11 @@ describe("the report's tests apart from the climb", () => {
     expect(none).toContain('| 0 / 0 | 3 / 0 | none | 20 | 1.2 | not read |');
     expect(none).toContain('- orgs-100: The step sent no request, so nothing could be judged.');
     expect(
-      renderStageG({ profile: stageGProfile('target'), steps: [stepOf(stageGProfile('target'), 0, 40)] }),
+      renderStageG({
+        site: 'azure',
+        profile: stageGProfile('target'),
+        steps: [stepOf(stageGProfile('target'), 0, 40)],
+      }),
     ).toContain('Baseline: the first step, target, p95 40.0 ms.\n');
   });
 });
