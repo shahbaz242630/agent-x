@@ -23,12 +23,12 @@ export const STAGE_G_TESTS = [
 export type StageGTest = (typeof STAGE_G_TESTS)[number];
 
 /** When a breaking-point climb stops itself: the traffic's own p95 or its share of failed answers past these. */
-export interface AbortRule {
+interface AbortRule {
   readonly p95Ms: number;
   readonly errorShare: number;
 }
 
-export type StepShape =
+type StepShape =
   | { readonly kind: 'ramp-hold' }
   /** One of the soak's one-hour segments, each its own run (a job runs at most an hour). */
   | { readonly kind: 'soak'; readonly segment: number; readonly segments: number }
@@ -85,10 +85,10 @@ export interface Profile {
 }
 
 /** The request rate the scale plan names for ~10k accounts (Claude's stated assumption, 4D2e-Scale-Plan.md). */
-export const TARGET_RATE = 170;
+const TARGET_RATE = 170;
 
 /** The organisations the target is set for (partner S167). */
-export const TARGET_ORGS = 10_000;
+const TARGET_ORGS = 10_000;
 
 /** Past the target: three times the organisations, the target's load (research test 9). */
 const PAST_TARGET_ORGS = 30_000;
@@ -146,7 +146,7 @@ const SPIKE_RECOVERY_SECONDS = 60;
 const OVERLOAD_RECOVERY_SECONDS = 300;
 
 /** Phase 5's offenders' rates (money-paths.k6.js): a busy organisation at 25 a second, a stuck one at 5. */
-export const NEIGHBOUR_RATES = { busyRate: 25, stuckRate: 5 } as const;
+const NEIGHBOUR_RATES = { busyRate: 25, stuckRate: 5 } as const;
 
 /** VUs ready for half a second of arrivals at the peak: a request answered in time holds one no longer. */
 const VU_SECONDS = 0.5;
@@ -287,7 +287,7 @@ export function stageGProfile(test: StageGTest, breakingRate?: number): Profile 
 }
 
 /** One of k6's `ramping-arrival-rate` stages: reach `target` a second over `duration`. */
-export interface K6Stage {
+interface K6Stage {
   readonly target: number;
   readonly duration: `${number}s`;
 }
