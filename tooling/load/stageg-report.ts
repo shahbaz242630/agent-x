@@ -148,7 +148,7 @@ export function recoverySeconds(
 }
 
 /** The base hold before a surge judged by the target's rules: what the surge must come back to must itself be right. */
-export function baseHoldFailures(stages: K6Stages, windowSeconds: number, windows: readonly WindowNumbers[]): string[] {
+function baseHoldFailures(stages: K6Stages, windowSeconds: number, windows: readonly WindowNumbers[]): string[] {
   const byWindow = new Map(windows.map((each) => [each.window, each]));
   return surgeWindows(stages, windowSeconds).base.flatMap((window) => {
     const numbers = byWindow.get(window);
