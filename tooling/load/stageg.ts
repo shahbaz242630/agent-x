@@ -387,7 +387,18 @@ export interface StepRun extends K6Stages {
   readonly mix: Profile['mix'];
   readonly vus: { readonly pre: number; readonly max: number };
   readonly abort: AbortRule | null;
+  /** The judged traffic's window, for a climb's abort rule and a surge's recovery; null for a step timed whole. */
+  readonly windowSeconds: number | null;
   readonly neighbours: typeof NEIGHBOUR_RATES | null;
+}
+
+/** A surge's recovery read window by window: as long as the climb's, so a minute's rule is two windows. */
+const RECOVERY_WINDOW_SECONDS = 30;
+
+/** The window a step is timed by, if any. */
+function windowSecondsOf({ shape }: Step): number | null {
+  if (shape.kind === 'breaking') return shape.abort.windowSeconds;
+  return shape.kind === 'spike' || shape.kind === 'overload' ? RECOVERY_WINDOW_SECONDS : null;
 }
 
 /** One step of a profile as stage-g.k6.js runs it. */
@@ -403,6 +414,7 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     ...stages,
     vus: { pre, max: pre * VU_HEADROOM },
     abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
+    windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,
   };
 }

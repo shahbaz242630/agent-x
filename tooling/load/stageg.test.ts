@@ -188,10 +188,29 @@ describe('what k6 is handed for one step', () => {
         stages: [{ target: 2, duration: '120s' }],
         vus: { pre: 10, max: 50 },
         abort: null,
+        windowSeconds: null,
         neighbours: null,
       },
     ]);
     expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 1275 }]);
+    // Timed by 30 s windows: the climb for its abort rule, the surges for their recovery; the rest whole.
+    const windowed = STAGE_G_TESTS.map((test) => [
+      test,
+      stageGProfile(test, 400).steps.map((step) => stepRun(stageGProfile(test, 400), step).windowSeconds)[0],
+    ]);
+    expect(Object.fromEntries(windowed)).toEqual({
+      smoke: null,
+      orgs: null,
+      target: null,
+      rates: null,
+      spike: 30,
+      neighbours: null,
+      breaking: 30,
+      overload: 30,
+      soak: null,
+      past10k: null,
+      ha: null,
+    });
   });
 
   it('works out the rate asked at any second, so a stopped climb names its breaking rate', () => {

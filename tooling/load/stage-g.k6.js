@@ -15,8 +15,17 @@
 // says whether the step passed.
 import { SharedArray } from 'k6/data';
 import exec from 'k6/execution';
+import { Rate, Trend } from 'k6/metrics';
 
-import { judgedKind, readStep, stageGOptions, stageGSummary, windowOf } from './plain.k6.js';
+import {
+  judgedKind,
+  readStep,
+  stageGOptions,
+  stageGSummary,
+  windowCount,
+  windowMetrics,
+  windowOf,
+} from './plain.k6.js';
 import {
   anyOf,
   ask,
@@ -65,14 +74,29 @@ export function setup() {
 
 const orderOf = ({ run }, letter, n) => `G-${STEP.label}-${run}-${letter}-${n}`;
 
-/** A climb's requests carry their window (plain.k6.js's windowOf), so each window is judged on its own. */
-const windowTags = ({ t0 }) =>
-  STEP.abort === null ? {} : { window: String(windowOf(t0, Date.now(), STEP.abort.windowSeconds)) };
+/**
+ * A windowed step's metrics, one pair a window (plain.k6.js's windowMetrics):
+ * made here in the init stage, as k6 makes every metric. A climb's stop it;
+ * a surge's show when latency came back.
+ */
+const WINDOWS =
+  STEP.windowSeconds === null
+    ? null
+    : Array.from({ length: windowCount(STEP) }, (_, window) => {
+        const { ms, failed } = windowMetrics(window);
+        return { ms: new Trend(ms, true), failed: new Rate(failed) };
+      });
 
 /** The steady (or calm) traffic: round the agents, so every active organisation sends, each round its suppliers. */
 export function steady(data) {
   const n = exec.scenario.iterationInTest;
-  sendSteady(steadyAgents[n % steadyAgents.length], orderOf(data, 'S', n), n, n, TRAFFIC, windowTags(data));
+  // Its window from when it was sent; past the last (k6's graceful stop) it counts in none.
+  const window = WINDOWS?.[windowOf(data.t0, Date.now(), STEP.windowSeconds)];
+  const answer = sendSteady(steadyAgents[n % steadyAgents.length], orderOf(data, 'S', n), n, n, TRAFFIC);
+  if (window === undefined) return;
+  window.ms.add(answer.timings.duration);
+  // As k6's http_req_failed: anything but a 2xx or 3xx answer, a timeout's status 0 included.
+  window.failed.add(answer.status < 200 || answer.status >= 400);
 }
 
 export function duplicate(data) {

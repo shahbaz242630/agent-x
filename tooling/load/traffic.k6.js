@@ -29,8 +29,8 @@ export const anyOf = (list) => list[Math.floor(Math.random() * list.length)];
 
 export const decided = (answer) => answer.status === 201;
 
-/** The agent asks to pay its `supplierN`th supplier `amountMinor` fils for the order, timed as `kind` and any `tags` more. */
-export function ask(agent, key, orderReference, amountMinor, supplierN, kind, tags = {}) {
+/** The agent asks to pay its `supplierN`th supplier `amountMinor` fils for the order, timed as `kind`. */
+export function ask(agent, key, orderReference, amountMinor, supplierN, kind) {
   const body = {
     amountMinor,
     currency: 'AED',
@@ -41,7 +41,7 @@ export function ask(agent, key, orderReference, amountMinor, supplierN, kind, ta
   };
   return http.post(`${API}/v1/spend-requests`, JSON.stringify(body), {
     headers: { authorization: `Bearer ${agent.key}`, 'idempotency-key': key, 'content-type': 'application/json' },
-    tags: { kind, ...tags },
+    tags: { kind },
   });
 }
 
@@ -54,9 +54,10 @@ export function counted(answer, isNew, kind) {
 }
 
 /** One steady order: asked once under its own reference as key, and expected decided. */
-export function sendSteady(agent, order, n, supplierN, kind, tags = {}) {
-  const answer = counted(ask(agent, order, order, steadyAmount(n), supplierN, kind, tags), true, kind);
+export function sendSteady(agent, order, n, supplierN, kind) {
+  const answer = counted(ask(agent, order, order, steadyAmount(n), supplierN, kind), true, kind);
   check(answer, { 'decided (201)': decided });
+  return answer;
 }
 
 /** An order asked for twice under two keys: the second must be denied as the same order. */

@@ -75,6 +75,9 @@ const JUDGED: Readonly<Record<Profile['mix'], string>> = { steady: 'steady', nei
 /** Back to the base load's latency: a window's p95 within this much of the base hold's slowest window's. */
 const RECOVERED_MARGIN = 0.15;
 
+/** Back means failed answers below the target's 1% too (stageg.ts's MAX_ERROR_SHARE), where a step has no rule of its own. */
+const RECOVERED_FAILED_SHARE = 0.01;
+
 const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, p95Ms: 0 };
 
 const ms = (value: number): string => value.toFixed(1);
@@ -83,14 +86,18 @@ const percent = (share: number): string => `${share >= 0 ? '+' : ''}${(share * 1
 const secondsOf = (duration: string): number => Number.parseInt(duration, 10);
 
 /**
- * Seconds from a surge's end until every later window's p95 was back within
- * RECOVERED_MARGIN of the base hold's, or null if it never was or the windows
- * can't say. A surge's stages end rise, peak, fall, recovery (stageg.ts's k6Stages).
+ * Seconds from a surge's end to the start of the first window after which
+ * every window is back: its p95 within RECOVERED_MARGIN of the base hold's
+ * slowest window and its failed share below `maxFailedShare`. Counted from the
+ * last bad window, so a relapse after a good one counts. Null if the last
+ * window is still bad, or no window was in the base hold to compare with.
+ * A surge's stages end rise, peak, fall, recovery (stageg.ts's k6Stages).
  */
 export function recoverySeconds(
   stages: K6Stages,
   windowSeconds: number,
   windows: readonly WindowNumbers[],
+  maxFailedShare: number,
 ): number | null {
   const opening = stages.stages.slice(0, -4).map(({ duration }) => secondsOf(duration));
   const baseTo = opening.reduce((sum, seconds) => sum + seconds, 0);
@@ -103,24 +110,28 @@ export function recoverySeconds(
   const after = windows
     .filter((each) => startOf(each) + windowSeconds > surgeEnd)
     .toSorted((a, b) => a.window - b.window);
-  const lastSlow = after.findLastIndex(({ p95Ms }) => p95Ms > limit);
-  const back = after[lastSlow + 1];
+  const lastBad = after.findLastIndex(({ p95Ms, failedShare }) => p95Ms > limit || failedShare >= maxFailedShare);
+  const back = after[lastBad + 1];
   return back === undefined ? null : Math.max(0, startOf(back) - surgeEnd);
 }
 
 const isSurge = (run: StepRun): boolean => run.test === 'spike' || run.test === 'overload';
 
-/** A step's recovery seconds (null: never back), or undefined when k6 gave no windows to read it from. */
-const measuredRecovery = ({ run, summary }: StageGStepResult): number | null | undefined =>
-  run.abort === null || summary.windows === null
+/**
+ * A step's recovery seconds (null: never back), or undefined when k6 gave no
+ * windows to read it from. Failed answers are judged by the step's own rule,
+ * or the target's where it has none (the overload's, refused past its peak by design).
+ */
+const measuredRecovery = ({ run, summary }: StageGStepResult, rules: Profile['rules']): number | null | undefined =>
+  run.windowSeconds === null || summary.windows === null
     ? undefined
-    : recoverySeconds(run, run.abort.windowSeconds, summary.windows);
+    : recoverySeconds(run, run.windowSeconds, summary.windows, rules.maxErrorShare ?? RECOVERED_FAILED_SHARE);
 
 /** Every reason a step failed, in plain words: its rules, its checks, its background work and its replicas. */
 function stepFailures(input: StageGReportInput, result: StageGStepResult, baselineP95Ms: number | undefined): string[] {
   const { run, summary, decisionP95Ms, restarts } = result;
   const judged = summary.kinds[JUDGED[input.profile.mix]] ?? NO_KIND;
-  const recovery = isSurge(run) ? measuredRecovery(result) : null;
+  const recovery = isSurge(run) ? measuredRecovery(result, input.profile.rules) : null;
   // A surge k6 gave no windows for can't be judged on its recovery: said apart, never as "never came back".
   const unmeasured = recovery === undefined;
   const measured: StepMeasured = {
@@ -199,7 +210,7 @@ function recoverySection(input: StageGReportInput): string[] {
   const window = input.profile.rules.recoveryWithinSeconds;
   return input.steps.flatMap((result) => {
     if (!isSurge(result.run)) return [];
-    const seconds = measuredRecovery(result);
+    const seconds = measuredRecovery(result, input.profile.rules);
     let said = `Latency was back to the base load's ${String(seconds)} s after the surge ended (the rule: within ${String(window)} s).`;
     if (seconds === undefined) said = 'Recovery: not measured, k6 gave no window numbers for this step.';
     else if (seconds === null) said = "Recovery: latency never came back to the base load's.";

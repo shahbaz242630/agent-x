@@ -159,44 +159,88 @@ const windowsOf = (p95s: Readonly<Record<number, number>>): WindowNumbers[] =>
   Object.entries(p95s).map(([window, p95Ms]) => ({ window: Number(window), p95Ms, failedShare: 0 }));
 
 const spike = stageGProfile('spike');
-/** The spike's base hold is 300 to 600 s, the surge ends at 800 s: windows 10 to 19 the base, 26 on after it. */
-const spikeWindows = (after: Readonly<Record<number, number>>) =>
-  windowsOf({ 9: 400, 10: 40, 15: 50, 19: 45, 22: 900, ...after });
-const ABORT = { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 };
+const overload = stageGProfile('overload', 400);
+
+/** A window's p95 and failed share, by window number. */
+type Windows = Readonly<Record<number, readonly [number, number]>>;
+const windowsWith = (each: Windows): WindowNumbers[] =>
+  Object.entries(each).map(([window, [p95Ms, failedShare]]) => ({ window: Number(window), p95Ms, failedShare }));
+
+/**
+ * The spike's base hold is 300 to 600 s (windows 10 to 19, the slowest 50 ms:
+ * back is at most 57.5 ms), its surge ends at 800 s, inside window 26.
+ */
+const spikeWindows = (after: Windows) =>
+  windowsWith({ 9: [400, 0], 10: [40, 0], 15: [50, 0], 19: [45, 0], 22: [900, 0.2], ...after });
 
 describe('the recovery after a surge, from its windows', () => {
   const run = stepOf(spike, 0, 40).run;
+  const recovered = (after: Windows) => recoverySeconds(run, 30, spikeWindows(after), 0.01);
 
-  it('is the time from the surge’s end to the window after its last slow one, within 15% of the base hold’s slowest', () => {
-    expect(recoverySeconds(run, 30, spikeWindows({ 26: 300, 27: 70, 28: 57, 29: 45 }))).toBe(40);
-    expect(recoverySeconds(run, 30, spikeWindows({ 26: 50, 27: 40 }))).toBe(0);
+  it('times the spike and overload by 30 s windows, with no rule to stop them', () => {
+    expect([run.windowSeconds, run.abort]).toEqual([30, null]);
+    expect(stepOf(overload, 0, 40).run.windowSeconds).toBe(30);
   });
 
-  it('is null when latency never came back, or no window was in the base hold', () => {
-    expect(recoverySeconds(run, 30, spikeWindows({ 26: 50, 27: 90 }))).toBeNull();
-    expect(recoverySeconds(run, 30, windowsOf({ 26: 50 }))).toBeNull();
+  it('recovers in time: from the surge’s end to the first window that stays back', () => {
+    // Window 26 (780-810 s) still slow, 27 (810-840 s) back and every one after it.
+    expect(recovered({ 26: [300, 0], 27: [57, 0.009], 28: [45, 0], 29: [44, 0] })).toBe(10);
+    expect(recovered({ 26: [50, 0], 27: [40, 0] })).toBe(0);
   });
 
-  it('reports a surge with windows against its rule, and one without as not measured, never as never recovered', () => {
-    const measured = { ...stepOf(spike, 0, 40), run: { ...run, abort: ABORT } };
-    const withWindows = (after: Readonly<Record<number, number>>) =>
-      renderStageG({
-        profile: spike,
-        steps: [{ ...measured, summary: { ...measured.summary, windows: spikeWindows(after) } }],
-      });
-    expect(withWindows({ 26: 300, 27: 45 })).toContain(
+  it('recovers late: slow, or failing past 1%, until window 29 (870 s)', () => {
+    expect(recovered({ 26: [300, 0], 27: [70, 0], 28: [50, 0.01], 29: [45, 0], 30: [44, 0] })).toBe(70);
+  });
+
+  it('never recovers: the last window is still bad, or no window was in the base hold', () => {
+    expect(recovered({ 26: [300, 0], 27: [50, 0], 28: [90, 0] })).toBeNull();
+    expect(recovered({ 26: [50, 0], 27: [50, 0.5] })).toBeNull();
+    expect(recoverySeconds(run, 30, windowsWith({ 26: [50, 0] }), 0.01)).toBeNull();
+  });
+
+  it('counts from the last bad window: a brief relapse after it was back restarts the clock', () => {
+    // Back in 27, a relapse in 31 (930-960 s), back for good from 32 (960 s): 160 s, not 10.
+    expect(recovered({ 26: [300, 0], 27: [45, 0], 28: [44, 0], 31: [200, 0], 32: [45, 0], 33: [44, 0] })).toBe(160);
+  });
+
+  it('judges each surge against its own window: the spike 60 s, the overload 300 s', () => {
+    const report = (profile: typeof spike, windows: WindowNumbers[]) => {
+      const step = stepOf(profile, 0, 40);
+      return renderStageG({ profile, steps: [{ ...step, summary: { ...step.summary, windows } }] });
+    };
+    expect(report(spike, spikeWindows({ 26: [300, 0], 27: [45, 0] }))).toContain(
       "### Recovery after the surge\n\nLatency was back to the base load's 10 s after the surge ended (the rule: within 60 s).",
     );
-    expect(withWindows({ 26: 300, 27: 90 })).toContain("Recovery: latency never came back to the base load's.");
-    expect(withWindows({ 26: 300, 27: 300, 28: 300, 29: 45 })).toContain(
-      '- spike: Latency took 70 s to come back after the surge, over the 60 s window.',
+    const late = report(spike, spikeWindows({ 26: [300, 0], 27: [70, 0], 28: [50, 0.01], 29: [45, 0] }));
+    expect(late).toContain('**Failed at step spike.**');
+    expect(late).toContain('- spike: Latency took 70 s to come back after the surge, over the 60 s window.');
+    const never = report(spike, spikeWindows({ 26: [300, 0], 27: [90, 0] }));
+    expect(never).toContain("Recovery: latency never came back to the base load's.");
+    expect(never).toContain("- spike: Latency never came back to the base load's after the surge.");
+    // The overload's base hold is 300-600 s (back: at most 63.25 ms), its surge ends at 1,320 s, window 44's start:
+    // 44 slow, 45 failing 2%, back from 46 (1,380 s): 60 s, inside its 300.
+    const overloadWindows = windowsWith({
+      12: [50, 0],
+      19: [55, 0],
+      30: [2000, 0.4],
+      44: [400, 0.05],
+      45: [60, 0.02],
+      46: [60, 0],
+      47: [58, 0],
+    });
+    expect(report(overload, overloadWindows)).toContain(
+      "Latency was back to the base load's 60 s after the surge ended (the rule: within 300 s).",
     );
+    expect(report(overload, overloadWindows)).toContain('**Passed: every step.**');
+  });
+
+  it('says a surge k6 gave no windows for was not measured, never that it never recovered', () => {
     const unmeasured = renderStageG({ profile: spike, steps: [stepOf(spike, 0, 40)] });
     expect(unmeasured).toContain('Recovery: not measured, k6 gave no window numbers for this step.');
     expect(unmeasured).toContain(
       '- spike: The recovery after the surge was not measured: k6 gave no window numbers for this step.',
     );
-    expect(unmeasured).not.toContain('never came back after the surge');
+    expect(unmeasured).not.toContain('never came back');
   });
 });
 

@@ -32,6 +32,7 @@ interface PlainModule {
   stageGSummary: (step: StepRun, data: K6Data, endedAt?: number) => Record<string, unknown>;
   windowOf: (t0: number, now: number, windowSeconds: number) => number;
   windowCount: (step: StepRun) => number;
+  windowMetrics: (window: number) => { ms: string; failed: string };
 }
 
 /** A plain JavaScript file has no types: named by URL so TypeScript takes it as the interface above. */
@@ -117,6 +118,9 @@ describe("Stage G's step, as k6 is handed it", () => {
       ['abort rule', { abort: { p95Ms: 500, errorShare: 1, windowSeconds: 30 } }],
       ['abort rule', { abort: { p95Ms: 0, errorShare: 0.01, windowSeconds: 30 } }],
       ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 0.5 } }],
+      ['windows', { windowSeconds: 0 }],
+      ['windows', { windowSeconds: '30' }],
+      ['windows', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 }, windowSeconds: 60 }],
       ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01 } }],
       ['neighbours', { neighbours: { busyRate: 25, stuckRate: 5 } }],
       ['neighbours', { mix: 'neighbours', neighbours: null }],
@@ -176,19 +180,46 @@ describe("a Stage G step's k6 options", () => {
     const { thresholds } = plain.stageGOptions(breaking);
     // 2,400 s of stages: 80 windows, each judged on its own.
     expect(plain.windowCount(breaking)).toBe(80);
-    const windowed = Object.keys(thresholds).filter((name) => name.includes(',window:'));
+    const windowed = Object.keys(thresholds).filter((name) => name.startsWith('window_'));
     expect(windowed).toHaveLength(160);
     for (const window of [0, 41, 79]) {
-      expect(thresholds[`http_req_duration{kind:steady,window:${String(window)}}`]).toEqual([
+      expect(thresholds[`window_ms_${String(window)}`]).toEqual([
         { threshold: 'p(95)<500', abortOnFail: true, delayAbortEval: '60s' },
       ]);
-      expect(thresholds[`http_req_failed{kind:steady,window:${String(window)}}`]).toEqual([
+      expect(thresholds[`window_failed_${String(window)}`]).toEqual([
         { threshold: 'rate<0.01', abortOnFail: true, delayAbortEval: '60s' },
       ]);
     }
-    expect(thresholds['http_req_duration{kind:steady,window:80}']).toBeUndefined();
+    expect(thresholds.window_ms_80).toBeUndefined();
     // The whole run's p95 is reported, never what stops the climb.
     expect(thresholds['http_req_duration{kind:steady}']).toEqual(['max>=0']);
+  });
+
+  it('times a surge by window too, with no threshold: its windows are its own metrics, in the summary without one', () => {
+    for (const test of ['spike', 'overload'] as const) {
+      const surge = runOf(test);
+      expect(Object.keys(plain.stageGOptions(surge).thresholds).filter((name) => name.startsWith('window_'))).toEqual(
+        [],
+      );
+      expect(plain.windowCount(surge)).toBe(test === 'spike' ? 57 : 104);
+    }
+    expect(plain.windowMetrics(7)).toEqual({ ms: 'window_ms_7', failed: 'window_failed_7' });
+    const summary = plain.stageGSummary(
+      runOf('spike'),
+      {
+        metrics: { window_ms_26: { values: { 'p(95)': 300 } }, window_failed_26: { values: { rate: 0.02 } } },
+        state: { testRunDurationMs: 1_700_000 },
+      },
+      Date.parse('2026-11-06T10:35:00.000Z'),
+    );
+    expect(summary).toMatchObject({ aborted: false, windows: [{ window: 26, p95Ms: 300, failedShare: 0.02 }] });
+    expect(
+      plain.stageGSummary(
+        target,
+        { metrics: {}, state: { testRunDurationMs: 1 } },
+        Date.parse('2026-11-06T10:35:00.000Z'),
+      ).windows,
+    ).toBeNull();
   });
 
   it("counts a request into its window from setup's start, a short last window counted too", () => {
@@ -261,7 +292,7 @@ describe("the summaries' numbers", () => {
     const summary = plain.stageGSummary(
       runOf('breaking'),
       {
-        metrics: { http_reqs: { values: { count: 0 } }, 'http_req_failed{kind:steady,window:3}': broken },
+        metrics: { http_reqs: { values: { count: 0 } }, window_failed_3: broken },
         state: { testRunDurationMs: 1_000_000 },
       },
       ended,
@@ -277,17 +308,15 @@ describe("the summaries' numbers", () => {
     const short = { testRunDurationMs: 119_985 };
     expect(plain.stageGSummary(runOf('smoke'), { metrics: failedOutside, state: short }, ended).aborted).toBe(false);
     const heldWindow = {
-      'http_req_failed{kind:steady,window:0}': { values: { rate: 0 }, thresholds: { 'rate<0.01': { ok: true } } },
+      window_failed_0: { values: { rate: 0 }, thresholds: { 'rate<0.01': { ok: true } } },
     };
     expect(plain.stageGSummary(runOf('breaking'), { metrics: heldWindow, state: short }, ended).aborted).toBe(false);
   });
 
   it("gives a climb's p95 and failed share window by window, for the windows that saw an answer", () => {
     const window = (n: number, p95: number, failed?: number): Metrics => ({
-      [`http_req_duration{kind:steady,window:${String(n)}}`]: { values: { 'p(95)': p95 } },
-      ...(failed === undefined
-        ? {}
-        : { [`http_req_failed{kind:steady,window:${String(n)}}`]: { values: { rate: failed } } }),
+      [`window_ms_${String(n)}`]: { values: { 'p(95)': p95 } },
+      ...(failed === undefined ? {} : { [`window_failed_${String(n)}`]: { values: { rate: failed } } }),
     });
     const summary = plain.stageGSummary(
       runOf('breaking'),
