@@ -57,6 +57,11 @@ param loadRun = bool(readEnvironmentVariable('AGENTX_AZURE_LOAD_RUN', 'false'))
 param loadImageRepository = 'ghcr.io/shahbaz242630/agent-x-load'
 param loadImageDigest = readEnvironmentVariable('AGENTX_AZURE_LOAD_IMAGE_DIGEST', '')
 
+// Stage G's throwaway copy (4D2e), by its host: deploy.ts sets it for
+// `apps --load-run --load-database <name>` alone, after checking the name, and
+// empty otherwise; apps.bicep reads it only in a load run.
+param loadDatabaseHost = readEnvironmentVariable('AGENTX_AZURE_LOAD_DATABASE_HOST', '')
+
 // The anchor key's public halves (4D2e E9), as staging's API logs them at start
 // (`api.starting`, keys: audit-anchor), `<version>:<key>`: public, so kept here.
 // Copied from staging's `api.starting` of d46cdaea (4 Nov 2026, S173).

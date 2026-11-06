@@ -17,6 +17,14 @@ import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
+import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
+import {
+  POSTGRES_HOST_SUFFIX,
+  THROWAWAY_NAME_RULE,
+  throwawayAnchorsContainer,
+  throwawayIdOf,
+  throwawayServerOfHost,
+} from '../../tooling/load/throwaway.ts';
 
 export type RuleId =
   | 'snapshot-complete'
@@ -36,6 +44,7 @@ export type RuleId =
   | 'database-zone'
   | 'database-measures'
   | 'load-run'
+  | 'load-database'
   | 'connections'
   | 'vault'
   | 'evidence-store'
@@ -538,6 +547,13 @@ const HELD: Readonly<
       { name: 'load-request', value: '{}', command: ['node', 'tooling/load/job.ts'], args: [part] },
     ]),
   ),
+  // Stage G's step and check (4D2e; apps.bicep `stageGJobs`), held as PL-38's: the mark asks nothing.
+  ...Object.fromEntries(
+    ['step', 'check'].map((part) => [
+      `load-${part}`,
+      { name: 'load-request', value: '{}', command: ['node', 'tooling/load/stageg-job.ts'], args: [part] },
+    ]),
+  ),
 };
 
 /** The load size's max_connections (postgres.bicep, `measured`); `apps --load-run` reads the live server's against it (deploy.ts). */
@@ -589,7 +605,39 @@ const LOAD_RUN = {
   jobsSettings: { AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000' } as Readonly<Record<string, string>>,
 };
 
-const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload);
+/**
+ * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
+ * runs as and what it reads. The mark and the checks as the set-up job's identity, which reads those logins already,
+ * so no grant is added; the step as PL-38's jobs. Each reads a part of its identity's own (a test holds it to GRANTS).
+ */
+export const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> =
+  {
+    'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
+    'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
+    'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
+  };
+
+const isStageGJob = (workload: string): boolean => Object.hasOwn(STAGE_G_JOBS, workload);
+
+/** A load job: PL-38's three, or Stage G's. */
+const isLoadJob = (workload: string): boolean => LOAD_RUN.jobs.includes(workload) || isStageGJob(workload);
+
+/** The identity a load job runs as (Stage G's its own, PL-38's the API's), and any other workload its own. */
+const runsAsOf = (workload: string): string =>
+  STAGE_G_JOBS[workload]?.runsAs ?? (isLoadJob(workload) ? LOAD_RUN.runsAs : workload);
+
+/**
+ * Stage G's throwaway copy the API reaches (4D2e; apps.bicep `throwaway`), or undefined: read from the `api` app's own
+ * AGENTX_DB_HOST, which load-database holds every app and load job to.
+ */
+function stageGCopyIn(snapshot: Snapshot): string | undefined {
+  const api = ofType(snapshot, TYPES.app).find((app) => jobWorkloadOf(app.name) === 'api');
+  const host = api === undefined ? undefined : settingsIn(containersOf(api)[0]).get('AGENTX_DB_HOST');
+  return typeof host === 'string' ? throwawayServerOfHost(host) : undefined;
+}
+
+/** The copy's own anchors container, for a copy's server: modules/evidence.bicep's `audit-anchors` is staging's alone. */
+const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwawayIdOf(copy) ?? '');
 
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
@@ -1182,7 +1230,13 @@ const required: Check = (snapshot, _expected, add) => {
     // The audit exports' store and the activity downloads', each with its own blob service and container.
     ["Storage accounts, the audit exports' and the activity downloads'", TYPES.storage, 2, 2],
     ['blob services, one in each Storage account', TYPES.blobService, 2, 2],
-    ['containers: the write-once store two, the activity downloads one', TYPES.container, 3, 3],
+    // And on Stage G's run, its copy's own anchors (apps.bicep `throwawayAnchors`), which load-database judges.
+    [
+      'containers: the write-once store two, the activity downloads one',
+      TYPES.container,
+      3,
+      3 + copyAnchorsContainers(snapshot).length,
+    ],
   ];
   for (const [what, type, least, most] of counts) {
     const found = ofType(snapshot, type).length;
@@ -2012,6 +2066,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'evidence-store', resource, message });
   };
+  const copy = stageGCopyIn(snapshot);
   const appsSubnets = appsSubnetIds(snapshot);
   const accounts = ofType(snapshot, TYPES.storage).filter((account) => EVIDENCE_ACCOUNT.test(account.name));
   for (const account of ofType(snapshot, TYPES.storage)) {
@@ -2090,6 +2145,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       workloads: [...ANCHOR_KEEPERS[expected.environment], 'operator'],
       called: "the anchors' role",
       on: 'the anchors container',
+      apart: copyAnchorsContainers(snapshot),
     },
     problem,
   );
@@ -2112,7 +2168,8 @@ const evidenceStore: Check = (snapshot, expected, add) => {
       url: 'AGENTX_AUDIT_ANCHORS_URL',
       clientId: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
       accounts,
-      container: ANCHOR_CONTAINER,
+      // On Stage G's copy the app holding the jobs keeps the copy's anchors in their own container, never staging's.
+      container: (workload) => (copy !== undefined && holdsJobs(workload) ? copyAnchorsOf(copy) : ANCHOR_CONTAINER),
       holders: (workload) => {
         if (holdsJobs(workload) || isJobOf(workload, ['operator'])) return ownOf(workload, keepers);
         return isJobOf(workload, ['chain-restore']) ? ownOf(workload, readers) : undefined;
@@ -2199,6 +2256,15 @@ const anchorEpoch: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** A resource's own name, the last part of its id. */
+const nameOf = (resource: PredictedResource): string => resource.id.slice(resource.id.lastIndexOf('/') + 1);
+
+/** Stage G's copies' own anchors containers (apps.bicep `throwawayAnchors`), by their name's shape alone. */
+const copyAnchorsContainers = (snapshot: Snapshot): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.container).filter(
+    (container) => !inDownloadsStore(snapshot, container) && /^audit-anchors-g-[a-z0-9]+$/.test(nameOf(container)),
+  );
+
 /** One of the write-once store's containers, by its name: a role is given on it alone. */
 const containersNamed = (snapshot: Snapshot, name: string): readonly PredictedResource[] =>
   ofType(snapshot, TYPES.container).filter(
@@ -2224,7 +2290,8 @@ function evidencePartsProblems(
       problem(service.name, 'must keep versions: version-level immutability keeps every one');
     }
   }
-  const wanted = [EVIDENCE_CONTAINER, ANCHOR_CONTAINER];
+  // Stage G's copy's own anchors are load-database's to judge: here, only that they are in this store.
+  const wanted = [EVIDENCE_CONTAINER, ANCHOR_CONTAINER, ...copyAnchorsContainers(snapshot).map(nameOf)];
   for (const container of ofType(snapshot, TYPES.container).filter(ours)) {
     if (
       !blobServices.some((service) => wanted.some((name) => container.id === `${service.id}/containers/${name}`)) ||
@@ -2250,6 +2317,8 @@ interface StoreRole {
   readonly containers: readonly PredictedResource[];
   /** The apps or jobs whose identities it is given to, once each. */
   readonly workloads: readonly string[];
+  /** Containers whose assignments of this role another rule judges (Stage G's copy's own anchors, load-database). */
+  readonly apart?: readonly PredictedResource[];
   /** What a problem calls it, and the container it is given on. */
   readonly called: string;
   readonly on: string;
@@ -2287,7 +2356,10 @@ function storeRoleProblems(
     problem('the deployment', `needs one custom role for ${wanted.called}; the snapshot has ${String(roles.length)}`);
   }
   const role = customRoleId(group, wanted.name);
-  const assignments = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => roleOf(assignment) === role);
+  const apart = new Set((wanted.apart ?? []).map((container) => container.id));
+  const assignments = ofType(snapshot, TYPES.roleAssignment).filter(
+    (assignment) => roleOf(assignment) === role && !apart.has(scopeOf(assignment)),
+  );
   const whose = wanted.workloads.join(' and ');
   const given = assignments.map((assignment) => principalOf(snapshot, assignment));
   for (const [index, assignment] of assignments.entries()) {
@@ -2339,7 +2411,8 @@ interface StoreSettings {
   readonly clientId: string;
   /** The store's account by name; the URL must name the one there is. */
   readonly accounts: readonly PredictedResource[];
-  readonly container: string;
+  /** The container a workload's URL must name. */
+  readonly container: string | ((workload: PredictedResource) => string);
   /** The identities a workload may name, those its store's role is given to; undefined for one never told of the store. */
   readonly holders: (workload: PredictedResource) => readonly PredictedResource[] | undefined;
   /** Who alone is told, and what a problem calls the store. */
@@ -2370,18 +2443,19 @@ function storeSettingsProblems(
       }
       const values = new Map(settings.map((entry) => [text(at(entry, 'name')), text(at(entry, 'value'))] as const));
       const url = STORE_URL.exec(values.get(wanted.url) ?? '');
+      const containerName = typeof wanted.container === 'string' ? wanted.container : wanted.container(workload);
       const client = CLIENT_ID_OF.exec(values.get(wanted.clientId) ?? '');
       const sound =
         names.toSorted().join() === [wanted.url, wanted.clientId].toSorted().join() &&
         wanted.accounts.length === 1 &&
         url !== null &&
         url[1] === wanted.accounts[0]?.name &&
-        url[2] === wanted.container &&
+        url[2] === containerName &&
         holders.some((holder) => holder.id === client?.[1]);
       if (!sound) {
         problem(
           workload.name,
-          `must set ${wanted.url} to this deployment's ${wanted.store}'s ${wanted.container} container, and ${wanted.clientId} to the client ID of the identity its role is given to, each once as a value, and no other ${wanted.prefix} setting`,
+          `must set ${wanted.url} to this deployment's ${wanted.store}'s ${containerName} container, and ${wanted.clientId} to the client ID of the identity its role is given to, each once as a value, and no other ${wanted.prefix} setting`,
         );
       }
     }
@@ -2497,6 +2571,7 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'activity-downloads', resource, message });
   };
+  const copy = stageGCopyIn(snapshot);
   const appsSubnets = appsSubnetIds(snapshot);
   const accounts = ofType(snapshot, TYPES.storage).filter((account) => DOWNLOADS_ACCOUNT.test(account.name));
   for (const account of accounts) {
@@ -2529,8 +2604,9 @@ const activityDownloads: Check = (snapshot, _expected, add) => {
       clientId: 'AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID',
       accounts,
       container: DOWNLOADS_CONTAINER,
-      holders: (workload) => (runsApi(workload) ? ownOf(workload, keepers) : undefined),
-      holder: 'the apps that run the API keep the activity downloads',
+      // Not on Stage G's copy (4D2e): it holds staging's downloads under way, which it would write over.
+      holders: (workload) => (runsApi(workload) && copy === undefined ? ownOf(workload, keepers) : undefined),
+      holder: `the apps that run the API keep the activity downloads${copy === undefined ? '' : ", and never on Stage G's copy"}`,
       store: 'downloads store',
     },
     problem,
@@ -3831,7 +3907,7 @@ const releaseAccess: Check = (snapshot, expected, add) => {
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
 
 /** How a job's configuration says it runs: started by hand, one replica per run, no retry, and a time limit. */
-function runProblems(configuration: unknown, problem: (message: string) => void): void {
+function runProblems(configuration: unknown, longest: number, problem: (message: string) => void): void {
   if (at(configuration, 'triggerType') !== 'Manual') {
     problem('must be started by hand (triggerType Manual): one that starts itself would use its secrets unwatched');
   }
@@ -3847,10 +3923,8 @@ function runProblems(configuration: unknown, problem: (message: string) => void)
     problem('must not retry a failed run (replicaRetryLimit 0): a retry hides why the first run failed');
   }
   const timeout = at(configuration, 'replicaTimeout');
-  if (typeof timeout !== 'number' || timeout <= 0 || timeout > LONGEST_RUN_SECONDS) {
-    problem(
-      `must give up after 1 to ${String(LONGEST_RUN_SECONDS)} seconds (replicaTimeout); it says ${String(timeout)}`,
-    );
+  if (typeof timeout !== 'number' || timeout <= 0 || timeout > longest) {
+    problem(`must give up after 1 to ${String(longest)} seconds (replicaTimeout); it says ${String(timeout)}`);
   }
 }
 
@@ -3894,7 +3968,9 @@ const jobs: Check = (snapshot, _expected, add) => {
     if (at(job.properties, 'workloadProfileName') !== WORKLOAD_PROFILE) {
       problem(`must run on the ${WORKLOAD_PROFILE} workload profile, the only one the environment offers`);
     }
-    runProblems(configuration, problem);
+    // Stage G's step alone runs past the hour: one step a run, the soak's full hour and its margin (stageg.ts).
+    const longest = jobWorkloadOf(job.name) === 'load-step' ? STAGE_G_JOB_SECONDS : LONGEST_RUN_SECONDS;
+    runProblems(configuration, longest, problem);
     containerProblems(job, problem);
   }
   for (const workload of JOB_WORKLOADS) {
@@ -4305,6 +4381,129 @@ function jobsAppCountProblems(
   }
 }
 
+/** Each database host a workload names: AGENTX_DB_HOST, and a load job's AGENTX_LOAD_DB_HOST. */
+const databaseHostsOf = (workload: PredictedResource): string[] =>
+  containersOf(workload).flatMap((container) =>
+    list(at(container, 'env'))
+      .filter((entry) => ['AGENTX_DB_HOST', 'AGENTX_LOAD_DB_HOST'].includes(text(at(entry, 'name'))))
+      .map((entry) => text(at(entry, 'value'))),
+  );
+
+/** How each of Stage G's jobs runs: its script, and its part as its one argument. */
+const STAGE_G_COMMAND = ['node', 'tooling/load/stageg-job.ts'];
+
+/**
+ * Stage G's throwaway copy (4D2e; tooling/load/throwaway.ts): staging's own database is never a run's target. The
+ * API, its jobs app and every load job reach one database alike: staging's own server, or, in a load run only, a copy
+ * named as one; every other workload staging's own. On a copy, and only there, Stage G's three jobs once each, running
+ * their own script and part; the copy's own anchors container, named for that copy, its anchors' role given to the
+ * jobs app alone (its settings are evidence-store's, its downloads activity-downloads', its logins workload-secrets').
+ */
+const loadDatabase: Check = (snapshot, _expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'load-database', resource, message });
+  };
+  const servers = ofType(snapshot, TYPES.server);
+  const own = servers.length === 1 ? `${servers[0]?.name ?? ''}${POSTGRES_HOST_SUFFIX}` : undefined;
+  const reaching = workloadsIn(snapshot).filter(
+    (workload) => runsApi(workload) || isLoadJob(jobWorkloadOf(workload.name)),
+  );
+  const targets = [...new Set(reaching.flatMap(databaseHostsOf))];
+  const copy = stageGCopyIn(snapshot);
+  if (targets.length > 1) {
+    problem(
+      'the deployment',
+      `must reach one database from the API, its jobs app and the load jobs; they reach ${targets.join(', ')}`,
+    );
+  }
+  for (const target of targets.filter(
+    (host) => own !== undefined && host !== own && throwawayServerOfHost(host) === undefined,
+  )) {
+    problem(
+      'the deployment',
+      `reaches ${target}, which is neither staging's own server nor a Stage G copy (${THROWAWAY_NAME_RULE}${POSTGRES_HOST_SUFFIX})`,
+    );
+  }
+  if (
+    copy !== undefined &&
+    !ofType(snapshot, TYPES.job).some((job) => LOAD_RUN.jobs.includes(jobWorkloadOf(job.name)))
+  ) {
+    problem(
+      'the deployment',
+      "reaches Stage G's copy out of a load run: apps --load-run --load-database alone points the API there",
+    );
+  }
+  for (const workload of workloadsIn(snapshot).filter((each) => !reaching.includes(each))) {
+    if (own !== undefined && databaseHostsOf(workload).some((host) => host !== own)) {
+      problem(
+        workload.name,
+        `must reach staging's own server, ${own}: only the API, its jobs app and the load jobs reach Stage G's copy`,
+      );
+    }
+  }
+  stageGJobsProblems(snapshot, copy, problem);
+  copyAnchorsProblems(snapshot, copy, problem);
+};
+
+/** Stage G's jobs: on a copy, each once, running its own script and part; never without one. */
+function stageGJobsProblems(
+  snapshot: Snapshot,
+  copy: string | undefined,
+  problem: (resource: string, message: string) => void,
+): void {
+  const found = ofType(snapshot, TYPES.job).filter((job) => isStageGJob(jobWorkloadOf(job.name)));
+  if (copy === undefined && found.length > 0) {
+    problem(
+      'the deployment',
+      "runs Stage G's jobs with no throwaway copy: they exist only on its run (apps --load-run --load-database)",
+    );
+  }
+  for (const workload of copy === undefined ? [] : Object.keys(STAGE_G_JOBS)) {
+    const count = found.filter((job) => jobWorkloadOf(job.name) === workload).length;
+    if (count !== 1)
+      problem('the deployment', `needs the ${workload} job once on Stage G's copy; the snapshot has ${String(count)}`);
+  }
+  for (const job of found) {
+    const part = jobWorkloadOf(job.name).replace(/^load-/, '');
+    const run = JSON.stringify([...STAGE_G_COMMAND, '|', part]);
+    for (const container of containersOf(job)) {
+      if (JSON.stringify([...list(at(container, 'command')), '|', ...list(at(container, 'args'))]) !== run) {
+        problem(job.name, `must run ${STAGE_G_COMMAND.join(' ')} ${part} and nothing else`);
+      }
+    }
+  }
+}
+
+/** The copy's own anchors: its container in the write-once store, its anchors' role there to the jobs app alone. */
+function copyAnchorsProblems(
+  snapshot: Snapshot,
+  copy: string | undefined,
+  problem: (resource: string, message: string) => void,
+): void {
+  const containers = copyAnchorsContainers(snapshot);
+  const wanted = copy === undefined ? undefined : copyAnchorsOf(copy);
+  for (const container of containers.filter((each) => nameOf(each) !== wanted)) {
+    problem(container.name, 'must be the anchors container of the Stage G copy the API reaches, and only on its run');
+  }
+  if (wanted !== undefined && !containers.some((container) => nameOf(container) === wanted)) {
+    problem('the deployment', `needs Stage G's copy's own anchors container, ${wanted}: never staging's audit-anchors`);
+  }
+  const ids = new Set(containers.map((container) => container.id));
+  const role = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
+  const given = ofType(snapshot, TYPES.roleAssignment).filter((assignment) => ids.has(scopeOf(assignment)));
+  for (const assignment of given) {
+    if (roleOf(assignment) !== role || workloadOf(principalOf(snapshot, assignment)?.name ?? '') !== 'jobs') {
+      problem(assignment.name, "must give the anchors' role on the copy's anchors to the jobs app's identity alone");
+    }
+  }
+  if (wanted !== undefined && given.length !== 1) {
+    problem(
+      'the deployment',
+      `must give the anchors' role on ${wanted} once, to the jobs app; it gives ${String(given.length)}`,
+    );
+  }
+}
+
 /** The connections an app running the API may hold, by its role: two of each copy's pool, for a deploy's overlap. */
 function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, unknown>): number | string {
   const role = roleIn(settings);
@@ -4550,19 +4749,20 @@ const secretsUsed = (job: PredictedResource): { readonly environment: string[]; 
 const workloadSecrets: Check = (snapshot, _expected, add) => {
   const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
   const loadRun = loadJobsIn(snapshot).length > 0;
+  const copy = stageGCopyIn(snapshot) !== undefined;
   for (const job of workloadsIn(snapshot)) {
     const workload = jobWorkloadOf(job.name);
     const problem = (message: string): void => {
       add({ rule: 'workload-secrets', resource: job.name, message });
     };
-    const assigned = identityProblems(job, isLoadJob(workload) ? LOAD_RUN.runsAs : workload, problem);
+    const assigned = identityProblems(job, runsAsOf(workload), problem);
     const all = list(at(job.properties, 'configuration', 'secrets'));
     const held = HELD[workload];
     const holding = all.filter((secret) => text(at(secret, 'name')) === held?.name);
     if (held !== undefined) heldProblems(job, held, holding, problem);
     const declared = all.filter((secret) => !holding.includes(secret));
     const given = all.map((secret) => text(at(secret, 'name')));
-    const needed = secretsNeeded(workload, loadRun);
+    const needed = secretsNeeded(workload, loadRun, copy);
     for (const name of declared.map((secret) => text(at(secret, 'name'))).filter((secret) => !needed.has(secret))) {
       problem(`is given ${name}, which GRANTS doesn't let ${workload} read`);
     }
@@ -4574,12 +4774,19 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`) and the API's and its jobs' in a load run. */
-function secretsNeeded(workload: string, loadRun: boolean): ReadonlySet<string> {
+/**
+ * What a workload is given (GRANTS), but a load job's (`LOAD_RUN.reads`, Stage G's `STAGE_G_JOBS`) and the API's and
+ * its jobs' in a load run; on Stage G's copy they go without the reset token too, as the copy holds staging's resets.
+ */
+function secretsNeeded(workload: string, loadRun: boolean, copy: boolean): ReadonlySet<string> {
+  const stageG = STAGE_G_JOBS[workload];
+  if (stageG !== undefined) return stageG.reads;
   if (isLoadJob(workload)) return LOAD_RUN.reads;
   const read = secretsRead(workload);
   if (!loadRun || !API_APPS.includes(workload)) return read;
-  return new Set([...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret)));
+  return new Set(
+    [...read].filter((secret) => !LOAD_RUN.apiLeavesOut.has(secret) && !(copy && secret === 'zitadel-reset-token')),
+  );
 }
 
 /** The identity a job or an app runs as: user-assigned, and its own alone. Gives back the ids it is assigned. */
@@ -4797,6 +5004,7 @@ const CHECKS: readonly Check[] = [
   jobs,
   apps,
   loadTest,
+  loadDatabase,
   connections,
   publicDoors,
   doorCertificates,
