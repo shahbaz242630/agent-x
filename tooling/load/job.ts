@@ -84,16 +84,23 @@ const withoutKey = ({ key: _key, ...agent }: SeededAgent): PrintedAgent => agent
  * bank (PL-46); when not, said. `tampered` counts as not: nothing is believed.
  */
 async function handoffsPaused(steps: JobSteps, when: string): Promise<boolean> {
-  const logger = createStartupLogger({ service: 'load' });
-  const pause = await steps.database
-    .transaction()
-    .execute((tx) => handoffPauseOf(tx, 'share', { keys: steps.keyring, logger }));
-  if (pause.outcome === 'paused') return true;
-  steps.print({
-    event: 'load.refused',
-    reason: `hand-offs are ${pause.outcome} ${when}, not paused: pause them (handoff-pause), so no request of the run can reach the bank`,
-  });
+  const reason = await notPaused(steps.database, steps.keyring, when);
+  if (reason === undefined) return true;
+  steps.print({ event: 'load.refused', reason });
   return false;
+}
+
+/** Why the run may not send now, unless every hand-off is paused (PL-46): Stage G's job (stageg-job.ts) asks it too. */
+export async function notPaused(
+  database: Database<LoadTables>,
+  keyring: KeyProvider,
+  when: string,
+): Promise<string | undefined> {
+  const logger = createStartupLogger({ service: 'load' });
+  const pause = await database.transaction().execute((tx) => handoffPauseOf(tx, 'share', { keys: keyring, logger }));
+  return pause.outcome === 'paused'
+    ? undefined
+    : `hand-offs are ${pause.outcome} ${when}, not paused: pause them (handoff-pause), so no request of the run can reach the bank`;
 }
 
 /**
@@ -261,31 +268,53 @@ export function runK6(
   k6: readonly [string, ...string[]] = ['k6'],
   smoke = false,
 ): (phase: LoadPhase, seeded: Seeded) => Promise<PhaseRun> {
-  const [command, ...first] = k6;
-  return async (phase, seeded) => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'agentx-load-'));
-    try {
-      const seed = path.join(dir, 'seed.json');
-      writeFileSync(seed, JSON.stringify(seeded), { mode: 0o600 });
-      // Beside this process's own work, never blocking it: phase 5's freeze is asked from here while k6 runs.
-      const status = await new Promise<number | null>((resolve) => {
-        spawn(command, [...first, 'run', '--quiet', K6_SCRIPT], {
-          env: { ...process.env, PHASE: String(phase), API: api, SEED: seed, OUT: dir, SMOKE: smoke ? '1' : '0' },
-          stdio: 'inherit',
-          windowsHide: true,
-        })
-          .on('error', () => {
-            resolve(null);
-          })
-          .on('close', resolve);
-      });
-      if (status !== 0 && status !== K6_THRESHOLD_FAILED) return { finished: false, result: undefined };
+  return (phase, seeded) =>
+    withSeedFile(seeded, async (dir, seed) => {
+      const env = { PHASE: String(phase), API: api, SEED: seed, OUT: dir, SMOKE: smoke ? '1' : '0' };
+      if (!(await k6Ran(k6, K6_SCRIPT, env))) return { finished: false, result: undefined };
       const summary = path.join(dir, `k6-phase-${String(phase)}.json`);
       return { finished: true, result: JSON.parse(readFileSync(summary, 'utf8')) as PhaseResult };
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  };
+    });
+}
+
+/** Runs `work` with the agents' keys in a file only this user can read, in a folder removed after, whatever it does. */
+export async function withSeedFile<T>(
+  seeded: Seeded,
+  work: (dir: string, seed: string) => Promise<T>,
+  prefix = 'agentx-load-',
+): Promise<T> {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  try {
+    const seed = path.join(dir, 'seed.json');
+    writeFileSync(seed, JSON.stringify(seeded), { mode: 0o600 });
+    return await work(dir, seed);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Runs a k6 script with `env` beside this process's own work, never blocking
+ * it (phase 5's freeze is asked from here while k6 runs), its output on ours:
+ * true when it ran to the end, its thresholds the report's to judge.
+ */
+export async function k6Ran(
+  [command, ...first]: readonly [string, ...string[]],
+  script: string,
+  env: Readonly<Record<string, string>>,
+): Promise<boolean> {
+  const status = await new Promise<number | null>((resolve) => {
+    spawn(command, [...first, 'run', '--quiet', script], {
+      env: { ...process.env, ...env },
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+      .on('error', () => {
+        resolve(null);
+      })
+      .on('close', resolve);
+  });
+  return status === 0 || status === K6_THRESHOLD_FAILED;
 }
 
 /** A setting the job can't run without. */
