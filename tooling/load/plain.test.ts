@@ -161,6 +161,7 @@ describe("a Stage G step's k6 options", () => {
       'http_reqs{kind:steady}': ['count>=0'],
       'server_errors{kind:steady}': ['count>=0'],
       'rate_limited{kind:steady}': ['count>=0'],
+      'failed_answers{kind:steady}': ['count>=0'],
     });
   });
 
@@ -169,7 +170,7 @@ describe("a Stage G step's k6 options", () => {
     expect(options.scenarios.busy).toEqual(plain.constantRate(1200, 25, 'busy', 60));
     expect(options.scenarios.stuck).toEqual(plain.constantRate(1200, 5, 'stuck', 60));
     expect(Object.keys(options.thresholds)).toEqual(
-      ['http_req_duration', 'http_reqs', 'server_errors', 'rate_limited'].flatMap((metric) =>
+      ['http_req_duration', 'http_reqs', 'server_errors', 'rate_limited', 'failed_answers'].flatMap((metric) =>
         ['calm', 'busy', 'stuck'].map((kind) => `${metric}{kind:${kind}}`),
       ),
     );
@@ -242,6 +243,7 @@ describe("the summaries' numbers", () => {
     checks: { values: { fails: 3 }, thresholds: { 'rate==1': { ok: false } } },
     'http_req_duration{kind:steady}': { values: trend, thresholds: { 'max>=0': { ok: true } } },
     'http_reqs{kind:steady}': { values: { count: 990 } },
+    'failed_answers{kind:steady}': { values: { count: 4 } },
     'rate_limited{kind:steady}': { values: { count: 1 } },
   };
   const ended = Date.parse('2026-11-06T10:35:00.000Z');
@@ -253,7 +255,13 @@ describe("the summaries' numbers", () => {
       'checks rate==1': false,
       'http_req_duration{kind:steady} max>=0': true,
     });
-    expect(plain.kindNumbers(metrics, 'busy')).toEqual({ requests: 0, serverErrors: 0, rateLimited: 0, p95Ms: 0 });
+    expect(plain.kindNumbers(metrics, 'busy')).toEqual({
+      requests: 0,
+      serverErrors: 0,
+      rateLimited: 0,
+      failedAnswers: 0,
+      p95Ms: 0,
+    });
   });
 
   it('dates the run back from its end by its own duration', () => {
@@ -277,7 +285,7 @@ describe("the summaries' numbers", () => {
       checksFailed: 3,
       dropped: 0,
       asksMs: { p50: 20, p95: 88.5, p99: 140, max: 310 },
-      kinds: { steady: { requests: 990, serverErrors: 0, rateLimited: 1, p95Ms: 88.5 } },
+      kinds: { steady: { requests: 990, serverErrors: 0, rateLimited: 1, failedAnswers: 4, p95Ms: 88.5 } },
       aborted: false,
       windows: null,
       thresholds: { 'checks rate==1': false, 'http_req_duration{kind:steady} max>=0': true },

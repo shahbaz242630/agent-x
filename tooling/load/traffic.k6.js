@@ -12,6 +12,8 @@ const API = __ENV.API ?? 'http://api:8080';
 const created = new Counter('created');
 const serverErrors = new Counter('server_errors');
 const rateLimited = new Counter('rate_limited');
+/** Every answer but a 2xx, whatever its status: a 4xx the steady traffic never asks for counts against a step too. */
+const failedAnswers = new Counter('failed_answers');
 
 /** The seeded agents of one kind, as the seed's file names them. */
 export const ofKind = (agents, kind) => agents.filter((agent) => agent.kind === kind);
@@ -49,14 +51,28 @@ export function ask(agent, key, orderReference, amountMinor, supplierN, kind) {
 export function counted(answer, isNew, kind) {
   if (answer.status >= 500) serverErrors.add(1, { kind });
   if (answer.status === 429) rateLimited.add(1, { kind });
+  if (answer.status < 200 || answer.status >= 300) failedAnswers.add(1, { kind });
   if (answer.status === 201 && isNew) created.add(1);
   return answer;
 }
 
+/**
+ * Turned away, not answered wrongly: refused for rate (429) or busy (503, with
+ * Retry-After). Counted (failed_answers, and its own counter) and judged by
+ * the step's share of failed answers, so a check never also counts it: what
+ * checks fail is then only a wrong answer, which fails any step.
+ */
+const turnedAway = (answer) => answer.status === 429 || answer.status === 503;
+
+/** Checks the answer, unless it was turned away. */
+const checked = (answer, expectation) => {
+  if (!turnedAway(answer)) check(answer, expectation);
+};
+
 /** One steady order: asked once under its own reference as key, and expected decided. */
 export function sendSteady(agent, order, n, supplierN, kind) {
   const answer = counted(ask(agent, order, order, steadyAmount(n), supplierN, kind), true, kind);
-  check(answer, { 'decided (201)': decided });
+  checked(answer, { 'decided (201)': decided });
   return answer;
 }
 
@@ -64,8 +80,14 @@ export function sendSteady(agent, order, n, supplierN, kind) {
 export function sendDuplicate(agent, order, supplierN, kind) {
   const first = counted(ask(agent, `${order}-a`, order, 300, supplierN, kind), true, kind);
   const second = counted(ask(agent, `${order}-b`, order, 300, supplierN, kind), true, kind);
-  check(first, { 'decided (201)': decided });
-  check(second, { 'the same order again denied': (r) => decided(r) && r.json('status') === 'DENIED' });
+  checked(first, { 'decided (201)': decided });
+  // A first ask turned away made nothing: the second is then the order's first, decided as any.
+  checked(
+    second,
+    turnedAway(first)
+      ? { 'decided (201)': decided }
+      : { 'the same order again denied': (r) => decided(r) && r.json('status') === 'DENIED' },
+  );
 }
 
 /** A request sent twice under one key: the second must be answered with the same request. */
@@ -73,6 +95,11 @@ export function sendReplay(agent, order, supplierN, kind) {
   const first = counted(ask(agent, order, order, 200, supplierN, kind), true, kind);
   // A first ask refused as busy made nothing, so the same key's second is the one that makes it (phase 5, S166).
   const again = counted(ask(agent, order, order, 200, supplierN, kind), first.status !== 201, kind);
-  check(first, { 'decided (201)': decided });
-  check(again, { 'replayed: the same request': (r) => decided(r) && r.json('id') === first.json('id') });
+  checked(first, { 'decided (201)': decided });
+  checked(
+    again,
+    turnedAway(first)
+      ? { 'decided (201)': decided }
+      : { 'replayed: the same request': (r) => decided(r) && r.json('id') === first.json('id') },
+  );
 }

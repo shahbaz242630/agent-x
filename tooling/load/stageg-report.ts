@@ -24,6 +24,8 @@ interface KindNumbers {
   readonly requests: number;
   readonly serverErrors: number;
   readonly rateLimited: number;
+  /** Every answer but a 2xx: server errors, busy, refused for rate, or any other. */
+  readonly failedAnswers: number;
   readonly p95Ms: number;
 }
 
@@ -78,7 +80,10 @@ const RECOVERED_MARGIN = 0.15;
 /** Back means failed answers below the target's 1% too (stageg.ts's MAX_ERROR_SHARE), where a step has no rule of its own. */
 const RECOVERED_FAILED_SHARE = 0.01;
 
-const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, p95Ms: 0 };
+const NO_KIND: KindNumbers = { requests: 0, serverErrors: 0, rateLimited: 0, failedAnswers: 0, p95Ms: 0 };
+
+/** The tests that mean their judged traffic to be refused for rate: a surge, and a climb past its knee. */
+const REFUSALS_EXPECTED: ReadonlySet<string> = new Set(['spike', 'overload', 'breaking']);
 
 const ms = (value: number): string => value.toFixed(1);
 const percent = (share: number): string => `${share >= 0 ? '+' : ''}${(share * 100).toFixed(1)}%`;
@@ -137,8 +142,10 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
   const measured: StepMeasured = {
     decisionP95Ms,
     requests: judged.requests,
-    serverErrors: judged.serverErrors,
-    rateLimited: judged.rateLimited,
+    // Every failed answer counts against the step's share: a 4xx the traffic never asks for too. Only a refusal
+    // for rate the test means to cause is left out (the neighbours' offender is not the judged traffic).
+    serverErrors: judged.failedAnswers - judged.rateLimited,
+    rateLimited: REFUSALS_EXPECTED.has(run.test) ? 0 : judged.rateLimited,
     dropped: summary.dropped,
     calmP95Ms: summary.asksMs?.p95 ?? judged.p95Ms,
     recoverySeconds: recovery ?? null,
@@ -146,6 +153,11 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
   const rules = unmeasured ? { ...input.profile.rules, recoveryWithinSeconds: null } : input.profile.rules;
   return [
     ...judgeStep(rules, measured, baselineP95Ms).failures,
+    ...(summary.checksFailed > 0
+      ? [
+          `k6's checks failed ${String(summary.checksFailed)} time(s): answers not turned away were wrong (read the checks in k6's output).`,
+        ]
+      : []),
     ...(unmeasured ? ['The recovery after the surge was not measured: k6 gave no window numbers for this step.'] : []),
     ...result.databaseFailures,
     ...backgroundFailures(result.background),

@@ -276,7 +276,7 @@ describe("judging a step's measured result", () => {
       passed: false,
       failures: [
         "The decisions' p95 was 150.1 ms, over the 150.0 ms limit.",
-        '1.00% of answers were server errors or refusals for rate, not below 1%.',
+        '1.00% of answers failed (not 2xx: a server error, busy, refused for rate or any other), not below 1%.',
         '3 requests were never sent (k6 had no free VU): the step carried less load than it says.',
       ],
     });

@@ -26,7 +26,7 @@ const summaryOf = (label: string, orgs: number, p95: number, more: Partial<Stage
   checksFailed: 0,
   dropped: 0,
   asksMs: { p50: p95 / 2, p95, p99: p95 * 1.5, max: p95 * 3 },
-  kinds: { steady: { requests: 153_000, serverErrors: 0, rateLimited: 0, p95Ms: p95 } },
+  kinds: { steady: { requests: 153_000, serverErrors: 0, rateLimited: 0, failedAnswers: 0, p95Ms: p95 } },
   aborted: false,
   windows: null,
   startedAt: '2026-11-06T10:00:00.000Z',
@@ -111,7 +111,7 @@ describe("the report's Stage G section", () => {
           summary: {
             serverErrors: 3,
             dropped: 12,
-            kinds: { steady: { requests: 153_000, serverErrors: 3, rateLimited: 2, p95Ms: 47 } },
+            kinds: { steady: { requests: 153_000, serverErrors: 3, rateLimited: 2, failedAnswers: 5, p95Ms: 47 } },
           },
           decisionP95Ms: 160,
           background: { ...CALM, failed: 1, stalled: ['anchor-check'], unchecked: null },
@@ -172,6 +172,37 @@ const windowsWith = (each: Windows): WindowNumbers[] =>
  */
 const spikeWindows = (after: Windows) =>
   windowsWith({ 9: [400, 0], 10: [40, 0], 15: [50, 0], 19: [45, 0], 22: [900, 0.2], ...after });
+
+describe('a bad run never passes for what the error share left out (review S175)', () => {
+  const failing = (test: 'orgs' | 'spike', kinds: StageGSummary['kinds'], checksFailed = 0) => {
+    const profile = test === 'orgs' ? orgs : stageGProfile('spike');
+    return renderStageG({ profile, steps: [stepOf(profile, 0, 40, { summary: { kinds, checksFailed } })] });
+  };
+  const steady = (failedAnswers: number, rateLimited: number) => ({
+    steady: { requests: 10_000, serverErrors: 0, rateLimited, failedAnswers, p95Ms: 40 },
+  });
+
+  it('counts every answer but a 2xx in the error share: 4xx ones that are neither 5xx nor 429 too', () => {
+    // 150 answers 409/422, none a 5xx or a 429: 1.5%, which the share of 5xx and 429 alone called 0%.
+    expect(failing('orgs', steady(150, 0))).toContain(
+      '- orgs-100: 1.50% of answers failed (not 2xx: a server error, busy, refused for rate or any other), not below 1%.',
+    );
+  });
+
+  it('leaves out only the refusals for rate a surge means to cause', () => {
+    // A spike: 3,000 refused for rate are its point; 99 others (busy 503s) are 0.99%, under its 1%.
+    expect(failing('spike', steady(3099, 3000))).not.toContain('of answers failed');
+    expect(failing('spike', steady(3100, 3000))).toContain('1.00% of answers failed');
+    // The organisations' climb means none: 100 refused for rate are 1%.
+    expect(failing('orgs', steady(100, 100))).toContain('1.00% of answers failed');
+  });
+
+  it('fails a step whose k6 checks failed: an answer not turned away was wrong', () => {
+    expect(failing('orgs', steady(0, 0), 3)).toContain(
+      "- orgs-100: k6's checks failed 3 time(s): answers not turned away were wrong (read the checks in k6's output).",
+    );
+  });
+});
 
 describe('the recovery after a surge, from its windows', () => {
   const run = stepOf(spike, 0, 40).run;
@@ -294,9 +325,9 @@ describe("the report's tests apart from the climb", () => {
   it('compares the neighbours with the target’s p95, judged by the calm organisations only', () => {
     const neighbours = stageGProfile('neighbours');
     const kinds = {
-      calm: { requests: 9000, serverErrors: 0, rateLimited: 4, p95Ms: 50 },
-      busy: { requests: 15_000, serverErrors: 0, rateLimited: 900, p95Ms: 20 },
-      stuck: { requests: 3000, serverErrors: 2, rateLimited: 0, p95Ms: 4000 },
+      calm: { requests: 9000, serverErrors: 0, rateLimited: 4, failedAnswers: 4, p95Ms: 50 },
+      busy: { requests: 15_000, serverErrors: 0, rateLimited: 900, failedAnswers: 900, p95Ms: 20 },
+      stuck: { requests: 3000, serverErrors: 2, rateLimited: 0, failedAnswers: 2, p95Ms: 4000 },
     };
     const text = renderStageG({
       profile: neighbours,

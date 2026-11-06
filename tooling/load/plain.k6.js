@@ -153,6 +153,7 @@ export function stageGOptions(step) {
       ...namedOnly(kinds, 'http_reqs', 'count>=0'),
       ...namedOnly(kinds, 'server_errors', 'count>=0'),
       ...namedOnly(kinds, 'rate_limited', 'count>=0'),
+      ...namedOnly(kinds, 'failed_answers', 'count>=0'),
       ...(step.abort === null ? {} : abortThresholds(step)),
     },
   };
@@ -226,6 +227,7 @@ export function kindNumbers(metrics, kind) {
     requests: count('http_reqs'),
     serverErrors: count('server_errors'),
     rateLimited: count('rate_limited'),
+    failedAnswers: count('failed_answers'),
     p95Ms: times?.['p(95)'] ?? 0,
   };
 }

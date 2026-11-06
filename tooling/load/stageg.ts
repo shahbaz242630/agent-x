@@ -448,7 +448,7 @@ const RULES: readonly Rule[] = [
   ({ maxErrorShare }, { requests, serverErrors, rateLimited }) => {
     const share = (serverErrors + rateLimited) / requests;
     return maxErrorShare !== null && share >= maxErrorShare
-      ? `${(share * 100).toFixed(2)}% of answers were server errors or refusals for rate, not below ${String(maxErrorShare * 100)}%.`
+      ? `${(share * 100).toFixed(2)}% of answers failed (not 2xx: a server error, busy, refused for rate or any other), not below ${String(maxErrorShare * 100)}%.`
       : undefined;
   },
   ({ droppedAllowed }, { dropped }) =>
