@@ -149,6 +149,35 @@ const NEIGHBOUR_AGENTS = 3 * CROWD_AGENTS;
 export const SEEDED_AGENTS = AMPLE_AGENTS + 1 + 2 * CROWD_AGENTS + NEIGHBOUR_AGENTS;
 
 /**
+ * Stage G's active organisations (4D2e, PL-62), one in this many light-active:
+ * about 2%, each one agent, the steady traffic's senders. Claude's stated
+ * assumption: no source names an active/idle ratio (StageG research).
+ */
+export const STAGE_G_LIGHT_EVERY = 50;
+
+/**
+ * One in this many heavy: about 0.5%, each a crowd of CROWD_AGENTS agents
+ * sharing three suppliers, as PL-38's busy neighbour; the first two are the
+ * neighbours test's busy and stuck organisations. A stated assumption too.
+ */
+export const STAGE_G_HEAVY_EVERY = 200;
+
+/**
+ * The neighbours test's long chain: the first organisation's source refreshed
+ * from the partner this many times, each a signed event, as years of its daily
+ * refresh would leave. Past the anchor check's 1,000-event probe window, so its
+ * check reads pages the others' don't.
+ */
+export const STAGE_G_HUGE_CHAIN_EVENTS = 20_000;
+
+/**
+ * Stage G's seed workers, each one connection at a time, plus two for the
+ * seed's other reads: beside the load run's API (20) and the jobs app, well
+ * within the server's connections.
+ */
+export const STAGE_G_SEED_WORKERS = 8;
+
+/**
  * A run's k6 phases: 1 and 2 the steady traffic (2 with the spike); 3 and 4 the
  * crowds, reported apart; 5 the neighbours, one organisation's trouble beside others.
  */

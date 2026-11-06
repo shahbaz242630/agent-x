@@ -252,7 +252,8 @@ const PROFILES: Record<Exclude<StageGTest, 'overload'>, Profile> = {
     rules: { ...TARGET_RULES, decisionP95Ms: null },
   },
   spike: surge('spike', TARGET_RATE * SPIKE.factor, SPIKE),
-  // One busy and one stuck organisation beside the calm ones; the huge-chain organisation is the seeding PR's to add, as its own kind.
+  // One busy and one stuck organisation beside the calm ones. The long chain is seeded (stageg-seed.ts, the first
+  // organisation) and loads the background checks; k6 sends nothing as it: that needs a scenario of its own.
   neighbours: {
     test: 'neighbours',
     mix: 'neighbours',
