@@ -8,9 +8,13 @@ const CALM: BackgroundHealth = {
   minutes: 20,
   anchorChecks: 4,
   failed: 0,
-  unchecked: { first: 0, last: 0 },
-  left: { first: 3, last: 1 },
+  complete: true,
+  unchecked: { most: 0, last: 0 },
+  left: { most: 3, last: 0 },
   stalled: [],
+  errors: {},
+  warnings: {},
+  offenderWarnings: {},
   pulses: 20,
   longestPulseGapMinutes: 1.2,
 };
@@ -64,7 +68,7 @@ const HEAD = [
 const BACKGROUND_HEAD = [
   '### Background work in each step’s window',
   '',
-  '| Step | Minutes | Anchor checks | Failed | Unchecked (first → last) | Waiting (first → last) | Stalled jobs | Pulses | Longest pulse gap min | API restarts (before → after) |',
+  '| Step | Minutes | Anchor checks | Failed | Unchecked (most / last) | Waiting (most / last) | Stalled jobs | Pulses | Longest pulse gap min | API restarts (before → after) |',
   '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
 ];
 const ASSUMPTIONS =
@@ -93,10 +97,10 @@ describe("the report's Stage G section", () => {
         "Baseline: the first step, orgs-100, p95 40.0 ms. A step's p95 more than 15% above it fails (AWS's investigation threshold).",
         '',
         ...BACKGROUND_HEAD,
-        '| orgs-100 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
-        '| orgs-1000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
-        '| orgs-3000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
-        '| orgs-10000 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-100 | 20.0 | 4 | 0 | 0 / 0 | 3 / 0 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-1000 | 20.0 | 4 | 0 | 0 / 0 | 3 / 0 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-3000 | 20.0 | 4 | 0 | 0 / 0 | 3 / 0 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-10000 | 20.0 | 4 | 0 | 0 / 0 | 3 / 0 | none | 20 | 1.2 | 0 → 0 |',
         '',
       ].join('\n'),
     );
@@ -114,7 +118,7 @@ describe("the report's Stage G section", () => {
             kinds: { steady: { requests: 153_000, serverErrors: 3, rateLimited: 2, failedAnswers: 5, p95Ms: 47 } },
           },
           decisionP95Ms: 160,
-          background: { ...CALM, failed: 1, stalled: ['anchor-check'], unchecked: null },
+          background: { ...CALM, failed: 1, stalled: ['anchor-check'], unchecked: null, errors: { 'job.stalled': 1 } },
           restarts: { before: 1, after: 2 },
           databaseFailures: [
             'The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
@@ -137,8 +141,8 @@ describe("the report's Stage G section", () => {
         "Baseline: the first step, orgs-100, p95 40.0 ms. A step's p95 more than 15% above it fails (AWS's investigation threshold).",
         '',
         ...BACKGROUND_HEAD,
-        '| orgs-100 | 20.0 | 4 | 0 | 0 → 0 | 3 → 1 | none | 20 | 1.2 | 0 → 0 |',
-        '| orgs-1000 | 20.0 | 4 | 1 | no run | 3 → 1 | anchor-check | 20 | 1.2 | 1 → 2 |',
+        '| orgs-100 | 20.0 | 4 | 0 | 0 / 0 | 3 / 0 | none | 20 | 1.2 | 0 → 0 |',
+        '| orgs-1000 | 20.0 | 4 | 1 | no run | 3 / 0 | anchor-check | 20 | 1.2 | 1 → 2 |',
         '',
         '### What failed',
         '',
@@ -147,7 +151,7 @@ describe("the report's Stage G section", () => {
         "- orgs-1000: The p95 was 47.0 ms, more than 15% above the baseline step's 40.0 ms.",
         '- orgs-1000: The database holds 152099 requests of step orgs-1000, but k6 was answered 201 for 152100 new ones.',
         '- orgs-1000: The anchor check failed 1 chain check(s) in the step: read its audit.anchor_check_done lines.',
-        '- orgs-1000: A background job stalled in the step: anchor-check.',
+        '- orgs-1000: The API logged job.stalled 1 time(s) at error level in the step.',
         "- orgs-1000: The API's replicas restarted 1 time(s) during the step: a crash, or a replica killed for memory.",
         '',
       ].join('\n'),
@@ -341,6 +345,19 @@ describe("the report's tests apart from the climb", () => {
     );
   });
 
+  it('names each busy line a step was allowed, with its count, and fails one logged where nothing is meant busy', () => {
+    const busy = { ...CALM, warnings: { 'spend_request.platform_full': 12 } };
+    const spikeStep = stepOf(spike, 0, 40, { background: busy });
+    expect(renderStageG({ profile: spike, steps: [spikeStep] })).toContain(
+      'Busy lines allowed in spike: spend_request.platform_full 12.',
+    );
+    const calm = renderStageG({ profile: orgs, steps: [stepOf(orgs, 0, 40, { background: busy })] });
+    expect(calm).not.toContain('Busy lines allowed');
+    expect(calm).toContain(
+      '- orgs-100: The API logged spend_request.platform_full 12 warning(s) in the step: only the busy lines of a step meant to overload are allowed.',
+    );
+  });
+
   it('says a climb not yet finished, and a step with no p95 has no baseline', () => {
     expect(renderStageG({ profile: orgs, steps: [stepOf(orgs, 0, 40)] })).toContain(
       '**Not finished: 1 of 4 steps ran, each passing.**',
@@ -351,7 +368,7 @@ describe("the report's tests apart from the climb", () => {
     });
     expect(none).toContain('No step had a p95 to set as the baseline.');
     expect(none).toContain('| 0 | no traffic | 0 | 60.0 | not compared | **Failed** |');
-    expect(none).toContain('| 0 → 0 | 3 → 1 | none | 20 | 1.2 | not read |');
+    expect(none).toContain('| 0 / 0 | 3 / 0 | none | 20 | 1.2 | not read |');
     expect(none).toContain('- orgs-100: The step sent no request, so nothing could be judged.');
     expect(
       renderStageG({ profile: stageGProfile('target'), steps: [stepOf(stageGProfile('target'), 0, 40)] }),

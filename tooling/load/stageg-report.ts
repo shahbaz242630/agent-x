@@ -5,7 +5,7 @@
 // what the test is for: the breaking rate of a climb, the recovery after a
 // surge, the soak's trend. A pure function of what the runner collected, so
 // the same numbers always give the same text.
-import { type BackgroundHealth, backgroundFailures } from './stageg-background.ts';
+import { allowedBusyLines, type BackgroundHealth, backgroundFailures } from './stageg-background.ts';
 import {
   breakingRate,
   judgeStep,
@@ -160,7 +160,7 @@ function stepFailures(input: StageGReportInput, result: StageGStepResult, baseli
       : []),
     ...(unmeasured ? ['The recovery after the surge was not measured: k6 gave no window numbers for this step.'] : []),
     ...result.databaseFailures,
-    ...backgroundFailures(result.background),
+    ...backgroundFailures(result.background, REFUSALS_EXPECTED.has(run.test)),
     ...(restarts !== null && restarts.after > restarts.before
       ? [
           `The API's replicas restarted ${String(restarts.after - restarts.before)} time(s) during the step: a crash, or a replica killed for memory.`,
@@ -192,15 +192,25 @@ function stepRow(result: StageGStepResult, baselineP95Ms: number | undefined, in
   );
 }
 
-const trendCell = (trend: BackgroundHealth['unchecked']): string =>
-  trend === null ? 'no run' : `${String(trend.first)} → ${String(trend.last)}`;
+const peakCell = (peak: BackgroundHealth['unchecked']): string =>
+  peak === null ? 'no run' : `${String(peak.most)} / ${String(peak.last)}`;
 
 function backgroundRow({ run, background: b, restarts }: StageGStepResult): string {
   const restarted = restarts === null ? 'not read' : `${String(restarts.before)} → ${String(restarts.after)}`;
   return (
-    `| ${run.label} | ${b.minutes.toFixed(1)} | ${String(b.anchorChecks)} | ${String(b.failed)} | ${trendCell(b.unchecked)} | ${trendCell(b.left)} | ` +
+    `| ${run.label} | ${b.minutes.toFixed(1)} | ${String(b.anchorChecks)} | ${String(b.failed)} | ${peakCell(b.unchecked)} | ${peakCell(b.left)} | ` +
     `${b.stalled.length === 0 ? 'none' : b.stalled.join(', ')} | ${String(b.pulses)} | ${b.longestPulseGapMinutes.toFixed(1)} | ${restarted} |`
   );
+}
+
+/** The busy lines each step was allowed, by event and count: what overloading it cost, said, never hidden. */
+function busyLines(steps: readonly StageGStepResult[]): string[] {
+  const said = steps.flatMap(({ run, background }) => {
+    const allowed = Object.entries(allowedBusyLines(background, REFUSALS_EXPECTED.has(run.test)));
+    const listed = allowed.map(([event, count]) => event + ' ' + String(count)).join(', ');
+    return allowed.length === 0 ? [] : [`Busy lines allowed in ${run.label}: ${listed}.`];
+  });
+  return said.length === 0 ? [] : ['', ...said];
 }
 
 /** Where a breaking-point climb broke, from its windows. */
@@ -308,9 +318,10 @@ export function renderStageG(input: StageGReportInput): string {
     '',
     '### Background work in each step’s window',
     '',
-    '| Step | Minutes | Anchor checks | Failed | Unchecked (first → last) | Waiting (first → last) | Stalled jobs | Pulses | Longest pulse gap min | API restarts (before → after) |',
+    '| Step | Minutes | Anchor checks | Failed | Unchecked (most / last) | Waiting (most / last) | Stalled jobs | Pulses | Longest pulse gap min | API restarts (before → after) |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...steps.map(backgroundRow),
+    ...busyLines(steps),
     ...breakingSection(steps),
     ...recoverySection(input),
     ...soakSection(input),
