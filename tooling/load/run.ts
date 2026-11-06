@@ -62,7 +62,7 @@ import { whileStuck } from './stuck.ts';
 import { growthBetween, readGrowthEnd } from './table-growth.ts';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const COMPOSE = [
+export const COMPOSE = [
   'compose',
   '-p',
   LOAD_PROJECT,
@@ -122,16 +122,17 @@ function preflight(): void {
 
 /**
  * One SQL statement run in the database's container as its admin, in the
- * server's `postgres` database, its rows as psql prints them unaligned. The
- * statement counter lives there, never in `agentx`: the API's schema check
- * refuses any object it doesn't know in its own database (S156, at the
- * restart). The password stays in the container's own environment: it is
- * never on this machine's command line.
+ * server's `postgres` database unless named, its rows as psql prints them
+ * unaligned. The statement counter lives there, never in `agentx`: the API's
+ * schema check refuses any object it doesn't know in its own database (S156,
+ * at the restart). Stage G's seed test reads `agentx` past every tenant wall,
+ * to count the run's organisations. The password stays in the container's own
+ * environment: it is never on this machine's command line.
  */
-function asAdmin(statement: string): string {
-  const psql = 'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -U postgres -d postgres -At -v ON_ERROR_STOP=1 -c "$1"';
+export function asAdmin(statement: string, database: 'postgres' | 'agentx' = 'postgres'): string {
+  const psql = `PGPASSWORD="$POSTGRES_PASSWORD" exec psql -U postgres -d ${database} -At -v ON_ERROR_STOP=1 -c "$1"`;
   const done = run('docker', [...COMPOSE, 'exec', '-T', 'db', 'sh', '-c', psql, 'sh', statement], { shown: false });
-  if (done.code !== 0) throw new LoadRefused(`The database's statement counter answered ${String(done.code)}.`);
+  if (done.code !== 0) throw new LoadRefused(`The database's admin statement answered ${String(done.code)}.`);
   return done.stdout.trim();
 }
 
