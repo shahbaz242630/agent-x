@@ -252,6 +252,7 @@ const PROFILES: Record<Exclude<StageGTest, 'overload'>, Profile> = {
     rules: { ...TARGET_RULES, decisionP95Ms: null },
   },
   spike: surge('spike', TARGET_RATE * SPIKE.factor, SPIKE),
+  // One busy and one stuck organisation beside the calm ones; the huge-chain organisation is the seeding PR's to add, as its own kind.
   neighbours: {
     test: 'neighbours',
     mix: 'neighbours',

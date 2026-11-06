@@ -89,7 +89,7 @@ describe('the load stack (compose.load.yaml)', () => {
     }
   });
 
-  it('runs k6 on the internal network only, read-only with no rights, by hand, its script and what it imports read-only', () => {
+  it('runs k6 on the internal network only, read-only with no rights, by hand, its two scripts and what they import read-only', () => {
     expect(services.k6).toMatchObject({
       profiles: ['load'],
       networks: ['internal'],
@@ -99,6 +99,7 @@ describe('the load stack (compose.load.yaml)', () => {
     });
     expect(services.k6?.volumes).toEqual([
       '../../tooling/load/money-paths.k6.js:/load/money-paths.k6.js:ro',
+      '../../tooling/load/stage-g.k6.js:/load/stage-g.k6.js:ro',
       '../../tooling/load/traffic.k6.js:/load/traffic.k6.js:ro',
       '../../tooling/load/plain.k6.js:/load/plain.k6.js:ro',
       '../../tooling/load/.out:/out',

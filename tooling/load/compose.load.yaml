@@ -45,8 +45,9 @@ services:
     restart: 'no'
 
   # k6, started by the runner for each phase, never by `up` (its profile).
-  # The script with the two files it imports, and the run's folder (the
-  # seed's keys in, k6's numbers out), are all it mounts; it reaches nothing but the internal network.
+  # The two scripts (PL-38's phases and Stage G's steps) with the two files
+  # they import, and the run's folder (the seed's keys in, k6's numbers
+  # out), are all it mounts; it reaches nothing but the internal network.
   k6:
     image: grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8
     profiles: [load]
@@ -56,6 +57,7 @@ services:
     networks: [internal]
     volumes:
       - ../../tooling/load/money-paths.k6.js:/load/money-paths.k6.js:ro
+      - ../../tooling/load/stage-g.k6.js:/load/stage-g.k6.js:ro
       - ../../tooling/load/traffic.k6.js:/load/traffic.k6.js:ro
       - ../../tooling/load/plain.k6.js:/load/plain.k6.js:ro
       - ../../tooling/load/.out:/out
