@@ -282,6 +282,10 @@ function appsOption(asked: AppsAsked, option: string | undefined, value: string)
   );
 }
 
+/** The copy's host as apps.bicep takes it, or empty: only ever a copy's, as parseApps refused any other name. */
+const loadDatabaseHostOf = (loadDatabase: string | undefined): string =>
+  loadDatabase === undefined ? '' : throwawayHost(loadDatabase);
+
 /** Stage G's throwaway copy, by its name alone: anything else, staging's own server above all, is refused here. */
 function loadDatabaseOf(name: string): string {
   const problem = throwawayServerProblem(name);
@@ -2073,8 +2077,7 @@ async function deployApps(
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
     [LOAD_VARIABLES.run]: loadRun ? 'true' : 'false',
     [LOAD_VARIABLES.digest]: loadDigest,
-    // Only ever a copy's host: parseApps refused any other name.
-    [LOAD_VARIABLES.database]: loadDatabase === undefined ? '' : throwawayHost(loadDatabase),
+    [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
   };
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return 1;
