@@ -30,7 +30,7 @@ interface AbortRule {
 
 type StepShape =
   | { readonly kind: 'ramp-hold' }
-  /** One of the soak's one-hour segments, each its own run (a job runs at most an hour). */
+  /** One of the soak's one-hour segments, each its own run of the load-step job (STAGE_G_JOB_SECONDS). */
   | { readonly kind: 'soak'; readonly segment: number; readonly segments: number }
   /** After the hold, up to `peakRate` within `riseSeconds`, held, back to the step's rate, held to recover. */
   | {
@@ -121,7 +121,7 @@ const BASE_SECONDS = 300;
 /** The spike: three times the target (the top of the table's 2-3×) within 10 s, for 3 minutes, then 15 minutes back at the target. */
 const SPIKE = { factor: 3, riseSeconds: 10, peakSeconds: 180, recoverySeconds: 900 } as const;
 
-/** Breaking point: ten times the target is past any knee seen so far; a 30-minute climb is smooth and fits an hour's job. */
+/** Breaking point: ten times the target is past any knee seen so far; a 30-minute climb is smooth and fits one job. */
 const BREAKING = { factor: 10, climbSeconds: 1800 } as const;
 
 /** The climb stops at the Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500) or 1% failed answers. */
@@ -130,7 +130,16 @@ const BREAKING_ABORT: AbortRule = { p95Ms: 500, errorShare: 0.01 };
 /** Overload: half again the measured breaking rate (top of the table's 1.2-1.5×) for 10 minutes, then 30 back at the target. */
 const OVERLOAD = { factor: 1.5, riseSeconds: 60, peakSeconds: 600, recoverySeconds: 1800 } as const;
 
-/** The soak: 4 hours, the sources' minimum, as four one-hour runs; later segments ramp a minute, the system already warm. */
+/**
+ * The load-step job's limit (decided S175, set by the wiring PR): one step's
+ * traffic, the soak's full hour the longest, plus STAGE_G_JOB_MARGIN_SECONDS.
+ */
+export const STAGE_G_JOB_SECONDS = 4500;
+
+/** What a job spends beside the traffic: starting, k6's gracefulStop, the summary and the checks. */
+export const STAGE_G_JOB_MARGIN_SECONDS = 300;
+
+/** The soak: 4 hours, the sources' minimum, as four runs of a full hour's traffic; later segments ramp a minute, the system already warm. */
 const SOAK = { segments: 4, segmentSeconds: 3600, laterRampSeconds: 60 } as const;
 
 /** Failed answers below 1% (Azure's example criterion). */

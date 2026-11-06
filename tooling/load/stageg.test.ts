@@ -8,6 +8,8 @@ import {
   k6Stages,
   type PassRules,
   rateAt,
+  STAGE_G_JOB_MARGIN_SECONDS,
+  STAGE_G_JOB_SECONDS,
   STAGE_G_TESTS,
   stageGProfile,
   stagesSeconds,
@@ -31,9 +33,6 @@ const runs = (test: Parameters<typeof stageGProfile>[0]): StepRun[] => {
   const profile = stageGProfile(test);
   return profile.steps.map((step) => stepRun(profile, step));
 };
-
-/** An hour's job, less five minutes for starting, the summary and the checks. */
-const JOB_SECONDS = 3600;
 
 describe("Stage G's profiles, as the research table sets them", () => {
   it('smokes at 100 organisations, 2 a second, for 2 minutes, straight at the rate', () => {
@@ -110,13 +109,24 @@ describe("Stage G's profiles, as the research table sets them", () => {
     ]);
   });
 
-  it('gives every test a profile, its steps labelled apart, each no longer than an hour', () => {
+  it("fits a soak segment's full hour of traffic and a 300 s margin inside the 4500 s load-step job", () => {
+    expect([STAGE_G_JOB_SECONDS, STAGE_G_JOB_MARGIN_SECONDS]).toEqual([4500, 300]);
+    for (const step of steps('soak')) {
+      const traffic = stagesSeconds(k6Stages(step));
+      expect(traffic).toBe(3600);
+      expect(traffic + STAGE_G_JOB_MARGIN_SECONDS).toBeLessThanOrEqual(STAGE_G_JOB_SECONDS);
+    }
+  });
+
+  it('gives every test a profile, its steps labelled apart, each with its margin inside the load-step job', () => {
     for (const test of STAGE_G_TESTS) {
       const profile = stageGProfile(test, 400);
       expect(profile.test).toBe(test);
       const labels = profile.steps.map(({ label }) => label);
       expect(new Set(labels).size).toBe(labels.length);
-      for (const step of profile.steps) expect(stagesSeconds(k6Stages(step))).toBeLessThanOrEqual(JOB_SECONDS);
+      for (const step of profile.steps) {
+        expect(stagesSeconds(k6Stages(step)) + STAGE_G_JOB_MARGIN_SECONDS).toBeLessThanOrEqual(STAGE_G_JOB_SECONDS);
+      }
     }
   });
 
