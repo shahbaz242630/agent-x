@@ -30,7 +30,8 @@ function leftOver(events: readonly string[], code: string): string[] {
 
 describe('decision 29: no plain words are left over', () => {
   it('every catalogued event is still named in the code', () => {
-    const code = ['apps', 'packages']
+    // And the load jobs, which log through the same logger on Azure (tooling/load/stageg-job.ts).
+    const code = ['apps', 'packages', 'tooling/load']
       .flatMap(sourceUnder)
       .filter((file) => !file.replaceAll('\\', '/').endsWith('observability/plain-words.ts'))
       .map((file) => readFileSync(file, 'utf8'))
