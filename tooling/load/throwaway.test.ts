@@ -50,6 +50,8 @@ describe("Stage G's throwaway copy, by name", () => {
       COPY,
       `${COPY}.postgres.database.azure.com.evil.example`,
       `${COPY}.private.postgres.database.azure.com`,
+      // As long as the suffix, but not it: only the suffix itself is taken off.
+      `${COPY}${'x'.repeat('.postgres.database.azure.com'.length)}`,
       '127.0.0.1',
     ]) {
       expect(throwawayServerOfHost(host)).toBeUndefined();

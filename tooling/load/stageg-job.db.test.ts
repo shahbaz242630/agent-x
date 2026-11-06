@@ -223,6 +223,29 @@ describe("Stage G's jobs on a database", () => {
     expect(printed).toEqual([expect.objectContaining({ event: 'load.stageg_stepped', finished: false })]);
   });
 
+  it('ends 1, saying so, when the hand-offs were unpaused while k6 ran', async () => {
+    const { make, printed } = makers();
+    const unpausing: StageGMakers = {
+      ...make,
+      k6: (api) => async (step, seeded) => {
+        await pauseMoved(false);
+        return make.k6(api)(step, seeded);
+      },
+    };
+    try {
+      expect(await main(['step'], settings(['step', JSON.stringify(STEP)]), unpausing)).toBe(1);
+    } finally {
+      await pauseMoved(true);
+    }
+    expect(printed).toEqual([
+      expect.objectContaining({
+        event: 'load.stageg_stepped',
+        finished: true,
+        notPaused: expect.stringMatching(/after the step, not paused/) as unknown,
+      }),
+    ]);
+  });
+
   it(
     'holds the stuck organisation for a neighbours step, its cohort the calm, busy and stuck agents',
     { timeout: 600_000 },
