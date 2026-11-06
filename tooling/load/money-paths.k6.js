@@ -29,27 +29,22 @@
 // seconds at 5 a second, the spike at 5 seconds: it proves the run is wired,
 // and measures nothing.
 // The requests, how they are counted and the scenarios' shapes are shared
-// with Stage G's script (stage-g.k6.js): traffic.k6.js and options.k6.js.
+// with Stage G's script (stage-g.k6.js): traffic.k6.js and plain.k6.js.
 import { check } from 'k6';
 import exec from 'k6/execution';
 
-import { constantRate, namedOnly } from './options.k6.js';
+import { constantRate, countOf, kindNumbers, namedOnly, runWindow, thresholdResults, trendMs } from './plain.k6.js';
 import {
   anyOf,
   ask,
-  countOf,
   counted,
   decided,
-  kindNumbers,
   ofKind,
-  runWindow,
   scattered,
   sendDuplicate,
   sendReplay,
   sendSteady,
   steadyAmount,
-  thresholdResults,
-  trendMs,
 } from './traffic.k6.js';
 
 const PHASE = __ENV.PHASE;

@@ -100,7 +100,7 @@ describe('the load stack (compose.load.yaml)', () => {
     expect(services.k6?.volumes).toEqual([
       '../../tooling/load/money-paths.k6.js:/load/money-paths.k6.js:ro',
       '../../tooling/load/traffic.k6.js:/load/traffic.k6.js:ro',
-      '../../tooling/load/options.k6.js:/load/options.k6.js:ro',
+      '../../tooling/load/plain.k6.js:/load/plain.k6.js:ro',
       '../../tooling/load/.out:/out',
     ]);
   });

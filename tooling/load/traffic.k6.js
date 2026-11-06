@@ -1,7 +1,7 @@
 // The traffic both load scripts send, as k6 runs it: money-paths.k6.js (PL-38's
-// phases) and stage-g.k6.js (Stage G's steps). Asking, counting the answers,
-// the orders' amounts and suppliers, and the summary pieces both read back.
-// Kept in one place so the two scripts send the same requests and count them
+// phases) and stage-g.k6.js (Stage G's steps): asking, counting the answers,
+// the orders' amounts and suppliers. What needs nothing of k6's (scenarios,
+// thresholds, the summaries' numbers) is plain.k6.js's. Kept in one place so the two scripts send the same requests and count them
 // the same way: a Stage G step and a PL-38 phase are then comparable.
 import { check } from 'k6';
 import http from 'k6/http';
@@ -74,39 +74,4 @@ export function sendReplay(agent, order, supplierN, kind) {
   const again = counted(ask(agent, order, order, 200, supplierN, kind), first.status !== 201, kind);
   check(first, { 'decided (201)': decided });
   check(again, { 'replayed: the same request': (r) => decided(r) && r.json('id') === first.json('id') });
-}
-
-/** A count k6 summed up, 0 when nothing was counted. */
-export const countOf = (metrics, name) => metrics[name]?.values.count ?? 0;
-
-/** Each threshold, as `metric rule`, and whether it held. */
-export const thresholdResults = (metrics) =>
-  Object.fromEntries(
-    Object.entries(metrics).flatMap(([name, metric]) =>
-      Object.entries(metric.thresholds ?? {}).map(([rule, result]) => [`${name} ${rule}`, result.ok]),
-    ),
-  );
-
-/** A timed kind's milliseconds, as the report reads them (summaryTrendStats names these four). */
-export const trendMs = (values) => ({ p50: values.med, p95: values['p(95)'], p99: values['p(99)'], max: values.max });
-
-/** One kind's numbers, as the report sets them side by side. */
-export function kindNumbers(metrics, kind) {
-  const times = metrics[`http_req_duration{kind:${kind}}`]?.values;
-  const count = (name) => countOf(metrics, `${name}{kind:${kind}}`);
-  return {
-    requests: count('http_reqs'),
-    serverErrors: count('server_errors'),
-    rateLimited: count('rate_limited'),
-    p95Ms: times?.['p(95)'] ?? 0,
-  };
-}
-
-/** When a run started and ended, from k6's own duration, as the report finds its log lines. */
-export function runWindow(state) {
-  const endedAt = Date.now();
-  return {
-    startedAt: new Date(endedAt - state.testRunDurationMs).toISOString(),
-    endedAt: new Date(endedAt).toISOString(),
-  };
 }
