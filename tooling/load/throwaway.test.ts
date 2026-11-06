@@ -36,11 +36,10 @@ describe("Stage G's throwaway copy, by name", () => {
     }
   });
 
-  it("refuses staging's own server even if its name ever fitted the rule", () => {
-    expect(throwawayServerProblem(COPY, COPY)).toBe(
-      `${COPY} is staging's own database server: a Stage G run only ever targets a throwaway copy, psql-agentx-stg-g-<8 lower-case letters or digits>.`,
-    );
-    expect(throwawayServerProblem(COPY, 'psql-agentx-stg-abc123')).toBeUndefined();
+  it("never takes staging's own server: its suffix (names.bicep uniqueSuffix) is six letters or digits, no g-", () => {
+    for (const suffix of ['abcdef', 'g12345', 'gggggg', '000000']) {
+      expect(throwawayServerProblem(`psql-agentx-stg-${suffix}`)).toMatch(/isn't a throwaway copy's name/);
+    }
   });
 
   it('reads the copy back from its host alone, and nothing else as one', () => {

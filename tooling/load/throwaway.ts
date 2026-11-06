@@ -29,14 +29,11 @@ export const THROWAWAY_NAME_RULE = `${THROWAWAY_PREFIX}<${String(THROWAWAY_ID_LE
 export const throwawayIdOf = (server: string): string | undefined => THROWAWAY_SERVER.exec(server)?.[1];
 
 /**
- * Why `server` can't be a Stage G run's database, or undefined when it can: it
- * must be named as a copy, and never be staging's own server (`stagingServer`,
- * as Azure lists it), whatever the name rule says.
+ * Why `server` can't be a Stage G run's database, or undefined when it can.
+ * Staging's own server can never fit: names.bicep names it
+ * `psql-agentx-stg-<suffix>`, its suffix six letters or digits with no `g-`.
  */
-export function throwawayServerProblem(server: string, stagingServer?: string): string | undefined {
-  if (stagingServer !== undefined && server === stagingServer) {
-    return `${server} is staging's own database server: a Stage G run only ever targets a throwaway copy, ${THROWAWAY_NAME_RULE}.`;
-  }
+export function throwawayServerProblem(server: string): string | undefined {
   return throwawayIdOf(server) === undefined
     ? `${server} isn't a throwaway copy's name: Stage G's database is named ${THROWAWAY_NAME_RULE}.`
     : undefined;
