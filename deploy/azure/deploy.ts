@@ -1088,7 +1088,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
 const DRILL_SERVER = 'psql-agentx-stg-drill';
 
 /** Whether a server in the group is staging's own: not the drill's copy nor a Stage G copy, which sit beside it a while. */
-const isOwnServer = (name: string): boolean => name !== DRILL_SERVER && throwawayIdOf(name) === undefined;
+export const isOwnServer = (name: string): boolean => name !== DRILL_SERVER && throwawayIdOf(name) === undefined;
 
 /**
  * The disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so sending the

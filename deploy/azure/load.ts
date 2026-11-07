@@ -36,28 +36,42 @@ import { LOAD_GATE, orgsOf, POLICY_P95_MS } from '../../tooling/load/plan.ts';
 import { type PhaseResult, phaseFailures, renderReport } from '../../tooling/load/report.ts';
 import { gatheredEnd, growthBetween } from '../../tooling/load/table-growth.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
-import { asciiJson, lastModified, reason, sendPatch, type VaultReference, vaultReferences } from './held-request.ts';
+import {
+  type Api,
+  API_APP,
+  apiUrl,
+  endedAs,
+  type JobRun,
+  jobThere,
+  lineOf,
+  linesOf,
+  limitOf,
+  loadJobUrl,
+  type Printed,
+  readApi,
+  readLoadJob,
+  replicasOf,
+  runLines,
+  runWith,
+  SETTLE_MS,
+} from './load-jobs.ts';
 import {
   askWorkspace,
-  type Ended,
   jobName,
   type JobSteps,
   LOAD_JOBS,
   type LoadJob,
+  POLL_MS,
   STAGE_G_JOBS,
   type StageGJob,
-  type LogLine,
-  POLL_MS,
-  readLog,
   runCli,
-  start,
   type Target,
   unfinishedRuns,
   UsageError,
   waitFor,
   workspaceId,
 } from './jobs.ts';
-import { get, record, resourceUrl } from './release.ts';
+import { get, record } from './release.ts';
 
 const USAGE = `Usage, from your own terminal window, after apps --load-run --keep-running:
   node deploy/azure/load.ts run [--smoke]   one run, start to report; --smoke is the wiring run's short k6
@@ -79,21 +93,6 @@ export function parseArguments(argv: readonly string[]): Request {
   }
   throw new UsageError(`say run, status or finish, not ${command ?? 'nothing'}`);
 }
-
-/** The secret each load job holds its run's request in (apps.bicep `loadRequest`; policy.ts `HELD`). */
-const LOAD_REQUEST = 'load-request';
-
-/** What a load job holds between runs: no request, which the jobs refuse. */
-export const NO_REQUEST = '{}';
-
-/** Where the load image is published (verify.ts `LOAD_SIGNER`), as a job names it, by digest. */
-const LOAD_IMAGE = /^ghcr\.io\/shahbaz242630\/agent-x-load@sha256:[0-9a-f]{64}$/;
-
-/** The API, as apps.bicep names it. */
-const API_APP = 'ca-agentx-stg-api';
-
-/** How long a change to a job, or the API's restart, may take to settle. */
-const SETTLE_MS = 10 * 60_000;
 
 /**
  * The API's own lines over the run, read a minute apart: none taken as all of
@@ -121,7 +120,7 @@ interface OpenRun {
   readonly runId: string;
   readonly smoke: boolean;
   readonly firstRun?: string;
-  readonly agents: readonly Readonly<Record<string, unknown>>[];
+  readonly agents: readonly Printed[];
 }
 
 const keep = (steps: LoadSteps, open: OpenRun): void => {
@@ -130,148 +129,9 @@ const keep = (steps: LoadSteps, open: OpenRun): void => {
 };
 
 /** The agents load-first seeded, from its `load.seeded_agent` lines, checked as load-second will check them. */
-function seededAgents(printed: readonly Readonly<Record<string, unknown>>[]): Readonly<Record<string, unknown>>[] {
+function seededAgents(printed: readonly Printed[]): Readonly<Record<string, unknown>>[] {
   const agents = linesOf(printed, 'load.seeded_agent').map(({ agent }) => agent);
   return agents.length === 0 ? [] : agentsOf(JSON.stringify(agents)).map(record);
-}
-
-/** A load job as Azure has it, checked: what a change sends back of it, and where it stands. */
-interface LoadJobState {
-  readonly references: readonly VaultReference[];
-  readonly state: string;
-  readonly modified: string;
-}
-
-const loadJobUrl = (subscription: string, job: LoadJob | StageGJob): string =>
-  resourceUrl(subscription, { path: `jobs/${jobName(job)}`, container: job });
-
-/** Whether the load job is there at all: an earlier finish may have removed it. */
-const jobThere = (steps: JobSteps, subscription: string, job: LoadJob | StageGJob): boolean =>
-  steps.az.run(['rest', '--method', 'get', '--url', loadJobUrl(subscription, job), '--output', 'json']).status === 0;
-
-/**
- * A load job, read from Azure, or an error saying why it isn't one as
- * apps.bicep deploys it: one container on the load image by digest, running
- * `node tooling/load/job.ts <its part>`, its request held once.
- */
-function readLoadJob(steps: JobSteps, subscription: string, job: LoadJob): LoadJobState {
-  const refuse = (why: string): never => {
-    throw new Error(`${jobName(job)} isn't a load job this tool knows (${why}): deploy apps --load-run again.`);
-  };
-  const found = get(steps.az, loadJobUrl(subscription, job), jobName(job));
-  const properties = record(found.properties);
-  const containers = record(properties.template).containers;
-  if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
-  const container = record(containers[0]);
-  if (!LOAD_IMAGE.test(text(container.image))) return refuse("it doesn't run the load image by digest");
-  const part = job.replace(/^load-/, '');
-  if (
-    JSON.stringify([container.command, container.args]) !== JSON.stringify([['node', 'tooling/load/job.ts'], [part]])
-  ) {
-    refuse(`it must run node tooling/load/job.ts ${part}`);
-  }
-  const references = vaultReferences(record(properties.configuration).secrets, LOAD_REQUEST, refuse);
-  const modified = lastModified(found);
-  if (modified === '') return refuse("Azure gave no time of its last change, so one of ours can't be told apart");
-  return { references, state: text(properties.provisioningState), modified };
-}
-
-/**
- * Writes `value` as the job's request, once no change to it is still going,
- * and waits until Azure has taken it: the secrets list whole, every vault
- * reference as it was read.
- */
-async function writeRequest(steps: JobSteps, subscription: string, job: LoadJob, value: string): Promise<void> {
-  const deadline = steps.now().getTime() + SETTLE_MS;
-  let before = readLoadJob(steps, subscription, job);
-  while (before.state === 'InProgress') {
-    if (steps.now().getTime() >= deadline)
-      throw new Error(`${jobName(job)} was still taking a change after 10 minutes.`);
-    await steps.sleep(POLL_MS);
-    before = readLoadJob(steps, subscription, job);
-  }
-  const what =
-    value === NO_REQUEST ? `putting ${NO_REQUEST} back on ${jobName(job)}` : `the run's request on ${jobName(job)}`;
-  const body = { properties: { configuration: { secrets: [...before.references, { name: LOAD_REQUEST, value }] } } };
-  sendPatch(steps, loadJobUrl(subscription, job), asciiJson(JSON.stringify(body)), what);
-  for (;;) {
-    const now = readLoadJob(steps, subscription, job);
-    if (now.modified !== before.modified && now.state === 'Succeeded') return;
-    if (now.modified !== before.modified && (now.state === 'Failed' || now.state === 'Canceled')) {
-      throw new Error(`Azure's change for ${what} ended ${now.state}.`);
-    }
-    if (steps.now().getTime() >= deadline) throw new Error(`Azure hadn't settled ${what} after 10 minutes.`);
-    await steps.sleep(POLL_MS);
-  }
-}
-
-/** A job's own JSON lines (what job.ts prints), from its run's log; the platform's lines and Node's own are skipped. */
-export function printedLines(lines: readonly LogLine[]): Readonly<Record<string, unknown>>[] {
-  return lines.flatMap((line) => {
-    if (line.source === 'platform') return [];
-    try {
-      const parsed = record(JSON.parse(line.text));
-      return typeof parsed.event === 'string' && parsed.event.startsWith('load.') ? [parsed] : [];
-    } catch {
-      return [];
-    }
-  });
-}
-
-/** One run of a load job: how it ended, its own lines, and why {} couldn't be put back, if it couldn't. */
-interface JobRun {
-  readonly run: Ended;
-  readonly printed: Readonly<Record<string, unknown>>[];
-  readonly putBack: string | undefined;
-}
-
-/**
- * A run's lines. One that didn't succeed and has no readable start never ran, as far as anything can tell, and has
- * none to look for: the report says it failed, where a refused read would lose every phase already measured.
- */
-const runLines = async (steps: JobSteps, target: Target, execution: string, run: Ended, lastEvent?: string) =>
-  run.status !== 'Succeeded' && !Number.isFinite(Date.parse(run.began))
-    ? []
-    : printedLines(await readLog(steps, target, execution, run, lastEvent));
-
-/**
- * One run of a load job with `request` written onto it first and {} put back
- * whatever happened, `started` told the run's name as soon as it has one. A
- * put-back that failed after a run that ended is said with its lines, never in
- * their place.
- */
-async function runWith(
-  steps: JobSteps,
-  subscription: string,
-  job: LoadJob,
-  request: Readonly<Record<string, string>>,
-  started: (execution: string) => void = () => undefined,
-): Promise<JobRun> {
-  const target: Target = { subscription, job };
-  const limit = limitOf(steps, subscription, job);
-  let execution: string | undefined;
-  let run: Ended | undefined;
-  let failure: unknown;
-  try {
-    await writeRequest(steps, subscription, job, JSON.stringify(request));
-    execution = start(steps, target);
-    started(execution);
-    run = await waitFor(steps, target, execution, limit);
-  } catch (error) {
-    failure = error;
-  }
-  let putBack: string | undefined;
-  try {
-    await writeRequest(steps, subscription, job, NO_REQUEST);
-  } catch (error) {
-    putBack = `${NO_REQUEST} wasn't put back on ${jobName(job)} (${reason(error)}): apps --load-run deploys it back.`;
-  }
-  const also = putBack === undefined ? '' : ` ${putBack}`;
-  if (failure !== undefined) throw new Error(`${reason(failure)}${also}`, { cause: failure });
-  if (execution === undefined || run === undefined) {
-    throw new Error(`${String(execution)} didn't end in time: wait for it, then load.ts finish.${also}`);
-  }
-  return { run, printed: await runLines(steps, target, execution, run, LAST_EVENT[job]), putBack };
 }
 
 /** The line each load job prints last when it succeeds: its log is read until that line has arrived. */
@@ -281,59 +141,12 @@ const LAST_EVENT: Readonly<Record<LoadJob, string>> = {
   'load-cleanup': 'load.cleaned',
 };
 
-/** A job's own time limit, in seconds. */
-function limitOf(steps: JobSteps, subscription: string, job: LoadJob): number {
-  const limit = record(
-    record(get(steps.az, loadJobUrl(subscription, job), jobName(job)).properties).configuration,
-  ).replicaTimeout;
-  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
-    throw new Error(`Azure gave no time limit for ${jobName(job)}.`);
-  }
-  return limit;
-}
-
-/** The API as it now runs: its CPUs, whether it keeps a copy running, its newest revision and its build. */
-interface Api {
-  readonly cpus: number;
-  readonly fewest: number;
-  readonly revision: string;
-  readonly release: string;
-}
-
-const apiUrl = (subscription: string, rest = ''): string =>
-  resourceUrl(subscription, { path: `containerApps/${API_APP}${rest}`, container: 'api' });
-
-function readApi(steps: JobSteps, subscription: string): Api {
-  const properties = record(get(steps.az, apiUrl(subscription), 'the API').properties);
-  const template = record(properties.template);
-  const [container] = Array.isArray(template.containers) ? template.containers.map(record) : [];
-  const settings = Array.isArray(container?.env) ? container.env.map(record) : [];
-  return {
-    cpus: Number(record(container?.resources).cpu),
-    fewest: Number(record(template.scale).minReplicas),
-    revision: text(properties.latestRevisionName),
-    release: text(settings.find((setting) => setting.name === 'AGENTX_RELEASE')?.value),
-  };
-}
-
-/** The revision's replicas as `name restarts` each, and whether every one runs. */
-function replicasOf(steps: JobSteps, subscription: string, revision: string) {
-  const listed = record(
-    get(steps.az, apiUrl(subscription, `/revisions/${revision}/replicas`), "the API's replicas"),
-  ).value;
-  const replicas = Array.isArray(listed) ? listed.map(record) : [];
-  const restarts = (replica: Readonly<Record<string, unknown>>): number => {
-    const containers = record(replica.properties).containers;
-    return Array.isArray(containers)
-      ? containers.map(record).reduce((sum, container) => sum + Number(container.restartCount ?? 0), 0)
-      : 0;
-  };
-  return {
-    shape: replicas.map((replica) => `${text(replica.name)} ${String(restarts(replica))}`).join(','),
-    running:
-      replicas.length > 0 && replicas.every((replica) => text(record(replica.properties).runningState) === 'Running'),
-  };
-}
+/** A PL-38 job's run: its request, the line it prints last, and finish for a run that outlasts the wait. */
+const loadRun = (request: Readonly<Record<string, string>>, job: LoadJob) => ({
+  request,
+  lastEvent: LAST_EVENT[job],
+  ifStuck: 'wait for it, then load.ts finish.',
+});
 
 /**
  * Restarts the API's newest revision, so a new process starts and its
@@ -342,7 +155,7 @@ function replicasOf(steps: JobSteps, subscription: string, revision: string) {
  * runs. A revision's own state can say Running throughout.
  */
 async function restartApi(steps: JobSteps, subscription: string, revision: string): Promise<void> {
-  const before = replicasOf(steps, subscription, revision).shape;
+  const before = replicasOf(steps.az, subscription, revision).shape;
   const done = steps.az.run([
     'rest',
     '--method',
@@ -355,7 +168,7 @@ async function restartApi(steps: JobSteps, subscription: string, revision: strin
   const deadline = steps.now().getTime() + SETTLE_MS;
   for (;;) {
     await steps.sleep(POLL_MS);
-    const now = replicasOf(steps, subscription, revision);
+    const now = replicasOf(steps.az, subscription, revision);
     if (now.shape !== before && now.running) return;
     if (steps.now().getTime() >= deadline) {
       throw new Error(`The API's revision ${revision} wasn't running again 10 minutes after its restart.`);
@@ -407,14 +220,8 @@ async function apiLog(steps: JobSteps, subscription: string, began: string, ende
   }
 }
 
-/** One event's lines among a job's, by name, or its first. */
-const linesOf = (printed: readonly Readonly<Record<string, unknown>>[], event: string) =>
-  printed.filter((line) => line.event === event);
-const lineOf = (printed: readonly Readonly<Record<string, unknown>>[], event: string) =>
-  printed.find((line) => line.event === event);
-
 /** k6's summary of each phase that ran to the end, as the job printed them. */
-const phasesOf = (printed: readonly Readonly<Record<string, unknown>>[]): PhaseResult[] =>
+const phasesOf = (printed: readonly Printed[]): PhaseResult[] =>
   linesOf(printed, 'load.k6_summary').flatMap(({ event: _event, ...result }) =>
     'phase' in result ? [result as unknown as PhaseResult] : [],
   );
@@ -439,7 +246,7 @@ function preflight(steps: LoadSteps, subscription: string, smoke: boolean): Api 
     const going = unfinishedRuns(steps, { subscription, job });
     if (going.length > 0) throw new Error(`${jobName(job)} has runs still going: ${going.join(', ')}.`);
   }
-  const api = readApi(steps, subscription);
+  const api = readApi(steps.az, subscription);
   if (api.fewest < 1) {
     throw new Error(
       'The API keeps no copy running, so phase 2 would start with a cold start in its numbers: run apps --load-run --keep-running first.',
@@ -452,12 +259,6 @@ function preflight(steps: LoadSteps, subscription: string, smoke: boolean): Api 
   }
   return api;
 }
-
-/** How a job's run ended, with its own reason when it refused: `Failed: hand-offs are running`. */
-const endedAs = (run: Ended, printed: readonly Readonly<Record<string, unknown>>[]): string => {
-  const refused = lineOf(printed, 'load.refused');
-  return refused === undefined ? run.status : `${run.status}: ${text(refused.reason)}`;
-};
 
 /** The problems a list in a job's line names, or `missing` when the line isn't there. */
 const problemsIn = (line: Readonly<Record<string, unknown>> | undefined, missing: string): string[] =>
@@ -472,15 +273,12 @@ async function phaseOne(
 ) {
   steps.say('Phase 1: the seed and k6, in load-first...');
   keep(steps, open);
-  const first = await runWith(
-    steps,
-    subscription,
-    'load-first',
-    { AGENTX_LOAD_RUN_ID: open.runId, ...flags },
-    (firstRun) => {
+  const first = await runWith(steps, subscription, 'load-first', {
+    ...loadRun({ AGENTX_LOAD_RUN_ID: open.runId, ...flags }, 'load-first'),
+    started: (firstRun) => {
       keep(steps, { ...open, firstRun });
     },
-  );
+  });
   const agents = seededAgents(first.printed);
   // Only a run that succeeded waits for its last line: a failed one's seed lines may be yet to come, for finish to read.
   const noneMade = agents.length === 0 && first.run.status === 'Succeeded';
@@ -537,12 +335,20 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   const first = await phaseOne(steps, subscription, { runId, smoke, agents: [] }, flags);
   await restartApi(steps, subscription, api.revision);
   steps.say('Phases 2 to 5: new keys, k6, the database checks and the clean-up, in load-second...');
-  const second = await runWith(steps, subscription, 'load-second', {
-    AGENTX_LOAD_RUN_ID: runId,
-    AGENTX_LOAD_SEEDED: JSON.stringify(first.agents),
-    AGENTX_LOAD_CREATED_FIRST: String(first.phase.created),
-    ...flags,
-  });
+  const second = await runWith(
+    steps,
+    subscription,
+    'load-second',
+    loadRun(
+      {
+        AGENTX_LOAD_RUN_ID: runId,
+        AGENTX_LOAD_SEEDED: JSON.stringify(first.agents),
+        AGENTX_LOAD_CREATED_FIRST: String(first.phase.created),
+        ...flags,
+      },
+      'load-second',
+    ),
+  );
   const checked = lineOf(second.printed, 'load.checked');
   const cleanedLine = lineOf(second.printed, 'load.cleaned');
   if (cleanedLine !== undefined && problemsIn(cleanedLine, '').length === 0) rmSync(steps.stateFile, { force: true });
@@ -585,9 +391,9 @@ const EVERY_LOAD_JOB: readonly (LoadJob | StageGJob)[] = [...LOAD_JOBS, ...STAGE
 function status(steps: LoadSteps): number {
   const subscription = signedIn(steps.az, steps.say);
   for (const job of EVERY_LOAD_JOB) {
-    steps.say(`  ${jobName(job)}: ${jobThere(steps, subscription, job) ? 'there' : 'not there'}`);
+    steps.say(`  ${jobName(job)}: ${jobThere(steps.az, subscription, job) ? 'there' : 'not there'}`);
   }
-  const api = readApi(steps, subscription);
+  const api = readApi(steps.az, subscription);
   steps.say(`  The API: ${String(api.cpus)} CPUs, ${api.fewest >= 1 ? 'a copy kept running' : 'scales to zero'}.`);
   steps.say(`  The database: ${databaseSize(steps, subscription)}.`);
   steps.say(
@@ -603,7 +409,7 @@ function status(steps: LoadSteps): number {
 async function openAgents(steps: LoadSteps, subscription: string, open: OpenRun) {
   if (open.agents.length > 0 || open.firstRun === undefined) return open.agents;
   const target: Target = { subscription, job: 'load-first' };
-  const run = await waitFor(steps, target, open.firstRun, limitOf(steps, subscription, 'load-first'));
+  const run = await waitFor(steps, target, open.firstRun, limitOf(steps.az, subscription, 'load-first'));
   if (run === undefined) throw new Error(`${open.firstRun} hasn't ended: run load.ts finish again once it has.`);
   return seededAgents(await runLines(steps, target, open.firstRun, run, LAST_EVENT['load-first']));
 }
@@ -620,10 +426,12 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
   steps.say(
     `Cleaning up run ${open.runId}'s ${String(orgsOf(agents.map((agent) => ({ orgId: text(agent.orgId) }))).length)} organisations, in load-cleanup...`,
   );
-  const { run, printed, putBack } = await runWith(steps, subscription, 'load-cleanup', {
-    AGENTX_LOAD_RUN_ID: open.runId,
-    AGENTX_LOAD_SEEDED: JSON.stringify(agents),
-  });
+  const { run, printed, putBack } = await runWith(
+    steps,
+    subscription,
+    'load-cleanup',
+    loadRun({ AGENTX_LOAD_RUN_ID: open.runId, AGENTX_LOAD_SEEDED: JSON.stringify(agents) }, 'load-cleanup'),
+  );
   const problems = problemsIn(lineOf(printed, 'load.cleaned'), 'the clean-up said nothing');
   if (run.status !== 'Succeeded' || problems.length > 0) {
     throw new Error(
@@ -639,7 +447,7 @@ async function finish(steps: LoadSteps): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
   for (const job of EVERY_LOAD_JOB) {
     // A job already removed (an earlier finish), or Stage G's on a run without its copy, has nothing going.
-    if (!jobThere(steps, subscription, job)) continue;
+    if (!jobThere(steps.az, subscription, job)) continue;
     const runs = unfinishedRuns(steps, { subscription, job });
     if (runs.length > 0) {
       throw new Error(
@@ -648,7 +456,7 @@ async function finish(steps: LoadSteps): Promise<number> {
     }
   }
   if (existsSync(steps.stateFile)) await cleanOpenRun(steps, subscription);
-  for (const job of [...LOAD_JOBS, ...STAGE_G_JOBS.filter((each) => jobThere(steps, subscription, each))]) {
+  for (const job of [...LOAD_JOBS, ...STAGE_G_JOBS.filter((each) => jobThere(steps.az, subscription, each))]) {
     const done = steps.az.run(['rest', '--method', 'delete', '--url', loadJobUrl(subscription, job)]);
     if (done.status !== 0) throw new Error(`Azure refused to remove ${jobName(job)}: run load.ts finish again.`);
     steps.say(`Removed ${jobName(job)}.`);
@@ -672,7 +480,7 @@ export function load(request: Request, steps: LoadSteps): Promise<number> {
 
 const LOAD_DIR = fileURLToPath(new URL('../../tooling/load/', import.meta.url));
 
-function main(
+export function main(
   argv: readonly string[],
   say: (line: string) => void = console.log,
   az: () => Az = realAz,
@@ -686,7 +494,7 @@ function main(
         az: az(),
         say,
         now: () => new Date(),
-        sleep: (ms) => sleep(ms),
+        sleep,
         stateFile: path.join(LOAD_DIR, '.out', 'azure-run.json'),
         reportsDir: path.join(LOAD_DIR, 'reports'),
       }),

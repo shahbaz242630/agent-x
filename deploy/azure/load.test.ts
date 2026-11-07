@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
 import { jobName, LOAD_JOBS, type LoadJob, type LogLine, STAGE_G_JOBS, type StageGJob } from './jobs.ts';
-import { load, type LoadSteps, NO_REQUEST, parseArguments, printedLines } from './load.ts';
+import { load, type LoadSteps, main, parseArguments } from './load.ts';
+import { NO_REQUEST, printedLines } from './load-jobs.ts';
 import { printedEnd } from '../../tooling/load/table-growth.ts';
 
 const SUBSCRIPTION = '6f1e2d3c-4b5a-4978-8a6b-5c4d3e2f1a0b';
@@ -436,6 +437,19 @@ describe('the command line', () => {
     ]) {
       expect(() => parseArguments(argv)).toThrow(/say run, status or finish|takes only --smoke|takes nothing/);
     }
+  });
+  it('says the usage, touching nothing, for a command it does not know', async () => {
+    const said: string[] = [];
+    const az = new FakeAzure();
+    expect(
+      await main(
+        ['go'],
+        (line) => said.push(line),
+        () => az,
+      ),
+    ).toBe(2);
+    expect(said.join(' ')).toContain('node deploy/azure/load.ts run [--smoke]');
+    expect(az.calls).toEqual([]);
   });
 });
 
