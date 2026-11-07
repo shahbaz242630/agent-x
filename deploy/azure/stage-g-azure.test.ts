@@ -312,6 +312,21 @@ describe("Stage G's Azure", () => {
     expect(cli.queries[0]).toContain("ContainerAppName in ('ca-agentx-stg-api', 'ca-agentx-stg-jobs')");
   });
 
+  // S176's smoke on Azure: the workspace refused `j.time` (SYN0002, `time` is a
+  // KQL keyword), so no step could be judged. The fixed queries were run on the
+  // real workspace before this; here no query may name a keyword as a field.
+  it('names no KQL keyword as a field in any query it asks', () => {
+    const cli = new FakeCli();
+    const { azure } = azureOn(cli);
+    azure.stepLog(WINDOW, []);
+    azure.decisionP95(WINDOW);
+    expect(cli.queries.length).toBe(4);
+    for (const query of cli.queries) {
+      expect(query).toContain("todatetime(j['time'])");
+      expect(query).not.toMatch(/\bj\.(time|first|last|in|and|or|not|between)\b/);
+    }
+  });
+
   it('reads the decisions p95 from counts, and the metrics last reading', () => {
     const { azure } = azureOn(new FakeCli());
     expect(azure.decisionP95(WINDOW)).toBe(80);
