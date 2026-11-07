@@ -1,4 +1,4 @@
-// The throwaway copy's sentinel (throwaway.ts) on a migrated database: one
+// The throwaway copy's sentinel (throwaway-sentinel.ts) on a migrated database: one
 // never marked (as staging's is) is refused, one marked as the copy is taken,
 // one marked as another copy is refused, and the API's schema guard still finds
 // nothing wrong, so the mark itself is never taken for tampering.
@@ -6,7 +6,7 @@ import { createDatabase, type Database, liveSchemaProblems } from '../../package
 import { createTestDatabase, type TestDatabase, testLogger } from '../../packages/testing/src/index.ts';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { markThrowaway, sentinelProblem } from './throwaway.ts';
+import { markThrowaway, sentinelProblem } from './throwaway-sentinel.ts';
 
 const server = inject('postgres');
 const COPY = 'psql-agentx-stg-g-a1b2c3d4';
