@@ -2,11 +2,11 @@
 // nothing of k6's: their scenarios and thresholds, Stage G's step, and the
 // numbers their summaries read. It imports nothing, so Vitest loads it as k6 does.
 
-/** A scenario sending `rate` iterations of `run` a second for `seconds`, `vus` ready and five times that at most. */
-export const constantRate = (seconds, rate, run, vus) => ({
+/** A scenario sending `rate` iterations of `run` every `unitSeconds` for `seconds`, `vus` ready and five times that at most. */
+export const constantRate = (seconds, rate, run, vus, unitSeconds = 1) => ({
   executor: 'constant-arrival-rate',
   rate,
-  timeUnit: '1s',
+  timeUnit: `${unitSeconds}s`,
   duration: `${seconds}s`,
   preAllocatedVUs: vus,
   maxVUs: vus * 5,
@@ -34,6 +34,7 @@ const STEP_FIELDS = [
   'abort',
   'windowSeconds',
   'neighbours',
+  'extrasEverySeconds',
 ];
 
 /** Lowercase words and dashes, short: it goes into every order reference (100 characters at most). */
@@ -89,6 +90,7 @@ const STEP_PARTS = [
           isPositive(step.neighbours.stuckRate)
         : step.neighbours === null,
   ],
+  ['extras', (step) => isWhole(step.extrasEverySeconds)],
 ];
 
 /** STEP read and checked, or a refusal saying what is wrong with it: k6 then sends nothing. */
@@ -139,8 +141,8 @@ export function stageGOptions(step) {
         maxVUs: step.vus.max,
         exec: 'steady',
       },
-      duplicates: constantRate(seconds, 1, 'duplicate', 4),
-      replays: constantRate(seconds, 1, 'replay', 4),
+      duplicates: constantRate(seconds, 1, 'duplicate', 4, step.extrasEverySeconds),
+      replays: constantRate(seconds, 1, 'replay', 4, step.extrasEverySeconds),
       ...(step.neighbours === null
         ? {}
         : {

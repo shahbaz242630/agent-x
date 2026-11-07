@@ -114,8 +114,22 @@ const RATE_STEP_HOLD_SECONDS = 600;
 /** A tenth of a rate step's hold: inside k6's 5-15% ramp guidance. */
 const RATE_STEP_RAMP_SECONDS = 60;
 
-/** The smoke run: the wiring proved at a trickle (research test 0). */
-const SMOKE = { orgs: 100, rate: 2, holdSeconds: 120 } as const;
+/**
+ * The steady traffic for `orgs` organisations at the target's pace for each:
+ * its active agents each send about as often as at 10k (S176: 100 organisations
+ * at 170/s put 85 a second on each of its 2 agents, a shape no customer has).
+ */
+const rateFor = (orgs: number): number => Math.max(1, Math.round((TARGET_RATE * orgs) / TARGET_ORGS));
+
+/**
+ * The duplicates and replays, one of each a second beside the target's rate:
+ * as rare beside a smaller step's traffic, never more often than that (S176's
+ * smoke sent them as often as its 2 agents' own traffic).
+ */
+const extrasEverySeconds = (rate: number): number => Math.max(1, Math.round(TARGET_RATE / rate));
+
+/** The smoke run: the wiring proved at a trickle (research test 0), at 100 organisations' share of the target. */
+const SMOKE = { orgs: 100, rate: rateFor(100), holdSeconds: 120 } as const;
 
 /** Steady base load before a surge, for the report to compare the surge and the recovery with. */
 const BASE_SECONDS = 300;
@@ -239,7 +253,7 @@ const PROFILES: Record<Exclude<StageGTest, 'overload'>, Profile> = {
     test: 'orgs',
     mix: 'steady',
     steps: ORG_STEPS.map((orgs) =>
-      rampHold(`orgs-${String(orgs)}`, orgs, orgs === TARGET_ORGS ? LONG_HOLD_SECONDS : HOLD_SECONDS),
+      rampHold(`orgs-${String(orgs)}`, orgs, orgs === TARGET_ORGS ? LONG_HOLD_SECONDS : HOLD_SECONDS, rateFor(orgs)),
     ),
     rules: { ...TARGET_RULES, calmMargin: CALM_MARGIN },
   },
@@ -398,6 +412,8 @@ export interface StepRun extends K6Stages {
   /** The judged traffic's window, for a climb's abort rule and a surge's recovery; null for a step timed whole. */
   readonly windowSeconds: number | null;
   readonly neighbours: typeof NEIGHBOUR_RATES | null;
+  /** One duplicate and one replay every this many seconds. */
+  readonly extrasEverySeconds: number;
 }
 
 /** A surge's recovery read window by window: as long as the climb's, so a minute's rule is two windows. */
@@ -424,6 +440,7 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
     windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,
+    extrasEverySeconds: extrasEverySeconds(step.rate),
   };
 }
 

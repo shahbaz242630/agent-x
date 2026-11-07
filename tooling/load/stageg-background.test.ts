@@ -107,10 +107,26 @@ describe("the background work's health over a step's window", () => {
     expect(health([...lines, ...asLog(SETTLED)], [API])).toEqual([]);
   });
 
-  it('fails a step whose background check never ran, however short', () => {
-    expect(failuresOf([...pulsesEvery(0, 30), ...SETTLED])).toEqual([
-      'The background check never ran: no audit.anchor_check_done line in the step.',
-    ]);
+  it('fails a step of 10 minutes or more whose background check never ran; a shorter one may see no run', () => {
+    const failures = (minutes: number) =>
+      backgroundFailures(
+        backgroundHealth(
+          asLog([
+            ...pulsesEvery(0, minutes),
+            line(minutes + 1, 'jobs.pulse'),
+            line(minutes + 1, 'http.request_completed'),
+          ]),
+          { from: at(0), to: at(minutes) },
+          { apiReplicas: [API] },
+        ),
+        false,
+      );
+    const neverRan = ['The background check never ran: no audit.anchor_check_done line in the step.'];
+    // A run's line comes at most every 10 minutes (anchor-check.ts): S176's 2-minute smoke saw none, with nothing wrong.
+    expect(failures(2)).toEqual([]);
+    expect(failures(9)).toEqual([]);
+    expect(failures(10)).toEqual(neverRan);
+    expect(failuresOf([...pulsesEvery(0, 30), ...SETTLED])).toEqual(neverRan);
   });
 
   it('fails a check above its ceiling, or not back to none by the step’s last run, which first-to-last missed', () => {
