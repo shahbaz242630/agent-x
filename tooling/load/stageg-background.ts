@@ -70,6 +70,13 @@ const PULSE_GAP_MINUTES = 3;
 const BEHIND_CEILING = 10;
 
 /**
+ * The anchor check's line comes at most every 10 minutes at the default
+ * interval (anchor-check.ts: 5 between runs, 4 of run, 1 for the last write):
+ * a shorter step may see none with nothing wrong (S176's 2-minute smoke).
+ */
+const ANCHOR_LINE_GAP_MINUTES = 10;
+
+/**
  * The lines a step meant to overload causes by design, and the only warnings it
  * may log: a decision turned away busy (503) or refused for rate (429), each
  * named in the report with its count.
@@ -245,7 +252,7 @@ const behind = (peak: Peak | null, what: string): string[] => {
 export function backgroundFailures(health: BackgroundHealth, overloading: boolean): string[] {
   const gap = health.longestPulseGapMinutes;
   return [
-    ...(health.anchorChecks === 0
+    ...(health.anchorChecks === 0 && health.minutes >= ANCHOR_LINE_GAP_MINUTES
       ? ['The background check never ran: no audit.anchor_check_done line in the step.']
       : []),
     ...(health.failed > 0

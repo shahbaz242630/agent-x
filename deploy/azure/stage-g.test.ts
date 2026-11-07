@@ -113,6 +113,8 @@ interface World {
   lateReadings?: number;
   /** The p95 each step label's summary gives. */
   p95?: Readonly<Record<string, number>>;
+  /** The requests each step label's summary says k6 never sent. */
+  dropped?: Readonly<Record<string, number>>;
   going?: Partial<Record<StageGJob, string[]>>;
   finishResult?: number;
   containers?: string[];
@@ -218,9 +220,12 @@ class FakeAzure implements StageGAzure {
     if (job === 'load-step' && (options.request?.command as string[])[0] === 'step') {
       const label = stepOf(options.request).label;
       const p95 = this.world.p95?.[label];
-      if (p95 !== undefined) {
+      const dropped = this.world.dropped?.[label];
+      if (p95 !== undefined || dropped !== undefined) {
         printed = printed.map((line) =>
-          line.event === 'load.stageg_summary' ? summaryOf(stepOf(options.request), at, p95) : line,
+          line.event === 'load.stageg_summary'
+            ? summaryOf(stepOf(options.request), at, p95, dropped === undefined ? {} : { dropped })
+            : line,
         );
       }
     }
@@ -549,7 +554,7 @@ describe('run', () => {
 
   it('skips a seed already grown, and stops the climb at its first failed step', async () => {
     markedCopy({ seededTo: 10_000 });
-    const done = await run(['run', 'orgs'], { p95: { 'orgs-100': 40, 'orgs-1000': 80 } });
+    const done = await run(['run', 'orgs'], { p95: { 'orgs-100': 40, 'orgs-1000': 80 }, dropped: { 'orgs-1000': 12 } });
     expect(done.code).toBe(1);
     expect(commands(done.azure)).toEqual(['load-step step', 'load-check check', 'load-step step', 'load-check check']);
     expect(done.text).toContain('node deploy/azure/stage-g.ts run orgs --from orgs-1000');

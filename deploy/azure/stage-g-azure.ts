@@ -118,7 +118,8 @@ function linesFrom(apps: readonly string[], { from, to }: StepWindow): string {
     `| where TimeGenerated between (datetime(${start}) .. datetime(${end}))`,
     `| where ContainerAppName in (${apps.map(kql).join(', ')})`,
     '| extend j = parse_json(Log)',
-    '| extend at = todatetime(j.time), event = tostring(j.event), level = tostring(j.level)',
+    // j['time'], not j.time: `time` is a reserved word in KQL, and the workspace refuses the query (S176's smoke).
+    "| extend at = todatetime(j['time']), event = tostring(j.event), level = tostring(j.level)",
     "| extend Replica = strcat(RevisionName, '/', ContainerGroupName)",
   ].join('\n');
 }
@@ -157,6 +158,14 @@ function stepLogQueries(window: StepWindow, offenders: readonly string[]): strin
     `${base}\n| where ContainerAppName == ${kql(API_APP)} and at > datetime(${window.to})\n| summarize at = max(at) by Replica`,
   ];
 }
+
+/** The decisions' times in the step's window, counted by each time to a tenth of a millisecond. */
+const decisionQuery = (window: StepWindow): string =>
+  [
+    linesFrom([API_APP], window),
+    `| where event == 'spend_request.decided' and at between (datetime(${window.from}) .. datetime(${window.to}))`,
+    '| summarize n = count() by ms = round(todouble(j.durationMs), 1)',
+  ].join('\n');
 
 /** The counted warnings and errors as the lines they stand for, the offenders' with their organisation. */
 const countedLines = (rows: readonly Readonly<Record<string, unknown>>[]): LogLine[] =>
@@ -215,7 +224,7 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(
         [
           ...server('restore', '--name', copy, '--source-server', source.id, '--restore-time', at),
-          ...['--subnet', source.subnet, '--private-dns-zone', source.privateDnsZone, '--no-wait'],
+          ...['--subnet', source.subnet, '--private-dns-zone', source.privateDnsZone, '--no-wait', '--yes'],
         ],
         `the restore of ${source.name} to ${copy}`,
       );
@@ -225,7 +234,11 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       return done.status === 0 ? text(record(JSON.parse(done.stdout)).state) : undefined;
     },
     resize: (name) => {
-      ok(server('update', '--name', name, '--sku-name', LOAD_SKU.name, '--tier', LOAD_SKU.tier), `resizing ${name}`);
+      // --yes on every update and restore: they ask before a restart, and no one can answer a job's prompt (S176).
+      ok(
+        server('update', '--name', name, '--sku-name', LOAD_SKU.name, '--tier', LOAD_SKU.tier, '--yes'),
+        `resizing ${name}`,
+      );
       ok(
         [
           ...server('parameter', 'set', '--server-name', name, '--name', 'max_connections'),
@@ -242,7 +255,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(server('restart', '--name', name), `restarting ${name}`);
     },
     setHa: (name, mode) => {
-      ok(server('update', '--name', name, '--high-availability', mode, '--no-wait'), `${name}'s high availability`);
+      ok(
+        server('update', '--name', name, '--high-availability', mode, '--no-wait', '--yes'),
+        `${name}'s high availability`,
+      );
     },
     haOf: (name) => {
       const ha = record(record(azJson(az, server('show', '--name', name))).highAvailability);
@@ -286,11 +302,7 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ];
     },
     decisionP95: (window) => {
-      const query = [
-        linesFrom([API_APP], window),
-        `| where event == 'spend_request.decided' and at between (datetime(${window.from}) .. datetime(${window.to}))`,
-        '| summarize n = count() by ms = round(todouble(j.durationMs), 1)',
-      ].join('\n');
+      const query = decisionQuery(window);
       return p95OfCounts(ask(query, window).map((row) => ({ ms: Number(row.ms), n: Number(row.n) })));
     },
     lastReading: (metric, copy, window) => {

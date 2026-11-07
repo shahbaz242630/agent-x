@@ -43,13 +43,22 @@ describe("Stage G's profiles, as the research table sets them", () => {
     ]);
   });
 
-  it('steps the organisations 100, 1k, 3k, 10k at 170/s: 5 minutes up, 15 held, 30 at 10k', () => {
+  it("steps the organisations 100, 1k, 3k, 10k at each one's share of 170/s: 5 minutes up, 15 held, 30 at 10k", () => {
+    // Each active agent at the target's pace (S176): never 170/s on 100 organisations' 2 agents.
     expect(steps('orgs').map((step) => [step.label, step.orgs, shape(step)])).toEqual([
-      ['orgs-100', 100, ['start 0', '170@300s', '170@900s']],
-      ['orgs-1000', 1000, ['start 0', '170@300s', '170@900s']],
-      ['orgs-3000', 3000, ['start 0', '170@300s', '170@900s']],
+      ['orgs-100', 100, ['start 0', '2@300s', '2@900s']],
+      ['orgs-1000', 1000, ['start 0', '17@300s', '17@900s']],
+      ['orgs-3000', 3000, ['start 0', '51@300s', '51@900s']],
       ['orgs-10000', 10_000, ['start 0', '170@300s', '170@1800s']],
     ]);
+  });
+
+  it('sends a duplicate and a replay each second at 170/s, as rarely beside a smaller step, at most each second', () => {
+    const everyOf = (test: Parameters<typeof stageGProfile>[0]) => runs(test).map((run) => run.extrasEverySeconds);
+    expect(everyOf('smoke')).toEqual([85]);
+    expect(everyOf('orgs')).toEqual([85, 10, 3, 1]);
+    expect(everyOf('rates')).toEqual([4, 2, 1, 1, 1]);
+    expect([...everyOf('target'), ...everyOf('breaking'), ...everyOf('neighbours')]).toEqual([1, 1, 1]);
   });
 
   it('holds the target, past 10k and the HA run at 170/s for 30 minutes, at 10k, 30k and 10k organisations', () => {
@@ -145,8 +154,9 @@ describe("Stage G's profiles, as the research table sets them", () => {
     expect(stageGProfile('soak').rules).toEqual(stageGProfile('target').rules);
   });
 
-  it('compares the organisations steps and the neighbours with a baseline, and only the neighbours forbid 429s', () => {
-    expect(stageGProfile('orgs').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: false });
+  it('judges only the neighbours against a baseline, and only they forbid 429s; the orgs steps report theirs', () => {
+    // Each orgs step at its own rate (S176): judged by the decision limit, its p95 against the first step's reported.
+    expect(stageGProfile('orgs').rules).toEqual(stageGProfile('target').rules);
     expect(stageGProfile('neighbours').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: true });
   });
 
@@ -190,6 +200,7 @@ describe('what k6 is handed for one step', () => {
         abort: null,
         windowSeconds: null,
         neighbours: null,
+        extrasEverySeconds: 85,
       },
     ]);
     expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 1275 }]);
@@ -306,12 +317,12 @@ describe("judging a step's measured result", () => {
   });
 
   it("holds the calm p95 within 15% of the baseline step's, failing without a baseline", () => {
-    const orgs = stageGProfile('orgs').rules;
-    expect(judgeStep(orgs, { ...good, calmP95Ms: 92 }, 80).passed).toBe(true);
-    expect(judgeStep(orgs, { ...good, calmP95Ms: 92.1 }, 80).failures).toEqual([
+    const calm: PassRules = { ...target, calmMargin: stageGProfile('neighbours').rules.calmMargin };
+    expect(judgeStep(calm, { ...good, calmP95Ms: 92 }, 80).passed).toBe(true);
+    expect(judgeStep(calm, { ...good, calmP95Ms: 92.1 }, 80).failures).toEqual([
       "The p95 was 92.1 ms, more than 15% above the baseline step's 80.0 ms.",
     ]);
-    expect(judgeStep(orgs, good).failures).toEqual(['No baseline step was given to compare the p95 with.']);
+    expect(judgeStep(calm, good).failures).toEqual(['No baseline step was given to compare the p95 with.']);
   });
 
   it('fails the neighbours when a calm organisation was refused for rate at all', () => {

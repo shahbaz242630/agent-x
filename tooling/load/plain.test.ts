@@ -20,7 +20,13 @@ interface StepOptions {
 }
 
 interface PlainModule {
-  constantRate: (seconds: number, rate: number, run: string, vus: number) => Record<string, unknown>;
+  constantRate: (
+    seconds: number,
+    rate: number,
+    run: string,
+    vus: number,
+    unitSeconds?: number,
+  ) => Record<string, unknown>;
   namedOnly: (kinds: readonly string[], metric: string, rule: string) => Record<string, string[]>;
   readStep: (text: string | undefined) => StepRun;
   stageGOptions: (step: StepRun) => StepOptions;
@@ -125,6 +131,9 @@ describe("Stage G's step, as k6 is handed it", () => {
       ['neighbours', { neighbours: { busyRate: 25, stuckRate: 5 } }],
       ['neighbours', { mix: 'neighbours', neighbours: null }],
       ['neighbours', { mix: 'neighbours', neighbours: { busyRate: 0, stuckRate: 5 } }],
+      ['extras', { extrasEverySeconds: 0 }],
+      ['extras', { extrasEverySeconds: 1.5 }],
+      ['extras', { extrasEverySeconds: '85' }],
     ];
     for (const [part, change] of wrong) {
       expect(() => plain.readStep(JSON.stringify({ ...target, ...change })), part).toThrow(
@@ -163,6 +172,12 @@ describe("a Stage G step's k6 options", () => {
       'rate_limited{kind:steady}': ['count>=0'],
       'failed_answers{kind:steady}': ['count>=0'],
     });
+  });
+
+  it("sends a smaller step's duplicates and replays as rarely beside its traffic as the target's: smoke's every 85 s", () => {
+    const { duplicates, replays } = plain.stageGOptions(runOf('smoke')).scenarios;
+    expect(duplicates).toEqual(plain.constantRate(120, 1, 'duplicate', 4, 85));
+    expect([duplicates?.timeUnit, replays?.timeUnit]).toEqual(['85s', '85s']);
   });
 
   it('runs the busy and stuck organisations beside the calm ones, each kind timed and counted apart', () => {
