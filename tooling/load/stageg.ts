@@ -255,7 +255,9 @@ const PROFILES: Record<Exclude<StageGTest, 'overload'>, Profile> = {
     steps: ORG_STEPS.map((orgs) =>
       rampHold(`orgs-${String(orgs)}`, orgs, orgs === TARGET_ORGS ? LONG_HOLD_SECONDS : HOLD_SECONDS, rateFor(orgs)),
     ),
-    rules: { ...TARGET_RULES, calmMargin: CALM_MARGIN },
+    // The p95 against the first step's is reported, not judged: the steps' rates differ with their organisations
+    // (S176), so a 2/s baseline says nothing of 170/s; the decision limit judges each step instead.
+    rules: TARGET_RULES,
   },
   target: atTarget('target', TARGET_ORGS),
   rates: {

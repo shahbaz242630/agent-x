@@ -154,8 +154,9 @@ describe("Stage G's profiles, as the research table sets them", () => {
     expect(stageGProfile('soak').rules).toEqual(stageGProfile('target').rules);
   });
 
-  it('compares the organisations steps and the neighbours with a baseline, and only the neighbours forbid 429s', () => {
-    expect(stageGProfile('orgs').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: false });
+  it('judges only the neighbours against a baseline, and only they forbid 429s; the orgs steps report theirs', () => {
+    // Each orgs step at its own rate (S176): judged by the decision limit, its p95 against the first step's reported.
+    expect(stageGProfile('orgs').rules).toEqual(stageGProfile('target').rules);
     expect(stageGProfile('neighbours').rules).toMatchObject({ calmMargin: 0.15, calmNeverLimited: true });
   });
 
@@ -316,12 +317,12 @@ describe("judging a step's measured result", () => {
   });
 
   it("holds the calm p95 within 15% of the baseline step's, failing without a baseline", () => {
-    const orgs = stageGProfile('orgs').rules;
-    expect(judgeStep(orgs, { ...good, calmP95Ms: 92 }, 80).passed).toBe(true);
-    expect(judgeStep(orgs, { ...good, calmP95Ms: 92.1 }, 80).failures).toEqual([
+    const calm: PassRules = { ...target, calmMargin: stageGProfile('neighbours').rules.calmMargin };
+    expect(judgeStep(calm, { ...good, calmP95Ms: 92 }, 80).passed).toBe(true);
+    expect(judgeStep(calm, { ...good, calmP95Ms: 92.1 }, 80).failures).toEqual([
       "The p95 was 92.1 ms, more than 15% above the baseline step's 80.0 ms.",
     ]);
-    expect(judgeStep(orgs, good).failures).toEqual(['No baseline step was given to compare the p95 with.']);
+    expect(judgeStep(calm, good).failures).toEqual(['No baseline step was given to compare the p95 with.']);
   });
 
   it('fails the neighbours when a calm organisation was refused for rate at all', () => {
