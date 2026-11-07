@@ -320,7 +320,7 @@ describe("Stage G's Azure", () => {
     const { azure } = azureOn(cli);
     azure.stepLog(WINDOW, []);
     azure.decisionP95(WINDOW);
-    expect(cli.queries.length).toBe(4);
+    expect(cli.queries).toHaveLength(4);
     for (const query of cli.queries) {
       expect(query).toContain("todatetime(j['time'])");
       expect(query).not.toMatch(/\bj\.(time|first|last|in|and|or|not|between)\b/);
