@@ -175,6 +175,18 @@ describe('parseArguments', () => {
     ]) {
       expect(parseArguments(argv)).toEqual({ command: 'apps', commit: COMMIT, keepRunning: true, loadRun: true });
     }
+    for (const argv of [
+      ['apps', '--load-run', '--load-database', 'psql-agentx-stg-g-a1b2c3d4'],
+      ['apps', '--load-database', 'psql-agentx-stg-g-a1b2c3d4', '--load-run'],
+    ]) {
+      expect(parseArguments(argv)).toEqual({
+        command: 'apps',
+        commit: undefined,
+        keepRunning: false,
+        loadRun: true,
+        loadDatabase: 'psql-agentx-stg-g-a1b2c3d4',
+      });
+    }
   });
 
   it('rotates the login key pair as one thing, whichever half is named', () => {
@@ -190,7 +202,34 @@ describe('parseArguments', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
       [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
-      [['apps', '--commit'], /apps takes --keep-running, --load-run, and --commit with one full 40-hex commit/],
+      [
+        ['apps', '--commit'],
+        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit/,
+      ],
+      // Stage G's copy (4D2e): its name alone, never staging's own server, and only in a load run.
+      [['apps', '--load-run', '--load-database'], /--load-database with the throwaway copy/],
+      [['apps', '--load-run', '--load-database', '--keep-running'], /--load-database with the throwaway copy/],
+      [
+        ['apps', '--load-run', '--load-database', 'psql-agentx-stg-abcdef'],
+        /psql-agentx-stg-abcdef isn't a throwaway copy's name: Stage G's database is named psql-agentx-stg-g-<8 lower-case letters or digits>\./,
+      ],
+      [['apps', '--load-run', '--load-database', 'psql-agentx-stg-drill'], /isn't a throwaway copy's name/],
+      [['apps', '--load-run', '--load-database', 'psql-agentx-stg-g-ABCDEFGH'], /isn't a throwaway copy's name/],
+      [
+        ['apps', '--load-database', 'psql-agentx-stg-g-a1b2c3d4'],
+        /--load-database is Stage G's load run alone: give --load-run with it/,
+      ],
+      [
+        [
+          'apps',
+          '--load-run',
+          '--load-database',
+          'psql-agentx-stg-g-a1b2c3d4',
+          '--load-database',
+          'psql-agentx-stg-g-a1b2c3d4',
+        ],
+        /each at most once/,
+      ],
       [['apps', '--load-run', '--load-run'], /each at most once/],
       [['apps', '--load-size'], /each at most once/],
       [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
@@ -1115,6 +1154,16 @@ describe('deploy foundation', () => {
     ['a list that says nothing of it', [{}], '32'],
     ['a size that is no number', [{ storage: { storageSizeGb: '64' } }], '32'],
     ['a list that fails, as a first deploy has no group', 'unreadable', '32'],
+    // Stage G's copy or the drill's beside it (4D2e): staging's own server's disk, wherever the list puts it.
+    [
+      "staging's own server after a copy's",
+      [
+        { name: 'psql-agentx-stg-g-a1b2c3d4', storage: { storageSizeGb: 256 } },
+        { name: 'psql-agentx-stg-drill', storage: { storageSizeGb: 128 } },
+        { name: 'psql-agentx-stg-abcdef', storage: { storageSizeGb: 64 } },
+      ],
+      '64',
+    ],
   ] as const)(
     'sends the disk as the server has it, never a shrink Azure would refuse: %s (S168)',
     async (_, servers, disk) => {
@@ -1680,6 +1729,7 @@ describe('deploy apps', () => {
       // Always sent, so a value left in the shell is never what's deployed (D2c).
       AGENTX_AZURE_LOAD_RUN: 'false',
       AGENTX_AZURE_LOAD_IMAGE_DIGEST: '',
+      AGENTX_AZURE_LOAD_DATABASE_HOST: '',
     });
     expect(done.checked).toEqual([deployment?.values]);
     expect(done.terminal.said).toContain('Each app will scale to zero while nothing uses it.');
@@ -1837,12 +1887,76 @@ describe('deploy apps', () => {
     expect(plain.az.calls.some((call) => call.args[2] === 'parameter')).toBe(false);
   });
 
+  describe("Stage G's run on its throwaway copy (4D2e)", () => {
+    const COPY = 'psql-agentx-stg-g-a1b2c3d4';
+    const stageG = (servers: readonly unknown[], options: AzAnswers = {}) =>
+      run(['apps', '--load-run', '--load-database', COPY], {
+        answers,
+        images: recordingImages(),
+        az: new RecordingAz({ servers, ...options }),
+      });
+
+    it("points the load run at the copy's host, its connection limit read there, not on staging's server", async () => {
+      const done = await stageG([
+        { name: 'psql-agentx-stg-abcdef' },
+        { name: COPY },
+        { name: 'psql-agentx-stg-drill' },
+      ]);
+      expect(done.error).toBeUndefined();
+      expect(done.status).toBe(0);
+      const values = done.az.deployment?.values;
+      expect(values?.AGENTX_AZURE_LOAD_RUN).toBe('true');
+      expect(values?.AGENTX_AZURE_LOAD_DATABASE_HOST).toBe(`${COPY}.postgres.database.azure.com`);
+      expect(done.checked).toEqual([values]);
+      const asked = done.az.calls.filter((call) => call.args[2] === 'parameter');
+      expect(asked.map((call) => call.args[call.args.indexOf('--server-name') + 1])).toEqual([COPY]);
+      expect(done.terminal.said).toContain(
+        `Stage G's run: the API, its jobs app and the load jobs reach ${COPY}, never staging's own database, and keep its anchors in its own container; email, the activity downloads and the second-factor resets are off on it. Every other job stays on staging's server.`,
+      );
+    });
+
+    it('sends nothing when the copy isn’t there, or is below the load size', async () => {
+      const missing = await stageG([{ name: 'psql-agentx-stg-abcdef' }]);
+      expect(missing.error).toMatchObject({
+        message: `rg-agentx-staging holds no server ${COPY}: make Stage G's copy first (deploy/azure/stage-g.ts create). Nothing was deployed.`,
+      });
+      expect(missing.az.deployment).toBeUndefined();
+      expect(missing.az.calls.some((call) => call.args[2] === 'parameter')).toBe(false);
+      const small = await stageG([{ name: 'psql-agentx-stg-abcdef' }, { name: COPY }], { connectionLimit: '50' });
+      expect(small.error).toMatchObject({
+        message: `The database allows 50 connections, but the load run is counted against 100: the API would be refused connections. Make Stage G's copy at the load size (deploy/azure/stage-g.ts create), then apps --load-run --load-database ${COPY} again. Nothing was deployed.`,
+      });
+      expect(small.az.deployment).toBeUndefined();
+    });
+
+    it("reads staging's own server beside a copy or the drill's for a plain load run, and refuses two of its own", async () => {
+      const plain = await run(['apps', '--load-run'], {
+        answers,
+        images: recordingImages(),
+        az: new RecordingAz({ servers: [{ name: COPY }, { name: 'psql-agentx-stg-abcdef' }] }),
+      });
+      expect(plain.status).toBe(0);
+      expect(plain.az.deployment?.values?.AGENTX_AZURE_LOAD_DATABASE_HOST).toBe('');
+      const asked = plain.az.calls.find((call) => call.args[2] === 'parameter');
+      expect(asked?.args).toEqual(expect.arrayContaining(['--server-name', 'psql-agentx-stg-abcdef']));
+      const two = await stageG([
+        { name: 'psql-agentx-stg-abcdef' },
+        { name: 'psql-agentx-stg-ghijkl' },
+        { name: COPY },
+      ]);
+      expect((two.error as Error | undefined)?.message).toMatch(
+        /^The database's connection limit couldn't be read \(rg-agentx-staging holds 2 database servers of its own, not one\)/,
+      );
+      expect(two.az.deployment).toBeUndefined();
+    });
+  });
+
   it("says the load test's jobs are still there after a plain apps, which never removes them", async () => {
     const jobs = ['job-agentx-stg-db-setup', 'job-agentx-stg-load-first'];
     const plain = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ jobs }) });
     expect(plain.status).toBe(0);
     expect(plain.terminal.said).toContain(
-      "The load test's jobs are still there, as the API's identity: load.ts finish removes them (D2c).",
+      "The load test's jobs are still there (PL-38's, and Stage G's where its run left them): load.ts finish removes them (D2c).",
     );
     const loadRun = await run(['apps', '--load-run'], {
       answers,

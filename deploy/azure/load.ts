@@ -44,6 +44,8 @@ import {
   type JobSteps,
   LOAD_JOBS,
   type LoadJob,
+  STAGE_G_JOBS,
+  type StageGJob,
   type LogLine,
   POLL_MS,
   readLog,
@@ -140,11 +142,11 @@ interface LoadJobState {
   readonly modified: string;
 }
 
-const loadJobUrl = (subscription: string, job: LoadJob): string =>
+const loadJobUrl = (subscription: string, job: LoadJob | StageGJob): string =>
   resourceUrl(subscription, { path: `jobs/${jobName(job)}`, container: job });
 
 /** Whether the load job is there at all: an earlier finish may have removed it. */
-const jobThere = (steps: JobSteps, subscription: string, job: LoadJob): boolean =>
+const jobThere = (steps: JobSteps, subscription: string, job: LoadJob | StageGJob): boolean =>
   steps.az.run(['rest', '--method', 'get', '--url', loadJobUrl(subscription, job), '--output', 'json']).status === 0;
 
 /**
@@ -576,10 +578,13 @@ async function runLoad(steps: LoadSteps, smoke: boolean): Promise<number> {
   return failures.length === 0 ? 0 : 1;
 }
 
+/** PL-38's three jobs and Stage G's (4D2e), which load.ts reads and removes alike. */
+const EVERY_LOAD_JOB: readonly (LoadJob | StageGJob)[] = [...LOAD_JOBS, ...STAGE_G_JOBS];
+
 /** What is up for the load run, read only. */
 function status(steps: LoadSteps): number {
   const subscription = signedIn(steps.az, steps.say);
-  for (const job of LOAD_JOBS) {
+  for (const job of EVERY_LOAD_JOB) {
     steps.say(`  ${jobName(job)}: ${jobThere(steps, subscription, job) ? 'there' : 'not there'}`);
   }
   const api = readApi(steps, subscription);
@@ -629,11 +634,11 @@ async function cleanOpenRun(steps: LoadSteps, subscription: string): Promise<voi
   if (putBack !== undefined) steps.say(putBack);
 }
 
-/** Cleans up a run left open, then removes the load jobs, never while a run of one goes; what to run next is said. */
+/** Cleans up a run left open, then removes the load jobs (Stage G's too, where its run left them), never while a run of one goes; what to run next is said. */
 async function finish(steps: LoadSteps): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
-  for (const job of LOAD_JOBS) {
-    // A job already removed (an earlier finish) has nothing going.
+  for (const job of EVERY_LOAD_JOB) {
+    // A job already removed (an earlier finish), or Stage G's on a run without its copy, has nothing going.
     if (!jobThere(steps, subscription, job)) continue;
     const runs = unfinishedRuns(steps, { subscription, job });
     if (runs.length > 0) {
@@ -643,7 +648,7 @@ async function finish(steps: LoadSteps): Promise<number> {
     }
   }
   if (existsSync(steps.stateFile)) await cleanOpenRun(steps, subscription);
-  for (const job of LOAD_JOBS) {
+  for (const job of [...LOAD_JOBS, ...STAGE_G_JOBS.filter((each) => jobThere(steps, subscription, each))]) {
     const done = steps.az.run(['rest', '--method', 'delete', '--url', loadJobUrl(subscription, job)]);
     if (done.status !== 0) throw new Error(`Azure refused to remove ${jobName(job)}: run load.ts finish again.`);
     steps.say(`Removed ${jobName(job)}.`);

@@ -63,8 +63,15 @@ const runsRequest = (job: Job): job is (typeof REQUEST_JOBS)[number] =>
 export const LOAD_JOBS = ['load-first', 'load-second', 'load-cleanup'] as const;
 export type LoadJob = (typeof LOAD_JOBS)[number];
 
+/**
+ * Stage G's jobs (4D2e; apps.bicep `stageGJobs`), there only on its throwaway
+ * copy's run: started by its runner, removed by load.ts finish with PL-38's.
+ */
+export const STAGE_G_JOBS = ['load-mark', 'load-step', 'load-check'] as const;
+export type StageGJob = (typeof STAGE_G_JOBS)[number];
+
 /** A job's name in Azure (names.bicep `jobName`). */
-export const jobName = (job: Job | LoadJob): string => `job-agentx-stg-${job}`;
+export const jobName = (job: Job | LoadJob | StageGJob): string => `job-agentx-stg-${job}`;
 
 /** How a run can end (Container Apps' execution states); any other state hasn't ended. */
 export const ENDED: ReadonlySet<string> = new Set(['Succeeded', 'Failed', 'Stopped', 'Degraded']);
@@ -128,7 +135,7 @@ const RUN_SUFFIX = /^[a-z0-9]+$/;
  * Whether a name is one of the job's runs. A fixed pattern and a prefix, never
  * a pattern built from what was typed (CodeQL js/regex-injection).
  */
-export const isRunOf = (job: Job | LoadJob, execution: string): boolean => {
+export const isRunOf = (job: Job | LoadJob | StageGJob, execution: string): boolean => {
   const prefix = `${jobName(job)}-`;
   return execution.startsWith(prefix) && RUN_SUFFIX.test(execution.slice(prefix.length));
 };
@@ -172,7 +179,7 @@ export const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 /** A job in the subscription the operator is signed in to. */
 export interface Target {
   readonly subscription: string;
-  readonly job: Job | LoadJob;
+  readonly job: Job | LoadJob | StageGJob;
 }
 
 /**
@@ -449,7 +456,7 @@ export const askWorkspace = (steps: JobSteps, workspace: string, query: string, 
  * and the container's (whose group is named after the run). Both names are
  * held to `isRunOf` before they get here, so neither can end a string early.
  */
-const logQuery = (job: Job | LoadJob, execution: string): string =>
+const logQuery = (job: Job | LoadJob | StageGJob, execution: string): string =>
   [
     'union',
     `(ContainerAppSystemLogs | where JobName == '${jobName(job)}' and (ReplicaName startswith_cs '${execution}-' or Log contains_cs "'${execution}'") | project TimeGenerated, Source = 'platform', Reason, Text = Log),`,

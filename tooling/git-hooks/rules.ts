@@ -107,6 +107,15 @@ const PASSWORD_NAMED_ARGUMENT_WITH_WORD = /\b[A-Za-z0-9_]*passw(?:or)?d[A-Za-z0-
  */
 const SECRET_CALL_WITH_DIGIT = /\bsecret\s*\(\s*(['"`])[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*\1/i;
 
+/**
+ * A quoted password-named name beside a quoted name holding a digit, which
+ * GitGuardian read as a generic password: a test listing the vault names a job
+ * reads (`db-app-password` next to a key's versioned name, PR #573, S175).
+ * Build the versioned name when the test runs.
+ */
+const PASSWORD_NAMED_BESIDE_DIGIT =
+  /(['"`])[A-Za-z0-9_.]+-[A-Za-z0-9_.-]*passw(?:or)?d\1\s*,\s*(['"`])[A-Za-z0-9_.]+-[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*\2/i;
+
 /** A required-variable placeholder with a message, which GitGuardian paired with a user name (PR #16, S10). */
 const PLACEHOLDER_WITH_MESSAGE = /\$\{[A-Za-z0-9_]+:\?[^}]+\}/;
 const YAML_FILE = /\.ya?ml$/i;
@@ -204,6 +213,12 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a call named for a secret given a quoted name with a digit; GitGuardian reads the name as a secret. Build the name when the test runs',
+    );
+  }
+  if (PASSWORD_NAMED_BESIDE_DIGIT.test(text)) {
+    add(
+      'scanner-bait',
+      'a quoted password-named name beside a quoted name with a digit; GitGuardian reads the pair as a password. Build the versioned name when the test runs',
     );
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {

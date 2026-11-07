@@ -116,6 +116,10 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['the same in lower case', join('pick(sec', 'ret(', q, 'db-', '2', q, '));')],
     [
+      'a quoted password-named name beside a quoted name with a digit (PR #573)',
+      join('    [', q, 'db-app-pass', 'word', q, ', ', q, 'key-audit-', 'mac-v1', q, ']'),
+    ],
+    [
       'a password-named variable beside a quoted word in a call (PR #480)',
       join('      writeFileSync(pass', 'word, ', q, 'not-a-', 'real-one', q, ');'),
     ],
@@ -158,6 +162,10 @@ describe('text the secret scanners mistake for a secret', () => {
     ['a type', join('  readonly pass', 'word: string;')],
     ['the path of a mounted file', join('AGENTX_DB_PASS', 'WORD_FILE: appFile,')],
     ['a redaction marker', join('secret: ', q, '[redacted]', q, ',')],
+    [
+      'a factor named beside a short one with a digit (never flagged)',
+      join('[', q, 'pass', 'word', q, ', ', q, 'u2f', q, ']'),
+    ],
     ['a short value', join('const token = ', q, 'a1b2', q, ';')],
     ['a value with no digits', join('const secret = ', q, 'abcdefgh', 'ijklmnop', q, ';')],
     ['a repeated value', join('const secret = ', q, 'a1a1a1a1a1a1', q, ';')],

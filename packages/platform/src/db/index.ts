@@ -42,6 +42,7 @@ export {
   organisationShareOf,
 } from './organisation-shares.ts';
 export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';
+export { commentOnDatabase, databaseComment } from './database-comment.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export {
   APP_ROLE,

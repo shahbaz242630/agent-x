@@ -4,6 +4,7 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { APP_KEYS } from './app-keys.ts';
+import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
 import { DEAD_MAN_RULE } from './deploy.ts';
 import {
   at,
@@ -4686,8 +4687,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       condition: "[variables('split')]",
       existing: true,
     });
-    // Every read of it sits in the branch for the jobs app alone, which ARM's if() evaluates only when taken.
-    const compiled = JSON.stringify(template);
+    // Stage G's copy's anchors role (4D2e) reads it only on the copy's run, a load run, so always split.
+    expect(at(template, 'resources', 'throwawayAnchorsKept', 'condition')).toBe("[variables('throwaway')]");
+    expect(at(template, 'variables', 'throwaway')).toMatch(/^\[and\(parameters\('loadRun'\), /);
+    expect(at(template, 'variables', 'split')).toMatch(/^\[or\(parameters\('loadRun'\), /);
+    // Every other read of it sits in the branch for the jobs app alone, which ARM's if() evaluates only when taken.
+    const { throwawayAnchorsKept: _onTheCopy, ...others } = at(template, 'resources') as Record<string, unknown>;
+    const compiled = JSON.stringify({ ...(template as Record<string, unknown>), resources: others });
     const reads = [...compiled.matchAll(/reference\('jobsIdentity'\)/g)].map((match) => match.index);
     expect(reads.length).toBeGreaterThan(0);
     const branch = "if(equals(variables('apps')[copyIndex()].workload, 'jobs'), createArray(";
@@ -6042,5 +6048,266 @@ describe('the load run (D2c, PL-38)', () => {
         }),
       ),
     ).toContain('must be given acs-access-key, which api reads (GRANTS)');
+  });
+});
+
+describe("Stage G's run on its throwaway copy (4D2e)", () => {
+  const LOAD_DIGEST = `sha256:${'a'.repeat(64)}`;
+  const COPY = 'psql-agentx-stg-g-a1b2c3d4';
+  const COPY_HOST = `${COPY}.postgres.database.azure.com`;
+  const ANCHORS = 'audit-anchors-g-a1b2c3d4';
+  let copy: EnvironmentSnapshot;
+  let ignored: EnvironmentSnapshot;
+  let plainLoad: EnvironmentSnapshot;
+
+  beforeAll(() => {
+    const snap = (values: Readonly<Record<string, string>>) =>
+      inCopy((dir) => environmentSnapshot(dir, 'staging', values));
+    const loadRun = { AGENTX_AZURE_LOAD_RUN: 'true', AGENTX_AZURE_LOAD_IMAGE_DIGEST: LOAD_DIGEST };
+    copy = snap({ ...loadRun, AGENTX_AZURE_LOAD_DATABASE_HOST: COPY_HOST });
+    plainLoad = snap(loadRun);
+    // A plain apps can never carry the copy: apps.bicep reads it in a load run alone.
+    ignored = snap({ AGENTX_AZURE_LOAD_DATABASE_HOST: COPY_HOST });
+  });
+
+  const onCopy = (pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot =>
+    changed(pick, change, copy.together);
+  const found = (snapshotted: Snapshot, pick: (resource: PredictedResource) => boolean): Mutable => {
+    const resource = snapshotted.predictedResources.find(pick);
+    if (resource === undefined) throw new Error('not in the snapshot');
+    return resource as unknown as Mutable;
+  };
+  const value = (resource: Mutable, name: string) => settingsOf(resource).find((entry) => entry.name === name)?.value;
+  const said = (snapshotted: Snapshot) =>
+    policyProblems(snapshotted, STAGING).map(({ rule, resource, message }) => `${rule} ${resource}: ${message}`);
+  const setTo = (name: string, to: string) => (resource: Mutable) => {
+    for (const entry of settingsOf(resource).filter((each) => each.name === name)) entry.value = to;
+  };
+  const STAGE_G = ['load-mark', 'load-step', 'load-check'];
+  const REACHING = [APP('api'), APP('jobs'), JOB('load-first'), JOB('load-step'), JOB('load-check')];
+  const STAGING_HOST = (snapshotted: Snapshot) =>
+    `${String(found(snapshotted, SERVER).name)}.postgres.database.azure.com`;
+  const ANCHORS_ON_COPY = (resource: PredictedResource) =>
+    resource.type === 'Microsoft.Storage/storageAccounts/blobServices/containers' &&
+    resource.id.endsWith(`/${ANCHORS}`);
+  const COPY_ROLE = (resource: PredictedResource) =>
+    resource.type === 'Microsoft.Authorization/roleAssignments' && resource.id.includes(`/containers/${ANCHORS}/`);
+
+  it('compiles: every rule holds, the API, its jobs app and the load jobs on the copy, every other job on staging', () => {
+    expect(policyProblems(copy.together, STAGING).map(describeProblem)).toEqual([]);
+    const staging = STAGING_HOST(copy.together);
+    for (const pick of REACHING) {
+      const resource = found(copy.together, pick);
+      expect([value(resource, 'AGENTX_DB_HOST'), value(resource, 'AGENTX_LOAD_DB_HOST') ?? COPY_HOST]).toEqual([
+        COPY_HOST,
+        COPY_HOST,
+      ]);
+    }
+    for (const job of ['db-setup', 'migrate', 'operator', 'chain-restore']) {
+      expect(value(found(copy.together, JOB(job)), 'AGENTX_DB_HOST')).toBe(staging);
+    }
+    // The copy's own anchors, its container and its role for the jobs app; no downloads, no resets on it.
+    expect(value(found(copy.together, APP('jobs')), 'AGENTX_AUDIT_ANCHORS_URL')).toMatch(
+      new RegExp(`'${ANCHORS}'\\)\\]$`),
+    );
+    expect(found(copy.together, ANCHORS_ON_COPY)).toBeDefined();
+    expect(at(found(copy.together, COPY_ROLE), 'properties', 'principalId')).toMatch(/id-agentx-stg-jobs/);
+    for (const app of [APP('api'), APP('jobs')]) {
+      const names = settingsOf(found(copy.together, app)).map(({ name }) => String(name));
+      expect(names.filter((name) => /DOWNLOADS|FACTOR_RESET|EMAIL/.test(name))).toEqual([]);
+      expect(declaredSecrets(found(copy.together, app)).map(({ name }) => name)).not.toContain('zitadel-reset-token');
+    }
+    // Stage G's jobs: who each runs as, what each reads, how long the step may run.
+    const identity = (job: string) =>
+      Object.keys(at(found(copy.together, JOB(job)), 'identity', 'userAssignedIdentities') as Mutable)[0];
+    expect(STAGE_G.map(identity)).toEqual([
+      expect.stringMatching(/id-agentx-stg-db-setup/),
+      expect.stringMatching(/id-agentx-stg-api/),
+      expect.stringMatching(/id-agentx-stg-db-setup/),
+    ]);
+    const reads = (job: string) => declaredSecrets(found(copy.together, JOB(job))).map(({ name }) => name);
+    expect(reads('load-mark')).toEqual(['db-owner-password']);
+    expect(reads('load-check')).toEqual(['db-app-password', 'db-backup-password', 'load-request']);
+    // The key's vault name built here: a password-named name beside a name with a digit reads to GitGuardian as a secret (S175, #573).
+    const macKey = `key-audit-mac-v${String(1)}`;
+    expect(reads('load-step')).toEqual(expect.arrayContaining(['db-app-password', macKey, 'load-request']));
+    expect(at(found(copy.together, JOB('load-step')), 'properties', 'configuration', 'replicaTimeout')).toBe(
+      STAGE_G_JOB_SECONDS,
+    );
+  });
+
+  it("can't be carried by a plain apps, and a load run without it stays on staging with no Stage G job", () => {
+    const names = (snapshotted: Snapshot) => snapshotted.predictedResources.map((resource) => resource.name).sort();
+    expect(names(ignored.together)).toEqual(names(staging));
+    expect(JSON.stringify(ignored.together)).not.toContain(COPY);
+    expect(policyProblems(plainLoad.together, STAGING)).toEqual([]);
+    expect(JSON.stringify(plainLoad.together)).not.toContain('stageg-job');
+    expect(JSON.stringify(plainLoad.together)).not.toContain('audit-anchors-g-');
+  });
+
+  it('load-database: the API, its jobs or a load job somewhere else, or another job on the copy', () => {
+    const staging = STAGING_HOST(copy.together);
+    // The API back on staging while the load jobs stay on the copy: two databases.
+    expect(said(onCopy(APP('api'), setTo('AGENTX_DB_HOST', staging)))).toEqual(
+      expect.arrayContaining([
+        `load-database the deployment: must reach one database from the API, its jobs app and the load jobs; they reach ${COPY_HOST}, ${staging}`,
+      ]),
+    );
+    expect(brokenRules(onCopy(JOB('load-step'), setTo('AGENTX_LOAD_DB_HOST', staging)))).toEqual(['load-database']);
+    // Every one of them on a server named as neither.
+    const elsewhere = 'psql-agentx-stg-other.postgres.database.azure.com';
+    const allElsewhere = onCopy(
+      (resource) =>
+        REACHING.some((pick) => pick(resource)) ||
+        JOB('load-second')(resource) ||
+        JOB('load-cleanup')(resource) ||
+        JOB('load-mark')(resource),
+      (resource) => {
+        setTo('AGENTX_DB_HOST', elsewhere)(resource);
+        setTo('AGENTX_LOAD_DB_HOST', elsewhere)(resource);
+      },
+    );
+    expect(said(allElsewhere)).toContain(
+      `load-database the deployment: reaches ${elsewhere}, which is neither staging's own server nor a Stage G copy (psql-agentx-stg-g-<8 lower-case letters or digits>.postgres.database.azure.com)`,
+    );
+    // The migration on the copy: everything else stays on staging's own server.
+    expect(said(onCopy(JOB('migrate'), setTo('AGENTX_DB_HOST', COPY_HOST)))).toEqual([
+      `load-database job-agentx-stg-migrate: must reach staging's own server, ${staging}: only the API, its jobs app and the load jobs reach Stage G's copy`,
+    ]);
+  });
+
+  it("load-database: Stage G's jobs missing, twice, running something else, or with no copy", () => {
+    const without = (pick: (resource: PredictedResource) => boolean): Snapshot => ({
+      predictedResources: copy.together.predictedResources.filter((resource) => !pick(resource)),
+      diagnostics: [],
+    });
+    for (const job of STAGE_G) {
+      expect(said(without(JOB(job)))).toEqual([
+        `load-database the deployment: needs the ${job} job once on Stage G's copy; the snapshot has 0`,
+      ]);
+    }
+    expect(said(onCopy(JOB('load-mark'), (job) => (containerOf(job).args = ['step'])))).toEqual([
+      'load-database job-agentx-stg-load-mark: must run node tooling/load/stageg-job.ts mark and nothing else',
+    ]);
+    expect(
+      brokenRules(onCopy(JOB('load-mark'), (job) => (containerOf(job).command = ['node', 'tooling/load/job.ts']))),
+    ).toEqual(['load-database']);
+    // Stage G's jobs beside a load run on staging's own server.
+    const mark = copy.together.predictedResources.filter(JOB('load-mark'));
+    const onStaging: Snapshot = {
+      predictedResources: [...plainLoad.together.predictedResources, ...mark],
+      diagnostics: [],
+    };
+    expect(said(onStaging)).toContain(
+      "load-database the deployment: runs Stage G's jobs with no throwaway copy: they exist only on its run (apps --load-run --load-database)",
+    );
+    // The copy reached with no load run at all (PL-38's jobs gone).
+    const noLoadRun = without((resource) =>
+      ['load-first', 'load-second', 'load-cleanup'].some((job) => JOB(job)(resource)),
+    );
+    expect(said(noLoadRun)).toContain(
+      "load-database the deployment: reaches Stage G's copy out of a load run: apps --load-run --load-database alone points the API there",
+    );
+  });
+
+  it("load-database and evidence-store: the copy's anchors in staging's container, another copy's, or kept by another", () => {
+    const stagingAnchors = onCopy(APP('jobs'), (app) => {
+      for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_AUDIT_ANCHORS_URL')) {
+        entry.value = String(entry.value).replace(ANCHORS, 'audit-anchors');
+      }
+    });
+    expect(said(stagingAnchors)).toEqual([
+      "evidence-store ca-agentx-stg-jobs: must set AGENTX_AUDIT_ANCHORS_URL to this deployment's store's audit-anchors-g-a1b2c3d4 container, and AGENTX_AUDIT_ANCHORS_CLIENT_ID to the client ID of the identity its role is given to, each once as a value, and no other AGENTX_AUDIT_ANCHORS_ setting",
+    ]);
+    const without = (pick: (resource: PredictedResource) => boolean): Snapshot => ({
+      predictedResources: copy.together.predictedResources.filter((resource) => !pick(resource)),
+      diagnostics: [],
+    });
+    expect(said(without(COPY_ROLE))).toEqual([
+      `load-database the deployment: must give the anchors' role on ${ANCHORS} once, to the jobs app; it gives 0`,
+    ]);
+    expect(said(without((resource) => ANCHORS_ON_COPY(resource) || COPY_ROLE(resource)))).toEqual(
+      expect.arrayContaining([
+        `load-database the deployment: needs Stage G's copy's own anchors container, ${ANCHORS}: never staging's audit-anchors`,
+      ]),
+    );
+    const another = onCopy(
+      (resource) => ANCHORS_ON_COPY(resource) || COPY_ROLE(resource),
+      (resource) => {
+        resource.id = String(resource.id).replace(ANCHORS, 'audit-anchors-g-zzzzzzzz');
+        resource.name = String(resource.name).replace(ANCHORS, 'audit-anchors-g-zzzzzzzz');
+      },
+    );
+    expect(brokenRules(another)).toEqual(['load-database']);
+    const toApi = onCopy(COPY_ROLE, (role) => {
+      inside(role, 'properties').principalId = String(at(role, 'properties', 'principalId')).replace(
+        'id-agentx-stg-jobs',
+        'id-agentx-stg-api',
+      );
+    });
+    expect(said(toApi)).toEqual([
+      expect.stringMatching(
+        /^load-database [0-9a-f-]+: must give the anchors' role on the copy's anchors to the jobs app's identity alone$/,
+      ),
+    ]);
+    // Out of the copy's run, a copy's container is no one's.
+    const stray = found(copy.together, ANCHORS_ON_COPY);
+    expect(
+      brokenRules({
+        predictedResources: [...staging.predictedResources, stray as unknown as PredictedResource],
+        diagnostics: [],
+      }),
+    ).toEqual(['load-database']);
+  });
+
+  it('activity-downloads and workload-secrets: the copy given the downloads or the reset token', () => {
+    const plainApi = found(staging, APP('api'));
+    const downloads = settingsOf(plainApi).filter(({ name }) => String(name).startsWith('AGENTX_ACTIVITY_DOWNLOADS_'));
+    expect(downloads).toHaveLength(2);
+    expect(said(onCopy(APP('api'), (app) => settingsOf(app).push(...structuredClone(downloads))))).toEqual([
+      "activity-downloads ca-agentx-stg-api: sets AGENTX_ACTIVITY_DOWNLOADS_URL, AGENTX_ACTIVITY_DOWNLOADS_CLIENT_ID: only the apps that run the API keep the activity downloads, and never on Stage G's copy",
+    ]);
+    const token = secretNamed(plainApi, 'zitadel-reset-token');
+    expect(
+      brokenRules(
+        onCopy(APP('jobs'), (app) =>
+          declaredSecrets(app).push({
+            ...structuredClone(token),
+            identity: secretNamed(app, 'db-app-password').identity,
+          }),
+        ),
+      ),
+    ).toEqual(['workload-secrets']);
+    // The mark given the backup login too, or the check the owner's.
+    expect(
+      said(
+        onCopy(JOB('load-mark'), (job) =>
+          declaredSecrets(job).push({ ...secretNamed(job, 'db-owner-password'), name: 'db-backup-password' }),
+        ),
+      ),
+    ).toContain(
+      "workload-secrets job-agentx-stg-load-mark: is given db-backup-password, which GRANTS doesn't let load-mark read",
+    );
+    expect(
+      said(
+        onCopy(
+          JOB('load-check'),
+          (job) => (job.identity = { type: 'UserAssigned', userAssignedIdentities: { 'id-agentx-stg-api': {} } }),
+        ),
+      ),
+    ).toContain(
+      'workload-secrets job-agentx-stg-load-check: must run as its own identity alone, the one named for db-setup',
+    );
+  });
+
+  it('jobs: the step past its stated limit, or any other load job past the hour', () => {
+    const longer = (job: string, seconds: number) =>
+      said(onCopy(JOB(job), (found) => (configurationOf(found).replicaTimeout = seconds)));
+    expect(longer('load-step', STAGE_G_JOB_SECONDS + 1)).toEqual([
+      `jobs job-agentx-stg-load-step: must give up after 1 to ${String(STAGE_G_JOB_SECONDS)} seconds (replicaTimeout); it says ${String(STAGE_G_JOB_SECONDS + 1)}`,
+    ]);
+    expect(longer('load-check', 3601)).toEqual([
+      'jobs job-agentx-stg-load-check: must give up after 1 to 3600 seconds (replicaTimeout); it says 3601',
+    ]);
   });
 });
