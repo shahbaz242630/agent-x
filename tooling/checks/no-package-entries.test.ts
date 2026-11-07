@@ -20,19 +20,26 @@ interface Workflow {
 
 const WORKFLOWS = '.github/workflows';
 const SCRIPT = /\bnode\s+([\w./-]+\.(?:ts|mjs|js))\b/g;
-/** Imports that load a module when run: `import type` and `export type` are erased first. */
+/**
+ * Imports that load a module when run (`import type` and `export type` are
+ * erased first): static ones, a bare `import '…'`, and `import('…')` of a literal.
+ */
 const LOADING_IMPORT =
-  /^\s*(?:import|export)\s+(?!type\b)[^'"]*?\bfrom\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]/gm;
+  /^\s*(?:import|export)\s+(?!type\b)[^'"]*?\bfrom\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/gm;
 
-/** Scripts run by `node` in jobs that install no packages, as `workflow job: script`. */
+/**
+ * Scripts run by `node` before any package is installed in their job, as
+ * `workflow job`: a step after `pnpm install` has packages, one before it doesn't.
+ */
 function scriptsRunWithoutPackages(): Map<string, string> {
   const scripts = new Map<string, string>();
   for (const file of readdirSync(WORKFLOWS).filter((name) => name.endsWith('.yml'))) {
     const workflow = parse(readFileSync(path.join(WORKFLOWS, file), 'utf8')) as Workflow;
     for (const [job, { steps = [] }] of Object.entries(workflow.jobs)) {
-      const runs = steps.map((step) => step.run ?? '');
-      if (runs.some((run) => /\bpnpm\s+install\b/.test(run))) continue;
-      for (const run of runs) for (const match of run.matchAll(SCRIPT)) scripts.set(match[1] ?? '', `${file} ${job}`);
+      for (const { run = '' } of steps) {
+        if (/\bpnpm\s+install\b/.test(run)) break;
+        for (const match of run.matchAll(SCRIPT)) scripts.set(match[1] ?? '', `${file} ${job}`);
+      }
     }
   }
   return scripts;
@@ -50,7 +57,7 @@ function packagesReached(entry: string): string[] {
       return;
     }
     for (const match of readFileSync(file, 'utf8').matchAll(LOADING_IMPORT)) {
-      const specifier = match[1] ?? match[2] ?? '';
+      const specifier = match[1] ?? match[2] ?? match[3] ?? '';
       if (specifier.startsWith('.')) walk(path.join(path.dirname(file), specifier).replaceAll('\\', '/'));
       else if (!specifier.startsWith('node:')) reached.push(`${specifier} (from ${file})`);
     }
@@ -64,7 +71,12 @@ describe('scripts CI runs with no packages installed', () => {
 
   it('finds the release and the other such jobs', () => {
     expect([...scripts.keys()]).toEqual(
-      expect.arrayContaining(['deploy/azure/release.ts', 'deploy/image/verify.ts', 'tooling/dast/scan.ts']),
+      expect.arrayContaining([
+        'deploy/azure/release.ts',
+        'deploy/image/verify.ts',
+        'tooling/dast/scan.ts',
+        'tooling/places/pin.ts',
+      ]),
     );
   });
 
