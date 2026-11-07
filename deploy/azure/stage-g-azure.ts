@@ -215,7 +215,7 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(
         [
           ...server('restore', '--name', copy, '--source-server', source.id, '--restore-time', at),
-          ...['--subnet', source.subnet, '--private-dns-zone', source.privateDnsZone, '--no-wait'],
+          ...['--subnet', source.subnet, '--private-dns-zone', source.privateDnsZone, '--no-wait', '--yes'],
         ],
         `the restore of ${source.name} to ${copy}`,
       );
@@ -225,7 +225,11 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       return done.status === 0 ? text(record(JSON.parse(done.stdout)).state) : undefined;
     },
     resize: (name) => {
-      ok(server('update', '--name', name, '--sku-name', LOAD_SKU.name, '--tier', LOAD_SKU.tier), `resizing ${name}`);
+      // --yes on every update and restore: they ask before a restart, and no one can answer a job's prompt (S176).
+      ok(
+        server('update', '--name', name, '--sku-name', LOAD_SKU.name, '--tier', LOAD_SKU.tier, '--yes'),
+        `resizing ${name}`,
+      );
       ok(
         [
           ...server('parameter', 'set', '--server-name', name, '--name', 'max_connections'),
@@ -242,7 +246,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(server('restart', '--name', name), `restarting ${name}`);
     },
     setHa: (name, mode) => {
-      ok(server('update', '--name', name, '--high-availability', mode, '--no-wait'), `${name}'s high availability`);
+      ok(
+        server('update', '--name', name, '--high-availability', mode, '--no-wait', '--yes'),
+        `${name}'s high availability`,
+      );
     },
     haOf: (name) => {
       const ha = record(record(azJson(az, server('show', '--name', name))).highAvailability);

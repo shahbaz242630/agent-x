@@ -191,11 +191,13 @@ describe("Stage G's Azure", () => {
     azure.restore(COPY, staging, '2026-11-06T10:55:00.000Z');
     const restore = cli.calls.find((args) => args[2] === 'restore') ?? [];
     expect(restore.join(' ')).toBe(
-      `postgres flexible-server restore --name ${COPY} --source-server ${STAGING_SERVER.id} --restore-time 2026-11-06T10:55:00.000Z --subscription ${SUBSCRIPTION} --resource-group rg-agentx-staging --subnet /subnets/database --private-dns-zone /privateDnsZones/zone --no-wait`,
+      `postgres flexible-server restore --name ${COPY} --source-server ${STAGING_SERVER.id} --restore-time 2026-11-06T10:55:00.000Z --subscription ${SUBSCRIPTION} --resource-group rg-agentx-staging --subnet /subnets/database --private-dns-zone /privateDnsZones/zone --no-wait --yes`,
     );
     azure.resize(COPY);
     const said = cli.calls.map((args) => args.slice(0, 4).join(' '));
     expect(said).toContain('postgres flexible-server update --name');
+    // Azure asks before the restart a resize brings; a job has no one to answer (S176's create stopped there).
+    expect(cli.calls.find((args) => args[2] === 'update')).toContain('--yes');
     expect(cli.calls.find((args) => args[3] === 'set')).toContain('100');
     expect(said).toContain('postgres flexible-server restart --name');
     expect(azure.serverState(COPY)).toBe('Ready');
@@ -230,6 +232,7 @@ describe("Stage G's Azure", () => {
         '--high-availability',
         'ZoneRedundant',
         '--no-wait',
+        '--yes',
       ]) as unknown,
     );
     expect(azure.haOf(COPY)).toEqual({ mode: 'ZoneRedundant', state: 'Healthy' });
