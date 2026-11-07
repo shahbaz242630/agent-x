@@ -38,13 +38,8 @@ import { type StageGCheckedStep, stageGChecks } from './stageg-checks.ts';
 import { stageGCohort, stageGSeed, stageGSeedWorkers } from './stageg-seed.ts';
 import { STAGE_G_TESTS, type StepRun } from './stageg.ts';
 import { whileStuck } from './stuck.ts';
-import {
-  markThrowaway,
-  POSTGRES_HOST_SUFFIX,
-  sentinelProblem,
-  THROWAWAY_NAME_RULE,
-  throwawayServerOfHost,
-} from './throwaway.ts';
+import { POSTGRES_HOST_SUFFIX, THROWAWAY_NAME_RULE, throwawayServerOfHost } from './throwaway.ts';
+import { markThrowaway, sentinelProblem } from './throwaway-sentinel.ts';
 
 const STAGE_G_PARTS = ['mark', 'step', 'check'] as const;
 export type StageGPart = (typeof STAGE_G_PARTS)[number];
