@@ -69,8 +69,10 @@ const STEP_PARTS = [
     'abort rule',
     (step) =>
       step.abort === null ||
-      (hasFields(step.abort, ['p95Ms', 'errorShare', 'windowSeconds']) &&
+      (hasFields(step.abort, ['p95Ms', 'errorShare', 'windowSeconds', 'fromSeconds']) &&
         isPositive(step.abort.p95Ms) &&
+        Number.isInteger(step.abort.fromSeconds) &&
+        step.abort.fromSeconds >= 0 &&
         isWhole(step.abort.windowSeconds) &&
         isPositive(step.abort.errorShare) &&
         step.abort.errorShare < 1),
@@ -188,18 +190,23 @@ export const windowMetrics = (window) => ({
 
 const windows = (step) => Array.from({ length: windowCount(step) }, (_, window) => window);
 
-/** The breaking-point climb stops itself in the first window whose p95 or failed share passes its rule. */
+/**
+ * The breaking-point climb stops itself in the first window whose p95 or failed share passes its rule, counted from
+ * the climb's own start: the ramp and the hold before it carry no threshold (stageg.ts AbortRule.fromSeconds).
+ */
 const abortThresholds = (step) => {
-  const { p95Ms, errorShare } = step.abort;
+  const { p95Ms, errorShare, fromSeconds } = step.abort;
   const stop = (threshold) => [{ threshold, abortOnFail: true, delayAbortEval: ABORT_AFTER }];
   return Object.fromEntries(
-    windows(step).flatMap((window) => {
-      const { ms, failed } = windowMetrics(window);
-      return [
-        [ms, stop(`p(95)<${p95Ms}`)],
-        [failed, stop(`rate<${errorShare}`)],
-      ];
-    }),
+    windows(step)
+      .filter((window) => window * step.windowSeconds >= fromSeconds)
+      .flatMap((window) => {
+        const { ms, failed } = windowMetrics(window);
+        return [
+          [ms, stop(`p(95)<${p95Ms}`)],
+          [failed, stop(`rate<${errorShare}`)],
+        ];
+      }),
   );
 };
 

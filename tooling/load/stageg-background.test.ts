@@ -204,6 +204,30 @@ describe("the background work's health over a step's window", () => {
     expect(failuresOf([...CLEAN, ranOut], true, offender)).toEqual([]);
   });
 
+  it('allows the stuck offender’s own lock waits running out, never anyone else’s (S178, PL-63)', () => {
+    const offender = new Set(['stuck']);
+    const lockWait = (orgId?: string) =>
+      JSON.stringify({
+        time: at(12),
+        level: 'warn',
+        event: 'api.lock_wait_ran_out',
+        ...(orgId === undefined ? {} : { orgId }),
+      });
+    const theirs = [lockWait('stuck'), lockWait('stuck')];
+    expect(failuresOf([...CLEAN, ...theirs], false, offender)).toEqual([]);
+    expect(failuresOf([...CLEAN, ...theirs], true, offender)).toEqual([]);
+    const health = backgroundHealth(asLog([...CLEAN, ...theirs]), WINDOW, { apiReplicas: [API], offenders: offender });
+    expect(allowedBusyLines(health, false)).toEqual({ 'api.lock_wait_ran_out': 2 });
+    expect(allowedBusyLines(health, true)).toEqual({ 'api.lock_wait_ran_out': 2 });
+    // A calm organisation's, or a line naming none, is trouble that reached the others: it fails, overloading or not.
+    const notAllowed =
+      'The API logged api.lock_wait_ran_out 1 warning(s) in the step: only the busy lines of a step meant to overload are allowed.';
+    for (const overloading of [false, true]) {
+      expect(failuresOf([...CLEAN, lockWait('calm')], overloading, offender)).toEqual([notAllowed]);
+      expect(failuresOf([...CLEAN, lockWait()], overloading, offender)).toEqual([notAllowed]);
+    }
+  });
+
   it("reads the decisions' p95 in a time range from the API's own lines, none when none was made", () => {
     const decided = (minute: number, durationMs: number) => line(minute, 'spend_request.decided', { durationMs });
     const log = asLog([decided(-1, 900), ...[40, 60, 80, 100, 120].map((d, i) => decided(i + 1, d)), decided(31, 900)]);

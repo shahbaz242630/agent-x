@@ -25,6 +25,11 @@ export interface StageGCheckedStep {
   readonly endedAt: string;
   /** When the run's first step began on this copy: a hold set any time since, in any organisation, fails the step. */
   readonly since: string;
+  /**
+   * How many requests may be made but never answered: a climb that stops itself (k6's abortOnFail) cuts off those in
+   * flight, at most one a VU (S178's breaking: 4). 0 for every other step, whose every request is answered.
+   */
+  readonly unansweredAtMost: number;
 }
 
 export interface StageGCheckResult {
@@ -130,11 +135,13 @@ const SET_CHECKS: readonly SetCheck[] = [
         .selectFrom(stepRequests(tx, step).as('s'))
         .select((eb) => eb.fn.countAll<string>().as('n'))
         .executeTakeFirstOrThrow();
-      return Number(n) === step.created
-        ? []
-        : [
-            `The database holds ${n} requests of step ${step.label}, but k6 was answered 201 for ${String(step.created)} new ones.`,
-          ];
+      const held = Number(n);
+      if (held >= step.created && held <= step.created + step.unansweredAtMost) return [];
+      const inFlight =
+        step.unansweredAtMost === 0 ? '' : ` (and at most ${String(step.unansweredAtMost)} cut off in flight)`;
+      return [
+        `The database holds ${n} requests of step ${step.label}, but k6 was answered 201 for ${String(step.created)} new ones${inFlight}.`,
+      ];
     },
   },
   {

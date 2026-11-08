@@ -13,7 +13,7 @@ import { throwawayHost } from '../../tooling/load/throwaway.ts';
 import type { Ended, StageGJob } from './jobs.ts';
 import type { JobRun, RunOptions } from './load-jobs.ts';
 import type { Metric, StageGAzure, StagingServer } from './stage-g-azure.ts';
-import { offendersOf, parseArguments, randomCopyId, stageG, type StageGSteps, uae } from './stage-g.ts';
+import { holdRunnerLock, offendersOf, parseArguments, randomCopyId, stageG, type StageGSteps, uae } from './stage-g.ts';
 
 const ID = 'abcd1234';
 const COPY = `psql-agentx-stg-g-${ID}`;
@@ -143,6 +143,7 @@ class FakeAzure implements StageGAzure {
   readonly runs: { job: StageGJob; request: Readonly<Record<string, unknown>> | undefined; options: RunOptions }[] = [];
   readonly removedContainers: string[] = [];
   readonly ha: { mode: string; readings: number }[] = [];
+  readonly decisionOffenders: (readonly string[] | undefined)[] = [];
   servers_: string[];
   #decisionReadings = 0;
   #stopsLeft = 0;
@@ -251,7 +252,8 @@ class FakeAzure implements StageGAzure {
       ? lines.filter(({ replica }) => replica !== 'api--r1/rep1')
       : lines;
   }
-  decisionP95() {
+  decisionP95(_window: StepWindow, offenders?: readonly string[]) {
+    this.decisionOffenders.push(offenders);
     this.#decisionReadings += 1;
     return this.#decisionReadings <= (this.world.noDecisionReadings ?? 0) ? null : 50;
   }
@@ -504,7 +506,7 @@ describe('run', () => {
     const seed = done.azure.runs[0]?.request;
     expect(seed).toEqual({ runId: `stage-g-${ID}`, command: ['seed', '--to', '100'] });
     const check = done.azure.runs[2]?.request?.command as string[];
-    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ created: 900 });
+    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ created: 900, unansweredAtMost: 0 });
     const state = keptCopy();
     expect(state.seededTo).toBe(100);
     expect(state.since).toEqual(expect.any(String));
@@ -655,6 +657,10 @@ describe('run', () => {
       },
     });
     expect(climbed.error).toBeUndefined();
+    // The stopped climb cut off what was in flight: its check allows up to one a VU unanswered (S178).
+    const check = climbed.azure.runs.find(({ job }) => job === 'load-check')?.request?.command as string[];
+    const climb = JSON.parse(check[1] ?? '{}') as StepRun;
+    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ unansweredAtMost: climb.vus.max });
     const rate = keptCopy().breakingRate ?? 0;
     expect(rate).toBeGreaterThan(170);
     await run(['run', 'overload']);
@@ -712,10 +718,16 @@ describe('run', () => {
 
   it('records the target p95, and runs the neighbours against it, offenders apart', async () => {
     markedCopy({ seededTo: 10_000 });
-    expect((await run(['run', 'target'])).code).toBe(0);
+    const target = await run(['run', 'target']);
+    expect(target.code).toBe(0);
     expect(keptCopy().targetP95Ms).toBe(40);
+    expect(target.azure.decisionOffenders.every((given) => given?.length === 0)).toBe(true);
     const neighbours = await run(['run', 'neighbours']);
     expect(neighbours.code).toBe(0);
+    // The decisions' p95 is the calm traffic's: the busy and stuck organisations' own are left out (S178).
+    const offenders = offendersOf({ runId: `stage-g-${ID}`, incomplete: [] }, 10_000);
+    expect(offenders).toHaveLength(2);
+    expect(neighbours.azure.decisionOffenders.filter((given) => given !== undefined)).toContainEqual(offenders);
     expect(readFileSync(path.join(dir, 'reports', '2026-11-06-stageg-neighbours.md'), 'utf8')).toContain(
       'Baseline: the target step, p95 40.0 ms',
     );
@@ -927,5 +939,31 @@ describe('delete', () => {
     ]);
     expect(done.text).toContain('audit-anchors-g-eeee5555 is already gone');
     expect(done.text).toContain("audit-anchors isn't a copy's anchors container");
+  });
+});
+
+describe('one runner at a time', () => {
+  it('refuses while another runner holds the lock, takes over a dead one’s, and gives it back (S178)', () => {
+    const lock = path.join(mkdtempSync(path.join(tmpdir(), 'stage-g-lock-')), '.out', 'stage-g.lock');
+    // This test's own process is running, so a lock naming it is held.
+    mkdirSync(path.dirname(lock), { recursive: true });
+    writeFileSync(lock, String(process.pid));
+    expect(() => holdRunnerLock(lock, 4_000_000_001)).toThrow(
+      `Another Stage G runner is going (process ${String(process.pid)})`,
+    );
+    // Windows reuses process IDs: the refusal names the file, to delete when no runner is open.
+    expect(() => holdRunnerLock(lock, 4_000_000_001)).toThrow(`If no Stage G runner is open, delete ${lock}`);
+    // A runner no longer running: its lock is taken over, and given back by this one alone.
+    writeFileSync(lock, '0');
+    const release = holdRunnerLock(lock, 4_000_000_001);
+    expect(readFileSync(lock, 'utf8')).toBe('4000000001');
+    release();
+    expect(() => readFileSync(lock, 'utf8')).toThrow(/ENOENT/);
+    // Given back twice, the second finds nothing to give back.
+    release();
+    const mine = holdRunnerLock(lock, 4_000_000_002);
+    writeFileSync(lock, '4000000003');
+    mine();
+    expect(readFileSync(lock, 'utf8')).toBe('4000000003');
   });
 });

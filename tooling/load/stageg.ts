@@ -28,7 +28,15 @@ interface AbortRule {
   readonly errorShare: number;
   /** Judged window by window: the whole run's p95 would hide a knee under every faster request before it. */
   readonly windowSeconds: number;
+  /**
+   * When the climb itself starts, in seconds: the windows before it (the ramp and the hold at the target) are never
+   * judged. On S178 a database just resized started cold, and the first window's p95 stopped the climb at "0 a second".
+   */
+  readonly fromSeconds: number;
 }
+
+/** The climb's rule as its profile states it: when the climb starts is its step's own (stepRun). */
+type AbortLimits = Omit<AbortRule, 'fromSeconds'>;
 
 type StepShape =
   | { readonly kind: 'ramp-hold' }
@@ -47,7 +55,7 @@ type StepShape =
       readonly kind: 'breaking';
       readonly ceilingRate: number;
       readonly climbSeconds: number;
-      readonly abort: AbortRule;
+      readonly abort: AbortLimits;
     };
 
 /** One k6 run: ramp from nothing to `rate` a second, hold it, then whatever its shape adds. */
@@ -147,7 +155,7 @@ const BREAKING = { factor: 10, climbSeconds: 1800 } as const;
 /** The Pilot's request target (PRD §8, money-paths.k6.js's p(95)<500): a request's p95 under this. */
 export const REQUEST_P95_MS = 500;
 
-const BREAKING_ABORT: AbortRule = { p95Ms: REQUEST_P95_MS, errorShare: 0.01, windowSeconds: 30 };
+const BREAKING_ABORT: AbortLimits = { p95Ms: REQUEST_P95_MS, errorShare: 0.01, windowSeconds: 30 };
 
 /** Overload: half again the measured breaking rate (top of the table's 1.2-1.5×) for 10 minutes, then 30 back at the target. */
 const OVERLOAD = { factor: 1.5, riseSeconds: 60, peakSeconds: 600, recoverySeconds: 1800 } as const;
@@ -409,6 +417,7 @@ export interface WindowNumbers {
  */
 export function breakingRate(stages: K6Stages, abort: AbortRule, windows: readonly WindowNumbers[]): number | null {
   const broke = windows
+    .filter(({ window }) => window * abort.windowSeconds >= abort.fromSeconds)
     .filter(({ p95Ms, failedShare }) => p95Ms >= abort.p95Ms || failedShare >= abort.errorShare)
     .map(({ window }) => window);
   return broke.length === 0 ? null : rateAt(stages, Math.min(...broke) * abort.windowSeconds);
@@ -450,7 +459,8 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     mix: profile.mix,
     ...stages,
     vus: { pre, max: Math.max(pre * VU_HEADROOM, Math.min(MOST_VUS, Math.ceil(peak * STALL_SECONDS))) },
-    abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
+    abort:
+      step.shape.kind === 'breaking' ? { ...step.shape.abort, fromSeconds: step.rampSeconds + step.holdSeconds } : null,
     windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,
     extrasEverySeconds: extrasEverySeconds(step.rate),

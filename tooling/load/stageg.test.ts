@@ -96,7 +96,9 @@ describe("Stage G's profiles, as the research table sets them", () => {
 
   it('climbs smoothly from 170/s to ten times over 30 minutes, stopped at p95 500 ms or 1% failed in any 30 s window', () => {
     expect(steps('breaking').map(shape)).toEqual([['start 0', '170@300s', '170@300s', '1700@1800s']]);
-    expect(runs('breaking').map(({ abort }) => abort)).toEqual([{ p95Ms: 500, errorShare: 0.01, windowSeconds: 30 }]);
+    expect(runs('breaking').map(({ abort }) => abort)).toEqual([
+      { p95Ms: 500, errorShare: 0.01, windowSeconds: 30, fromSeconds: 600 },
+    ]);
   });
 
   it('overloads to one and a half times the measured breaking rate for 10 minutes, then 30 back at 170/s', () => {
@@ -281,6 +283,19 @@ describe("naming a climb's breaking rate from its windows", () => {
       rateAt(climb, 25 * 30),
     );
     expect(breakingRate(climb, abort, [calm(0), calm(1)])).toBeNull();
+  });
+
+  it('never names a rate from the ramp or the hold before the climb: a cold database there is no knee (S178)', () => {
+    const at = (window: number, p95Ms: number): WindowNumbers => ({
+      window,
+      p95Ms,
+      failedShare: 0,
+      refusedShare: 0,
+      requests: 1000,
+    });
+    expect(abort.fromSeconds).toBe(600);
+    expect(breakingRate(climb, abort, [at(0, 1053), at(19, 900), at(20, 120), at(21, 120)])).toBeNull();
+    expect(breakingRate(climb, abort, [at(0, 1053), at(20, 500)])).toBe(rateAt(climb, 600));
   });
 });
 

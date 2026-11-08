@@ -119,6 +119,7 @@ async function aStep() {
     startedAt,
     endedAt: new Date(clock.now().getTime() + 1000).toISOString(),
     since: startedAt,
+    unansweredAtMost: 0,
   };
   return { a, b, step, cohort: [a.agent, b.agent] };
 }
@@ -280,6 +281,20 @@ describe("Stage G's checks over the whole copy (4D2e item 8)", () => {
     expect((await byName({ ...step, created: Number.NaN }, cohort))[LOST]).toEqual([
       'k6 recorded no new request in step orgs-100, so nothing could be checked.',
     ]);
+  });
+
+  it('allow a stopped climb what it cut off in flight, never more and never a lost one (S178)', async () => {
+    const { step, cohort } = await aStep();
+    // The database holds 8: k6 saw 201 for 6 before its stop cut the other 2 off unanswered.
+    expect((await byName({ ...step, created: 6, unansweredAtMost: 2 }, cohort))[LOST]).toEqual([]);
+    expect((await byName({ ...step, created: 6, unansweredAtMost: 1 }, cohort))[LOST]).toEqual([
+      'The database holds 8 requests of step orgs-100, but k6 was answered 201 for 6 new ones (and at most 1 cut off in flight).',
+    ]);
+    expect((await byName({ ...step, created: 6 }, cohort))[LOST]).toEqual([
+      'The database holds 8 requests of step orgs-100, but k6 was answered 201 for 6 new ones.',
+    ]);
+    // Fewer saved than answered is a lost request, whatever the allowance.
+    expect((await byName({ ...step, created: 9, unansweredAtMost: 5 }, cohort))[LOST]).toHaveLength(1);
   });
 
   it('catch a reservation held in another organisation for a request not its own', async () => {
