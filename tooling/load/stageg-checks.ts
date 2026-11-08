@@ -46,7 +46,7 @@ const ENDED = ['DENIED', 'EXPIRED', 'CANCELLED'] as const;
 type Tx = DatabaseTransaction<MandateWorldTables>;
 
 /** The step's own requests: k6 names every order `G-<label>-<run>-...` (stage-g.k6.js), made in the step's window. */
-const stepRequests = (tx: Tx, step: StageGCheckedStep) =>
+const stepRequests = (tx: Pick<Tx, 'selectFrom'>, step: StageGCheckedStep) =>
   tx
     .selectFrom('spend_requests.requests as r')
     .selectAll('r')
@@ -207,8 +207,27 @@ const SET_CHECKS: readonly SetCheck[] = [
   {
     name: 'kept every month the step touched within its agent’s limit',
     async run(tx, step) {
+      // The step's agents' months first, then each month's holdings by held_in_an_agents_month: a correlated
+      // EXISTS rescanned the organisation's reservations for every one of them, which never ended at 10,000 (S177).
       const over = await tx
-        .selectFrom('limit_reservations.reservations as v')
+        .with(
+          (cte) => cte('touched').materialized(),
+          (db) =>
+            db
+              .selectFrom(stepRequests(db, step).as('s'))
+              .innerJoin('limit_reservations.reservations as t', (join) =>
+                join.onRef('t.org_id', '=', 's.org_id').onRef('t.request_id', '=', 's.id'),
+              )
+              .select(['t.org_id', 't.agent_id', 't.month'])
+              .distinct(),
+        )
+        .selectFrom('touched as x')
+        .innerJoin('limit_reservations.reservations as v', (join) =>
+          join
+            .onRef('v.org_id', '=', 'x.org_id')
+            .onRef('v.agent_id', '=', 'x.agent_id')
+            .onRef('v.month', '=', 'x.month'),
+        )
         .innerJoin('mandates.mandates as m', (join) =>
           join.onRef('m.org_id', '=', 'v.org_id').onRef('m.id', '=', 'v.mandate_id'),
         )
@@ -224,20 +243,6 @@ const SET_CHECKS: readonly SetCheck[] = [
           eb.fn.countAll<string>().over().as('total'),
         ])
         .where('v.state', '<>', 'RELEASED')
-        // Only the agents' months the step held money in.
-        .where((eb) =>
-          eb.exists(
-            eb
-              .selectFrom(stepRequests(tx, step).as('s'))
-              .innerJoin('limit_reservations.reservations as t', (join) =>
-                join.onRef('t.org_id', '=', 's.org_id').onRef('t.request_id', '=', 's.id'),
-              )
-              .select('t.id')
-              .whereRef('t.org_id', '=', 'v.org_id')
-              .whereRef('t.agent_id', '=', 'v.agent_id')
-              .whereRef('t.month', '=', 'v.month'),
-          ),
-        )
         .groupBy(['v.org_id', 'v.agent_id', 'v.month'])
         .having((eb) => eb(eb.fn.sum('v.amount_minor'), '>', eb.fn.max('ver.monthly_limit_minor')))
         .orderBy('v.org_id')
