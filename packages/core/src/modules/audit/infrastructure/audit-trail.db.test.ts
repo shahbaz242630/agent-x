@@ -35,6 +35,7 @@ import {
   type AuditTransaction,
   type AuditTrail,
   createAuditTrail,
+  headJoins,
   type HistoryToRead,
   type LogPageToRead,
   signedEvent,
@@ -1657,6 +1658,20 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       );
     });
 
+    it('judges several events past the head as it always has, the seek for the first changing nothing (S178)', async () => {
+      await record(org, signed(org, 1, 'ACTIVE'));
+      await tamper(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, seq + n, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events cross join (values (1), (2)) as extra (n) where org_id = $1 and seq = 1`,
+      );
+
+      // As before the head's seek was made indexable: the same broken place, read the same way.
+      expect(await latestOfMany([AGENT])).toEqual(new Map([[AGENT, { kind: 'broken', seq: 3n }]]));
+    });
+
     it('reads nothing for no IDs, and refuses a bad type, an ID not a UUID or more than 500 before any SQL runs', async () => {
       expect(await latestOfMany([])).toEqual(new Map());
       await expect(latestOfMany([AGENT], 'Agent')).rejects.toBeInstanceOf(AuditEventRefused);
@@ -2568,5 +2583,54 @@ describe("recordAlong (4D2d P8): a statement in the event's own write", () => {
     await expect(withTenant(app, org, (tx) => trail.recordAlong(tx, org, event(4), along))).rejects.toThrow(
       ChainBroken,
     );
+  });
+});
+
+describe("the head's check under the tenant wall (S178)", () => {
+  /** Every node of a JSON plan, flat. */
+  const nodes = (plan: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>>[] => [
+    plan,
+    ...((plan.Plans as Readonly<Record<string, unknown>>[] | undefined) ?? []).flatMap(nodes),
+  ];
+  /** The check alone, as every read joins it, planned and run as the app inside the organisation's wall. */
+  const pastHead = (orgId: string) =>
+    withTenant(app, orgId, async (tx) => {
+      const check = sql`select past.past_head from (values (1)) as one (x) ${headJoins({ kind: 'organisation', orgId })}`;
+      const { rows } = await sql<{ past_head: bigint | null }>`${check}`.execute(tx);
+      const explained = await sql<{ 'QUERY PLAN': [{ Plan: Record<string, unknown> }] }>`
+        explain (analyze, buffers, format json) ${check}`.execute(tx);
+      const plan = explained.rows[0]?.['QUERY PLAN'][0].Plan ?? {};
+      return {
+        pastHead: rows[0]?.past_head ?? null,
+        events: nodes(plan).filter((n) => n['Relation Name'] === 'events'),
+      };
+    });
+
+  it('seeks the first event past the head with the index, never walking the log, head or none', async () => {
+    // Long enough that a walk would show: each read must still touch a handful of the log's rows, not all 300.
+    await record(org, ...Array.from({ length: 300 }, (_, i) => event(i + 1)));
+    const headed = await pastHead(org);
+    expect(headed.pastHead).toBeNull();
+    expect(headed.events.length).toBeGreaterThan(0);
+    for (const scan of headed.events) {
+      // The head's place is a seek condition, so no row of the log is read only to be thrown away.
+      expect(String(scan['Index Cond'])).toMatch(/seq >/);
+      expect(scan['Rows Removed by Filter'] ?? 0).toBe(0);
+    }
+    // A chain with no head yet: its first event is the one past it, still found by seeking.
+    const headless = newOrg();
+    await attacker.query(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select $1, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id, subject_version, details,
+         prev_hash, hash, mac, mac_key_version from audit.events where org_id = $2 and seq = 1`,
+      [headless, org],
+    );
+    const unheaded = await pastHead(headless);
+    expect(unheaded.pastHead).toBe(1n);
+    for (const scan of unheaded.events) {
+      expect(String(scan['Index Cond'])).toMatch(/seq >/);
+      expect(scan['Rows Removed by Filter'] ?? 0).toBe(0);
+    }
   });
 });
