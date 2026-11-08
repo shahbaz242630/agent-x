@@ -187,7 +187,7 @@ describe("Stage G's profiles, as the research table sets them", () => {
 });
 
 describe('what k6 is handed for one step', () => {
-  it('names the test, the step, its organisations and VUs for half a second of its peak, at least 10, five times at most', () => {
+  it('names the test, the step, its organisations and VUs for half a second of its peak, at least 10, five times or 5 s of its peak at most', () => {
     expect(runs('smoke')).toEqual([
       {
         test: 'smoke',
@@ -203,7 +203,13 @@ describe('what k6 is handed for one step', () => {
         extrasEverySeconds: 85,
       },
     ]);
-    expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 1275 }]);
+    // Room for 5 s of the peak's arrivals unanswered: 510 a second's spike; the target's 170 rides out a storage flush.
+    expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 2550 }]);
+    expect(runs('target').map(({ vus }) => vus)).toEqual([{ pre: 85, max: 850 }]);
+    // The stall room stops at the breaking climb's 4,250, but never cuts five times the ready VUs: overload past it keeps them.
+    expect(runs('breaking').map(({ vus }) => vus)).toEqual([{ pre: 850, max: 4250 }]);
+    const overload = stageGProfile('overload', 1700);
+    expect(overload.steps.map((step) => stepRun(overload, step).vus)).toEqual([{ pre: 1275, max: 6375 }]);
     // Timed by 30 s windows: the climb for its abort rule, the surges for their recovery; the rest whole.
     const windowed = STAGE_G_TESTS.map((test) => [
       test,

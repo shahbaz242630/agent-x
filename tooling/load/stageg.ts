@@ -186,6 +186,17 @@ const LEAST_VUS = 10;
 /** As money-paths.k6.js: five times the ready VUs at most, for the moments answers slow down. */
 const VU_HEADROOM = 5;
 
+/**
+ * And never fewer than a few seconds of the peak's arrivals: at 170 a second five times half a second
+ * rode out under 2.5 s, and one 4 s storage flush on Azure (S177, 10k step) left 225 requests unsent
+ * though every one sent was answered. A request never sent still fails the step; only past this many
+ * seconds unanswered is it the system's, not k6's.
+ */
+const STALL_SECONDS = 5;
+
+/** The stall room's ceiling, the breaking climb's own five times (1,700 a second): it only ever adds VUs to five times, never takes any. */
+const MOST_VUS = 4250;
+
 const TARGET_RULES: PassRules = {
   decisionP95Ms: POLICY_P95_MS,
   maxErrorShare: MAX_ERROR_SHARE,
@@ -438,7 +449,7 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     orgs: step.orgs,
     mix: profile.mix,
     ...stages,
-    vus: { pre, max: pre * VU_HEADROOM },
+    vus: { pre, max: Math.max(pre * VU_HEADROOM, Math.min(MOST_VUS, Math.ceil(peak * STALL_SECONDS))) },
     abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
     windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,

@@ -159,7 +159,7 @@ describe("a Stage G step's k6 options", () => {
           { target: 170, duration: '1800s' },
         ],
         preAllocatedVUs: 85,
-        maxVUs: 425,
+        maxVUs: 850,
         exec: 'steady',
       },
       duplicates: plain.constantRate(2100, 1, 'duplicate', 4),
