@@ -1,7 +1,7 @@
 // Stage G's runner (stage-g.ts) against a stand-in for what it asks of Azure
 // (stage-g-azure.ts): the servers, the jobs' runs and lines, the API's
 // replicas, a step's lines in the workspace. Nothing here reaches Azure.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -958,7 +958,9 @@ describe('one runner at a time', () => {
     const release = holdRunnerLock(lock, 4_000_000_001);
     expect(readFileSync(lock, 'utf8')).toBe('4000000001');
     release();
-    expect(existsSync(lock)).toBe(false);
+    expect(() => readFileSync(lock, 'utf8')).toThrow(/ENOENT/);
+    // Given back twice, the second finds nothing to give back.
+    release();
     const mine = holdRunnerLock(lock, 4_000_000_002);
     writeFileSync(lock, '4000000003');
     mine();

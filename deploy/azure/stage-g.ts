@@ -1014,8 +1014,15 @@ export function holdRunnerLock(lockFile: string, pid: number = process.pid): () 
       throw refused;
     }
   }
+  // Read, not checked first (CodeQL js/file-system-race): a lock already gone has nothing to give back.
   return () => {
-    if (existsSync(lockFile) && readFileSync(lockFile, 'utf8').trim() === String(pid)) rmSync(lockFile);
+    let holder: string;
+    try {
+      holder = readFileSync(lockFile, 'utf8').trim();
+    } catch {
+      return;
+    }
+    if (holder === String(pid)) rmSync(lockFile, { force: true });
   };
 }
 
