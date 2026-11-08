@@ -181,7 +181,7 @@ function offenderCallsLet(base: string, inWindow: string, apart: string): string
     '| project agent = tostring(j.agentId), org',
     '| distinct agent, org;',
     'let offenderCalls = ' + base,
-    `| where ${inWindow} and event == 'http.request_completed' and level == 'warn'`,
+    `| where ${inWindow} and event == 'http.request_completed' and toint(j.status) >= 400`,
     '| project correlation = tostring(j.correlationId), agent = tostring(j.agentId)',
     '| join kind=inner offenderAgents on agent',
     '| project correlation, callOrg = org',
