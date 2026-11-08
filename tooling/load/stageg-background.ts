@@ -205,32 +205,33 @@ const LOCK_WAIT_RAN_OUT = 'api.lock_wait_ran_out';
 const offenderMayLog = (event: string): boolean =>
   (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || event === LOCK_WAIT_RAN_OUT;
 
+/** Anyone's busy line, when the step means to overload: only then may the shared pool run out. */
+const platformMayLog = (event: string, overloading: boolean): boolean => overloading && BUSY_LINES.has(event);
+
+const offenderAllowed = (event: string, overloading: boolean): boolean =>
+  offenderMayLog(event) || platformMayLog(event, overloading);
+
 /**
  * The warnings a step may log, by event, with their counts: the offenders'
  * busy lines always, and everyone's when the step means to overload the platform.
  */
 export function allowedBusyLines(health: BackgroundHealth, overloading: boolean): Record<string, number> {
   const allowed: Record<string, number> = {};
-  const sources: [Record<string, number>, (event: string) => boolean][] = [
-    // Only an overloaded platform may run its shared pool out: beside the neighbours that is their trouble spreading.
-    [health.offenderWarnings, (event) => offenderMayLog(event) || (overloading && BUSY_LINES.has(event))],
-    [health.warnings, (event) => overloading && BUSY_LINES.has(event)],
-  ];
-  for (const [counts, mayLog] of sources) {
+  const add = (counts: Record<string, number>, mayLog: (event: string, overloading: boolean) => boolean) => {
     for (const [event, count] of Object.entries(counts)) {
-      if (mayLog(event)) allowed[event] = (allowed[event] ?? 0) + count;
+      if (mayLog(event, overloading)) allowed[event] = (allowed[event] ?? 0) + count;
     }
-  }
+  };
+  add(health.offenderWarnings, offenderAllowed);
+  add(health.warnings, platformMayLog);
   return allowed;
 }
 
 /** A warning not allowed in the step: any but a busy line, or a busy line where nothing is meant to be busy. */
 function warningsNotAllowed(health: BackgroundHealth, overloading: boolean): [string, number][] {
   return [
-    ...Object.entries(health.warnings).filter(([event]) => !(overloading && BUSY_LINES.has(event))),
-    ...Object.entries(health.offenderWarnings).filter(
-      ([event]) => !(offenderMayLog(event) || (overloading && BUSY_LINES.has(event))),
-    ),
+    ...Object.entries(health.warnings).filter(([event]) => !platformMayLog(event, overloading)),
+    ...Object.entries(health.offenderWarnings).filter(([event]) => !offenderAllowed(event, overloading)),
   ];
 }
 

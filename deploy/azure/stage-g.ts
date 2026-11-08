@@ -981,22 +981,31 @@ function running(pid: number): boolean {
 /**
  * One runner at a time on this laptop: on S178 a second, left running by mistake, fought the first over load-step's
  * request, each putting `{}` back on the other's run, so breaking's job read none and refused. The lock holds the
- * runner's process ID; one left by a runner no longer running is taken over. Gives back the release.
+ * runner's process ID; one left by a runner no longer running is removed and made again, only-if-absent, so two
+ * runners finding it together can't both take it. Windows reuses process IDs, so the refusal names the file too.
+ * Gives back the release.
  */
 export function holdRunnerLock(lockFile: string, pid: number = process.pid): () => void {
   mkdirSync(path.dirname(lockFile), { recursive: true });
-  try {
+  const take = (): void => {
     writeFileSync(lockFile, String(pid), { flag: 'wx' });
+  };
+  try {
+    take();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     const holder = Number(readFileSync(lockFile, 'utf8').trim());
-    if (running(holder)) {
-      throw new Error(
-        `Another Stage G runner is going (process ${String(holder)}): let it finish or stop it, then run this again. Two at once overwrite each other's job requests.`,
-        { cause: error },
-      );
+    const refused = new Error(
+      `Another Stage G runner is going (process ${String(holder)}): let it finish or stop it, then run this again. Two at once overwrite each other's job requests. If no Stage G runner is open, delete ${lockFile} and run this again.`,
+      { cause: error },
+    );
+    if (running(holder)) throw refused;
+    rmSync(lockFile, { force: true });
+    try {
+      take();
+    } catch {
+      throw refused;
     }
-    writeFileSync(lockFile, String(pid));
   }
   return () => {
     if (existsSync(lockFile) && readFileSync(lockFile, 'utf8').trim() === String(pid)) rmSync(lockFile);
@@ -1023,6 +1032,12 @@ export function main(
       // Reading the state changes nothing, so only the commands that do take the lock.
       const release =
         request.command === 'status' ? () => undefined : holdRunnerLock(path.join(loadDir, '.out', 'stage-g.lock'));
+      // Ctrl+C or a closed window ends Node without running `finally`: the lock is given back there too.
+      const stopped = () => {
+        release();
+        process.exit(130);
+      };
+      for (const signal of STOP_SIGNALS) process.once(signal, stopped);
       const base: JobSteps = { az: az(), say, now: () => new Date(), sleep };
       try {
         return await stageG(request, {
@@ -1043,10 +1058,14 @@ export function main(
             ),
         });
       } finally {
+        for (const signal of STOP_SIGNALS) process.off(signal, stopped);
         release();
       }
     },
   );
 }
+
+/** How a runner is stopped by hand: Ctrl+C, Ctrl+Break, a closed console window, or a kill. */
+const STOP_SIGNALS = ['SIGINT', 'SIGBREAK', 'SIGHUP', 'SIGTERM'] as const;
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

@@ -327,6 +327,29 @@ describe("Stage G's Azure", () => {
     }
   });
 
+  it('gives an org-less warning to the offender whose agent’s refused request it was, only beside offenders (S178)', () => {
+    const cli = new FakeCli();
+    const { azure } = azureOn(cli);
+    azure.stepLog(WINDOW, ['d1e2f3a4-0000-8000-8000-00000000000b']);
+    azure.stepLog(WINDOW, []);
+    const [withOffenders, without] = [cli.queries[1], cli.queries[4]];
+    for (const part of [
+      'let offenderAgents = ',
+      "event == 'spend_request.decided'",
+      'let offenderCalls = ',
+      "event == 'http.request_completed' and toint(j.status) >= 400",
+      // A refused request is answered just after its warning: its line is looked for a minute past the step.
+      `datetime(${new Date(Date.parse(WINDOW.to) + 60_000).toISOString()})`,
+      '| join kind=inner offenderAgents on agent',
+      '| join kind=leftouter offenderCalls on correlation',
+      "| extend org = iff(org == '', callOrg, org)",
+    ]) {
+      expect(withOffenders).toContain(part);
+    }
+    expect(without).not.toContain('offenderCalls');
+    expect(without).toContain('| extend org = tostring(j.orgId)');
+  });
+
   it('leaves the offenders’ own decisions out of the p95, and only when there are offenders (S178)', () => {
     const cli = new FakeCli();
     const { azure } = azureOn(cli);

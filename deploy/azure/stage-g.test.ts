@@ -947,6 +947,8 @@ describe('one runner at a time', () => {
     expect(() => holdRunnerLock(lock, 4_000_000_001)).toThrow(
       `Another Stage G runner is going (process ${String(process.pid)})`,
     );
+    // Windows reuses process IDs: the refusal names the file, to delete when no runner is open.
+    expect(() => holdRunnerLock(lock, 4_000_000_001)).toThrow(`If no Stage G runner is open, delete ${lock}`);
     // A runner no longer running: its lock is taken over, and given back by this one alone.
     writeFileSync(lock, '0');
     const release = holdRunnerLock(lock, 4_000_000_001);

@@ -146,20 +146,15 @@ function stepLogQueries(window: StepWindow, offenders: readonly string[]): strin
   const inWindow = `at between (datetime(${window.from}) .. datetime(${window.to}))`;
   const kept = KEPT_EVENTS.map(kql).join(', ');
   const apart = offendersSet(offenders);
+  const byCall = offenders.length === 0 ? { lets: [], join: [] } : offenderCalls(base, window, apart);
   return [
     `${base}\n| where at >= datetime(${window.from}) and event in (${kept})\n| project Replica, Log`,
     [
-      ...(offenders.length === 0 ? [] : offenderCallsLet(base, inWindow, apart)),
+      ...byCall.lets,
       base,
       `| where ${inWindow} and level in ('warn', 'error', 'fatal') and event !in (${kept})`,
       '| extend org = tostring(j.orgId)',
-      ...(offenders.length === 0
-        ? []
-        : [
-            '| extend correlation = tostring(j.correlationId)',
-            '| join kind=leftouter offenderCalls on correlation',
-            "| extend org = iff(org == '', callOrg, org)",
-          ]),
+      ...byCall.join,
       `| extend org = iff(set_has_element(${apart}, org), org, '')`,
       '| summarize n = count(), at = min(at) by event, level, org',
     ].join('\n'),
@@ -167,26 +162,37 @@ function stepLogQueries(window: StepWindow, offenders: readonly string[]): strin
   ];
 }
 
+/** How far past the step a refused request's line is looked for: logged as it is answered, just after its warning. */
+const ANSWERED_AFTER_MS = 60_000;
+
 /**
- * The offenders' refused requests, each by its correlation ID with its organisation: a warning that names no
- * organisation (a lock's wait run out, until server.ts's naming one is deployed) is the offender's when its request
- * was sent by one of the offender's agents (S178). An offender's agents are those its decisions name; its refused
- * requests are always logged, naming their agent (request-log.ts).
+ * The offenders' refused requests, each by its correlation ID with its organisation, and the join that reads them: a
+ * warning that names no organisation (a lock's wait run out, until server.ts's naming one is deployed) is the
+ * offender's when its request was sent by one of the offender's agents (S178). An offender's agents are those its
+ * decisions name; its refused requests are always logged, naming their agent (request-log.ts).
  */
-function offenderCallsLet(base: string, inWindow: string, apart: string): string[] {
-  return [
-    'let offenderAgents = ' + base,
-    `| where ${inWindow} and event == 'spend_request.decided'`,
-    `| extend org = tostring(j.orgId) | where set_has_element(${apart}, org)`,
-    '| project agent = tostring(j.agentId), org',
-    '| distinct agent, org;',
-    'let offenderCalls = ' + base,
-    `| where ${inWindow} and event == 'http.request_completed' and toint(j.status) >= 400`,
-    '| project correlation = tostring(j.correlationId), agent = tostring(j.agentId)',
-    '| join kind=inner offenderAgents on agent',
-    '| project correlation, callOrg = org',
-    '| distinct correlation, callOrg;',
-  ];
+function offenderCalls(base: string, window: StepWindow, apart: string): { lets: string[]; join: string[] } {
+  const answeredBy = new Date(Date.parse(window.to) + ANSWERED_AFTER_MS).toISOString();
+  return {
+    lets: [
+      'let offenderAgents = ' + base,
+      `| where at between (datetime(${window.from}) .. datetime(${window.to})) and event == 'spend_request.decided'`,
+      `| extend org = tostring(j.orgId) | where set_has_element(${apart}, org)`,
+      '| project agent = tostring(j.agentId), org',
+      '| distinct agent, org;',
+      'let offenderCalls = ' + base,
+      `| where at between (datetime(${window.from}) .. datetime(${answeredBy})) and event == 'http.request_completed' and toint(j.status) >= 400`,
+      '| project correlation = tostring(j.correlationId), agent = tostring(j.agentId)',
+      '| join kind=inner offenderAgents on agent',
+      '| project correlation, callOrg = org',
+      '| distinct correlation, callOrg;',
+    ],
+    join: [
+      '| extend correlation = tostring(j.correlationId)',
+      '| join kind=leftouter offenderCalls on correlation',
+      "| extend org = iff(org == '', callOrg, org)",
+    ],
+  };
 }
 
 /** The offenders as a KQL set, each ID cut to the characters a UUID has. */
