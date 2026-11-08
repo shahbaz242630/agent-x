@@ -121,7 +121,7 @@ describe('the commands each part takes', () => {
     expect(commandOf(['check', JSON.stringify(STEP), JSON.stringify(CHECKED)], 'check')).toEqual({
       kind: 'check',
       step: STEP,
-      checked: { label: 'smoke', ...CHECKED },
+      checked: { label: 'smoke', ...CHECKED, unansweredAtMost: 0 },
     });
   });
 
@@ -181,8 +181,15 @@ describe('the commands each part takes', () => {
     ['a start that is no time', JSON.stringify({ ...CHECKED, startedAt: 'soon' })],
     ['an end that is no time', JSON.stringify({ ...CHECKED, endedAt: 7 })],
     ['no first step', JSON.stringify({ ...CHECKED, since: undefined })],
+    ['a negative allowance in flight', JSON.stringify({ ...CHECKED, unansweredAtMost: -1 })],
+    ['part of a request in flight', JSON.stringify({ ...CHECKED, unansweredAtMost: 1.5 })],
   ])('refuses the step’s numbers with %s', (_case, text) => {
     expect(() => checkedOf(text, 'smoke')).toThrow(/The step['’]s numbers/);
+  });
+
+  it('takes how many a stopped climb cut off in flight, none when not given (S178)', () => {
+    expect(checkedOf(JSON.stringify(CHECKED), 'smoke').unansweredAtMost).toBe(0);
+    expect(checkedOf(JSON.stringify({ ...CHECKED, unansweredAtMost: 850 }), 'breaking').unansweredAtMost).toBe(850);
   });
 });
 

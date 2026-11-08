@@ -506,7 +506,7 @@ describe('run', () => {
     const seed = done.azure.runs[0]?.request;
     expect(seed).toEqual({ runId: `stage-g-${ID}`, command: ['seed', '--to', '100'] });
     const check = done.azure.runs[2]?.request?.command as string[];
-    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ created: 900 });
+    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ created: 900, unansweredAtMost: 0 });
     const state = keptCopy();
     expect(state.seededTo).toBe(100);
     expect(state.since).toEqual(expect.any(String));
@@ -657,6 +657,10 @@ describe('run', () => {
       },
     });
     expect(climbed.error).toBeUndefined();
+    // The stopped climb cut off what was in flight: its check allows up to one a VU unanswered (S178).
+    const check = climbed.azure.runs.find(({ job }) => job === 'load-check')?.request?.command as string[];
+    const climb = JSON.parse(check[1] ?? '{}') as StepRun;
+    expect(JSON.parse(check[2] ?? '{}')).toMatchObject({ unansweredAtMost: climb.vus.max });
     const rate = keptCopy().breakingRate ?? 0;
     expect(rate).toBeGreaterThan(170);
     await run(['run', 'overload']);

@@ -543,7 +543,14 @@ async function stepTraffic(steps: StageGSteps, copy: Copy, run: StepRun, notes: 
 /** load-check over the step: each check's findings, none when the job said nothing. */
 async function checkStep(steps: StageGSteps, copy: Copy, run: StepRun, summary: StageGSummary, since: string) {
   steps.say(`Checking the copy after ${run.label}, in load-check...`);
-  const checked = { created: summary.created, startedAt: summary.startedAt, endedAt: summary.endedAt, since };
+  const checked = {
+    created: summary.created,
+    startedAt: summary.startedAt,
+    endedAt: summary.endedAt,
+    since,
+    // A climb that stopped itself cut off what was in flight: saved, never answered, at most one a VU.
+    unansweredAtMost: summary.aborted ? run.vus.max : 0,
+  };
   const done = await steps.azure.runJob('load-check', {
     request: { runId: copy.runId, command: ['check', JSON.stringify(run), JSON.stringify(checked)] },
     lastEvent: 'load.stageg_checked',

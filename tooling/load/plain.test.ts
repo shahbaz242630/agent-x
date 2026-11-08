@@ -121,13 +121,15 @@ describe("Stage G's step, as k6 is handed it", () => {
       ['VUs', { vus: { pre: 10, max: 5 } }],
       ['VUs', { vus: { pre: 0, max: 5 } }],
       ['VUs', { vus: { pre: 10 } }],
-      ['abort rule', { abort: { p95Ms: 500, errorShare: 1, windowSeconds: 30 } }],
-      ['abort rule', { abort: { p95Ms: 0, errorShare: 0.01, windowSeconds: 30 } }],
-      ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 0.5 } }],
+      ['abort rule', { abort: { p95Ms: 500, errorShare: 1, windowSeconds: 30, fromSeconds: 600 } }],
+      ['abort rule', { abort: { p95Ms: 0, errorShare: 0.01, windowSeconds: 30, fromSeconds: 600 } }],
+      ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 0.5, fromSeconds: 600 } }],
       ['windows', { windowSeconds: 0 }],
       ['windows', { windowSeconds: '30' }],
-      ['windows', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 30 }, windowSeconds: 60 }],
+      ['windows', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 30, fromSeconds: 600 }, windowSeconds: 60 }],
       ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01 } }],
+      ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 30, fromSeconds: -30 } }],
+      ['abort rule', { abort: { p95Ms: 500, errorShare: 0.01, windowSeconds: 30, fromSeconds: 1.5 } }],
       ['neighbours', { neighbours: { busyRate: 25, stuckRate: 5 } }],
       ['neighbours', { mix: 'neighbours', neighbours: null }],
       ['neighbours', { mix: 'neighbours', neighbours: { busyRate: 0, stuckRate: 5 } }],
@@ -194,11 +196,13 @@ describe("a Stage G step's k6 options", () => {
   it("stops the breaking-point climb itself on any 30 s window's p95 or failed share, after a minute of numbers", () => {
     const breaking = runOf('breaking');
     const { thresholds } = plain.stageGOptions(breaking);
-    // 2,400 s of stages: 80 windows, each judged on its own.
+    // 2,400 s of stages: 80 windows, each judged on its own from the climb's start at 600 s (window 20, S178).
     expect(plain.windowCount(breaking)).toBe(80);
     const windowed = Object.keys(thresholds).filter((name) => name.startsWith('window_'));
-    expect(windowed).toHaveLength(160);
-    for (const window of [0, 41, 79]) {
+    expect(windowed).toHaveLength(120);
+    expect(thresholds.window_ms_19).toBeUndefined();
+    expect(thresholds.window_failed_0).toBeUndefined();
+    for (const window of [20, 41, 79]) {
       expect(thresholds[`window_ms_${String(window)}`]).toEqual([
         { threshold: 'p(95)<500', abortOnFail: true, delayAbortEval: '60s' },
       ]);

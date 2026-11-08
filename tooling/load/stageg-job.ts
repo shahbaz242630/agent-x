@@ -123,6 +123,9 @@ export function stepOf(text: string): StepRun {
   return step as unknown as StepRun;
 }
 
+/** Past any step's VUs (stageg.ts MOST_VUS, 4,250): no more requests can be in flight when a climb stops. */
+const MOST_VUS_IN_FLIGHT = 10_000;
+
 const isTime = (value: unknown): value is string => typeof value === 'string' && !Number.isNaN(Date.parse(value));
 
 /** What a step's summary and the run say about it, for the checks: its new requests, when it ran, when the run began. */
@@ -133,10 +136,11 @@ export function checkedOf(text: string, label: string): StageGCheckedStep {
     !wholeIn(checked.created, 0, Number.MAX_SAFE_INTEGER) ||
     !isTime(checked.startedAt) ||
     !isTime(checked.endedAt) ||
-    !isTime(checked.since)
+    !isTime(checked.since) ||
+    !(checked.unansweredAtMost === undefined || wholeIn(checked.unansweredAtMost, 0, MOST_VUS_IN_FLIGHT))
   ) {
     throw new StageGRefused(
-      "The step's numbers must be {created, startedAt, endedAt, since}: its count of new requests, as load.stageg_summary gave them, and when the run's first step began.",
+      "The step's numbers must be {created, startedAt, endedAt, since, unansweredAtMost?}: its count of new requests, as load.stageg_summary gave them, when the run's first step began, and how many a climb's stop may have cut off.",
     );
   }
   return {
@@ -145,6 +149,7 @@ export function checkedOf(text: string, label: string): StageGCheckedStep {
     startedAt: checked.startedAt,
     endedAt: checked.endedAt,
     since: checked.since,
+    unansweredAtMost: checked.unansweredAtMost ?? 0,
   };
 }
 
