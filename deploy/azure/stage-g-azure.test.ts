@@ -327,6 +327,17 @@ describe("Stage G's Azure", () => {
     }
   });
 
+  it('leaves the offenders’ own decisions out of the p95, and only when there are offenders (S178)', () => {
+    const cli = new FakeCli();
+    const { azure } = azureOn(cli);
+    azure.decisionP95(WINDOW, ['d1e2f3a4-0000-8000-8000-00000000000b', 'bad"]), x']);
+    azure.decisionP95(WINDOW);
+    expect(cli.queries[0]).toContain(
+      '| where not(set_has_element(dynamic(["d1e2f3a4-0000-8000-8000-00000000000b", "bad"]), tostring(j.orgId)))',
+    );
+    expect(cli.queries[1]).not.toContain('set_has_element');
+  });
+
   it('reads the decisions p95 from counts, and the metrics last reading', () => {
     const { azure } = azureOn(new FakeCli());
     expect(azure.decisionP95(WINDOW)).toBe(80);

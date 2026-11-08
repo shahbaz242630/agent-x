@@ -82,8 +82,8 @@ export interface StageGAzure {
   replicas(revision: string): readonly Replica[];
   /** The step's background lines (stageg-background.ts) as read so far, `offenders` kept apart. */
   stepLog(window: StepWindow, offenders: readonly string[]): readonly LogLine[];
-  /** The decisions' p95 over the window, from the API's own lines; null when none was made in it. */
-  decisionP95(window: StepWindow): number | null;
+  /** The decisions' p95 over the window, from the API's own lines, the offenders' left out; null when none was made in it. */
+  decisionP95(window: StepWindow, offenders?: readonly string[]): number | null;
   /**
    * The metric's last 5-minute maximum in the window (MB of memory, or
    * connections): the soak's report reads each segment at its end, to compare
@@ -145,25 +145,64 @@ function stepLogQueries(window: StepWindow, offenders: readonly string[]): strin
   const base = linesFrom([API_APP, JOBS_APP], window);
   const inWindow = `at between (datetime(${window.from}) .. datetime(${window.to}))`;
   const kept = KEPT_EVENTS.map(kql).join(', ');
-  const quoted = offenders.map((org) => '"' + org.replace(/[^0-9a-f-]/g, '') + '"');
-  const apart = `dynamic([${quoted.join(', ')}])`;
+  const apart = offendersSet(offenders);
   return [
     `${base}\n| where at >= datetime(${window.from}) and event in (${kept})\n| project Replica, Log`,
     [
+      ...(offenders.length === 0 ? [] : offenderCallsLet(base, inWindow, apart)),
       base,
       `| where ${inWindow} and level in ('warn', 'error', 'fatal') and event !in (${kept})`,
-      `| extend org = tostring(j.orgId) | extend org = iff(set_has_element(${apart}, org), org, '')`,
+      '| extend org = tostring(j.orgId)',
+      ...(offenders.length === 0
+        ? []
+        : [
+            '| extend correlation = tostring(j.correlationId)',
+            '| join kind=leftouter offenderCalls on correlation',
+            "| extend org = iff(org == '', callOrg, org)",
+          ]),
+      `| extend org = iff(set_has_element(${apart}, org), org, '')`,
       '| summarize n = count(), at = min(at) by event, level, org',
     ].join('\n'),
     `${base}\n| where ContainerAppName == ${kql(API_APP)} and at > datetime(${window.to})\n| summarize at = max(at) by Replica`,
   ];
 }
 
-/** The decisions' times in the step's window, counted by each time to a tenth of a millisecond. */
-const decisionQuery = (window: StepWindow): string =>
+/**
+ * The offenders' refused requests, each by its correlation ID with its organisation: a warning that names no
+ * organisation (a lock's wait run out, until server.ts's naming one is deployed) is the offender's when its request
+ * was sent by one of the offender's agents (S178). An offender's agents are those its decisions name; its refused
+ * requests are always logged, naming their agent (request-log.ts).
+ */
+function offenderCallsLet(base: string, inWindow: string, apart: string): string[] {
+  return [
+    'let offenderAgents = ' + base,
+    `| where ${inWindow} and event == 'spend_request.decided'`,
+    `| extend org = tostring(j.orgId) | where set_has_element(${apart}, org)`,
+    '| project agent = tostring(j.agentId), org',
+    '| distinct agent, org;',
+    'let offenderCalls = ' + base,
+    `| where ${inWindow} and event == 'http.request_completed' and level == 'warn'`,
+    '| project correlation = tostring(j.correlationId), agent = tostring(j.agentId)',
+    '| join kind=inner offenderAgents on agent',
+    '| project correlation, callOrg = org',
+    '| distinct correlation, callOrg;',
+  ];
+}
+
+/** The offenders as a KQL set, each ID cut to the characters a UUID has. */
+function offendersSet(offenders: readonly string[]): string {
+  return `dynamic([${offenders.map((org) => '"' + org.replace(/[^0-9a-f-]/g, '') + '"').join(', ')}])`;
+}
+
+/**
+ * The decisions' times in the step's window, counted by each time to a tenth of a millisecond. The offenders' are left
+ * out: slow by design beside the neighbours (a stuck one's wait for its own rows), they are not the traffic judged (S178).
+ */
+const decisionQuery = (window: StepWindow, offenders: readonly string[]): string =>
   [
     linesFrom([API_APP], window),
     `| where event == 'spend_request.decided' and at between (datetime(${window.from}) .. datetime(${window.to}))`,
+    ...(offenders.length === 0 ? [] : [`| where not(set_has_element(${offendersSet(offenders)}, tostring(j.orgId)))`]),
     '| summarize n = count() by ms = round(todouble(j.durationMs), 1)',
   ].join('\n');
 
@@ -301,8 +340,8 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
         })),
       ];
     },
-    decisionP95: (window) => {
-      const query = decisionQuery(window);
+    decisionP95: (window, offenders = []) => {
+      const query = decisionQuery(window, offenders);
       return p95OfCounts(ask(query, window).map((row) => ({ ms: Number(row.ms), n: Number(row.n) })));
     },
     lastReading: (metric, copy, window) => {

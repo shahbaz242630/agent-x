@@ -196,7 +196,14 @@ export function backgroundHealth(
  */
 const SHARED_POOL_RAN_OUT = 'db.pool_wait_ran_out';
 
-const offenderMayLog = (event: string): boolean => BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT;
+/**
+ * A lock's wait run out: the stuck organisation's own decisions behind the rows it holds (S178). Its trouble beside
+ * the neighbours, named with its organisation (server.ts); anyone else's, or in any other step, still fails.
+ */
+const LOCK_WAIT_RAN_OUT = 'api.lock_wait_ran_out';
+
+const offenderMayLog = (event: string): boolean =>
+  (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || event === LOCK_WAIT_RAN_OUT;
 
 /**
  * The warnings a step may log, by event, with their counts: the offenders'
@@ -204,12 +211,14 @@ const offenderMayLog = (event: string): boolean => BUSY_LINES.has(event) && even
  */
 export function allowedBusyLines(health: BackgroundHealth, overloading: boolean): Record<string, number> {
   const allowed: Record<string, number> = {};
-  const sources = overloading ? [health.offenderWarnings, health.warnings] : [health.offenderWarnings];
-  for (const counts of sources) {
+  const sources: [Record<string, number>, (event: string) => boolean][] = [
+    // Only an overloaded platform may run its shared pool out: beside the neighbours that is their trouble spreading.
+    [health.offenderWarnings, (event) => offenderMayLog(event) || (overloading && BUSY_LINES.has(event))],
+    [health.warnings, (event) => overloading && BUSY_LINES.has(event)],
+  ];
+  for (const [counts, mayLog] of sources) {
     for (const [event, count] of Object.entries(counts)) {
-      // Only an overloaded platform may run its shared pool out: beside the neighbours that is their trouble spreading.
-      const mayLog = overloading ? BUSY_LINES.has(event) : offenderMayLog(event);
-      if (mayLog) allowed[event] = (allowed[event] ?? 0) + count;
+      if (mayLog(event)) allowed[event] = (allowed[event] ?? 0) + count;
     }
   }
   return allowed;

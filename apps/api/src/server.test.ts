@@ -24,6 +24,8 @@ const PLANTED = 'planted value that must not appear';
 /** The first IDs SequentialIds hands out, for requests that bring no usable correlation ID. */
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const SECOND_ID = '00000000-0000-7000-8000-000000000002';
+const ORG_OF_AGENT = '00000000-0000-7000-8000-0000000000a1';
+const AGENT_ID = '00000000-0000-7000-8000-0000000000a2';
 /**
  * Test routes are open to anyone, read at most 1 KiB and answer `{ ok: true }`
  * (or a string, sent as it is): none of that is what these tests are about.
@@ -107,6 +109,10 @@ async function setup(options: SetupOptions = {}) {
     throw new PoolWaitRanOut(new Error('timeout exceeded when trying to connect'));
   });
   app.get('/test/lock-wait', OPEN, () => {
+    throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+  });
+  app.get('/test/agent-lock-wait', OPEN, (request) => {
+    request.agent = { orgId: ORG_OF_AGENT, agentId: AGENT_ID, keyId: AGENT_ID, scopes: [], expiresAt: new Date(0) };
     throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
   });
   // A route bug a later route could have: it replies twice.
@@ -276,6 +282,16 @@ describe('an organisation too busy to answer (PL-63)', () => {
     expect(events(lines(), REQUEST_FAILED)).toEqual([]);
     expect(events(lines(), 'api.lock_wait_ran_out')).toEqual([
       expect.objectContaining({ level: 'warn', correlationId: FIRST_ID }),
+    ]);
+    expect(events(lines(), 'api.lock_wait_ran_out')[0]).not.toHaveProperty('orgId');
+  });
+
+  it('an agent’s lock wait run out names its organisation, so one organisation’s trouble is told apart (PL-63)', async () => {
+    const { app, lines } = await setup();
+    const response = await app.inject('/test/agent-lock-wait');
+    expect(response.statusCode).toBe(503);
+    expect(events(lines(), 'api.lock_wait_ran_out')).toEqual([
+      expect.objectContaining({ level: 'warn', correlationId: FIRST_ID, orgId: ORG_OF_AGENT }),
     ]);
   });
 });

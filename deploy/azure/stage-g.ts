@@ -25,7 +25,7 @@
 // report still holds the steps before it, and the overload is sized from the
 // breaking test's rate, the neighbours compared with the target's p95.
 import { randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -579,7 +579,7 @@ function jobNotes(run: StepRun, ran: JobRun, summary: StageGSummary, checked: Jo
 function readLines(azure: StageGAzure, window: StepWindow, offenders: readonly string[], sent: boolean) {
   try {
     const log = azure.stepLog(window, offenders);
-    const decisionP95Ms = azure.decisionP95(window);
+    const decisionP95Ms = azure.decisionP95(window, offenders);
     const missing = decisionP95Ms === null && sent ? ['no decision lines read yet from the step'] : [];
     return { log, decisionP95Ms, missing };
   } catch (error) {
@@ -967,6 +967,42 @@ export function stageG(request: Request, steps: StageGSteps): Promise<number> {
   }
 }
 
+/** Whether a process with this ID is running: signal 0 tests it and sends nothing (EPERM: running, not ours). */
+function running(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * One runner at a time on this laptop: on S178 a second, left running by mistake, fought the first over load-step's
+ * request, each putting `{}` back on the other's run, so breaking's job read none and refused. The lock holds the
+ * runner's process ID; one left by a runner no longer running is taken over. Gives back the release.
+ */
+export function holdRunnerLock(lockFile: string, pid: number = process.pid): () => void {
+  mkdirSync(path.dirname(lockFile), { recursive: true });
+  try {
+    writeFileSync(lockFile, String(pid), { flag: 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const holder = Number(readFileSync(lockFile, 'utf8').trim());
+    if (running(holder)) {
+      throw new Error(
+        `Another Stage G runner is going (process ${String(holder)}): let it finish or stop it, then run this again. Two at once overwrite each other's job requests.`,
+        { cause: error },
+      );
+    }
+    writeFileSync(lockFile, String(pid));
+  }
+  return () => {
+    if (existsSync(lockFile) && readFileSync(lockFile, 'utf8').trim() === String(pid)) rmSync(lockFile);
+  };
+}
+
 const LOAD_DIR = fileURLToPath(new URL('../../tooling/load/', import.meta.url));
 
 /** Where the partner keeps the Azure load reports (Documents, outside git). */
@@ -983,25 +1019,32 @@ export function main(
     USAGE,
     say,
     () => parseArguments(argv),
-    (request) => {
+    async (request) => {
+      // Reading the state changes nothing, so only the commands that do take the lock.
+      const release =
+        request.command === 'status' ? () => undefined : holdRunnerLock(path.join(loadDir, '.out', 'stage-g.lock'));
       const base: JobSteps = { az: az(), say, now: () => new Date(), sleep };
-      return stageG(request, {
-        ...base,
-        azure: realStageGAzure(base),
-        stateFile: path.join(loadDir, '.out', 'stage-g.json'),
-        reportsDir: path.join(loadDir, 'reports'),
-        copyDir: DOCUMENTS_REPORTS,
-        randomId: randomCopyId,
-        finishLoad: () =>
-          load(
-            { command: 'finish' },
-            {
-              ...base,
-              stateFile: path.join(loadDir, '.out', 'azure-run.json'),
-              reportsDir: path.join(loadDir, 'reports'),
-            },
-          ),
-      });
+      try {
+        return await stageG(request, {
+          ...base,
+          azure: realStageGAzure(base),
+          stateFile: path.join(loadDir, '.out', 'stage-g.json'),
+          reportsDir: path.join(loadDir, 'reports'),
+          copyDir: DOCUMENTS_REPORTS,
+          randomId: randomCopyId,
+          finishLoad: () =>
+            load(
+              { command: 'finish' },
+              {
+                ...base,
+                stateFile: path.join(loadDir, '.out', 'azure-run.json'),
+                reportsDir: path.join(loadDir, 'reports'),
+              },
+            ),
+        });
+      } finally {
+        release();
+      }
     },
   );
 }
