@@ -194,7 +194,7 @@ const VU_HEADROOM = 5;
  */
 const STALL_SECONDS = 5;
 
-/** The most VUs any step may start: the breaking climb's own ceiling, 1,700 a second, as it was before. */
+/** The stall room's ceiling, the breaking climb's own five times (1,700 a second): it only ever adds VUs to five times, never takes any. */
 const MOST_VUS = 4250;
 
 const TARGET_RULES: PassRules = {
@@ -449,7 +449,7 @@ export function stepRun(profile: Profile, step: Step): StepRun {
     orgs: step.orgs,
     mix: profile.mix,
     ...stages,
-    vus: { pre, max: Math.min(MOST_VUS, Math.max(pre * VU_HEADROOM, Math.ceil(peak * STALL_SECONDS))) },
+    vus: { pre, max: Math.max(pre * VU_HEADROOM, Math.min(MOST_VUS, Math.ceil(peak * STALL_SECONDS))) },
     abort: step.shape.kind === 'breaking' ? step.shape.abort : null,
     windowSeconds: windowSecondsOf(step),
     neighbours: profile.mix === 'neighbours' ? NEIGHBOUR_RATES : null,

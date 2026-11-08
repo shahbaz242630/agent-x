@@ -206,8 +206,10 @@ describe('what k6 is handed for one step', () => {
     // Room for 5 s of the peak's arrivals unanswered: 510 a second's spike; the target's 170 rides out a storage flush.
     expect(runs('spike').map(({ vus }) => vus)).toEqual([{ pre: 255, max: 2550 }]);
     expect(runs('target').map(({ vus }) => vus)).toEqual([{ pre: 85, max: 850 }]);
-    // Never past the breaking climb's ceiling (1,700 a second): 850 ready, 4,250 at most, as before.
+    // The stall room stops at the breaking climb's 4,250, but never cuts five times the ready VUs: overload past it keeps them.
     expect(runs('breaking').map(({ vus }) => vus)).toEqual([{ pre: 850, max: 4250 }]);
+    const overload = stageGProfile('overload', 1700);
+    expect(overload.steps.map((step) => stepRun(overload, step).vus)).toEqual([{ pre: 1275, max: 6375 }]);
     // Timed by 30 s windows: the climb for its abort rule, the surges for their recovery; the rest whole.
     const windowed = STAGE_G_TESTS.map((test) => [
       test,
