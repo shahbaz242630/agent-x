@@ -56,7 +56,11 @@ class FakeCli implements Az {
     if (said.startsWith('account show')) return json({ name: 'Azure subscription 1', id: SUBSCRIPTION });
     if (said.startsWith('postgres flexible-server list')) return json([STAGING_SERVER, { name: COPY }]);
     if (said.startsWith('postgres flexible-server show'))
-      return json({ state: 'Ready', highAvailability: { mode: 'ZoneRedundant', state: 'Healthy' } });
+      return json({
+        state: 'Ready',
+        sku: { name: 'Standard_D16ads_v5' },
+        highAvailability: { mode: 'ZoneRedundant', state: 'Healthy' },
+      });
     if (said.startsWith('postgres flexible-server parameter show')) {
       return json({ value: '100', isConfigPendingRestart: false });
     }
@@ -201,6 +205,7 @@ describe("Stage G's Azure", () => {
     expect(cli.calls.find((args) => args[3] === 'set')).toContain('100');
     expect(said).toContain('postgres flexible-server restart --name');
     expect(azure.serverState(COPY)).toBe('Ready');
+    expect(azure.serverSize(COPY)).toBe('Standard_D16ads_v5');
     expect(azure.connectionLimit(COPY)).toEqual({ limit: 100, waiting: false });
     azure.deleteServer(COPY);
     expect(cli.calls.at(-1)).toContain('--yes');
@@ -255,6 +260,7 @@ describe("Stage G's Azure", () => {
       azure.deleteServer(COPY);
     }).toThrow(`Azure refused deleting ${COPY}`);
     expect(azure.serverState(COPY)).toBeUndefined();
+    expect(azure.serverSize(COPY)).toBeUndefined();
   });
 
   it("finds staging's own server, or refuses when there isn't exactly one with its network", () => {
