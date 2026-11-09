@@ -225,16 +225,11 @@ describe("Stage G's Azure", () => {
     const { azure } = azureOn(cli);
     azure.setHa(COPY, 'ZoneRedundant');
     expect(cli.calls.at(-1)).toEqual(
-      expect.arrayContaining([
-        'update',
-        '--name',
-        COPY,
-        '--high-availability',
-        'ZoneRedundant',
-        '--no-wait',
-        '--yes',
-      ]) as unknown,
+      expect.arrayContaining(['update', '--name', COPY, '--zonal-resiliency', 'Enabled', '--yes']) as unknown,
     );
+    expect(cli.calls.at(-1)).not.toContain('--no-wait');
+    azure.setHa(COPY, 'Disabled');
+    expect(cli.calls.at(-1)).toEqual(expect.arrayContaining(['--zonal-resiliency', 'Disabled']) as unknown);
     expect(azure.haOf(COPY)).toEqual({ mode: 'ZoneRedundant', state: 'Healthy' });
     cli.answer = (args) => (args[2] === 'show' ? json({}) : undefined);
     expect(azure.haOf(COPY)).toEqual({ mode: '', state: '' });
