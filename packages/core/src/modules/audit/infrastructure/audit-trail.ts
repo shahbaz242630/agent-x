@@ -658,12 +658,19 @@ const EVENT_COLUMNS = sql`e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, 
  */
 export const SIGNED_EVENT_COLUMNS = sql`${EVENT_COLUMNS}, ${OPERATOR_COLUMNS}`;
 
-/** The chain's head and the first event past it, joined to each row of a read's `from`. */
-const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
+/**
+ * The chain's head and the first event past it, joined to each row of a read's `from`. The head's place is compared
+ * bare, a branch each for a chain with and without a head (S178): under the tenant wall a `coalesce(h.seq, 0)` isn't
+ * leakproof, so Postgres filtered it after the wall instead of seeking with it, and every read walked the
+ * organisation's whole log (Stage G on Azure: 38,095 rows, 1,265 pages a read, every decision slower as its log grew).
+ */
+export const headJoins = (chain: Chain & { readonly kind: 'organisation' }): RawBuilder<unknown> => sql`
   left join audit.heads h on h.org_id = ${chain.orgId}
   cross join lateral (
-    select pg_catalog.min(p.seq) as past_head from audit.events p
-    where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+    select case when h.org_id is null
+      then (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > 0)
+      else (select pg_catalog.min(p.seq) from audit.events p where p.org_id = ${chain.orgId} and p.seq > h.seq)
+    end as past_head
   ) as past`;
 
 /**
