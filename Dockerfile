@@ -11,7 +11,7 @@
 # dependencies of the apps are installed; test helpers and test files never
 # ship (.dockerignore).
 
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS dependencies
+FROM node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS dependencies
 
 # Corepack must not read a .corepack.env file, which could turn off its
 # signature checks or point it at another registry (the same rule as CI).
@@ -33,7 +33,7 @@ RUN corepack enable pnpm \
 # The console (Phase 6 6A1): built here from its sources and the lockfile, its
 # build tools (Vite) installed in this stage alone. Only the built files, the
 # page and its hashed assets, reach the image (console-files.ts serves them).
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS console
+FROM node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS console
 
 ENV COREPACK_ENV_FILE=0
 WORKDIR /app
@@ -51,7 +51,7 @@ RUN pnpm --filter "@agentx/console" run build
 # this repository; the build takes it only with the SHA-256 of DB-IP's own
 # file. The monthly refresh (.github/workflows/places-refresh.yml) checks each
 # new month's file and opens a PR moving this pin (tooling/places/pin.ts).
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea AS places
+FROM node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a AS places
 
 ADD --checksum=sha256:b69c625515f636ac92112b71df26bb92a5748f648c79bad124ecd9ba1c97bf4a \
   https://github.com/shahbaz242630/agent-x/releases/download/geoip-dbip-city-lite-2026-11/dbip-city-lite-2026-11.mmdb.gz \
@@ -59,7 +59,7 @@ ADD --checksum=sha256:b69c625515f636ac92112b71df26bb92a5748f648c79bad124ecd9ba1c
 # Read-only to all: a download is root's alone (0600), and the API runs as node.
 RUN gzip --decompress /places/dbip-city-lite.mmdb.gz && chmod 0444 /places/dbip-city-lite.mmdb
 
-FROM node:24.22.1-trixie-slim@sha256:43b9ba1142b8dcf33fa8f922ca1be85714adc444e0586c7cf7726daaeabc1bea
+FROM node:24.22.1-trixie-slim@sha256:89c5244bc22a9bc3287d89ebc7e49b9cb5bb84cd40e6175ac3421d5a9f68b95a
 
 ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
