@@ -36,8 +36,13 @@ const asLog = (lines: readonly string[]): LogLine[] =>
 /** A clean step: two anchor check runs, a pulse every minute, the log settled. */
 const CLEAN = [anchored(5, { left: 4 }), anchored(20), ...pulsesEvery(0, 30), ...SETTLED];
 
-const failuresOf = (lines: readonly string[], overloading = false, offenders?: ReadonlySet<string>) =>
-  backgroundFailures(backgroundHealth(asLog(lines), WINDOW, { apiReplicas: [API], offenders }), overloading);
+const failuresOf = (lines: readonly string[], overloading = false, offenders?: ReadonlySet<string>, stuck?: string) =>
+  backgroundFailures(backgroundHealth(asLog(lines), WINDOW, { apiReplicas: [API], offenders, stuck }), overloading);
+
+const lockWaitOf = (orgId: string) =>
+  JSON.stringify({ time: at(12), level: 'warn', event: 'api.lock_wait_ran_out', orgId });
+const busyOf = (orgId: string) =>
+  JSON.stringify({ time: at(12), level: 'warn', event: 'spend_request.supplier_busy', orgId });
 
 describe("the background work's health over a step's window", () => {
   it('reads the anchor check, the stalls, the trouble lines and the pulses inside the window, and skips the rest', () => {
@@ -75,6 +80,7 @@ describe("the background work's health over a step's window", () => {
       errors: { 'job.stalled': 3, '(no event)': 1 },
       warnings: { 'spend_request.agent_busy': 1, 'db.transaction_retried': 1 },
       offenderWarnings: { 'spend_request.agent_busy': 1 },
+      stuckWarnings: {},
       pulses: 4,
       // 10 to 24: the edges (0 to 1, 24 to 30) are shorter.
       longestPulseGapMinutes: 14,
@@ -226,6 +232,46 @@ describe("the background work's health over a step's window", () => {
       expect(failuresOf([...CLEAN, lockWait('calm')], overloading, offender)).toEqual([notAllowed]);
       expect(failuresOf([...CLEAN, lockWait()], overloading, offender)).toEqual([notAllowed]);
     }
+  });
+
+  it('allows the stuck offender’s own decision in trouble, never the busy one’s or anyone else’s (S179, PL-63)', () => {
+    const offenders = new Set(['busy', 'stuck']);
+    const trouble = (orgId?: string) =>
+      JSON.stringify({
+        time: at(12),
+        level: 'warn',
+        event: 'api.decision_in_trouble',
+        ...(orgId === undefined ? {} : { orgId }),
+      });
+    const stuckLines = [trouble('stuck'), lockWaitOf('stuck'), busyOf('stuck')];
+    expect(failuresOf([...CLEAN, ...stuckLines], false, offenders, 'stuck')).toEqual([]);
+    const health = backgroundHealth(asLog([...CLEAN, ...stuckLines]), WINDOW, {
+      apiReplicas: [API],
+      offenders,
+      stuck: 'stuck',
+    });
+    expect(health.stuckWarnings).toEqual({
+      'api.decision_in_trouble': 1,
+      'api.lock_wait_ran_out': 1,
+      'spend_request.supplier_busy': 1,
+    });
+    expect(health.offenderWarnings).toEqual({});
+    expect(allowedBusyLines(health, false)).toEqual(health.stuckWarnings);
+    const notAllowed =
+      'The API logged api.decision_in_trouble 1 warning(s) in the step: only the busy lines of a step meant to overload are allowed.';
+    for (const overloading of [false, true]) {
+      // The busy organisation's would be a real locking fault in the decision path.
+      expect(failuresOf([...CLEAN, trouble('busy')], overloading, offenders, 'stuck')).toEqual([notAllowed]);
+      expect(failuresOf([...CLEAN, trouble('calm')], overloading, offenders, 'stuck')).toEqual([notAllowed]);
+      expect(failuresOf([...CLEAN, trouble()], overloading, offenders, 'stuck')).toEqual([notAllowed]);
+      // Without the stuck one named, no one's is allowed.
+      expect(failuresOf([...CLEAN, trouble('stuck')], overloading, offenders)).toEqual([notAllowed]);
+    }
+    // The stuck one still may not run the shared pool out.
+    const ranOut = JSON.stringify({ time: at(12), level: 'warn', event: 'db.pool_wait_ran_out', orgId: 'stuck' });
+    expect(failuresOf([...CLEAN, ranOut], false, offenders, 'stuck')).toEqual([
+      "The API logged db.pool_wait_ran_out 1 warning(s) in the step: the shared pool ran out, so one organisation's trouble reached the others.",
+    ]);
   });
 
   it("reads the decisions' p95 in a time range from the API's own lines, none when none was made", () => {
