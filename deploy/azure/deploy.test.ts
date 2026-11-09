@@ -552,24 +552,55 @@ describe('retriedWhileOffline', () => {
     ]);
   });
 
-  it('stops after the tries it was given and returns the last failure', () => {
+  it('stops after the tries it was given and returns the last failure; reads (show, list) are repeated too', () => {
     const { run, calls } = scripted([offline, offline, offline, ok]);
-    expect(run(['x'])).toEqual(offline);
+    expect(run(['containerapp', 'job', 'show'])).toEqual(offline);
     expect(calls).toHaveLength(3);
+    const listed = scripted([offline, ok]);
+    expect(listed.run(['containerapp', 'revision', 'list'])).toEqual(ok);
+    expect(listed.calls).toHaveLength(2);
   });
 
-  it('never repeats any other failure: Azure may have acted on it', () => {
-    const refused: AzResult = { status: 1, stdout: '', stderr: 'ConnectionResetError: connection aborted' };
-    const { run, calls, waits } = scripted([refused, ok]);
-    expect(run(['x'])).toEqual(refused);
+  it('never repeats a long-running write: Azure may have taken it before the drop', () => {
+    const { run, calls, waits } = scripted([offline, ok]);
+    expect(run(['postgres', 'flexible-server', 'restart'])).toEqual(offline);
     expect(calls).toHaveLength(1);
     expect(waits).toEqual([]);
   });
 
-  it('runs a success once', () => {
-    const { run, calls } = scripted([ok]);
-    expect(run(['x'])).toEqual(ok);
+  it("never repeats Azure's own answer, even one that says it failed to resolve something", () => {
+    const kql: AzResult = {
+      status: 1,
+      stdout: '',
+      stderr: 'Bad Request({"error":{"message":"\'where\' operator: Failed to resolve table or column expression"}})',
+    };
+    const refused: AzResult = { status: 1, stdout: '', stderr: 'ConnectionResetError: connection aborted' };
+    for (const failure of [kql, refused]) {
+      const { run, calls, waits } = scripted([failure, ok]);
+      expect(run(['rest', '--method', 'post'])).toEqual(failure);
+      expect(calls).toHaveLength(1);
+      expect(waits).toEqual([]);
+    }
+  });
+
+  it('runs a success once, even with a warning on stderr', () => {
+    const { run, calls } = scripted([{ ...ok, stderr: offline.stderr }]);
+    expect(run(['rest'])).toEqual({ ...ok, stderr: offline.stderr });
     expect(calls).toHaveLength(1);
+  });
+
+  it('by default tries 21 times: 10 minutes at 30 s', () => {
+    let calls = 0;
+    const run = retriedWhileOffline(
+      () => {
+        calls += 1;
+        return offline;
+      },
+      () => undefined,
+      () => undefined,
+    );
+    run(['rest']);
+    expect(calls).toBe(21);
   });
 });
 

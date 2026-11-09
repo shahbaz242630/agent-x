@@ -656,12 +656,22 @@ export function azInvocation(
   return { command: python, prefix: ['-IBm', 'azure.cli'], env };
 }
 
-/** The CLI couldn't look up an address: this computer's internet dropped, and nothing reached Azure. */
-const OFFLINE = /NameResolutionError|getaddrinfo failed|Failed to resolve/;
+/**
+ * Only the laptop's own network layer prints these (Azure's replies never do: a query's "Failed to resolve
+ * column" is Azure's own answer, review S179).
+ */
+const OFFLINE = /NameResolutionError|getaddrinfo failed/;
 
 /**
- * Runs the CLI again while this computer can't look up Azure's addresses, every 30 s for 10 minutes. S179: a
- * short internet drop lost a finished load step's verdict. Nothing was sent, so a write is as safe to re-run as a read.
+ * A command that is one request (`rest`) or only reads (`show`, `list`). Long-running writes (restart, a resize,
+ * delete) poll after Azure took them, so a drop while polling must not send them twice.
+ */
+const repeatable = (args: readonly string[]): boolean =>
+  args[0] === 'rest' || args.includes('show') || args.includes('list');
+
+/**
+ * Runs a repeatable command again while this computer can't look up Azure's addresses, every 30 s for 10 minutes.
+ * S179: a short internet drop lost a finished load step's verdict.
  */
 export function retriedWhileOffline(
   run: Az['run'],
@@ -671,6 +681,7 @@ export function retriedWhileOffline(
 ): Az['run'] {
   return (args) => {
     let done = run(args);
+    if (!repeatable(args)) return done;
     for (let attempt = 1; attempt < tries && done.status !== 0 && OFFLINE.test(done.stderr); attempt++) {
       note(
         `Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (${String(attempt)} of ${String(tries - 1)}).`,
