@@ -52,8 +52,10 @@ export interface BackgroundHealth {
   readonly errors: Readonly<Record<string, number>>;
   /** Warning lines, by event, but the offenders'. */
   readonly warnings: Readonly<Record<string, number>>;
-  /** Warning lines of the organisations the step means to be in trouble (the neighbours' busy and stuck ones), by event. */
+  /** Warning lines of the organisations the step means to be in trouble (the neighbours' busy one), by event. */
   readonly offenderWarnings: Readonly<Record<string, number>>;
+  /** Warning lines of the neighbours' stuck organisation, by event: kept apart, it may log its own decisions' trouble. */
+  readonly stuckWarnings: Readonly<Record<string, number>>;
   readonly pulses: number;
   /** The longest time without a pulse, the window's two ends counted as edges. */
   readonly longestPulseGapMinutes: number;
@@ -149,7 +151,7 @@ function missingAfter(timed: ReturnType<typeof timedLines>, to: number, apiRepli
  * The health of the background work over `window`, from the log's lines:
  * lines outside it, or not the logger's JSON, are skipped. `apiReplicas` are
  * the API's replicas while the step ran, each of whose lines must have come in;
- * `offenders` the organisations the step means to be in trouble.
+ * `offenders` the organisations the step means to be in trouble, `stuck` the one of them whose rows are held.
  */
 export function backgroundHealth(
   log: readonly LogLine[],
@@ -157,7 +159,12 @@ export function backgroundHealth(
   {
     apiReplicas,
     offenders = new Set(),
-  }: { readonly apiReplicas: readonly string[]; readonly offenders?: ReadonlySet<string> | undefined },
+    stuck,
+  }: {
+    readonly apiReplicas: readonly string[];
+    readonly offenders?: ReadonlySet<string> | undefined;
+    readonly stuck?: string | undefined;
+  },
 ): BackgroundHealth {
   const from = Date.parse(window.from);
   const to = Date.parse(window.to);
@@ -172,6 +179,7 @@ export function backgroundHealth(
     lines.map(({ line }) => line).filter(({ level }) => typeof level === 'string' && levels.includes(level));
   const warned = atLevel('warn');
   const isOffender = ({ orgId }: Line) => typeof orgId === 'string' && offenders.has(orgId);
+  const isStuck = ({ orgId }: Line) => stuck !== undefined && orgId === stuck;
   return {
     minutes: (to - from) / MINUTE_MS,
     missing: missingAfter(timed, to, apiReplicas),
@@ -183,8 +191,9 @@ export function backgroundHealth(
       ...new Set(of('job.stalled').map(({ line: { job } }) => (typeof job === 'string' ? job : '(no job named)'))),
     ],
     errors: countBy(atLevel('error', 'fatal')),
-    warnings: countBy(warned.filter((line) => !isOffender(line))),
-    offenderWarnings: countBy(warned.filter(isOffender)),
+    warnings: countBy(warned.filter((line) => !isOffender(line) && !isStuck(line))),
+    offenderWarnings: countBy(warned.filter((line) => isOffender(line) && !isStuck(line))),
+    stuckWarnings: countBy(warned.filter(isStuck)),
     pulses: pulses.length,
     longestPulseGapMinutes: Math.max(...gaps) / MINUTE_MS,
   };
@@ -197,20 +206,28 @@ export function backgroundHealth(
 const SHARED_POOL_RAN_OUT = 'db.pool_wait_ran_out';
 
 /**
- * The stuck organisation's own decisions behind the rows it holds: a lock's wait run out (S178), or a statement past
- * its limit, answered busy (api.decision_in_trouble, S179). Its trouble beside the neighbours, named with its
- * organisation (server.ts); anyone else's, or in any other step, still fails.
+ * A lock's wait run out: the stuck organisation's own decisions behind the rows it holds (S178). Its trouble beside
+ * the neighbours, named with its organisation (server.ts); anyone else's, or in any other step, still fails.
  */
-const STUCK_LINES: ReadonlySet<string> = new Set(['api.lock_wait_ran_out', 'api.decision_in_trouble']);
+const LOCK_WAIT_RAN_OUT = 'api.lock_wait_ran_out';
+
+/**
+ * A decision answered busy past a statement's limit or a lost deadlock: the stuck organisation's alone, behind its own
+ * held rows (S179). The busy one's would be a real locking fault in the decision path, so it still fails (review).
+ */
+const DECISION_IN_TROUBLE = 'api.decision_in_trouble';
 
 const offenderMayLog = (event: string): boolean =>
-  (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || STUCK_LINES.has(event);
+  (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || event === LOCK_WAIT_RAN_OUT;
 
 /** Anyone's busy line, when the step means to overload: only then may the shared pool run out. */
 const platformMayLog = (event: string, overloading: boolean): boolean => overloading && BUSY_LINES.has(event);
 
 const offenderAllowed = (event: string, overloading: boolean): boolean =>
   offenderMayLog(event) || platformMayLog(event, overloading);
+
+const stuckAllowed = (event: string, overloading: boolean): boolean =>
+  event === DECISION_IN_TROUBLE || offenderAllowed(event, overloading);
 
 /**
  * The warnings a step may log, by event, with their counts: the offenders'
@@ -224,6 +241,7 @@ export function allowedBusyLines(health: BackgroundHealth, overloading: boolean)
     }
   };
   add(health.offenderWarnings, offenderAllowed);
+  add(health.stuckWarnings, stuckAllowed);
   add(health.warnings, platformMayLog);
   return allowed;
 }
@@ -233,6 +251,7 @@ function warningsNotAllowed(health: BackgroundHealth, overloading: boolean): [st
   return [
     ...Object.entries(health.warnings).filter(([event]) => !platformMayLog(event, overloading)),
     ...Object.entries(health.offenderWarnings).filter(([event]) => !offenderAllowed(event, overloading)),
+    ...Object.entries(health.stuckWarnings).filter(([event]) => !stuckAllowed(event, overloading)),
   ];
 }
 

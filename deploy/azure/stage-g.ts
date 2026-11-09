@@ -610,6 +610,8 @@ function readResult(
   const health = backgroundHealth(lines.log, window, {
     apiReplicas: after?.names ?? [],
     offenders: new Set(offenders),
+    // The second offender is the stuck one (offendersOf, stageg-seed.ts's cohort order).
+    stuck: offenders[1],
   });
   const surge = run.test === 'spike' || run.test === 'overload';
   return {

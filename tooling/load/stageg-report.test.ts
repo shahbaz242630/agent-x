@@ -22,6 +22,7 @@ const CALM: BackgroundHealth = {
   errors: {},
   warnings: {},
   offenderWarnings: {},
+  stuckWarnings: {},
   pulses: 20,
   longestPulseGapMinutes: 1.2,
 };
