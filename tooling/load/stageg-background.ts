@@ -197,13 +197,14 @@ export function backgroundHealth(
 const SHARED_POOL_RAN_OUT = 'db.pool_wait_ran_out';
 
 /**
- * A lock's wait run out: the stuck organisation's own decisions behind the rows it holds (S178). Its trouble beside
- * the neighbours, named with its organisation (server.ts); anyone else's, or in any other step, still fails.
+ * The stuck organisation's own decisions behind the rows it holds: a lock's wait run out (S178), or a statement past
+ * its limit, answered busy (api.decision_in_trouble, S179). Its trouble beside the neighbours, named with its
+ * organisation (server.ts); anyone else's, or in any other step, still fails.
  */
-const LOCK_WAIT_RAN_OUT = 'api.lock_wait_ran_out';
+const STUCK_LINES: ReadonlySet<string> = new Set(['api.lock_wait_ran_out', 'api.decision_in_trouble']);
 
 const offenderMayLog = (event: string): boolean =>
-  (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || event === LOCK_WAIT_RAN_OUT;
+  (BUSY_LINES.has(event) && event !== SHARED_POOL_RAN_OUT) || STUCK_LINES.has(event);
 
 /** Anyone's busy line, when the step means to overload: only then may the shared pool run out. */
 const platformMayLog = (event: string, overloading: boolean): boolean => overloading && BUSY_LINES.has(event);

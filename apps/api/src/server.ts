@@ -290,18 +290,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     // After sending, so a failure to log can't stop the plain answer going out.
     if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });
     // The share's own refusal logs itself, naming the organisation; this one's lock is the line to look for. An agent's
-    // names its organisation too, so one organisation's stuck rows are told apart from the others' (PL-63, S178).
-    if (isLockWaitRunOut(error)) {
-      const orgId = request.agent?.orgId;
-      logger
-        .child({ correlationId: request.id, ...(orgId === undefined ? {} : { orgId }) })
-        .warn('api.lock_wait_ran_out');
-    }
+    // names its organisation too, so one organisation's stuck rows are told apart from the others' (PL-63, S178);
+    // so does a decision in trouble, whose own advice is to look at that organisation's rows (S179).
+    const orgId = request.agent?.orgId;
+    const named = { correlationId: request.id, ...(orgId === undefined ? {} : { orgId }) };
+    if (isLockWaitRunOut(error)) logger.child(named).warn('api.lock_wait_ran_out');
     const trouble = troubleOf(error, operation);
     if (trouble === 'stop') logger.child({ correlationId: request.id }).error('api.stop_in_trouble', { err: error });
-    if (trouble === 'decision') {
-      logger.child({ correlationId: request.id }).warn('api.decision_in_trouble', { err: error });
-    }
+    if (trouble === 'decision') logger.child(named).warn('api.decision_in_trouble', { err: error });
     return reply;
   };
 

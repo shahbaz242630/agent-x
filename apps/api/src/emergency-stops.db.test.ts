@@ -1074,7 +1074,7 @@ describe('a decision under trouble, through its route', () => {
       expect(answer.statusCode).toBe(503);
       expect(answer.headers['retry-after']).toBe('5');
       expect(answer.json()).toMatchObject({ error: { code: 'ORGANISATION_BUSY' } });
-      expect(linesOf('api.decision_in_trouble')).toMatchObject([{ level: 'warn' }]);
+      expect(linesOf('api.decision_in_trouble')).toMatchObject([{ level: 'warn', orgId: r.w.org }]);
       expect(linesOf('http.request_failed')).toEqual([]);
       expect((await post('INV_T', 'trouble-1')).statusCode).toBe(201);
     },

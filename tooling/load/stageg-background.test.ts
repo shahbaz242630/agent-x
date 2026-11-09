@@ -228,6 +228,29 @@ describe("the background work's health over a step's window", () => {
     }
   });
 
+  it('allows the stuck offender’s own decision in trouble, never anyone else’s (S179, PL-63)', () => {
+    const offender = new Set(['stuck']);
+    const trouble = (orgId?: string) =>
+      JSON.stringify({
+        time: at(12),
+        level: 'warn',
+        event: 'api.decision_in_trouble',
+        ...(orgId === undefined ? {} : { orgId }),
+      });
+    expect(failuresOf([...CLEAN, trouble('stuck')], false, offender)).toEqual([]);
+    const health = backgroundHealth(asLog([...CLEAN, trouble('stuck')]), WINDOW, {
+      apiReplicas: [API],
+      offenders: offender,
+    });
+    expect(allowedBusyLines(health, false)).toEqual({ 'api.decision_in_trouble': 1 });
+    const notAllowed =
+      'The API logged api.decision_in_trouble 1 warning(s) in the step: only the busy lines of a step meant to overload are allowed.';
+    for (const overloading of [false, true]) {
+      expect(failuresOf([...CLEAN, trouble('calm')], overloading, offender)).toEqual([notAllowed]);
+      expect(failuresOf([...CLEAN, trouble()], overloading, offender)).toEqual([notAllowed]);
+    }
+  });
+
   it("reads the decisions' p95 in a time range from the API's own lines, none when none was made", () => {
     const decided = (minute: number, durationMs: number) => line(minute, 'spend_request.decided', { durationMs });
     const log = asLog([decided(-1, 900), ...[40, 60, 80, 100, 120].map((d, i) => decided(i + 1, d)), decided(31, 900)]);

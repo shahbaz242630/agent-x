@@ -62,7 +62,7 @@ describe('how long a transaction may sit open', () => {
     await limitedTransaction(db, async (tx) => {
       await inAWhile.execute(tx);
       await holdOpenOnPurpose(tx);
-      expect(await idleLimit(tx)).toBe('15min');
+      expect(await idleLimit(tx)).toBe('60min');
       await pauseMs(1_000);
       await sql`select 1`.execute(tx);
     });
