@@ -300,10 +300,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(server('restart', '--name', name), `restarting ${name}`);
     },
     setHa: (name, mode) => {
-      ok(
-        server('update', '--name', name, '--high-availability', mode, '--no-wait', '--yes'),
-        `${name}'s high availability`,
-      );
+      // Azure CLI 2.90 renamed --high-availability to --zonal-resiliency and dropped --no-wait here (S179): the
+      // command now waits for the standby, which haOf then reads as Healthy.
+      const resiliency = mode === 'ZoneRedundant' ? 'Enabled' : 'Disabled';
+      ok(server('update', '--name', name, '--zonal-resiliency', resiliency, '--yes'), `${name}'s high availability`);
     },
     haOf: (name) => {
       const ha = record(record(azJson(az, server('show', '--name', name))).highAvailability);
