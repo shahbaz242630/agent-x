@@ -197,7 +197,10 @@ const RESULT_CELL: Readonly<Record<StepJudgement['state'], string>> = {
 
 const timesCell = (summary: StageGSummary): string => {
   const { asksMs } = summary;
-  return asksMs === null ? 'none | none | none' : `${ms(asksMs.p50)} | ${ms(asksMs.p95)} | ${ms(asksMs.p99)}`;
+  // The max beside the p99 (#579's review): a stall of a second or two hides under every percentile.
+  return asksMs === null
+    ? 'none | none | none | none'
+    : `${ms(asksMs.p50)} | ${ms(asksMs.p95)} | ${ms(asksMs.p99)} | ${ms(asksMs.max)}`;
 };
 
 const refusedCell = ({ kinds }: StageGSummary): string =>
@@ -362,8 +365,8 @@ export function renderStageG(input: StageGReportInput): string {
     '',
     ASSUMPTIONS,
     '',
-    '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | max ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
     ...steps.map((step, index) => stepRow(step, baselineP95Ms, index, judged[index] ?? { state: 'passed' })),
     '',
     baseline,
