@@ -65,6 +65,8 @@ export interface StageGAzure {
   restore(copy: string, source: StagingServer, at: string): void;
   /** The server's state (`Ready` once usable), or undefined when Azure has none of that name (yet). */
   serverState(name: string): string | undefined;
+  /** The server's size as Azure has it now (`Standard_D16ads_v5`): a copy may be resized by hand mid-test (S177). */
+  serverSize(name: string): string | undefined;
   /** The copy to the load size, its connection limit and measurements to the load run's, and a restart for them to take. */
   resize(name: string): void;
   /** Asks Azure to turn the copy's high availability to `mode`, returning at once. */
@@ -277,6 +279,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
     serverState: (name) => {
       const done = az.run([...server('show', '--name', name), '--output', 'json']);
       return done.status === 0 ? text(record(JSON.parse(done.stdout)).state) : undefined;
+    },
+    serverSize: (name) => {
+      const done = az.run([...server('show', '--name', name), '--output', 'json']);
+      return done.status === 0 ? text(record(record(JSON.parse(done.stdout)).sku).name) : undefined;
     },
     resize: (name) => {
       // --yes on every update and restore: they ask before a restart, and no one can answer a job's prompt (S176).
