@@ -54,6 +54,7 @@ import {
   realDns,
   realImages,
   RESOURCE_GROUP,
+  retriedWhileOffline,
   secretValues,
   shapedForPolicy,
   type Steps,
@@ -510,6 +511,65 @@ describe('azInvocation', () => {
     expect(() =>
       azInvocation('win32', { Path: String.raw`${cli}\wbin` }, 'C:\\bicep.exe', (file) => file.endsWith('az.cmd')),
     ).toThrow(/own Python isn't at/);
+  });
+});
+
+describe('retriedWhileOffline', () => {
+  const offline: AzResult = {
+    status: 1,
+    stdout: '',
+    stderr: "NameResolutionError: Failed to resolve 'login.microsoftonline.com' ([Errno 11001] getaddrinfo failed)",
+  };
+  const ok: AzResult = { status: 0, stdout: '{}', stderr: '' };
+  const scripted = (results: AzResult[]) => {
+    const calls: (readonly string[])[] = [];
+    const waits: number[] = [];
+    const notes: string[] = [];
+    const run = retriedWhileOffline(
+      (args) => {
+        calls.push(args);
+        return results.shift() ?? ok;
+      },
+      (ms) => waits.push(ms),
+      (line) => notes.push(line),
+      3,
+    );
+    return { run, calls, waits, notes };
+  };
+
+  it('runs the same command again, 30 s apart, while the address cannot be looked up, then gives its answer', () => {
+    const { run, calls, waits, notes } = scripted([offline, offline, ok]);
+    expect(run(['rest', '--method', 'get'])).toEqual(ok);
+    expect(calls).toEqual([
+      ['rest', '--method', 'get'],
+      ['rest', '--method', 'get'],
+      ['rest', '--method', 'get'],
+    ]);
+    expect(waits).toEqual([30_000, 30_000]);
+    expect(notes).toEqual([
+      "Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (1 of 2).",
+      "Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (2 of 2).",
+    ]);
+  });
+
+  it('stops after the tries it was given and returns the last failure', () => {
+    const { run, calls } = scripted([offline, offline, offline, ok]);
+    expect(run(['x'])).toEqual(offline);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('never repeats any other failure: Azure may have acted on it', () => {
+    const refused: AzResult = { status: 1, stdout: '', stderr: 'ConnectionResetError: connection aborted' };
+    const { run, calls, waits } = scripted([refused, ok]);
+    expect(run(['x'])).toEqual(refused);
+    expect(calls).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it('runs a success once', () => {
+    const { run, calls } = scripted([ok]);
+    expect(run(['x'])).toEqual(ok);
+    expect(calls).toHaveLength(1);
   });
 });
 
