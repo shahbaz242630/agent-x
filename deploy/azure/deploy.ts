@@ -656,9 +656,63 @@ export function azInvocation(
   return { command: python, prefix: ['-IBm', 'azure.cli'], env };
 }
 
+/**
+ * Only the laptop's own network layer prints these (Azure's replies never do: a query's "Failed to resolve
+ * column" is Azure's own answer, review S179).
+ */
+const OFFLINE = /NameResolutionError|getaddrinfo failed/;
+
+/**
+ * A command that is one request (`rest`) or only reads (`show`, `list`). Long-running writes (restart, a resize,
+ * delete) poll after Azure took them, so a drop while polling must not send them twice.
+ */
+const repeatable = (args: readonly string[]): boolean =>
+  args[0] === 'rest' || args.includes('show') || args.includes('list');
+
+/**
+ * Runs a repeatable command again while this computer can't look up Azure's addresses, every 30 s for 10 minutes.
+ * S179: a short internet drop lost a finished load step's verdict.
+ */
+export function retriedWhileOffline(
+  run: Az['run'],
+  wait: (ms: number) => void,
+  note: (line: string) => void,
+  tries = 21,
+): Az['run'] {
+  return (args) => {
+    let done = run(args);
+    if (!repeatable(args)) return done;
+    for (let attempt = 1; attempt < tries && done.status !== 0 && OFFLINE.test(done.stderr); attempt++) {
+      note(
+        `Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (${String(attempt)} of ${String(tries - 1)}).`,
+      );
+      wait(30_000);
+      done = run(args);
+    }
+    return done;
+  };
+}
+
+/** Blocks the thread: the CLI is run synchronously, so the wait between tries is too. */
+const waitSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
 /** The CLI as every command here runs it (jobs.ts too). */
 export function realAz(): Az {
   const invocation = azInvocation(process.platform, process.env, installedBicep());
+  const once: Az['run'] = (args) => {
+    const done = spawnSync(invocation.command, [...invocation.prefix, ...args], {
+      cwd: AZURE_DIR,
+      env: invocation.env,
+      encoding: 'utf8',
+      // A load run's API log comes back whole: ~19 MB with the many-agents phases (S164's review).
+      maxBuffer: 128 * 1024 * 1024,
+      windowsHide: true,
+    });
+    // Past the limit Node kills az with nothing on stderr: its own error says why.
+    return { status: done.status, stdout: done.stdout, stderr: done.stderr || (done.error?.message ?? '') };
+  };
   return {
     interactive: (args, values) =>
       spawnSync(invocation.command, [...invocation.prefix, ...args], {
@@ -667,18 +721,7 @@ export function realAz(): Az {
         stdio: 'inherit',
         windowsHide: true,
       }).status,
-    run: (args) => {
-      const done = spawnSync(invocation.command, [...invocation.prefix, ...args], {
-        cwd: AZURE_DIR,
-        env: invocation.env,
-        encoding: 'utf8',
-        // A load run's API log comes back whole: ~19 MB with the many-agents phases (S164's review).
-        maxBuffer: 128 * 1024 * 1024,
-        windowsHide: true,
-      });
-      // Past the limit Node kills az with nothing on stderr: its own error says why.
-      return { status: done.status, stdout: done.stdout, stderr: done.stderr || (done.error?.message ?? '') };
-    },
+    run: retriedWhileOffline(once, waitSync, (line) => process.stderr.write(`${line}\n`)),
   };
 }
 

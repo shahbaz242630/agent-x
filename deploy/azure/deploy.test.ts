@@ -54,6 +54,7 @@ import {
   realDns,
   realImages,
   RESOURCE_GROUP,
+  retriedWhileOffline,
   secretValues,
   shapedForPolicy,
   type Steps,
@@ -510,6 +511,96 @@ describe('azInvocation', () => {
     expect(() =>
       azInvocation('win32', { Path: String.raw`${cli}\wbin` }, 'C:\\bicep.exe', (file) => file.endsWith('az.cmd')),
     ).toThrow(/own Python isn't at/);
+  });
+});
+
+describe('retriedWhileOffline', () => {
+  const offline: AzResult = {
+    status: 1,
+    stdout: '',
+    stderr: "NameResolutionError: Failed to resolve 'login.microsoftonline.com' ([Errno 11001] getaddrinfo failed)",
+  };
+  const ok: AzResult = { status: 0, stdout: '{}', stderr: '' };
+  const scripted = (results: AzResult[]) => {
+    const calls: (readonly string[])[] = [];
+    const waits: number[] = [];
+    const notes: string[] = [];
+    const run = retriedWhileOffline(
+      (args) => {
+        calls.push(args);
+        return results.shift() ?? ok;
+      },
+      (ms) => waits.push(ms),
+      (line) => notes.push(line),
+      3,
+    );
+    return { run, calls, waits, notes };
+  };
+
+  it('runs the same command again, 30 s apart, while the address cannot be looked up, then gives its answer', () => {
+    const { run, calls, waits, notes } = scripted([offline, offline, ok]);
+    expect(run(['rest', '--method', 'get'])).toEqual(ok);
+    expect(calls).toEqual([
+      ['rest', '--method', 'get'],
+      ['rest', '--method', 'get'],
+      ['rest', '--method', 'get'],
+    ]);
+    expect(waits).toEqual([30_000, 30_000]);
+    expect(notes).toEqual([
+      "Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (1 of 2).",
+      "Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (2 of 2).",
+    ]);
+  });
+
+  it('stops after the tries it was given and returns the last failure; reads (show, list) are repeated too', () => {
+    const { run, calls } = scripted([offline, offline, offline, ok]);
+    expect(run(['containerapp', 'job', 'show'])).toEqual(offline);
+    expect(calls).toHaveLength(3);
+    const listed = scripted([offline, ok]);
+    expect(listed.run(['containerapp', 'revision', 'list'])).toEqual(ok);
+    expect(listed.calls).toHaveLength(2);
+  });
+
+  it('never repeats a long-running write: Azure may have taken it before the drop', () => {
+    const { run, calls, waits } = scripted([offline, ok]);
+    expect(run(['postgres', 'flexible-server', 'restart'])).toEqual(offline);
+    expect(calls).toHaveLength(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("never repeats Azure's own answer, even one that says it failed to resolve something", () => {
+    const kql: AzResult = {
+      status: 1,
+      stdout: '',
+      stderr: 'Bad Request({"error":{"message":"\'where\' operator: Failed to resolve table or column expression"}})',
+    };
+    const refused: AzResult = { status: 1, stdout: '', stderr: 'ConnectionResetError: connection aborted' };
+    for (const failure of [kql, refused]) {
+      const { run, calls, waits } = scripted([failure, ok]);
+      expect(run(['rest', '--method', 'post'])).toEqual(failure);
+      expect(calls).toHaveLength(1);
+      expect(waits).toEqual([]);
+    }
+  });
+
+  it('runs a success once, even with a warning on stderr', () => {
+    const { run, calls } = scripted([{ ...ok, stderr: offline.stderr }]);
+    expect(run(['rest'])).toEqual({ ...ok, stderr: offline.stderr });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('by default tries 21 times: 10 minutes at 30 s', () => {
+    let calls = 0;
+    const run = retriedWhileOffline(
+      () => {
+        calls += 1;
+        return offline;
+      },
+      () => undefined,
+      () => undefined,
+    );
+    run(['rest']);
+    expect(calls).toBe(21);
   });
 });
 
