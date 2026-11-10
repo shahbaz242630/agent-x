@@ -205,7 +205,7 @@ describe('the shared confirm', () => {
     expect(document.activeElement).toBe(cancel);
   });
 
-  it('brings focus that leaves it some other way back to Cancel', async () => {
+  it('brings focus that leaves it some other way back to Cancel', () => {
     render(<button type="button">Behind</button>);
     shown('mark_failed');
 

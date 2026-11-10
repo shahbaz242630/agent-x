@@ -193,7 +193,7 @@ const STEP_UP_FAILED_QUERY = 'stepUpFailed';
  * challenge, so the console forgets the change it kept for it.
  */
 const failedStepUpPage = ({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string =>
-  `${returnTo.replace(/\?.*$/s, '')}?${new URLSearchParams({ [STEP_UP_FAILED_QUERY]: challengeId }).toString()}`;
+  `${returnTo.split('?', 1)[0] ?? '/'}?${new URLSearchParams({ [STEP_UP_FAILED_QUERY]: challengeId }).toString()}`;
 
 /** Sign-out reads no body; this is the smallest limit the contract takes. */
 const SIGN_OUT_BODY_LIMIT = 1;
