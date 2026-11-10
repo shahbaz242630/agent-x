@@ -54,12 +54,18 @@
 // signs it again as its own (anchor-check.ts). One badly signed, or not a rebase file, is the alarm,
 // once a process; one dated past the clock waits, the alarm each read until its time.
 //
-// So the API identity's token alone (add and read) can raise alarms and, with enough
-// spoiled files before a restart, make payments wait, but can't move an anchor back;
-// nor stop payments by a file under `cutover/` or `shards/`, as only a signed cutover
-// marker says the store has moved on (PL-65). Whoever also holds the `audit-anchor`
-// signing key can write anything a file may hold, a marker too, which makes payments
-// wait for good: nothing here guards against them; nor against whoever holds `audit-rebase`.
+// So the API identity's token alone (add and read) can raise alarms, and can make payments
+// wait after a restart: by more than a day's spoiled snapshots named newer than the last
+// sound one, or by a file under `deltas/` or `snapshots/` too large to fetch within a read's
+// deadline (both from before PL-65, both until an operator acts). It can't move
+// an anchor back, nor stop a running process anchoring. Under `cutover/` and `shards/` it can
+// raise the alarm alone: only a marker signed with `audit-anchor`, at its one name, says the
+// store has moved on (PL-65), and a marker or rebase is never fetched past 4 KB. Taking the
+// marker's name first only makes the migration's write of it refused, which stops the
+// migration loudly before any shard, payments unaffected. Whoever also holds the
+// `audit-anchor` signing key can write anything a file may hold, a marker too, which makes
+// payments wait for good: nothing here guards against them; nor against whoever holds
+// `audit-rebase`.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -68,7 +74,7 @@ import { createGunzip, createGzip } from 'node:zlib';
 
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
-import { OverwriteRefused, type WriteOnceStore } from '../storage/write-once.ts';
+import { OverwriteRefused, type WriteOncePage, type WriteOnceStore } from '../storage/write-once.ts';
 import type { Message } from '../keys/message.ts';
 import {
   type Anchor,
@@ -80,8 +86,8 @@ import {
   progressMessage,
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
-import { cutoverFolder, readCutoverFile } from './cutover.ts';
-import { isCount, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
+import { cutoverFolder, cutoverName, readCutoverFile } from './cutover.ts';
+import { isCount, MOST_FILE_BYTES, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -168,16 +174,6 @@ const REBASE_MOST_AHEAD_MS = 20_000;
 
 /** A rebase file's name after its folder: its ID. */
 const REBASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * The sharded store (4D2e PL-65) writes its signed cutover marker (cutover.ts) before any shard: this reader can't read
- * the shards, so a marker means the store has moved on past it, and a rollback to this version, reading only the old files,
- * could anchor afresh a chain wound back. Only a signed marker counts, as anyone with the add token can add a file; a name
- * under `shards/` with no marker is the alarm alone. How many marker files a read opens: an honest store has one, and past
- * this the read fails, as one with a call failed, until the rest are judged over the next reads.
- */
-const MOST_CUTOVER_GETS = 10;
-const CUTOVER_A_PAGE = 100;
 
 /** A line's kind: an anchor, or a finished full pass. */
 type LineKind = 'a' | 'p' | 'u';
@@ -462,9 +458,9 @@ export function createAnchorLog({
   // Each chain's newest rebase, the rebase files read already, and the anchors that are a rebase's, not signed here.
   const rebases = new Map<string, Rebase>();
   const rebaseFilesRead = new Set<string>();
-  // Names under `cutover/` judged no marker, and whether a name under `shards/` has been said: each the alarm once.
-  const notMarkers = new Set<string>();
-  let shardsSaid = false;
+  // Whether a file at the marker's name that is none, another name under `cutover/`, and a name under `shards/` have been
+  // said: each the alarm once a process.
+  const said = { marker: false, cutover: false, shards: false };
   const fromRebase = new WeakSet<Anchor>();
   /** Whether the chain's newest rebase is later than `at`: whatever was dated then is passed over. */
   const rebasedAfter = (chain: string, at: Date): boolean => {
@@ -716,7 +712,10 @@ export function createAnchorLog({
 
   /** One rebase file: taken in, or the alarm; one dated ahead of the clock is read again next time. */
   const rebaseRead = async (name: string): Promise<void> => {
-    const read = await readRebaseFile(keys, { bytes: await store.get(name), name, epoch });
+    // Never more than a rebase's size fetched: one made huge is no rebase, and must not stall every read.
+    const bytes = await store.getAtMost(name, MOST_FILE_BYTES);
+    if (bytes === 'missing') throw new Error('a rebase file listed and then not there');
+    const read = bytes === 'too-large' ? { problem: 'file' } : await readRebaseFile(keys, { bytes, name, epoch });
     if ('problem' in read) {
       rebaseFilesRead.add(name);
       alarm('rebase', { problem: read.problem, file: name });
@@ -748,33 +747,39 @@ export function createAnchorLog({
     } while (after !== undefined);
   };
 
+  /** Whether a page holds any name but `except`: one of its own, one it would never write, or more to come. */
+  const holdsOther = (page: WriteOncePage, except?: string): boolean =>
+    page.names.some((name) => name !== except) || page.foreign > 0 || page.next !== undefined;
+
   /**
-   * Thrown if the store holds a signed cutover marker for this epoch: every name under `cutover/` is judged, at every read,
-   * as a rollback may come at any time. One that is no marker is the alarm, once a process, and is not opened again; a
-   * name under `shards/` is the alarm too, once. Neither moves anything: the read goes on with today's files.
+   * Thrown if the store holds a signed cutover marker for this epoch, at its one name, asked at every read as a rollback may
+   * come at any time; never more than a marker's size fetched. Anything else there, any other name under `cutover/`, and any
+   * name under `shards/` is the alarm, once a process each, and moves nothing: the read goes on with today's files.
    */
   const refuseMovedOn = async (foreign: { count: number }): Promise<void> => {
-    const start = cutoverFolder(epoch);
-    let after: string | undefined;
-    let gets = 0;
-    do {
-      const page = await store.list(start, CUTOVER_A_PAGE, after);
+    const name = cutoverName(epoch);
+    const got = await store.getAtMost(name, MOST_FILE_BYTES);
+    if (got !== 'missing') {
+      const read = got === 'too-large' ? { problem: 'file' } : await readCutoverFile(keys, { bytes: got, name, epoch });
+      if ('marker' in read) throw new MovedOn(name);
+      if (!said.marker) alarm('cutover', { problem: read.problem, file: name });
+      said.marker = true;
+    }
+    if (!said.cutover) {
+      const page = await store.list(cutoverFolder(epoch), 2);
       foreign.count += page.foreign;
-      for (const name of page.names.filter((listed) => !notMarkers.has(listed))) {
-        gets += 1;
-        if (gets > MOST_CUTOVER_GETS) throw new Error('more files to judge under cutover/ than a read opens');
-        const read = await readCutoverFile(keys, { bytes: await store.get(name), name, epoch });
-        if ('marker' in read) throw new MovedOn(name);
-        notMarkers.add(name);
-        alarm('cutover', { problem: read.problem, file: name });
+      if (holdsOther(page, name)) {
+        said.cutover = true;
+        alarm('cutover', { problem: 'name' });
       }
-      after = page.next;
-    } while (after !== undefined);
-    if (shardsSaid) return;
-    const shards = await store.list(`e${String(epoch)}/shards/`, 1);
-    if (shards.names.length > 0 || shards.foreign > 0 || shards.next !== undefined) {
-      shardsSaid = true;
-      alarm('shards', {});
+    }
+    if (!said.shards) {
+      const page = await store.list(`e${String(epoch)}/shards/`, 1);
+      foreign.count += page.foreign;
+      if (holdsOther(page)) {
+        said.shards = true;
+        alarm('shards', {});
+      }
     }
   };
 

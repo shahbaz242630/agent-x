@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { cutoverFile, cutoverFolder, readCutoverFile, SHARDED_LAYOUT } from './cutover.ts';
+import { cutoverFile, cutoverName, readCutoverFile, SHARDED_LAYOUT } from './cutover.ts';
 
 const keysFilled = (fill: number, version = 1): KeyProvider =>
   createKeyProvider(
@@ -16,9 +16,8 @@ const keysFilled = (fill: number, version = 1): KeyProvider =>
   );
 const keys = keysFilled(3);
 const AT = new Date('2026-11-10T08:00:00.000Z');
-const ID = '00000000-0000-4000-8000-000000000001';
 
-const made = (signing = keys, epoch = 1) => cutoverFile(signing, { epoch, at: AT, id: ID });
+const made = (signing = keys, epoch = 1) => cutoverFile(signing, { epoch, at: AT });
 /** A marker's one line, changed by `change`, gzipped again. */
 const changed = (change: (fields: Record<string, unknown>) => Record<string, unknown>): Buffer => {
   const fields = JSON.parse(gunzipSync(made().bytes).toString('utf8')) as Record<string, unknown>;
@@ -28,9 +27,10 @@ const read = (bytes: Buffer, name = made().name, epoch = 1, holding = keys) =>
   readCutoverFile(holding, { bytes, name, epoch });
 
 describe('the cutover marker (PL-65)', () => {
-  it('is named under its epoch, newest first, and reads back as a marker of the sharded layout', async () => {
+  it('is at the one name for its epoch and layout, and reads back as a marker of the sharded layout', async () => {
     const { name, bytes } = made();
-    expect(name).toBe(`${cutoverFolder(1)}${String(9_999_999_999_999 - AT.getTime())}-${ID}`);
+    expect(name).toBe('e1/cutover/shards-v1');
+    expect(cutoverName(2)).toBe('e2/cutover/shards-v1');
     expect(JSON.parse(gunzipSync(bytes).toString('utf8'))).toMatchObject({ k: 'cutover', layout: SHARDED_LAYOUT });
     expect(await read(bytes, name)).toEqual({ marker: true });
   });
@@ -55,8 +55,8 @@ describe('the cutover marker (PL-65)', () => {
     expect(await read(changed((fields) => ({ ...fields, epoch: 2 })))).toEqual({ problem: 'epoch' });
   });
 
-  it('another layout is `layout`, even signed', async () => {
-    const other = cutoverFile(keys, { epoch: 1, at: AT, id: ID, layout: 'shards-v2' });
+  it('another layout, read under its own name, is `layout`, even signed', async () => {
+    const other = cutoverFile(keys, { epoch: 1, at: AT, layout: 'shards-v2' });
     expect(await read(other.bytes, other.name)).toEqual({ problem: 'layout' });
   });
 

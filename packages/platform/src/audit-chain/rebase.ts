@@ -34,8 +34,8 @@ const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 const HASH = /^[0-9a-f]{64}$/;
 
-/** A rebase file holds one line of about 450 bytes: anything past this isn't one. */
-const MOST_FILE_BYTES = 4096;
+/** A rebase file holds one line of about 450 bytes, a cutover marker less: anything past this isn't one. */
+export const MOST_FILE_BYTES = 4096;
 
 export interface Rebase extends CheckedPoint {
   /** The rebase's own ID (a UUID), which its file is named by. */

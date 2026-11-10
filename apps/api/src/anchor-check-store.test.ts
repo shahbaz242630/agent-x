@@ -596,7 +596,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       const fake = createFakeWriteOnceStore();
       const chains = chainsHolding({ [ORG]: ok(3n) });
       await process(fake, chains.organizations).check.finish();
-      expect(fake.calls).toEqual({ puts: 0, lists: 0, gets: 0 });
+      expect(fake.calls).toEqual({ puts: 0, lists: 0, gets: 0, smallGets: 0 });
 
       const memoryOnly = createAnchorCheck({
         chains: [],

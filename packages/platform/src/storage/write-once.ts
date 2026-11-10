@@ -9,7 +9,7 @@
 //
 // Nothing here is called in production until the durable anchors arrive (E5).
 import { createHash, randomUUID } from 'node:crypto';
-import { link, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import type { OutboundFetch } from '../outbound/index.ts';
@@ -62,7 +62,36 @@ export interface WriteOnceStore {
   list(start: string, most: number, after?: string): Promise<WriteOncePage>;
   /** The whole of `name`. Throws BlobStoreFailed if there is none. */
   get(name: string): Promise<Buffer>;
+  /**
+   * `name` if it holds at most `mostBytes`, never downloading more than one byte past that: `missing` if there is no such
+   * file, `too-large` if it holds more. For files anyone with the add token could make huge (PL-65).
+   */
+  getAtMost(name: string, mostBytes: number): Promise<Buffer | 'missing' | 'too-large'>;
 }
+
+/** A body read only as far as `mostBytes`: past it, the rest is never fetched, and it is `too-large`. */
+async function bodyAtMost(response: Response, mostBytes: number): Promise<Buffer | 'too-large'> {
+  if (response.body === null) return Buffer.alloc(0);
+  // Node's own types leave the chunks untyped: fetch's bodies are bytes.
+  const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    size += read.value.length;
+    if (size > mostBytes) {
+      await reader.cancel();
+      return 'too-large';
+    }
+    chunks.push(read.value);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** A blob's whole size, from a ranged answer's `Content-Range: bytes <from>-<to>/<size>`. */
+const sizeInRange = (response: Response): number | undefined => {
+  const size = /^bytes \d+-\d+\/(\d{1,15})$/.exec(response.headers.get('content-range') ?? '')?.[1];
+  return size === undefined ? undefined : Number(size);
+};
 
 function checkedListing(start: string, most: number): void {
   if (!NAME_START.test(start)) throw new RangeError('A list starts from plain path characters');
@@ -159,6 +188,34 @@ export function azureWriteOnceStore({
       if (response.status !== 200) throw await failed(response);
       return Buffer.from(await response.arrayBuffer());
     },
+
+    async getAtMost(name, mostBytes) {
+      // One byte past the most asked, so a file of exactly that much is told from a larger one.
+      const response = await call(`/${checkedBlobName(name)}`, {
+        method: 'GET',
+        headers: { 'x-ms-range': `bytes=0-${String(mostBytes)}` },
+      });
+      if (response.status === 404 && blobErrorCode(response) === 'BlobNotFound') {
+        await response.body?.cancel();
+        return 'missing';
+      }
+      // An empty blob has no first byte to give.
+      if (response.status === 416) {
+        await response.body?.cancel();
+        return Buffer.alloc(0);
+      }
+      if (response.status === 206) {
+        const size = sizeInRange(response);
+        if (size === undefined) throw await failed(response);
+        if (size > mostBytes) {
+          await response.body?.cancel();
+          return 'too-large';
+        }
+      } else if (response.status !== 200) {
+        throw await failed(response);
+      }
+      return bodyAtMost(response, mostBytes);
+    },
   };
 }
 
@@ -223,6 +280,16 @@ export function folderWriteOnceStore(directory: string): WriteOnceStore {
         return await readFile(pathOf(name));
       } catch (error) {
         if (hasCode(error, 'ENOENT')) throw new BlobStoreFailed(STORE, 'no file of that name');
+        throw error;
+      }
+    },
+
+    async getAtMost(name, mostBytes) {
+      try {
+        if ((await stat(pathOf(name))).size > mostBytes) return 'too-large';
+        return await readFile(pathOf(name));
+      } catch (error) {
+        if (hasCode(error, 'ENOENT')) return 'missing';
         throw error;
       }
     },

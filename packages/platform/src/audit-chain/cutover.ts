@@ -2,10 +2,12 @@
 // layout, so a version from before it (anchor-log.ts) must read none of the store. The migration writes it FIRST, before
 // any shard file, then the shards, then a separate signed record that the migration is done.
 //
-// It is one line in a file of its own, under `e<epoch>/cutover/<inverted-ms>-<id>` like the anchors' files, signed with
-// the `audit-anchor` key for its own name, epoch, layout and time, as a file's closing line is. Only a marker so signed
-// counts: anyone holding no more than the store's add token can add a file there, and must not be able to stop payments by
-// it. Anything else under the folder is the alarm and moves nothing.
+// It is one line in a file of its own, at a name fixed for its epoch and layout, `e<epoch>/cutover/shards-v1`, so a reader
+// asks for that one name and never lists through what anyone may have added beside it. It is signed with the
+// `audit-anchor` key for its own name, epoch, layout and time, as a file's closing line is. Only a marker so signed counts:
+// anyone holding no more than the store's add token can add a file there, and must not be able to stop payments by it.
+// Anything else at the name or under the folder is the alarm and moves nothing. Someone who takes the name first only
+// makes the migration's write of it refused as an overwrite, which stops the migration loudly before it writes a shard.
 import { gzipSync } from 'node:zlib';
 
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
@@ -15,10 +17,10 @@ import { isCount, openedSmallFile, parsedJson, timeIn } from './rebase.ts';
 /** The layout the marker moves the store on to: the sharded store's first. */
 export const SHARDED_LAYOUT = 'shards-v1';
 
-/** What a file's name counts down from, as the anchors' files do, so the newest lists first. */
-const LAST_MS = 9_999_999_999_999;
-
 export const cutoverFolder = (epoch: number): string => `e${String(epoch)}/cutover/`;
+
+/** Where the marker of a layout is, in an epoch: one name, fixed. */
+export const cutoverName = (epoch: number, layout = SHARDED_LAYOUT): string => `${cutoverFolder(epoch)}${layout}`;
 
 /** What a marker signs: its own name, its epoch, the layout and when. */
 const cutoverMessage = (name: string, epoch: number, layout: string, at: Date): Message => [
@@ -32,9 +34,9 @@ const cutoverMessage = (name: string, epoch: number, layout: string, at: Date): 
 /** A marker's name and bytes, signed with the `audit-anchor` key: what the migration writes first (PR2). */
 export function cutoverFile(
   keys: KeyProvider,
-  { epoch, at, id, layout = SHARDED_LAYOUT }: { epoch: number; at: Date; id: string; layout?: string },
+  { epoch, at, layout = SHARDED_LAYOUT }: { epoch: number; at: Date; layout?: string },
 ): { readonly name: string; readonly bytes: Buffer } {
-  const name = `${cutoverFolder(epoch)}${String(LAST_MS - at.getTime()).padStart(13, '0')}-${id}`;
+  const name = cutoverName(epoch, layout);
   const { signature, keyVersion } = keys.sign('audit-anchor', cutoverMessage(name, epoch, layout, at));
   const line = JSON.stringify({
     k: 'cutover',

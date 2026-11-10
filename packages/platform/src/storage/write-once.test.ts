@@ -78,9 +78,16 @@ function azure(refusal: { status: number; code: string } = { status: 403, code: 
       );
     }
     const found = blobs.get(path);
-    return found === undefined
-      ? new Response(null, { status: 404, headers: { 'x-ms-error-code': 'BlobNotFound' } })
-      : new Response(found);
+    if (found === undefined) return new Response(null, { status: 404, headers: { 'x-ms-error-code': 'BlobNotFound' } });
+    // A range, as Azure answers one: what of it there is, with the blob's whole size; none of an empty blob.
+    const range = /^bytes=0-(\d+)$/.exec(new Headers(init.headers).get('x-ms-range') ?? '');
+    if (range === null) return new Response(found);
+    if (found.length === 0) return new Response(null, { status: 416, headers: { 'x-ms-error-code': 'InvalidRange' } });
+    const part = found.subarray(0, Number(range[1]) + 1);
+    return new Response(part, {
+      status: 206,
+      headers: { 'content-range': `bytes 0-${String(part.length - 1)}/${String(found.length)}` },
+    });
   };
   const fetch = (url: string | URL, init: RequestInit = {}) => {
     const asked = new URL(url);
@@ -132,6 +139,19 @@ function behavesAsWriteOnce(make: () => WriteOnceStore): void {
 
   it('lists nothing where nothing is', async () => {
     expect(await make().list('e9/', 10)).toEqual({ names: [], foreign: 0, next: undefined });
+  });
+
+  it('gives back a file of at most so many bytes, and says so of one larger or none, fetching no more', async () => {
+    const store = make();
+    await store.put('e1/four', Buffer.from('four'));
+    await store.put('e1/empty', Buffer.alloc(0));
+
+    expect((await store.getAtMost('e1/four', 4)) as Buffer).toEqual(Buffer.from('four'));
+    expect((await store.getAtMost('e1/four', 10)) as Buffer).toEqual(Buffer.from('four'));
+    expect(await store.getAtMost('e1/four', 3)).toBe('too-large');
+    expect((await store.getAtMost('e1/empty', 3)) as Buffer).toEqual(Buffer.alloc(0));
+    expect(await store.getAtMost('e1/none', 3)).toBe('missing');
+    await expect(store.getAtMost('a?comp=list', 3)).rejects.toThrow(RangeError);
   });
 
   it('names a read of nothing as the store’s failure', async () => {
@@ -259,6 +279,48 @@ describe('4D2e E3 the write-once store on Azure', () => {
     await expect(refusing.get(NAME)).rejects.toThrow(
       'The write-once store failed: the blob service answered 403 (AuthorizationFailure)',
     );
+  });
+
+  /** A store whose blob service answers every read as `answer` says. */
+  const readingAs = (answer: () => Response): WriteOnceStore =>
+    azureWriteOnceStore({
+      settings: SETTINGS,
+      fetch: (url) =>
+        Promise.resolve(
+          new URL(url).origin === 'http://localhost:42356' ? Response.json({ access_token: ISSUED }) : answer(),
+        ),
+    });
+
+  it('asks Azure for one byte past the most, never the whole', async () => {
+    const { calls, store } = azure();
+    await store.put(NAME, Buffer.alloc(100));
+
+    expect(await store.getAtMost(NAME, 10)).toBe('too-large');
+    expect(new Headers(calls.at(-1)?.init.headers).get('x-ms-range')).toBe('bytes=0-10');
+  });
+
+  it('takes the whole size a range answer gives, before any of its body', async () => {
+    const answer = (size: number) => () =>
+      new Response('x', { status: 206, headers: { 'content-range': `bytes 0-0/${String(size)}` } });
+    expect(await readingAs(answer(100)).getAtMost(NAME, 10)).toBe('too-large');
+    expect((await readingAs(answer(1)).getAtMost(NAME, 10)) as Buffer).toEqual(Buffer.from('x'));
+  });
+
+  it('reads a whole answer, the range not kept to, only as far as the most', async () => {
+    expect(await readingAs(() => new Response(Buffer.alloc(11))).getAtMost(NAME, 10)).toBe('too-large');
+    expect((await readingAs(() => new Response(Buffer.alloc(10))).getAtMost(NAME, 10)) as Buffer).toHaveLength(10);
+    expect((await readingAs(() => new Response(null)).getAtMost(NAME, 10)) as Buffer).toHaveLength(0);
+  });
+
+  it.each([
+    ['a range answer with no whole size', () => new Response('x', { status: 206 })],
+    [
+      'another 404, the container gone',
+      () => new Response(null, { status: 404, headers: { 'x-ms-error-code': 'ContainerNotFound' } }),
+    ],
+    ['a refusal', () => new Response(null, { status: 403, headers: { 'x-ms-error-code': 'AuthorizationFailure' } })],
+  ])('names %s as a failure, never a file missing or one to read', async (_, answer) => {
+    await expect(readingAs(answer).getAtMost(NAME, 10)).rejects.toThrow(BlobStoreFailed);
   });
 
   const answering = (xml: string): WriteOnceStore =>
