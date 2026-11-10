@@ -8,8 +8,12 @@
 // can't be loaded are said, and nothing can be confirmed without them.
 // A change the API states no words for (a reject: one outcome, no signed
 // statement) is confirmed with the console's own words instead (6B1).
+// It is modal for the keyboard too (WAI-ARIA's dialog pattern): focus starts
+// on Cancel, Tab and Shift+Tab go round its own controls only, focus that
+// leaves it some other way is brought back, Escape cancels, and on closing
+// focus goes back to what was pressed to open it.
 import { useQuery } from '@tanstack/react-query';
-import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 
 import { api } from './api.ts';
 import { t } from './text.ts';
@@ -35,6 +39,22 @@ function useStatement(id: string | undefined) {
     refetchOnMount: 'always',
     select: ({ statements }) => statements.find((statement) => statement.id === id),
   });
+}
+
+/** What Tab may reach inside the pop-up: its enabled controls, in page order. */
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
+/** Tab from the last control goes to the first, Shift+Tab from the first to the last: never out of the pop-up. */
+function tabRound(event: KeyboardEvent<HTMLElement>): void {
+  const inside = [...event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
+  const first = inside[0];
+  const last = inside.at(-1);
+  if (first === undefined || last === undefined) return;
+  const from = event.shiftKey ? first : last;
+  if (document.activeElement !== from && inside.includes(document.activeElement as HTMLElement)) return;
+  event.preventDefault();
+  (event.shiftKey ? last : first).focus();
 }
 
 /** Where the words come from: the API's set by its id, or the console's own for a change the API states none for (a reject). */
@@ -70,8 +90,19 @@ export function Confirm({
   const [chosen, setChosen] = useState<string | null>(null);
   const titleId = useId();
   const cancel = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLElement>(null);
   useEffect(() => {
+    const opener = document.activeElement;
     cancel.current?.focus();
+    // Focus that leaves the pop-up some other way than Tab (a click on the page behind it) comes back to Cancel.
+    const keepIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && dialog.current?.contains(event.target) === false) cancel.current?.focus();
+    };
+    document.addEventListener('focusin', keepIn);
+    return () => {
+      document.removeEventListener('focusin', keepIn);
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
   }, []);
   // Words only once read afresh, and none after a failed read (whatever was read before).
   const served = statement !== undefined;
@@ -85,12 +116,14 @@ export function Confirm({
   return (
     <div className="veil">
       <section
+        ref={dialog}
         className="dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && !busy) onCancel();
+          if (event.key === 'Tab') tabRound(event);
         }}
       >
         <h2 id={titleId}>{title}</h2>
