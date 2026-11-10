@@ -44,7 +44,7 @@
 // supplier holding it, which that lock waits for. So a claim taken meanwhile
 // is something past the app, and fails the request (D3's `taken`).
 import { AGENT_KEYS, agentKeyOf, agentOf, AGENTS, isLiveKey } from '@agentx/core/modules/agents';
-import type { SignedStates } from '@agentx/core/modules/audit';
+import type { AuditTables, SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   AGENT_ZONES,
@@ -198,12 +198,22 @@ const believed = (read: { readonly outcome: string }): void => {
   if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
 };
 
-/** A decided request, read and verified for its answer: INTEGRITY_FAILED if tampered with. */
-async function answerOf(tx: DecisionTx, states: SignedStates, orgId: string, id: string): Promise<SpendRequestRecord> {
+/**
+ * A request as it stands once written, or answered for its key (a decision, an
+ * approval, a reject, a cancel): read and verified for its answer,
+ * INTEGRITY_FAILED if tampered with. `written` names it in the error for one
+ * missing ("A decided spend request").
+ */
+export async function answerOf(
+  tx: DatabaseTransaction<SpendRequestsTables & AuditTables>,
+  states: SignedStates,
+  { orgId, id }: { readonly orgId: string; readonly id: string },
+  written: string,
+): Promise<SpendRequestRecord> {
   const found = await requestOf(tx, states, { orgId, id });
   believed(found);
-  // Requests are never deleted (0039's grants): one just made, or answered for its key, is there.
-  if (found.outcome !== 'found') throw new Error(`A decided spend request is missing: ${id}`);
+  // Requests are never deleted (0039's grants): one just written, or answered for its key, is there.
+  if (found.outcome !== 'found') throw new Error(`${written} is missing: ${id}`);
   return found.request;
 }
 
@@ -797,7 +807,12 @@ export function createSpendRequestDecisions({
       if (done.outcome === 'done' && fresh !== undefined) return { outcome: 'decided' as const, request: fresh };
       return work.answered(agent.orgId, correlationId, async (tx, states) => ({
         outcome: 'decided' as const,
-        request: await answerOf(tx, states, agent.orgId, done.result.resourceId),
+        request: await answerOf(
+          tx,
+          states,
+          { orgId: agent.orgId, id: done.result.resourceId },
+          'A decided spend request',
+        ),
       }));
     },
   };

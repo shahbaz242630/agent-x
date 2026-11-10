@@ -35,14 +35,10 @@ import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwr
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { Refused } from './refused.ts';
-import {
-  createStepUps,
-  createUseCaseWork,
-  type SessionMember,
-  UseCaseRefused,
-  type UseCaseTables,
-} from './use-case-work.ts';
+import { MandateRefused } from './mandate-reads.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
+import { answerOf } from './spend-request-decisions.ts';
+import { createStepUps, createUseCaseWork, type SessionMember, type UseCaseTables } from './use-case-work.ts';
 
 export const REJECT_OPERATION = 'spend-requests.reject';
 export const REJECT_CONFIRM_OPERATION = 'spend-requests.reject.confirm';
@@ -52,11 +48,7 @@ export const DECIDING_ROLES = ['admin', 'approver'] as const;
 
 type RejectTables = UseCaseTables & SpendRequestsTables & LimitReservationsTables;
 
-export type RejectAsked =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
-  | { readonly outcome: 'conflict' }
-  | { readonly outcome: 'busy' }
-  | Refused;
+export type RejectAsked = StepUpAsked | { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
 
 export type Rejected =
   | { readonly outcome: 'rejected'; readonly request: SpendRequestRecord }
@@ -82,9 +74,6 @@ export interface SpendRequestRejects {
   ): Promise<Rejected>;
 }
 
-/** Refused inside a reject's write, so its transaction ends there. */
-class RejectRefused extends UseCaseRefused {}
-
 /**
  * The reject's SHA-256: the organisation, the request's latest event, IDs in
  * lower case, and the reason. That event is the request's own, read from its
@@ -102,9 +91,9 @@ async function waiting(
   lock: 'share' | 'change',
 ) {
   const read = await requestOf(tx, states, key, lock);
-  if (read.outcome === 'missing') throw new RejectRefused(404, 'NOT_FOUND');
-  if (read.outcome === 'tampered') throw new RejectRefused(503, 'INTEGRITY_FAILED');
-  if (read.request.status !== 'APPROVAL_REQUIRED') throw new RejectRefused(409, 'REQUEST_NOT_WAITING');
+  if (read.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
+  if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (read.request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
   return read;
 }
 
@@ -123,8 +112,8 @@ export function createSpendRequestRejects({
   readonly challenges: StepUpChallenges;
   readonly logger: Logger;
 }): SpendRequestRejects {
-  const work = createUseCaseWork({ database, keys, ids, logger, Refusal: RejectRefused });
-  const stepUps = createStepUps({ challenges, Refusal: RejectRefused });
+  const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
+  const stepUps = createStepUps({ challenges, Refusal: MandateRefused });
 
   return {
     async ask(member, idempotent, requestId, reason, correlationId) {
@@ -166,14 +155,15 @@ export function createSpendRequestRejects({
       });
       if (isUnwritten(done)) return done;
       // The request as it now stands, once rejected or answered for its key.
-      return work.answered(member.orgId, correlationId, async (tx, states) => {
-        const found = await requestOf(tx, states, { orgId: member.orgId, id: done.result.resourceId });
-        if (found.outcome === 'tampered') throw new RejectRefused(503, 'INTEGRITY_FAILED');
-        // Requests are never deleted (0039's grants): one rejected is there.
-        if (found.outcome !== 'found')
-          throw new Error(`A rejected spend request is missing: ${done.result.resourceId}`);
-        return { outcome: 'rejected' as const, request: found.request };
-      });
+      return work.answered(member.orgId, correlationId, async (tx, states) => ({
+        outcome: 'rejected' as const,
+        request: await answerOf(
+          tx,
+          states,
+          { orgId: member.orgId, id: done.result.resourceId },
+          'A rejected spend request',
+        ),
+      }));
     },
   };
 }

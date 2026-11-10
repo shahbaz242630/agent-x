@@ -24,7 +24,6 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import {
   cancelRequest,
   type Ended,
-  requestOf,
   type SpendRequestRecord,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
@@ -34,7 +33,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { MandateRefused } from './mandate-reads.ts';
-import type { AgentActing } from './spend-request-decisions.ts';
+import { type AgentActing, answerOf } from './spend-request-decisions.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork, type Member, type UseCaseTables } from './use-case-work.ts';
 
@@ -94,13 +93,10 @@ export function createSpendRequestCancels({
   /** The request as it stands once the write is done (or answered for its key). */
   const shown = async (orgId: string, correlationId: string, done: Awaited<ReturnType<typeof work.write>>) => {
     if (isUnwritten(done)) return done;
-    return work.answered(orgId, correlationId, async (tx, states) => {
-      const found = await requestOf(tx, states, { orgId, id: done.result.resourceId });
-      if (found.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-      // Requests are never deleted (0039's grants): one just cancelled, or answered for its key, is there.
-      if (found.outcome !== 'found') throw new Error(`A cancelled spend request is missing: ${done.result.resourceId}`);
-      return { outcome: 'cancelled' as const, request: found.request };
-    });
+    return work.answered(orgId, correlationId, async (tx, states) => ({
+      outcome: 'cancelled' as const,
+      request: await answerOf(tx, states, { orgId, id: done.result.resourceId }, 'A cancelled spend request'),
+    }));
   };
 
   return {
