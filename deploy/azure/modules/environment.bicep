@@ -801,12 +801,15 @@ resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     evaluationFrequency: 'PT10M'
     // Azure takes only its own window lengths (5, 10, 15, 30, 45 minutes, then hours): 20 was refused (S171).
     windowSize: 'PT30M'
+    // A day back, for the workspace's own word on its cap: while it is over it nothing arrives, so
+    // a line missing then is no sign the jobs stopped (S183; the cap's own alert says so instead).
+    overrideQueryTimeRange: 'P1D'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_check_done" | summarize Done = count()'
+          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(30m) | where tostring(parse_json(Log).event) == "audit.anchor_check_done"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota") | summarize Done = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Done'
           operator: 'LessThan'
@@ -840,12 +843,14 @@ resource jobsStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     scopes: [workspaceId]
     evaluationFrequency: 'PT5M'
     windowSize: 'PT15M'
+    // As the anchor check's: a day back for the cap's word, the pulses within the window alone.
+    overrideQueryTimeRange: 'P1D'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "jobs.pulse" | summarize Pulses = count()'
+          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(15m) | where tostring(parse_json(Log).event) == "jobs.pulse"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota") | summarize Pulses = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Pulses'
           operator: 'LessThan'

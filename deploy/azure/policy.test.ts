@@ -3685,45 +3685,70 @@ describe('SEC-OPS-09 each rule can fail', () => {
   describe('dead-man-alerts (4D2e D, PL-33): the jobs having stopped, seen from outside', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const RULES = [
-      [ANCHOR_STOPPED_ALERT, 'audit.anchor_check_done', 'Done', 1],
-      [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2],
+      [ANCHOR_STOPPED_ALERT, 'audit.anchor_check_done', 'Done', 1, 30],
+      [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2, 15],
     ] as const;
+    /** The workspace's own word that its cap stopped collection (S183): silence then is no sign. */
+    const OVER_CAP =
+      '(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota")';
+    const deadMan = (event: string, column: string, minutes: number, cap = OVER_CAP) =>
+      `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${cap} | summarize ${column} = count()`;
 
-    it.each(RULES)('%#: is off on staging, which sleeps, and all else stands', (rule, event, column, severity) => {
-      const alert = staging.predictedResources.find(rule);
-      expect(at(alert?.properties, 'enabled')).toBe(false);
-      expect(at(alert?.properties, 'severity')).toBe(severity);
-      const only = first(at(alert?.properties, 'criteria', 'allOf'));
-      expect(at(only, 'query')).toBe(
-        `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}" | summarize ${column} = count()`,
-      );
-      expect(brokenRules(staging)).toEqual([]);
-    });
+    it.each(RULES)(
+      '%#: is off on staging, which sleeps, and all else stands',
+      (rule, event, column, severity, minutes) => {
+        const alert = staging.predictedResources.find(rule);
+        expect(at(alert?.properties, 'enabled')).toBe(false);
+        expect(at(alert?.properties, 'severity')).toBe(severity);
+        const only = first(at(alert?.properties, 'criteria', 'allOf'));
+        expect(at(only, 'query')).toBe(deadMan(event, column, minutes));
+        expect(at(alert?.properties, 'overrideQueryTimeRange')).toBe('P1D');
+        expect(brokenRules(staging)).toEqual([]);
+      },
+    );
 
     it.each(RULES)('%#: on staging it may be on, for a keep-running window', (rule) => {
       expect(brokenRules(changed(rule, (alert) => (properties(alert).enabled = true)))).toEqual([]);
     });
 
-    it.each(RULES)('%#: gone, or changed so it could not fire, breaks the rule', (rule, event) => {
-      expect(brokenRules(without(rule))).toEqual(['dead-man-alerts']);
-      for (const change of [
-        (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
-        (alert: Mutable) => (criterion(alert).threshold = 0),
-        (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
-        (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
-        (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
-        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
-        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
-        (alert: Mutable) =>
-          (criterion(alert).query =
-            `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize N = count()`),
-        (alert: Mutable) =>
-          (criterion(alert).query =
-            `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}.x" | summarize N = count()`),
-      ]) {
-        expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
-      }
-    });
+    it.each(RULES)(
+      '%#: gone, or changed so it could not fire, breaks the rule',
+      (rule, event, column, _severity, minutes) => {
+        expect(brokenRules(without(rule))).toEqual(['dead-man-alerts']);
+        for (const change of [
+          (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
+          (alert: Mutable) => (criterion(alert).threshold = 0),
+          (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+          (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
+          (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+          (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
+          (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize N = count()`),
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}.x" | summarize N = count()`),
+          // Its old form, which a full log store would set off for nothing (S183).
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}" | summarize ${column} = count()`),
+          // Looking further back than its window: a line from an hour ago would hide jobs stopped since.
+          (alert: Mutable) => (criterion(alert).query = deadMan(event, column, minutes * 2)),
+          // Quiet whenever the cap was ever reached, not only while it is over.
+          (alert: Mutable) =>
+            (criterion(alert).query = deadMan(
+              event,
+              column,
+              minutes,
+              OVER_CAP.replace(' | summarize arg_max(TimeGenerated, Detail)', ''),
+            )),
+          (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+        ]) {
+          expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
+        }
+      },
+    );
 
     it.each(RULES)('%#: in production it must be on', (rule) => {
       const production = { region: 'uaenorth', environment: 'production' } as const;

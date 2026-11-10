@@ -2782,33 +2782,50 @@ const workbooks: Check = (snapshot, _expected, add) => {
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
  */
 const DEAD_MEN = [
-  { event: 'audit.anchor_check_done', windowSize: 'PT30M', severity: 1, autoMitigate: false },
-  { event: 'jobs.pulse', windowSize: 'PT15M', severity: 2, autoMitigate: true },
+  {
+    event: 'audit.anchor_check_done',
+    windowSize: 'PT30M',
+    minutes: 30,
+    column: 'Done',
+    severity: 1,
+    autoMitigate: false,
+  },
+  { event: 'jobs.pulse', windowSize: 'PT15M', minutes: 15, column: 'Pulses', severity: 2, autoMitigate: true },
 ] as const;
 
-const deadManLines = (event: string): string => `where tostring(parse_json(Log).event) == "${event}"`;
+/**
+ * The workspace's own word that its daily cap has stopped collection, the newest of the day: one row while it is
+ * over, so a line missing then counts as seen (S183). Nothing arrives over the cap, so silence then says nothing of
+ * the jobs; the cap's own alert says monitoring is blind. The day's word needs the day: `overrideQueryTimeRange`.
+ */
+const OVER_CAP =
+  '(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota")';
+
+/** The one query a dead man may run: its line within its own window, or the cap's word. */
+const deadManQuery = ({ event, minutes, column }: (typeof DEAD_MEN)[number]): string =>
+  `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${OVER_CAP} | summarize ${column} = count()`;
 
 /** Whether the alert counts one of those lines, however else it is set. */
 const isDeadMan = (alert: PredictedResource): boolean =>
   list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
-    DEAD_MEN.some(({ event }) =>
-      queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()'),
-    ),
+    DEAD_MEN.some((man) => at(criterion, 'query') === deadManQuery(man)),
   );
 
 const deadManAlerts: Check = (snapshot, expected, add) => {
   const workspaces = mainWorkspaceIds(snapshot);
-  for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
+  for (const man of DEAD_MEN) {
+    const { event, windowSize, severity, autoMitigate } = man;
     const found = ofType(snapshot, TYPES.alert).some(
       (alert) =>
         (expected.environment === 'staging' || at(alert.properties, 'enabled') === true) &&
         at(alert.properties, 'severity') === severity &&
         at(alert.properties, 'autoMitigate') === autoMitigate &&
         at(alert.properties, 'windowSize') === windowSize &&
+        at(alert.properties, 'overrideQueryTimeRange') === 'P1D' &&
         list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
         list(at(alert.properties, 'criteria', 'allOf')).some(
           (criterion) =>
-            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()') &&
+            at(criterion, 'query') === deadManQuery(man) &&
             totals(criterion) &&
             at(criterion, 'operator') === 'LessThan' &&
             at(criterion, 'threshold') === 1 &&
@@ -2820,7 +2837,7 @@ const deadManAlerts: Check = (snapshot, expected, add) => {
       add({
         rule: 'dead-man-alerts',
         resource: event,
-        message: `needs an alert on this deployment's workspace firing, at SEV-${String(severity)}, when ${windowSize} pass with none of this line, on everywhere but staging`,
+        message: `needs an alert on this deployment's workspace firing, at SEV-${String(severity)}, when ${windowSize} pass with none of this line and the workspace not over its daily cap, on everywhere but staging`,
       });
     }
   }
