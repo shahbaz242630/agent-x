@@ -11,6 +11,7 @@ import { z } from 'zod';
 import './route-server.helper.test.ts';
 import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
 import { answerAsked, answerRefusal, canonicalJson, idempotentRequest } from './idempotent-writes.ts';
+import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -20,17 +21,7 @@ const COOKIE = 'S'.repeat(43);
 const ORG = '0199a0f0-0000-7000-8000-0000000000aa';
 const ITEM = '0199a0f0-0000-7000-8000-0000000000bb';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
-  createdAt: new Date('2026-09-24T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
-  endsAt: new Date('2026-09-24T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
 
 /** A sign-in that knows one session and does nothing else these tests need. */
 const SIGN_IN: SignIn = {

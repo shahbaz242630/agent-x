@@ -86,8 +86,8 @@ import type { Logger } from '@agentx/platform/observability';
 import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejections.ts';
 import { MandateRefused } from './mandate-reads.ts';
 import { overMandateLimit } from './over-limit-choice.ts';
-import type { Refused } from './refused.ts';
-import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
+import { agentAlone, answerOf, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
 import { cancelledSinceOf, isCarried, pausedFromOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
@@ -158,10 +158,7 @@ interface ApprovalShown {
 }
 
 export type ApproveAsked =
-  | ({ readonly outcome: 'asked'; readonly stepUpChallengeId: string } & ApprovalShown)
-  | { readonly outcome: 'conflict' }
-  | { readonly outcome: 'busy' }
-  | Refused;
+  (StepUpAsked & ApprovalShown) | { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
 
 export type Approved =
   /** Approved; or rejected, the engine now refusing it under rules the team set (E5b). */
@@ -525,13 +522,10 @@ export function createSpendRequestApprovals({
       if (isUnwritten(done)) return expiredIfDue(done, member.orgId, requestId, correlationId);
       // The request as it now stands, once approved or answered for its key.
       return work.answered(member.orgId, correlationId, async (tx, states) => {
-        const found = await requestOf(tx, states, { orgId: member.orgId, id: done.result.resourceId });
-        if (found.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-        // Requests are never deleted (0039's grants): one approved or rejected is there.
-        if (found.outcome !== 'found')
-          throw new Error(`An approved spend request is missing: ${done.result.resourceId}`);
-        const outcome = found.request.status === 'DENIED' ? ('rejected' as const) : ('approved' as const);
-        return { outcome, request: found.request };
+        const key = { orgId: member.orgId, id: done.result.resourceId };
+        const request = await answerOf(tx, states, key, 'An approved spend request');
+        const outcome = request.status === 'DENIED' ? ('rejected' as const) : ('approved' as const);
+        return { outcome, request };
       });
     },
   };

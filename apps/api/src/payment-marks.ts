@@ -62,7 +62,7 @@ import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwr
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import {
   createStepUps,
   createUseCaseWork,
@@ -110,7 +110,7 @@ type MarkTx = DatabaseTransaction<MarkTables>;
 
 type Unwritten = { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
 
-type MarkAsked = { readonly outcome: 'asked'; readonly stepUpChallengeId: string } | Unwritten;
+type MarkAsked = StepUpAsked | Unwritten;
 type ApproveAsked =
   | { readonly outcome: 'asked'; readonly stepUpChallengeId: string; readonly proposal: FailureProposalRecord }
   | Unwritten;

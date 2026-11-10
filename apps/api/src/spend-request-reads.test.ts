@@ -7,13 +7,13 @@
 // agent's read of its own (B4c): its key and scope, what it is shown, and a
 // reject shown as APPROVAL_REJECTED alone.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession } from '@agentx/core/modules/identity';
 import type { SpendRequestRecord } from '@agentx/core/modules/spend-requests';
 import { money, REASON_CODES } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type {
@@ -31,17 +31,7 @@ const SUPPLIER_ID = '0199a0f0-0000-7000-8000-0000000000e1';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 const STUCK = '0199a0f0-0000-7000-8000-0000000000c9';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-07T08:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-07T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-07T08:10:00.000Z'),
-  endsAt: new Date('2099-10-07T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-07T08:00:00.000Z', { endless: true });
 
 const WAITING: SpendRequestRecord = {
   id: REQUEST_ID,

@@ -5,7 +5,6 @@
 // before the use case runs, and the use case's own. What the use case does
 // is spend-request-decisions.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession } from '@agentx/core/modules/identity';
 import type { SpendRequestRecord } from '@agentx/core/modules/spend-requests';
 import { money, REASON_CODES } from '@agentx/core/shared-kernel';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -13,6 +12,7 @@ import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type {
@@ -43,17 +43,7 @@ const KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
   [KEY_READING_ONLY, accepted(['requests:read', 'sources:read'])],
 ]);
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-07T08:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-07T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-07T08:10:00.000Z'),
-  endsAt: new Date('2099-10-07T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-07T08:00:00.000Z', { endless: true });
 
 const BODY = {
   amountMinor: 125_050,
