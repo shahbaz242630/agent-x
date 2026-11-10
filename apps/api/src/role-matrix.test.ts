@@ -19,7 +19,9 @@
 //
 // SEC-HA-12 (B3+-1): an admin and an approver signed in with an authenticator
 // app, not a passkey, are allowed only where a developer or a viewer is too,
-// and refused everywhere else their role is named as PASSKEY_REQUIRED.
+// and there to read alone (AUTH-01, S182: a write of theirs needs the passkey
+// wherever it is made); refused everywhere else their role is named as
+// PASSKEY_REQUIRED.
 // SEC-OPS-04 (B6-3d): so are an admin and an approver in the 7 days after a
 // second factor of theirs was removed, as SECOND_FACTOR_REMOVED.
 import { type Scope, SCOPES } from '@agentx/core/modules/agents';
@@ -156,6 +158,8 @@ interface Operation {
   readonly access: readonly Principal[];
   /** The scopes an agent's key needs, on an operation naming agents. */
   readonly agentScopes: readonly Scope[];
+  /** Whether it is a write: the document shows each one's idempotency key (write-operations.ts). */
+  readonly writes: boolean;
 }
 
 let app: FastifyInstance;
@@ -223,6 +227,9 @@ beforeAll(async () => {
         path,
         access: (operation as { 'x-access': Principal[] })['x-access'],
         agentScopes: (operation as { 'x-agent-scopes'?: Scope[] })['x-agent-scopes'] ?? [],
+        writes: ((operation as { parameters?: { in: string; name: string }[] }).parameters ?? []).some(
+          (parameter) => parameter.in === 'header' && parameter.name === 'idempotency-key',
+        ),
       })),
   );
 });
@@ -263,11 +270,15 @@ const accessRefusal = (status: number, body: string): boolean => {
 /** The refusal's reason code. */
 const codeOf = (body: string): string | undefined => (JSON.parse(body) as { error?: { code?: string } }).error?.code;
 
-/** Whether the caller's role is named, yet on a route for the powers they lack. */
+/**
+ * Whether the caller's role is named, yet on a route for the powers they lack;
+ * or, without a passkey, on any write (AUTH-01).
+ */
 const lacksPowers = (operation: Operation, caller: Caller): boolean =>
   caller.withoutPowers !== undefined &&
   operation.access.includes(caller.withoutPowers.role) &&
-  !operation.access.some((principal) => WITHOUT_PASSKEY.includes(principal));
+  (!operation.access.some((principal) => WITHOUT_PASSKEY.includes(principal)) ||
+    (caller.withoutPowers.code === 'PASSKEY_REQUIRED' && operation.writes));
 
 /** Whether an agent's key lacks a scope the operation needs: refused as INSUFFICIENT_SCOPE. */
 const lacksScopes = (operation: Operation, caller: Caller): boolean =>
@@ -353,6 +364,26 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
       expect(accessRefusal(listed.statusCode, listed.body), listed.body).toBe(false);
     },
   );
+
+  it("SEC-HA-12 (AUTH-01) refuses an admin with an app code the agents' writes, never vacuously, and lets them read the agents and try a policy", async () => {
+    const admin = CALLERS.find((caller) => caller.name === 'admin with an app code');
+    if (admin === undefined) throw new Error('no admin with an app code');
+    const refused = operations.filter((operation) => lacksPowers(operation, admin)).map((o) => `${o.method} ${o.path}`);
+    expect(refused).toEqual(
+      expect.arrayContaining([
+        'POST /v1/agents',
+        'POST /v1/agents/confirm',
+        'POST /v1/agents/{id}/suspend',
+        'POST /v1/agents/{id}/keys/{keyId}/rotate',
+        'POST /v1/agents/{id}/keys/{keyId}/revoke/confirm',
+      ]),
+    );
+    expect(refused).not.toContain('GET /v1/agents');
+    expect(refused).not.toContain('POST /v1/mandates/{id}/policy/simulate');
+    const suspend = operations.find(({ path }) => path === '/v1/agents/{id}/suspend');
+    if (suspend === undefined) throw new Error('no kill switch');
+    expect(codeOf((await app.inject(requestFor(suspend, admin))).body)).toBe('PASSKEY_REQUIRED');
+  });
 
   it('refuses a person in a role everywhere their role is not named, in an organisation they do belong to', async () => {
     const roleRoutes = operations.filter(({ access }) => ROLES.some((role) => access.includes(role)));

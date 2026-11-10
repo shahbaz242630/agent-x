@@ -257,10 +257,18 @@ export function agentScopeProblems(access: unknown, scopes: unknown): string[] {
 
 /**
  * The roles that may act without a passkey (ADR-012 §7): a developer or a
- * viewer may sign in with an authenticator app, and what either may do, anyone
- * in the organisation may. A route naming neither is for admins or approvers.
+ * viewer may sign in with an authenticator app. A route naming neither is for
+ * admins or approvers.
  */
 const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
+
+/**
+ * The roles whose every write needs a passkey (ADR-012 §7), on a route a
+ * developer shares too (the S182 Shannon pass, AUTH-01, partner's choice): an
+ * admin signed in with an app code reads what a developer reads, but changes
+ * nothing.
+ */
+const WITH_PASSKEY: readonly Principal[] = ['admin', 'approver'];
 
 /**
  * Whether a route is for an admin's or an approver's powers: one only an admin
@@ -269,9 +277,17 @@ const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
  */
 const needsPowers = (access: readonly Principal[]): boolean => !access.some((name) => WITHOUT_PASSKEY.includes(name));
 
-/** Whether a session, its role already named by the route, needs a passkey it wasn't signed in with. */
-const passkeyMissing = (amr: readonly string[], access: readonly Principal[]): boolean =>
-  !amr.includes(PASSKEY_METHOD) && needsPowers(access);
+/**
+ * Whether a session, its role already named by the route, needs a passkey it
+ * wasn't signed in with: on a route for powers, or on a write (a route naming
+ * its operation, write-operations.ts) by an admin or an approver.
+ */
+const passkeyMissing = (
+  amr: readonly string[],
+  access: readonly Principal[],
+  role: Principal,
+  writes: boolean,
+): boolean => !amr.includes(PASSKEY_METHOD) && (needsPowers(access) || (writes && WITH_PASSKEY.includes(role)));
 
 /** A signed-in person the route doesn't answer. */
 const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
@@ -408,7 +424,9 @@ export function registerAccess(
             if (membership.outcome === 'active') request.verifiedOrg = orgId.toLowerCase();
             if (membership.outcome !== 'active' || !access.includes(membership.role)) {
               refuse(() => void forbidden(request, reply));
-            } else if (passkeyMissing(session.amr, access)) {
+            } else if (
+              passkeyMissing(session.amr, access, membership.role, request.routeOptions.config.operation !== undefined)
+            ) {
               refuse(() => void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id));
             } else {
               const through = () => {
