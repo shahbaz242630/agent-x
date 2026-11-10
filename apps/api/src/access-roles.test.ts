@@ -3,8 +3,9 @@
 // there says (access.ts). The membership's own reading and verifying is the
 // identity module's (memberships.db.test.ts); here, what the hook does with
 // each answer. B3+-1: an admin's and an approver's powers need a session
-// signed in with a passkey. B6-3d: and none for 7 days after a second factor
-// of theirs is removed (SEC-OPS-04).
+// signed in with a passkey, and so does any write of theirs on a route a
+// developer shares (AUTH-01, S182). B6-3d: and no powers for 7 days after a
+// second factor of theirs is removed (SEC-OPS-04).
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -148,6 +149,23 @@ async function withRoutes(
     reached.push({ member: request.member, person: request.person });
     return { ok: true };
   });
+  // A write a developer shares, as the agents' are (AUTH-01), and a POST beside it that writes nothing.
+  app.post(
+    '/v1/test-builds',
+    { ...answer, config: { access: ['admin', 'approver', 'developer'], operation: 'test-builds.make' } },
+    (request) => {
+      reached.push({ member: request.member, person: request.person });
+      return { ok: true };
+    },
+  );
+  app.post(
+    '/v1/test-tries',
+    { ...answer, config: { access: ['admin', 'approver', 'developer'], writesNothing: true } },
+    (request) => {
+      reached.push({ member: request.member, person: request.person });
+      return { ok: true };
+    },
+  );
   app.get(
     '/v1/test-reads',
     { ...answer, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
@@ -392,7 +410,7 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
     ['admin', '/v1/test-builds'],
     ['approver', '/v1/test-reads'],
   ] as const)(
-    'SEC-HA-12 keeps what a developer or a viewer may do for an active %s with an app code: %s',
+    'SEC-HA-12 keeps what a developer or a viewer may read for an active %s with an app code: %s',
     async (role, url) => {
       const { app, reached } = await withRoutes(ACTIVE(role));
 
@@ -402,6 +420,39 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
       expect(reached).toMatchObject([{ member: { role } }]);
     },
   );
+
+  it.each(['admin', 'approver'] as const)(
+    'SEC-HA-12 (AUTH-01) refuses an active %s signed in with an app code on a write a developer shares as PASSKEY_REQUIRED',
+    async (role) => {
+      const { app, reached } = await withRoutes(ACTIVE(role));
+      const write = (cookie: string) =>
+        signedIn({
+          method: 'POST',
+          url: '/v1/test-builds',
+          headers: { cookie: `${SESSION_COOKIE}=${cookie}`, origin: PUBLIC_ORIGIN, 'idempotency-key': 'k-1' },
+        });
+
+      const refused = await app.inject(write(APP_COOKIE));
+
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toEqual(errorBody('PASSKEY_REQUIRED', FIRST_ID));
+      expect(reached).toEqual([]);
+      expect((await app.inject(write(COOKIE))).statusCode).toBe(200);
+      expect(reached).toMatchObject([{ member: { role } }]);
+    },
+  );
+
+  it('SEC-HA-12 (AUTH-01) lets a developer with an app code make that write, and an admin with one a POST that writes nothing', async () => {
+    const headers = { cookie: `${SESSION_COOKIE}=${APP_COOKIE}`, origin: PUBLIC_ORIGIN, 'idempotency-key': 'k-1' };
+    const developer = await withRoutes(ACTIVE('developer'));
+    const admin = await withRoutes(ACTIVE('admin'));
+
+    expect((await developer.app.inject(signedIn({ method: 'POST', url: '/v1/test-builds', headers }))).statusCode).toBe(
+      200,
+    );
+    expect((await admin.app.inject(signedIn({ method: 'POST', url: '/v1/test-tries', headers }))).statusCode).toBe(200);
+    expect(admin.reached).toMatchObject([{ member: { role: 'admin' } }]);
+  });
 
   it.each(['developer', 'viewer'] as const)(
     'lets an active %s with an app code through where their role is named, and refuses them elsewhere as FORBIDDEN, not for a passkey',
