@@ -245,7 +245,7 @@ function listAll(az: Az, what: string, url: string): unknown[] {
     const done = az.run(['rest', '--method', 'get', '--url', next, '--output', 'json']);
     if (done.status !== 0) {
       throw new Error(
-        `Azure refused to list ${what}, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's identity (AZURE_WATCH_CLIENT_ID) and its role on ${RESOURCE_GROUP}, then run the workflow again.
+        `Azure refused to list ${what}, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's repository secrets (AZURE_WATCH_CLIENT_ID and the other two) and its role on ${RESOURCE_GROUP}, then run the workflow again.
 ${done.stderr.trim()}`,
       );
     }

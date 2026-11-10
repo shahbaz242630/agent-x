@@ -101,7 +101,14 @@ func appName(environment string, workload string) string => 'ca-agentx-${shortNa
 
 @export()
 @description('Who CI signs in to Azure as (G4): a job of this repository in the GitHub environment of the same name. GitHub writes the subject with the owner\'s and the repository\'s IDs for a repository made after 15 July 2026 (`use_immutable_subject`), as ours is; Azure matches it exactly, and a wrong one fails without an error.')
-func releaseSubject(environment string) string => 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}'
+func releaseSubject(environment string) string => '${githubRepository()}:environment:${environment}'
+
+@export()
+@description('Who the job-start watch signs in to Azure as (S175): a job of this repository running on main (a scheduled run or one started by hand there), never in an environment and never a pull request\'s. Kept apart from CI\'s subject, so the watch needs no GitHub environment.')
+func jobWatchSubject() string => '${githubRepository()}:ref:refs/heads/main'
+
+@description('This repository as GitHub names it in a subject: the immutable form, with the owner\'s and the repository\'s IDs.')
+func githubRepository() string => 'repo:shahbaz242630@205810405/agent-x@1368211207'
 
 @export()
 @description('CI\'s role (G4), by the resource group it may be given in: a custom role is named by a GUID, made here from a fixed word so a new display name updates the role rather than orphaning it. The foundation defines it by this name and the apps deployment gives it by this name.')

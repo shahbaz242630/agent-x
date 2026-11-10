@@ -297,7 +297,7 @@ describe('the job-start watch', () => {
     });
     expect(done.status).toBe(1);
     expect(done.lines.at(-1)).toBe(
-      `Azure refused to list ${OPERATOR_JOB}'s runs, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's identity (AZURE_WATCH_CLIENT_ID) and its role on rg-agentx-staging, then run the workflow again.\nERROR: (AuthorizationFailed) not allowed`,
+      `Azure refused to list ${OPERATOR_JOB}'s runs, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's repository secrets (AZURE_WATCH_CLIENT_ID and the other two) and its role on rg-agentx-staging, then run the workflow again.\nERROR: (AuthorizationFailed) not allowed`,
     );
   });
 

@@ -699,14 +699,23 @@ const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 /** The one audience Azure accepts in such a token. */
 const TOKEN_EXCHANGE = 'api://AzureADTokenExchange';
 
+/** This repository as GitHub names it in a subject (names.bicep `githubRepository`). */
+const GITHUB_REPOSITORY = 'repo:shahbaz242630@205810405/agent-x@1368211207';
+
 /**
  * The GitHub subject CI signs in with (G4): a job of this repository in the
  * GitHub environment of the same name, in the immutable form GitHub writes for
  * a repository made after 15 July 2026. names.bicep writes it too, so changing
  * who may sign in takes both.
  */
-const releaseSubject = (environment: string): string =>
-  `repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}`;
+const releaseSubject = (environment: string): string => `${GITHUB_REPOSITORY}:environment:${environment}`;
+
+/**
+ * The GitHub subject the job-start watch signs in with (S175; names.bicep
+ * `jobWatchSubject`): a job of this repository on main, in no environment. Never
+ * CI's environment subject, so the watch's trust can't stand in for CI's.
+ */
+const WATCH_SUBJECT = `${GITHUB_REPOSITORY}:ref:refs/heads/main`;
 
 /** CI's identity in an environment, as names.bicep names it. */
 const releaseIdentityName = (environment: string): string =>
@@ -3814,7 +3823,11 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
     if (!releases.some((release) => trust.id.startsWith(`${release.id}/federatedIdentityCredentials/`))) {
       problem(trust.name, "must be on CI's identity: no other identity is signed in to from outside Azure");
     }
-    trustProblems(trust, expected, problem);
+    trustProblems(
+      trust,
+      { subject: releaseSubject(expected.environment), who: "a job in this environment's GitHub environment" },
+      problem,
+    );
   }
   if (trusts.length !== 1) {
     problem('the deployment', `needs one trust, for CI's identity; the snapshot has ${String(trusts.length)}`);
@@ -3822,10 +3835,10 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
   releaseRoleProblems(snapshot, problem);
 };
 
-/** A trust in GitHub, for CI or the watch: GitHub's issuer, this environment's subject and the token exchange alone. */
+/** A trust in GitHub, for CI or the watch: GitHub's issuer, the one subject wanted and the token exchange alone. */
 function trustProblems(
   trust: PredictedResource,
-  expected: Expectations,
+  wanted: { readonly subject: string; readonly who: string },
   problem: (resource: string, message: string) => void,
 ): void {
   const issuer = at(trust.properties, 'issuer');
@@ -3833,11 +3846,8 @@ function trustProblems(
     problem(trust.name, `must trust ${GITHUB_ISSUER} alone; it trusts ${JSON.stringify(issuer)}`);
   }
   const subject = at(trust.properties, 'subject');
-  if (subject !== releaseSubject(expected.environment)) {
-    problem(
-      trust.name,
-      `must trust ${releaseSubject(expected.environment)} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
-    );
+  if (subject !== wanted.subject) {
+    problem(trust.name, `must trust ${wanted.subject} alone (${wanted.who}); it trusts ${JSON.stringify(subject)}`);
   }
   const audiences = list(at(trust.properties, 'audiences'));
   if (audiences.length !== 1 || audiences[0] !== TOKEN_EXCHANGE) {
@@ -3971,7 +3981,8 @@ const releaseAccess: Check = (snapshot, expected, add) => {
  * The job-start watch (S175): a scheduled GitHub job that reads every job's
  * recent runs (deploy/azure/job-starts.ts). Its identity, the one names.bicep
  * calls job-watch, which no app or job runs as, is trusted for GitHub's issuer,
- * this environment's subject and the token exchange alone, once. Its one custom
+ * main's own subject (WATCH_SUBJECT, never CI's environment subject) and the
+ * token exchange alone, once. Its one custom
  * role, named as `jobWatchRoleName` names it and assignable in the resource
  * group alone, allows WATCH_ACTIONS (reads) and no data action, and is given
  * once, on the resource group, to the watch's identity as a service principal,
@@ -3993,7 +4004,9 @@ const jobWatch: Check = (snapshot, expected, add) => {
     }
   }
   const trusts = ofType(snapshot, TYPES.trust).filter((trust) => trustOn(trust, watch));
-  for (const trust of trusts) trustProblems(trust, expected, problem);
+  for (const trust of trusts) {
+    trustProblems(trust, { subject: WATCH_SUBJECT, who: 'a job on main, in no GitHub environment' }, problem);
+  }
   if (trusts.length !== 1) {
     problem(
       'the deployment',

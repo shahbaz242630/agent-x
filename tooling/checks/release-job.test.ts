@@ -55,13 +55,13 @@ const AZURE_LOGIN = /^azure\/login@[0-9a-f]{40}$/;
 const WATCH_WORKFLOW = '.github/workflows/job-starts.yml';
 
 describe('the release job', () => {
-  it('is, with the job-start watch, the only job anywhere that names an environment or signs in to Azure', () => {
+  it('is the only job anywhere that names an environment, and with the job-start watch the only one that signs in to Azure', () => {
     const naming = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => job.environment !== undefined)
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(naming).toEqual([`${SIGNING_WORKFLOW}: release`, `${WATCH_WORKFLOW}: watch`]);
+    expect(naming).toEqual([`${SIGNING_WORKFLOW}: release`]);
     const signingIn = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
@@ -152,9 +152,10 @@ describe('the release job', () => {
 });
 
 // The job-start watch (S175): a scheduled read of every job's recent runs, as
-// its own read-only identity. Held as narrow as the release: main alone, in
-// `staging`, without a deployment (one would start the smoke test), and with
-// nothing but reading the code and asking for Azure's token.
+// its own read-only identity. Held as narrow as the release: main alone (Azure
+// trusts main's own subject for it, never CI's environment's), in no GitHub
+// environment, its IDs repository secrets, and with nothing but reading the
+// code and asking for Azure's token.
 describe('the job-start watch', () => {
   const found = workflows.find(({ file }) => file === WATCH_WORKFLOW);
   const text = found?.text ?? '';
@@ -162,10 +163,11 @@ describe('the job-start watch', () => {
   const watchSteps = watch.steps ?? [];
   const on = (parse(text) as { on: unknown }).on;
 
-  it('runs every half hour and by hand, on main alone, in staging without a deployment, one at a time', () => {
+  it('runs every half hour and by hand, on main alone, in no environment, one at a time', () => {
     expect(on).toEqual({ schedule: [{ cron: '7,37 * * * *' }], workflow_dispatch: null });
     expect(watch.if).toBe("github.ref == 'refs/heads/main'");
-    expect(watch.environment).toEqual({ name: 'staging', deployment: false });
+    // No environment: it never stands in CI's `staging` subject, and creates no deployment (the smoke test's trigger).
+    expect(watch.environment).toBeUndefined();
     expect((parse(text) as { concurrency: unknown }).concurrency).toEqual({
       group: 'job-starts-staging',
       'cancel-in-progress': false,
@@ -173,9 +175,16 @@ describe('the job-start watch', () => {
     expect(watch['timeout-minutes']).toBe(15);
   });
 
-  it('may read the code and ask for Azure’s token, and nothing else, with no secret', () => {
+  it('may read the code and ask for Azure’s token, and nothing else; its only secrets are its three IDs', () => {
     expect(watch.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
-    expect(JSON.stringify(watch)).not.toMatch(/secrets\./);
+    const named = [...text.matchAll(/secrets\.([A-Z_]+)/g)].map((match) => match[1]);
+    expect([...new Set(named)].sort()).toEqual([
+      'AZURE_WATCH_CLIENT_ID',
+      'AZURE_WATCH_SUBSCRIPTION_ID',
+      'AZURE_WATCH_TENANT_ID',
+    ]);
+    // A variable in a step's env is printed in the public log.
+    expect(text).not.toMatch(/\bvars\./);
   });
 
   it('signs in as its own identity, the IDs masked first, and only reads; then signs out whatever happens', () => {
@@ -185,18 +194,18 @@ describe('the job-start watch', () => {
     const signingIn = at((step) => AZURE_LOGIN.test(step.uses ?? ''));
     expect(watchSteps[0]?.with).toEqual({ 'persist-credentials': false });
     expect(watchSteps[masking]?.env).toEqual({
-      CLIENT: '${{ vars.AZURE_WATCH_CLIENT_ID }}',
-      TENANT: '${{ vars.AZURE_TENANT_ID }}',
-      SUBSCRIPTION: '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+      CLIENT: '${{ secrets.AZURE_WATCH_CLIENT_ID }}',
+      TENANT: '${{ secrets.AZURE_WATCH_TENANT_ID }}',
+      SUBSCRIPTION: '${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}',
     });
     expect(masking).toBeGreaterThan(0);
     expect(bicep).toBeGreaterThan(masking);
     expect(signingIn).toBeGreaterThan(bicep);
     expect(watchSteps.filter((step) => step.uses?.startsWith('azure/login@') === true)).toHaveLength(1);
     expect(watchSteps[signingIn]?.with).toEqual({
-      'client-id': '${{ vars.AZURE_WATCH_CLIENT_ID }}',
-      'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
-      'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+      'client-id': '${{ secrets.AZURE_WATCH_CLIENT_ID }}',
+      'tenant-id': '${{ secrets.AZURE_WATCH_TENANT_ID }}',
+      'subscription-id': '${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}',
     });
     expect(watchSteps[signingIn + 1]).toEqual({
       name: 'Check every job run of the last three hours',
@@ -204,6 +213,6 @@ describe('the job-start watch', () => {
     });
     expect(watchSteps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });
     // The release identity's ID is never named here: the watch signs in as itself alone.
-    expect(text).not.toContain('vars.AZURE_CLIENT_ID');
+    expect(text).not.toMatch(/AZURE_CLIENT_ID/);
   });
 });

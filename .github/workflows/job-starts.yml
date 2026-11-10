@@ -7,12 +7,14 @@
 # do is in the Incident-Response-Playbook, section T.
 #
 # - it signs in by OIDC as the watch's own identity (modules/job-watch.bicep),
-#   whose one role reads the jobs and their runs and nothing else; its client
-#   ID is the staging environment's variable AZURE_WATCH_CLIENT_ID, set once
-#   after the foundation deploy (not a secret, masked all the same)
-# - in GitHub's `staging` environment, which only main may use, as the release
-#   job is; `deployment: false`, so no run creates a deployment, which would
-#   start the smoke test (smoke.yml) every half hour
+#   whose one role reads the jobs and their runs and nothing else
+# - no GitHub environment: Azure trusts main's own subject for the watch
+#   (names.bicep jobWatchSubject), which a scheduled run and one started by hand
+#   on main carry, and a run on another branch or a pull request's doesn't. So
+#   nothing here touches CI's `staging` environment or its trust, and no run
+#   creates a deployment (which would start the smoke test)
+# - its three IDs are repository secrets, set once after the foundation deploy
+#   (a variable in a step's env is printed in the public log); masked as well
 # - one at a time; a run waiting behind another is dropped for the newer
 # - the log is public: the watch prints no setting's value, command or argument
 name: Job starts (staging)
@@ -36,9 +38,6 @@ jobs:
     runs-on: ubuntu-latest
     # Two lists a job, about a minute on Azure's side; the rest is the setup.
     timeout-minutes: 15
-    environment:
-      name: staging
-      deployment: false
     permissions:
       contents: read # to check out the watch
       id-token: write # for the token Azure takes in place of a credential (OIDC)
@@ -56,13 +55,13 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ vars.AZURE_WATCH_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          CLIENT: ${{ secrets.AZURE_WATCH_CLIENT_ID }}
+          TENANT: ${{ secrets.AZURE_WATCH_TENANT_ID }}
+          SUBSCRIPTION: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
         run: |
           for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
             if [ -z "${id}" ]; then
-              echo "::error::One of the watch's three Azure IDs (AZURE_WATCH_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID) is not set, so no job run was checked. Set it in GitHub: Settings, Environments, staging, Variables (the watch's client ID is the foundation deploy's output jobWatchClientId); then run this workflow again."
+              echo "::error::One of the watch's three Azure IDs (the repository secrets AZURE_WATCH_CLIENT_ID, AZURE_WATCH_TENANT_ID, AZURE_WATCH_SUBSCRIPTION_ID) is not set, so no job run was checked. Set it with gh secret set (Incident-Response-Playbook section T), then run this workflow again."
               exit 1
             fi
             echo "::add-mask::${id}"
@@ -74,9 +73,9 @@ jobs:
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_WATCH_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_WATCH_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_WATCH_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
 
       - name: Check every job run of the last three hours
         run: node deploy/azure/job-starts.ts

@@ -266,6 +266,13 @@ const inside = (value: unknown, ...keys: readonly string[]): Mutable => at(value
 const nth = (value: unknown, index: number): Mutable => (value as readonly Mutable[]).at(index) ?? {};
 const first = (value: unknown): Mutable => nth(value, 0);
 
+/** A staging resource's id. A lookup that finds nothing fails, so no case passes on a scope or principal that isn't there. */
+function idOf(pick: (resource: PredictedResource) => boolean): string {
+  const found = staging.predictedResources.find(pick);
+  if (found === undefined) throw new Error('the snapshot has no such resource');
+  return found.id;
+}
+
 const accountProperties = (found: Mutable): Mutable => inside(found, 'properties');
 const accountAcls = (found: Mutable): Mutable => inside(found, 'properties', 'networkAcls');
 /**
@@ -3856,10 +3863,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       subject,
       audiences: ['api://AzureADTokenExchange'],
     };
-    // CI's, and the job-start watch's (S175), which `job-watch` checks.
+    // CI's, and the job-start watch's (S175) for main's own subject, which `job-watch` checks.
+    const mainSubject = 'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/main';
     expect(staging.predictedResources.filter(ANY_TRUST).map((found) => [found.name, found.properties])).toEqual([
       [trust, trusted],
-      ['id-agentx-stg-job-watch/github', trusted],
+      ['id-agentx-stg-job-watch/github', { ...trusted, subject: mainSubject }],
     ]);
     expect(staging.predictedResources.filter(RELEASE).map((found) => found.properties)).toEqual([
       { isolationScope: 'Regional' },
@@ -3891,7 +3899,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
       `${trust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
       `${watchTrust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
-      `${watchTrust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+      `${watchTrust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(mainSubject)}`,
       "the deployment: needs one trust, for CI's identity; the snapshot has 2",
     ]);
     // Another issuer, or an audience besides the token exchange.
@@ -4031,12 +4039,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       policyProblems(snapshotted, STAGING)
         .filter((problem) => problem.rule === 'release-access')
         .map((problem) => `${problem.resource}: ${problem.message}`);
-    // A lookup that finds nothing fails here, so no case below passes on a scope or principal that isn't there.
-    const idOf = (pick: (resource: PredictedResource) => boolean): string => {
-      const found = staging.predictedResources.find(pick);
-      if (found === undefined) throw new Error('the snapshot has no such resource');
-      return found.id;
-    };
     const group = idOf(type('Microsoft.Resources/resourceGroups'));
     const subscription = group.slice(0, group.indexOf('/resourceGroups/'));
     const role = String(staging.predictedResources.find(RELEASE_ROLE)?.name);
@@ -4218,11 +4220,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       policyProblems(snapshotted, expected)
         .filter((problem) => problem.rule === 'job-watch')
         .map((problem) => `${problem.resource}: ${problem.message}`);
-    const idOf = (pick: (resource: PredictedResource) => boolean): string => {
-      const found = staging.predictedResources.find(pick);
-      if (found === undefined) throw new Error('the snapshot has no such resource');
-      return found.id;
-    };
     const WATCH = named(/^id-agentx-stg-job-watch$/);
     const TRUST = (resource: PredictedResource): boolean =>
       type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials')(resource) &&
@@ -4241,7 +4238,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const permissionsOf = (found: Mutable): Mutable => first(at(found, 'properties', 'permissions'));
     const grantProperties = (found: Mutable): Mutable => inside(found, 'properties');
     const principal = (identity: string): string =>
-      `[reference('${idOf(named(new RegExp(`^${identity}$`)))}', '2024-11-30').principalId]`;
+      `[reference('${idOf(named(new RegExp('^' + identity + '$')))}', '2024-11-30').principalId]`;
     const wanted = [
       'Microsoft.App/jobs/read',
       'Microsoft.App/jobs/executions/read',
@@ -4249,7 +4246,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ];
     const alone = `${grant}: must give the job-start watch's role to the watch's identity (principalType ServicePrincipal) on this deployment's resource group alone`;
 
-    // As deployed: read-only, on the group, to the watch, named by names.bicep, trusted for staging's GitHub environment.
+    // As deployed: read-only, on the group, to the watch, named by names.bicep, trusted for main's own subject.
     expect(role).toBe(bicepGuid(group, 'job-watch'));
     expect(staging.predictedResources.filter(WATCH).map((found) => found.properties)).toEqual([
       { isolationScope: 'Regional' },
@@ -4288,10 +4285,20 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(watchProblems(withExtra(second))).toEqual([
       "the deployment: needs one trust for the job-start watch's identity; the snapshot has 2",
     ]);
-    const branch = 'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/main';
-    expect(watchProblems(changed(TRUST, (found) => (inside(found, 'properties').subject = branch)))).toEqual([
-      `id-agentx-stg-job-watch/github: must trust repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(branch)}`,
-    ]);
+    // Main's own subject alone: never CI's environment subject (which would let any job in `staging` sign in as the
+    // watch), another branch, a pull request, or the old form without IDs.
+    const mainSubject = 'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/main';
+    expect(at(staging.predictedResources.find(TRUST)?.properties, 'subject')).toBe(mainSubject);
+    for (const other of [
+      'repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging',
+      'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/other',
+      'repo:shahbaz242630@205810405/agent-x@1368211207:pull_request',
+      'repo:shahbaz242630/agent-x:ref:refs/heads/main',
+    ]) {
+      expect(watchProblems(changed(TRUST, (found) => (inside(found, 'properties').subject = other)))).toEqual([
+        `id-agentx-stg-job-watch/github: must trust ${mainSubject} alone (a job on main, in no GitHub environment); it trusts ${JSON.stringify(other)}`,
+      ]);
+    }
     // An app or a job running as the watch would read with the watch's role.
     const running = changed(JOB('migrate'), (job) => {
       inside(job, 'identity', 'userAssignedIdentities')[idOf(WATCH).toUpperCase()] = {};

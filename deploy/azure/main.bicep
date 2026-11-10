@@ -22,7 +22,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { appName, identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { appName, identityName, jobName, jobWatchSubject, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 import { evidenceAccountName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName } from 'modules/activity-downloads.bicep'
 
@@ -419,7 +419,7 @@ module jobWatch 'modules/job-watch.bicep' = {
     tags: tags
     identityName: names.jobWatch
     roleName: names.jobWatchRole
-    subject: releaseSubject(environment)
+    subject: jobWatchSubject()
   }
 }
 

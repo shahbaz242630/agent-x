@@ -5,10 +5,11 @@
 // trust in GitHub, and its one role, given on the resource group: it may read
 // the jobs and their runs, and nothing else (policy rule `job-watch`).
 //
-// - the trust is the release's subject (names.bicep releaseSubject): a job of
-//   this repository in the GitHub environment of this environment's name, which
-//   only main may use. Two identities may trust one subject; each job picks
-//   its identity by the client ID it signs in with
+// - the trust is main's own subject (names.bicep jobWatchSubject): a job of
+//   this repository running on main, which a scheduled run and one started by
+//   hand there carry, and a run on another branch or a pull request's doesn't.
+//   Not CI's environment subject, so the watch names no GitHub environment and
+//   nothing about it can widen who signs in as CI
 // - the role reads; it can't start, stop, change or list a secret. A job's own
 //   read shows its settings' values but never a secret's (those take
 //   `listSecrets`), so nothing the watch reads is a secret
@@ -22,7 +23,7 @@ param tags object
 param identityName string
 param roleName string
 
-@description('The GitHub subject the watch signs in with (names.bicep releaseSubject).')
+@description('The GitHub subject the watch signs in with (names.bicep jobWatchSubject).')
 param subject string
 
 // Usable only by resources in this region, like every identity here (it is
@@ -88,5 +89,5 @@ resource readsJobs 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-@description('The identity the watch signs in as: its client ID goes into the GitHub environment as AZURE_WATCH_CLIENT_ID (not a secret).')
+@description('The identity the watch signs in as: its client ID goes into the repository secret AZURE_WATCH_CLIENT_ID.')
 output clientId string = watch.properties.clientId
