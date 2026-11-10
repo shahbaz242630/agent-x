@@ -30,8 +30,10 @@ export {
   firePendingChecks,
   guardsOff,
   guardsOn,
+  lockNotAvailable,
   readRowsAlike,
   rowsAsStored,
+  shortLockWait,
   type StateAsRead,
   stateObjectIds,
   type StateRepairRow,
@@ -39,6 +41,7 @@ export {
   statesAsRead,
   StateWriteMissed,
   triggersOf,
+  withRepairStates,
   writeStateRow,
 } from './infrastructure/state-repair.ts';
 export {

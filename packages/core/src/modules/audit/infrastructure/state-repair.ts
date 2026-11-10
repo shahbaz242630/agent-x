@@ -18,17 +18,62 @@
 // the repair switches those guards alone off on the tables it writes, inside
 // its one transaction, and on again before it checks and commits: ALTER TABLE
 // takes the table's SHARE ROW EXCLUSIVE lock, so no other session writes the
-// table, or sees the guard off, until it commits with the guard on again.
+// table, or sees the guard off, until it commits with the guard on again. Every
+// organisation's writes to that table wait for it, so the repair waits for the
+// lock a second at most (shortLockWait) and keeps the window to its writes and
+// their own checks: everything else it checks before.
 // Every other trigger stays on, and whatever a planted one did would fail the
 // check that the row as written is the copy's exactly.
 import type { SignedRow, SignedRowKey, SignedStateTable } from '@agentx/platform/db';
-import { assertTenant, readSignedRows, signedRowIds } from '@agentx/platform/db';
+import { assertTenant, readSignedRows, signedRowIds, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import { sql, type Transaction } from 'kysely';
+import type { Logger } from '@agentx/platform/observability';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { AuditTrail, LatestSignedState } from './audit-trail.ts';
-import { judgeSignedRow, type StateCheck } from './signed-states.ts';
+import type { IdGenerator } from '../../../shared-kernel/index.ts';
+import { type AuditTrail, createAuditTrail, type LatestSignedState } from './audit-trail.ts';
+import { createSignedStates, judgeSignedRow, type SignedStates, type StateCheck } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
+
+/**
+ * A state repair's one transaction, withTenant's for the organisation, each
+ * statement limited, with signed states of its own that hand nothing on to
+ * the hold: a repair that finds a record still tampered with rolls back, and
+ * its outcome and the verifier's alarm line are the record, so a failed repair
+ * never adds a hold event or a row of the holds waiting, nor moves the chain's
+ * head under its plan. The hold is left as it is, as by the chain's repair.
+ */
+export function withRepairStates<Result>(
+  db: Kysely<AuditTables>,
+  orgId: string,
+  services: { readonly keys: KeyProvider; readonly ids: IdGenerator; readonly logger: Logger },
+  work: (tx: Transaction<AuditTables>, states: SignedStates) => Promise<Result>,
+): Promise<Result> {
+  const states = createSignedStates({
+    keys: services.keys,
+    trail: createAuditTrail({ keys: services.keys, ids: services.ids }),
+    logger: services.logger,
+    onTamper: () => undefined,
+    // It reads no hold: nothing waiting could change what it does.
+    unrecorded: () => undefined,
+  });
+  return withTenant(db, orgId, (tx) => work(tx, states), { limited: true });
+}
+
+/**
+ * From here to the end of the transaction, a lock is waited for a second at
+ * most: the repair's tables' locks hold every organisation's writes to them,
+ * so a table some other write holds refuses the repair (busy) rather than
+ * queueing everyone behind it. Nothing after needs longer: every row it then
+ * locks is in a table it already holds.
+ */
+export async function shortLockWait(tx: Transaction<AuditTables>): Promise<void> {
+  await sql`set local lock_timeout = '1s'`.execute(tx);
+}
+
+/** Whether an error is Postgres giving up on a lock (55P03, lock_not_available). */
+export const lockNotAvailable = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === '55P03';
 
 /** The most objects one read here takes: readSignedRows' and latestSignedStates' limit alike. */
 export const STATES_READ_AT_ONCE = 500;

@@ -10,18 +10,22 @@
 // a seal, a MAC or a hash. Every write is in one transaction, as the owner
 // (the only role that may delete a row, or write past the database's guards),
 // and:
-// 1. on each table it writes, in the lock order (ADR-006 §6), the guards
+// 1. before any table's lock, the whole chain is checked against its anchor
+//    and every object of the tables it leaves alone by the app's own verifier
+//    (verifyAll), so none of that runs while other organisations wait
+// 2. on each table it writes, in the lock order (ADR-006 §6), the guards
 //    that would refuse an original put back are switched off: that takes the
-//    table's lock, so nothing else writes it until this commits (state-repair.ts)
-// 2. each row it writes is locked for change, and must still be the live row
+//    table's lock, so nothing else writes it, for any organisation, until
+//    this commits (state-repair.ts). Each lock is waited for a second at most:
+//    a table other work holds refuses the repair as `busy`
+// 3. each row it writes is locked for change, and must still be the live row
 //    the plan read, its object's latest signed event the same: an event
 //    about an object needs its row changed first, which now waits
-// 3. the rows are written, the guards switched on again, and each row read
+// 4. the rows are written, the guards switched on again, and each row read
 //    back must be the copy's exactly, or gone where it was removed
-// 4. every row written is judged by the app's own verifier (verifiedState),
-//    then every authority object of the organisation (verifyAll), then the
-//    whole chain against its anchor. Anything short of verified rolls it all
-//    back.
+// 5. every row written is judged by the app's verifier (verifiedState), then
+//    every object of the tables it wrote (verifyAll). Anything short of
+//    verified rolls it all back.
 // It takes no chain head's lock: it writes no event, and the rows it writes
 // are held by their tables' locks. A deadlock with the organisation's own
 // work (rare while it is on hold) rolls it back too; run it again.
@@ -30,14 +34,17 @@
 // - `plan`: the plan made now is itself refused (state-recovery.ts's reasons)
 // - `stale`: the plan made now isn't the one asked for (its digest differs)
 // - `moved`: a row, or its latest signed event, changed after the plan
+// - `busy`: a table or row it writes was held past its second's wait
 // - `write_refused`: the database refused a write (a foreign key, a check):
 //   rolled back, with the database's code alone
 // - `unverified`: what was written didn't read back as planned, a trigger
 //   was left otherwise than it was, or the verifier found anything tampered
 //   with: rolled back
 //
-// The organisation's integrity hold is left as it is: its admin clears it
-// with a step-up once the investigation is recorded, as for any hold.
+// The organisation's integrity hold is left as it is, even by a repair that
+// fails: its signed states hand nothing on to the hold (withRepairStates), so
+// its outcome and the verifier's alarm line are the record. Its admin clears
+// the hold with a step-up once the investigation is recorded, as for any hold.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import {
   type AuditTables,
@@ -47,12 +54,14 @@ import {
   firePendingChecks,
   guardsOff,
   guardsOn,
+  lockNotAvailable,
   readRowsAlike,
   rowsAsStored,
+  shortLockWait,
   type SignedStates,
   STATES_READ_AT_ONCE,
   triggersOf,
-  withSignedStates,
+  withRepairStates,
   writeStateRow,
 } from '@agentx/core/modules/audit';
 import { OBJECTS_CHECKED } from '@agentx/core/modules/identity';
@@ -72,13 +81,15 @@ import {
 type Planned = Extract<StatePlan, { ok: true }>;
 
 /** Which check of the rows as written failed. */
-type UnverifiedCheck = 'written' | 'guards' | 'state' | 'whole' | 'chain';
+type UnverifiedCheck = 'written' | 'guards' | 'state' | 'whole' | 'untouched' | 'chain';
 
 export type StateRestoreOutcome =
   | { readonly ok: true; readonly plan: Planned }
   | { readonly ok: false; readonly reason: 'plan'; readonly plan: Extract<StatePlan, { ok: false }> }
   | { readonly ok: false; readonly reason: 'stale'; readonly digest: string }
   | { readonly ok: false; readonly reason: 'moved'; readonly subjectType: string; readonly objectId: string }
+  /** A table, or a row in one, held by other work past the repair's short wait: run it again. */
+  | { readonly ok: false; readonly reason: 'busy'; readonly subjectType?: string }
   | {
       readonly ok: false;
       readonly reason: 'write_refused';
@@ -130,7 +141,7 @@ export async function restoreStates(sides: StateRestoreSides): Promise<StateRest
   const madeNow = statePlanDigest(plan, orgId, sides.anchor);
   if (madeNow !== sides.digest) return { ok: false, reason: 'stale', digest: madeNow };
   try {
-    return await withSignedStates(
+    return await withRepairStates(
       sides.live,
       orgId,
       { keys: sides.keys, ids: uuidV7Ids, logger: sides.logger },
@@ -162,7 +173,31 @@ const batches = (rows: readonly PlannedState[]): PlannedState[][] =>
 
 const about = ({ table, id }: PlannedState) => ({ subjectType: table.subject, objectId: id });
 
-/** The repair's one transaction: locked, compared, written, read back and verified; Stopped rolls it back. */
+/** A verifyAll's tampered outcome as the repair's refusal, naming its first finding. */
+function wholeChecked(whole: Awaited<ReturnType<SignedStates['verifyAll']>>, check: 'whole' | 'untouched'): void {
+  if (whole.outcome !== 'tampered') return;
+  // The first finding names where: a tampered outcome always has one.
+  const named = whole.findings.slice(0, 1).map(({ subjectType, objectId, sign }) => ({ subjectType, objectId, sign }));
+  throw new Stopped({ ok: false, reason: 'unverified', check, ...named[0] });
+}
+
+/** Runs `step` under the short lock wait: a lock not had within it refuses the repair as `busy`, naming the table. */
+async function notBusy<T>(table: SignedStateTable | undefined, step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (!lockNotAvailable(error)) throw error;
+    throw new Stopped({ ok: false, reason: 'busy', ...(table === undefined ? {} : { subjectType: table.subject }) });
+  }
+}
+
+/**
+ * The repair's one transaction: checked, locked, compared, written, read back
+ * and verified; Stopped rolls it back. Every organisation's writes to the
+ * tables it writes wait from its first guard switched off to its commit, so
+ * all it can check before (the chain, every object of the tables it leaves
+ * alone) it checks before; inside, only what it wrote.
+ */
 async function repairIn(
   tx: AuditTransaction,
   states: SignedStates,
@@ -171,15 +206,26 @@ async function repairIn(
 ): Promise<StateRestoreOutcome> {
   const { orgId, tables = AUTHORITY_TABLES } = sides;
   const touched = touchedTables(tables, plan);
+  const writes = new Set(touched.map(({ table }) => table.table));
   await readRowsAlike(tx);
-  // 1. Each table's guards off, in the lock order, each table's triggers as they were kept to compare after.
+  // 1. Before any table's lock: the whole chain against its anchor, and every object of the tables it leaves alone.
+  // The trail's IDs are never used: the check writes nothing.
+  const report = await createAuditTrail({ keys: sides.keys, ids: uuidV7Ids }).verify(tx, orgId, sides.anchor);
+  if (!report.ok) throw new Stopped({ ok: false, reason: 'unverified', check: 'chain' });
+  const untouched = tables.filter(({ table }) => !writes.has(table));
+  wholeChecked(
+    await states.verifyAll(tx, orgId, untouched, OBJECTS_CHECKED, { counted: () => undefined }),
+    'untouched',
+  );
+  // 2. The lock window, a second's wait for each lock at most: each table's guards off, in the lock order, its
+  // triggers as they were kept to compare after; then each row locked and compared with what the plan read.
+  await shortLockWait(tx);
   const switched = [];
   for (const { table } of touched) {
     const before = await triggersOf(tx, table);
-    switched.push({ table, before, off: await guardsOff(tx, table) });
+    switched.push({ table, before, off: await notBusy(table, () => guardsOff(tx, table)) });
   }
-  // 2. Each row locked and compared with what the plan read.
-  await stillAsPlanned(tx, sides, touched);
+  await notBusy(undefined, () => stillAsPlanned(tx, sides, touched));
   // 3. Removed first, the latest tables first, then put back in the lock order: a planted row named by another goes
   // before what it names, and an original before what names it.
   for (const { rows } of touched.toReversed()) {
@@ -198,19 +244,13 @@ async function repairIn(
       throw new Stopped({ ok: false, reason: 'unverified', check: 'guards', subjectType: table.subject });
     }
   }
-  // 4. Read back, then judged by the app's own verifier.
+  // 4. Read back, then judged by the app's own verifier: each row written, then every object of the tables written.
   await asWritten(tx, states, orgId, touched);
-  const whole = await states.verifyAll(tx, orgId, tables, OBJECTS_CHECKED, { counted: () => undefined });
-  if (whole.outcome === 'tampered') {
-    // The first finding names where: a tampered outcome always has one.
-    const named = whole.findings
-      .slice(0, 1)
-      .map(({ subjectType, objectId, sign }) => ({ subjectType, objectId, sign }));
-    throw new Stopped({ ok: false, reason: 'unverified', check: 'whole', ...named[0] });
-  }
-  // The trail's IDs are never used: the check writes nothing.
-  const report = await createAuditTrail({ keys: sides.keys, ids: uuidV7Ids }).verify(tx, orgId, sides.anchor);
-  if (!report.ok) throw new Stopped({ ok: false, reason: 'unverified', check: 'chain' });
+  const writtenTables = tables.filter(({ table }) => writes.has(table));
+  wholeChecked(
+    await states.verifyAll(tx, orgId, writtenTables, OBJECTS_CHECKED, { counted: () => undefined }),
+    'whole',
+  );
   return { ok: true, plan };
 }
 
@@ -220,12 +260,10 @@ async function eachBatch(
   check: (table: SignedStateTable, batch: readonly PlannedState[], ids: readonly string[]) => Promise<void>,
 ): Promise<void> {
   for (const { table, rows } of touched) {
-    for (const batch of batches(rows))
-      await check(
-        table,
-        batch,
-        batch.map(({ id }) => id),
-      );
+    for (const batch of batches(rows)) {
+      const ids = batch.map(({ id }) => id);
+      await check(table, batch, ids);
+    }
   }
 }
 
@@ -340,6 +378,8 @@ export function stateOutcomeLine(outcome: StateRestoreOutcome): Readonly<Record<
       return { ok: false, reason: 'stale', digestNow: outcome.digest };
     case 'moved':
       return { ok: false, reason: 'moved', subjectType: outcome.subjectType, objectId: outcome.objectId };
+    case 'busy':
+      return { ok: false, reason: 'busy', subjectType: outcome.subjectType ?? null };
     case 'write_refused':
       return {
         ok: false,

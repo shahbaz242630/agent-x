@@ -63,12 +63,8 @@ vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
       faults.guardsLeftOff ? Promise.resolve() : actual.guardsOn(...args),
     writeStateRow: (...args: Parameters<typeof actual.writeStateRow>) =>
       faults.writeFails === undefined ? actual.writeStateRow(...args) : Promise.reject(faults.writeFails),
-    withSignedStates: <Result>(
-      ...[db, org, services, work]: Parameters<
-        typeof actual.withSignedStates<import('@agentx/core/modules/audit').AuditTables, Result>
-      >
-    ) =>
-      actual.withSignedStates(db, org, services, (tx, states) =>
+    withRepairStates: <Result>(...[db, org, services, work]: Parameters<typeof actual.withRepairStates<Result>>) =>
+      actual.withRepairStates(db, org, services, (tx, states) =>
         work(
           tx,
           faults.verifierRefuses
@@ -586,6 +582,10 @@ describe('PL-29 follow-up: the plan’s and repair’s records', () => {
       { reason: 'moved', objectId: 'x' },
     ],
     [
+      { ok: false, reason: 'busy' },
+      { reason: 'busy', subjectType: null },
+    ],
+    [
       { ok: false, reason: 'write_refused', subjectType: 'agent', objectId: 'x', code: '23503' },
       { reason: 'write_refused', code: '23503' },
     ],
@@ -638,12 +638,24 @@ describe('PL-29 follow-up: the plan’s and repair’s records', () => {
     expect(await verifiedNow()).toMatchObject({ outcome: 'verified' });
   });
 
-  it('rolls back when the verifier finds a row tampered with during the repair, raising its alarm', async () => {
+  it('checks the tables it leaves alone before it locks any, and a failure there touches no hold', async () => {
     await copied();
     await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
     const digest = await digestNow();
     const capture = new LogCapture();
-    // The organisation's row tampered with in another session, held: the repair's whole check waits for it.
+    // Its own session: rowOf below ends the shared one.
+    const watcher = await tamperAsOwner(live, INVITATIONS, orgId);
+    const counts = async () =>
+      (
+        await watcher.query<{ events: string; waiting: string }>(
+          `select (select pg_catalog.count(*) from audit.events where org_id = $1)::text as events,
+                  (select pg_catalog.count(*) from directory.holds_waiting where org_id = $1)::text as waiting`,
+          [orgId],
+        )
+      )[0];
+    const before = await counts();
+    // The organisation's row, which the plan leaves alone, tampered with in another session and held: the repair's
+    // check of the tables it leaves alone waits for it, and holds no table's lock while it waits.
     const other: TestClient = await live.connect('owner');
     const monitor: TestClient = await live.connect('admin');
     try {
@@ -653,21 +665,50 @@ describe('PL-29 follow-up: the plan’s and repair’s records', () => {
         orgId,
       ]);
       const repairing = restore(digest, { logger: testLogger(capture) });
-      await waitUntilQueued(monitor, 1);
+      const [waiting] = await waitUntilQueued(monitor, 1);
+      const tableLocks = await monitor.query<{ mode: string }>(
+        `select l.mode from pg_catalog.pg_locks l
+         where l.pid = $1 and l.relation = 'identity.invitations'::regclass and l.mode = 'ShareRowExclusiveLock'`,
+        [waiting],
+      );
+      expect(tableLocks).toEqual([]);
       await other.query('commit');
-      expect(await repairing).toMatchObject({
+      expect(await repairing).toEqual({
         ok: false,
         reason: 'unverified',
-        check: 'whole',
+        check: 'untouched',
         subjectType: ORGANIZATIONS.subject,
         objectId: orgId,
+        sign: 'seal',
       });
     } finally {
       await other.end();
       await monitor.end();
     }
     expect(JSON.parse(String(await rowOf(INVITATIONS.table, invitationId)))).toMatchObject({ expires_at: LATER_JSON });
+    // The alarm line is the record; no hold event and no row of the holds waiting were written.
     expect(capture.lines().some((line) => line.event === 'audit.integrity_failed')).toBe(true);
+    expect(await counts()).toEqual(before);
+    await watcher.end();
+  });
+
+  it('refuses as busy, within a few seconds, a table another organisation is writing', async () => {
+    await copied();
+    await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
+    const digest = await digestNow();
+    // A write in progress on the table, whatever its organisation: it holds the table's ROW EXCLUSIVE lock.
+    const other: TestClient = await live.connect('owner');
+    try {
+      await other.query('begin');
+      await other.query('lock table identity.invitations in row exclusive mode');
+      const started = Date.now();
+      expect(await restore(digest)).toEqual({ ok: false, reason: 'busy', subjectType: INVITATIONS.subject });
+      expect(Date.now() - started).toBeLessThan(5000);
+    } finally {
+      await other.query('rollback');
+      await other.end();
+    }
+    expect(await triggersOn(INVITATIONS.table)).toMatchObject({ status_guard: 'O' });
   });
 });
 

@@ -977,7 +977,7 @@ export const PLAIN_WORDS = {
   'operator.state_restore_refused': {
     happened: "An organisation's tampered records repair was refused or rolled back.",
     broke: 'Nothing was changed, and the organisation stays on hold.',
-    next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
+    next: 'Read the reason in the line. If a table was busy, run it again; if the plan changed, make a new one. Then follow playbook H.',
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',

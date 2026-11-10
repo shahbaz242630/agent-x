@@ -1230,6 +1230,8 @@ const STATE_RESTORE_REFUSALS: Readonly<Record<string, (line: Readonly<Record<str
   plan: (line) => `the plan made now is refused (${String(line.planRefused)}): make a new plan and read why`,
   stale: () => 'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
   moved: (line) => `${String(line.subjectType)} ${String(line.objectId)} changed as the repair began: make a new plan`,
+  busy: () =>
+    'a table it writes was busy with other work for more than a second, so it stopped rather than hold everyone up: run it again',
   write_refused: (line) =>
     `the database refused a write (code ${String(line.code)}), so every write was rolled back: read playbook H`,
   unverified: (line) =>

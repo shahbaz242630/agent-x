@@ -242,6 +242,7 @@ type Ending =
   | 'state-restore-plan'
   | 'state-restore-stale'
   | 'state-restore-moved'
+  | 'state-restore-busy'
   | 'state-restore-write'
   | 'state-restore-unverified'
   | 'state-restore-unknown'
@@ -584,6 +585,10 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
       subjectType: 'agent',
       objectId: OTHER_ID,
     }),
+    TERMINATED,
+  ],
+  'state-restore-busy': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'busy', subjectType: 'invitation' }),
     TERMINATED,
   ],
   'state-restore-write': (id) => [
@@ -2618,6 +2623,10 @@ describe("PL-29 follow-up: an organisation's authority rows planned and repaired
       'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
     ],
     ['state-restore-moved', `agent ${OTHER_ID} changed as the repair began: make a new plan`],
+    [
+      'state-restore-busy',
+      'a table it writes was busy with other work for more than a second, so it stopped rather than hold everyone up: run it again',
+    ],
     [
       'state-restore-write',
       'the database refused a write (code 23503), so every write was rolled back: read playbook H',

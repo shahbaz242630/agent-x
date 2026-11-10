@@ -870,7 +870,9 @@ const notTheHold = (table: SignedStateTable): void => {
  * correlation ID (Rule Book §8); each alarm adds the organisation, and is
  * handed to `onTamper` as it is raised. What it knows of each transaction's
  * rows (locks and verified states) is its own: use one for the whole
- * transaction. Outside tests, only withSignedStates builds one.
+ * transaction. Outside tests, only withSignedStates builds one, besides the
+ * hold's own holder and a state repair's (withRepairStates), which hand
+ * nothing on to the hold.
  */
 export function createSignedStates({
   keys,
