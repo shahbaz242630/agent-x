@@ -229,7 +229,7 @@ jobs:
 
       # Every part's tests, counted and their coverage merged, each file held to its limit.
       - name: Tests, gate proofs and coverage (the parts merged)
-        run: pnpm vitest --merge-reports --coverage
+        run: pnpm vitest --merge-reports .vitest-reports --coverage
 
   dependency-review:
     name: Dependency review

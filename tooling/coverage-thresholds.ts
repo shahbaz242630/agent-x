@@ -15,9 +15,15 @@ export const MONEY_CRITICAL_GLOB =
 /** The hand-off, its fair turns and its bank breaker (4D2e Stage F): they send money, in the API's own folder. */
 const MONEY_CRITICAL_API_GLOB = 'apps/api/src/{fair-lanes,rail-health,handoff,payment-checks}.ts';
 
+/**
+ * Each glob says perFile itself: since Vitest 5 a glob's entry no longer takes the top-level one, and would judge its
+ * files as one average, so a well-tested money file could hide an untested one (S183; the gate proof caught it).
+ */
+const moneyCritical = { ...standard, branches: 95, perFile: true };
+
 export const coverageThresholds = {
   perFile: true,
   ...standard,
-  [MONEY_CRITICAL_GLOB]: { ...standard, branches: 95 },
-  [MONEY_CRITICAL_API_GLOB]: { ...standard, branches: 95 },
+  [MONEY_CRITICAL_GLOB]: moneyCritical,
+  [MONEY_CRITICAL_API_GLOB]: moneyCritical,
 };
