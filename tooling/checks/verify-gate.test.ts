@@ -115,7 +115,7 @@ describe('CI-05 verify gate', () => {
     const runs = (verifyJob?.steps ?? []).map((step) => step.run);
     const { 'test:coverage': _tests, ...statics } = CHECKS;
     expect(runs).toEqual(expect.arrayContaining(Object.keys(statics).map((check) => `pnpm ${check}`)));
-    expect(runs).toContain('pnpm vitest --merge-reports --coverage');
+    expect(runs).toContain('pnpm vitest --merge-reports .vitest-reports --coverage');
     const partRuns = (partsJob?.steps ?? []).map((step) => step.run ?? '');
     expect(partRuns.filter((run) => run.startsWith('pnpm test:coverage '))).toEqual([PART_RUN]);
     // Together the parts run every project the config makes, each once: one added is in a part or this fails.
