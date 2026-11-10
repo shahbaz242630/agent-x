@@ -61,7 +61,8 @@ describe('the sample', () => {
       'apps/api/src/spend-request-decisions.ts',
       'apps/api/src/start-web.ts',
     ]);
-  });
+    // A read of every source file: past the default 5 s on a busy laptop's whole unit run (S183, Vitest 5).
+  }, 30_000);
 });
 
 describe('a decision’s timers', () => {
