@@ -16,10 +16,11 @@
 //
 // **A known gap:** a run is compared with the job as it is now. A run started
 // before the job last changed (every release, every operator run) that differs
-// only as a deploy does (an image of the same repository, a plain setting's
+// only as a release does (another digest of our own image, AGENTX_RELEASE's
 // value) is listed NOT COMPARED, a warning on the workflow's page; any other
 // difference stays a finding. So an override that changes only those, followed
-// by a deploy, would pass as one. A start doesn't move the job's change time.
+// by a release, would pass as one: an older image of ours, and a release label.
+// A start doesn't move the job's change time.
 // Azure keeps a job's last 100 runs: a full list still inside the window, or a
 // flood of runs, is a finding of its own. Nothing here stops a start: it only
 // makes one seen.
@@ -145,9 +146,9 @@ const sameList = (one: readonly string[], other: readonly string[]): boolean =>
 
 /**
  * One way a run differs from its job, in plain words with no value. `routine`
- * when a release or a deploy also makes it (another image from the same
- * repository, or a plain setting's value), so a run older than the job's last
- * change may differ so honestly; anything else no deploy of ours does.
+ * when a release also makes it (RELEASE_SETTINGS' values, another digest of an
+ * image of ours), so a run older than the job's last change may differ so
+ * honestly; anything else no release does.
  */
 export interface Difference {
   readonly text: string;
@@ -156,8 +157,27 @@ export interface Difference {
 
 const unusual = (text: string): Difference => ({ text, routine: false });
 
-/** An image's repository: the reference without its tag or digest, so a release's new digest keeps it. */
-const repositoryOf = (image: string): string => image.replace(/@.*$/, '').replace(/:[^/:]*$/, '');
+/**
+ * The settings whose values a release writes (apps.bicep `release`): every
+ * other value is the same from one release to the next, so a run older than the
+ * job's change that points the database, the keys or a URL elsewhere is a finding.
+ */
+const RELEASE_SETTINGS: ReadonlySet<string> = new Set(['AGENTX_RELEASE']);
+
+/** Our own images, which a release moves to a new digest; a third party's (Zitadel's) changes only by hand. */
+const OUR_REPOSITORIES: ReadonlySet<string> = new Set([
+  'ghcr.io/shahbaz242630/agent-x',
+  'ghcr.io/shahbaz242630/agent-x-load',
+]);
+
+/** An image named by digest, `<repository>@sha256:<64 hex>`: its repository, or undefined for any other form. */
+const digestRepository = (image: string): string | undefined => /^([^@\s]+)@sha256:[0-9a-f]{64}$/.exec(image)?.[1];
+
+/** Whether a run's other image is one a release makes: another digest of the same image of ours, nothing else. */
+const releasedImage = (expected: string, ran: string): boolean => {
+  const repository = digestRepository(expected);
+  return repository !== undefined && OUR_REPOSITORIES.has(repository) && digestRepository(ran) === repository;
+};
 
 /** How one container's settings differ, by name alone: never a value. */
 function settingDifferences(where: string, job: readonly Setting[], ran: readonly Setting[]): Difference[] {
@@ -169,11 +189,15 @@ function settingDifferences(where: string, job: readonly Setting[], ran: readonl
   for (const [name, setting] of run) {
     const expected = own.get(name);
     if (expected === undefined) found.push(unusual(`${where} had a setting the job doesn't: ${shown(name)}`));
-    else if (expected.secretRef !== setting.secretRef) {
-      // Another secret, or a value where the job reads a secret (or the other way): never a release's change.
+    else if (
+      expected.secretRef !== setting.secretRef ||
+      (expected.value === undefined) !== (setting.value === undefined)
+    ) {
+      // Another secret, a value where the job reads a secret (or the other way), or neither: never a release's change.
       found.push(unusual(`${where}'s setting ${shown(name)} reads another secret, or none, than the job's`));
     } else if (expected.value !== setting.value) {
-      found.push({ text: `${where}'s setting ${shown(name)} differs from the job's`, routine: true });
+      const routine = RELEASE_SETTINGS.has(name);
+      found.push({ text: `${where}'s setting ${shown(name)} differs from the job's`, routine });
     }
   }
   for (const name of own.keys()) {
@@ -188,8 +212,8 @@ function settingDifferences(where: string, job: readonly Setting[], ran: readonl
 function sameNameDifferences(where: string, expected: Container, container: Container): Difference[] {
   const found: Difference[] = [];
   if (container.image !== expected.image) {
-    const routine = repositoryOf(container.image) === repositoryOf(expected.image);
-    found.push({ text: `${where} ran another image${routine ? '' : ', from another repository'}`, routine });
+    const routine = releasedImage(expected.image, container.image);
+    found.push({ text: `${where} ran another image${routine ? '' : ', not a release of the job’s own'}`, routine });
   }
   if (!sameList(container.command, expected.command)) found.push(unusual(`${where} ran another command`));
   if (!sameList(container.args, expected.args)) found.push(unusual(`${where} ran with other arguments`));
@@ -361,8 +385,9 @@ const BUSY_PER_THREE_HOURS = 20;
 export function historyProblems(listed: readonly Run[], since: number, hours: number): string[] {
   const problems: string[] = [];
   const recent = listed.filter((run) => inWindow(run, since)).length;
-  const oldest = listed.at(-1);
-  if (listed.length >= HISTORY_KEPT && oldest !== undefined && inWindow(oldest, since)) {
+  // The earliest start listed, in whatever order Azure lists them: before the window, and the window is whole.
+  const reachesBack = listed.some((run) => run.startedAt !== undefined && run.startedAt < since);
+  if (listed.length >= HISTORY_KEPT && !reachesBack) {
     problems.push(
       `the run history may be incomplete: Azure keeps ${String(HISTORY_KEPT)} runs, and all ${String(recent)} listed started in the window, so older runs in it may be gone unchecked`,
     );
@@ -420,7 +445,7 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
         case 'not-comparable':
           // A warning GitHub shows on the run's page, so it isn't lost in a green run's log.
           steps.say(
-            `::warning::${run.name} (started ${when(run.startedAt)}): NOT COMPARED. It started before ${job.name} last changed (${when(job.changedAt)}), and differs from the job as it is now only as a deploy does (${verdict.differences.join('; ')}). Check it by hand if nobody deployed then.`,
+            `::warning::${run.name} (started ${when(run.startedAt)}): NOT COMPARED. It started before ${job.name} last changed (${when(job.changedAt)}), and differs from the job as it is now only as a release does (${verdict.differences.join('; ')}). Check it by hand if nothing was released then.`,
           );
           break;
         case 'changed':

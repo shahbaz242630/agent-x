@@ -34,13 +34,15 @@ const OPERATOR = {
     { name: 'AGENTX_ENV', value: 'staging' },
     { name: setting('AGENTX', 'DB', 'PASSWORD', 'FILE'), value: '/mnt/secrets/db-operator-password' },
     { name: setting('AGENTX', 'HELD', 'REF'), secretRef: 'held-ref' },
+    { name: 'AGENTX_DB_HOST', value: 'db.example.invalid' },
+    { name: 'AGENTX_RELEASE', value: 'commit-one' },
   ],
   resources: { cpu: 0.5, memory: '1Gi' },
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
 };
 
 /** The same container as a run records it: no mounts, a type and a storage size of its own. */
-const RAN = (changes: Partial<typeof OPERATOR> = {}): Record<string, unknown> => {
+const RAN = (changes: Partial<Record<keyof typeof OPERATOR, unknown>> = {}): Record<string, unknown> => {
   const { volumeMounts: _mounts, ...rest } = OPERATOR;
   return {
     ...rest,
@@ -169,7 +171,7 @@ describe('the job-start watch', () => {
     [
       'another image',
       RAN({ image: 'ghcr.io/elsewhere/tool:1' }),
-      'the container operator ran another image, from another repository',
+      'the container operator ran another image, not a release of the job’s own',
     ],
     [
       'a changed setting value',
@@ -238,26 +240,43 @@ describe('the job-start watch', () => {
     expect(twice.lines).toContain('  - the container operator named a setting twice');
   });
 
-  it("lists a run older than its job's last change as not compared only when it differs as a deploy does", async () => {
+  it("lists a run older than its job's last change as not compared only when it differs as a release does", async () => {
     // The job changed at 13:02:02 UTC (written with no zone, as Azure does); the run started at 12:16.
+    const released = `ghcr.io/shahbaz242630/agent-x@sha256:${'b'.repeat(64)}`;
+    const withSetting = (name: string, value: string): unknown[] =>
+      OPERATOR.env.map((entry) => (entry.name === name ? { name, value } : entry));
     const world: World = {
       jobs: [JOB(OPERATOR_JOB, [OPERATOR], '2026-11-10T13:02:02.4268454')],
       runs: {
         [OPERATOR_JOB]: [
-          EXECUTION(RUN_NAME, LATELY, [
-            RAN({
-              image: 'ghcr.io/shahbaz242630/agent-x@sha256:old',
-              env: [{ name: 'AGENTX_ENV', value: 'before-the-release' }, ...OPERATOR.env.slice(1)],
-            }),
-          ]),
+          EXECUTION(RUN_NAME, LATELY, [RAN({ image: released, env: withSetting('AGENTX_RELEASE', 'commit-before') })]),
         ],
       },
     };
     const done = await run(world);
     expect(done.status).toBe(0);
     expect(done.lines).toContain(
-      `::warning::${RUN_NAME} (started 2026-11-10 12:16 UTC): NOT COMPARED. It started before ${OPERATOR_JOB} last changed (2026-11-10 13:02 UTC), and differs from the job as it is now only as a deploy does (the container operator ran another image; the container operator's setting AGENTX_ENV differs from the job's). Check it by hand if nobody deployed then.`,
+      `::warning::${RUN_NAME} (started 2026-11-10 12:16 UTC): NOT COMPARED. It started before ${OPERATOR_JOB} last changed (2026-11-10 13:02 UTC), and differs from the job as it is now only as a release does (the container operator ran another image; the container operator's setting AGENTX_RELEASE differs from the job's). Check it by hand if nothing was released then.`,
     );
+    // Our load image's other digest is a release's too.
+    const LOAD = { ...OPERATOR, image: `ghcr.io/shahbaz242630/agent-x-load@sha256:${'c'.repeat(64)}` };
+    const load = await run({
+      jobs: [JOB(OPERATOR_JOB, [LOAD], '2026-11-10T13:02:02.4268454')],
+      runs: {
+        [OPERATOR_JOB]: [
+          EXECUTION(RUN_NAME, LATELY, [RAN({ image: released.replace('/agent-x@', '/agent-x-load@') })]),
+        ],
+      },
+    });
+    expect(load.status).toBe(0);
+    // Zitadel's image is a third party's: a release never moves it, so any other image is a finding.
+    const ZITADEL = { ...OPERATOR, image: `ghcr.io/zitadel/zitadel:v4.17.3@sha256:${'d'.repeat(64)}` };
+    const zitadel = await run({
+      jobs: [JOB(OPERATOR_JOB, [ZITADEL], '2026-11-10T13:02:02.4268454')],
+      runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, LATELY, [RAN({ image: 'ghcr.io/zitadel/zitadel:v4.18.0' })])] },
+    });
+    expect(zitadel.status).toBe(1);
+    expect(zitadel.lines).toContain('  - the container operator ran another image, not a release of the job’s own');
     // The same run, unchanged, is simply clean: the job's change is no reason to doubt a run that matches it.
     const same = await run({ ...world, runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, LATELY, [RAN()])] } });
     expect(same.lines).toContain(`${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`);
@@ -267,8 +286,31 @@ describe('the job-start watch', () => {
       [RAN({ command: ['sh'] }), 'the container operator ran another command'],
       [RAN({ args: ['--other'] }), 'the container operator ran with other arguments'],
       [
-        RAN({ image: 'ghcr.io/elsewhere/tool@sha256:old' }),
-        'the container operator ran another image, from another repository',
+        RAN({ image: `ghcr.io/elsewhere/tool@sha256:${'b'.repeat(64)}` }),
+        'the container operator ran another image, not a release of the job’s own',
+      ],
+      // A repository that only starts like ours, or our own image by a tag where the job names a digest.
+      [
+        RAN({ image: `ghcr.io/shahbaz242630/agent-x-evil@sha256:${'b'.repeat(64)}` }),
+        'the container operator ran another image, not a release of the job’s own',
+      ],
+      [
+        RAN({ image: 'ghcr.io/shahbaz242630/agent-x:latest' }),
+        'the container operator ran another image, not a release of the job’s own',
+      ],
+      // Any value but the release's: the database, the keys or a URL pointed elsewhere.
+      [
+        RAN({ env: withSetting('AGENTX_ENV', 'elsewhere') }),
+        "the container operator's setting AGENTX_ENV differs from the job's",
+      ],
+      [
+        RAN({ env: withSetting('AGENTX_DB_HOST', 'db.attacker.invalid') }),
+        "the container operator's setting AGENTX_DB_HOST differs from the job's",
+      ],
+      // A setting with neither a value nor a secret where the job has a value.
+      [
+        RAN({ env: [{ name: 'AGENTX_ENV' }, ...OPERATOR.env.slice(1)] }),
+        "the container operator's setting AGENTX_ENV reads another secret, or none, than the job's",
       ],
       [
         RAN({ env: [...OPERATOR.env, { name: 'NODE_OPTIONS', value: 'x' }] }),
@@ -309,6 +351,12 @@ describe('the job-start watch', () => {
     // A hundred kept, the oldest outside the window: the window is whole, and 40 runs in it are not a flood.
     const whole = await run(world(runsOf(100, (index) => (index < 40 ? inside(index) : '2026-11-09T12:00:00+00:00'))));
     expect(whole.status).toBe(0);
+    // In whatever order Azure lists them: the run before the window listed first still makes the window whole.
+    const reordered = runsOf(100, (index) => (index < 40 ? inside(index) : '2026-11-09T12:00:00+00:00')).reverse();
+    expect((await run(world(reordered))).status).toBe(0);
+    // A run with no start time is no proof the list reaches back past the window.
+    const unknown = await run(world(runsOf(100, (index) => (index === 99 ? '' : inside(index % 30)))));
+    expect(unknown.lines.filter((line) => line.includes('may be incomplete'))).toHaveLength(1);
     // 41 in six hours is.
     const busy = await run(world(runsOf(41, inside)));
     expect(busy.status).toBe(1);
