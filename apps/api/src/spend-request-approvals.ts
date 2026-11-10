@@ -89,7 +89,7 @@ import { overMandateLimit } from './over-limit-choice.ts';
 import type { Refused } from './refused.ts';
 import { agentAlone, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
-import { cancelledSinceOf, pausedFromOf } from './suspensions.ts';
+import { cancelledSinceOf, isCarried, pausedFromOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 export const APPROVE_OPERATION = 'spend-requests.approve';
@@ -272,7 +272,7 @@ async function supplierMoveOf(
   if (supplier.currentVersionId === decidedUnder) return { move: 'same' };
   if (decidedUnder === null) return { move: 'moved' };
   const pausedFrom = await pausedFromOf(tx, states, orgId, supplier, () => new MandateRefused(503, 'INTEGRITY_FAILED'));
-  return pausedFrom.includes(decidedUnder)
+  return isCarried(decidedUnder, supplier.currentVersionId, pausedFrom)
     ? { move: 'carried', from: decidedUnder, to: supplier.currentVersionId }
     : { move: 'moved' };
 }
