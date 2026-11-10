@@ -1077,8 +1077,14 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
     const head = await headOf(chain);
     const log = apiLog();
     await log.read();
-    log.keep(signAnchor(apiAnchorKey, chain, { ...head, seq: head.seq + ahead }, new Date(), 1));
+    const at = new Date();
+    log.keep(signAnchor(apiAnchorKey, chain, { ...head, seq: head.seq + ahead }, at, 1));
     await log.flush();
+    // The anchor is dated by this process's clock, the rebase by the database's, and a
+    // rebase moves only anchors dated before it: Docker's clock can trail the host's by
+    // ~0.2 s (the laptop-only flake, S183), so wait until the database's has passed it.
+    // Backdating instead lets the platform chain's own newer anchors win (4D2e).
+    await vi.waitUntil(async () => (await databaseNow(app)).getTime() > at.getTime(), { timeout: 5000, interval: 20 });
     return head;
   }
 
