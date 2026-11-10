@@ -10,6 +10,16 @@
 //   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
 //   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
 //   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
+//   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
+//   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
+//
+// state-recovery-plan and state-restore (PL-29 follow-up, Carry-Forward S175;
+// playbook H) put an organisation's tampered authority rows (its members,
+// agents, keys, mandates, policies, suppliers and the like) back from the
+// restore drill's copy, once its chain checks whole: the first plans it,
+// read-only, and says the plan's ID and digest; the second applies that plan
+// only if it is still the same. Both run on the chain repair's job, as the
+// database's owner, so each sets off the owner-login SEV-1 alert, by design.
 //
 // chain-recovery-plan and chain-restore (4D2e E9, E10; PL-29; playbook H) mend an organisation's audit
 // chain from the restore drill's copy: the first plans it, read-only, and says
@@ -101,6 +111,8 @@ import {
   chainRecoveryRequest,
   chainRestoreRequest,
   DISCARD_FORK,
+  stateRecoveryRequest,
+  stateRestoreRequest,
   HEAD_HASH,
   HEAD_SEQ,
   PLAN_DIGEST_HEX,
@@ -217,6 +229,8 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
+  node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
+  node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -871,12 +885,22 @@ export interface RestoreArguments {
 
 /** What was asked for, or a UsageError saying why it can't be done. */
 export function parseRestore(argv: readonly string[]): RestoreArguments {
+  return repairAsked(argv, 'chain-restore', ` [${DISCARD_FORK}]`);
+}
+
+/**
+ * A repair's words, the chain's (`chain-restore`, which may take the named flag
+ * last) or the authority rows' (`state-restore`, which never does): the plan by
+ * its ID and digest, and the repair's ID if one ran before.
+ */
+function repairAsked(argv: readonly string[], named: string, forkWords: string): RestoreArguments {
   const [command, orgFlag, orgId, planFlag, planId, digestFlag, digest, ...rest] = argv;
   const ided = rest[0] === '--id';
   const id = ided ? rest[1] : undefined;
-  const discardFork = forkFlag(rest.slice(ided ? 2 : 0));
+  const afterId = rest.slice(ided ? 2 : 0);
+  const discardFork = forkWords === '' && afterId.length > 0 ? undefined : forkFlag(afterId);
   const shaped =
-    command === 'chain-restore' &&
+    command === named &&
     orgFlag === '--org' &&
     planFlag === '--plan' &&
     digestFlag === '--digest' &&
@@ -885,7 +909,7 @@ export function parseRestore(argv: readonly string[]): RestoreArguments {
     discardFork !== undefined;
   if (!shaped) {
     throw new UsageError(
-      `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [${DISCARD_FORK}], and nothing else`,
+      `say ${named} --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]${forkWords}, and nothing else`,
     );
   }
   const problems = [
@@ -1020,6 +1044,30 @@ export function chainRebase(asked: RebaseArguments, steps: JobSteps): Promise<nu
   }));
 }
 
+/** An authority rows' recovery plan the partner asked for (PL-29 follow-up): the organisation alone. */
+export interface StatePlanArguments {
+  readonly orgId: string;
+}
+
+/** What was asked for, or a UsageError saying why it can't be done. */
+export function parseStatePlan(argv: readonly string[]): StatePlanArguments {
+  const [command, orgFlag, orgId, ...rest] = argv;
+  if (command !== 'state-recovery-plan' || orgFlag !== '--org' || orgId === undefined || rest.length > 0) {
+    throw new UsageError('say state-recovery-plan --org <organisation ID>, and nothing else');
+  }
+  if (!UUID_V7.test(orgId)) throw new UsageError(ORG_PROBLEM);
+  return { orgId };
+}
+
+/** An authority rows' repair the partner asked for: the plan by its ID and digest, and the repair's ID if one ran before. */
+export type StateRestoreArguments = Omit<RestoreArguments, 'discardFork'>;
+
+/** What was asked for, or a UsageError saying why it can't be done. */
+export function parseStateRestore(argv: readonly string[]): StateRestoreArguments {
+  const { orgId, planId, digest, id } = repairAsked(argv, 'state-restore', '');
+  return { orgId, planId, digest, id };
+}
+
 /** What a plan's run did: 0 once a plan is made, saying its digest and the repair's command. */
 function planOutcome(steps: JobSteps, lines: readonly LogLine[], asked: RecoveryPlanArguments, planId: string): number {
   const said = commandLines(lines);
@@ -1150,6 +1198,109 @@ export function chainRestore(asked: RestoreArguments, steps: JobSteps): Promise<
   );
 }
 
+/** What an authority rows' plan's run did: 0 once a plan is made, saying its digest and the repair's command. */
+function statePlanOutcome(steps: JobSteps, lines: readonly LogLine[], asked: StatePlanArguments, planId: string) {
+  const said = commandLines(lines);
+  const about = (event: string) => said.find((line) => line.event === event && line.planId === planId);
+  const planned = about('operator.state_recovery_planned');
+  if (planned !== undefined) {
+    steps.say(
+      `Planned ${planId}: ${String(planned.putBack)} records to put back, ${String(planned.removed)} planted ones to remove, of ${String(planned.objects)} checked. Nothing was changed. The plan and its rows are in the evidence store as ${asked.orgId}/state-recovery-${planId}.ndjson.`,
+    );
+    steps.say(
+      `Once read, the repair is: node deploy/azure/operator.ts state-restore --org ${asked.orgId} --plan ${planId} --digest ${String(planned.digest)}`,
+    );
+    return 0;
+  }
+  const refusedPlan = about('operator.state_recovery_refused');
+  if (refusedPlan !== undefined) {
+    const where =
+      typeof refusedPlan.objectId === 'string' ? ` on ${String(refusedPlan.subjectType)} ${refusedPlan.objectId}` : '';
+    const problem = typeof refusedPlan.problem === 'string' ? ` (${refusedPlan.problem})` : '';
+    steps.say(
+      `No plan: refused as ${String(refusedPlan.reason)}${where}${problem}. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.`,
+    );
+    return 1;
+  }
+  return refusedOrUnclear(steps, said, 'Run the same command again: a plan only reads.');
+}
+
+/** What each refused authority rows' repair means, in plain words, by its reason. */
+const STATE_RESTORE_REFUSALS: Readonly<Record<string, (line: Readonly<Record<string, unknown>>) => string>> = {
+  plan: (line) => `the plan made now is refused (${String(line.planRefused)}): make a new plan and read why`,
+  stale: () => 'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
+  moved: (line) => `${String(line.subjectType)} ${String(line.objectId)} changed as the repair began: make a new plan`,
+  write_refused: (line) =>
+    `the database refused a write (code ${String(line.code)}), so every write was rolled back: read playbook H`,
+  unverified: (line) =>
+    `what was written did not check out (${String(line.check)}), so every write was rolled back: treat it as tampering (playbook B)`,
+};
+
+/** What an authority rows' repair's run did: 0 once repaired. */
+function stateRestoreOutcome(steps: JobSteps, lines: readonly LogLine[], asked: StateRestoreArguments, id: string) {
+  const said = commandLines(lines);
+  const about = (event: string) => said.find((line) => line.event === event && line.restoreId === id);
+  const records = `${asked.orgId}/state-restore-${id}-start.ndjson and -outcome.ndjson`;
+  const restored = about('operator.states_restored');
+  if (restored !== undefined) {
+    steps.say(
+      `Repaired: ${String(restored.putBack)} records put back, ${String(restored.removed)} planted ones removed; every record checks whole. The records are in the evidence store as ${records}. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
+    );
+    return 0;
+  }
+  const refusedRepair = about('operator.state_restore_refused');
+  if (refusedRepair !== undefined) {
+    const why = STATE_RESTORE_REFUSALS[String(refusedRepair.reason)]?.(refusedRepair) ?? String(refusedRepair.reason);
+    steps.say(`Not repaired, and nothing changed: ${why}. The records are in the evidence store as ${records}.`);
+    return 1;
+  }
+  if (about('operator.done_before') !== undefined) {
+    steps.say(
+      `This repair's ID ran before, so nothing was done now: its records in the evidence store (${records}) say how it ended. A new repair needs no --id.`,
+    );
+    return 1;
+  }
+  return refusedOrUnclear(
+    steps,
+    said,
+    `Run the same command again with --id ${id}: a repair that ran stops at its first record and does nothing twice.`,
+  );
+}
+
+/** Plans an organisation's authority rows' recovery on the chain repair's job (PL-29 follow-up): 0 once planned. */
+export function stateRecoveryPlan(asked: StatePlanArguments, steps: JobSteps): Promise<number> {
+  const planId = uuidV7Ids.next();
+  const again = 'Run the same command again: a plan only reads, so nothing is done twice.';
+  return runRequest(
+    steps,
+    () => ({
+      text: stateRecoveryRequest(asked.orgId, planId),
+      intro: `Planning ${planId} for ${asked.orgId}'s records from the drill's copy, read-only on both servers. ${OWNER_LOGIN_SAID}`,
+      tryAgain: again,
+      mayStillHold: `The request may still be on ${jobName('chain-restore')}: it only reads. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+      judge: (_run, lines) => statePlanOutcome(steps, lines, asked, planId),
+    }),
+    'chain-restore',
+  );
+}
+
+/** Repairs an organisation's authority rows from their plan on the chain repair's job: 0 once repaired. */
+export function stateRestore(asked: StateRestoreArguments, steps: JobSteps): Promise<number> {
+  const id = asked.id ?? uuidV7Ids.next();
+  const again = `Run the same command again with --id ${id}: a repair that ran stops at its first record and does nothing twice.`;
+  return runRequest(
+    steps,
+    () => ({
+      text: stateRestoreRequest({ orgId: asked.orgId, planId: asked.planId, digest: asked.digest, id }),
+      intro: `Repairing ${asked.orgId}'s records from plan ${asked.planId}, as repair ${id}. ${OWNER_LOGIN_SAID}`,
+      tryAgain: again,
+      mayStillHold: `The request may still be on ${jobName('chain-restore')}. It names ${id}, so it can't repair twice. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+      judge: (_run, lines) => stateRestoreOutcome(steps, lines, asked, id),
+    }),
+    'chain-restore',
+  );
+}
+
 /** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
 async function runRequest(
   steps: JobSteps,
@@ -1237,6 +1388,14 @@ export function main(
       if (argv[0] === 'chain-restore') {
         const asked = parseRestore(argv);
         return (steps) => chainRestore(asked, steps);
+      }
+      if (argv[0] === 'state-recovery-plan') {
+        const asked = parseStatePlan(argv);
+        return (steps) => stateRecoveryPlan(asked, steps);
+      }
+      if (argv[0] === 'state-restore') {
+        const asked = parseStateRestore(argv);
+        return (steps) => stateRestore(asked, steps);
       }
       if (argv[0] === 'chain-rebase') {
         const asked = parseRebase(argv);

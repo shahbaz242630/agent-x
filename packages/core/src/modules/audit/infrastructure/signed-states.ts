@@ -735,6 +735,59 @@ export interface HoldingSignedStates extends SignedStates {
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
 
+/** The row matched with the log's latest signed event for it: the state, or the tamper sign it shows. */
+function judgeFound(
+  keys: KeyProvider,
+  table: SignedStateTable,
+  key: SignedRowKey,
+  row: FoundRow,
+  latest: LatestSignedState,
+): Extract<StateCheck, { outcome: 'verified' }> | { readonly sign: TamperSign; readonly seq?: bigint } {
+  if (latest.kind === 'none') return { sign: 'unsigned' };
+  if (latest.kind === 'broken') return latest.seq === undefined ? { sign: 'log' } : { sign: 'log', seq: latest.seq };
+  const eventId = latest.id.toLowerCase();
+  if (row.eventId !== eventId) return { sign: 'pointer' };
+  if (row.version !== latest.version) return { sign: 'version' };
+  const facts = {
+    orgId: key.orgId,
+    subject: { type: table.subject, id: key.id, version: row.version },
+    fields: row.fields,
+  };
+  if (!stateSealMatches(keys, facts, latest.seal)) return { sign: 'seal' };
+  return Object.freeze({
+    outcome: 'verified',
+    version: row.version,
+    eventId,
+    recordedAt: latest.recordedAt,
+    fields: new Map(row.fields),
+  });
+}
+
+/**
+ * A row and its object's latest signed event, read by the caller at one point
+ * in time with no lock, judged as verifiedState judges them, but raising no
+ * alarm and setting no hold: for a state recovery plan (PL-29), which reads a
+ * restored copy and the live server read-only, where Postgres takes no lock,
+ * and whose findings are an incident's already. A row read from one server
+ * may be judged against the other's log. Never for a decision: the repair
+ * that applies a plan checks every row again through verifiedState.
+ */
+export function judgeSignedRow(
+  keys: KeyProvider,
+  table: SignedStateTable,
+  key: SignedRowKey,
+  row: SignedRow,
+  latest: LatestSignedState,
+): StateCheck {
+  if (row.outcome === 'unreadable') return { outcome: 'tampered', sign: 'row' };
+  if (row.outcome === 'missing') {
+    if (latest.kind === 'none') return MISSING;
+    return { outcome: 'tampered', sign: latest.kind === 'broken' ? 'log' : 'deleted' };
+  }
+  const judged = judgeFound(keys, table, key, row, latest);
+  return 'sign' in judged ? { outcome: 'tampered', sign: judged.sign } : judged;
+}
+
 /** A row this transaction has read: the lock it holds, and the state it may record a change from. */
 interface Held {
   lock: RowLock;
@@ -881,32 +934,8 @@ export function createSignedStates({
   const latestOf = (tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey): Promise<LatestSignedState> =>
     trail.latestSignedState(tx, key.orgId, { type: table.subject, id: key.id });
 
-  /** The row matched with the log's latest signed event for it: the state, or the tamper sign it shows. */
-  const judge = (
-    table: SignedStateTable,
-    key: SignedRowKey,
-    row: FoundRow,
-    latest: LatestSignedState,
-  ): Extract<StateCheck, { outcome: 'verified' }> | { readonly sign: TamperSign; readonly seq?: bigint } => {
-    if (latest.kind === 'none') return { sign: 'unsigned' };
-    if (latest.kind === 'broken') return latest.seq === undefined ? { sign: 'log' } : { sign: 'log', seq: latest.seq };
-    const eventId = latest.id.toLowerCase();
-    if (row.eventId !== eventId) return { sign: 'pointer' };
-    if (row.version !== latest.version) return { sign: 'version' };
-    const facts = {
-      orgId: key.orgId,
-      subject: { type: table.subject, id: key.id, version: row.version },
-      fields: row.fields,
-    };
-    if (!stateSealMatches(keys, facts, latest.seal)) return { sign: 'seal' };
-    return Object.freeze({
-      outcome: 'verified',
-      version: row.version,
-      eventId,
-      recordedAt: latest.recordedAt,
-      fields: new Map(row.fields),
-    });
-  };
+  const judge = (table: SignedStateTable, key: SignedRowKey, row: FoundRow, latest: LatestSignedState) =>
+    judgeFound(keys, table, key, row, latest);
 
   /** judge, with the alarm raised for a tamper sign. */
   const compare = (

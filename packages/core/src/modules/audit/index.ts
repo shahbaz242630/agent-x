@@ -26,6 +26,22 @@ export {
   writeOriginalRows,
 } from './infrastructure/chain-repair.ts';
 export {
+  columnsOf,
+  firePendingChecks,
+  guardsOff,
+  guardsOn,
+  readRowsAlike,
+  rowsAsStored,
+  type StateAsRead,
+  stateObjectIds,
+  type StateRepairRow,
+  STATES_READ_AT_ONCE,
+  statesAsRead,
+  StateWriteMissed,
+  triggersOf,
+  writeStateRow,
+} from './infrastructure/state-repair.ts';
+export {
   chainRowsAlone,
   chainRowsIn,
   type ChainRowsPage,
@@ -69,6 +85,7 @@ export {
   type SignedStates,
   type SignedStatusChange,
   checkOf,
+  judgeSignedRow,
   type StateCheck,
   type TamperSign,
   type VerifiedState,
