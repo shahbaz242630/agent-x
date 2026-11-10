@@ -44,6 +44,7 @@ export {
   type LatestSignedState,
   type LogEvent,
   type LogPageToRead,
+  MOST_HISTORIES_READ,
   type ReadEvent,
   type RecordedAuditEvent,
   TooManyEventsAboutObject,

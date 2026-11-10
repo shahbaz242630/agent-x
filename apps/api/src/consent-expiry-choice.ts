@@ -12,7 +12,13 @@
 // consumed or rejected before its end still cancels (decision 21). Held
 // requests can't be approved or paid (mayFund); waiting ones still expire at
 // their wait (E6); once the renewal is refreshed they stand again at once.
-import type { AuditDetails, AuditTransaction, HistoryToRead, SignedStates } from '@agentx/core/modules/audit';
+import {
+  type AuditDetails,
+  type AuditTransaction,
+  type HistoryToRead,
+  MOST_HISTORIES_READ,
+  type SignedStates,
+} from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { z } from 'zod';
@@ -83,20 +89,30 @@ export async function consentExpiryOf(
 }
 
 /**
- * Each source's choice in force, in the order given, as consentExpiryOf reads
- * one: their histories read in one statement first (gatherHistories), so a
- * page of sources costs one trip, not one a source (PM5, E7 review 40).
+ * Each source with its choice in force, in the order given, as
+ * consentExpiryOf reads one: their histories gathered first,
+ * MOST_HISTORIES_READ to a statement (the most one reads), so a page of 50
+ * sources costs 7 trips, not 50 (PM5, E7 review 40).
  */
-export async function consentExpiriesOf(
+export async function withConsentExpiries<Source extends { readonly id: string }>(
   tx: AuditTransaction,
   states: SignedStates,
   orgId: string,
-  sourceIds: readonly string[],
-): Promise<readonly (PendingChoice | null)[]> {
-  if (sourceIds.length === 0) return [];
-  await states.gatherHistories(tx, orgId, sourceIds.map(consentExpiryHistory));
-  const chosen: (PendingChoice | null)[] = [];
-  for (const sourceId of sourceIds) chosen.push(await consentExpiryOf(tx, states, orgId, sourceId));
+  sources: readonly Source[],
+): Promise<readonly { readonly source: Source; readonly consentExpiry: PendingChoice | null }[]> {
+  const chosen: { readonly source: Source; readonly consentExpiry: PendingChoice | null }[] = [];
+  for (let start = 0; start < sources.length; start += MOST_HISTORIES_READ) {
+    const part = sources.slice(start, start + MOST_HISTORIES_READ);
+    await states.gatherHistories(
+      tx,
+      orgId,
+      part.map(({ id }) => consentExpiryHistory(id)),
+    );
+    // Each answered from the gather just made: one statement for the part.
+    for (const source of part) {
+      chosen.push({ source, consentExpiry: await consentExpiryOf(tx, states, orgId, source.id) });
+    }
+  }
   return chosen;
 }
 

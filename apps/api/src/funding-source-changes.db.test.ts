@@ -451,6 +451,23 @@ describe(`reading the organisation’s sources (D2-4a, Postgres ${server.version
     });
   });
 
+  it('lists a page past the 8 histories one statement reads, each source with its own choice (PM5)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const choices: PendingChoice[] = Array.from({ length: 10 }, (_, at) => (at % 3 === 0 ? 'pause' : 'cancel'));
+    const sources: SourceRecord[] = [];
+    for (const choice of choices) sources.push((await linked(admin, ACCOUNT, choice)).source);
+
+    const listed = await reads.list(org, FIRST_PAGE, CORRELATION);
+
+    if (listed.outcome !== 'listed') throw new Error(`not listed: ${JSON.stringify(listed)}`);
+    const chosen = new Map(sources.map((source, at) => [source.id, choices[at]]));
+    expect(listed.sources).toHaveLength(10);
+    expect(listed.sources.map(({ source, consentExpiry }) => [source.id, consentExpiry])).toEqual(
+      listed.sources.map(({ source }) => [source.id, chosen.get(source.id)]),
+    );
+  });
+
   it('shows another organisation’s source as none', async () => {
     const org = await organization();
     const { source } = await linked(await member(org, 'admin'));

@@ -14,7 +14,7 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { consentExpiriesOf, consentExpiryOf } from './consent-expiry-choice.ts';
+import { consentExpiryOf, withConsentExpiries } from './consent-expiry-choice.ts';
 import { createFundingSourceWork, type FundingSourceTables } from './funding-source-work.ts';
 import { type Refused, refused } from './refused.ts';
 
@@ -77,13 +77,7 @@ export function createFundingSourceReads({
       const listed = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
         const read = await sourcesPage(tx, states, orgId, page);
         if (read.outcome === 'tampered') return read;
-        const chosen = await consentExpiriesOf(
-          tx,
-          states,
-          orgId,
-          read.sources.map(({ id }) => id),
-        );
-        return { ...read, sources: read.sources.map((source, at) => ({ source, consentExpiry: chosen[at] ?? null })) };
+        return { ...read, sources: await withConsentExpiries(tx, states, orgId, read.sources) };
       });
       if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       return listed;
