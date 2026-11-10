@@ -407,6 +407,8 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
 
     await expect(signIn.beginStepUp(other.sessionId, challenge.challengeId)).rejects.toMatchObject({
       failure: 'challenge_missing',
+      // Refused at the start, the browser is still on the console's page: nowhere to send it back to.
+      back: undefined,
     });
     await expect(signIn.beginStepUp(other.sessionId, challenge.challengeId, '//evil.example')).rejects.toThrow(
       RangeError,
@@ -501,7 +503,14 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
 
     const failed = act(setUp);
     await expect(failed).rejects.toBeInstanceOf(StepUpFailed);
-    await expect(failed).rejects.toMatchObject({ failure });
+    // CO2: with the challenge it was for and the page it came from, for the API to send the browser back to.
+    await expect(failed).rejects.toMatchObject({
+      failure,
+      back: {
+        challengeId: challenge.challengeId,
+        returnTo: expect.stringMatching(/^\/(members\/confirm)?$/) as unknown,
+      },
+    });
     expect(await sessions.use(app, done.cookie)).toBeDefined();
     expect(await used(challenges, app, challenge.challengeId, binding(done.sessionId), NEED)).toBeUndefined();
     // Still pending, so the person can try again: unless its time ran out, which is the failure.
@@ -520,6 +529,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     await expect(stepUp(done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({
       name: 'StepUpFailed',
       failure: 'session_missing',
+      back: { returnTo: '/members/confirm', challengeId: challenge.challengeId },
     });
     expect(await sessionsOf(done.userId)).toEqual([]);
   });

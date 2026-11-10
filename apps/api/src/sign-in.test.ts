@@ -860,19 +860,30 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     ['no second factor', 'no_second_factor', USER_ID],
     ['no live session', 'session_missing', undefined],
   ] as const)(
-    'refuses a step-up back with %s as STEP_UP_FAILED, leaving the cookies',
+    'refuses a step-up back with %s, sending the browser back to its page to say so (CO2), the session cookie left',
     async (_what, failure, userId) => {
       const standIn = new StandIn();
-      standIn.failWith = new StepUpFailed(failure, 'test', userId);
-      const { app, noted } = await server(standIn);
+      // The page's own query (`?stepped=`, which would offer the change to confirm) is dropped.
+      const back = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+      standIn.failWith = new StepUpFailed(failure, 'test', userId, back);
+      const { app, noted, capture } = await server(standIn);
 
       const response = await app.inject(
         callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
       );
 
-      expect(response.statusCode).toBe(403);
-      expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
-      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(response.statusCode).toBe(302);
+      expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}`);
+      expect(setCookies(response.headers['set-cookie'])).toEqual([
+        `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+      ]);
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({
+          event: 'auth.step_up_failed',
+          failure,
+          correlationId: expect.any(String) as unknown,
+        }),
+      );
       expect(noted).toEqual([
         {
           kind: 'sign_in_failed',
@@ -883,6 +894,20 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
       ]);
     },
   );
+
+  it('answers a step-up failure that names no page to go back to as STEP_UP_FAILED, leaving the cookies', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new StepUpFailed('challenge_missing', 'test', USER_ID);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+    );
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
 });
 
 describe('reading our cookies', () => {

@@ -32,9 +32,13 @@
 //   The callback then checks the fresh sign-in against the challenge,
 //   records its evidence there and gives the session a new cookie ID
 //   (SEC-HA-07), keeping its record, and sends the browser back to confirm
-//   the change. Anything wrong is STEP_UP_FAILED, 403: this change is not
+//   the change. Anything wrong is STEP_UP_FAILED: this change is not
 //   confirmed, and a live session stays as it was; noted as a security
 //   event with the person (`sign_in_failed`, reason `step_up_<failure>`).
+//   Wrong at the callback, the browser is sent back to the page the change
+//   was asked on (its path, its query dropped) with `?stepUpFailed=<challenge>`,
+//   for the console to say so there (CO2); wrong at the start, before the
+//   browser left the console, it is a 403.
 //   The session cookie is SameSite=Strict, so the login service must be on
 //   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
 //   browser would bring no session back and every step-up would fail.
@@ -180,6 +184,17 @@ const SIGN_OUT_SCHEMA = {
   },
 };
 
+/** The query a step-up's page comes back with when it failed at the login service's return: the challenge it was for. */
+const STEP_UP_FAILED_QUERY = 'stepUpFailed';
+
+/**
+ * The page a failed step-up was asked on, said failed: its path alone (its
+ * query held `?stepped=`, which would offer the change to confirm), with the
+ * challenge, so the console forgets the change it kept for it.
+ */
+const failedStepUpPage = ({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string =>
+  `${returnTo.replace(/\?.*$/s, '')}?${new URLSearchParams({ [STEP_UP_FAILED_QUERY]: challengeId }).toString()}`;
+
 /** Sign-out reads no body; this is the smallest limit the contract takes. */
 const SIGN_OUT_BODY_LIMIT = 1;
 
@@ -229,7 +244,11 @@ export function registerSignIn(
       request.id,
     );
   };
-  /** Logs a failed step-up, notes it as a security event with the person, and refuses it: they stay signed in. */
+  /**
+   * Logs a failed step-up, notes it as a security event with the person, and
+   * refuses it: they stay signed in. Back from the login service, the browser
+   * goes back to the change's page, saying so; at the start, a 403.
+   */
   const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
     const { failure, userId } = failed;
     logger
@@ -241,7 +260,12 @@ export function registerSignIn(
       ip: request.ip,
       ...(userId !== undefined && { userId }),
     });
-    return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
+    if (failed.back === undefined) return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
+    return reply
+      .code(302)
+      .header('location', failedStepUpPage(failed.back))
+      .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
+      .send({});
   };
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {

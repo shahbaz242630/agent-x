@@ -1,6 +1,7 @@
 // 6A2: back from signing in again (`?stepped=<challenge>`), the shell shows
 // the change kept for it to confirm or not; the address is cleaned after;
-// one with nothing kept, a refusal and a failure on the way are each said.
+// one with nothing kept, a refusal and a failure on the way are each said;
+// so is a step-up the API refused at the sign-in's return (`?stepUpFailed=`).
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -110,6 +111,19 @@ describe('back from a step-up', () => {
 
     expect(await screen.findByText(`Done: ${PENDING.label}`)).toBeDefined();
     expect(confirms).toBe(2);
+  });
+
+  it('says a step-up the API refused at the sign-in’s return was not made, forgets its change and cleans the address (CO2)', async () => {
+    sessionStorage.setItem(`agentx.step-up.${CHALLENGE}`, JSON.stringify(PENDING));
+    const history = createMemoryHistory({ initialEntries: [`/more?stepUpFailed=${CHALLENGE}`] });
+    render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+
+    expect(await screen.findByText(/Signing in again didn't go through/)).toBeDefined();
+    expect(sessionStorage).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(history.location.search).toBe('');
+    expect(confirms).toBe(0);
   });
 
   it('says a change with nothing kept for it was not made', async () => {

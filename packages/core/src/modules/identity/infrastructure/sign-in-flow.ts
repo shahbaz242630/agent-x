@@ -90,15 +90,24 @@ export interface CallbackInput {
 export type StepUpFailure =
   Exclude<SignInFailure, 'provider_unavailable'> | 'session_missing' | 'challenge_missing' | StepUpRefusal;
 
+/** Where a step-up's browser goes back to after a failure on the way back: the page it was asked on, and for which challenge. */
+interface StepUpReturn {
+  readonly returnTo: string;
+  readonly challengeId: string;
+}
+
 export class StepUpFailed extends Error {
   override readonly name = 'StepUpFailed';
   readonly failure: StepUpFailure;
   /** The session's person, where the failure came after the session was found. */
   readonly userId: string | undefined;
-  constructor(failure: StepUpFailure, detail: string, userId?: string) {
+  /** Where the browser came from, for a failure on the way back from the login service; none at the start. */
+  readonly back: StepUpReturn | undefined;
+  constructor(failure: StepUpFailure, detail: string, userId?: string, back?: StepUpReturn) {
     super(`step-up failed (${failure}): ${detail}`);
     this.failure = failure;
     this.userId = userId;
+    this.back = back;
   }
 }
 
@@ -156,19 +165,23 @@ export function createSignIn({
     returned: { readonly code: string; readonly state: string },
     cookie: string | undefined,
   ): Promise<SignInCompleted> {
+    // Each failure names the page the browser came from, so the API can send it back there to say so (CO2).
+    const back = { returnTo: taken.returnTo, challengeId };
+    const failed = (failure: StepUpFailure, detail: string, userId?: string) =>
+      new StepUpFailed(failure, detail, userId, back);
     const session = cookie === undefined ? undefined : await limited((tx) => sessions.use(tx, cookie));
-    if (session === undefined) throw new StepUpFailed('session_missing', 'the browser brought no live session');
+    if (session === undefined) throw failed('session_missing', 'the browser brought no live session');
     const { sessionId, userId } = session;
     const pending = await limited((tx) => challenges.pending(tx, challengeId, sessionId));
     if (pending === undefined) {
-      throw new StepUpFailed('challenge_missing', 'the challenge is not pending for this session', userId);
+      throw failed('challenge_missing', 'the challenge is not pending for this session', userId);
     }
     let signedIn;
     try {
       signedIn = await oidc.finish(taken.flow, returned);
     } catch (error) {
       if (!(error instanceof SignInFailed) || error.failure === 'provider_unavailable') throw error;
-      throw new StepUpFailed(error.failure, error.message, userId);
+      throw failed(error.failure, error.message, userId);
     }
     const { subject, evidence, idTokenHash } = signedIn;
     const personId = await limited((tx) => userOfSubject(tx, subject));
@@ -178,18 +191,18 @@ export function createSignIn({
         ? 'other_person'
         : stepUpRefusal(pending, { userId: personId, evidence }, { passkeyRequired: false });
     if (refusal !== undefined) {
-      throw new StepUpFailed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
+      throw failed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
     }
     return limited(async (tx) => {
       const rotated = await sessions.rotate(tx, sessionId);
-      if (rotated === undefined) throw new StepUpFailed('session_missing', 'the session ended', userId);
+      if (rotated === undefined) throw failed('session_missing', 'the session ended', userId);
       const recorded = await challenges.recordEvidence(tx, challengeId, sessionId, {
         authTime: evidence.authTime,
         amr: evidence.amr,
         idpSessionId: evidence.idpSessionId ?? null,
         idTokenHash,
       });
-      if (!recorded) throw new StepUpFailed('challenge_missing', 'the challenge ran out of time', userId);
+      if (!recorded) throw failed('challenge_missing', 'the challenge ran out of time', userId);
       return { userId, sessionId, cookie: rotated, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
     });
   }

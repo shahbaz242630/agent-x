@@ -1,7 +1,8 @@
 // The shared step-up (6A2, ADR-003 §9). A change that needs a fresh sign-in
 // is asked first: the API answers 202 with a challenge for this session. The
 // browser signs in again for it (`/v1/auth/step-up`), comes back to the same
-// page with `?stepped=<challenge>`, and the person confirms the change there,
+// page with `?stepped=<challenge>` (or `?stepUpFailed=<challenge>` when the
+// API refused the fresh sign-in), and the person confirms the change there,
 // which sends the ask's own body with the challenge to the change's confirm
 // address. A change the API makes at once (no step-up asked) is just done.
 //
@@ -44,6 +45,8 @@ export class StepUpStorageBlocked extends Error {
 const KEY = 'agentx.step-up.';
 /** The query a page comes back with from its step-up. */
 export const STEPPED = 'stepped';
+/** The query a page comes back with when its step-up failed at the login service's return: the challenge it was for (CO2). */
+export const STEP_UP_FAILED = 'stepUpFailed';
 
 const isPending = (value: unknown): value is PendingChange =>
   typeof value === 'object' &&
