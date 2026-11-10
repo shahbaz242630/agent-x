@@ -38,7 +38,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { memberInSessionOf, need } from './access.ts';
+import { EVERY_MEMBER, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { APPROVAL_WAIT_HOURS } from './approval-wait-choice.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
@@ -68,9 +68,6 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAskedWith,
 } from './route-schemas.ts';
-
-/** Every member may see the organisation's policies, as its mandates. */
-const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /**
  * The most a change's body may be: 100 supplier IDs written as the longest
@@ -515,7 +512,7 @@ export function registerPolicies(
     const schemas = schemasOf(kind);
     const { path } = KINDS[kind];
 
-    routes.get(path, { schema: schemas.show, config: { access: [...READING_ROLES] } }, async (request, reply) => {
+    routes.get(path, { schema: schemas.show, config: { access: [...EVERY_MEMBER] } }, async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const found = await need(changes).show(orgId, targetOf(kind, request), request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
