@@ -263,10 +263,10 @@ export function agentScopeProblems(access: unknown, scopes: unknown): string[] {
 const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
 
 /**
- * The roles that must use a passkey (ADR-012 §7): for their powers, and for
- * every write of theirs, on a route a developer shares too (the S182 Shannon
- * pass, AUTH-01, partner's choice): an admin signed in with an app code reads
- * what a developer reads, but changes nothing.
+ * The roles whose every write needs a passkey (ADR-012 §7), on a route a
+ * developer shares too (the S182 Shannon pass, AUTH-01, partner's choice): an
+ * admin signed in with an app code reads what a developer reads, but changes
+ * nothing.
  */
 const WITH_PASSKEY: readonly Principal[] = ['admin', 'approver'];
 
