@@ -24,7 +24,7 @@ import {
   type FinancialRailAdapter,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -122,7 +122,7 @@ const keyed = (who: LinkingMember, operation: string, key = nextKey()): Idempote
 });
 
 /** A source linked as D2-3 links it, through the use case and the fake bank: it and the consent the bank gave. */
-async function linked(admin: LinkingMember, accountId = ACCOUNT) {
+async function linked(admin: LinkingMember, accountId = ACCOUNT, consentExpiry: PendingChoice = 'cancel') {
   const started = await links.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   const consentId = await rail.bank.approve(admin.orgId, started.link.sessionRef, accountId);
@@ -130,7 +130,7 @@ async function linked(admin: LinkingMember, accountId = ACCOUNT) {
     admin,
     keyed(admin, LINK_CONFIRM_OPERATION),
     started.link.id,
-    'cancel',
+    consentExpiry,
     CORRELATION,
   );
   if (confirmed.outcome !== 'confirmed' || confirmed.source === null) {
@@ -425,25 +425,29 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
 });
 
 describe(`reading the organisation’s sources (D2-4a, Postgres ${server.version})`, () => {
-  it('lists every source to its members, an ended one too, and none of another organisation’s', async () => {
+  it('lists every source to its members with the choice in force, an ended one too, and none of another organisation’s', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const first = await linked(admin);
-    const second = await linked(admin, 'sme-trading-business-acct-01');
+    const second = await linked(admin, 'sme-trading-business-acct-01', 'pause');
     await rail.bank.changeConsent(org, second.consentId, 'Revoked');
     const ended = refreshed(await refresh(admin, second.source.id));
-    await linked(await member(await organization(), 'admin'));
+    await linked(await member(await organization(), 'admin'), ACCOUNT, 'pause');
 
+    // Each source's own choice (PM5, E7 review 40): the first's cancel, the second's pause.
     expect(await reads.list(org, FIRST_PAGE, CORRELATION)).toEqual({
       outcome: 'listed',
-      sources: [first.source, ended],
+      sources: [
+        { source: first.source, consentExpiry: 'cancel' },
+        { source: ended, consentExpiry: 'pause' },
+      ],
       next: null,
       unchecked: [],
     });
     expect(await reads.show(org, ended.id, CORRELATION)).toEqual({
       outcome: 'found',
       source: ended,
-      consentExpiry: 'cancel',
+      consentExpiry: 'pause',
     });
   });
 

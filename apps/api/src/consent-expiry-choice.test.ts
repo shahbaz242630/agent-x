@@ -4,7 +4,8 @@
 import type { AuditTransaction, SignedStates } from '@agentx/core/modules/audit';
 import { describe, expect, it } from 'vitest';
 
-import { consentExpiryDetails, consentExpiryOf, holdsOverExpiry } from './consent-expiry-choice.ts';
+import { IntegrityFailure } from './errors.ts';
+import { consentExpiriesOf, consentExpiryDetails, consentExpiryOf, holdsOverExpiry } from './consent-expiry-choice.ts';
 
 const TX = {} as AuditTransaction;
 
@@ -38,5 +39,36 @@ describe('a source’s consent-expiry choice (E7)', () => {
       ReturnType<SignedStates['historyOf']>
     >);
     await expect(consentExpiryOf(TX, tampered, 'org', 'source')).rejects.toThrow(/can't be believed/);
+  });
+
+  it('reads a page of sources’ choices in order, their histories gathered in one read first (PM5)', async () => {
+    const gathered: unknown[] = [];
+    const chosen = { a: consentExpiryDetails('pause'), b: undefined, c: consentExpiryDetails('cancel') };
+    const states = {
+      gatherHistories: (_tx: unknown, orgId: string, finds: readonly { subjectId?: string }[]) => {
+        gathered.push([orgId, finds.map((find) => find.subjectId)]);
+        return Promise.resolve();
+      },
+      historyOf: (_tx: unknown, _orgId: string, find: { subjectId?: string }) => {
+        const details = chosen[find.subjectId as keyof typeof chosen];
+        return Promise.resolve({ outcome: 'read', events: details === undefined ? [] : [{ event: { details } }] });
+      },
+    } as unknown as SignedStates;
+
+    expect(await consentExpiriesOf(TX, states, 'org', ['a', 'b', 'c'])).toEqual(['pause', null, 'cancel']);
+    expect(gathered).toEqual([['org', ['a', 'b', 'c']]]);
+  });
+
+  it('reads nothing for no sources', async () => {
+    expect(await consentExpiriesOf(TX, {} as SignedStates, 'org', [])).toEqual([]);
+  });
+
+  it('throws as an integrity failure (503) for any one history that can’t be believed', async () => {
+    const states = {
+      gatherHistories: () => Promise.resolve(),
+      historyOf: () => Promise.resolve({ outcome: 'tampered', sign: 'log' }),
+    } as unknown as SignedStates;
+
+    await expect(consentExpiriesOf(TX, states, 'org', ['a'])).rejects.toBeInstanceOf(IntegrityFailure);
   });
 });

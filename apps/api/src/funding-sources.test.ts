@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { FundingSourceChanges, SourceChangeWrite } from './funding-source-changes.ts';
 import type { FundingSourceLinks, LinkConfirmWrite, LinkingMember, LinkStartWrite } from './funding-source-links.ts';
-import type { FundingSourceReads, SourcePage, SourceShown, SourcesListed } from './funding-source-reads.ts';
+import type { FundingSourceReads, SourcePage, SourceShown } from './funding-source-reads.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -141,7 +141,7 @@ async function withLinks(
   answers: {
     start?: LinkStartWrite;
     confirm?: LinkConfirmWrite;
-    list?: SourcesListed;
+    list?: Awaited<ReturnType<FundingSourceReads['list']>>;
     show?: SourceShown;
     refresh?: SourceChangeWrite;
     change?: SourceChangeWrite;
@@ -274,7 +274,9 @@ describe('POST /v1/funding-sources/link-sessions starts a link at the partner (D
 
 describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partner how it ended (D2-3b)', () => {
   it('answers 202 with the link while the business hasn’t finished at its bank', async () => {
-    const { app, calls } = await withLinks({ confirm: { outcome: 'confirmed', link: OPEN_LINK, source: null } });
+    const { app, calls } = await withLinks({
+      confirm: { outcome: 'confirmed', link: OPEN_LINK, source: null, consentExpiry: null },
+    });
 
     const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
@@ -291,15 +293,18 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
     ]);
   });
 
-  it('answers 200 with the link, linked, and its source: never an account number or a partner reference', async () => {
-    const { app } = await withLinks({ confirm: { outcome: 'confirmed', link: LINKED, source: SOURCE } });
+  it('answers 200 with the link, linked, and its source with the choice kept: never an account number or a partner reference', async () => {
+    // Another admin's confirm came first with another choice: theirs is the one kept, and said (PM5, E7 review 40).
+    const { app } = await withLinks({
+      confirm: { outcome: 'confirmed', link: LINKED, source: SOURCE, consentExpiry: 'cancel' },
+    });
 
     const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       link: { ...LINK_ANSWERED, status: 'linked', sourceId: SOURCE_ID, settledAt: '2026-10-01T08:12:00.000Z' },
-      source: SOURCE_ANSWERED,
+      source: { ...SOURCE_SHOWN, consentExpiry: 'cancel' },
     });
     expect(response.body).not.toContain('fake-source-1');
     expect(response.body).not.toContain('fake-consent-1');
@@ -309,7 +314,9 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
     'answers 200 with a link settled %s, and no source',
     async (outcome) => {
       const settled = { ...OPEN_LINK, outcome, settledAt: LINKED.settledAt };
-      const { app } = await withLinks({ confirm: { outcome: 'confirmed', link: settled, source: null } });
+      const { app } = await withLinks({
+        confirm: { outcome: 'confirmed', link: settled, source: null, consentExpiry: null },
+      });
 
       const response = await app.inject(post(`/${LINK_ID}/confirm`, CHOSEN));
 
@@ -368,17 +375,25 @@ const refresh = (sourceId: string, payload: unknown = {}): InjectOptions => ({
 const LAST_ID = '0199a0f0-0000-7000-8000-0000000000ff';
 
 describe('GET /v1/funding-sources lists the organisation’s sources (D2-4a)', () => {
-  it('answers a page of sources as Agent X holds them, and where the next starts', async () => {
+  it('answers a page of sources as Agent X holds them, each with its consent-expiry choice, and where the next starts', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks(
-      { list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID, unchecked: [STUCK] } },
-      asked,
-    );
+    const sources = [
+      { source: SOURCE, consentExpiry: 'pause' as const },
+      { source: { ...SOURCE, id: LAST_ID }, consentExpiry: null },
+    ];
+    const { app } = await withLinks({ list: { outcome: 'listed', sources, next: LAST_ID, unchecked: [STUCK] } }, asked);
 
     const response = await app.inject(read('/v1/funding-sources'));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID, unchecked: [STUCK] });
+    expect(response.json()).toEqual({
+      sources: [
+        { ...SOURCE_SHOWN, consentExpiry: 'pause' },
+        { ...SOURCE_SHOWN, id: LAST_ID },
+      ],
+      next: LAST_ID,
+      unchecked: [STUCK],
+    });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: null, limit: 50 } }]);
   });
 

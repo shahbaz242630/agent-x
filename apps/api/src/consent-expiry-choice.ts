@@ -12,7 +12,7 @@
 // consumed or rejected before its end still cancels (decision 21). Held
 // requests can't be approved or paid (mayFund); waiting ones still expire at
 // their wait (E6); once the renewal is refreshed they stand again at once.
-import type { AuditDetails, AuditTransaction, SignedStates } from '@agentx/core/modules/audit';
+import type { AuditDetails, AuditTransaction, HistoryToRead, SignedStates } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { z } from 'zod';
@@ -56,10 +56,19 @@ const consentExpiryIn = (details: AuditDetails | undefined): PendingChoice | nul
   return chosen === 'cancel' || chosen === 'pause' ? chosen : null;
 };
 
+/** Where a source's choice in force is read: its newest choice event. */
+const consentExpiryHistory = (sourceId: string): HistoryToRead => ({
+  subjectTypes: [SOURCES.subject],
+  subjectId: sourceId,
+  actions: [CONSENT_EXPIRY_CHOSEN],
+  limit: 1,
+  newest: true,
+});
+
 /**
  * The source's choice in force, its newest choice event believed only whole
  * (null: none chosen, so cancel). Throws for a history that can't be
- * believed, its alarm raised.
+ * believed, its alarm raised (503 INTEGRITY_FAILED, #431).
  */
 export async function consentExpiryOf(
   tx: AuditTransaction,
@@ -67,16 +76,28 @@ export async function consentExpiryOf(
   orgId: string,
   sourceId: string,
 ): Promise<PendingChoice | null> {
-  const history = await states.historyOf(tx, orgId, {
-    subjectTypes: [SOURCES.subject],
-    subjectId: sourceId,
-    actions: [CONSENT_EXPIRY_CHOSEN],
-    limit: 1,
-    newest: true,
-  });
+  const history = await states.historyOf(tx, orgId, consentExpiryHistory(sourceId));
   if (history.outcome !== 'read')
     throw new IntegrityFailure(`A source's consent-expiry choice can't be believed: ${sourceId}`);
   return consentExpiryIn(history.events.at(-1)?.event.details);
+}
+
+/**
+ * Each source's choice in force, in the order given, as consentExpiryOf reads
+ * one: their histories read in one statement first (gatherHistories), so a
+ * page of sources costs one trip, not one a source (PM5, E7 review 40).
+ */
+export async function consentExpiriesOf(
+  tx: AuditTransaction,
+  states: SignedStates,
+  orgId: string,
+  sourceIds: readonly string[],
+): Promise<readonly (PendingChoice | null)[]> {
+  if (sourceIds.length === 0) return [];
+  await states.gatherHistories(tx, orgId, sourceIds.map(consentExpiryHistory));
+  const chosen: (PendingChoice | null)[] = [];
+  for (const sourceId of sourceIds) chosen.push(await consentExpiryOf(tx, states, orgId, sourceId));
+  return chosen;
 }
 
 /** Whether the source holds its pending requests when its consent runs out. */

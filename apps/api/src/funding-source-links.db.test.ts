@@ -515,8 +515,27 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
       summary: { holderName: 'Jasmine AI FZ-LLC', accountType: 'sme', hint: 'AE…6026' },
     });
     // Asked again, by another request: answered as it stands, no second source.
-    expect(confirmedOf(await confirm(admin, link.id))).toEqual({ outcome: 'confirmed', link: settled, source });
+    expect(confirmedOf(await confirm(admin, link.id))).toEqual({
+      outcome: 'confirmed',
+      link: settled,
+      source,
+      consentExpiry: 'cancel',
+    });
     expect((await rows(org)).sources).toEqual([{ id: settled.sourceId, link_id: link.id, status: 'ACTIVE' }]);
+  });
+
+  it('answers a second admin’s confirm with another choice with the first’s, the one kept (PM5, E7 review 40)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const other = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
+
+    const first = confirmedOf(await confirm(admin, link.id, undefined, 'pause'));
+    const second = confirmedOf(await confirm(other, link.id, undefined, 'cancel'));
+
+    expect(first).toMatchObject({ link: { outcome: 'linked' }, consentExpiry: 'pause' });
+    expect(second).toEqual({ ...first, consentExpiry: 'pause' });
   });
 
   it('asks the partner again when asked again with the same key while it waited: nothing of a wait is kept', async () => {
