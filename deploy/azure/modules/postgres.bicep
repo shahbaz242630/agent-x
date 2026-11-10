@@ -139,10 +139,12 @@ var settings = [
   // read 50 on run day 5, 35 for everyone, and refused the API's twenty beside
   // Zitadel's ten and the load job (S167). So it is stated. The API's two
   // copies in a restart, Zitadel and the job come to 56. Takes effect only on
-  // a restart, which deploy.ts does when Azure says one is waiting.
+  // a restart, which deploy.ts does when Azure says one is waiting. 120 since
+  // S183: three web copies of twelve, each twice in a restart, the jobs' six
+  // twice, Zitadel's ten and two come to 96, under 120 less Azure's 15.
   {
     name: 'max_connections'
-    value: measured ? '100' : '50'
+    value: measured ? '120' : '50'
   }
 ]
 

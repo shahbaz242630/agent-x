@@ -37,8 +37,10 @@ var workspaces = [
     alertPrefix: 'log'
     title: 'Log quota'
     what: 'The workspace'
-    blind: 'monitoring is blind until then'
-    capSeverity: 2
+    // Every alert reading this workspace is blind, the tamper and jobs-stopped ones among them (S183: those
+    // stay quiet while it is over, so this says it): as loud as the login workspace's.
+    blind: 'monitoring is blind until then, the tamper and jobs-stopped alerts among it'
+    capSeverity: 1
   }
   {
     name: loginWorkspaceName
