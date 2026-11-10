@@ -288,10 +288,11 @@ export async function inBoundedSavepoint<Schema, Result>(
  * Raises the idle limit (database.ts) for this transaction alone, to past a load
  * phase, for the load test's stuck organisation, which holds its rows open for a
  * whole phase on purpose, and for nothing in the product. Still a limit: a hung
- * run must not hold back dead rows' clean-up for ever.
+ * run must not hold back dead rows' clean-up for ever. 60 minutes: Stage G's
+ * neighbours step holds for 20 and more (S179: at 15 the hold ended mid-step).
  */
 export async function holdOpenOnPurpose<Schema>(tx: Transaction<Schema>): Promise<void> {
-  await sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '15min', true)`.execute(tx);
+  await sql`select pg_catalog.set_config('idle_in_transaction_session_timeout', '60min', true)`.execute(tx);
 }
 
 /**

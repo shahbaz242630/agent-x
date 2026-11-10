@@ -2,7 +2,7 @@
 // role. Reserving through them, and its forced lock tests, come with D4.
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilBlocked } from '@agentx/testing';
-import type { Insertable, Updateable } from 'kysely';
+import { type Insertable, sql, type Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -546,6 +546,60 @@ describe('several months’ totals at once (`monthsSpent`, E4c)', () => {
       monthSpent(tx, { agentId: org.agent, month: MONTH, currency: 'AED', except: left }),
     );
     expect(alone).toBe(totals.get(MONTH));
+  });
+});
+
+describe("the month's total from its index alone (0081, S180)", () => {
+  /** Every node of a JSON plan, flat. */
+  const nodes = (plan: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>>[] => [
+    plan,
+    ...((plan.Plans as Readonly<Record<string, unknown>>[] | undefined) ?? []).flatMap(nodes),
+  ];
+
+  /**
+   * The total as a decision reads it, and how, planned and run as the app inside the organisation's wall. A table this
+   * small is read whole cheaper than by any index, so the plain scans are set aside for the plan alone: what this holds
+   * is that the index answers the read with no row of the table read (Stage G: one page a reservation, ~3,470 a
+   * decision for an agent at its cap), which 0040's index, without the amounts, could not.
+   */
+  const planned = (org: Org, month: MonthToSum) =>
+    inOrg(org, async (tx) => {
+      const spent = await monthSpent(tx, month);
+      await sql`set local enable_seqscan = off`.execute(tx);
+      await sql`set local enable_bitmapscan = off`.execute(tx);
+      const explained = await sql<{ 'QUERY PLAN': [{ Plan: Record<string, unknown> }] }>`
+        explain (analyze, buffers, format json) ${monthSpentRead(tx, month)}`.execute(tx);
+      const plan = explained.rows[0]?.['QUERY PLAN'][0].Plan ?? {};
+      return { spent, scans: nodes(plan).filter((n) => n['Relation Name'] === 'reservations') };
+    });
+
+  it('reads the total, a request left out or none, from the index, no row of the table read', async () => {
+    const org = await organisation();
+    await period(org);
+    const left = await requestOf(org);
+    await add(org, reservationRow(org, left));
+    await reserve(org);
+    await withoutPayments(async () => {
+      await moved(org, 'RELEASED');
+    });
+    // Its pages marked all visible, as autovacuum leaves a settled month: the index alone then answers.
+    await database.as('admin').query('vacuum (analyze) limit_reservations.reservations');
+
+    for (const [month, total] of [
+      [{ agentId: org.agent, month: MONTH, currency: 'AED' }, 50_000n],
+      [{ agentId: org.agent, month: MONTH, currency: 'AED', except: left }, 25_000n],
+    ] as const) {
+      const { spent, scans } = await planned(org, month);
+      expect(spent).toBe(total);
+      expect(scans).toEqual([
+        expect.objectContaining({
+          'Node Type': 'Index Only Scan',
+          'Index Name': 'held_in_an_agents_month_summed',
+          'Heap Fetches': 0,
+          'Index Cond': expect.stringMatching(/org_id = .*agent_id = .*month = .*currency = /s) as string,
+        }),
+      ]);
+    }
   });
 });
 

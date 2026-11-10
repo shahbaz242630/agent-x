@@ -106,6 +106,8 @@ interface World {
   servers?: string[];
   /** Readings of the copy before Azure has it Ready. */
   restoreReadings?: number;
+  /** Azure's show answers without the server's size. */
+  sizeUnread?: boolean;
   /** Readings of the jobs before they reach the copy (the partner's apps deploy). */
   appsReadings?: number;
   behaviour?: Partial<Record<StageGJob, Behaviour>>;
@@ -173,6 +175,9 @@ class FakeAzure implements StageGAzure {
     if (!this.servers_.includes(name)) return undefined;
     this.#stateReadings += 1;
     return this.#stateReadings > (this.world.restoreReadings ?? 0) ? 'Ready' : 'Restoring';
+  }
+  serverSize() {
+    return this.world.sizeUnread === true ? undefined : 'Standard_D16ads_v5';
   }
   resize(name: string) {
     this.resized.push(name);
@@ -514,7 +519,10 @@ describe('run', () => {
     const [report] = readdirSync(path.join(dir, 'reports'));
     expect(report).toBe('2026-11-06-stageg-smoke.md');
     expect(readdirSync(path.join(dir, 'documents'))).toEqual([report]);
-    expect(readFileSync(path.join(dir, 'reports', report ?? ''), 'utf8')).toContain('**Passed: every step.**');
+    const text = readFileSync(path.join(dir, 'reports', report ?? ''), 'utf8');
+    expect(text).toContain('**Passed: every step.**');
+    // The header names the size Azure reports, not the load size the runner asked for.
+    expect(text).toContain('(Standard_D16ads_v5, high availability off)');
   });
 
   it('runs the seed again while a run ends before it is done, and stops when it refuses', async () => {
@@ -756,13 +764,13 @@ describe('run', () => {
 describe('high availability for the ha test', () => {
   it('turns it on and waits until Healthy before the first step, and turns it off before any other test', async () => {
     markedCopy({ seededTo: 10_000 });
-    const ha = await run(['run', 'ha'], { haReadings: 3 });
+    const ha = await run(['run', 'ha'], { haReadings: 3, sizeUnread: true });
     expect(ha.error).toBeUndefined();
     expect(ha.azure.ha).toEqual([{ mode: 'ZoneRedundant', readings: 4 }]);
     expect(ha.text.indexOf('standby is healthy')).toBeLessThan(ha.text.indexOf('Step ha:'));
     expect(keptCopy().ha).toBe(true);
     expect(readFileSync(path.join(dir, 'reports', '2026-11-06-stageg-ha.md'), 'utf8')).toContain(
-      'high availability on, zone-redundant',
+      '(Standard_D2ads_v5, not read back, high availability on, zone-redundant)',
     );
 
     const target = await run(['run', 'target'], { haReadings: 2 });

@@ -22,6 +22,7 @@ const CALM: BackgroundHealth = {
   errors: {},
   warnings: {},
   offenderWarnings: {},
+  stuckWarnings: {},
   pulses: 20,
   longestPulseGapMinutes: 1.2,
 };
@@ -76,8 +77,8 @@ const stepOf = (
 const orgs = stageGProfile('orgs');
 
 const HEAD = [
-  '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
-  '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  '| Step | Organisations | Requests | New | p50 ms | p95 ms | p99 ms | max ms | 5xx | 429 by kind | Not sent | Decision p95 ms | p95 vs baseline | Result |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
 ];
 const BACKGROUND_HEAD = [
   '### Background work in each step’s window',
@@ -104,10 +105,10 @@ describe("the report's Stage G section", () => {
         ASSUMPTIONS,
         '',
         ...HEAD,
-        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
-        '| orgs-1000 | 1000 | 153000 | 152100 | 21.0 | 42.0 | 63.0 | 0 | steady 0 | 0 | 60.0 | +5.0% | Passed |',
-        '| orgs-3000 | 3000 | 153000 | 152100 | 22.4 | 44.8 | 67.2 | 0 | steady 0 | 0 | 60.0 | +12.0% | Passed |',
-        '| orgs-10000 | 10000 | 153000 | 152100 | 22.8 | 45.6 | 68.4 | 0 | steady 0 | 0 | 60.0 | +14.0% | Passed |',
+        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 120.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
+        '| orgs-1000 | 1000 | 153000 | 152100 | 21.0 | 42.0 | 63.0 | 126.0 | 0 | steady 0 | 0 | 60.0 | +5.0% | Passed |',
+        '| orgs-3000 | 3000 | 153000 | 152100 | 22.4 | 44.8 | 67.2 | 134.4 | 0 | steady 0 | 0 | 60.0 | +12.0% | Passed |',
+        '| orgs-10000 | 10000 | 153000 | 152100 | 22.8 | 45.6 | 68.4 | 136.8 | 0 | steady 0 | 0 | 60.0 | +14.0% | Passed |',
         '',
         'Baseline: the first step, orgs-100, p95 40.0 ms.',
         '',
@@ -156,8 +157,8 @@ describe("the report's Stage G section", () => {
         ASSUMPTIONS,
         '',
         ...HEAD,
-        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
-        '| orgs-1000 | 1000 | 153000 | 152100 | 23.5 | 47.0 | 70.5 | 3 | steady 2 | 12 | 160.0 | +17.5% | **Failed** |',
+        '| orgs-100 | 100 | 153000 | 152100 | 20.0 | 40.0 | 60.0 | 120.0 | 0 | steady 0 | 0 | 60.0 | baseline | Passed |',
+        '| orgs-1000 | 1000 | 153000 | 152100 | 23.5 | 47.0 | 70.5 | 141.0 | 3 | steady 2 | 12 | 160.0 | +17.5% | **Failed** |',
         '',
         'Baseline: the first step, orgs-100, p95 40.0 ms.',
         '',
@@ -468,7 +469,7 @@ describe("the report's tests apart from the climb", () => {
         "The database's connections: not measured.",
       ].join('\n'),
     );
-    expect(text).toContain('| soak-3 | 10000 | 153000 | 152100 | none | none | none |');
+    expect(text).toContain('| soak-3 | 10000 | 153000 | 152100 | none | none | none | none |');
     expect(
       renderStageG({ site: 'azure', profile: soak, steps: [stepOf(soak, 0, 0, { summary: { asksMs: null } })] }),
     ).toContain('p95 from 0.0 ms in the first segment to 0.0 ms in the last (not compared).');
