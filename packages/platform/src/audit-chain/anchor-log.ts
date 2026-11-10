@@ -108,17 +108,31 @@ const MOST_SPOILED_SNAPSHOTS = 24;
 const MOST_AHEAD_MS = 5 * 60_000;
 
 /**
- * What of a file this process can take into memory, a fifth of its heap: an anchor held is about 2.6 times its line (885
- * bytes to 340), so that much file is about half the heap in anchors. Past it a file is read on only to tell a sound one,
- * capacity, from a broken one; it isn't kept. By what the process has, not by a setting the store can outgrow.
+ * What this process may hold of the store, a third of its heap, the lines held counted at `KEPT_LINE_BYTES` each (and a
+ * file's opened bytes against it too: past it a file is read on only to tell a sound one, capacity, from a broken one; it
+ * isn't kept). By what the process has, not by a setting the store can outgrow.
+ *
+ * Measured (S183, Node 24, `--max-old-space-size=768`, whose heap limit reads 960 MB): a store of N organisations, each an
+ * anchor and a finished pass, read whole and an hourly snapshot written. Held: 995-1,031 bytes an organisation in this log
+ * at 100k-450k (840 at 20k, as the maps grow in steps), and 104-111 more in the anchor check's `seen` and `firstSeen`
+ * (anchor-check.ts), which take every organisation in the store. The heap's high point, garbage and what a restart's read
+ * stages with it, was 1.15 to 1.5 times what is held. 450k organisations (487 MB held, 558 MB at the high point) read and
+ * wrote in that heap alone; 600k ran out of it and ended the process. So at a third, about 320 MB held at the edge (about
+ * 280k organisations), under ~480 MB at the high point, leaving ~480 MB for the rest of the API, the check's notes on its
+ * first 100k organisations (~88 MB) among them: the refusal comes, clean and alarmed (`audit.anchor_store_beyond_memory`),
+ * well before the heap could run out. A fifth at 340 bytes a line, before, came to much the same edge only because it
+ * counted each organisation at under two thirds of its cost and left out the check's maps.
  */
-const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 5);
+const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 3);
 
-/** What a chain's line comes to, for counting a whole read against that: a read keeps one for each. */
-const KEPT_LINE_BYTES = 340;
+/** What a line held costs, the anchor check's share of its organisation with it: (1,031 + 111) / 2 at most, rounded up. */
+const KEPT_LINE_BYTES = 600;
 
-/** How near a file written may come to that before a successor might not read it: said in time to add memory. */
-const NEAR_MEMORY = 0.8;
+/**
+ * How near what is held may come to that before it is said, at each snapshot (hourly): half, so it is said while the
+ * organisations can still double, months of growth to add memory or move to the sharded store (PL-65).
+ */
+const NEAR_MEMORY = 0.5;
 
 /** How far past that a file is read: a million lines of ones signed before, in a file anyone can add, cost little to pack. */
 const MOST_READ_PAST = 8;
@@ -149,6 +163,13 @@ const REBASE_MOST_AHEAD_MS = 20_000;
 /** A rebase file's name after its folder: its ID. */
 const REBASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/**
+ * Folders under an epoch that only a later layout of the store writes: the sharded store's shards and its signed cutover
+ * marker (4D2e PL-65). This reader can't read them, so any file there means the store has moved on past it: a rollback to
+ * this version would read only the old files, older than what the shards hold, and could anchor afresh a chain wound back.
+ */
+const LATER_LAYOUT = ['shards', 'cutover'] as const;
+
 /** A line's kind: an anchor, or a finished full pass. */
 type LineKind = 'a' | 'p' | 'u';
 
@@ -168,6 +189,16 @@ class BeyondMemory extends Error {
     super('a sound file too large for this process');
     this.kind = kind;
     this.fileAt = fileAt;
+  }
+}
+
+/** The store holds a later layout's files: this version must not read it. */
+class MovedOn extends Error {
+  readonly folder: string;
+
+  constructor(folder: string) {
+    super('the anchor store has moved on to a later layout');
+    this.folder = folder;
   }
 }
 
@@ -430,6 +461,12 @@ export function createAnchorLog({
   };
   /** How many lines this process holds, against what it can: anchors and the side lines alike. */
   const linesHeld = (): number => anchors.size + sides.p.size + sides.u.size + rebases.size;
+  /** How many organisations have an anchor here: counted, not listed, as a snapshot is made. */
+  const organisationsHeld = (): number => {
+    let count = 0;
+    for (const name of anchors.keys()) if (name.startsWith(ORGANISATION)) count += 1;
+    return count;
+  };
   /** A place reached by a pass no later than the chain's last finished one: nothing goes on from it. */
   const overtaken = (line: Progress): boolean => {
     const pass = sides.p.get(line.chain);
@@ -699,8 +736,21 @@ export function createAnchorLog({
     } while (after !== undefined);
   };
 
+  /**
+   * Thrown if a later layout has written anything under this epoch: one name asked of each of its folders, at every read,
+   * as a rollback may come at any time. Any answer but an empty last page counts, a name this store would never write or a
+   * page that goes on alike: a reader that can't tell must not read.
+   */
+  const refuseLaterLayout = async (): Promise<void> => {
+    for (const later of LATER_LAYOUT) {
+      const page = await store.list(`e${String(epoch)}/${later}/`, 1);
+      if (page.names.length > 0 || page.foreign > 0 || page.next !== undefined) throw new MovedOn(later);
+    }
+  };
+
   const catchUp = async (): Promise<void> => {
     try {
+      await refuseLaterLayout();
       const foreign = { count: 0 };
       const stage = new Map<string, Anchor>();
       // First, so every line read after is judged against them.
@@ -723,6 +773,13 @@ export function createAnchorLog({
       readFailingSince = undefined;
       state = 'read';
     } catch (error) {
+      if (error instanceof MovedOn) {
+        // Unreadable even after a whole read: what this process holds may be older than the later layout's anchors, so
+        // it anchors nothing more, and after a start payments wait. Files are never taken away, so it stays so.
+        logger.error('audit.anchor_store_moved_on', { epoch, folder: error.folder });
+        state = 'unreadable';
+        return;
+      }
       if (!(error instanceof BeyondMemory)) {
         readFailed(error);
         return;
@@ -816,10 +873,18 @@ export function createAnchorLog({
         yield `${closing}\n`;
       })(),
     );
-    // In the budget's own count, so it is said before a read of this many would be refused.
-    const size = linesHeld() * KEPT_LINE_BYTES;
-    if (size > mostFileBytes * NEAR_MEMORY) {
-      logger.error('audit.anchor_store_near_memory', { kind, bytes: size, mostBytes: mostFileBytes });
+    // In the budget's own count, so it is said long before a read of this many would be refused; with each snapshot, so
+    // hourly, not each minute's delta.
+    const held = linesHeld();
+    if (kind === 'snapshots' && held * KEPT_LINE_BYTES > mostFileBytes * NEAR_MEMORY) {
+      logger.error('audit.anchor_store_near_memory', {
+        kind,
+        bytes: held * KEPT_LINE_BYTES,
+        mostBytes: mostFileBytes,
+        organisations: organisationsHeld(),
+        // Where a read is refused, each organisation an anchor and a finished pass: two lines.
+        edgeOrganisations: Math.floor(mostFileBytes / KEPT_LINE_BYTES / 2),
+      });
     }
     // Only what this file holds: `keep` may have run while it was made.
     for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);

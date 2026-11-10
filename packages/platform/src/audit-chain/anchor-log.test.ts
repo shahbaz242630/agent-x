@@ -268,8 +268,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(log.latest(CHAIN)).toBeUndefined();
       await log.read();
 
-      // The rebases' list (E11), the snapshots' and the deltas'.
-      expect(fake.calls).toMatchObject({ lists: 3, gets: 13 });
+      // One name each of the later layout's two folders (PL-65), the rebases' list (E11), the snapshots' and the deltas'.
+      expect(fake.calls).toMatchObject({ lists: 5, gets: 13 });
       expect(log.state()).toBe('read');
       expect(log.latest(CHAIN)).toMatchObject({ seq: 12n, macKeyVersion: 2, keyVersion: 1 });
       expect(log.latest(CHAIN)?.hash).toEqual(Buffer.alloc(32, 12));
@@ -317,8 +317,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const { log } = logOver(fake);
       await log.read();
 
-      // The rebases' list (E11), then the snapshots' and two pages of deltas.
-      expect(fake.calls).toMatchObject({ lists: 4, gets: 101 });
+      // The later layout's two folders (PL-65), the rebases' list (E11), then the snapshots' and two pages of deltas.
+      expect(fake.calls).toMatchObject({ lists: 6, gets: 101 });
       expect(log.latest(CHAIN)?.seq).toBe(101n);
     });
 
@@ -370,14 +370,107 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
     });
 
+    describe('a store moved on to a later layout (PL-65): this version reads none of it, as a rollback must not', () => {
+      /** A store this version could read whole, a chain anchored at 5, with `extra` beside it. */
+      const readable = (...extra: readonly string[]): FakeWriteOnceStore => {
+        const fake = createFakeWriteOnceStore();
+        fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 5n)));
+        for (const name of extra) fake.files.set(name, gzipSync('anything'));
+        return fake;
+      };
+      const movedOn = (lines: (event: string) => Record<string, unknown>[]) => lines('audit.anchor_store_moved_on');
+
+      it.each([
+        ['shards', 'e1/shards/a7/snapshots/9999-x'],
+        ['cutover', 'e1/cutover/marker'],
+      ])(
+        'a file under `%s/` fails the read closed, with its own alarm, and nothing of the old files is taken',
+        async (folder, name) => {
+          const fake = readable(name);
+          const { log, lines } = logOver(fake);
+          await log.read();
+
+          expect(log.state()).toBe('unreadable');
+          expect(log.latest(CHAIN)).toBeUndefined();
+          expect(log.organisations()).toEqual([]);
+          expect(movedOn(lines)).toEqual([expect.objectContaining({ level: 'error', epoch: 1, folder })]);
+          expect(lines('audit.anchor_store_unreadable')).toEqual([]);
+          expect(lines('audit.anchors_read')).toEqual([]);
+          // One name asked of each folder up to the one found, and no file opened.
+          expect(fake.calls).toMatchObject({ gets: 0 });
+        },
+      );
+
+      it('the same store without them reads as ever: only another epoch, or a name only starting alike, has them', async () => {
+        const fake = readable('e2/shards/a7/x', 'e2/cutover/marker', 'e1/shards-elsewhere', 'e1/cutovers/x');
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(5n);
+        expect(movedOn(lines)).toEqual([]);
+      });
+
+      it('a name the store would never write, or a page that goes on with none, counts all the same', async () => {
+        for (const answer of [
+          { names: [], foreign: 1, next: undefined },
+          { names: [], foreign: 0, next: 'more' },
+        ]) {
+          const fake = readable();
+          fake.instead.list = (start, most, after) =>
+            start === 'e1/cutover/' ? Promise.resolve(answer) : fake.real.list(start, most, after);
+          const { log, lines } = logOver(fake);
+          await log.read();
+
+          expect(log.state()).toBe('unreadable');
+          expect(movedOn(lines)).toEqual([expect.objectContaining({ folder: 'cutover' })]);
+        }
+      });
+
+      it('asks one name of each folder, every read', async () => {
+        const fake = readable();
+        const asked: [string, number][] = [];
+        fake.instead.list = (start, most, after) => {
+          asked.push([start, most]);
+          return fake.real.list(start, most, after);
+        };
+        const { log } = logOver(fake);
+        await log.read();
+        await log.read();
+
+        const later = asked.filter(([start]) => /^e1\/(?:shards|cutover)\//.test(start));
+        expect(later).toEqual([
+          ['e1/shards/', 1],
+          ['e1/cutover/', 1],
+          ['e1/shards/', 1],
+          ['e1/cutover/', 1],
+        ]);
+      });
+
+      it('a process already reading stops anchoring when it appears, and stays so at every read after', async () => {
+        const fake = readable();
+        const { log, lines } = logOver(fake);
+        await log.read();
+        expect(log.state()).toBe('read');
+
+        fake.files.set('e1/cutover/marker', gzipSync('anything'));
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        expect(movedOn(lines)).toHaveLength(2);
+        expect(lines('audit.anchor_store_read_failed')).toEqual([]);
+      });
+    });
+
     it('reads once at a time: a second call joins the first, and a later one reads again', async () => {
       const fake = createFakeWriteOnceStore();
       const { log } = logOver(fake);
       await Promise.all([log.read(), log.read()]);
-      // Rebases (E11), snapshots and deltas: once for both calls.
-      expect(fake.calls.lists).toBe(3);
+      // The later layout's two folders (PL-65), rebases (E11), snapshots and deltas: once for both calls.
+      expect(fake.calls.lists).toBe(5);
       await log.read();
-      expect(fake.calls.lists).toBe(6);
+      expect(fake.calls.lists).toBe(10);
     });
   });
 
@@ -1179,6 +1272,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         kind: 'organisation',
         orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
       });
+      /** What a line held costs in the budget's count (anchor-log.ts `KEPT_LINE_BYTES`). */
+      const KEPT_LINE = 600;
       /** A delta with no closing line: spoiled, its lines still counted as signed. */
       const spoiled = (fake: FakeWriteOnceStore, minutes: number, from: number, count: number): void => {
         const lines = Array.from({ length: count }, (_, index) => lineOf(anchorAt(chain(from + index), 1n)));
@@ -1189,7 +1284,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         const fake = createFakeWriteOnceStore();
         spoiled(fake, 1, 0, 40);
         spoiled(fake, 2, 100, 40);
-        const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
+        // Room for 50 lines: 40 alone fit, 80 together don't.
+        const size = 50 * KEPT_LINE;
         const { log, capture } = limited(fake, size);
         await log.read();
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toHaveLength(1);
@@ -1200,14 +1296,13 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       it('the same chains replayed in many files cost one line each: nothing past the limit', async () => {
         const fake = createFakeWriteOnceStore();
         for (let minutes = 1; minutes <= 5; minutes += 1) spoiled(fake, minutes, 0, 40);
-        const size = 40 * lineOf(anchorAt(chain(0), 1n)).length + 4096;
+        const size = 50 * KEPT_LINE;
         const { log, capture } = limited(fake, size);
         await log.read();
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([]);
         expect(log.organisations()).toHaveLength(40);
       });
 
-      const KEPT_LINE = 340;
       /** A log already holding `count` chains at place 1, from a sound snapshot. */
       const holding = async (fake: FakeWriteOnceStore, mostFileBytes: number, count: number) => {
         const first = Array.from({ length: count }, (_, index) => anchorAt(chain(index), 1n));
@@ -1275,13 +1370,13 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(log.state()).toBe('unreadable');
       });
 
-      it('near_memory speaks before the budget refuses: at 80% of it, in the same chains', async () => {
+      it('near_memory speaks long before the budget refuses: past half of it, in the same chains', async () => {
         const fake = createFakeWriteOnceStore();
         const mostFileBytes = 25 * KEPT_LINE;
         const { log, capture } = limited(fake, mostFileBytes);
         await log.read();
-        // 21 of 25: past 80%, and under the budget, by the same count a read would make.
-        for (let index = 0; index < 21; index += 1) log.keep(anchorAt(chain(index), 1n, LATER));
+        // 13 of 25: past half, and under the budget, by the same count a read would make.
+        for (let index = 0; index < 13; index += 1) log.keep(anchorAt(chain(index), 1n, LATER));
         await log.flush();
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory')).toHaveLength(1);
         expect(beyond(capture)).toEqual([]);
@@ -1392,18 +1487,21 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       });
     });
 
-    describe('a file near what a process can hold', () => {
-      const near = async (mostFileBytes: number, count: number) => {
+    describe('what is held, near what a process can hold (PL-65)', () => {
+      /** The budget for 20 lines at 600 bytes, what a line held costs in its count: half of it is 10. */
+      const SIZE = 20 * 600;
+      const near = async (count: number) => {
         const capture = new LogCapture();
         const fake = createFakeWriteOnceStore();
+        const clock = { at: LATER };
         const log = createAnchorLog({
           store: fake.store,
           keys,
           logger: testLogger(capture),
-          now: () => LATER,
+          now: () => clock.at,
           epoch: 1,
           alertAfterMs: 1000,
-          mostFileBytes,
+          mostFileBytes: SIZE,
         });
         await log.read();
         for (let index = 0; index < count; index += 1) {
@@ -1411,19 +1509,42 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
           log.keep(anchorAt({ kind: 'organisation', orgId }, 1n, LATER));
         }
         await log.flush();
-        return capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory');
+        const said = () => capture.lines().filter((line) => line.event === 'audit.anchor_store_near_memory');
+        return { log, clock, said };
       };
 
-      it('past 80% of it, says to add memory before the next restart, with the sizes', async () => {
-        const size = 10 * lineOf(anchorAt(CHAIN, 1n, LATER)).length;
-        expect(await near(size, 9)).toEqual([
-          expect.objectContaining({ level: 'error', kind: 'snapshots', mostBytes: size }),
+      it('past half of it, says so with the organisations held and where a read would stop', async () => {
+        const { said } = await near(11);
+        expect(said()).toEqual([
+          expect.objectContaining({
+            level: 'error',
+            kind: 'snapshots',
+            bytes: 11 * 600,
+            mostBytes: SIZE,
+            organisations: 11,
+            edgeOrganisations: 10,
+          }),
         ]);
       });
 
-      it('under 80% of it says nothing', async () => {
-        const size = 10 * lineOf(anchorAt(CHAIN, 1n, LATER)).length;
-        expect(await near(size, 6)).toEqual([]);
+      it('at half of it, or under, says nothing', async () => {
+        expect((await near(10)).said()).toEqual([]);
+      });
+
+      it('says it with each snapshot, hourly, not with every delta; the platform is no organisation', async () => {
+        const { log, clock, said } = await near(11);
+        log.keep(anchorAt(PLATFORM, 1n, LATER));
+        clock.at = new Date(LATER.getTime() + MINUTE);
+        await log.flush();
+        expect(said()).toHaveLength(1);
+
+        log.keep(anchorAt(PLATFORM, 2n, LATER));
+        clock.at = new Date(LATER.getTime() + 60 * MINUTE);
+        await log.flush();
+        expect(said()).toEqual([
+          expect.anything(),
+          expect.objectContaining({ kind: 'snapshots', bytes: 12 * 600, organisations: 11 }),
+        ]);
       });
     });
 
@@ -2107,8 +2228,8 @@ describe('the place a pass under way has reached, kept beside the passes (4D2e E
 
   it('a place dropped by its pass no longer counts against memory', async () => {
     const fake = createFakeWriteOnceStore();
-    // Room for two lines and a little: an anchor and a pass are under 80% of it, a dropped place kept as well is not.
-    const { log, capture } = limited(fake, 1000);
+    // An anchor and a pass are under half of it, a dropped place kept as well is not.
+    const { log, capture } = limited(fake, 3000);
     await log.read();
     log.keep(anchorAt(CHAIN, 1n));
     log.keepProgress(placeAt(CHAIN, 1n));
