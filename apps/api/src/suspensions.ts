@@ -329,7 +329,7 @@ export async function pausedFromOf(
  * supplier's details now: decided under a version, and the supplier has moved
  * past it. Only then is `pausedFromOf` worth reading.
  */
-export function movedPast(decidedUnder: string | null, currentVersionId: string): decidedUnder is string {
+export function movedPast(decidedUnder: string | null, currentVersionId: string): boolean {
   return decidedUnder !== null && decidedUnder !== currentVersionId;
 }
 
@@ -341,8 +341,8 @@ export function isCarried(
   decidedUnder: string | null,
   currentVersionId: string,
   pausedFrom: readonly string[],
-): decidedUnder is string {
-  return movedPast(decidedUnder, currentVersionId) && pausedFrom.includes(decidedUnder);
+): boolean {
+  return decidedUnder !== null && movedPast(decidedUnder, currentVersionId) && pausedFrom.includes(decidedUnder);
 }
 
 /** The first PAYEE_STATEMENTS whose cancel said it acts whatever the supplier's status (C3c). */
