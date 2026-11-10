@@ -20,6 +20,9 @@ import {
   type RuleId,
   singleSummaryColumn,
   templateProblems,
+  DECISION_HEADROOM,
+  gateBusy,
+  LOAD_RUN,
 } from './policy.ts';
 import {
   type BicepRun,
@@ -847,7 +850,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
-      max_connections: '100',
+      max_connections: '120',
     });
     expect(at(load.foundation.predictedResources.find(SERVER)?.properties, 'availabilityZone')).toBe('2');
     const sizeless = (resource: PredictedResource) =>
@@ -1322,7 +1325,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
-      max_connections: '100',
+      max_connections: '120',
     };
     for (const [name, value] of Object.entries(on)) {
       const measured = changed(MEASURE(name), (setting) => (inside(setting, 'properties').value = value));
@@ -5758,14 +5761,14 @@ describe('the load run (D2c, PL-38)', () => {
     expect(settingNames(api).filter((name) => /EMAIL|DIRECTORY/.test(name))).toEqual([]);
     const pool = (resource: PredictedResource) =>
       settingsOf(resource as unknown as Mutable).find(({ name }) => name === 'AGENTX_DB_POOL_MAX')?.value;
-    expect(pool(api)).toBe('8');
+    expect(pool(api)).toBe('12');
     expect(pool(found(staging, APP('api')))).toBe('10');
     expect(at(containerIn(found(staging, APP('api'))), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
     // Split (4D2e D13): three web copies, each its third of the gate, beside the jobs app, which keeps the anchors.
     const value = (resource: PredictedResource, name: string) =>
       settingsOf(resource as unknown as Mutable).find((entry) => entry.name === name)?.value;
     expect(['AGENTX_ROLE', 'AGENTX_WEB_COPIES', 'AGENTX_DECISION_GATE_ACTIVE'].map((name) => value(api, name))).toEqual(
-      ['web', '3', '7'],
+      ['web', '3', '11'],
     );
     expect(at(api.properties, 'template', 'scale')).toEqual({ minReplicas: 3, maxReplicas: 3 });
     expect(settingNames(api).filter((name) => name.includes('ANCHOR'))).toEqual([]);
@@ -5817,12 +5820,18 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual(['load-run']);
   });
 
-  it('load-run: the API off eight connections a copy in a load run, or over ten on staging out of one', () => {
+  it('load-run: the API off twelve connections a copy in a load run, or over ten on staging out of one', () => {
     const api = APP('api');
     const poolAt = (value: string) => (app: Mutable) => {
       for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_DB_POOL_MAX')) entry.value = value;
     };
     expect(brokenRules(loadChanged(api, poolAt('7')))).toEqual(['load-run']);
+    // The pinned numbers keep the decisions' room (S177): the target at 60% or less of the copies' gates, each gate
+    // under its pool, so a change to either is a change to this.
+    const gate = Number(LOAD_RUN.apiSettings.AGENTX_DECISION_GATE_ACTIVE);
+    expect(gateBusy(Number(LOAD_RUN.webCopies), gate)).toBeLessThanOrEqual(DECISION_HEADROOM.mostBusy);
+    expect(gate).toBeLessThan(Number(LOAD_RUN.apiPool));
+    expect(gateBusy(3, 9)).toBeGreaterThan(DECISION_HEADROOM.mostBusy);
     expect(brokenRules(changed(api, poolAt('11')))).toEqual(['load-run']);
     expect(brokenRules(changed(api, poolAt('10')))).toEqual([]);
     // Production's own server sizes its pool: PL-63 wants twenty or more there.
@@ -5883,18 +5892,18 @@ describe('the load run (D2c, PL-38)', () => {
         }),
       ),
     ).toEqual(['ca-agentx-stg-api must state AGENTX_DB_POOL_MAX as a whole number, so its connections can be counted']);
-    // The load run on the larger server's 85, split as apps.bicep makes it (4D2e D13): three web copies of eight and
-    // the jobs app's six are 72; four web copies, 88; the jobs' pool at twelve, 84; at thirteen, 86.
+    // The load run on the larger server's 105, split as apps.bicep makes it (4D2e D13; S183): three web copies of
+    // twelve and the jobs app's six are 96; four web copies, 120; the jobs' pool at ten, 104; at eleven, 106.
     expect(connectionProblems(load.together)).toEqual([]);
     const copies = (count: string) => (app: Mutable) => {
       setting('AGENTX_WEB_COPIES', count)(app);
       Object.assign(scaleOf(app), { minReplicas: Number(count), maxReplicas: Number(count) });
     };
     const over = (holds: number) =>
-      `has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
-    expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(88)]);
-    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '12')))).toEqual([]);
-    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '13')))).toEqual([over(86)]);
+      `has 105 connections for users (max_connections 120 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
+    expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(120)]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '10')))).toEqual([]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '11')))).toEqual([over(106)]);
   });
 
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {

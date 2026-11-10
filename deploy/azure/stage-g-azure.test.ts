@@ -62,7 +62,7 @@ class FakeCli implements Az {
         highAvailability: { mode: 'ZoneRedundant', state: 'Healthy' },
       });
     if (said.startsWith('postgres flexible-server parameter show')) {
-      return json({ value: '100', isConfigPendingRestart: false });
+      return json({ value: '120', isConfigPendingRestart: false });
     }
     if (said.startsWith('postgres flexible-server')) return json({});
     if (said.startsWith('containerapp job execution list')) return json([]);
@@ -202,11 +202,11 @@ describe("Stage G's Azure", () => {
     expect(said).toContain('postgres flexible-server update --name');
     // Azure asks before the restart a resize brings; a job has no one to answer (S176's create stopped there).
     expect(cli.calls.find((args) => args[2] === 'update')).toContain('--yes');
-    expect(cli.calls.find((args) => args[3] === 'set')).toContain('100');
+    expect(cli.calls.find((args) => args[3] === 'set')).toContain('120');
     expect(said).toContain('postgres flexible-server restart --name');
     expect(azure.serverState(COPY)).toBe('Ready');
     expect(azure.serverSize(COPY)).toBe('Standard_D16ads_v5');
-    expect(azure.connectionLimit(COPY)).toEqual({ limit: 100, waiting: false });
+    expect(azure.connectionLimit(COPY)).toEqual({ limit: 120, waiting: false });
     azure.deleteServer(COPY);
     expect(cli.calls.at(-1)).toContain('--yes');
   });
@@ -221,7 +221,7 @@ describe("Stage G's Azure", () => {
     const set = cli.calls
       .filter((args) => args[3] === 'set')
       .map((args) => [args[7], args[args.indexOf('--value') + 1]]);
-    expect(set).toEqual([['max_connections', '100'], ...Object.entries(MEASURED_SETTINGS)]);
+    expect(set).toEqual([['max_connections', '120'], ...Object.entries(MEASURED_SETTINGS)]);
     expect(cli.calls.at(-1)?.slice(0, 3)).toEqual(['postgres', 'flexible-server', 'restart']);
   });
 

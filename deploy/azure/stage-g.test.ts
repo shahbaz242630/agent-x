@@ -183,7 +183,7 @@ class FakeAzure implements StageGAzure {
     this.resized.push(name);
   }
   connectionLimit() {
-    return { limit: this.resized.length > 0 ? 100 : 50, waiting: false };
+    return { limit: this.resized.length > 0 ? 120 : 50, waiting: false };
   }
   deleteServer(name: string) {
     this.deleted.push(name);

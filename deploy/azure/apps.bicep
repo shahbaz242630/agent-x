@@ -1120,12 +1120,12 @@ var loadApiSettings = [
     name: 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'
     value: '200000'
   }
-  // The fair gate (4D2e C, PL-63), wide until the load run's sweep sets the numbers: tooling/load/plan.ts's LOAD_GATE
-  // (20 at once, 6 an organisation, 100 waiting), shared by the three copies as the rate limits are, each its third
-  // rounded up (4D2e D13). Each copy keeps its own gate (decision-gate.ts), and one gate can't pass its pool's eight.
+  // The fair gate (4D2e C, PL-63), each copy its own (decision-gate.ts): eleven at once, as Stage G passed on Azure
+  // (S179), so the target's 170 a second at ~0.1 s a decision fills about half of three copies' 33 (policy.ts holds it
+  // at 60% or less, S177). One gate can't pass its pool's twelve; the waiting stay as measured.
   {
     name: 'AGENTX_DECISION_GATE_ACTIVE'
-    value: '7'
+    value: '11'
   }
   {
     name: 'AGENTX_DECISION_GATE_PER_ORGANISATION'
@@ -1142,7 +1142,7 @@ var loadApiSettings = [
 ]
 
 // The load run's split (4D2e D13; StageD-Design "Memory at N copies"): three `web`
-// copies of eight connections and one `jobs` of six, 72 of the larger server's 85.
+// copies of twelve connections and one `jobs` of six (Stage G, S179).
 var loadWebCopies = 3
 var copies = loadRun ? loadWebCopies : webCopies
 
@@ -1392,14 +1392,14 @@ var apps = concat([
         publicOriginSetting
         trustedProxiesSetting
         // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
-        // each job, and room for the worker (ADR-002 Amendment G1). Eight a copy on
+        // each job, and room for the worker (ADR-002 Amendment G1). Twelve a copy on
         // the load run's larger server, three copies beside the jobs' six (4D2e
-        // D13): each organisation's agents may hold 30% of a copy's pool
+        // D13; Stage G S179): each organisation's agents may hold 30% of a copy's pool
         // (organisation-shares.ts). Production needs its own server's numbers
         // (Pre-Launch Checklist, PL-63), which the policy's `connections` counts.
         {
           name: 'AGENTX_DB_POOL_MAX'
-          value: loadRun ? '8' : '10'
+          value: loadRun ? '12' : '10'
         }
       ],
       signInAndPartnerSettings,
