@@ -1,7 +1,7 @@
 # The job-start watch (Carry-Forward S175). Whoever may start a Container Apps
 # job may start it with its containers replaced, and so run anything with the
 # job's secrets and identity; our own starts never do. Every half hour this
-# reads each job's runs of the last three hours and fails on any that ran other
+# reads each job's runs of the last six hours and fails on any that ran other
 # containers than its job's own (deploy/azure/job-starts.ts). A failed scheduled
 # run emails the repository's owner (GitHub's own notifications), and what to
 # do is in the Incident-Response-Playbook, section T.
@@ -77,7 +77,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_WATCH_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
 
-      - name: Check every job run of the last three hours
+      - name: Check every job run of the last six hours
         run: node deploy/azure/job-starts.ts
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

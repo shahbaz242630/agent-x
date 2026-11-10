@@ -122,7 +122,7 @@ async function run(
 
 const OPERATOR_JOB = 'job-agentx-stg-operator';
 const RUN_NAME = 'job-agentx-stg-operator-bvf2opt';
-/** After the job's last change, inside the last three hours. */
+/** After the job's last change, inside the last six hours. */
 const LATELY = '2026-11-10T12:16:55+00:00';
 
 const oneRun = (containers: readonly unknown[], startTime = LATELY, initContainers: unknown[] = []): World => ({
@@ -140,8 +140,8 @@ describe('the job-start watch', () => {
       runs: {
         [OPERATOR_JOB]: [
           EXECUTION(RUN_NAME, LATELY, [RAN()]),
-          // Older than three hours, and changed: outside the window, so never read.
-          EXECUTION('job-agentx-stg-operator-old', '2026-11-10T10:59:59+00:00', [RAN({ command: ['sh'] })]),
+          // Older than six hours, and changed: outside the window, so never read.
+          EXECUTION('job-agentx-stg-operator-old', '2026-11-10T07:59:59+00:00', [RAN({ command: ['sh'] })]),
         ],
         // A run omits empty arguments; the job lists them as [].
         'job-agentx-stg-migrate': [
@@ -153,10 +153,10 @@ describe('the job-start watch', () => {
     expect(done.status).toBe(0);
     expect(done.lines).toEqual([
       `Signed in to the subscription "Pay-As-You-Go" (${SUBSCRIPTION}).`,
-      'Reading the runs of 2 jobs started since 2026-11-10 11:00 UTC (the last 3 h).',
+      'Reading the runs of 2 jobs started since 2026-11-10 08:00 UTC (the last 6 h).',
       `${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`,
       'job-agentx-stg-migrate-x1 (started 2026-11-10 12:16 UTC): ran the job as it is deployed.',
-      "No run started since 2026-11-10 11:00 UTC ran other containers than its job's own.",
+      "No run started since 2026-11-10 08:00 UTC ran other containers than its job's own.",
     ]);
     // Reads only: every call a GET or the account.
     for (const call of done.az.calls)
@@ -166,7 +166,11 @@ describe('the job-start watch', () => {
   it.each([
     ['a changed command', RAN({ command: ['sh', '-c'] }), 'the container operator ran another command'],
     ['changed arguments', RAN({ args: ['--other'] }), 'the container operator ran with other arguments'],
-    ['another image', RAN({ image: 'ghcr.io/elsewhere/tool:1' }), 'the container operator ran another image'],
+    [
+      'another image',
+      RAN({ image: 'ghcr.io/elsewhere/tool:1' }),
+      'the container operator ran another image, from another repository',
+    ],
     [
       'a changed setting value',
       RAN({ env: [{ name: 'AGENTX_ENV', value: 'hidden-value-xyz' }, ...OPERATOR.env.slice(1)] }),
@@ -180,7 +184,7 @@ describe('the job-start watch', () => {
     [
       'a setting pointed at another secret',
       RAN({ env: [...OPERATOR.env.slice(0, 2), { name: setting('AGENTX', 'HELD', 'REF'), secretRef: 'other-ref' }] }),
-      `the container operator's setting ${setting('AGENTX', 'HELD', 'REF')} differs from the job's`,
+      `the container operator's setting ${setting('AGENTX', 'HELD', 'REF')} reads another secret, or none, than the job's`,
     ],
     [
       'a dropped setting',
@@ -234,22 +238,82 @@ describe('the job-start watch', () => {
     expect(twice.lines).toContain('  - the container operator named a setting twice');
   });
 
-  it('lists a run that started before its job last changed as not compared, never as a finding or as clean', async () => {
+  it("lists a run older than its job's last change as not compared only when it differs as a deploy does", async () => {
     // The job changed at 13:02:02 UTC (written with no zone, as Azure does); the run started at 12:16.
     const world: World = {
       jobs: [JOB(OPERATOR_JOB, [OPERATOR], '2026-11-10T13:02:02.4268454')],
       runs: {
-        [OPERATOR_JOB]: [EXECUTION(RUN_NAME, LATELY, [RAN({ image: 'ghcr.io/shahbaz242630/agent-x@sha256:old' })])],
+        [OPERATOR_JOB]: [
+          EXECUTION(RUN_NAME, LATELY, [
+            RAN({
+              image: 'ghcr.io/shahbaz242630/agent-x@sha256:old',
+              env: [{ name: 'AGENTX_ENV', value: 'before-the-release' }, ...OPERATOR.env.slice(1)],
+            }),
+          ]),
+        ],
       },
     };
     const done = await run(world);
     expect(done.status).toBe(0);
     expect(done.lines).toContain(
-      `${RUN_NAME} (started 2026-11-10 12:16 UTC): NOT COMPARED. It started before ${OPERATOR_JOB} last changed (2026-11-10 13:02 UTC), and differs from the job as it is now (the container operator ran another image), which that change may explain. Check it by hand if nobody changed the job then.`,
+      `::warning::${RUN_NAME} (started 2026-11-10 12:16 UTC): NOT COMPARED. It started before ${OPERATOR_JOB} last changed (2026-11-10 13:02 UTC), and differs from the job as it is now only as a deploy does (the container operator ran another image; the container operator's setting AGENTX_ENV differs from the job's). Check it by hand if nobody deployed then.`,
     );
     // The same run, unchanged, is simply clean: the job's change is no reason to doubt a run that matches it.
     const same = await run({ ...world, runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, LATELY, [RAN()])] } });
     expect(same.lines).toContain(`${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`);
+    // Anything a deploy doesn't change stays a finding, however old the run: a routine write after an override
+    // (a release, the operator's request taken off) must not hide it.
+    const notRoutine: readonly (readonly [Record<string, unknown>, string])[] = [
+      [RAN({ command: ['sh'] }), 'the container operator ran another command'],
+      [RAN({ args: ['--other'] }), 'the container operator ran with other arguments'],
+      [
+        RAN({ image: 'ghcr.io/elsewhere/tool@sha256:old' }),
+        'the container operator ran another image, from another repository',
+      ],
+      [
+        RAN({ env: [...OPERATOR.env, { name: 'NODE_OPTIONS', value: 'x' }] }),
+        "the container operator had a setting the job doesn't: NODE_OPTIONS",
+      ],
+      [RAN({ env: OPERATOR.env.slice(1) }), "the container operator lacked the job's setting AGENTX_ENV"],
+      [
+        RAN({ env: [{ name: 'AGENTX_ENV', secretRef: 'held-ref' }, ...OPERATOR.env.slice(1)] }),
+        "the container operator's setting AGENTX_ENV reads another secret, or none, than the job's",
+      ],
+      [{ ...RAN(), name: 'sidecar' }, "it ran the container sidecar, which the job doesn't have"],
+    ];
+    for (const [container, difference] of notRoutine) {
+      const old = await run({ ...world, runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, LATELY, [container])] } });
+      expect(old.status).toBe(1);
+      expect(old.lines).toContain(`  - ${difference}`);
+    }
+  });
+
+  it("finds a job's run history that may be cut short, or a flood of runs of one job", async () => {
+    const runsOf = (count: number, startOf: (index: number) => string): unknown[] =>
+      Array.from({ length: count }, (_, index) =>
+        EXECUTION(`${OPERATOR_JOB}-r${String(index)}`, startOf(index), [RAN()]),
+      );
+    const inside = (index: number): string => new Date(NOW.getTime() - (index + 1) * 60_000).toISOString();
+    const world = (runs: unknown[]): World => ({
+      jobs: [JOB(OPERATOR_JOB, [OPERATOR])],
+      runs: { [OPERATOR_JOB]: runs },
+    });
+    // A hundred kept, every one inside the window: older ones in it may have fallen off.
+    const full = await run(world(runsOf(100, inside)));
+    expect(full.status).toBe(1);
+    expect(full.lines).toContain(`FOUND: ${OPERATOR_JOB}'s runs can't all be checked:`);
+    expect(full.lines).toContain(
+      '  - the run history may be incomplete: Azure keeps 100 runs, and all 100 listed started in the window, so older runs in it may be gone unchecked',
+    );
+    expect(full.lines).toContain('  - it ran 100 times in 6 h, more than the 40 ever expected');
+    // A hundred kept, the oldest outside the window: the window is whole, and 40 runs in it are not a flood.
+    const whole = await run(world(runsOf(100, (index) => (index < 40 ? inside(index) : '2026-11-09T12:00:00+00:00'))));
+    expect(whole.status).toBe(0);
+    // 41 in six hours is.
+    const busy = await run(world(runsOf(41, inside)));
+    expect(busy.status).toBe(1);
+    expect(busy.lines).toContain('  - it ran 41 times in 6 h, more than the 40 ever expected');
+    expect(busy.lines.some((line) => line.includes('may be incomplete'))).toBe(false);
   });
 
   it("says Zitadel's stuck-step clean-up as itself, and anything more on that job as a finding", async () => {
@@ -309,7 +373,7 @@ describe('the job-start watch', () => {
       nextPage: { link, jobs: [JOB('job-agentx-stg-second', [OPERATOR])] },
     });
     expect(done.status).toBe(0);
-    expect(done.lines[1]).toBe('Reading the runs of 2 jobs started since 2026-11-10 11:00 UTC (the last 3 h).');
+    expect(done.lines[1]).toBe('Reading the runs of 2 jobs started since 2026-11-10 08:00 UTC (the last 6 h).');
     const elsewhere = await run({
       jobs: [JOB(OPERATOR_JOB, [OPERATOR])],
       runs: {},
@@ -363,9 +427,8 @@ describe('the job-start watch', () => {
     const dayOld = oneRun([RAN({ command: ['sh'] })], '2026-11-09T15:00:00+00:00');
     expect((await run(dayOld)).lines.some((line) => line.startsWith(RUN_NAME))).toBe(false);
     const asked = await run(dayOld, ['--hours', '24']);
-    expect(
-      asked.lines.some((line) => line.startsWith(`${RUN_NAME} (started 2026-11-09 15:00 UTC): NOT COMPARED.`)),
-    ).toBe(true);
+    expect(asked.status).toBe(1);
+    expect(asked.lines).toContain('  - the container operator ran another command');
   });
 });
 

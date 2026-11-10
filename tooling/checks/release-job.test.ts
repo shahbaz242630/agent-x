@@ -208,7 +208,7 @@ describe('the job-start watch', () => {
       'subscription-id': '${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}',
     });
     expect(watchSteps[signingIn + 1]).toEqual({
-      name: 'Check every job run of the last three hours',
+      name: 'Check every job run of the last six hours',
       run: 'node deploy/azure/job-starts.ts',
     });
     expect(watchSteps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });

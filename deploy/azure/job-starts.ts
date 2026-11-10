@@ -5,7 +5,7 @@
 // "Permissions"). Our own starts never do that but one: jobs.ts `cleanup` runs
 // Zitadel's setup as `setup cleanup`, which is said here as the clean-up it is.
 //
-//   node deploy/azure/job-starts.ts [--hours 3]
+//   node deploy/azure/job-starts.ts [--hours 6]
 //
 // The activity log doesn't keep a start's body, but each run keeps the template
 // it ran with. So this reads every job in staging's resource group and each run
@@ -15,11 +15,14 @@
 // which turns the scheduled workflow red and emails the repository's owner.
 //
 // **A known gap:** a run is compared with the job as it is now. A run started
-// before the job last changed (a release, a request written onto the operator's
-// job) that differs from today's job can't be told apart from a release, so it
-// is listed as not comparable, never as clean or as a finding. Someone who can
-// both start and change a job could hide a run that way; a job's change is in
-// the activity log. Nothing here stops a start: it only makes one seen.
+// before the job last changed (every release, every operator run) that differs
+// only as a deploy does (an image of the same repository, a plain setting's
+// value) is listed NOT COMPARED, a warning on the workflow's page; any other
+// difference stays a finding. So an override that changes only those, followed
+// by a deploy, would pass as one. A start doesn't move the job's change time.
+// Azure keeps a job's last 100 runs: a full list still inside the window, or a
+// flood of runs, is a finding of its own. Nothing here stops a start: it only
+// makes one seen.
 //
 // No setting's value is ever printed, nor a command or an argument: the
 // workflow's log is public. Each finding names the run, and the partner reads
@@ -27,8 +30,8 @@
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text, UsageError } from './deploy.ts';
 import { jobName, JOBS_API, runCli } from './jobs.ts';
 
-/** How far back runs are read by default: six of the workflow's half-hourly runs, so a late or missed one loses nothing. */
-export const DEFAULT_HOURS = 3;
+/** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
+export const DEFAULT_HOURS = 6;
 
 /** The most hours asked for: a run older than Azure's own history isn't listed anyway. */
 const MOST_HOURS = 24 * 7;
@@ -140,54 +143,82 @@ const shown = (name: string): string => name.replace(/[^\w.-]/g, '?');
 const sameList = (one: readonly string[], other: readonly string[]): boolean =>
   one.length === other.length && one.every((item, index) => item === other[index]);
 
+/**
+ * One way a run differs from its job, in plain words with no value. `routine`
+ * when a release or a deploy also makes it (another image from the same
+ * repository, or a plain setting's value), so a run older than the job's last
+ * change may differ so honestly; anything else no deploy of ours does.
+ */
+export interface Difference {
+  readonly text: string;
+  readonly routine: boolean;
+}
+
+const unusual = (text: string): Difference => ({ text, routine: false });
+
+/** An image's repository: the reference without its tag or digest, so a release's new digest keeps it. */
+const repositoryOf = (image: string): string => image.replace(/@.*$/, '').replace(/:[^/:]*$/, '');
+
 /** How one container's settings differ, by name alone: never a value. */
-function settingDifferences(where: string, job: readonly Setting[], ran: readonly Setting[]): string[] {
-  const differences: string[] = [];
+function settingDifferences(where: string, job: readonly Setting[], ran: readonly Setting[]): Difference[] {
+  const found: Difference[] = [];
   const byName = (settings: readonly Setting[]): ReadonlyMap<string, Setting> =>
     new Map(settings.map((setting) => [setting.name, setting]));
   const own = byName(job);
   const run = byName(ran);
   for (const [name, setting] of run) {
     const expected = own.get(name);
-    if (expected === undefined) differences.push(`${where} had a setting the job doesn't: ${shown(name)}`);
-    else if (expected.value !== setting.value || expected.secretRef !== setting.secretRef) {
-      differences.push(`${where}'s setting ${shown(name)} differs from the job's`);
+    if (expected === undefined) found.push(unusual(`${where} had a setting the job doesn't: ${shown(name)}`));
+    else if (expected.secretRef !== setting.secretRef) {
+      // Another secret, or a value where the job reads a secret (or the other way): never a release's change.
+      found.push(unusual(`${where}'s setting ${shown(name)} reads another secret, or none, than the job's`));
+    } else if (expected.value !== setting.value) {
+      found.push({ text: `${where}'s setting ${shown(name)} differs from the job's`, routine: true });
     }
   }
   for (const name of own.keys()) {
-    if (!run.has(name)) differences.push(`${where} lacked the job's setting ${shown(name)}`);
+    if (!run.has(name)) found.push(unusual(`${where} lacked the job's setting ${shown(name)}`));
   }
   // Two settings of one name: the later wins, so a repeat could hide a value.
-  if (run.size !== ran.length) differences.push(`${where} named a setting twice`);
-  return differences;
+  if (run.size !== ran.length) found.push(unusual(`${where} named a setting twice`));
+  return found;
+}
+
+/** How one container a run ran differs from the job's container of its name. */
+function sameNameDifferences(where: string, expected: Container, container: Container): Difference[] {
+  const found: Difference[] = [];
+  if (container.image !== expected.image) {
+    const routine = repositoryOf(container.image) === repositoryOf(expected.image);
+    found.push({ text: `${where} ran another image${routine ? '' : ', from another repository'}`, routine });
+  }
+  if (!sameList(container.command, expected.command)) found.push(unusual(`${where} ran another command`));
+  if (!sameList(container.args, expected.args)) found.push(unusual(`${where} ran with other arguments`));
+  return [...found, ...settingDifferences(where, expected.env, container.env)];
 }
 
 /** How one kind of container (`container` or `init container`) differs between the job and a run, in plain words, no values. */
-function containerDifferences(kind: string, job: readonly Container[], ran: readonly Container[]): string[] {
-  const differences: string[] = [];
+function containerDifferences(kind: string, job: readonly Container[], ran: readonly Container[]): Difference[] {
+  const found: Difference[] = [];
   const own = new Map(job.map((container) => [container.name, container]));
   for (const container of ran) {
     const where = `the ${kind} ${shown(container.name)}`;
     const expected = own.get(container.name);
-    if (expected === undefined) {
-      differences.push(`it ran ${where}, which the job doesn't have`);
-      continue;
-    }
-    if (container.image !== expected.image) differences.push(`${where} ran another image`);
-    if (!sameList(container.command, expected.command)) differences.push(`${where} ran another command`);
-    if (!sameList(container.args, expected.args)) differences.push(`${where} ran with other arguments`);
-    differences.push(...settingDifferences(where, expected.env, container.env));
+    found.push(
+      ...(expected === undefined
+        ? [unusual(`it ran ${where}, which the job doesn't have`)]
+        : sameNameDifferences(where, expected, container)),
+    );
   }
   const names = new Set(ran.map((container) => container.name));
   for (const name of own.keys()) {
-    if (!names.has(name)) differences.push(`it didn't run the job's ${kind} ${shown(name)}`);
+    if (!names.has(name)) found.push(unusual(`it didn't run the job's ${kind} ${shown(name)}`));
   }
-  if (names.size !== ran.length) differences.push(`it named a ${kind} twice`);
-  return differences;
+  if (names.size !== ran.length) found.push(unusual(`it named a ${kind} twice`));
+  return found;
 }
 
 /** Every way a run's template differs from its job's, or none. */
-export function differences(job: Template, ran: Template): string[] {
+export function differences(job: Template, ran: Template): Difference[] {
   return [
     ...containerDifferences('container', job.containers, ran.containers),
     ...containerDifferences('init container', job.initContainers, ran.initContainers),
@@ -220,8 +251,13 @@ export function verdictOf(job: DeployedJob, run: Run): Verdict {
   const found = differences(job.template, run.template);
   if (found.length === 0) return { kind: 'same' };
   if (isCleanUp(job, run.template)) return { kind: 'clean-up' };
+  // The job changes on every release and every operator run (its request is taken off), so a run older than that
+  // change is let off only for what a deploy itself changes: an image of the same repository, a plain value. A
+  // start doesn't move the job's own change time (read on staging, S183): an override shows in what it ran.
   const before = job.changedAt !== undefined && run.startedAt !== undefined && run.startedAt < job.changedAt;
-  return { kind: before ? 'not-comparable' : 'changed', differences: found };
+  const texts = found.map((difference) => difference.text);
+  const routine = found.every((difference) => difference.routine);
+  return { kind: before && routine ? 'not-comparable' : 'changed', differences: texts };
 }
 
 /** A time as `YYYY-MM-DD HH:MM UTC`, or "an unknown time". */
@@ -238,6 +274,16 @@ function findingLines(subscription: string, job: DeployedJob, run: Run, found: r
   ];
 }
 
+/** What the partner reads for a job whose run history can't be trusted whole. */
+function historyLines(job: DeployedJob, problems: readonly string[]): string[] {
+  return [
+    `FOUND: ${job.name}'s runs can't all be checked:`,
+    ...problems.map((problem) => `  - ${problem}`),
+    '  What it means: a run with its containers changed could be among those not seen, or hidden by a flood of starts.',
+    `  What to do: find who started it so often (the activity log, section T), then read its runs by hand (az containerapp job execution list --resource-group ${RESOURCE_GROUP} --name ${job.name}); treat it as section B until explained.`,
+  ];
+}
+
 /** Azure's list, page by page: a page names the next with `nextLink`. */
 function listAll(az: Az, what: string, url: string): unknown[] {
   const items: unknown[] = [];
@@ -245,8 +291,7 @@ function listAll(az: Az, what: string, url: string): unknown[] {
     const done = az.run(['rest', '--method', 'get', '--url', next, '--output', 'json']);
     if (done.status !== 0) {
       throw new Error(
-        `Azure refused to list ${what}, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's repository secrets (AZURE_WATCH_CLIENT_ID and the other two) and its role on ${RESOURCE_GROUP}, then run the workflow again.
-${done.stderr.trim()}`,
+        `Azure refused to list ${what}, so no run was checked and nothing is known about them. What to do: read Azure's words below; if it is the sign-in or the role, check the watch's repository secrets (AZURE_WATCH_CLIENT_ID and the other two) and its role on ${RESOURCE_GROUP}, then run the workflow again.\n${done.stderr.trim()}`,
       );
     }
     const page = JSON.parse(done.stdout) as { value?: unknown; nextLink?: unknown } | null;
@@ -280,10 +325,10 @@ export function deployedJobs(az: Az, subscription: string): DeployedJob[] {
   );
 }
 
-/** A job's runs started at or after `since` (ms); a run with no start time is kept, since its age is unknown. */
-export function runsSince(az: Az, subscription: string, job: string, since: number): Run[] {
-  return listAll(az, `${job}'s runs`, `${jobsUrl(subscription)}/${job}/executions?api-version=${JOBS_API}`)
-    .map((item) => {
+/** Every run of a job Azure lists, newest first as it gives them. */
+export function listedRuns(az: Az, subscription: string, job: string): Run[] {
+  return listAll(az, `${job}'s runs`, `${jobsUrl(subscription)}/${job}/executions?api-version=${JOBS_API}`).map(
+    (item) => {
       const run = item as {
         name?: unknown;
         properties?: { startTime?: unknown; status?: unknown; template?: unknown };
@@ -294,8 +339,39 @@ export function runsSince(az: Az, subscription: string, job: string, since: numb
         status: text(run.properties?.status),
         template: templateOf(run.properties?.template),
       };
-    })
-    .filter((run) => run.startedAt === undefined || run.startedAt >= since);
+    },
+  );
+}
+
+/** A run started at or after `since` (ms); one with no start time counts, since its age is unknown. */
+const inWindow = (run: Run, since: number): boolean => run.startedAt === undefined || run.startedAt >= since;
+
+/**
+ * How many runs a job's history keeps: "the most recent 100" (learn.microsoft.com
+ * /azure/container-apps/jobs, "Get job execution history"; staging's migration
+ * job lists exactly 100). A list that full whose oldest run is still in the
+ * window may have lost runs off its end, which are then never compared.
+ */
+export const HISTORY_KEPT = 100;
+
+/** More runs of one job than this per three hours is a finding of its own: a flood could push an override off the history. */
+const BUSY_PER_THREE_HOURS = 20;
+
+/** Why a job's runs in the window can't be taken as all of them or as ordinary, a line each, or none. */
+export function historyProblems(listed: readonly Run[], since: number, hours: number): string[] {
+  const problems: string[] = [];
+  const recent = listed.filter((run) => inWindow(run, since)).length;
+  const oldest = listed.at(-1);
+  if (listed.length >= HISTORY_KEPT && oldest !== undefined && inWindow(oldest, since)) {
+    problems.push(
+      `the run history may be incomplete: Azure keeps ${String(HISTORY_KEPT)} runs, and all ${String(recent)} listed started in the window, so older runs in it may be gone unchecked`,
+    );
+  }
+  const most = Math.ceil((hours * BUSY_PER_THREE_HOURS) / 3);
+  if (recent > most) {
+    problems.push(`it ran ${String(recent)} times in ${String(hours)} h, more than the ${String(most)} ever expected`);
+  }
+  return problems;
 }
 
 /** How many hours back to read, or a UsageError. */
@@ -327,7 +403,10 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
   );
   const found: string[] = [];
   for (const job of jobs) {
-    for (const run of runsSince(steps.az, subscription, job.name, since)) {
+    const listed = listedRuns(steps.az, subscription, job.name);
+    const problems = historyProblems(listed, since, hours);
+    if (problems.length > 0) found.push(...historyLines(job, problems));
+    for (const run of listed.filter((each) => inWindow(each, since))) {
       const verdict = verdictOf(job, run);
       switch (verdict.kind) {
         case 'same':
@@ -339,8 +418,9 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
           );
           break;
         case 'not-comparable':
+          // A warning GitHub shows on the run's page, so it isn't lost in a green run's log.
           steps.say(
-            `${run.name} (started ${when(run.startedAt)}): NOT COMPARED. It started before ${job.name} last changed (${when(job.changedAt)}), and differs from the job as it is now (${verdict.differences.join('; ')}), which that change may explain. Check it by hand if nobody changed the job then.`,
+            `::warning::${run.name} (started ${when(run.startedAt)}): NOT COMPARED. It started before ${job.name} last changed (${when(job.changedAt)}), and differs from the job as it is now only as a deploy does (${verdict.differences.join('; ')}). Check it by hand if nobody deployed then.`,
           );
           break;
         case 'changed':
