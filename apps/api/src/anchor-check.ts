@@ -388,7 +388,8 @@ export function createAnchorCheck({
     void work.then(end, end);
     return withinDeadline(work, deadlineMs, signal);
   };
-  // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed.
+  // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed. Every one in the
+  // store comes here, past any cap: with `firstSeen`, counted in the anchor log's memory budget (anchor-log.ts, PL-65).
   const seen = new Set<string>();
   // When each organisation was first seen, so its stale period starts then, not when the process began.
   const firstSeen = new Map<string, number>();

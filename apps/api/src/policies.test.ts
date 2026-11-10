@@ -4,13 +4,14 @@
 // confirmed, every refusal, and the reads. Who reaches them is the access
 // hook's (role-matrix.test.ts); what the use case does in the database is
 // policy-changes.db.test.ts.
-import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
+import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { PolicyChangeAsked, PolicyChanged, PolicyChanges, PolicyView } from './policy-changes.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -30,18 +31,7 @@ const ASKED = {
 } as const;
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-08T09:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-08T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-08T09:10:00.000Z'),
-  endsAt: new Date('2099-10-07T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-08T09:00:00.000Z', { endless: true });
 
 const AED = (minor: bigint) => money(minor, 'AED');
 

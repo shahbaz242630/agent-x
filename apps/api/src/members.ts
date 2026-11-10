@@ -13,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { EVERY_MEMBER } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 
@@ -61,7 +62,7 @@ export function registerMembers(app: FastifyInstance, listMembers: ListMembers |
   const routes = app.withTypeProvider<ZodTypeProvider>();
   routes.get(
     '/v1/members',
-    { schema: MEMBERS_SCHEMA, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
+    { schema: MEMBERS_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const member = request.member;
       // The access hook lets no one else through; a route that runs without a member is a bug.

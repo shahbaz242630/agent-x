@@ -7,7 +7,7 @@
 // supplier-registry.db.test.ts, supplier-changes.db.test.ts,
 // supplier-payees.db.test.ts and supplier-payee-changes.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
+import type { MembershipCheck } from '@agentx/core/modules/identity';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type {
   RegistrationRecord,
@@ -22,6 +22,7 @@ import type { InjectOptions } from 'fastify';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
@@ -39,18 +40,7 @@ const MEMBERSHIP = '0199a0f0-0000-7000-8000-000000000033';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000e3';
 const REGISTRATION_ID = '0199a0f0-0000-7000-8000-0000000000e4';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-01T08:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-01T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-01T08:10:00.000Z'),
-  endsAt: new Date('2099-10-01T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-01T08:00:00.000Z', { endless: true });
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: MEMBERSHIP, role: 'admin' };
 const MEMBER = { orgId: ORG, userId: LIVE.userId };

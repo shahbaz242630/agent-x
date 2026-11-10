@@ -23,10 +23,11 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
-import { OWNER_LOGIN_NOTE, runChainRestore } from './chain-restore-main.ts';
+import { runChainRestore } from './chain-restore-main.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 import type { OperatorProcess } from './main.ts';
 import { chainRestoreRequest } from './request.ts';
+import { OWNER_LOGIN_NOTE } from './restore-job.ts';
 
 /** Each answer pushed overrides one read-only proof, in the order the command asks. */
 const faults = vi.hoisted(() => ({
