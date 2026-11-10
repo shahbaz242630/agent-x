@@ -125,6 +125,16 @@ describe('PL-29 follow-up: a state repair’s steps', () => {
           columns,
         ),
       ).rejects.toThrow(StateWriteMissed);
+      // Nor inserted under this one's key: the insert's twin.
+      await expect(
+        writeStateRow(
+          tx,
+          ORG,
+          { action: 'put_back', table: THINGS, id: NONE, stored: changed, exists: false },
+          columns,
+        ),
+      ).rejects.toThrow(StateWriteMissed);
+      expect((await rowsAsStored(tx, THINGS, ORG, [NONE])).has(NONE)).toBe(false);
     });
     await withTenant(owner, ORG, async (tx) => {
       await expect(writeStateRow(tx, ORG, { action: 'remove', table: THINGS, id: NONE }, [])).rejects.toMatchObject({

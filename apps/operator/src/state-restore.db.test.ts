@@ -8,11 +8,16 @@
 // the app's own verifier before it commits. No event is forged here: every
 // event on either chain is one the app or the operator recorded.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
-import { withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { INVITATIONS, MEMBERSHIPS } from '@agentx/core/modules/identity';
+import { MANDATE_VERSIONS, MANDATES } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
+import { SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { SUPPLIER_VERSIONS, SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, readSignedRows, type SignedStateTable } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import {
   createTestDatabase,
@@ -40,24 +45,47 @@ import {
 
 /**
  * Faults a test turns on, each standing for what the database alone can't be made to do here: a guard not switched on
- * again, a write failing for something other than a constraint, the verifier finding a row written still tampered.
+ * again, a write failing for something other than a constraint, the verifier finding a row written still tampered (one
+ * row, or the whole check of the tables written), the chain failing its check, the log answering an object's latest
+ * signed event as broken, and the latest signed event moving between the plan and the repair's lock.
  */
 const faults = vi.hoisted(() => ({
   guardsLeftOff: false,
   writeFails: undefined as Error | undefined,
   verifierRefuses: false,
+  wholeFails: undefined as string | undefined,
   chainFails: false,
+  latestBroken: undefined as string | undefined,
+  /** Trails made past this many answer every signed event by another ID: the plan's own is the first. */
+  latestMovesAfter: undefined as number | undefined,
+  trailsMade: 0,
 }));
+
+/** An event ID no event has: what a moved latest signed event is answered as. */
+const ANOTHER_EVENT = '0199a0f0-0000-7000-8000-0000000000ee';
 
 vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/core/modules/audit')>();
   return {
     ...actual,
-    // The chain's own check as the repair's last step makes it: everything before it passed.
+    // The chain's check as the repair makes it before any table's lock, and the log's latest signed events.
     createAuditTrail: (...args: Parameters<typeof actual.createAuditTrail>) => {
       const trail = actual.createAuditTrail(...args);
+      faults.trailsMade += 1;
       const broken = { ok: false as const, problem: { reason: 'link' as const, seq: 1n } };
-      return faults.chainFails ? { ...trail, verify: () => Promise.resolve(broken) } : trail;
+      const moved = faults.latestMovesAfter !== undefined && faults.trailsMade > faults.latestMovesAfter;
+      const latestSignedStates: typeof trail.latestSignedStates = async (...asked) =>
+        new Map(
+          [...(await trail.latestSignedStates(...asked))].map(([id, latest]) => {
+            if (id === faults.latestBroken) return [id, { kind: 'broken' as const }];
+            return [id, moved && latest.kind === 'signed' ? { ...latest, id: ANOTHER_EVENT } : latest];
+          }),
+        );
+      return {
+        ...trail,
+        latestSignedStates,
+        ...(faults.chainFails ? { verify: () => Promise.resolve(broken) } : {}),
+      };
     },
     guardsOn: (...args: Parameters<typeof actual.guardsOn>) =>
       faults.guardsLeftOff ? Promise.resolve() : actual.guardsOn(...args),
@@ -65,21 +93,27 @@ vi.mock('@agentx/core/modules/audit', async (importOriginal) => {
       faults.writeFails === undefined ? actual.writeStateRow(...args) : Promise.reject(faults.writeFails),
     withRepairStates: <Result>(...[db, org, services, work]: Parameters<typeof actual.withRepairStates<Result>>) =>
       actual.withRepairStates(db, org, services, (tx, states) =>
-        work(
-          tx,
-          faults.verifierRefuses
-            ? {
-                ...states,
-                verifiedStates: async (...args: Parameters<typeof states.verifiedStates>) =>
-                  new Map(
-                    [...(await states.verifiedStates(...args)).keys()].map((id) => [
-                      id,
-                      { outcome: 'tampered' as const, sign: 'seal' as const },
-                    ]),
-                  ),
-              }
-            : states,
-        ),
+        work(tx, {
+          ...states,
+          verifiedStates: async (...args: Parameters<typeof states.verifiedStates>) => {
+            const checks = await states.verifiedStates(...args);
+            if (!faults.verifierRefuses) return checks;
+            return new Map(
+              [...checks.keys()].map((id) => [id, { outcome: 'tampered' as const, sign: 'seal' as const }]),
+            );
+          },
+          // The whole check of the tables written, failing on the one that names the table faulted.
+          verifyAll: (async (...args: Parameters<typeof states.verifyAll>) => {
+            const [, org, tables] = args;
+            if (faults.wholeFails === undefined || !tables.some(({ table }) => table === faults.wholeFails)) {
+              return states.verifyAll(...args);
+            }
+            return {
+              outcome: 'tampered',
+              findings: [{ orgId: org, subjectType: 'invitation', objectId: ANOTHER_EVENT, sign: 'seal' }],
+            };
+          }) as typeof states.verifyAll,
+        }),
       ),
   };
 });
@@ -88,7 +122,10 @@ afterEach(() => {
   faults.guardsLeftOff = false;
   faults.writeFails = undefined;
   faults.verifierRefuses = false;
+  faults.wholeFails = undefined;
   faults.chainFails = false;
+  faults.latestBroken = undefined;
+  faults.latestMovesAfter = undefined;
 });
 
 const server = inject('postgres');
@@ -121,6 +158,9 @@ function theCopy(): TestDatabase {
   if (copy === undefined) throw new Error('No copy made yet.');
   return copy;
 }
+
+/** The audit trail the app records with. */
+const actualTrail = () => createAuditTrail({ keys, ids: uuidV7Ids });
 
 const services = (capture?: LogCapture) => ({ keys, ids: uuidV7Ids, logger: testLogger(capture) });
 
@@ -793,7 +833,7 @@ describe('PL-29 follow-up: what the database alone does not show here', () => {
     });
   });
 
-  it('rolls back when the chain fails its check as the last step', async () => {
+  it('refuses, writing nothing, when the chain fails its check before any table is locked', async () => {
     await copied();
     await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
     const digest = await digestNow();
@@ -801,5 +841,299 @@ describe('PL-29 follow-up: what the database alone does not show here', () => {
     expect(await restore(digest)).toEqual({ ok: false, reason: 'unverified', check: 'chain' });
     faults.chainFails = false;
     expect(JSON.parse(String(await rowOf(INVITATIONS.table, invitationId)))).toMatchObject({ expires_at: LATER_JSON });
+  });
+
+  it('rolls back when the whole check of the tables written finds a record tampered with', async () => {
+    await copied();
+    await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
+    const digest = await digestNow();
+    faults.wholeFails = INVITATIONS.table;
+    expect(await restore(digest)).toEqual({
+      ok: false,
+      reason: 'unverified',
+      check: 'whole',
+      subjectType: 'invitation',
+      objectId: ANOTHER_EVENT,
+      sign: 'seal',
+    });
+    faults.wholeFails = undefined;
+    expect(JSON.parse(String(await rowOf(INVITATIONS.table, invitationId)))).toMatchObject({ expires_at: LATER_JSON });
+    expect(await triggersOn(INVITATIONS.table)).toMatchObject({ status_guard: 'O' });
+  });
+
+  it('refuses a plan where the live log answers the tampered object as broken', async () => {
+    await copied();
+    await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
+    faults.latestBroken = invitationId;
+    expect(await planned()).toEqual({
+      ok: false,
+      reason: 'unrepairable',
+      subjectType: INVITATIONS.subject,
+      objectId: invitationId,
+      sign: 'log',
+    });
+  });
+
+  it('refuses as moved when the latest signed event changes between the plan and the repair', async () => {
+    await copied();
+    await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
+    const digest = await digestNow();
+    // The repair's plan made again uses the next trail; every trail after it answers the event by another ID.
+    faults.trailsMade = 0;
+    faults.latestMovesAfter = 1;
+    expect(await restore(digest)).toEqual({
+      ok: false,
+      reason: 'moved',
+      subjectType: INVITATIONS.subject,
+      objectId: invitationId,
+    });
+    faults.latestMovesAfter = undefined;
+    expect(JSON.parse(String(await rowOf(INVITATIONS.table, invitationId)))).toMatchObject({ expires_at: LATER_JSON });
+  });
+});
+
+describe('PL-29 follow-up: an object the app refuses to judge', () => {
+  it('refuses a plan with an object that has a backlog of events since its newest signed one', async () => {
+    // More events about the invitation than one read of its latest signed state takes: the app refuses to judge it.
+    const trail = actualTrail();
+    await withSignedStates(on(live, 'app'), orgId, services(), async (tx) => {
+      for (let step = 1; step <= 1001; step += 1) {
+        await trail.record(tx, orgId, {
+          actor: ADMIN,
+          action: 'invitation.viewed',
+          subject: { type: INVITATIONS.subject, id: invitationId, version: 1 },
+          details: { step },
+        });
+      }
+    });
+    await copied();
+    expect(await planned()).toEqual({
+      ok: false,
+      reason: 'backlog',
+      subjectType: INVITATIONS.subject,
+      objectId: invitationId,
+    });
+  }, 120_000);
+});
+
+/** A row the world below seeds, by its table and ID. */
+type Seeded = readonly [SignedStateTable, string];
+
+/**
+ * An agent, its key, a funding source, a supplier and its version, a mandate
+ * with two versions, and an approved spend request, made past the app as the
+ * core's tests make them (seed-rows.helper.test.ts), each then signed as the
+ * app signs a new row (record from `new`, its fields as they stand), so every
+ * one verifies: the tables whose guards an original put back meets beyond the
+ * status guard (made_once, fixed_at_creation, decided_move, carried_version).
+ */
+async function seededWorld() {
+  const admin = live.as('admin');
+  const at = new Date('2026-11-01T08:00:00Z');
+  const id = () => uuidV7Ids.next();
+  const world = {
+    agent: id(),
+    key: id(),
+    link: id(),
+    source: id(),
+    supplier: id(),
+    supplierVersion: id(),
+    mandate: id(),
+    version: id(),
+    later: id(),
+    request: id(),
+  };
+  await admin.query(
+    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
+     values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
+    [orgId, world.agent, id(), at],
+  );
+  await admin.query('insert into directory.agent_keys (key_id, org_id) values ($1, $2)', [world.key, orgId]);
+  await admin.query(
+    `insert into agents.agent_keys (org_id, id, agent_id, status, scopes, secret_mac, secret_key_version, expires_at,
+       created_at)
+     values ($1, $2, $3, 'ACTIVE', 'requests:write', $4, 1, '2027-10-08T08:00:00Z', $5)`,
+    [orgId, world.key, world.agent, 'c'.repeat(64), at],
+  );
+  await admin.query(
+    `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
+     values ($1, $2, $3, 'fake', 'session-1', $5, $4)`,
+    [orgId, world.link, id(), at, new Date(at.getTime() + 86_400_000)],
+  );
+  await admin.query(
+    `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
+       consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
+       max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
+     values ($1, $2, $3, 'fake', $4, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1', '2027-10-06T08:00:00Z', 'AED',
+       'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $5, $5)`,
+    [orgId, world.source, world.link, `acct-${world.source}`, at],
+  );
+  await admin.query(
+    `with supplier as (
+       insert into suppliers.suppliers (org_id, id, status, current_version_id, created_at)
+       values ($1, $2, 'UNVERIFIED', $3, $4) returning org_id)
+     insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts,
+       phone_ciphertext, contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
+     select org_id, $3, $2, 1, 'Gulf Office Supplies LLC', 'phone',
+       pg_catalog.decode(pg_catalog.repeat('00', 40), 'hex'), 1, $4, 'registry', 'trade-licence-1', $2, $4
+     from supplier`,
+    [orgId, world.supplier, world.supplierVersion, at],
+  );
+  // The mandate and its first version in one statement, as each names the other; its second version beside it.
+  await admin.query(
+    `with mandate as (
+       insert into mandates.mandates (org_id, id, agent_id, time_zone, split_window_hours, status, pending_version_id,
+         created_at)
+       values ($1, $2, $3, 'Asia/Dubai', 24, 'PENDING_ACCEPTANCE', $4, $9) returning org_id)
+     insert into mandates.versions (org_id, id, mandate_id, version, purpose, currency, per_order_limit_minor,
+       monthly_limit_minor, approval_threshold_minor, supplier_ids, funding_source_id, split_check, consent_limits,
+       terms_hash, drafted_by, drafted_at)
+     select org_id, $4::uuid, $2::uuid, 1, 'Office supplies', 'AED', 500000, 2000000, 100000, $6::text, $7::uuid, 'on',
+       'strict', $8::text, $3::uuid, $9::timestamptz from mandate
+     union all
+     select org_id, $5::uuid, $2::uuid, 2, 'Office supplies', 'AED', 500000, 2000000, 100000, $6::text, $7::uuid, 'on',
+       'strict', $8::text, $3::uuid, $9::timestamptz from mandate`,
+    [orgId, world.mandate, world.agent, world.version, world.later, world.supplier, world.source, 'a'.repeat(64), at],
+  );
+  await admin.query(
+    `insert into spend_requests.requests (org_id, id, agent_id, agent_key_id, mandate_id, mandate_version_id,
+       supplier_id, supplier_version_id, funding_source_id, amount_minor, currency, purpose, order_reference,
+       idempotency_key, input_hash, input_hash_key_version, decision, reason_codes, status, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 25000, 'AED', 'Printer paper', 'PO-1', $10, $11, 1, 'ALLOW', null,
+       'VALIDATING', $12)`,
+    [
+      orgId,
+      world.request,
+      world.agent,
+      world.key,
+      world.mandate,
+      world.version,
+      world.supplier,
+      world.supplierVersion,
+      world.source,
+      id(),
+      'd'.repeat(64),
+      at,
+    ],
+  );
+  // Allowed, as its decision says: the request a payment would follow.
+  await admin.query("update spend_requests.requests set status = 'APPROVED' where org_id = $1 and id = $2", [
+    orgId,
+    world.request,
+  ]);
+  const rows: readonly Seeded[] = [
+    [AGENTS, world.agent],
+    [AGENT_KEYS, world.key],
+    [SOURCES, world.source],
+    [SUPPLIERS, world.supplier],
+    [SUPPLIER_VERSIONS, world.supplierVersion],
+    [MANDATES, world.mandate],
+    [MANDATE_VERSIONS, world.version],
+    [MANDATE_VERSIONS, world.later],
+    [SPEND_REQUESTS, world.request],
+  ];
+  // Each in a transaction of its own: recording takes the chain head's lock, after which no row is locked.
+  for (const [table, rowId] of rows) {
+    await withSignedStates(on(live, 'app'), orgId, services(), async (tx, states) => {
+      const read = (await readSignedRows(tx, table, orgId, [rowId], 'none')).get(rowId);
+      if (read?.outcome !== 'found') throw new Error(`The seeded ${table.subject} can't be read`);
+      await states.record(tx, table, { orgId, id: rowId }, 'new', Object.fromEntries(read.fields), {
+        actor: ADMIN,
+        action: `${table.subject}.created`,
+        details: {},
+      });
+    });
+  }
+  return world;
+}
+
+/** Changes a row as the owner, every trigger of its table off as an attacker would have them: the statement given. */
+async function tamperedPastEveryGuard(table: string, statement: string, values: readonly unknown[]): Promise<void> {
+  const owner = await live.connect('owner');
+  try {
+    await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [orgId]);
+    await owner.query('begin');
+    // The table is one of the product's own constants, quoted part by part.
+    const quoted = table
+      .split('.')
+      .map((part) => `"${part}"`)
+      .join('.');
+    // eslint-disable-next-line agentx/no-string-built-sql -- The table is a fixed constant, quoted above.
+    await owner.query(`alter table ${quoted} disable trigger user`);
+    // eslint-disable-next-line agentx/no-string-built-sql -- The caller's statement is fixed text with bound values.
+    await owner.query(statement, values);
+    // eslint-disable-next-line agentx/no-string-built-sql -- The table is a fixed constant, quoted above.
+    await owner.query(`alter table ${quoted} enable trigger user`);
+    await owner.query('commit');
+  } finally {
+    await owner.end();
+  }
+}
+
+/** A row of the world as Postgres's JSON text of it, read as the owner. */
+async function worldRow(table: string, rowId: string): Promise<string | undefined> {
+  const tamper = await ownerOn({ table, subject: 'probe' });
+  const rows = await tamper.query<{ row: string }>(
+    `select r.row from (
+       select 'mandates.versions' as name, pg_catalog.to_jsonb(t)::text as row, t.org_id, t.id from mandates.versions t
+       union all select 'mandates.mandates', pg_catalog.to_jsonb(t)::text, t.org_id, t.id from mandates.mandates t
+       union all select 'spend_requests.requests', pg_catalog.to_jsonb(t)::text, t.org_id, t.id
+       from spend_requests.requests t
+     ) r where r.name = $3 and r.org_id = $1 and r.id = $2`,
+    [orgId, rowId, table],
+  );
+  return rows[0]?.row;
+}
+
+describe('PL-29 follow-up: originals put back past every guard the database holds', () => {
+  it('puts back a made-once mandate version, a mandate fixed at creation, and a decided, carried spend request', async () => {
+    const world = await seededWorld();
+    expect(await verifiedNow()).toMatchObject({ outcome: 'verified' });
+    await copied();
+    const originals = {
+      version: await worldRow(MANDATE_VERSIONS.table, world.version),
+      mandate: await worldRow(MANDATES.table, world.mandate),
+      request: await worldRow(SPEND_REQUESTS.table, world.request),
+    };
+    // A made-once version's limit raised; a mandate's time zone, fixed when it was made, moved; a request moved
+    // back to deciding, its decision a denial and its version another of its mandate's. Put back, each meets its
+    // guards: made_once; fixed_at_creation; and the request's status guard, decided_move, fixed_at_creation and
+    // carried_version together.
+    await tamperedPastEveryGuard(
+      MANDATE_VERSIONS.table,
+      'update mandates.versions set per_order_limit_minor = 1500000 where org_id = $1 and id = $2',
+      [orgId, world.version],
+    );
+    await tamperedPastEveryGuard(
+      MANDATES.table,
+      "update mandates.mandates set time_zone = 'Europe/London' where org_id = $1 and id = $2",
+      [orgId, world.mandate],
+    );
+    await tamperedPastEveryGuard(
+      SPEND_REQUESTS.table,
+      `update spend_requests.requests set status = 'VALIDATING', decision = 'DENY', reason_codes = 'APPROVAL_THRESHOLD',
+       mandate_version_id = $3
+       where org_id = $1 and id = $2`,
+      [orgId, world.request, world.later],
+    );
+    expect(await verifiedNow()).toMatchObject({ outcome: 'tampered' });
+    const plan = await planned();
+    expect(plan).toMatchObject({
+      ok: true,
+      rows: [
+        { action: 'put_back', table: MANDATES, id: world.mandate },
+        { action: 'put_back', table: MANDATE_VERSIONS, id: world.version },
+        { action: 'put_back', table: SPEND_REQUESTS, id: world.request },
+      ],
+    });
+    expect(await restore(statePlanDigest(plan, orgId, undefined))).toMatchObject({ ok: true });
+    expect(await worldRow(MANDATE_VERSIONS.table, world.version)).toBe(originals.version);
+    expect(await worldRow(MANDATES.table, world.mandate)).toBe(originals.mandate);
+    expect(await worldRow(SPEND_REQUESTS.table, world.request)).toBe(originals.request);
+    expect(await verifiedNow()).toMatchObject({ outcome: 'verified' });
+    for (const table of [MANDATE_VERSIONS.table, MANDATES.table, SPEND_REQUESTS.table]) {
+      const triggers = await triggersOn(table);
+      expect(Object.values(triggers).every((state) => state === 'O')).toBe(true);
+    }
   });
 });
