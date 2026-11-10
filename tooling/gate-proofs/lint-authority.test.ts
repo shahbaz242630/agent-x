@@ -9,10 +9,23 @@
 // lint-authority-registry.test.ts, on a registry of its own. Its one rule that
 // bites whatever the registry holds — a table that declares itself and isn't
 // on it — is proven here.
-import { API, AUDIT, CORE, describes, type LintCase, PLATFORM, PLATFORM_DB, proveLintRules } from './lint-harness.ts';
+import {
+  API,
+  AUDIT,
+  CORE,
+  describes,
+  type LintCase,
+  OPERATOR,
+  PLATFORM,
+  PLATFORM_DB,
+  proveLintRules,
+} from './lint-harness.ts';
 
 const STEPS_RULE = 'agentx/signed-state-steps-in-audit-module';
 const TABLES_RULE = 'agentx/authority-tables-through-signed-state';
+const IMPORTS_RULE = 'no-restricted-imports';
+/** What the state repair's fence says (PL-29 follow-up, eslint.config.js). */
+const STATE_REPAIR = "the operator's repair alone (apps/operator) uses them";
 
 const REJECTED: LintCase[] = [
   {
@@ -117,6 +130,29 @@ const REJECTED: LintCase[] = [
     says: 'createStatusChanger',
   },
   {
+    name: "a module importing the state repair's steps from the audit module",
+    filePath: `${API}/state-repair-step.ts`,
+    code: "import { guardsOff } from '@agentx/core/modules/audit';\n\nexport const step = guardsOff;\n",
+    rule: IMPORTS_RULE,
+    says: STATE_REPAIR,
+  },
+  {
+    name: "a core module importing the state repair's steps by a path to the audit module",
+    filePath: `${CORE}/state-repair-relative.ts`,
+    code:
+      "import { guardsOff, judgeSignedRow, withRepairStates, writeStateRow } from '../../audit/index.ts';\n\n" +
+      'export const steps = { guardsOff, judgeSignedRow, withRepairStates, writeStateRow };\n',
+    rule: IMPORTS_RULE,
+    says: STATE_REPAIR,
+  },
+  {
+    name: "a core module importing the state repair's file itself",
+    filePath: `${CORE}/state-repair-file.ts`,
+    code: "import { guardsOff } from '../../audit/infrastructure/state-repair.ts';\n\nexport const step = guardsOff;\n",
+    rule: IMPORTS_RULE,
+    says: STATE_REPAIR,
+  },
+  {
     name: 'an authority table that is not on the registry',
     filePath: `${CORE}/unregistered-table.ts`,
     // A name no registry will ever hold, so this stays a proof of the rule
@@ -156,6 +192,18 @@ const ALLOWED: LintCase[] = [
       'declare const signedStates: { verifiedState: (key: string) => string; changeStatus: (key: string) => void };\n\n' +
       'export const decide = (key: string): string => signedStates.verifiedState(key);\n',
     rule: STEPS_RULE,
+  },
+  {
+    name: "the operator's repair importing the state repair's steps",
+    filePath: `${OPERATOR}/state-repair.ts`,
+    code: "import { guardsOff } from '@agentx/core/modules/audit';\n\nexport const step = guardsOff;\n",
+    rule: IMPORTS_RULE,
+  },
+  {
+    name: 'a core module importing what else the audit module offers by a path to it',
+    filePath: `${CORE}/audit-relative.ts`,
+    code: "import { withSignedStates } from '../../audit/index.ts';\n\nexport const work = withSignedStates;\n",
+    rule: IMPORTS_RULE,
   },
   {
     name: 'a module re-exporting another module whole',
