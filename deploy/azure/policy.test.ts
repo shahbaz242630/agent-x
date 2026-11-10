@@ -20,6 +20,9 @@ import {
   type RuleId,
   singleSummaryColumn,
   templateProblems,
+  DECISION_HEADROOM,
+  gateBusy,
+  LOAD_RUN,
 } from './policy.ts';
 import {
   type BicepRun,
@@ -866,7 +869,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
-      max_connections: '100',
+      max_connections: '120',
     });
     expect(at(load.foundation.predictedResources.find(SERVER)?.properties, 'availabilityZone')).toBe('2');
     const sizeless = (resource: PredictedResource) =>
@@ -1341,7 +1344,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'pg_qs.store_query_plans': 'on',
       'pgms_wait_sampling.query_capture_mode': 'all',
       track_io_timing: 'on',
-      max_connections: '100',
+      max_connections: '120',
     };
     for (const [name, value] of Object.entries(on)) {
       const measured = changed(MEASURE(name), (setting) => (inside(setting, 'properties').value = value));
@@ -2538,13 +2541,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual(['database-disk', 'alert-delivery']);
     // A SEV-1 alert muted after it fires tells nobody of the next window; a
-    // SEV-2 one may be.
-    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT]) {
+    // SEV-2 one may be. The log cap is a SEV-1 since S183: every alert is blind over it.
+    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT, CAP_ALERT]) {
       expect(brokenRules(changed(sev1, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([
         'alert-delivery',
       ]);
     }
-    expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([]);
+    expect(
+      brokenRules(changed(DENIAL_SURGE_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H'))),
+    ).toEqual([]);
     // A second condition that never holds keeps the whole alert from firing.
     for (const alert of [LOGIN_ALERT, OWNER_ALERT, CAP_ALERT]) {
       expect(
@@ -3601,7 +3606,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_write_failed" | summarize Events = count()',
       ),
       query(
-        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size") | summarize Events = count()',
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()',
       ),
       query(
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()',
@@ -3704,45 +3709,72 @@ describe('SEC-OPS-09 each rule can fail', () => {
   describe('dead-man-alerts (4D2e D, PL-33): the jobs having stopped, seen from outside', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const RULES = [
-      [ANCHOR_STOPPED_ALERT, 'audit.anchor_check_done', 'Done', 1],
-      [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2],
+      [ANCHOR_STOPPED_ALERT, 'audit.anchor_check_done', 'Done', 1, 30],
+      [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2, 15],
     ] as const;
+    /** The workspace's own word that its cap stopped collection (S183): silence then is no sign. */
+    const overCap = (minutes: number) =>
+      `(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(${String(minutes)}m))`;
+    const deadMan = (event: string, column: string, minutes: number, cap = overCap(minutes)) =>
+      `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${cap} | summarize ${column} = count()`;
 
-    it.each(RULES)('%#: is off on staging, which sleeps, and all else stands', (rule, event, column, severity) => {
-      const alert = staging.predictedResources.find(rule);
-      expect(at(alert?.properties, 'enabled')).toBe(false);
-      expect(at(alert?.properties, 'severity')).toBe(severity);
-      const only = first(at(alert?.properties, 'criteria', 'allOf'));
-      expect(at(only, 'query')).toBe(
-        `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}" | summarize ${column} = count()`,
-      );
-      expect(brokenRules(staging)).toEqual([]);
-    });
+    it.each(RULES)(
+      '%#: is off on staging, which sleeps, and all else stands',
+      (rule, event, column, severity, minutes) => {
+        const alert = staging.predictedResources.find(rule);
+        expect(at(alert?.properties, 'enabled')).toBe(false);
+        expect(at(alert?.properties, 'severity')).toBe(severity);
+        const only = first(at(alert?.properties, 'criteria', 'allOf'));
+        expect(at(only, 'query')).toBe(deadMan(event, column, minutes));
+        expect(at(alert?.properties, 'overrideQueryTimeRange')).toBe('P1D');
+        expect(brokenRules(staging)).toEqual([]);
+      },
+    );
 
     it.each(RULES)('%#: on staging it may be on, for a keep-running window', (rule) => {
       expect(brokenRules(changed(rule, (alert) => (properties(alert).enabled = true)))).toEqual([]);
     });
 
-    it.each(RULES)('%#: gone, or changed so it could not fire, breaks the rule', (rule, event) => {
-      expect(brokenRules(without(rule))).toEqual(['dead-man-alerts']);
-      for (const change of [
-        (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
-        (alert: Mutable) => (criterion(alert).threshold = 0),
-        (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
-        (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
-        (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
-        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
-        (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
-        (alert: Mutable) =>
-          (criterion(alert).query =
-            `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize N = count()`),
-        (alert: Mutable) =>
-          (criterion(alert).query =
-            `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}.x" | summarize N = count()`),
-      ]) {
-        expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
-      }
-    });
+    it.each(RULES)(
+      '%#: gone, or changed so it could not fire, breaks the rule',
+      (rule, event, column, _severity, minutes) => {
+        expect(brokenRules(without(rule))).toEqual(['dead-man-alerts']);
+        for (const change of [
+          (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
+          (alert: Mutable) => (criterion(alert).threshold = 0),
+          (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+          (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
+          (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+          (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
+          (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "${event}" | summarize N = count()`),
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}.x" | summarize N = count()`),
+          // Its old form, which a full log store would set off for nothing (S183).
+          (alert: Mutable) =>
+            (criterion(alert).query =
+              `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "${event}" | summarize ${column} = count()`),
+          // Looking further back than its window: a line from an hour ago would hide jobs stopped since.
+          (alert: Mutable) => (criterion(alert).query = deadMan(event, column, minutes * 2)),
+          // Quiet whenever the cap was ever reached, not only while it is over.
+          (alert: Mutable) =>
+            (criterion(alert).query = deadMan(
+              event,
+              column,
+              minutes,
+              overCap(minutes).replace(' | summarize arg_max(TimeGenerated, Detail)', ''),
+            )),
+          // Quiet a day after the cap's word, not one window: a stop after the reset would go unseen.
+          (alert: Mutable) => (criterion(alert).query = deadMan(event, column, minutes, overCap(24 * 60))),
+          (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+        ]) {
+          expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
+        }
+      },
+    );
 
     it.each(RULES)('%#: in production it must be on', (rule) => {
       const production = { region: 'uaenorth', environment: 'production' } as const;
@@ -5896,14 +5928,14 @@ describe('the load run (D2c, PL-38)', () => {
     expect(settingNames(api).filter((name) => /EMAIL|DIRECTORY/.test(name))).toEqual([]);
     const pool = (resource: PredictedResource) =>
       settingsOf(resource as unknown as Mutable).find(({ name }) => name === 'AGENTX_DB_POOL_MAX')?.value;
-    expect(pool(api)).toBe('8');
+    expect(pool(api)).toBe('12');
     expect(pool(found(staging, APP('api')))).toBe('10');
     expect(at(containerIn(found(staging, APP('api'))), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
     // Split (4D2e D13): three web copies, each its third of the gate, beside the jobs app, which keeps the anchors.
     const value = (resource: PredictedResource, name: string) =>
       settingsOf(resource as unknown as Mutable).find((entry) => entry.name === name)?.value;
     expect(['AGENTX_ROLE', 'AGENTX_WEB_COPIES', 'AGENTX_DECISION_GATE_ACTIVE'].map((name) => value(api, name))).toEqual(
-      ['web', '3', '7'],
+      ['web', '3', '11'],
     );
     expect(at(api.properties, 'template', 'scale')).toEqual({ minReplicas: 3, maxReplicas: 3 });
     expect(settingNames(api).filter((name) => name.includes('ANCHOR'))).toEqual([]);
@@ -5955,12 +5987,18 @@ describe('the load run (D2c, PL-38)', () => {
     ).toEqual(['load-run']);
   });
 
-  it('load-run: the API off eight connections a copy in a load run, or over ten on staging out of one', () => {
+  it('load-run: the API off twelve connections a copy in a load run, or over ten on staging out of one', () => {
     const api = APP('api');
     const poolAt = (value: string) => (app: Mutable) => {
       for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_DB_POOL_MAX')) entry.value = value;
     };
     expect(brokenRules(loadChanged(api, poolAt('7')))).toEqual(['load-run']);
+    // The pinned numbers keep the decisions' room (S177): the target at 60% or less of the copies' gates, each gate
+    // under its pool, so a change to either is a change to this.
+    const gate = Number(LOAD_RUN.apiSettings.AGENTX_DECISION_GATE_ACTIVE);
+    expect(gateBusy(Number(LOAD_RUN.webCopies), gate)).toBeLessThanOrEqual(DECISION_HEADROOM.mostBusy);
+    expect(gate).toBeLessThan(Number(LOAD_RUN.apiPool));
+    expect(gateBusy(3, 9)).toBeGreaterThan(DECISION_HEADROOM.mostBusy);
     expect(brokenRules(changed(api, poolAt('11')))).toEqual(['load-run']);
     expect(brokenRules(changed(api, poolAt('10')))).toEqual([]);
     // Production's own server sizes its pool: PL-63 wants twenty or more there.
@@ -6021,18 +6059,18 @@ describe('the load run (D2c, PL-38)', () => {
         }),
       ),
     ).toEqual(['ca-agentx-stg-api must state AGENTX_DB_POOL_MAX as a whole number, so its connections can be counted']);
-    // The load run on the larger server's 85, split as apps.bicep makes it (4D2e D13): three web copies of eight and
-    // the jobs app's six are 72; four web copies, 88; the jobs' pool at twelve, 84; at thirteen, 86.
+    // The load run on the larger server's 105, split as apps.bicep makes it (4D2e D13; S183): three web copies of
+    // twelve and the jobs app's six are 96; four web copies, 120; the jobs' pool at ten, 104; at eleven, 106.
     expect(connectionProblems(load.together)).toEqual([]);
     const copies = (count: string) => (app: Mutable) => {
       setting('AGENTX_WEB_COPIES', count)(app);
       Object.assign(scaleOf(app), { minReplicas: Number(count), maxReplicas: Number(count) });
     };
     const over = (holds: number) =>
-      `has 85 connections for users (max_connections 100 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
-    expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(88)]);
-    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '12')))).toEqual([]);
-    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '13')))).toEqual([over(86)]);
+      `has 105 connections for users (max_connections 120 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
+    expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(120)]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '10')))).toEqual([]);
+    expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '11')))).toEqual([over(106)]);
   });
 
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
