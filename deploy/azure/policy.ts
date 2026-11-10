@@ -335,7 +335,7 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
  * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on")';
 
 /**
  * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
@@ -558,7 +558,18 @@ const HELD: Readonly<
 };
 
 /** The load size's max_connections (postgres.bicep, `measured`); `apps --load-run` reads the live server's against it (deploy.ts). */
-export const LOAD_SERVER_CONNECTIONS = 100;
+export const LOAD_SERVER_CONNECTIONS = 120;
+
+/**
+ * The room the decisions keep (S177, partner): at the target, about 170 requests a second at about 0.1 s each
+ * (Stage G's decision p50, S179), the copies' gates run at 60% or less, so a slow spell of the database queues
+ * nothing (day 2: at 85% a 10% slowdown queued waits of seconds). Changing copies, gate or pool is checked against it.
+ */
+export const DECISION_HEADROOM = { perSecond: 170, decisionMs: 100, mostBusy: 0.6 } as const;
+
+/** How full the load run's gates run at the target: the decisions in flight over the slots the copies hold. */
+export const gateBusy = (copies: number, gate: number): number =>
+  (DECISION_HEADROOM.perSecond * DECISION_HEADROOM.decisionMs) / 1000 / (copies * gate);
 
 /**
  * The load test's run (D2c, PL-38; apps.bicep `loadRun`): staging's alone,
@@ -571,17 +582,17 @@ export const LOAD_SERVER_CONNECTIONS = 100;
  * none). It runs split (4D2e D13): three `web` copies of eight connections
  * beside one `jobs` app of six, which goes without them too.
  */
-const LOAD_RUN = {
+export const LOAD_RUN = {
   jobs: LOAD_PARTS.map((part) => `load-${part}`),
   runsAs: 'api',
   image: 'ghcr.io/shahbaz242630/agent-x-load@',
   reads: new Set(['db-app-password', ...APP_KEYS.filter((key) => !operatorOnly(key)), ...PUBLIC_HALVES.values()]),
   apiLeavesOut: new Set(['acs-access-key', 'zitadel-directory-token']),
   apiSize: { cpu: 2, memory: '4Gi' },
-  // Three `web` copies of eight connections, and the jobs' six, on the larger server `foundation --load-size` gives,
-  // whose limit postgres.bicep states: 72 of its 85 (4D2e D13). Staging's small server has 35 for everyone, so out of
-  // a load run its one API keeps to ten (PL-63).
-  apiPool: '8',
+  // Three `web` copies of twelve connections, and the jobs' six, on the larger server `foundation --load-size` gives,
+  // whose limit postgres.bicep states (4D2e D13; twelve as Stage G passed, S179). Staging's small server has 35 for
+  // everyone, so out of a load run its one API keeps to ten (PL-63).
+  apiPool: '12',
   webCopies: '3',
   jobsPool: '6',
   jobsSize: { cpu: 1, memory: '2Gi' },
@@ -595,9 +606,8 @@ const LOAD_RUN = {
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '50000',
     AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '50000',
     AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
-    // The fair gate's numbers it is measured at (tooling/load/plan.ts's LOAD_GATE: 20, 6, 100), each copy its third
-    // rounded up, as the rate limits are shared (4D2e D13): each copy keeps its own gate.
-    AGENTX_DECISION_GATE_ACTIVE: '7',
+    // The fair gate as Stage G passed it on Azure (S179): each copy its own, eleven at once (DECISION_HEADROOM).
+    AGENTX_DECISION_GATE_ACTIVE: '11',
     AGENTX_DECISION_GATE_PER_ORGANISATION: '2',
     AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: '34',
     AGENTX_DECISION_GATE_WAIT_MS: '10000',
@@ -2810,33 +2820,51 @@ const workbooks: Check = (snapshot, _expected, add) => {
  * Each line, how long without it, and at what severity. Only these may be off, and only on staging, which sleeps.
  */
 const DEAD_MEN = [
-  { event: 'audit.anchor_check_done', windowSize: 'PT30M', severity: 1, autoMitigate: false },
-  { event: 'jobs.pulse', windowSize: 'PT15M', severity: 2, autoMitigate: true },
+  {
+    event: 'audit.anchor_check_done',
+    windowSize: 'PT30M',
+    minutes: 30,
+    column: 'Done',
+    severity: 1,
+    autoMitigate: false,
+  },
+  { event: 'jobs.pulse', windowSize: 'PT15M', minutes: 15, column: 'Pulses', severity: 2, autoMitigate: true },
 ] as const;
 
-const deadManLines = (event: string): string => `where tostring(parse_json(Log).event) == "${event}"`;
+/**
+ * The workspace's own word that its daily cap has stopped collection, the newest of the day: one row while it is
+ * over, and for one window after its newest word (the reset's), as nothing from the stretch over arrived and new lines
+ * come 4 to 9 minutes late: so a line missing then counts as seen (S183). Nothing arrives over the cap, so silence then says nothing of
+ * the jobs; the cap's own alert says monitoring is blind. The day's word needs the day: `overrideQueryTimeRange`.
+ */
+const overCap = (minutes: number): string =>
+  `(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(${String(minutes)}m))`;
+
+/** The one query a dead man may run: its line within its own window, or the cap's word. */
+const deadManQuery = ({ event, minutes, column }: (typeof DEAD_MEN)[number]): string =>
+  `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${overCap(minutes)} | summarize ${column} = count()`;
 
 /** Whether the alert counts one of those lines, however else it is set. */
 const isDeadMan = (alert: PredictedResource): boolean =>
   list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
-    DEAD_MEN.some(({ event }) =>
-      queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()'),
-    ),
+    DEAD_MEN.some((man) => at(criterion, 'query') === deadManQuery(man)),
   );
 
 const deadManAlerts: Check = (snapshot, expected, add) => {
   const workspaces = mainWorkspaceIds(snapshot);
-  for (const { event, windowSize, severity, autoMitigate } of DEAD_MEN) {
+  for (const man of DEAD_MEN) {
+    const { event, windowSize, severity, autoMitigate } = man;
     const found = ofType(snapshot, TYPES.alert).some(
       (alert) =>
         (expected.environment === 'staging' || at(alert.properties, 'enabled') === true) &&
         at(alert.properties, 'severity') === severity &&
         at(alert.properties, 'autoMitigate') === autoMitigate &&
         at(alert.properties, 'windowSize') === windowSize &&
+        at(alert.properties, 'overrideQueryTimeRange') === 'P1D' &&
         list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
         list(at(alert.properties, 'criteria', 'allOf')).some(
           (criterion) =>
-            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [deadManLines(event)], 'count()') &&
+            at(criterion, 'query') === deadManQuery(man) &&
             totals(criterion) &&
             at(criterion, 'operator') === 'LessThan' &&
             at(criterion, 'threshold') === 1 &&
@@ -2848,7 +2876,7 @@ const deadManAlerts: Check = (snapshot, expected, add) => {
       add({
         rule: 'dead-man-alerts',
         resource: event,
-        message: `needs an alert on this deployment's workspace firing, at SEV-${String(severity)}, when ${windowSize} pass with none of this line, on everywhere but staging`,
+        message: `needs an alert on this deployment's workspace firing, at SEV-${String(severity)}, when ${windowSize} pass with none of this line and the workspace not over its daily cap, on everywhere but staging`,
       });
     }
   }

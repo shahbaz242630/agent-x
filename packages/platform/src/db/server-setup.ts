@@ -130,7 +130,10 @@ export async function loadBootstrap(directory: string, database: string): Promis
   const problems: string[] = [];
   const statementsOf = async (file: string): Promise<string[]> => {
     const sql = (await readFile(path.join(directory, file), 'utf8')).replaceAll(DATABASE_VARIABLE, quoted(database));
-    if (/^\s*\\/m.test(sql)) problems.push(`${file} has a psql meta-command, which only psql understands`);
+    // Line by line: a multiline /^\s*\\/ backtracks over long runs of blank lines (S70, sonarjs/super-linear-regex).
+    if (sql.split('\n').some((line) => line.trimStart().startsWith('\\'))) {
+      problems.push(`${file} has a psql meta-command, which only psql understands`);
+    }
     if (/:["'][A-Za-z_]/.test(sql)) problems.push(`${file} has a psql variable other than ${DATABASE_VARIABLE}`);
     const statements = splitStatements(sql);
     if (statements.length === 0) problems.push(`${file} has no statements`);

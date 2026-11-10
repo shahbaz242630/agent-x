@@ -57,7 +57,7 @@ const NOT_TAKEN = {
  * one such pattern is fixed with its next change (`Carry-Forward.md`).
  */
 const OWN_INPUT_ONLY = {
-  files: ['tooling/**', 'scripts/**', 'deploy/**', '**/*.test.ts', 'packages/platform/src/db/server-setup.ts'],
+  files: ['tooling/**', 'scripts/**', 'deploy/**', '**/*.test.ts'],
   rules: { 'sonarjs/super-linear-regex': 'off' },
 };
 

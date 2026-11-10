@@ -685,7 +685,7 @@ interface AzAnswers {
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
   /** What the server list answers: the servers (by default one, named), or a failure. */
   readonly servers?: readonly unknown[] | 'unreadable';
-  /** The server's max_connections as Azure shows it: by default the load size's 100. */
+  /** The server's max_connections as Azure shows it: by default the load size's 120. */
   readonly connectionLimit?: string;
   /** What `az bicep version` prints. */
   readonly bicep?: string;
@@ -842,7 +842,7 @@ class RecordingAz implements Az {
       return json({});
     }
     const waiting = limit !== 'applied' && !this.#limitApplied;
-    return json({ value: this.options.connectionLimit ?? '100', isConfigPendingRestart: limit === 'stays' || waiting });
+    return json({ value: this.options.connectionLimit ?? '120', isConfigPendingRestart: limit === 'stays' || waiting });
   }
 
   interactive(args: readonly string[], values: Readonly<Record<string, string>>): number | null {
@@ -1945,7 +1945,7 @@ describe('deploy apps', () => {
       run(['apps', '--load-run'], { answers, images: recordingImages(), az: new RecordingAz(options) });
     const small = await loadRun({ connectionLimit: '50' });
     expect(small.error).toMatchObject({
-      message: `The database allows 50 connections, but the load run is counted against 100: the API would be refused connections. ${next}`,
+      message: `The database allows 50 connections, but the load run is counted against 120: the API would be refused connections. ${next}`,
     });
     expect(small.az.deployment).toBeUndefined();
     const asked = small.az.calls.find((call) => call.args[2] === 'parameter');
@@ -1956,14 +1956,14 @@ describe('deploy apps', () => {
     expect((await loadRun({ connectionLimit: 'unknown' })).az.deployment).toBeUndefined();
     const waiting = await loadRun({ limit: 'stays' });
     expect(waiting.error).toMatchObject({
-      message: `The database allows 100 connections, and a change of it waits on a restart, but the load run is counted against 100: the API would be refused connections. ${next}`,
+      message: `The database allows 120 connections, and a change of it waits on a restart, but the load run is counted against 120: the API would be refused connections. ${next}`,
     });
     for (const options of [{ limit: 'unreadable' }, { servers: [] }, { servers: 'unreadable' }] as const) {
       const unread = await loadRun(options);
       expect({ options, message: (unread.error as Error | undefined)?.message }).toEqual({
         options,
         message: expect.stringMatching(
-          /^The database's connection limit couldn't be read \([\s\S]+\), and the load run is counted against 100\. Run node/,
+          /^The database's connection limit couldn't be read \([\s\S]+\), and the load run is counted against 120\. Run node/,
         ) as unknown,
       });
       expect(unread.az.deployment).toBeUndefined();
@@ -2015,7 +2015,7 @@ describe('deploy apps', () => {
       expect(missing.az.calls.some((call) => call.args[2] === 'parameter')).toBe(false);
       const small = await stageG([{ name: 'psql-agentx-stg-abcdef' }, { name: COPY }], { connectionLimit: '50' });
       expect(small.error).toMatchObject({
-        message: `The database allows 50 connections, but the load run is counted against 100: the API would be refused connections. Make Stage G's copy at the load size (deploy/azure/stage-g.ts create), then apps --load-run --load-database ${COPY} again. Nothing was deployed.`,
+        message: `The database allows 50 connections, but the load run is counted against 120: the API would be refused connections. Make Stage G's copy at the load size (deploy/azure/stage-g.ts create), then apps --load-run --load-database ${COPY} again. Nothing was deployed.`,
       });
       expect(small.az.deployment).toBeUndefined();
     });

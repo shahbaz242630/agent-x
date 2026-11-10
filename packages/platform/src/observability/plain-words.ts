@@ -973,6 +973,17 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was changed, and the organisation stays on hold.',
     next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
   },
+  'operator.state_recovery_refused': {
+    happened: "A recovery plan for an organisation's tampered records was refused.",
+    broke:
+      'Nothing was changed, and the organisation stays on hold: its copy cannot put those records back as they were.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
+  },
+  'operator.state_restore_refused': {
+    happened: "An organisation's tampered records repair was refused or rolled back.",
+    broke: 'Nothing was changed, and the organisation stays on hold.',
+    next: 'Read the reason in the line. If a table was busy, run it again; if the plan changed, make a new one. Then follow playbook H.',
+  },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',
     broke: 'Nothing was changed: an earlier run with the same ID, named in the line, already did it.',
