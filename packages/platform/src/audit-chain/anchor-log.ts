@@ -57,10 +57,13 @@
 // So the API identity's token alone (add and read) can raise alarms, and can make payments
 // wait after a restart: by more than a day's spoiled snapshots named newer than the last
 // sound one, or by a file under `deltas/` or `snapshots/` too large to fetch within a read's
-// deadline (both from before PL-65, both until an operator acts). It can't move
-// an anchor back, nor stop a running process anchoring. Under `cutover/` and `shards/` it can
-// raise the alarm alone: only a marker signed with `audit-anchor`, at its one name, says the
-// store has moved on (PL-65), and a marker or rebase is never fetched past 4 KB. Taking the
+// deadline, or put beyond a plain read (its own encryption key, the archive tier, an encoding
+// fetch undoes): those two folders are still fetched whole and unguarded, from before PL-65,
+// not closed here (a PR2 item), each until an operator acts. It can't move an anchor back,
+// nor stop a running process anchoring. Under `cutover/` and `shards/`, and with a rebase
+// file, it can raise the alarm alone: only a marker signed with `audit-anchor`, at its one
+// name, says the store has moved on (PL-65), and a marker or rebase is never fetched past
+// 4 KB, one too large or unreadable being no marker or rebase. Taking the
 // marker's name first only makes the migration's write of it refused, which stops the
 // migration loudly before any shard, payments unaffected. Whoever also holds the
 // `audit-anchor` signing key can write anything a file may hold, a marker too, which makes
@@ -712,10 +715,11 @@ export function createAnchorLog({
 
   /** One rebase file: taken in, or the alarm; one dated ahead of the clock is read again next time. */
   const rebaseRead = async (name: string): Promise<void> => {
-    // Never more than a rebase's size fetched: one made huge is no rebase, and must not stall every read.
+    // Never more than a rebase's size fetched: one made huge, or put beyond a plain read, is no rebase, and must not stop
+    // every read.
     const bytes = await store.getAtMost(name, MOST_FILE_BYTES);
     if (bytes === 'missing') throw new Error('a rebase file listed and then not there');
-    const read = bytes === 'too-large' ? { problem: 'file' } : await readRebaseFile(keys, { bytes, name, epoch });
+    const read = typeof bytes === 'string' ? { problem: 'file' } : await readRebaseFile(keys, { bytes, name, epoch });
     if ('problem' in read) {
       rebaseFilesRead.add(name);
       alarm('rebase', { problem: read.problem, file: name });
@@ -760,7 +764,8 @@ export function createAnchorLog({
     const name = cutoverName(epoch);
     const got = await store.getAtMost(name, MOST_FILE_BYTES);
     if (got !== 'missing') {
-      const read = got === 'too-large' ? { problem: 'file' } : await readCutoverFile(keys, { bytes: got, name, epoch });
+      const read =
+        typeof got === 'string' ? { problem: 'file' } : await readCutoverFile(keys, { bytes: got, name, epoch });
       if ('marker' in read) throw new MovedOn(name);
       if (!said.marker) alarm('cutover', { problem: read.problem, file: name });
       said.marker = true;

@@ -449,6 +449,20 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         ]);
       });
 
+      it('a marker there but unreadable by a plain read is the alarm, once, and the read goes on', async () => {
+        const fake = readable();
+        put(fake, marker());
+        fake.instead.getAtMost = (name, most) =>
+          name === MARKER ? Promise.resolve('unreadable') : fake.real.getAtMost(name, most);
+        const { log, lines } = logOver(fake);
+        await log.read();
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(movedOn(lines)).toEqual([]);
+        expect(alarms(lines)).toEqual([expect.objectContaining({ reason: 'cutover', problem: 'file', file: MARKER })]);
+      });
+
       it('a signed marker of another layout, at its own name, is another name under the folder: the alarm', async () => {
         const fake = readable();
         put(fake, marker(keys, { layout: 'shards-v0' }));
@@ -2697,6 +2711,20 @@ describe('a rebase moves a chain on (4D2e E11)', () => {
       expect.objectContaining({ check: 'anchor_store', reason: 'rebase', problem: 'file', file: name }),
     ]);
     expect(fake.calls.gets).toBe(1);
+  });
+
+  it('a rebase file there but unreadable by a plain read is no rebase: the alarm, and the read goes on', async () => {
+    const fake = anchoredAtTen();
+    const name = rebaseFileName(1, '00000000-0000-4000-8000-0000000000aa');
+    fake.files.set(name, Buffer.alloc(10));
+    fake.instead.getAtMost = (asked, most) =>
+      asked === name ? Promise.resolve('unreadable') : fake.real.getAtMost(asked, most);
+    const { log, lines } = logOver(fake);
+    await log.read();
+    expect(log.state()).toBe('read');
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'rebase', problem: 'file', file: name }),
+    ]);
   });
 
   it('a rebase file listed and then not there is a failed read', async () => {

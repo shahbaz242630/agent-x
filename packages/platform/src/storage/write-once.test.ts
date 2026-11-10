@@ -299,6 +299,70 @@ describe('4D2e E3 the write-once store on Azure', () => {
     expect(new Headers(calls.at(-1)?.init.headers).get('x-ms-range')).toBe('bytes=0-10');
   });
 
+  it.each(['BlobUsesCustomerSpecifiedEncryption', 'BlobArchived', 'BlobBeingRehydrated'])(
+    'reads a blob Azure refuses as %s as there and unreadable, never the store failing',
+    async (code) => {
+      const refused = () => new Response('<Error />', { status: 409, headers: { 'x-ms-error-code': code } });
+      expect(await readingAs(refused).getAtMost(NAME, 10)).toBe('unreadable');
+    },
+  );
+
+  it('names another 409 as a failure', async () => {
+    const refused = () => new Response(null, { status: 409, headers: { 'x-ms-error-code': 'LeaseIdMissing' } });
+    await expect(readingAs(refused).getAtMost(NAME, 10)).rejects.toThrow(BlobStoreFailed);
+  });
+
+  it('asks for the bytes as stored, and reads a blob stored with any other encoding as unreadable, its body unread', async () => {
+    const { calls, store } = azure();
+    await store.put(NAME, Buffer.from('abc'));
+    await store.getAtMost(NAME, 10);
+    expect(new Headers(calls.at(-1)?.init.headers).get('accept-encoding')).toBe('identity');
+
+    for (const status of [200, 206]) {
+      let pulled = false;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled = true;
+            controller.enqueue(new Uint8Array([1]));
+            controller.close();
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const encoded = () =>
+        new Response(body, {
+          status,
+          headers: { 'content-encoding': 'gzip', 'content-range': 'bytes 0-0/1' },
+        });
+      expect(await readingAs(encoded).getAtMost(NAME, 10)).toBe('unreadable');
+      expect(pulled).toBe(false);
+      expect(cancelled).toBe(true);
+    }
+    const plain = () => new Response('abc', { headers: { 'content-encoding': ' Identity ' } });
+    expect((await readingAs(plain).getAtMost(NAME, 10)) as Buffer).toEqual(Buffer.from('abc'));
+  });
+
+  it('reads a body that fails part way as unreadable, but a read out of time as the failure it is', async () => {
+    const failingWith = (error: Error) => () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(error);
+          },
+        }),
+      );
+    expect(await readingAs(failingWith(new TypeError('terminated'))).getAtMost(NAME, 10)).toBe('unreadable');
+    const late = Object.assign(new Error('out of time'), { name: 'TimeoutError' });
+    await expect(readingAs(failingWith(late)).getAtMost(NAME, 10)).rejects.toThrow('out of time');
+    const stopped = Object.assign(new Error('stopped'), { name: 'AbortError' });
+    await expect(readingAs(failingWith(stopped)).getAtMost(NAME, 10)).rejects.toThrow('stopped');
+  });
+
   it('takes the whole size a range answer gives, before any of its body', async () => {
     const answer = (size: number) => () =>
       new Response('x', { status: 206, headers: { 'content-range': `bytes 0-0/${String(size)}` } });
@@ -402,6 +466,11 @@ describe('4D2e E3 the write-once store on a local folder', () => {
       await writeFile(join(folder, name), 'planted');
     },
   }));
+
+  it('reads a folder where a file would be as no file of that name', async () => {
+    await mkdir(join(folder, 'e1', 'cutover', 'shards-v1'), { recursive: true });
+    expect(await folderWriteOnceStore(folder).getAtMost('e1/cutover/shards-v1', 10)).toBe('missing');
+  });
 
   it('leaves no part-written file behind when the write itself fails, and no file under the name', async () => {
     const store = folderWriteOnceStore(folder);
