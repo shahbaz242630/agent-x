@@ -493,13 +493,16 @@ export const MOST_SIGNED_ROWS_READ = 500;
  * `share` in order of ID, in the caller's transaction, which must be
  * withTenant's for the organisation. Every ID asked has its read in the map,
  * by its ID in lower case: `missing` where no row holds it, and each judged
- * alone by readSignedRow's rules.
+ * alone by readSignedRow's rules. `none`: no lock, for a read-only
+ * transaction that decides nothing on its own (a state recovery plan's,
+ * PL-29), which Postgres refuses a lock in.
  */
 export async function readSignedRows<Schema>(
   tx: Transaction<Schema>,
   table: SignedStateTable,
   orgId: string,
   ids: readonly string[],
+  lock: 'share' | 'none' = 'share',
 ): Promise<ReadonlyMap<string, SignedRow>> {
   checkTable(table);
   if (!UUID.test(orgId) || !ids.every((id) => UUID.test(id))) throw new RangeError('A signed row is named by UUIDs');
@@ -513,7 +516,7 @@ export async function readSignedRows<Schema>(
     select target.id::text as row_id, ${columnsOf(table)} from ${sql.table(table.table)} as target
     where target.org_id = ${orgId} and target.id = any(${asked}::uuid[])
     order by target.id
-    for share
+    ${lock === 'share' ? sql`for share` : sql``}
   `.execute(tx);
   return new Map(
     asked.map((id) => [

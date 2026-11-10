@@ -9,7 +9,8 @@
 //
 // Those find the object's latest signed event in the log, check the row
 // against its seal, and seal every change as it is recorded. The raw steps
-// (`readSignedRow`, `writeSignedRow`, `pointSignedRow`) and the bare status
+// (`readSignedRow`, `readSignedRows`, which can read with no lock at all,
+// `writeSignedRow`, `pointSignedRow`) and the bare status
 // change (`createStatusChanger`) do none of that: a module using them directly
 // would write an authority field, or move a status, with nothing to prove it
 // afterwards -- which is exactly the tamper the signed state exists to catch.
@@ -20,7 +21,7 @@
 // the list of the places allowed to hold them.
 import { textOf } from './strings.js';
 
-const STEPS = new Set(['readSignedRow', 'writeSignedRow', 'pointSignedRow', 'createStatusChanger']);
+const STEPS = new Set(['readSignedRow', 'readSignedRows', 'writeSignedRow', 'pointSignedRow', 'createStatusChanger']);
 
 /** The module the steps come from: re-exporting it whole would pass them on wholesale. */
 const PLATFORM_DB = '@agentx/platform/db';

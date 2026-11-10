@@ -34,8 +34,8 @@ const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
 const HASH = /^[0-9a-f]{64}$/;
 
-/** A rebase file holds one line of about 450 bytes: anything past this isn't one. */
-const MOST_FILE_BYTES = 4096;
+/** A rebase file holds one line of about 450 bytes, a cutover marker less: anything past this isn't one. */
+export const MOST_FILE_BYTES = 4096;
 
 export interface Rebase extends CheckedPoint {
   /** The rebase's own ID (a UUID), which its file is named by. */
@@ -150,8 +150,8 @@ function rebaseFrom(fields: Record<string, unknown>): Rebase | undefined {
   };
 }
 
-/** A file's bytes opened, or nothing past MOST_FILE_BYTES either way, or for bytes that aren't gzip. */
-async function opened(bytes: Buffer): Promise<string | undefined> {
+/** A file's bytes opened, or nothing past MOST_FILE_BYTES either way, or for bytes that aren't gzip. Shared with cutover.ts. */
+export async function openedSmallFile(bytes: Buffer): Promise<string | undefined> {
   if (bytes.length > MOST_FILE_BYTES) return undefined;
   const opening = createGunzip();
   opening.end(bytes);
@@ -170,11 +170,11 @@ async function opened(bytes: Buffer): Promise<string | undefined> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function parsed(text: string): unknown {
+export function parsedJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
-    // Not JSON: no rebase, which the caller refuses.
+    // Not JSON: no file of ours, which the caller refuses.
     return undefined;
   }
 }
@@ -187,9 +187,9 @@ export async function readRebaseFile(
   keys: KeyProvider,
   { bytes, name, epoch }: { readonly bytes: Buffer; readonly name: string; readonly epoch: number },
 ): Promise<{ readonly rebase: Rebase } | { readonly problem: RebaseProblem }> {
-  const text = await opened(bytes);
+  const text = await openedSmallFile(bytes);
   const lines = text?.endsWith('\n') === true ? text.slice(0, -1).split('\n') : [];
-  const fields = lines.length === 1 ? parsed(lines[0] ?? '') : undefined;
+  const fields = lines.length === 1 ? parsedJson(lines[0] ?? '') : undefined;
   const rebase =
     typeof fields === 'object' && fields !== null ? rebaseFrom(fields as Record<string, unknown>) : undefined;
   if (rebase === undefined || name !== rebaseFileName(epoch, rebase.id)) return { problem: 'file' };

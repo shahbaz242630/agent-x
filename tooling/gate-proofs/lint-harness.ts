@@ -33,6 +33,8 @@ export const PLATFORM = 'packages/platform/src/gate-proof';
 export const CONFIG = 'packages/platform/src/config/gate-proof';
 export const OUTBOUND = 'packages/platform/src/outbound/gate-proof';
 export const API = 'apps/api/src/gate-proof';
+/** The operator's command, the one place the state repair's steps may be imported (PL-29 follow-up). */
+export const OPERATOR = 'apps/operator/src/gate-proof';
 export const CONSOLE = 'apps/console/src/gate-proof';
 export const TESTING = 'packages/testing/src/gate-proof';
 /** Inside the audit module, the one product module allowed to hold the signed-row steps (A3c). */
@@ -91,6 +93,7 @@ export function proveLintRules(
                 CONFIG,
                 OUTBOUND,
                 API,
+                OPERATOR,
                 CONSOLE,
                 TESTING,
                 AUDIT,

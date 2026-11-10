@@ -9,7 +9,7 @@
 //
 // Nothing here is called in production until the durable anchors arrive (E5).
 import { createHash, randomUUID } from 'node:crypto';
-import { link, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import type { OutboundFetch } from '../outbound/index.ts';
@@ -62,6 +62,69 @@ export interface WriteOnceStore {
   list(start: string, most: number, after?: string): Promise<WriteOncePage>;
   /** The whole of `name`. Throws BlobStoreFailed if there is none. */
   get(name: string): Promise<Buffer>;
+  /**
+   * `name` if it holds at most `mostBytes`, never downloading more than one byte past that: `missing` if there is no such
+   * file, `too-large` if it holds more, `unreadable` if it is there and can't be read as plain bytes. For files anyone with
+   * the add token could make huge, or put beyond a plain read (PL-65): never a failure of the store for that alone.
+   */
+  getAtMost(name: string, mostBytes: number): Promise<Buffer | 'missing' | 'too-large' | 'unreadable'>;
+}
+
+/** A body read only as far as `mostBytes`: past it, the rest is never fetched, and it is `too-large`. */
+async function bodyAtMost(response: Response, mostBytes: number): Promise<Buffer | 'too-large'> {
+  if (response.body === null) return Buffer.alloc(0);
+  // Node's own types leave the chunks untyped: fetch's bodies are bytes.
+  const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    size += read.value.length;
+    if (size > mostBytes) {
+      await reader.cancel();
+      return 'too-large';
+    }
+    chunks.push(read.value);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Azure's refusals to read a blob that whoever added it chose: under their own encryption key, or put in the archive
+ * tier. The blob is there and nobody can read it with a plain GET: the file's fault, not the store's.
+ */
+const UNREADABLE_BLOB = new Set(['BlobUsesCustomerSpecifiedEncryption', 'BlobArchived', 'BlobBeingRehydrated']);
+
+/** A read stopped by its own deadline or a stop: the store's failure, never the file's. */
+const stoppedByTime = (error: unknown): boolean =>
+  error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+
+/** A blob's whole size, from a ranged answer's `Content-Range: bytes <from>-<to>/<size>`. */
+const sizeInRange = (response: Response): number | undefined => {
+  const size = /^bytes \d+-\d+\/(\d{1,15})$/.exec(response.headers.get('content-range') ?? '')?.[1];
+  return size === undefined ? undefined : Number(size);
+};
+
+/**
+ * What a ranged read's answer comes to before any of its body: missing, empty, too large, unreadable or a failure; or
+ * nothing, and its body is the file's bytes to read.
+ */
+function answerOtherThanBytes(
+  response: Response,
+  mostBytes: number,
+): Buffer | 'missing' | 'too-large' | 'unreadable' | 'failed' | undefined {
+  const code = blobErrorCode(response);
+  if (response.status === 404) return code === 'BlobNotFound' ? 'missing' : 'failed';
+  if (response.status === 409) return UNREADABLE_BLOB.has(code) ? 'unreadable' : 'failed';
+  // An empty blob has no first byte to give.
+  if (response.status === 416) return Buffer.alloc(0);
+  if (response.status !== 200 && response.status !== 206) return 'failed';
+  // A blob stored with an encoding fetch would undo is no plain bytes, and its undoing can fail mid-read.
+  const encoding = response.headers.get('content-encoding');
+  if (encoding !== null && encoding.trim().toLowerCase() !== 'identity') return 'unreadable';
+  if (response.status === 200) return undefined;
+  const size = sizeInRange(response);
+  if (size === undefined) return 'failed';
+  return size > mostBytes ? 'too-large' : undefined;
 }
 
 function checkedListing(start: string, most: number): void {
@@ -159,6 +222,26 @@ export function azureWriteOnceStore({
       if (response.status !== 200) throw await failed(response);
       return Buffer.from(await response.arrayBuffer());
     },
+
+    async getAtMost(name, mostBytes) {
+      // One byte past the most asked, so a file of exactly that much is told from a larger one.
+      const response = await call(`/${checkedBlobName(name)}`, {
+        method: 'GET',
+        headers: { 'x-ms-range': `bytes=0-${String(mostBytes)}`, 'accept-encoding': 'identity' },
+      });
+      const answer = answerOtherThanBytes(response, mostBytes);
+      if (answer === 'failed') throw await failed(response);
+      if (answer !== undefined) {
+        await response.body?.cancel();
+        return answer;
+      }
+      try {
+        return await bodyAtMost(response, mostBytes);
+      } catch (error) {
+        if (stoppedByTime(error)) throw error;
+        return 'unreadable';
+      }
+    },
   };
 }
 
@@ -224,6 +307,26 @@ export function folderWriteOnceStore(directory: string): WriteOnceStore {
       } catch (error) {
         if (hasCode(error, 'ENOENT')) throw new BlobStoreFailed(STORE, 'no file of that name');
         throw error;
+      }
+    },
+
+    async getAtMost(name, mostBytes) {
+      let file: Awaited<ReturnType<typeof open>>;
+      try {
+        file = await open(pathOf(name), 'r');
+      } catch (error) {
+        if (hasCode(error, 'ENOENT')) return 'missing';
+        throw error;
+      }
+      try {
+        // Sized on the file opened, so it can't change between the look and the read.
+        const about = await file.stat();
+        // A folder where a file would be is no file of that name: it opens for reading on Windows and Linux alike.
+        if (about.isDirectory()) return 'missing';
+        if (about.size > mostBytes) return 'too-large';
+        return await file.readFile();
+      } finally {
+        await file.close();
       }
     },
   };
