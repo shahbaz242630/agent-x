@@ -4,7 +4,7 @@
 //
 // It holds CHECK constraints to the image's own built-checks.json, and the
 // backup role to reading. A release migrates first, so its new CHECK, function,
-// table, or a trigger that image was told is coming (schema-guard.ts), is drift to
+// table, or a trigger or guard body that image was told is coming (schema-guard.ts), is drift to
 // the image before it until the new image is in. That image refuses a start on it,
 // as on any drift.
 //
