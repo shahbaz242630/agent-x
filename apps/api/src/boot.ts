@@ -260,7 +260,14 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     const workAtCrash = workUnderWay();
     asNoWork(() => {
       logger.error('api.crashed', { err: error, origin, ...(workAtCrash && { workAtCrash }) });
-      for (const last of lastWords) last();
+      for (const last of lastWords) {
+        // A hook that throws must never keep the process from its flush and exit below.
+        try {
+          last();
+        } catch {
+          // Its count is lost; the crash line above is already written.
+        }
+      }
     });
     logger.flush();
     host.exit(1);
