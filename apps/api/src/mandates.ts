@@ -184,6 +184,12 @@ const VERSION = z
       .describe(
         'Where the monthly cap the organisation’s policies hold the agent to (agentMonthlyCap) is below these terms: payments past it are refused. Empty when they fit.',
       ),
+    splitCheckWarning: z
+      .string()
+      .nullable()
+      .describe(
+        'Said while these terms switch the split check off (decision 43, ADR-014 §5): orders to one supplier are then weighed one at a time. Null while it is on.',
+      ),
   })
   .register(API_SCHEMAS, { id: 'MandateVersion', description: 'One version of a mandate’s terms, made once.' });
 
@@ -455,6 +461,10 @@ const mandateBody = (mandate: MandateRecord) => ({
   status: mandate.status,
 });
 
+/** Decision 43 (S184): the split check off is never quiet. */
+const SPLIT_CHECK_OFF =
+  'the split check is off: orders to one supplier are weighed one at a time, so an order split into smaller ones can stay under the approval threshold (the exact duplicate is still refused)';
+
 const versionOf = ({ version: v, overLimit, consentWarnings, capWarnings }: VersionShown) => ({
   id: v.id,
   version: v.version,
@@ -474,6 +484,7 @@ const versionOf = ({ version: v, overLimit, consentWarnings, capWarnings }: Vers
   draftedAt: v.draftedAt.toISOString(),
   consentWarnings: [...consentWarnings],
   capWarnings: [...capWarnings],
+  splitCheckWarning: v.splitCheck ? null : SPLIT_CHECK_OFF,
 });
 
 const detailsOf = ({ mandate, current, pending, agentMonthlyCap: { cap, from } }: MandateView) => ({

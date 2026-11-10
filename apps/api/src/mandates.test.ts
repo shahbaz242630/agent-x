@@ -99,6 +99,7 @@ const VERSION_ANSWERED = {
   draftedAt: '2026-10-07T09:15:00.000Z',
   consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
   capWarnings: [],
+  splitCheckWarning: null,
 };
 
 const DETAILS_ANSWERED = {
@@ -785,6 +786,18 @@ describe('reading mandates (B2)', () => {
     expect(reply.json()).toMatchObject({
       pending: { capWarnings: [ABOVE_THE_CAP] },
       agentMonthlyCap: { capMinor: 800_000, currency: 'AED', from: 'organization-policy' },
+    });
+  });
+
+  it('warns while a version switches the split check off, and not while it is on (decision 43, never quiet)', async () => {
+    const pending =
+      VIEW.pending === null ? null : { ...VIEW.pending, version: { ...VIEW.pending.version, splitCheck: false } };
+    const { app } = await withMandates({ found: { outcome: 'found', ...VIEW, pending } }, 'viewer');
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    // While it is on, the warning is null: VERSION_ANSWERED, read whole above.
+    expect(reply.json()).toMatchObject({
+      pending: { splitCheck: false, splitCheckWarning: expect.stringContaining('the split check is off') as unknown },
     });
   });
 
