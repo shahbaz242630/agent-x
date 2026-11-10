@@ -214,8 +214,8 @@ const SET_CHECKS: readonly SetCheck[] = [
   {
     name: 'kept every month the step touched within its agent’s limit',
     async run(tx, step) {
-      // The step's agents' months first, then each month's holdings by held_in_an_agents_month: a correlated
-      // EXISTS rescanned the organisation's reservations for every one of them, which never ended at 10,000 (S177).
+      // The step's agents' months first, then each month's holdings by its index (0081's): a correlated EXISTS
+      // rescanned the organisation's reservations for every one of them, which never ended at 10,000 (S177).
       const over = await tx
         .with(
           (cte) => cte('touched').materialized(),

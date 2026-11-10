@@ -65,6 +65,8 @@ export interface StageGAzure {
   restore(copy: string, source: StagingServer, at: string): void;
   /** The server's state (`Ready` once usable), or undefined when Azure has none of that name (yet). */
   serverState(name: string): string | undefined;
+  /** The server's size as Azure has it now (`Standard_D16ads_v5`): a copy may be resized by hand mid-test (S177). */
+  serverSize(name: string): string | undefined;
   /** The copy to the load size, its connection limit and measurements to the load run's, and a restart for them to take. */
   resize(name: string): void;
   /** Asks Azure to turn the copy's high availability to `mode`, returning at once. */
@@ -278,6 +280,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       const done = az.run([...server('show', '--name', name), '--output', 'json']);
       return done.status === 0 ? text(record(JSON.parse(done.stdout)).state) : undefined;
     },
+    serverSize: (name) => {
+      const done = az.run([...server('show', '--name', name), '--output', 'json']);
+      return done.status === 0 ? text(record(record(JSON.parse(done.stdout)).sku).name) : undefined;
+    },
     resize: (name) => {
       // --yes on every update and restore: they ask before a restart, and no one can answer a job's prompt (S176).
       ok(
@@ -300,10 +306,10 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ok(server('restart', '--name', name), `restarting ${name}`);
     },
     setHa: (name, mode) => {
-      ok(
-        server('update', '--name', name, '--high-availability', mode, '--no-wait', '--yes'),
-        `${name}'s high availability`,
-      );
+      // Azure CLI 2.90 renamed --high-availability to --zonal-resiliency and dropped --no-wait here (S179): the
+      // command now waits for the standby, which haOf then reads as Healthy.
+      const resiliency = mode === 'ZoneRedundant' ? 'Enabled' : 'Disabled';
+      ok(server('update', '--name', name, '--zonal-resiliency', resiliency, '--yes'), `${name}'s high availability`);
     },
     haOf: (name) => {
       const ha = record(record(azJson(az, server('show', '--name', name))).highAvailability);

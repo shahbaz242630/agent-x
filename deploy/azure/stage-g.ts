@@ -610,6 +610,8 @@ function readResult(
   const health = backgroundHealth(lines.log, window, {
     apiReplicas: after?.names ?? [],
     offenders: new Set(offenders),
+    // The second offender is the stuck one (offendersOf, stageg-seed.ts's cohort order).
+    stuck: offenders[1],
   });
   const surge = run.test === 'spike' || run.test === 'overload';
   return {
@@ -674,11 +676,13 @@ function reportFile(dir: string, at: Date, test: StageGTest): string {
 /** Writes the test's report as it stands, and a copy to the Documents folder where it exists. */
 function writeReport(steps: StageGSteps, copy: Copy, profile: Profile, tested: TestRecord, stopped?: string): string {
   const now = steps.now();
+  // The size Azure reports, not LOAD_SKU: day 2-4's copies were resized by hand and their headers said D2 (S177).
+  const size = steps.azure.serverSize(copy.server) ?? `${LOAD_SKU.name}, not read back`;
   const notes = tested.notes.map(({ label, note }) => `- ${label}: ${note}`);
   const report = [
     `# Stage G on Azure: ${profile.test}`,
     '',
-    `Written ${uae(now)}, on the throwaway copy ${copy.server} (${LOAD_SKU.name}, high availability ${copy.ha === true ? 'on, zone-redundant' : 'off'}), the seed's run ${copy.runId}.`,
+    `Written ${uae(now)}, on the throwaway copy ${copy.server} (${size}, high availability ${copy.ha === true ? 'on, zone-redundant' : 'off'}), the seed's run ${copy.runId}.`,
     '',
     renderStageG(reportInput(profile, copy, tested.results)).trimEnd(),
     ...(notes.length === 0 ? [] : ['', '### What the runner found', '', ...notes]),
