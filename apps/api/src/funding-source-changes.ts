@@ -88,7 +88,7 @@ import {
   type FundingSourceTx,
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { cancelledInForce, choiceDetails, chosenAgain, LAPSED_CONSENT_KEY, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
@@ -123,7 +123,7 @@ export type SourceChangeWrite =
       /** Its admin's choice for when its consent runs out (decision 21), or null: none (so cancel). */
       readonly consentExpiry: PendingChoice | null;
     }
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;

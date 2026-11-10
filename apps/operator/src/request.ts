@@ -64,6 +64,41 @@ export const CHAIN_RESTORE = 'chain-restore';
 /** What the chain repair's request file holds: the plan the operator read, by its ID and digest, and the repair's own ID. */
 export const CHAIN_RESTORE_USAGE = `${CHAIN_RESTORE} --org <organisation ID> --plan <plan ID> --digest <the plan's digest, 64 hex> --id <new repair ID> [${DISCARD_FORK}]`;
 
+/** The authority rows' recovery plan's command word (PL-29 follow-up): the chain repair's job, as the owner, read-only. */
+export const STATE_RECOVERY = 'state-recovery-plan';
+
+/** What a request file holds to plan an organisation's authority rows' recovery from the drill's copy. */
+export const STATE_RECOVERY_USAGE = `${STATE_RECOVERY} --org <organisation ID> --id <new plan ID>`;
+
+/** The request for an authority rows' recovery plan, as its file holds it. */
+export const stateRecoveryRequest = (orgId: string, id: string): string =>
+  JSON.stringify([STATE_RECOVERY, '--org', orgId, '--id', id]);
+
+/** The authority rows' repair's command word (PL-29 follow-up): the chain repair's job, as the owner. */
+export const STATE_RESTORE = 'state-restore';
+
+/** What the authority rows' repair's request file holds: the plan the operator read, by its ID and digest, and the repair's own ID. */
+export const STATE_RESTORE_USAGE = `${STATE_RESTORE} --org <organisation ID> --plan <plan ID> --digest <the plan's digest, 64 hex> --id <new repair ID>`;
+
+/** The request for an authority rows' repair, as its file holds it. */
+export const stateRestoreRequest = (asked: {
+  readonly orgId: string;
+  readonly planId: string;
+  readonly digest: string;
+  readonly id: string;
+}): string =>
+  JSON.stringify([
+    STATE_RESTORE,
+    '--org',
+    asked.orgId,
+    '--plan',
+    asked.planId,
+    '--digest',
+    asked.digest,
+    '--id',
+    asked.id,
+  ]);
+
 /** A plan's digest (chain-recovery.ts's planDigest): SHA-256 in lower-case hex. */
 export const PLAN_DIGEST_HEX = /^[0-9a-f]{64}$/;
 

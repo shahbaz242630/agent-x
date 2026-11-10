@@ -4,7 +4,7 @@
 // database, and the files the builder makes, is
 // activity-background-exports.db.test.ts; who reaches them, role-matrix.test.ts.
 import type { BackgroundExport } from '@agentx/core/modules/activity';
-import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
+import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -14,20 +14,11 @@ import type {
   BackgroundExports,
   BackgroundExportWrite,
 } from './activity-background-exports.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-19T09:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-19T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-19T09:10:00.000Z'),
-  endsAt: new Date('2026-10-19T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-10-19T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-19T09:00:00.000Z');
 
 const AGENT = '0199a0f0-0000-7000-8000-00000000a9e1';
 const ID = '0199a0f0-0000-7000-8000-0000000a15c1';

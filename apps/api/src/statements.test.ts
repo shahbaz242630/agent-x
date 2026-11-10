@@ -3,27 +3,17 @@
 // alone; and every such constant in the API is imported into statements.ts
 // (whose types then hold it in SERVED_STATEMENTS, or lint refuses the unused
 // import), so a new choice's words can't be left off the console's confirm.
-import type { LiveSession } from '@agentx/core/modules/identity';
 import { readdirSync, readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import { MARK_FAILED_STATEMENT, MARK_FAILED_STATEMENT_VERSION } from './payment-marks.ts';
 import { closeServers, COOKIE, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import { SERVED_STATEMENTS } from './statements.ts';
 import { FREEZE_STATEMENT_VERSION, FREEZE_STATEMENTS } from './suspensions.ts';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
-  createdAt: new Date('2026-09-24T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
-  endsAt: new Date('2026-09-24T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
 
 afterEach(closeServers);
 

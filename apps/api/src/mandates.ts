@@ -29,7 +29,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { memberInSessionOf, need } from './access.ts';
+import { EVERY_MEMBER, memberInSessionOf, memberOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
@@ -74,9 +74,6 @@ import {
   stepUpAskedWith,
 } from './route-schemas.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
-
-/** Every member may see the organisation's mandates. */
-const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /**
  * The most a draft's body may be: a purpose of at most 200 code points once
@@ -441,12 +438,6 @@ const SHOW_SCHEMA = {
   response: { 200: MANDATE_DETAILS },
 };
 
-function memberOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a mandates route ran without a member');
-  return { orgId: member.orgId, userId: person.userId };
-}
-
 const mandateBody = (mandate: MandateRecord) => ({
   id: mandate.id,
   agentId: mandate.agentId,
@@ -686,25 +677,21 @@ export function registerMandates(
     },
   );
 
-  routes.get(
-    '/v1/mandates',
-    { schema: LIST_SCHEMA, config: { access: [...READING_ROLES] } },
-    async (request, reply) => {
-      const { orgId } = memberOf(request);
-      const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_MANDATES_A_PAGE };
-      const listed = await need(registry).list(orgId, page, request.id);
-      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return {
-        mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
-        next: listed.next,
-        unchecked: [...listed.unchecked],
-      };
-    },
-  );
+  routes.get('/v1/mandates', { schema: LIST_SCHEMA, config: { access: [...EVERY_MEMBER] } }, async (request, reply) => {
+    const { orgId } = memberOf(request);
+    const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_MANDATES_A_PAGE };
+    const listed = await need(registry).list(orgId, page, request.id);
+    if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
+    return {
+      mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
+      next: listed.next,
+      unchecked: [...listed.unchecked],
+    };
+  });
 
   routes.get(
     '/v1/mandates/:id',
-    { schema: SHOW_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: SHOW_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(registry).show(orgId, request.params.id, request.id);

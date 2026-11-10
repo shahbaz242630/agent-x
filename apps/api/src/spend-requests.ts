@@ -72,7 +72,7 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { agentOf, memberInSessionOf, need } from './access.ts';
+import { agentOf, EVERY_MEMBER, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import type { RuleDenial } from './approval-rejections.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
@@ -212,9 +212,6 @@ const AGENT_SHOW_SCHEMA = {
     ),
   },
 };
-
-/** Every role reads the organisation's requests (Phase 3 B3), as its mandates and suppliers. */
-const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 const SPEND_REQUEST_LISTED = z
   .object({
@@ -487,7 +484,7 @@ export function registerSpendRequests(
 
   routes.get(
     '/v1/spend-requests',
-    { schema: LIST_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: LIST_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_REQUESTS_A_PAGE };
@@ -499,7 +496,7 @@ export function registerSpendRequests(
 
   routes.get(
     '/v1/approvals',
-    { schema: APPROVALS_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: APPROVALS_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_REQUESTS_A_PAGE };
@@ -511,7 +508,7 @@ export function registerSpendRequests(
 
   routes.get(
     '/v1/spend-requests/:id',
-    { schema: SHOW_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: SHOW_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const found = await need(reads).show(orgId, request.params.id, request.id);

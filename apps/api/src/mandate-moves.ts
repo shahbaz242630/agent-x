@@ -74,7 +74,7 @@ import {
   viewIn,
 } from './mandate-reads.ts';
 import { OVER_LIMIT_CHOSEN, overLimitDetails } from './over-limit-choice.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { cancelledInForce, choiceDetails, pausedOf, SUSPENDS } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
@@ -107,11 +107,7 @@ const MOVED = {
 /** Who may move a mandate: an admin, as for accepting it (ADR-003 §8). */
 export const MOVING_ROLES = ['admin'] as const;
 
-export type MoveAsked =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
-  | { readonly outcome: 'conflict' }
-  | { readonly outcome: 'busy' }
-  | Refused;
+export type MoveAsked = StepUpAsked | { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
 
 export type MandateMoved =
   | ({ readonly outcome: 'moved' } & MandateView)

@@ -2,29 +2,20 @@
 // access hook's (access-roles.test.ts, role-matrix.test.ts); here, what it
 // answers a member with each outcome of the list. The list's own reading and
 // verifying is the identity module's (memberships.db.test.ts).
-import type { LiveSession, MembersList, MembershipCheck } from '@agentx/core/modules/identity';
+import type { MembersList, MembershipCheck } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
+import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import type { ListMembers } from './members.ts';
 import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
-  createdAt: new Date('2026-09-24T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
-  endsAt: new Date('2026-09-24T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
 
 const ACTIVE_VIEWER: MembershipCheck = {
   outcome: 'active',

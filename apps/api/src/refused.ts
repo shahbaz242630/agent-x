@@ -8,3 +8,9 @@ export interface Refused {
 }
 
 export const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });
+
+/** A step-up asked for, as a use case answers it: the challenge its confirm is to name. */
+export interface StepUpAsked {
+  readonly outcome: 'asked';
+  readonly stepUpChallengeId: string;
+}
