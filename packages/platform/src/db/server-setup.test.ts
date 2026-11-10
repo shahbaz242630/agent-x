@@ -77,6 +77,12 @@ describe('loadBootstrap', () => {
       'roles.sql has a psql meta-command, which only psql understands',
     ],
     [
+      'a psql meta-command indented on a later line',
+      'roles.sql',
+      (sql: string) => `${sql}\r\n\r\n  \t\\connect other\r\n`,
+      'roles.sql has a psql meta-command, which only psql understands',
+    ],
+    [
       'another psql variable',
       'zitadel-role.sql',
       (sql: string) => `${sql}\nALTER ROLE zitadel PASSWORD :'login';`,
