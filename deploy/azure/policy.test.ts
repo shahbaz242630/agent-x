@@ -225,11 +225,14 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
     ),
   );
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
-    resource.id = String(resource.id).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
-    resource.name = String(resource.name).replace(/^id-agentx-stg-release/, 'id-agentx-prd-release');
-    if (resource.type === 'Microsoft.Authorization/roleAssignments') {
-      const grant = resource.properties as Mutable;
-      grant.principalId = String(grant.principalId).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
+    // CI's identity and the job-start watch's (S175), both named by the environment.
+    for (const who of ['release', 'job-watch']) {
+      resource.id = String(resource.id).replace(`/id-agentx-stg-${who}`, `/id-agentx-prd-${who}`);
+      resource.name = String(resource.name).replace(new RegExp(`^id-agentx-stg-${who}`), `id-agentx-prd-${who}`);
+      if (resource.type === 'Microsoft.Authorization/roleAssignments') {
+        const grant = resource.properties as Mutable;
+        grant.principalId = String(grant.principalId).replace(`/id-agentx-stg-${who}`, `/id-agentx-prd-${who}`);
+      }
     }
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
     if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
@@ -705,6 +708,15 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      // The job-start watch (S175): its identity, its trust, its read-only role and that role on the group.
+      'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-job-watch',
+      'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-job-watch/github',
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
     ]);
   });
@@ -3826,7 +3838,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       policyProblems(snapshotted, expected)
         .filter((problem) => problem.rule === 'release-identity')
         .map((problem) => `${problem.resource}: ${problem.message}`);
-    const TRUST = type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials');
+    const ANY_TRUST = type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials');
+    // CI's trust alone: the watch's is `job-watch`'s.
+    const TRUST = (resource: PredictedResource): boolean =>
+      ANY_TRUST(resource) && resource.name.startsWith('id-agentx-stg-release/');
     const ROLE = RELEASE_ROLE;
     const RELEASE = named(/^id-agentx-stg-release$/);
     const subject = 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging';
@@ -3836,15 +3851,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const role = String(staging.predictedResources.find(ROLE)?.name);
     const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
 
-    expect(staging.predictedResources.filter(TRUST).map((found) => [found.name, found.properties])).toEqual([
-      [
-        trust,
-        {
-          issuer: 'https://token.actions.githubusercontent.com',
-          subject,
-          audiences: ['api://AzureADTokenExchange'],
-        },
-      ],
+    const trusted = {
+      issuer: 'https://token.actions.githubusercontent.com',
+      subject,
+      audiences: ['api://AzureADTokenExchange'],
+    };
+    // CI's, and the job-start watch's (S175), which `job-watch` checks.
+    expect(staging.predictedResources.filter(ANY_TRUST).map((found) => [found.name, found.properties])).toEqual([
+      [trust, trusted],
+      ['id-agentx-stg-job-watch/github', trusted],
     ]);
     expect(staging.predictedResources.filter(RELEASE).map((found) => found.properties)).toEqual([
       { isolationScope: 'Regional' },
@@ -3869,10 +3884,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       `id-agentx-prd-release/github: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
     ]);
     expect(releaseProblems(productionLike({ subject: true }), production)).toEqual([]);
+    // Staging's watch isn't production's either, so its trust is one more on no known identity.
+    const watchTrust = 'id-agentx-stg-job-watch/github';
     expect(releaseProblems(staging, production)).toEqual([
       'the deployment: needs an identity for CI (id-agentx-prd-release)',
       `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
       `${trust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+      `${watchTrust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+      `${watchTrust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+      "the deployment: needs one trust, for CI's identity; the snapshot has 2",
     ]);
     // Another issuer, or an audience besides the token exchange.
     expect(
@@ -4190,6 +4210,144 @@ describe('SEC-OPS-09 each rule can fail', () => {
       apiVersion: '2022-04-01',
     };
     expect(brokenRules(withExtra(pim))).toEqual(['secret-access']);
+  });
+
+  it('job-watch: the job-start watch trusted for another subject, allowed more than reading the jobs, or given its role anywhere but the group, to anyone else (S175)', () => {
+    // The rule's own messages, so a condition another one also catches can't hide.
+    const watchProblems = (snapshotted: Snapshot, expected = STAGING): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter((problem) => problem.rule === 'job-watch')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    const idOf = (pick: (resource: PredictedResource) => boolean): string => {
+      const found = staging.predictedResources.find(pick);
+      if (found === undefined) throw new Error('the snapshot has no such resource');
+      return found.id;
+    };
+    const WATCH = named(/^id-agentx-stg-job-watch$/);
+    const TRUST = (resource: PredictedResource): boolean =>
+      type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials')(resource) &&
+      resource.name === 'id-agentx-stg-job-watch/github';
+    const ROLE = (resource: PredictedResource): boolean =>
+      ROLE_DEFINITIONS(resource) && String(at(resource.properties, 'roleName')).startsWith('Agent X job watch ');
+    const GRANT = (resource: PredictedResource): boolean =>
+      ASSIGNMENTS(resource) &&
+      at(resource.properties, 'description') ===
+        'The job-start watch reads the jobs and their runs (deploy/azure/modules/job-watch.bicep)';
+    const group = idOf(type('Microsoft.Resources/resourceGroups'));
+    const subscription = group.slice(0, group.indexOf('/resourceGroups/'));
+    const role = String(staging.predictedResources.find(ROLE)?.name);
+    const grant = String(staging.predictedResources.find(GRANT)?.name);
+    const marker = '/providers/Microsoft.Authorization/roleAssignments/';
+    const permissionsOf = (found: Mutable): Mutable => first(at(found, 'properties', 'permissions'));
+    const grantProperties = (found: Mutable): Mutable => inside(found, 'properties');
+    const principal = (identity: string): string =>
+      `[reference('${idOf(named(new RegExp(`^${identity}$`)))}', '2024-11-30').principalId]`;
+    const wanted = [
+      'Microsoft.App/jobs/read',
+      'Microsoft.App/jobs/executions/read',
+      'Microsoft.App/jobs/execution/read',
+    ];
+    const alone = `${grant}: must give the job-start watch's role to the watch's identity (principalType ServicePrincipal) on this deployment's resource group alone`;
+
+    // As deployed: read-only, on the group, to the watch, named by names.bicep, trusted for staging's GitHub environment.
+    expect(role).toBe(bicepGuid(group, 'job-watch'));
+    expect(staging.predictedResources.filter(WATCH).map((found) => found.properties)).toEqual([
+      { isolationScope: 'Regional' },
+    ]);
+    expect(at(staging.predictedResources.find(ROLE)?.properties, 'permissions')).toEqual([
+      { actions: wanted, notActions: [], dataActions: [], notDataActions: [] },
+    ]);
+    expect(
+      staging.predictedResources.filter(GRANT).map((found) => [found.id.split(marker)[0], found.properties]),
+    ).toEqual([
+      [
+        group,
+        {
+          description: 'The job-start watch reads the jobs and their runs (deploy/azure/modules/job-watch.bicep)',
+          roleDefinitionId: `${subscription}/providers/Microsoft.Authorization/roleDefinitions/${role}`,
+          principalId: principal('id-agentx-stg-job-watch'),
+          principalType: 'ServicePrincipal',
+        },
+      ],
+    ]);
+    expect(watchProblems(staging)).toEqual([]);
+    expect(watchProblems(productionLike({ subject: true }), { region: 'uaenorth', environment: 'production' })).toEqual(
+      [],
+    );
+
+    // No identity, no trust, two, or a trust for another subject.
+    // Without its identity, its grant names no one the deployment creates.
+    expect(watchProblems(without(WATCH))).toEqual([
+      'the deployment: needs an identity for the job-start watch (id-agentx-stg-job-watch)',
+      alone,
+    ]);
+    expect(watchProblems(without(TRUST))).toEqual([
+      "the deployment: needs one trust for the job-start watch's identity; the snapshot has 0",
+    ]);
+    const second = structuredClone(staging.predictedResources.find(TRUST)) as unknown as Mutable;
+    expect(watchProblems(withExtra(second))).toEqual([
+      "the deployment: needs one trust for the job-start watch's identity; the snapshot has 2",
+    ]);
+    const branch = 'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/main';
+    expect(watchProblems(changed(TRUST, (found) => (inside(found, 'properties').subject = branch)))).toEqual([
+      `id-agentx-stg-job-watch/github: must trust repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(branch)}`,
+    ]);
+    // An app or a job running as the watch would read with the watch's role.
+    const running = changed(JOB('migrate'), (job) => {
+      inside(job, 'identity', 'userAssignedIdentities')[idOf(WATCH).toUpperCase()] = {};
+    });
+    expect(watchProblems(running)).toEqual([
+      "job-agentx-stg-migrate: must not run as the job-start watch's identity, whose role is the watch's alone",
+    ]);
+
+    // The role: starting, a secret's list, a write, a shell, every action, or one read less.
+    for (const actions of [
+      [...wanted, 'Microsoft.App/jobs/start/action'],
+      [...wanted, 'Microsoft.App/jobs/listsecrets/action'],
+      [...wanted, 'Microsoft.App/jobs/write'],
+      [...wanted, 'Microsoft.App/jobs/exec/action'],
+      ['*'],
+      wanted.slice(1),
+    ]) {
+      expect(watchProblems(changed(ROLE, (found) => (permissionsOf(found).actions = actions)))).toEqual([
+        `${role}: must allow exactly ${wanted.join(', ')}; it allows ${actions.join(', ')}`,
+      ]);
+    }
+    const secretValue = 'Microsoft.KeyVault/vaults/secrets/getSecret/action';
+    expect(watchProblems(changed(ROLE, (found) => (permissionsOf(found).dataActions = [secretValue])))).toEqual([
+      `${role}: must allow no data action, which could read a secret's value; it allows ${secretValue}`,
+    ]);
+    expect(
+      watchProblems(changed(ROLE, (found) => (inside(found, 'properties').assignableScopes = [subscription]))),
+    ).toEqual([
+      `${role}: must be assignable in this deployment's resource group alone; it says ${JSON.stringify([subscription])}`,
+    ]);
+    expect(watchProblems(without(ROLE))).toEqual([
+      'the deployment: needs one custom role for the job-start watch; the snapshot has 0',
+    ]);
+
+    // Given at the subscription or on one job, to the API's identity, as a user, or not once.
+    for (const scope of [subscription, idOf(JOB('operator'))]) {
+      expect(watchProblems(changed(GRANT, (found) => (found.id = `${scope}${marker}${grant}`)))).toEqual([alone]);
+    }
+    for (const change of [
+      (found: Mutable) => (grantProperties(found).principalId = principal('id-agentx-stg-api')),
+      (found: Mutable) => (grantProperties(found).principalType = 'User'),
+    ]) {
+      expect(watchProblems(changed(GRANT, change))).toEqual([alone]);
+    }
+    expect(watchProblems(without(GRANT))).toEqual([
+      "the deployment: must give the job-start watch's role once; it gives it 0 times",
+    ]);
+    const twice = structuredClone(staging.predictedResources.find(GRANT)) as unknown as Mutable;
+    expect(watchProblems(withExtra(twice))).toEqual([
+      "the deployment: must give the job-start watch's role once; it gives it 2 times",
+    ]);
+    // Any other role to the watch, a vault reader's among them, is `secret-access`'s to refuse.
+    const reads = changed(READS('api', 'db-app-password'), (found) => {
+      grantProperties(found).principalId = principal('id-agentx-stg-job-watch');
+    });
+    expect(brokenRules(reads)).toEqual(['secret-access']);
   });
 
   it('SEC-OPS-11 vault-secrets: a secret written on every run or on another condition, missing, doubled, unread, or elsewhere', () => {

@@ -108,6 +108,10 @@ func releaseSubject(environment string) string => 'repo:shahbaz242630@205810405/
 func releaseRoleName(groupId string) string => guid(groupId, 'release')
 
 @export()
+@description('The job-start watch\'s role (Carry-Forward S175), named from the resource group as CI\'s is: the foundation defines it and gives it on the group (modules/job-watch.bicep).')
+func jobWatchRoleName(groupId string) string => guid(groupId, 'job-watch')
+
+@export()
 @description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
 func doorName(environment string, door string) string => 'rtagentx${shortName(environment)}${door}'
 
@@ -170,4 +174,7 @@ func resourceNames(environment string, nameSuffix string) object => {
   // so it carries the suffix too.
   release: identityName(environment, 'release')
   releaseRole: 'Agent X release (${environment} ${nameSuffix})'
+  // The job-start watch's identity and role (S175): it reads the jobs and their runs, nothing else.
+  jobWatch: identityName(environment, 'job-watch')
+  jobWatchRole: 'Agent X job watch (${environment} ${nameSuffix})'
 }

@@ -411,6 +411,18 @@ module release 'modules/release.bicep' = {
   }
 }
 
+// The job-start watch's identity, its trust in GitHub and its read-only role (S175).
+module jobWatch 'modules/job-watch.bicep' = {
+  scope: group
+  params: {
+    location: location
+    tags: tags
+    identityName: names.jobWatch
+    roleName: names.jobWatchRole
+    subject: releaseSubject(environment)
+  }
+}
+
 // Who changed what in this subscription, kept in the same workspace: every
 // change is meant to come from this code (ADR-012 §6), so a change from
 // anywhere else shows up here. The activity log costs nothing to collect.
@@ -487,3 +499,4 @@ output keyVaultName string = vault.outputs.name
 output databaseHost string = database.outputs.host
 output appsEnvironmentName string = appsEnvironment.outputs.name
 output releaseClientId string = release.outputs.clientId
+output jobWatchClientId string = jobWatch.outputs.clientId
