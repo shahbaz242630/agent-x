@@ -22,7 +22,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { appName, identityName, jobName, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { appName, identityName, jobName, jobWatchSubject, networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 import { evidenceAccountName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName } from 'modules/activity-downloads.bicep'
 
@@ -411,6 +411,18 @@ module release 'modules/release.bicep' = {
   }
 }
 
+// The job-start watch's identity, its trust in GitHub and its read-only role (S175).
+module jobWatch 'modules/job-watch.bicep' = {
+  scope: group
+  params: {
+    location: location
+    tags: tags
+    identityName: names.jobWatch
+    roleName: names.jobWatchRole
+    subject: jobWatchSubject()
+  }
+}
+
 // Who changed what in this subscription, kept in the same workspace: every
 // change is meant to come from this code (ADR-012 §6), so a change from
 // anywhere else shows up here. The activity log costs nothing to collect.
@@ -487,3 +499,4 @@ output keyVaultName string = vault.outputs.name
 output databaseHost string = database.outputs.host
 output appsEnvironmentName string = appsEnvironment.outputs.name
 output releaseClientId string = release.outputs.clientId
+output jobWatchClientId string = jobWatch.outputs.clientId

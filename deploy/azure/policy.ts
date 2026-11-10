@@ -89,6 +89,7 @@ export type RuleId =
   | 'identities'
   | 'release-identity'
   | 'release-access'
+  | 'job-watch'
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
@@ -708,18 +709,31 @@ const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 /** The one audience Azure accepts in such a token. */
 const TOKEN_EXCHANGE = 'api://AzureADTokenExchange';
 
+/** This repository as GitHub names it in a subject (names.bicep `githubRepository`). */
+const GITHUB_REPOSITORY = 'repo:shahbaz242630@205810405/agent-x@1368211207';
+
 /**
  * The GitHub subject CI signs in with (G4): a job of this repository in the
  * GitHub environment of the same name, in the immutable form GitHub writes for
  * a repository made after 15 July 2026. names.bicep writes it too, so changing
  * who may sign in takes both.
  */
-const releaseSubject = (environment: string): string =>
-  `repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}`;
+const releaseSubject = (environment: string): string => `${GITHUB_REPOSITORY}:environment:${environment}`;
+
+/**
+ * The GitHub subject the job-start watch signs in with (S175; names.bicep
+ * `jobWatchSubject`): a job of this repository on main, in no environment. Never
+ * CI's environment subject, so the watch's trust can't stand in for CI's.
+ */
+const WATCH_SUBJECT = `${GITHUB_REPOSITORY}:ref:refs/heads/main`;
 
 /** CI's identity in an environment, as names.bicep names it. */
 const releaseIdentityName = (environment: string): string =>
   `id-agentx-${environment === 'production' ? 'prd' : 'stg'}-release`;
+
+/** The job-start watch's identity in an environment (S175), as names.bicep names it. */
+const watchIdentityName = (environment: string): string =>
+  `id-agentx-${environment === 'production' ? 'prd' : 'stg'}-job-watch`;
 
 /** The namespace Bicep's and ARM's `guid()` makes its version-5 UUIDs in. */
 const BICEP_GUID_NAMESPACE = Buffer.from('11fb06fb712d4ddd98c7e71bbd588830', 'hex');
@@ -747,6 +761,20 @@ export function bicepGuid(...parts: readonly string[]): string {
  * (Owner's), from passing as CI's.
  */
 const releaseRoleName = (groupId: string): string => bicepGuid(groupId, 'release');
+
+/** The job-start watch's role's name (S175), as names.bicep's `jobWatchRoleName` makes it. */
+const watchRoleName = (groupId: string): string => bicepGuid(groupId, 'job-watch');
+
+/**
+ * Everything the job-start watch's role allows (S175): reading the jobs and
+ * their runs (Azure names a run's read both ways). Nothing that starts, stops,
+ * writes, lists a secret or opens a shell: the watch only reads.
+ */
+const WATCH_ACTIONS: readonly string[] = [
+  'Microsoft.App/jobs/read',
+  'Microsoft.App/jobs/executions/read',
+  'Microsoft.App/jobs/execution/read',
+];
 
 /**
  * Everything CI's role allows (G4): an app's and a job's own reads and writes,
@@ -3677,6 +3705,17 @@ const groupOf = (snapshot: Snapshot): string => ofType(snapshot, TYPES.group)[0]
 const releaseIdentityId = (snapshot: Snapshot, environment: string): string =>
   `${groupOf(snapshot)}/providers/${TYPES.identity}/${releaseIdentityName(environment)}`.toLowerCase();
 
+/** The job-start watch's identity's id, without case, in the deployment's resource group. */
+const watchIdentityId = (snapshot: Snapshot, environment: string): string =>
+  `${groupOf(snapshot)}/providers/${TYPES.identity}/${watchIdentityName(environment)}`.toLowerCase();
+
+/** The job-start watch's role as a role assignment names it, without case. */
+const watchRoleId = (snapshot: Snapshot): string => customRoleId(groupOf(snapshot), watchRoleName(groupOf(snapshot)));
+
+/** Whether a trust is on the identity whose id (without case) is given. */
+const trustOn = (trust: PredictedResource, identity: string): boolean =>
+  trust.id.toLowerCase().startsWith(`${identity}/federatedidentitycredentials/`);
+
 /**
  * CI's role as a role assignment names it, without case: at the subscription,
  * the form Azure keeps a custom role under wherever it may be given (G4-2b),
@@ -3734,7 +3773,8 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   const keptAnchors = customRoleId(groupOf(snapshot), anchorRoleName(groupOf(snapshot)));
   const readAnchors = customRoleId(groupOf(snapshot), anchorReaderRoleName(groupOf(snapshot)));
   const readPlans = customRoleId(groupOf(snapshot), planReaderRoleName(groupOf(snapshot)));
-  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans]);
+  // The watch's role is `job-watch`'s to check.
+  const stores = new Set([release, evidence, downloads, keptAnchors, readAnchors, readPlans, watchRoleId(snapshot)]);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
     const role = roleOf(assignment);
@@ -3804,32 +3844,44 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
       problem(workload.name, "must not run as CI's identity, whose role is CI's alone");
     }
   }
-  const trusts = ofType(snapshot, TYPES.trust);
+  // The job-start watch's own trust is `job-watch`'s to check.
+  const watch = watchIdentityId(snapshot, expected.environment);
+  const trusts = ofType(snapshot, TYPES.trust).filter((trust) => !trustOn(trust, watch));
   for (const trust of trusts) {
     if (!releases.some((release) => trust.id.startsWith(`${release.id}/federatedIdentityCredentials/`))) {
       problem(trust.name, "must be on CI's identity: no other identity is signed in to from outside Azure");
     }
-    const issuer = at(trust.properties, 'issuer');
-    if (issuer !== GITHUB_ISSUER) {
-      problem(trust.name, `must trust ${GITHUB_ISSUER} alone; it trusts ${JSON.stringify(issuer)}`);
-    }
-    const subject = at(trust.properties, 'subject');
-    if (subject !== releaseSubject(expected.environment)) {
-      problem(
-        trust.name,
-        `must trust ${releaseSubject(expected.environment)} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
-      );
-    }
-    const audiences = list(at(trust.properties, 'audiences'));
-    if (audiences.length !== 1 || audiences[0] !== TOKEN_EXCHANGE) {
-      problem(trust.name, `must accept the audience ${TOKEN_EXCHANGE} alone; it accepts ${JSON.stringify(audiences)}`);
-    }
+    trustProblems(
+      trust,
+      { subject: releaseSubject(expected.environment), who: "a job in this environment's GitHub environment" },
+      problem,
+    );
   }
   if (trusts.length !== 1) {
     problem('the deployment', `needs one trust, for CI's identity; the snapshot has ${String(trusts.length)}`);
   }
   releaseRoleProblems(snapshot, problem);
 };
+
+/** A trust in GitHub, for CI or the watch: GitHub's issuer, the one subject wanted and the token exchange alone. */
+function trustProblems(
+  trust: PredictedResource,
+  wanted: { readonly subject: string; readonly who: string },
+  problem: (resource: string, message: string) => void,
+): void {
+  const issuer = at(trust.properties, 'issuer');
+  if (issuer !== GITHUB_ISSUER) {
+    problem(trust.name, `must trust ${GITHUB_ISSUER} alone; it trusts ${JSON.stringify(issuer)}`);
+  }
+  const subject = at(trust.properties, 'subject');
+  if (subject !== wanted.subject) {
+    problem(trust.name, `must trust ${wanted.subject} alone (${wanted.who}); it trusts ${JSON.stringify(subject)}`);
+  }
+  const audiences = list(at(trust.properties, 'audiences'));
+  if (audiences.length !== 1 || audiences[0] !== TOKEN_EXCHANGE) {
+    problem(trust.name, `must accept the audience ${TOKEN_EXCHANGE} alone; it accepts ${JSON.stringify(audiences)}`);
+  }
+}
 
 /** CI's custom role, half of `release-identity`: exactly one, named so, given in the resource group alone, allowing RELEASE_ACTIONS and no data action. */
 function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
@@ -3841,6 +3893,8 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
     anchorReaderRoleName(groupOf(snapshot)),
     planReaderRoleName(groupOf(snapshot)),
     downloadsRoleName(groupOf(snapshot)),
+    // The watch's is `job-watch`'s.
+    watchRoleName(groupOf(snapshot)),
   ]);
   const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => !stores.has(role.name));
   const roleName = releaseRoleName(groupOf(snapshot));
@@ -3851,28 +3905,38 @@ function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, mes
         `must be named ${roleName} (names.bicep's releaseRoleName), so that no other role, a built-in one among them, passes as CI's`,
       );
     }
-    const scopes = list(at(role.properties, 'assignableScopes'));
-    if (scopes.length !== 1 || !groups.includes(String(scopes[0]))) {
-      problem(
-        role.name,
-        `must be assignable in this deployment's resource group alone; it says ${JSON.stringify(scopes)}`,
-      );
-    }
-    const permissions = list(at(role.properties, 'permissions'));
-    const actions = permissions.flatMap((entry) => list(at(entry, 'actions')));
-    if (actionSet(actions) !== actionSet(RELEASE_ACTIONS)) {
-      problem(role.name, `must allow exactly ${RELEASE_ACTIONS.join(', ')}; it allows ${actions.join(', ')}`);
-    }
-    const dataActions = permissions.flatMap((entry) => list(at(entry, 'dataActions')));
-    if (dataActions.length > 0) {
-      problem(
-        role.name,
-        `must allow no data action, which could read a secret's value; it allows ${dataActions.join(', ')}`,
-      );
-    }
+    roleShapeProblems(role, groups, RELEASE_ACTIONS, problem);
   }
   if (roles.length !== 1) {
     problem('the deployment', `needs one custom role, CI's; the snapshot has ${String(roles.length)}`);
+  }
+}
+
+/** A custom role of CI's or the watch's: assignable in the resource group alone, exactly `allowed`, no data action. */
+function roleShapeProblems(
+  role: PredictedResource,
+  groups: readonly string[],
+  allowed: readonly string[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const scopes = list(at(role.properties, 'assignableScopes'));
+  if (scopes.length !== 1 || !groups.includes(String(scopes[0]))) {
+    problem(
+      role.name,
+      `must be assignable in this deployment's resource group alone; it says ${JSON.stringify(scopes)}`,
+    );
+  }
+  const permissions = list(at(role.properties, 'permissions'));
+  const actions = permissions.flatMap((entry) => list(at(entry, 'actions')));
+  if (actionSet(actions) !== actionSet(allowed)) {
+    problem(role.name, `must allow exactly ${allowed.join(', ')}; it allows ${actions.join(', ')}`);
+  }
+  const dataActions = permissions.flatMap((entry) => list(at(entry, 'dataActions')));
+  if (dataActions.length > 0) {
+    problem(
+      role.name,
+      `must allow no data action, which could read a secret's value; it allows ${dataActions.join(', ')}`,
+    );
   }
 }
 
@@ -3938,6 +4002,71 @@ const releaseAccess: Check = (snapshot, expected, add) => {
         message: `must give CI's role on ${name} once; it gives it ${String(given)} times`,
       });
     }
+  }
+};
+
+/**
+ * The job-start watch (S175): a scheduled GitHub job that reads every job's
+ * recent runs (deploy/azure/job-starts.ts). Its identity, the one names.bicep
+ * calls job-watch, which no app or job runs as, is trusted for GitHub's issuer,
+ * main's own subject (WATCH_SUBJECT, never CI's environment subject) and the
+ * token exchange alone, once. Its one custom
+ * role, named as `jobWatchRoleName` names it and assignable in the resource
+ * group alone, allows WATCH_ACTIONS (reads) and no data action, and is given
+ * once, on the resource group, to the watch's identity as a service principal,
+ * and to no one else. That the watch holds no other role is `secret-access`'s.
+ */
+const jobWatch: Check = (snapshot, expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'job-watch', resource, message });
+  };
+  const name = watchIdentityName(expected.environment);
+  const watch = watchIdentityId(snapshot, expected.environment);
+  if (!ofType(snapshot, TYPES.identity).some((identity) => identity.id.toLowerCase() === watch)) {
+    problem('the deployment', `needs an identity for the job-start watch (${name})`);
+  }
+  for (const workload of workloadsIn(snapshot)) {
+    const assigned = Object.keys(at(workload.identity, 'userAssignedIdentities') ?? {});
+    if (assigned.some((id) => id.toLowerCase() === watch)) {
+      problem(workload.name, "must not run as the job-start watch's identity, whose role is the watch's alone");
+    }
+  }
+  const trusts = ofType(snapshot, TYPES.trust).filter((trust) => trustOn(trust, watch));
+  for (const trust of trusts) {
+    trustProblems(trust, { subject: WATCH_SUBJECT, who: 'a job on main, in no GitHub environment' }, problem);
+  }
+  if (trusts.length !== 1) {
+    problem(
+      'the deployment',
+      `needs one trust for the job-start watch's identity; the snapshot has ${String(trusts.length)}`,
+    );
+  }
+  const roleName = watchRoleName(groupOf(snapshot));
+  const roles = ofType(snapshot, TYPES.roleDefinition).filter((role) => role.name === roleName);
+  const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
+  for (const role of roles) roleShapeProblems(role, groups, WATCH_ACTIONS, problem);
+  if (roles.length !== 1) {
+    problem(
+      'the deployment',
+      `needs one custom role for the job-start watch; the snapshot has ${String(roles.length)}`,
+    );
+  }
+  const given = ofType(snapshot, TYPES.roleAssignment).filter(
+    (assignment) => roleOf(assignment) === watchRoleId(snapshot),
+  );
+  for (const assignment of given) {
+    if (
+      scopeOf(assignment).toLowerCase() !== groupOf(snapshot).toLowerCase() ||
+      principalOf(snapshot, assignment)?.id.toLowerCase() !== watch
+    ) {
+      problem(
+        assignment.name,
+        "must give the job-start watch's role to the watch's identity (principalType ServicePrincipal) on this deployment's resource group alone",
+      );
+    }
+  }
+  if (given.length !== 1) {
+    problem('the deployment', `must give the job-start watch's role once; it gives it ${String(given.length)} times`);
   }
 };
 
@@ -5037,6 +5166,7 @@ const CHECKS: readonly Check[] = [
   identities,
   releaseIdentity,
   releaseAccess,
+  jobWatch,
   vaultSecrets,
   secretAccess,
   jobs,
