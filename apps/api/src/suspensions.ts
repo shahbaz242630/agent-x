@@ -324,6 +324,27 @@ export async function pausedFromOf(
   return carried;
 }
 
+/**
+ * Whether a request decided under `decidedUnder` may have been carried to its
+ * supplier's details now: decided under a version, and the supplier has moved
+ * past it. Only then is `pausedFromOf` worth reading.
+ */
+export function movedPast(decidedUnder: string | null, currentVersionId: string): boolean {
+  return decidedUnder !== null && decidedUnder !== currentVersionId;
+}
+
+/**
+ * The one rule for "carried to new details" (E5, S117): moved past the version
+ * it was decided under, and that version one the current carries requests from.
+ */
+export function isCarried(
+  decidedUnder: string | null,
+  currentVersionId: string,
+  pausedFrom: readonly string[],
+): boolean {
+  return decidedUnder !== null && movedPast(decidedUnder, currentVersionId) && pausedFrom.includes(decidedUnder);
+}
+
 /** The first PAYEE_STATEMENTS whose cancel said it acts whatever the supplier's status (C3c). */
 const CANCELS_AT_ONCE_FROM = 2;
 
