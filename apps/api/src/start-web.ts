@@ -428,6 +428,11 @@ export async function startWeb(
     host.exitCode = 1;
     return undefined;
   }
-  logger.info('api.listening', { ports: server.addresses().map((address) => address.port) });
+  logger.info('api.listening', {
+    ports: server
+      .addresses()
+      .filter((address) => typeof address !== 'string')
+      .map((address) => address.port),
+  });
   return server;
 }
