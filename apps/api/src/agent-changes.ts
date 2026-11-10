@@ -412,7 +412,7 @@ export function createAgentChanges({
           await work.keyBudgetLeft(tx, member.orgId, now);
           const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
           if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-          roomForAKey(listed.keys);
+          if (!roomForAKey(listed.keys)) throw new AgentRefused(409, 'AGENT_KEYS_TOO_MANY');
           const shown = await work.shown(tx, member.orgId, read.agent);
           const consumed = await stepUps.consumed(
             tx,

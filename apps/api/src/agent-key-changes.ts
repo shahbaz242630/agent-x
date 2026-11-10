@@ -16,7 +16,9 @@
 //   for change; the key the agent's, and live (AGENT_KEY_NOT_LIVE for one
 //   revoked or expired); fewer than MOST_LIVE_KEYS of the agent's keys live
 //   once it is done (AGENT_KEYS_FULL: a rotation already in its overlap is
-//   waited out, or a key revoked; ending the old key at once adds none); a
+//   waited out, or a key revoked; ending the old key at once adds none);
+//   room for one more of its keys in all (AGENT_KEYS_TOO_MANY past
+//   MOST_KEYS_LISTED, ended ones included, AG2); a
 //   challenge bound to the organisation, the key's latest event and the
 //   choice, so it rotates exactly that key as it stood, as chosen. The confirm: the
 //   organisation's lock for issuing keys; the member; the day's budget
@@ -210,7 +212,7 @@ export function createAgentKeyChanges({
     if (listed.keys.filter((key) => isLiveKey(key, now)).length - ending >= MOST_LIVE_KEYS) {
       throw new AgentRefused(409, 'AGENT_KEYS_FULL');
     }
-    roomForAKey(listed.keys);
+    if (!roomForAKey(listed.keys)) throw new AgentRefused(409, 'AGENT_KEYS_TOO_MANY');
     return { ...read, keys: listed.keys };
   };
 

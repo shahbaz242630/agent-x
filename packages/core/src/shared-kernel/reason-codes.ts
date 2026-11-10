@@ -38,6 +38,8 @@ export const REASON_CODES = {
     'The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, revoke one, or rotate ending the old key at once, then try again. Nothing was changed.',
   AGENT_KEYS_SPENT:
     "The organisation has issued as many agent keys as it may in 24 hours, so this one wasn't issued. Try again tomorrow; if no one at the organisation rotated them, tell its admins at once.",
+  AGENT_KEYS_TOO_MANY:
+    "The agent has had 100 keys, ended ones included, the most Agent X keeps for one agent, so it can't be given another. Register it again as a new agent to give it a key. Nothing was changed.",
   AGENT_KEY_ENDED:
     "The agent key this request was made with was ended at once after it was approved, so it wasn't handed to the bank, and the money held for it was freed. The agent asks again with a live key.",
   AGENT_KEY_NOT_LIVE: 'The key is revoked or expired, so there is nothing to rotate. Nothing was changed.',

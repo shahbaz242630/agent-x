@@ -81,6 +81,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_KEYS_TOO_MANY",
+                    "description": "The agent has had 100 keys, ended ones included, the most Agent X keeps for one agent, so it can't be given another. Register it again as a new agent to give it a key. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_KEY_ENDED",
                     "description": "The agent key this request was made with was ended at once after it was approved, so it wasn't handed to the bank, and the money held for it was freed. The agent asks again with a live key."
                   },

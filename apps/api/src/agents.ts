@@ -27,7 +27,8 @@
 //   the agent, its keys (every one before it revoked) and its new key, shown
 //   this once. 409 AGENT_OWNER_NOT_ELIGIBLE unless the member is an active
 //   admin or developer of the organisation, AGENT_OWNER_UNCHANGED for the
-//   agent's owner already, AGENT_KEYS_SPENT past the day's key budget.
+//   agent's owner already, AGENT_KEYS_SPENT past the day's key budget,
+//   AGENT_KEYS_TOO_MANY for an agent that has had 100 keys (AG2).
 // - `POST /v1/agents/:id/keys/:keyId/rotate`, then `…/rotate/confirm` with the
 //   step-up's ID (C1-4b): a new key, shown this once, and the old one, as
 //   chosen in both bodies (`oldKey`, Phase 3 E8, decision 22): kept working
@@ -35,7 +36,9 @@
 //   201 with the agent, its keys, the new key and the choice. 409
 //   AGENT_KEY_NOT_LIVE for a key revoked or expired, AGENT_KEYS_FULL while a
 //   rotation's overlap runs (unless ending the old key at once),
-//   AGENT_KEYS_SPENT past the day's budget. Admins and developers.
+//   AGENT_KEYS_SPENT past the day's budget, AGENT_KEYS_TOO_MANY for an agent
+//   that has had 100 keys, ended ones included (AG2, once a 500). Admins and
+//   developers.
 // - `POST /v1/agents/:id/keys/:keyId/revoke`, then `…/revoke/confirm` (C1-4b):
 //   the key stops at once: 202, then 200 with the agent and its keys. 409
 //   AGENT_KEY_REVOKED for one revoked already. Admins and developers.

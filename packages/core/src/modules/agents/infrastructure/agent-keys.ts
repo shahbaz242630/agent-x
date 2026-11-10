@@ -221,11 +221,12 @@ export async function agentKeysOf(
 }
 
 /**
- * Refuses a key that would take the agent past what a list reads: past it, every read of the agent would throw
- * TooManyAgentKeys for good. For a write issuing one, from its own list, before its first event.
+ * Whether the agent has room for one more key: past what a list reads, every read of the agent would throw
+ * TooManyAgentKeys for good. For a write issuing one, from its own list, before its first event: without room it
+ * refuses (AGENT_KEYS_TOO_MANY, AG2), a plain answer, never the failure it was.
  */
-export function roomForAKey(keys: readonly AgentKeyRecord[]): void {
-  if (keys.length >= MOST_KEYS_LISTED) throw new TooManyAgentKeys();
+export function roomForAKey(keys: readonly AgentKeyRecord[]): boolean {
+  return keys.length < MOST_KEYS_LISTED;
 }
 
 /** A new key's own fields, as addAgentKey takes them. */
