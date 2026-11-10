@@ -1230,6 +1230,21 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(readsUnderTheHead(sent)).toEqual([]);
   });
 
+  it(`refuses a hand-over's confirm asked before the agent reached ${String(MOST_KEYS_LISTED)} keys: nothing changed`, async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 1);
+
+    expect(await handOverConfirm(admin, key.agentId, next.membershipId, challengeId)).toEqual(
+      refusal(409, 'AGENT_KEYS_TOO_MANY'),
+    );
+    expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
+  });
+
   it(`hands over up to ${String(MOST_KEYS_LISTED)} keys, and no further: nothing changed past it`, async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1241,11 +1256,8 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(agent.keys).toHaveLength(MOST_KEYS_LISTED);
     expect(agent).toEqual(await readBack(org, key.agentId));
 
-    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, admin.membershipId));
-    await stepUp(admin, challengeId);
-    expect(await handOverConfirm(admin, key.agentId, admin.membershipId, challengeId)).toEqual(
-      refusal(409, 'AGENT_KEYS_TOO_MANY'),
-    );
+    // Refused at the ask (AG2), so no one signs in again for it.
+    expect(await handOverAsk(admin, key.agentId, admin.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_TOO_MANY'));
     expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
     expect(await readBack(org, key.agentId)).toEqual(agent);
   });
