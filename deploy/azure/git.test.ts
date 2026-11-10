@@ -144,6 +144,25 @@ describe('a release, read from a real history', () => {
   });
 });
 
+describe('files at a commit (decision 49: the coming list staging runs)', () => {
+  it("reads a file's text as the commit had it, and none where it had none", () => {
+    const history = realHistory(repository);
+    expect(history.fileAt(made.first, 'README.md')).toBe('README.md\n');
+    expect(history.fileAt(made.first, 'deploy/azure/release.ts')).toBeUndefined();
+    expect(history.fileAt(made.deleted, 'deploy/azure/release.ts')).toBeUndefined();
+    expect(history.fileAt(made.tool, 'deploy/azure/release.ts')).toBe('deploy/azure/release.ts\n');
+  });
+
+  it('lists the files directly in a folder', () => {
+    expect(realHistory(repository).filesIn(made.bicep, 'deploy/azure')).toEqual(['apps.bicep', 'release.ts']);
+  });
+
+  it('is an error for a commit this clone lacks, or a folder the commit lacks: never taken as nothing there', () => {
+    expect(() => realHistory(repository).fileAt(MISSING, 'README.md')).toThrow(`git couldn't find ${MISSING}`);
+    expect(() => realHistory(repository).filesIn(made.first, 'deploy/azure')).toThrow("git couldn't list deploy/azure");
+  });
+});
+
 describe('the checkout', () => {
   it('is the commit the folder is at, clean only when nothing differs from it', () => {
     expect(realCheckout(repository)).toEqual({ head: made.unusual, clean: true });

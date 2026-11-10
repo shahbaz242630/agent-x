@@ -30,6 +30,10 @@
 //   is now, needs no hand deploy. Bicep is asked only once a release would be
 //   red without it, and any doubt (Bicep unable to say, a record that isn't a
 //   commit, or isn't in the history) leaves it red
+// - a new migration adding a trigger to a table already built, or a new body
+//   to a guard function, is red unless the commit staging runs already carried
+//   it as coming (decision 49, tooling/migration-order.ts): otherwise the image
+//   running while it migrates raises a false tamper alarm
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
@@ -48,6 +52,13 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
+import {
+  COMING_FILE,
+  MIGRATION_NAME,
+  MIGRATIONS_FOLDER,
+  parseComing,
+  refusals,
+} from '../../tooling/migration-order.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
 import {
   ARM,
@@ -407,6 +418,30 @@ function changedFile(
 }
 
 /**
+ * Decision 49 (PL-66): each migration this release would run that adds a trigger to a table already built, or a new
+ * body to a function already written, which the image staging runs (`release`) didn't carry as coming
+ * (tooling/migration-order.ts). The check in CI holds a migration to the code before its merge, but GitHub may drop a
+ * waiting release, so that code may never have run here: this holds it to what does run, before the first write.
+ */
+function notYetComing(release: string, commit: string, changed: readonly string[], history: History): string[] {
+  const folder = `${MIGRATIONS_FOLDER}/`;
+  const added = changed
+    .filter((file) => file.startsWith(folder) && MIGRATION_NAME.test(file.slice(folder.length)))
+    .filter((file) => history.fileAt(release, file) === undefined)
+    .map((file) => file.slice(folder.length));
+  if (added.length === 0) return [];
+  const migrations = history
+    .filesIn(commit, MIGRATIONS_FOLDER)
+    .filter((name) => MIGRATION_NAME.test(name))
+    .map((name) => ({ name, sql: history.fileAt(commit, `${folder}${name}`) ?? '' }));
+  const coming = parseComing(history.fileAt(release, COMING_FILE));
+  return refusals(migrations, added, () => coming).map(
+    (line) =>
+      `${line}, and staging runs ${release}: release a commit carrying it in coming.json first, then this one (decision 49)`,
+  );
+}
+
+/**
  * What a release of `commit` would do, given what each workload runs: nothing
  * when both already run it, or both run a later commit that has it (a release
  * run again after a newer one); a hand deploy when what either runs isn't in
@@ -449,17 +484,21 @@ export function decide(
   };
   const reasons = new Set<string>();
   const deployed = new Set<string>();
+  const notComing: string[] = [];
   for (const release of new Set(all.map(([, found]) => found.release))) {
     if (!history.isAncestor(release, commit)) {
       reasons.add(`staging runs ${release}, which isn't in ${commit}'s history`);
       continue;
     }
-    for (const file of history.changedFiles(release, commit)) {
+    const changed = history.changedFiles(release, commit);
+    for (const file of changed) {
       const found = changedFile(file, release, readers, recordFor);
       if (found?.kind === 'reason') reasons.add(found.line);
       if (found?.kind === 'deployed') deployed.add(found.line);
     }
+    notComing.push(...notYetComing(release, commit, changed, history));
   }
+  for (const line of notComing) reasons.add(line);
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
   return {
     kind: 'release',

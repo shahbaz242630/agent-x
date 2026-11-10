@@ -12,6 +12,10 @@ export interface History {
   isAncestor(ancestor: string, commit: string): boolean;
   /** The files that differ between the two commits, a renamed one under both its names. */
   changedFiles(from: string, to: string): readonly string[];
+  /** A file's text at a commit, or undefined when the commit has no such file; a commit this clone lacks is an error. */
+  fileAt(commit: string, file: string): string | undefined;
+  /** The names of the files directly in a folder at a commit. */
+  filesIn(commit: string, folder: string): readonly string[];
 }
 
 /** The folder a hand deploy is sent from: the commit it is at, and whether anything differs from it. */
@@ -53,6 +57,21 @@ export function realHistory(repository = REPOSITORY): History {
       // -z: every path as it is, never quoted (git quotes an unusual one, which would hide its folder).
       const done = git(repository, ['diff', '--name-only', '-z', '--no-renames', '--no-color', from, to]);
       if (done.status !== 0) throw new Error(`git couldn't list the changes from ${from} to ${to}:\n${done.stderr}`);
+      return done.stdout.split(NUL).filter((file) => file !== '');
+    },
+    fileAt: (commit, file) => {
+      const known = git(repository, ['rev-parse', '--verify', '--quiet', `${commit}^{commit}`]);
+      if (known.status !== 0) throw new Error(`git couldn't find ${commit} to read ${file}:\n${known.stderr}`);
+      const at = `${known.stdout.trim()}:${file}`;
+      // Not there is an answer; anything else git can't do is not.
+      if (git(repository, ['cat-file', '-e', at]).status !== 0) return undefined;
+      const done = git(repository, ['show', '--no-color', at]);
+      if (done.status !== 0) throw new Error(`git couldn't read ${file} at ${commit}:\n${done.stderr}`);
+      return done.stdout;
+    },
+    filesIn: (commit, folder) => {
+      const done = git(repository, ['ls-tree', '--name-only', '-z', `${commit}:${folder}`]);
+      if (done.status !== 0) throw new Error(`git couldn't list ${folder} at ${commit}:\n${done.stderr}`);
       return done.stdout.split(NUL).filter((file) => file !== '');
     },
   };
