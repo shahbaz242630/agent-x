@@ -67,6 +67,11 @@ export interface SecurityRecorder extends SecurityEventSink {
    * whatever it couldn't write: the API calls it last, as it stops. Never throws.
    */
   flush(until: number): Promise<void>;
+  /**
+   * Logs and drops every count still held, writing none: the process is
+   * ending at once (a crash), with no time to write (MO4). Never throws.
+   */
+  drop(): void;
 }
 
 export interface SecurityRecorderOptions {
@@ -177,6 +182,15 @@ export function createSecurityRecorder({
     return at - (at % WINDOW_MS);
   };
 
+  /** Whatever is still held is lost as the process ends: counted here, so the log says what the store never got. */
+  const dropHeld = (): void => {
+    if (held.size === 0) return;
+    let count = 0;
+    for (const entry of held.values()) count += entry.count;
+    logger.error('security.events_unwritten', { events: held.size, count });
+    held.clear();
+  };
+
   return Object.freeze({
     note(note: SecurityEventNote): void {
       add(
@@ -197,12 +211,8 @@ export function createSecurityRecorder({
         () => now() + LONGEST_BATCH_MS > until,
       );
       // The process is stopping: whatever is still held is lost, so it is counted here.
-      if (held.size > 0) {
-        let count = 0;
-        for (const entry of held.values()) count += entry.count;
-        logger.error('security.events_unwritten', { events: held.size, count });
-        held.clear();
-      }
+      dropHeld();
     },
+    drop: dropHeld,
   });
 }
