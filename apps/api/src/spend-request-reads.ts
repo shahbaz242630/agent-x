@@ -52,7 +52,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { type Refused, refused } from './refused.ts';
-import { pausedFromOf } from './suspensions.ts';
+import { isCarried, movedPast, pausedFromOf } from './suspensions.ts';
 import { createUseCaseWork, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 export type RequestReadTables = UseCaseTables & AgentsTables & SuppliersTables & SpendRequestsTables;
@@ -162,7 +162,7 @@ export async function requestInOrder(
   if (expiresAt === undefined) return { outcome: 'unbelieved' };
   const decidedUnder = decidedAgainst(read.state).supplierVersionId;
   let carried: readonly string[] = [];
-  if (waiting && decidedUnder !== null && decidedUnder !== supplier.supplier.currentVersionId) {
+  if (waiting && movedPast(decidedUnder, supplier.supplier.currentVersionId)) {
     try {
       carried = await pausedFromOf(tx, states, orgId, supplier.supplier, integrityFailed);
     } catch (error) {
@@ -180,7 +180,7 @@ export async function requestInOrder(
       expiresAt,
       agentName: shown.name,
       supplierName: version.version.displayName,
-      needsRecheck: decidedUnder !== null && carried.includes(decidedUnder),
+      needsRecheck: isCarried(decidedUnder, supplier.supplier.currentVersionId, carried),
     },
   };
 }
@@ -224,8 +224,9 @@ async function carriedFrom(
   const moved = new Map<string, { readonly id: string; readonly currentVersionId: string }>();
   for (const item of items) {
     const supplier = suppliers.get(item.request.supplierId);
-    const waiting = item.request.status === 'APPROVAL_REQUIRED' && item.supplierVersionId !== null;
-    if (waiting && supplier && supplier.currentVersionId !== item.supplierVersionId) moved.set(supplier.id, supplier);
+    const waiting = item.request.status === 'APPROVAL_REQUIRED';
+    if (waiting && supplier && movedPast(item.supplierVersionId, supplier.currentVersionId))
+      moved.set(supplier.id, supplier);
   }
   const carried = new Map<string, readonly string[]>();
   for (const supplier of moved.values()) {
@@ -290,9 +291,7 @@ export function createSpendRequestReads({
         const supplier = pointedTo(suppliers.suppliers, item.request.supplierId);
         return (
           item.request.status === 'APPROVAL_REQUIRED' &&
-          item.supplierVersionId !== supplier.currentVersionId &&
-          item.supplierVersionId !== null &&
-          (carried.get(supplier.id)?.includes(item.supplierVersionId) ?? false)
+          isCarried(item.supplierVersionId, supplier.currentVersionId, carried.get(supplier.id) ?? [])
         );
       };
       const expiresAt = ({ request }: { readonly request: SpendRequestRecord }) =>

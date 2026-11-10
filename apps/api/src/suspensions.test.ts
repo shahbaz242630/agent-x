@@ -9,7 +9,7 @@ import type { AuditDetails, AuditTransaction, HistoryCheck, SignedStates } from 
 import { PAUSED_IN } from '@agentx/core/modules/spend-requests';
 import { describe, expect, it } from 'vitest';
 
-import { cancelsAtOnce, choiceIn, PAUSE_EVENTS, pausedFromOf } from './suspensions.ts';
+import { cancelsAtOnce, choiceIn, isCarried, movedPast, PAUSE_EVENTS, pausedFromOf } from './suspensions.ts';
 
 describe('choiceIn', () => {
   it('reads a pause recorded as a pause, and anything else as a cancel: none, older events, a value past the app', () => {
@@ -18,6 +18,22 @@ describe('choiceIn', () => {
     expect(choiceIn({})).toBe('cancel');
     expect(choiceIn(undefined)).toBe('cancel');
     expect(choiceIn({ pendingRequests: 'PAUSE' })).toBe('cancel');
+  });
+});
+
+describe('movedPast and isCarried (the one "carried to new details" rule, S117)', () => {
+  it('reads moved past only for a version the supplier has left, never for none or the current one', () => {
+    expect(movedPast('v1', 'v2')).toBe(true);
+    expect(movedPast('v2', 'v2')).toBe(false);
+    expect(movedPast(null, 'v2')).toBe(false);
+  });
+
+  it('reads carried only when moved past and the version is one the current carries from', () => {
+    expect(isCarried('v1', 'v2', ['v1'])).toBe(true);
+    expect(isCarried('v0', 'v2', ['v1'])).toBe(false);
+    expect(isCarried('v2', 'v2', ['v2'])).toBe(false);
+    expect(isCarried(null, 'v2', ['v1'])).toBe(false);
+    expect(isCarried('v1', 'v2', [])).toBe(false);
   });
 });
 
