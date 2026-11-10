@@ -1,0 +1,86 @@
+# The job-start watch (Carry-Forward S175). Whoever may start a Container Apps
+# job may start it with its containers replaced, and so run anything with the
+# job's secrets and identity; our own starts never do. Every half hour this
+# reads each job's runs of the last six hours and fails on any that ran other
+# containers than its job's own (deploy/azure/job-starts.ts). A failed scheduled
+# run emails the repository's owner (GitHub's own notifications), and what to
+# do is in the Incident-Response-Playbook, section T.
+#
+# - it signs in by OIDC as the watch's own identity (modules/job-watch.bicep),
+#   whose one role reads the jobs and their runs and nothing else
+# - no GitHub environment: Azure trusts main's own subject for the watch
+#   (names.bicep jobWatchSubject), which a scheduled run and one started by hand
+#   on main carry, and a run on another branch or a pull request's doesn't. So
+#   nothing here touches CI's `staging` environment or its trust, and no run
+#   creates a deployment (which would start the smoke test)
+# - its three IDs are repository secrets, set once after the foundation deploy
+#   (a variable in a step's env is printed in the public log); masked as well
+# - one at a time; a run waiting behind another is dropped for the newer
+# - the log is public: the watch prints no setting's value, command or argument
+name: Job starts (staging)
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-starts-staging
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Job runs with their containers changed
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Two lists a job, about a minute on Azure's side; the rest is the setup.
+    timeout-minutes: 15
+    permissions:
+      contents: read # to check out the watch
+      id-token: write # for the token Azure takes in place of a credential (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner image's own Node 24, as in the release job. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Mask the Azure IDs in the log
+        env:
+          CLIENT: ${{ secrets.AZURE_WATCH_CLIENT_ID }}
+          TENANT: ${{ secrets.AZURE_WATCH_TENANT_ID }}
+          SUBSCRIPTION: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
+        run: |
+          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
+            if [ -z "${id}" ]; then
+              echo "::error::One of the watch's three Azure IDs (the repository secrets AZURE_WATCH_CLIENT_ID, AZURE_WATCH_TENANT_ID, AZURE_WATCH_SUBSCRIPTION_ID) is not set, so no job run was checked. Set it with gh secret set (Incident-Response-Playbook section T), then run this workflow again."
+              exit 1
+            fi
+            echo "::add-mask::${id}"
+          done
+
+      # The Azure CLI the watch runs uses this pinned compiler, as every deploy tool's does.
+      - name: Install the pinned Bicep compiler
+        run: node tooling/bicep/install.ts
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_WATCH_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_WATCH_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
+
+      - name: Check every job run of the last six hours
+        run: node deploy/azure/job-starts.ts
+
+      # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear
