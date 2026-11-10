@@ -2519,13 +2519,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual(['database-disk', 'alert-delivery']);
     // A SEV-1 alert muted after it fires tells nobody of the next window; a
-    // SEV-2 one may be.
-    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT]) {
+    // SEV-2 one may be. The log cap is a SEV-1 since S183: every alert is blind over it.
+    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT, CAP_ALERT]) {
       expect(brokenRules(changed(sev1, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([
         'alert-delivery',
       ]);
     }
-    expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([]);
+    expect(
+      brokenRules(changed(DENIAL_SURGE_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H'))),
+    ).toEqual([]);
     // A second condition that never holds keeps the whole alert from firing.
     for (const alert of [LOGIN_ALERT, OWNER_ALERT, CAP_ALERT]) {
       expect(
