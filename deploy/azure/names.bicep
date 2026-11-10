@@ -101,11 +101,22 @@ func appName(environment string, workload string) string => 'ca-agentx-${shortNa
 
 @export()
 @description('Who CI signs in to Azure as (G4): a job of this repository in the GitHub environment of the same name. GitHub writes the subject with the owner\'s and the repository\'s IDs for a repository made after 15 July 2026 (`use_immutable_subject`), as ours is; Azure matches it exactly, and a wrong one fails without an error.')
-func releaseSubject(environment string) string => 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}'
+func releaseSubject(environment string) string => '${githubRepository()}:environment:${environment}'
+
+@export()
+@description('Who the job-start watch signs in to Azure as (S175): a job of this repository running on main (a scheduled run or one started by hand there), never in an environment and never a pull request\'s. Kept apart from CI\'s subject, so the watch needs no GitHub environment.')
+func jobWatchSubject() string => '${githubRepository()}:ref:refs/heads/main'
+
+@description('This repository as GitHub names it in a subject: the immutable form, with the owner\'s and the repository\'s IDs.')
+func githubRepository() string => 'repo:shahbaz242630@205810405/agent-x@1368211207'
 
 @export()
 @description('CI\'s role (G4), by the resource group it may be given in: a custom role is named by a GUID, made here from a fixed word so a new display name updates the role rather than orphaning it. The foundation defines it by this name and the apps deployment gives it by this name.')
 func releaseRoleName(groupId string) string => guid(groupId, 'release')
+
+@export()
+@description('The job-start watch\'s role (Carry-Forward S175), named from the resource group as CI\'s is: the foundation defines it and gives it on the group (modules/job-watch.bicep).')
+func jobWatchRoleName(groupId string) string => guid(groupId, 'job-watch')
 
 @export()
 @description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
@@ -170,4 +181,7 @@ func resourceNames(environment string, nameSuffix string) object => {
   // so it carries the suffix too.
   release: identityName(environment, 'release')
   releaseRole: 'Agent X release (${environment} ${nameSuffix})'
+  // The job-start watch's identity and role (S175): it reads the jobs and their runs, nothing else.
+  jobWatch: identityName(environment, 'job-watch')
+  jobWatchRole: 'Agent X job watch (${environment} ${nameSuffix})'
 }

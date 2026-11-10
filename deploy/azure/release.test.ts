@@ -803,6 +803,7 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/dns-policy.bicep': ['foundation'],
       'deploy/azure/modules/environment.bicep': ['foundation'],
       'deploy/azure/modules/evidence.bicep': ['foundation', 'apps'],
+      'deploy/azure/modules/job-watch.bicep': ['foundation'],
       'deploy/azure/modules/keyvault.bicep': ['foundation'],
       'deploy/azure/modules/metrics.bicep': ['foundation'],
       'deploy/azure/modules/monitoring.bicep': ['foundation'],

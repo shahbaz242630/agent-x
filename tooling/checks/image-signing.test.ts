@@ -100,11 +100,13 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect(steps('image-prune').find((step) => step.run !== undefined)?.run).toMatch(
       /^node deploy\/image\/prune\.ts prune /,
     );
-    // The release job asks for a token too, but Azure's (release-job.test.ts): it pushes nothing and signs nothing.
+    // The release job and the job-start watch ask for a token too, but Azure's (release-job.test.ts): they push
+    // nothing and sign nothing, and a signature from any workflow but SIGNING_WORKFLOW fails the deploy check.
     expect(holding('id-token').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,
       `${SIGNING_WORKFLOW}: image-publish`,
       `${SIGNING_WORKFLOW}: release`,
+      '.github/workflows/job-starts.yml: watch',
       `${LOAD_SIGNER.workflow}: load-image-attest`,
       `${LOAD_SIGNER.workflow}: load-image-publish`,
     ]);
