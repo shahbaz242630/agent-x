@@ -592,7 +592,7 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -809,7 +809,7 @@ resource anchorStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     criteria: {
       allOf: [
         {
-          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(30m) | where tostring(parse_json(Log).event) == "audit.anchor_check_done"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota") | summarize Done = count()'
+          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(30m) | where tostring(parse_json(Log).event) == "audit.anchor_check_done"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(30m)) | summarize Done = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Done'
           operator: 'LessThan'
@@ -850,7 +850,7 @@ resource jobsStoppedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     criteria: {
       allOf: [
         {
-          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(15m) | where tostring(parse_json(Log).event) == "jobs.pulse"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota") | summarize Pulses = count()'
+          query: 'union (ContainerAppConsoleLogs | where TimeGenerated > ago(15m) | where tostring(parse_json(Log).event) == "jobs.pulse"), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(15m)) | summarize Pulses = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Pulses'
           operator: 'LessThan'

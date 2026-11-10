@@ -334,7 +334,7 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
  * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on")';
 
 /**
  * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass
@@ -2805,15 +2805,16 @@ const DEAD_MEN = [
 
 /**
  * The workspace's own word that its daily cap has stopped collection, the newest of the day: one row while it is
- * over, so a line missing then counts as seen (S183). Nothing arrives over the cap, so silence then says nothing of
+ * over, and for one window after its newest word (the reset's), as nothing from the stretch over arrived and new lines
+ * come 4 to 9 minutes late: so a line missing then counts as seen (S183). Nothing arrives over the cap, so silence then says nothing of
  * the jobs; the cap's own alert says monitoring is blind. The day's word needs the day: `overrideQueryTimeRange`.
  */
-const OVER_CAP =
-  '(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota")';
+const overCap = (minutes: number): string =>
+  `(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(${String(minutes)}m))`;
 
 /** The one query a dead man may run: its line within its own window, or the cap's word. */
 const deadManQuery = ({ event, minutes, column }: (typeof DEAD_MEN)[number]): string =>
-  `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${OVER_CAP} | summarize ${column} = count()`;
+  `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${overCap(minutes)} | summarize ${column} = count()`;
 
 /** Whether the alert counts one of those lines, however else it is set. */
 const isDeadMan = (alert: PredictedResource): boolean =>

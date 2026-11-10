@@ -3587,7 +3587,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_write_failed" | summarize Events = count()',
       ),
       query(
-        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size") | summarize Events = count()',
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()',
       ),
       query(
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()',
@@ -3694,9 +3694,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [JOBS_STOPPED_ALERT, 'jobs.pulse', 'Pulses', 2, 15],
     ] as const;
     /** The workspace's own word that its cap stopped collection (S183): silence then is no sign. */
-    const OVER_CAP =
-      '(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota")';
-    const deadMan = (event: string, column: string, minutes: number, cap = OVER_CAP) =>
+    const overCap = (minutes: number) =>
+      `(_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(${String(minutes)}m))`;
+    const deadMan = (event: string, column: string, minutes: number, cap = overCap(minutes)) =>
       `union (ContainerAppConsoleLogs | where TimeGenerated > ago(${String(minutes)}m) | where tostring(parse_json(Log).event) == "${event}"), ${cap} | summarize ${column} = count()`;
 
     it.each(RULES)(
@@ -3746,8 +3746,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
               event,
               column,
               minutes,
-              OVER_CAP.replace(' | summarize arg_max(TimeGenerated, Detail)', ''),
+              overCap(minutes).replace(' | summarize arg_max(TimeGenerated, Detail)', ''),
             )),
+          // Quiet a day after the cap's word, not one window: a stop after the reset would go unseen.
+          (alert: Mutable) => (criterion(alert).query = deadMan(event, column, minutes, overCap(24 * 60))),
           (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
         ]) {
           expect(brokenRules(changed(rule, change))).toContain('dead-man-alerts');
