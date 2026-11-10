@@ -8,6 +8,7 @@ import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import { type Anchor, type Progress, signAnchor, signPass, signProgress } from './anchor.ts';
 import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import { type Chain, chainName } from './chain.ts';
+import { cutoverFile } from './cutover.ts';
 import { type Rebase, rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
 
 const keyMaterial = (fill: number): KeyMaterial =>
@@ -370,90 +371,183 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
     });
 
-    describe('a store moved on to a later layout (PL-65): this version reads none of it, as a rollback must not', () => {
-      /** A store this version could read whole, a chain anchored at 5, with `extra` beside it. */
-      const readable = (...extra: readonly string[]): FakeWriteOnceStore => {
+    describe('a store moved on to a later layout (PL-65): only a signed cutover marker stops this version reading', () => {
+      /** A store this version could read whole, a chain anchored at 5. */
+      const readable = (): FakeWriteOnceStore => {
         const fake = createFakeWriteOnceStore();
         fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 5n)));
-        for (const name of extra) fake.files.set(name, gzipSync('anything'));
         return fake;
       };
+      const marker = (signing = keys, id = 1, more: { epoch?: number; layout?: string } = {}) =>
+        cutoverFile(signing, {
+          epoch: more.epoch ?? 1,
+          at: new Date(START.getTime() + id * MINUTE),
+          id: `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`,
+          ...(more.layout === undefined ? {} : { layout: more.layout }),
+        });
+      const put = (fake: FakeWriteOnceStore, file: { name: string; bytes: Buffer }): void => {
+        fake.files.set(file.name, file.bytes);
+      };
       const movedOn = (lines: (event: string) => Record<string, unknown>[]) => lines('audit.anchor_store_moved_on');
+      const cutoverAlarms = (lines: (event: string) => Record<string, unknown>[]) =>
+        lines('audit.integrity_failed').filter((line) => line.reason === 'cutover');
+
+      it('a signed marker for this epoch fails the read closed, with its own alarm, and nothing of the old files is taken', async () => {
+        const fake = readable();
+        const signed = marker();
+        put(fake, signed);
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('unreadable');
+        expect(log.latest(CHAIN)).toBeUndefined();
+        expect(log.organisations()).toEqual([]);
+        expect(movedOn(lines)).toEqual([expect.objectContaining({ level: 'error', epoch: 1, file: signed.name })]);
+        expect(lines('audit.anchor_store_unreadable')).toEqual([]);
+        expect(lines('audit.anchors_read')).toEqual([]);
+        // The marker alone opened.
+        expect(fake.calls).toMatchObject({ gets: 1 });
+      });
 
       it.each([
-        ['shards', 'e1/shards/a7/snapshots/9999-x'],
-        ['cutover', 'e1/cutover/marker'],
-      ])(
-        'a file under `%s/` fails the read closed, with its own alarm, and nothing of the old files is taken',
-        async (folder, name) => {
-          const fake = readable(name);
-          const { log, lines } = logOver(fake);
-          await log.read();
-
-          expect(log.state()).toBe('unreadable');
-          expect(log.latest(CHAIN)).toBeUndefined();
-          expect(log.organisations()).toEqual([]);
-          expect(movedOn(lines)).toEqual([expect.objectContaining({ level: 'error', epoch: 1, folder })]);
-          expect(lines('audit.anchor_store_unreadable')).toEqual([]);
-          expect(lines('audit.anchors_read')).toEqual([]);
-          // One name asked of each folder up to the one found, and no file opened.
-          expect(fake.calls).toMatchObject({ gets: 0 });
-        },
-      );
-
-      it('the same store without them reads as ever: only another epoch, or a name only starting alike, has them', async () => {
-        const fake = readable('e2/shards/a7/x', 'e2/cutover/marker', 'e1/shards-elsewhere', 'e1/cutovers/x');
+        ['unsigned', 'file', () => ({ name: 'e1/cutover/x', bytes: gzipSync('anything') })],
+        ['signed by another key', 'signature', () => marker(otherKeys)],
+        ['signed by a key version this process lacks', 'signature', () => marker(LATER_KEYS)],
+        ['of another layout', 'layout', () => marker(keys, 1, { layout: 'shards-v0' })],
+        [
+          'of another epoch, copied here',
+          'file',
+          () => ({ name: marker().name, bytes: marker(keys, 1, { epoch: 2 }).bytes }),
+        ],
+      ])('a marker %s is the alarm and moves nothing: the read goes on', async (_, problem, made) => {
+        const fake = readable();
+        const file = made();
+        put(fake, file);
         const { log, lines } = logOver(fake);
         await log.read();
 
         expect(log.state()).toBe('read');
         expect(log.latest(CHAIN)?.seq).toBe(5n);
         expect(movedOn(lines)).toEqual([]);
+        expect(cutoverAlarms(lines)).toEqual([
+          expect.objectContaining({ level: 'error', check: 'anchor_store', problem, file: file.name }),
+        ]);
       });
 
-      it('a name the store would never write, or a page that goes on with none, counts all the same', async () => {
+      it('a marker of another epoch in its own folder is not this one: nothing said', async () => {
+        const fake = readable();
+        put(fake, marker(keys, 1, { epoch: 2 }));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(lines('audit.integrity_failed')).toEqual([]);
+      });
+
+      it('a name under `shards/` with no marker is the alarm, once a process, and the read goes on', async () => {
+        const fake = readable();
+        fake.files.set('e1/shards/a7/snapshots/x', gzipSync('anything'));
+        const { log, lines } = logOver(fake);
+        await log.read();
+        await log.read();
+
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(5n);
+        expect(movedOn(lines)).toEqual([]);
+        expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'shards' })]);
+      });
+
+      it('a page under `shards/` with only names it would never write, or only more to come, is the alarm too', async () => {
         for (const answer of [
           { names: [], foreign: 1, next: undefined },
           { names: [], foreign: 0, next: 'more' },
         ]) {
           const fake = readable();
           fake.instead.list = (start, most, after) =>
-            start === 'e1/cutover/' ? Promise.resolve(answer) : fake.real.list(start, most, after);
+            start === 'e1/shards/' ? Promise.resolve(answer) : fake.real.list(start, most, after);
           const { log, lines } = logOver(fake);
           await log.read();
 
-          expect(log.state()).toBe('unreadable');
-          expect(movedOn(lines)).toEqual([expect.objectContaining({ folder: 'cutover' })]);
+          expect(log.state()).toBe('read');
+          expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'shards' })]);
         }
       });
 
-      it('asks one name of each folder, every read', async () => {
+      it('a file judged no marker is the alarm once, and not opened again', async () => {
         const fake = readable();
-        const asked: [string, number][] = [];
-        fake.instead.list = (start, most, after) => {
-          asked.push([start, most]);
-          return fake.real.list(start, most, after);
-        };
-        const { log } = logOver(fake);
+        put(fake, marker(otherKeys));
+        const { log, lines } = logOver(fake);
         await log.read();
+        const gets = fake.calls.gets;
         await log.read();
 
-        const later = asked.filter(([start]) => /^e1\/(?:shards|cutover)\//.test(start));
-        expect(later).toEqual([
-          ['e1/shards/', 1],
-          ['e1/cutover/', 1],
-          ['e1/shards/', 1],
-          ['e1/cutover/', 1],
-        ]);
+        expect(fake.calls.gets).toBe(gets);
+        expect(cutoverAlarms(lines)).toHaveLength(1);
       });
 
-      it('a process already reading stops anchoring when it appears, and stays so at every read after', async () => {
+      it('a signed marker behind files that are none still counts', async () => {
+        const fake = readable();
+        // Named later, so listed first.
+        for (let id = 2; id <= 4; id += 1) put(fake, marker(otherKeys, id));
+        put(fake, marker(keys, 1));
+        const { log, lines } = logOver(fake);
+        await log.read();
+
+        expect(log.state()).toBe('unreadable');
+        expect(movedOn(lines)).toHaveLength(1);
+        expect(cutoverAlarms(lines)).toHaveLength(3);
+      });
+
+      it('more files than a read opens fail the read, as a call failed; the next reads judge the rest', async () => {
+        const fake = readable();
+        for (let id = 1; id <= 12; id += 1) put(fake, marker(otherKeys, id));
+        const { log, lines } = logOver(fake);
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
+        expect(cutoverAlarms(lines)).toHaveLength(10);
+
+        await log.read();
+        expect(log.state()).toBe('read');
+        expect(cutoverAlarms(lines)).toHaveLength(12);
+        expect(movedOn(lines)).toEqual([]);
+      });
+
+      it('goes on to the next page of the folder', async () => {
+        const fake = readable();
+        for (let id = 1; id <= 100; id += 1) {
+          fake.files.set(`e1/cutover/0-${String(id).padStart(3, '0')}`, gzipSync(''));
+        }
+        put(fake, marker());
+        const asked: (string | undefined)[] = [];
+        fake.instead.list = (start, most, after) => {
+          if (start === 'e1/cutover/') asked.push(after);
+          return fake.real.list(start, most, after);
+        };
+        const { log, lines } = logOver(fake);
+        // Judged over ten reads, ten a read; the marker sorts last, on the second page.
+        for (let read = 0; read < 11; read += 1) await log.read();
+        expect(movedOn(lines)).toHaveLength(1);
+        expect(asked.at(-1)).toBe('e1/cutover/0-100');
+      });
+
+      it('a list of the folder that fails is a failed read', async () => {
+        const fake = readable();
+        fake.instead.list = (start, most, after) =>
+          start === 'e1/cutover/' ? failing() : fake.real.list(start, most, after);
+        const { log, lines } = logOver(fake);
+        await log.read();
+        expect(log.state()).toBe('unreadable');
+        expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
+      });
+
+      it('a process already reading stops anchoring when a marker appears, and stays so at every read after', async () => {
         const fake = readable();
         const { log, lines } = logOver(fake);
         await log.read();
         expect(log.state()).toBe('read');
 
-        fake.files.set('e1/cutover/marker', gzipSync('anything'));
+        put(fake, marker());
         await log.read();
         expect(log.state()).toBe('unreadable');
         await log.read();

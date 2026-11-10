@@ -55,9 +55,11 @@
 // once a process; one dated past the clock waits, the alarm each read until its time.
 //
 // So the API identity's token alone (add and read) can raise alarms and, with enough
-// spoiled files before a restart, make payments wait, but can't move an anchor back.
-// Whoever also holds the `audit-anchor` signing key can write anything a file may
-// hold: nothing here guards against them; nor against whoever holds `audit-rebase`.
+// spoiled files before a restart, make payments wait, but can't move an anchor back;
+// nor stop payments by a file under `cutover/` or `shards/`, as only a signed cutover
+// marker says the store has moved on (PL-65). Whoever also holds the `audit-anchor`
+// signing key can write anything a file may hold, a marker too, which makes payments
+// wait for good: nothing here guards against them; nor against whoever holds `audit-rebase`.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -78,6 +80,7 @@ import {
   progressMessage,
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
+import { cutoverFolder, readCutoverFile } from './cutover.ts';
 import { isCount, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
@@ -118,10 +121,13 @@ const MOST_AHEAD_MS = 5 * 60_000;
  * (anchor-check.ts), which take every organisation in the store. The heap's high point, garbage and what a restart's read
  * stages with it, was 1.15 to 1.5 times what is held. 450k organisations (487 MB held, 558 MB at the high point) read and
  * wrote in that heap alone; 600k ran out of it and ended the process. So at a third, about 320 MB held at the edge (about
- * 280k organisations), under ~480 MB at the high point, leaving ~480 MB for the rest of the API, the check's notes on its
- * first 100k organisations (~88 MB) among them: the refusal comes, clean and alarmed (`audit.anchor_store_beyond_memory`),
- * well before the heap could run out. A fifth at 340 bytes a line, before, came to much the same edge only because it
- * counted each organisation at under two thirds of its cost and left out the check's maps.
+ * 280k organisations), under ~480 MB at the high point. The margin is less than the 480 MB left of the heap's limit: the
+ * container has 1 GiB, and outside the heap sit Node's own memory (~50-80 MB) and the buffers of files fetched and of the
+ * snapshot made (gzipped, ~85 MB at the edge). With the rest of the API's heap (assumed ~150 MB, not measured here) and
+ * the check's notes on its first 100k organisations (~88 MB), that is ~850-900 MB at the edge's worst moment, under the
+ * container's 1 GiB, ~720 MB of it heap: the refusal comes, clean and alarmed (`audit.anchor_store_beyond_memory`), before the process could
+ * run out. A fifth at 340 bytes a line, before, came to much the same edge only because it counted each organisation at
+ * under two thirds of its cost and left out the check's maps.
  */
 const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 3);
 
@@ -164,11 +170,14 @@ const REBASE_MOST_AHEAD_MS = 20_000;
 const REBASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * Folders under an epoch that only a later layout of the store writes: the sharded store's shards and its signed cutover
- * marker (4D2e PL-65). This reader can't read them, so any file there means the store has moved on past it: a rollback to
- * this version would read only the old files, older than what the shards hold, and could anchor afresh a chain wound back.
+ * The sharded store (4D2e PL-65) writes its signed cutover marker (cutover.ts) before any shard: this reader can't read
+ * the shards, so a marker means the store has moved on past it, and a rollback to this version, reading only the old files,
+ * could anchor afresh a chain wound back. Only a signed marker counts, as anyone with the add token can add a file; a name
+ * under `shards/` with no marker is the alarm alone. How many marker files a read opens: an honest store has one, and past
+ * this the read fails, as one with a call failed, until the rest are judged over the next reads.
  */
-const LATER_LAYOUT = ['shards', 'cutover'] as const;
+const MOST_CUTOVER_GETS = 10;
+const CUTOVER_A_PAGE = 100;
 
 /** A line's kind: an anchor, or a finished full pass. */
 type LineKind = 'a' | 'p' | 'u';
@@ -192,13 +201,13 @@ class BeyondMemory extends Error {
   }
 }
 
-/** The store holds a later layout's files: this version must not read it. */
+/** The store holds a signed cutover marker for this epoch: this version must not read it. */
 class MovedOn extends Error {
-  readonly folder: string;
+  readonly file: string;
 
-  constructor(folder: string) {
+  constructor(file: string) {
     super('the anchor store has moved on to a later layout');
-    this.folder = folder;
+    this.file = file;
   }
 }
 
@@ -453,6 +462,9 @@ export function createAnchorLog({
   // Each chain's newest rebase, the rebase files read already, and the anchors that are a rebase's, not signed here.
   const rebases = new Map<string, Rebase>();
   const rebaseFilesRead = new Set<string>();
+  // Names under `cutover/` judged no marker, and whether a name under `shards/` has been said: each the alarm once.
+  const notMarkers = new Set<string>();
+  let shardsSaid = false;
   const fromRebase = new WeakSet<Anchor>();
   /** Whether the chain's newest rebase is later than `at`: whatever was dated then is passed over. */
   const rebasedAfter = (chain: string, at: Date): boolean => {
@@ -737,21 +749,39 @@ export function createAnchorLog({
   };
 
   /**
-   * Thrown if a later layout has written anything under this epoch: one name asked of each of its folders, at every read,
-   * as a rollback may come at any time. Any answer but an empty last page counts, a name this store would never write or a
-   * page that goes on alike: a reader that can't tell must not read.
+   * Thrown if the store holds a signed cutover marker for this epoch: every name under `cutover/` is judged, at every read,
+   * as a rollback may come at any time. One that is no marker is the alarm, once a process, and is not opened again; a
+   * name under `shards/` is the alarm too, once. Neither moves anything: the read goes on with today's files.
    */
-  const refuseLaterLayout = async (): Promise<void> => {
-    for (const later of LATER_LAYOUT) {
-      const page = await store.list(`e${String(epoch)}/${later}/`, 1);
-      if (page.names.length > 0 || page.foreign > 0 || page.next !== undefined) throw new MovedOn(later);
+  const refuseMovedOn = async (foreign: { count: number }): Promise<void> => {
+    const start = cutoverFolder(epoch);
+    let after: string | undefined;
+    let gets = 0;
+    do {
+      const page = await store.list(start, CUTOVER_A_PAGE, after);
+      foreign.count += page.foreign;
+      for (const name of page.names.filter((listed) => !notMarkers.has(listed))) {
+        gets += 1;
+        if (gets > MOST_CUTOVER_GETS) throw new Error('more files to judge under cutover/ than a read opens');
+        const read = await readCutoverFile(keys, { bytes: await store.get(name), name, epoch });
+        if ('marker' in read) throw new MovedOn(name);
+        notMarkers.add(name);
+        alarm('cutover', { problem: read.problem, file: name });
+      }
+      after = page.next;
+    } while (after !== undefined);
+    if (shardsSaid) return;
+    const shards = await store.list(`e${String(epoch)}/shards/`, 1);
+    if (shards.names.length > 0 || shards.foreign > 0 || shards.next !== undefined) {
+      shardsSaid = true;
+      alarm('shards', {});
     }
   };
 
   const catchUp = async (): Promise<void> => {
     try {
-      await refuseLaterLayout();
       const foreign = { count: 0 };
+      await refuseMovedOn(foreign);
       const stage = new Map<string, Anchor>();
       // First, so every line read after is judged against them.
       await readRebases(foreign);
@@ -776,7 +806,7 @@ export function createAnchorLog({
       if (error instanceof MovedOn) {
         // Unreadable even after a whole read: what this process holds may be older than the later layout's anchors, so
         // it anchors nothing more, and after a start payments wait. Files are never taken away, so it stays so.
-        logger.error('audit.anchor_store_moved_on', { epoch, folder: error.folder });
+        logger.error('audit.anchor_store_moved_on', { epoch, file: error.file });
         state = 'unreadable';
         return;
       }

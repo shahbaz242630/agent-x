@@ -250,9 +250,9 @@ export const PLAIN_WORDS = {
     next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
   },
   'audit.anchor_store_moved_on': {
-    happened: 'An older version of the app found the audit anchors kept in a newer layout it cannot read.',
-    broke: 'Payments wait for every organisation. Nothing has been tampered with.',
-    next: 'Release the newer version again. Never delete its files to let this one read: playbook section H.',
+    happened: 'The app found a signed mark that the audit anchors moved to a newer layout this version cannot read.',
+    broke: 'Payments wait for every organisation. Agent decisions go on.',
+    next: 'If a newer version was rolled back, release it again. If none ever ran, treat it as a breach: playbook section H.',
   },
   'audit.anchor_store_not_set': {
     happened: 'This API was started with no store named for the audit anchors.',
