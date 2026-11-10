@@ -28,10 +28,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+      # The action's own image, pinned by digest (ossf/scorecard-action v2.5.0's
+      # action.yaml names it by tag only); with: is passed as its INPUT_* settings.
+      - uses: docker://ghcr.io/ossf/scorecard-action:v2.5.0@sha256:1e1481c65fc2407d3fd6ab18a23c741eb4d1c0d9359ebafc4b3ab13aa61d8627
         with:
           results_file: scorecard.sarif
           results_format: sarif
+          repo_token: ${{ github.token }}
+          internal_default_token: ${{ github.token }}
+          file_mode: archive
           # Kept to the repository: nothing is sent to the OpenSSF.
           publish_results: false
 
