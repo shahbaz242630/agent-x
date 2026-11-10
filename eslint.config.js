@@ -239,6 +239,9 @@ const stateRepairSteps = [
   'writeStateRow',
 ];
 
+const stateRepairOnly =
+  "PL-29: the state repair's steps write authority rows past the signed states and switch the guards off: the operator's repair alone (apps/operator) uses them.";
+
 /** The property bans of all product code. Flat config replaces a rule's options per block, so blocks that add to it repeat these. */
 const productProperties = [mathRandom, { object: 'process', property: 'env', message: configOnly }, ...outputStreams];
 
@@ -385,12 +388,19 @@ export default defineConfig([
 
   // PL-29 follow-up (S183): the state repair's steps write authority rows past
   // the signed states and switch the database's guards off. They are exported
-  // by the audit module for the operator's repair alone (apps/operator); the
-  // audit module itself reaches them by path. Flat config replaces a rule's
-  // options per block, so the product's own bans are repeated.
+  // by the audit module for the operator's repair alone (apps/operator), whether
+  // a module names the audit module by its package or, inside core, by a path
+  // to it (`../../audit/index.ts`). The audit module itself holds them. Flat
+  // config replaces a rule's options per block, so the product's own bans are
+  // repeated.
   {
     files: ['packages/**/*.{ts,tsx}', 'apps/**/*.{ts,tsx}'],
-    ignores: ['apps/operator/**', 'packages/platform/src/config/**', '**/*.test.{ts,tsx}'],
+    ignores: [
+      'apps/operator/**',
+      'packages/core/src/modules/audit/**',
+      'packages/platform/src/config/**',
+      '**/*.test.{ts,tsx}',
+    ],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -400,8 +410,19 @@ export default defineConfig([
             {
               name: '@agentx/core/modules/audit',
               importNames: stateRepairSteps,
-              message:
-                "PL-29: the state repair's steps write authority rows past the signed states and switch the guards off: the operator's repair alone (apps/operator) uses them.",
+              message: stateRepairOnly,
+            },
+          ],
+          patterns: [
+            {
+              group: [
+                '**/modules/audit',
+                '**/audit/index',
+                '**/audit/index.ts',
+                '**/audit/infrastructure/state-repair*',
+              ],
+              importNames: stateRepairSteps,
+              message: stateRepairOnly,
             },
           ],
         },

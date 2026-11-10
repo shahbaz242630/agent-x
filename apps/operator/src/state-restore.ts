@@ -149,6 +149,9 @@ export async function restoreStates(sides: StateRestoreSides): Promise<StateRest
     );
   } catch (error) {
     if (error instanceof Stopped) return error.outcome;
+    // A lock not had within the short wait anywhere else in the transaction (a row another session holds in a table
+    // it checks, a foreign key's check on a table it doesn't hold): the same refusal, never a raw failure.
+    if (lockNotAvailable(error)) return { ok: false, reason: 'busy' };
     throw error;
   }
 }

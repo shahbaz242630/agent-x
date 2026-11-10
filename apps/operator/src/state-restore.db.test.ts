@@ -692,6 +692,47 @@ describe('PL-29 follow-up: the plan’s and repair’s records', () => {
     await watcher.end();
   });
 
+  it('refuses as busy a row another session holds for update in a table it writes, though the plan leaves it alone', async () => {
+    // A second invitation, signed as the first: the plan touches only the first.
+    const second = uuidV7Ids.next();
+    await inviteFirstAdminAsOperator(on(live, 'operator'), services(), {
+      orgId,
+      invitationId: second,
+      email: 'second.admin@example.com',
+      tokenHash: Buffer.alloc(32, 8),
+      release: 'r-1',
+      run: null,
+    });
+    await copied();
+    await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
+    const plan = await planned();
+    expect(plan).toMatchObject({ ok: true, rows: [{ id: invitationId }] });
+    // The untouched row locked for update: the repair's check of the table it wrote waits for it past its second.
+    const other: TestClient = await live.connect('owner');
+    try {
+      await other.query("select pg_catalog.set_config('app.org_id', $1, false)", [orgId]);
+      await other.query('begin');
+      await other.query('select 1 from identity.invitations where org_id = $1 and id = $2 for update', [orgId, second]);
+      const started = Date.now();
+      const outcome = await restore(statePlanDigest(plan, orgId, undefined));
+      expect(outcome).toEqual({ ok: false, reason: 'busy' });
+      expect(Date.now() - started).toBeLessThan(5000);
+      // What its outcome record holds: the refusal in plain facts.
+      const facts = { restoreId: 'r', planId: 'p', orgId, digest: 'd', release: 'r-1', run: null };
+      expect(JSON.parse(stateRestoreFile(outcome, facts).toString('utf8'))).toMatchObject({
+        k: 'state_restore',
+        ok: false,
+        reason: 'busy',
+        subjectType: null,
+      });
+    } finally {
+      await other.query('rollback');
+      await other.end();
+    }
+    expect(await triggersOn(INVITATIONS.table)).toMatchObject({ status_guard: 'O' });
+    expect(JSON.parse(String(await rowOf(INVITATIONS.table, invitationId)))).toMatchObject({ expires_at: LATER_JSON });
+  });
+
   it('refuses as busy, within a few seconds, a table another organisation is writing', async () => {
     await copied();
     await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);

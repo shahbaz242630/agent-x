@@ -63,9 +63,9 @@ export function withRepairStates<Result>(
 /**
  * From here to the end of the transaction, a lock is waited for a second at
  * most: the repair's tables' locks hold every organisation's writes to them,
- * so a table some other write holds refuses the repair (busy) rather than
- * queueing everyone behind it. Nothing after needs longer: every row it then
- * locks is in a table it already holds.
+ * so any lock other work holds (a table it writes, a row locked for update or
+ * share in one, a foreign key's check on a table it doesn't hold) refuses the
+ * repair as busy, to be run again, rather than queueing everyone behind it.
  */
 export async function shortLockWait(tx: Transaction<AuditTables>): Promise<void> {
   await sql`set local lock_timeout = '1s'`.execute(tx);
