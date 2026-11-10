@@ -17,6 +17,7 @@ import { z } from 'zod';
 import './route-server.helper.test.ts';
 import { type FindMembership, type Member, ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -28,17 +29,7 @@ const APP_COOKIE = 'A'.repeat(43);
 const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-000000000033';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-09-24T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
-  endsAt: new Date('2026-09-24T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-24T09:00:00.000Z');
 
 const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in these tests')),

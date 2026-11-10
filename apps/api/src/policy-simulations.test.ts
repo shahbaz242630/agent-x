@@ -5,12 +5,13 @@
 // use it (decision 9: never a viewer), the edge's refusals and the use
 // case's. What the use case weighs, and that it writes nothing, is
 // spend-request-decisions.db.test.ts ("the simulator").
-import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
+import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import { money, REASON_CODES } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { PolicySimulations, Simulated, WhatIf } from './policy-simulations.ts';
 import type { Refused } from './refused.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
@@ -25,17 +26,7 @@ const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 const MEMBER = '0199a0f0-0000-7000-8000-000000000033';
 const URL = `/v1/mandates/${MANDATE_ID}/policy/simulate`;
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-09T09:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-09T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-09T09:10:00.000Z'),
-  endsAt: new Date('2099-10-07T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-09T09:00:00.000Z', { endless: true });
 
 const AED = (minor: bigint) => money(minor, 'AED');
 
