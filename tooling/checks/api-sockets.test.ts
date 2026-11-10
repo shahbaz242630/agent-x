@@ -95,7 +95,7 @@ async function listening() {
   });
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
-  const port = app.addresses()[0]?.port ?? 0;
+  const port = app.addresses().find((address) => typeof address !== 'string')?.port ?? 0;
   return {
     app,
     port,
