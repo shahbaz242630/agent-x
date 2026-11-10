@@ -126,6 +126,14 @@ describe('back from a step-up', () => {
     expect(confirms).toBe(0);
   });
 
+  it('says nothing for a stepUpFailed that names no challenge (a made-up link)', async () => {
+    const history = createMemoryHistory({ initialEntries: ['/more?stepUpFailed=anything'] });
+    render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+
+    expect(await screen.findByRole('heading', { level: 1 })).toBeDefined();
+    expect(screen.queryByText(/Signing in again didn't go through/)).toBeNull();
+  });
+
   it('says a change with nothing kept for it was not made', async () => {
     const history = backFromStepUp(false);
 

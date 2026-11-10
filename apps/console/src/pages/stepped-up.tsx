@@ -9,7 +9,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
 
-import { isRefusal } from '../api.ts';
+import { isRefusal, isUuid } from '../api.ts';
 import { confirm, forget, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
@@ -21,7 +21,9 @@ export function SteppedUp() {
   const query = useRouterState({ select: ({ location }) => location.searchStr });
   const params = new URLSearchParams(query);
   const challenge = params.get(STEPPED) ?? undefined;
-  const failedFor = params.get(STEP_UP_FAILED) ?? undefined;
+  // Only a challenge's ID, as the API sends: a link made up with anything else says nothing.
+  const failed = params.get(STEP_UP_FAILED);
+  const failedFor = failed !== null && isUuid(failed) ? failed : undefined;
   const pending = useMemo(() => (challenge === undefined ? undefined : pendingFor(challenge)), [challenge]);
   const [sent, setSent] = useState<Sent>('ready');
   const queries = useQueryClient();
