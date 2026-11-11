@@ -1131,6 +1131,8 @@ export function createAnchorCheck({
             if (signal.aborted) throw new Stopped('the run has ended');
             return tracked(ROTATION, 'the last read of the rotation has not finished', work, signal);
           },
+          // Its shards pinned for each step, where the log lets them go (PL-65 PR3).
+          ...(durable === undefined ? {} : { shards: durable }),
           failed: (orgId, check, { reason, seq }) => rotationFailed(from, orgId, check, reason, seq),
           missed: async (orgId, check, error) => {
             // A database that refuses the read is the alarm, as for any check; anything else a warning, and next run.

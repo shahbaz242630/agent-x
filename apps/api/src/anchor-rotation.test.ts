@@ -7,8 +7,10 @@ import {
   type CheckedPoint,
   createMemoryAnchorStore,
   type AnchorStore,
+  type Chain,
   createMemoryPassRecord,
   type PassRecord,
+  type Progress,
   signAnchor,
   signPass,
   signProgress,
@@ -110,13 +112,84 @@ interface Rotating {
   readonly lastRanAt?: Date;
   /** Another process's memory of the store, to start after it as a restart would. */
   readonly after?: { readonly anchors: AnchorStore; readonly passes: PassRecord };
+  /** A log that lets shards go (PL-65 PR3), as `lettingGo` makes one. */
+  readonly shards?: ReturnType<typeof lettingGo>;
+}
+
+/**
+ * Anchors and passes as a log that lets shards go holds them (PL-65 PR3), each organisation a shard of its own: one let
+ * go says and keeps nothing until pinned, which reads it again; a pinned one is never let go. `sticky`: let go again at
+ * each release, as a log always past its budget would.
+ */
+function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
+  const anchors = createMemoryAnchorStore();
+  const passes = createMemoryPassRecord();
+  const away = new Set<string>();
+  const unreadable = new Set<string>();
+  const pins = new Map<string, number>();
+  const refused: string[] = [];
+  const ofName = (name: string): string => name.slice('organisation:'.length);
+  const idOf = (chain: Chain): string => (chain.kind === 'organisation' ? chain.orgId : 'platform');
+  const here = (chain: Chain): boolean => !away.has(idOf(chain));
+  const letGo = (orgId: string): boolean => {
+    if ((pins.get(orgId) ?? 0) > 0) return false;
+    away.add(orgId);
+    return true;
+  };
+  const kept =
+    <T extends Anchor>(keep: (line: T) => void) =>
+    (line: T): void => {
+      if (away.has(ofName(line.chain))) refused.push(line.chain);
+      else keep(line);
+    };
+  return {
+    away,
+    unreadable,
+    refused,
+    letGo,
+    /** What the log holds, let go or not. */
+    inner: { anchors, passes },
+    anchors: {
+      latest: (chain: Chain) => (here(chain) ? anchors.latest(chain) : undefined),
+      keep: kept((anchor: Anchor) => {
+        anchors.keep(anchor);
+      }),
+    } satisfies AnchorStore,
+    passes: {
+      lastPass: (chain: Chain) => (here(chain) ? passes.lastPass(chain) : undefined),
+      keepPass: kept((line: Anchor) => {
+        passes.keepPass(line);
+      }),
+      lastProgress: (chain: Chain) => (here(chain) ? passes.lastProgress(chain) : undefined),
+      keepProgress: kept((line: Progress) => {
+        passes.keepProgress(line);
+      }),
+      rebasedAfter: () => false,
+    } satisfies PassRecord,
+    shards: {
+      holds: here,
+      pin: (chain: Chain): Promise<(() => void) | undefined> => {
+        const orgId = idOf(chain);
+        if (unreadable.has(orgId)) return Promise.resolve(undefined);
+        away.delete(orgId);
+        pins.set(orgId, (pins.get(orgId) ?? 0) + 1);
+        let open = true;
+        return Promise.resolve(() => {
+          if (!open) return;
+          open = false;
+          pins.set(orgId, (pins.get(orgId) ?? 1) - 1);
+          if (sticky) letGo(orgId);
+        });
+      },
+    },
+  };
 }
 
 function rotating(more: Rotating = {}) {
   const capture = new LogCapture();
   const clock = new FixedClock(more.started ?? AT);
-  const anchors = more.after?.anchors ?? createMemoryAnchorStore();
-  const passes = more.after?.passes ?? createMemoryPassRecord();
+  const anchors = more.shards?.anchors ?? more.after?.anchors ?? createMemoryAnchorStore();
+  const passes = more.shards?.passes ?? more.after?.passes ?? createMemoryPassRecord();
   const { checks, calls, answer } = fakeChecks();
   const failed: [string, RotationCheck, ChainProblem][] = [];
   const missed: [string, RotationCheck, unknown][] = [];
@@ -141,10 +214,11 @@ function rotating(more: Rotating = {}) {
       missed.push([orgId, check, error]);
       return Promise.resolve();
     },
+    ...(more.shards === undefined ? {} : { shards: more.shards.shards }),
   });
   const anchor = (orgId: string, seq: bigint, at = clock.now()): Anchor => {
     const signed = signAnchor(keys, chainOf(orgId), point(seq), at);
-    anchors.keep(signed);
+    (more.shards?.inner.anchors ?? anchors).keep(signed);
     return signed;
   };
   const run = (listed: readonly string[], signal = new AbortController().signal, stopping?: AbortSignal) =>
@@ -1150,5 +1224,123 @@ describe('a pass across restarts: its place kept in the store (4D2e E7 review)',
     await after.run([orgId]);
     expect(after.missed).toEqual([[orgId, 'pass', away]]);
     expect(after.calls).toEqual([{ check: 'walk', orgId, to: 2n, most: 1 }]);
+  });
+});
+
+describe('over a log that lets shards go (PL-65 PR3): each step pins its chain’s shard', () => {
+  it('the day of an organisation whose shard is let go: walked against its anchor, read again, and a tamper caught', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards });
+    const orgId = orgInSlot(109);
+    made.anchor(orgId, 5000n);
+    shards.letGo(orgId);
+    made.answer.walk = () => Promise.resolve({ ok: false, problem: { reason: 'hash', seq: 4990n } });
+    made.clock.advanceBy(SLOT_MS);
+    await made.run([orgId]);
+    expect(onlyDays(made.calls)).toEqual([
+      { check: 'count', orgId, after: 0n, upTo: 5000n },
+      { check: 'walk', orgId, to: 5000n, most: 1000 },
+    ]);
+    expect(made.failed).toEqual([[orgId, 'walk', { reason: 'hash', seq: 4990n }]]);
+  });
+
+  it('a day whose shard can’t be read again: kept, never dropped, and taken once it can be', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards });
+    const orgId = orgInSlot(109);
+    made.anchor(orgId, 5000n);
+    shards.letGo(orgId);
+    shards.unreadable.add(orgId);
+    made.clock.advanceBy(SLOT_MS);
+    await made.run([orgId]);
+    expect(onlyDays(made.calls)).toEqual([]);
+    expect(made.lines('audit.anchor_rotation_done').at(-1)).toMatchObject({ due: 1, left: 1 });
+    shards.unreadable.delete(orgId);
+    made.clock.advanceBy(SLOT_MS);
+    await made.run([orgId]);
+    expect(onlyDays(made.calls).map(({ check }) => check)).toEqual(['count', 'walk']);
+    expect(made.lines('audit.anchor_rotation_done').at(-1)).toMatchObject({ left: 0 });
+  });
+
+  it('the full pass of a chain whose shard is let go: passed to its anchor, its pass kept, a tamper caught', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards, epoch: 1 });
+    const [passing, tampered] = [orgInSlot(1), orgInSlot(2)];
+    made.anchor(passing, 10n);
+    made.anchor(tampered, 10n);
+    shards.letGo(passing);
+    shards.letGo(tampered);
+    made.answer.pass = (orgId, cursor, target) => {
+      // Asked to go while it is read: pinned, it stays.
+      expect(shards.letGo(orgId)).toBe(false);
+      return Promise.resolve(
+        orgId === tampered
+          ? { ok: false, problem: { reason: 'hash', seq: 3n } }
+          : { ok: true, ...target, to: target.seq, seq: target.seq > cursor.seq ? target.seq : cursor.seq },
+      );
+    };
+    // The tampered one first: found failing, it leaves the share to the other.
+    await made.run([tampered, passing]);
+    expect(shards.inner.passes.lastPass(chainOf(passing))?.seq).toBe(10n);
+    expect(made.failed).toEqual([[tampered, 'pass', { reason: 'hash', seq: 3n }]]);
+    expect(shards.refused).toEqual([]);
+  });
+
+  it('late with its shard let go: the overdue alarm still names it, by its last pass known', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards, started: new Date(AT.getTime() - PASS_LATE_MS) });
+    const late = orgInSlot(1);
+    made.anchor(late, 864n * 4000n);
+    shards.inner.passes.keepPass(signPass(keys, chainOf(late), point(1n), new Date(AT.getTime() - PASS_LATE_MS)));
+    made.clock.advanceBy(PASS_LATE_MS);
+    await made.run([late]);
+    expect(shards.away.has(late)).toBe(true);
+    expect(made.lines('audit.full_pass_overdue')).toEqual([
+      expect.objectContaining({ level: 'error', organisations: 1, firstFew: [late] }),
+    ]);
+  });
+
+  it('a chain let go and never read again in this process: unchecked, so late once the 7 days pass', async () => {
+    const shards = lettingGo();
+    const made = rotating({ shards, started: new Date(AT.getTime() - PASS_LATE_MS) });
+    const unread = orgInSlot(1);
+    made.anchor(unread, 864n * 4000n);
+    shards.letGo(unread);
+    shards.unreadable.add(unread);
+    made.clock.advanceBy(PASS_LATE_MS);
+    await made.run([unread]);
+    expect(made.lines('audit.full_pass_overdue')).toEqual([
+      expect.objectContaining({ level: 'error', organisations: 1, firstFew: [unread] }),
+    ]);
+  });
+
+  it('the pass’s share counts a chain whose shard is let go at its last known place, as one held', async () => {
+    const twins = [lettingGo({ sticky: true }), lettingGo()].map((shards) => ({
+      shards,
+      made: rotating({ shards }),
+    }));
+    const orgId = orgInSlot(1);
+    for (const { made } of twins) made.anchor(orgId, 864n * 10_000n);
+    for (const { made } of twins) {
+      await made.run([orgId]);
+      made.clock.advanceBy(SLOT_MS);
+      await made.run([orgId]);
+    }
+    const [budget, heldBudget] = twins.map(({ made }) => made.lines('audit.anchor_rotation_done').at(-1)?.budget);
+    expect(twins[0]?.shards.away.has(orgId)).toBe(true);
+    expect(BigInt(String(budget))).toBeGreaterThan(0n);
+    expect(budget).toEqual(heldBudget);
+  });
+
+  it('a chain never passed, its shard let go: marked owed once read again, its place kept', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards });
+    const orgId = orgInSlot(1);
+    made.anchor(orgId, 0n);
+    shards.letGo(orgId);
+    // An empty chain gives the pass no share: it is owed one from now, its place kept with its shard read again.
+    await made.run([orgId]);
+    expect(shards.refused).toEqual([]);
+    expect(shards.inner.passes.lastProgress(chainOf(orgId))?.seq).toBe(0n);
   });
 });
