@@ -5,12 +5,16 @@
 // (apps/api/src/grant-summaries.ts), and the rule reads the history for an
 // organisation with one unbuilt meanwhile (two-person-facts.ts).
 //
+// A summary left behind its membership by an image from before OR1 (a change
+// it made writes none) is brought up to date the same way: what the history
+// says, with nothing it held taken away. Never an alarm (two-person-facts.ts).
+//
 // In one transaction, withSignedStates' for the organisation: its memberships
 // read for a decision (`share`), so no change of one comes between the
 // history read and the summary built from it; then each summary for the
-// change, after its membership (ADR-006 §6, 2a). A summary already kept must
-// hold at least what the history says, at its membership's version, or it is
-// a mismatch: the alarm, and the hold.
+// change, after its membership (ADR-006 §6, 2a). A summary in step must hold
+// at least what the history says, and none may be ahead of its membership, or
+// it is a mismatch: the alarm, and the hold.
 import { type AuditActor, checkOf, type SignedStates, type TamperSign } from '../../audit/index.ts';
 import {
   gatherGrants,
@@ -19,21 +23,50 @@ import {
   type GrantSummary,
   summaryFromHistory,
 } from '../domain/two-person.ts';
-import { addGrants, type GrantsCheck, grantsToChange } from './membership-grants.ts';
+import { addGrants, bringUpToDate, grantsToChange } from './membership-grants.ts';
 import { MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
-import { membersFrom, membershipsMade, MOST_HISTORY_EVENTS, summariesAgree } from './two-person-facts.ts';
+import {
+  type KeptGrants,
+  membersFrom,
+  membershipsMade,
+  MOST_HISTORY_EVENTS,
+  summariesCover,
+  summariesInStep,
+} from './two-person-facts.ts';
 
 /** Who builds a summary: the API's job, as the log names it. */
 export const BUILDER: AuditActor = { type: 'system', id: 'api' };
 
-/** What a build did: how many summaries it built (none: every one was there); or tampered with (the alarm raised). */
+/** What a build did: how many summaries it built or brought up to date (none: every one was in step); or tampered with (the alarm raised). */
 export type GrantBuilding =
   { readonly outcome: 'built'; readonly built: number } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+/** Each member's summary read for the change, after its membership: kept, or unbuilt; or the first tampered with. */
+async function grantsRead(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+  members: readonly { readonly id: string }[],
+): Promise<
+  | { readonly outcome: 'read'; readonly kept: ReadonlyMap<string, KeptGrants>; readonly unbuilt: readonly string[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const kept = new Map<string, KeptGrants>();
+  const unbuilt: string[] = [];
+  for (const { id } of members) {
+    const grants = await grantsToChange(tx, states, { orgId, id });
+    if (grants.outcome === 'tampered') return grants;
+    if (grants.outcome === 'unbuilt') unbuilt.push(id);
+    else kept.set(id, grants);
+  }
+  return { outcome: 'read', kept, unbuilt };
+}
+
 /**
  * Builds and seals the summary of each of the organisation's memberships that
- * has none, in the caller's transaction, which must be withSignedStates' for
- * it. `page`: how many events a read of the history takes.
+ * has none, and brings up to date each left behind its membership, in the
+ * caller's transaction, which must be withSignedStates' for it. `page`: how
+ * many events a read of the history takes.
  */
 export async function buildGrantSummaries(
   tx: MembershipsTransaction,
@@ -47,27 +80,27 @@ export async function buildGrantSummaries(
   const checks = await states.verifiedStates(tx, MEMBERSHIPS, orgId, made.ids);
   const verified = membersFrom(states, orgId, made, (id) => checkOf(checks, id));
   if (verified.outcome === 'tampered') return verified;
-  const kept = new Map<string, Extract<GrantsCheck, { readonly outcome: 'kept' }>>();
-  const unbuilt: string[] = [];
-  for (const { id } of verified.members) {
-    const grants = await grantsToChange(tx, states, { orgId, id });
-    if (grants.outcome === 'tampered') return grants;
-    if (grants.outcome === 'unbuilt') unbuilt.push(id);
-    else kept.set(id, grants);
-  }
-  if (unbuilt.length === 0) return { outcome: 'built', built: 0 };
+  const read = await grantsRead(tx, states, orgId, verified.members);
+  if (read.outcome === 'tampered') return read;
+  const disagrees = { outcome: 'tampered', sign: 'holding' } as const;
+  const inStep = summariesInStep(states, orgId, verified, read.kept);
+  if (inStep === undefined) return disagrees;
+  const due = [...read.unbuilt, ...inStep.behind];
+  if (due.length === 0) return { outcome: 'built', built: 0 };
   const whole = await wholeHistory(tx, states, orgId, verified.members, page);
   if (whole.outcome === 'tampered') return whole;
-  const fromHistory = whole.summaries;
-  if (!summariesAgree(states, orgId, verified, kept, fromHistory)) return { outcome: 'tampered', sign: 'holding' };
-  for (const id of unbuilt) {
-    const summary = fromHistory.get(id);
+  if (!summariesCover(states, orgId, verified, inStep.current, whole.summaries)) return disagrees;
+  const change = { actor: BUILDER, action: 'membership_grant.built' } as const;
+  for (const id of due) {
+    const summary = whole.summaries.get(id);
     const version = verified.versions.get(id);
     // Both read for every member just above.
     if (summary === undefined || version === undefined) throw new Error(`A member was read and not judged: ${id}`);
-    await addGrants(tx, states, { orgId, id }, summary, version, { actor: BUILDER, action: 'membership_grant.built' });
+    const behind = read.kept.get(id);
+    if (behind === undefined) await addGrants(tx, states, { orgId, id }, summary, version, change);
+    else await bringUpToDate(tx, states, behind, { orgId, id }, { summary, membershipVersion: version, ...change });
   }
-  return { outcome: 'built', built: unbuilt.length };
+  return { outcome: 'built', built: due.length };
 }
 
 /** Each member's summary as the whole history holds it, read `page` events at a time from the start; or tampered with. */

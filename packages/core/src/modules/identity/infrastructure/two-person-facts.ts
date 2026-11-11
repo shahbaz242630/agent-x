@@ -10,13 +10,22 @@
 // list no longer holds would make the organisation look smaller than it is
 // and open the one-person path (gate H10's review), so it is a tamper sign.
 //
-// Each summary must have been kept at its membership's version: one a change
-// left behind, or a membership moved on past it, disagrees and is a tamper
-// sign too. A membership added before the summaries (0085) has none until the
-// API's job builds it: while any member's is unbuilt the rule reads the
-// organisation's history as it always has (at most MOST_HISTORY_EVENTS, past
-// which it throws rather than decide on part of it), and every summary kept
-// must hold at least what that history says.
+// A summary is believed only at its membership's version. One behind it was
+// left by a change an image from before OR1 made (it writes no summary): during
+// a release's swap, or after a rollback. That is never a tamper sign (no one
+// without the app's keys can move a membership on), so the rule reads the
+// history for that organisation and the API's job brings the summary up to
+// date; one ahead of its membership no image writes, so it is a mismatch. The
+// strict check, a summary behind as the alarm, waits for a migration that
+// refuses any membership change committed without its summary, released by
+// decision 49's order (coming.json) only over an image that keeps them, so no
+// image in service can then leave one behind.
+//
+// A membership added before the summaries (0085) has none until the job builds
+// it. While any member's is unbuilt or behind, the rule reads the organisation's
+// history as it always has (at most MOST_HISTORY_EVENTS, past which it throws
+// rather than decide on part of it), and every summary in step must hold at
+// least what that history says.
 //
 // Up to MOST_GATHERED_MEMBERS members, the memberships and their summaries are
 // read on one trip (gather); more, in four statements (verifiedStates, two a
@@ -165,26 +174,53 @@ async function gathered(
   await states.gather(tx, orgId, [...rows(MEMBERSHIPS), ...rows(MEMBERSHIP_GRANTS)]);
 }
 
+/** A summary kept, as its read gives it. */
+export type KeptGrants = Extract<GrantsCheck, { readonly outcome: 'kept' }>;
+
 /**
- * Whether each kept summary is at its membership's version and, against the
- * history's when one was read, holds at least what it says; one that isn't is
- * raised as a mismatch (the alarm, and the hold).
+ * The kept summaries split by their membership's version: in step, or behind
+ * it (left by an image from before OR1, so rebuilt from the history, never an
+ * alarm); undefined for one ahead of it, which no image writes, raised as a
+ * mismatch (the alarm, and the hold).
  */
-export function summariesAgree(
+export function summariesInStep(
   states: SignedStates,
   orgId: string,
-  { members, versions }: VerifiedMembers,
-  kept: ReadonlyMap<string, Extract<GrantsCheck, { readonly outcome: 'kept' }>>,
-  fromHistory?: ReadonlyMap<string, GrantSummary>,
+  { versions }: VerifiedMembers,
+  kept: ReadonlyMap<string, KeptGrants>,
+): { readonly current: ReadonlyMap<string, KeptGrants>; readonly behind: readonly string[] } | undefined {
+  const current = new Map<string, KeptGrants>();
+  const behind: string[] = [];
+  for (const [id, grants] of kept) {
+    const version = versions.get(id) ?? 0;
+    if (grants.membershipVersion > version) {
+      states.mismatch(MEMBERSHIP_GRANTS.subject, { orgId, id });
+      return undefined;
+    }
+    if (grants.membershipVersion < version) behind.push(id);
+    else current.set(id, grants);
+  }
+  return { current, behind };
+}
+
+/**
+ * Whether each summary in step holds at least what the history says; the
+ * first that doesn't is raised as a mismatch (the alarm, and the hold). For a
+ * deactivated member only the verifier change is held to it: an invitation
+ * accepted since counts once they are brought back, which reads them all again.
+ */
+export function summariesCover(
+  states: SignedStates,
+  orgId: string,
+  { members }: VerifiedMembers,
+  current: ReadonlyMap<string, KeptGrants>,
+  fromHistory: ReadonlyMap<string, GrantSummary>,
 ): boolean {
   for (const member of members) {
-    const grants = kept.get(member.id);
-    if (grants === undefined) continue;
-    const history = fromHistory?.get(member.id);
-    if (
-      grants.membershipVersion !== versions.get(member.id) ||
-      (history !== undefined && !summaryCovers(grants.summary, history, member.status === 'ACTIVE'))
-    ) {
+    const grants = current.get(member.id);
+    const history = fromHistory.get(member.id);
+    if (grants === undefined || history === undefined) continue;
+    if (!summaryCovers(grants.summary, history, member.status === 'ACTIVE')) {
       states.mismatch(MEMBERSHIP_GRANTS.subject, { orgId, id: member.id });
       return false;
     }
@@ -209,7 +245,7 @@ export async function twoPersonFactsOf(
   const verified = membersFrom(states, orgId, made, (id) => checkOf(memberships, id));
   if (verified.outcome === 'tampered') return verified;
   const summaries = await checksOf(tx, states, orgId, MEMBERSHIP_GRANTS, made.ids);
-  const kept = new Map<string, Extract<GrantsCheck, { readonly outcome: 'kept' }>>();
+  const kept = new Map<string, KeptGrants>();
   let unbuilt = false;
   for (const { id } of verified.members) {
     const grants = grantsFrom(checkOf(summaries, id));
@@ -218,18 +254,20 @@ export async function twoPersonFactsOf(
     else kept.set(id, grants);
   }
   const disagrees = { outcome: 'tampered', sign: 'holding' } as const;
-  if (!unbuilt) {
-    if (!summariesAgree(states, orgId, verified, kept)) return disagrees;
-    const held = new Map([...kept].map(([id, { summary }]) => [id, summary]));
+  const inStep = summariesInStep(states, orgId, verified, kept);
+  if (inStep === undefined) return disagrees;
+  if (!unbuilt && inStep.behind.length === 0) {
+    const held = new Map([...inStep.current].map(([id, { summary }]) => [id, summary]));
     return { outcome: 'read', ...factsFromSummaries(verified.members, held) };
   }
-  // A summary not built yet (a membership added before 0085): the history, as before the summaries.
+  // A summary not built yet (a membership added before 0085), or left behind by an image from before OR1: the
+  // history, as before the summaries.
   const read = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
   if (read.outcome === 'tampered') return read;
   const history = grantHistory();
   gatherGrants(history, read.events);
   const fromHistory = historyFacts(verified.members, history);
-  if (!summariesAgree(states, orgId, verified, kept, fromHistory.summaries)) return disagrees;
+  if (!summariesCover(states, orgId, verified, inStep.current, fromHistory.summaries)) return disagrees;
   const { facts } = fromHistory;
   return { outcome: 'read', ...facts };
 }

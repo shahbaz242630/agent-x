@@ -12,7 +12,11 @@
 // Nothing is ever taken from it, so it never looks cleaner than the history
 // it stands for. A membership added before 0085 has none (`unbuilt`) until
 // the API's job builds it from the history (grant-building.ts); its changes
-// meanwhile leave it unbuilt, as the history the job reads holds them.
+// meanwhile leave it unbuilt, as the history the job reads holds them. One
+// left behind its membership by an image from before OR1 is left behind by
+// later changes too, never moved on as if in step, until the job brings it up
+// to date from the history. An invitation a deactivated member accepts is
+// added only when they are brought back, which reads them all again.
 import type { SignedStateTable } from '@agentx/platform/db';
 
 import {
@@ -124,17 +128,24 @@ export async function addGrants(
 /**
  * Moves the summary on with its membership's change, in the caller's
  * transaction, which read it for the change (`grantsToChange`) and has just
- * recorded the membership at `membershipVersion`. An unbuilt one is left for
- * the job, whose history holds this change.
+ * recorded the membership from `fromVersion` to `membershipVersion`. One
+ * unbuilt, or behind the membership as the change found it (an image from
+ * before OR1 changed it), is left for the job, whose history holds this change:
+ * moved on, it would claim a version whose grants it never saw.
  */
 export async function keepGrants(
   tx: MembershipsTransaction,
   states: SignedStates,
   read: Exclude<GrantsCheck, { readonly outcome: 'tampered' }>,
   key: { readonly orgId: string; readonly id: string },
-  { change, membershipVersion, actor }: { change: GrantChange; membershipVersion: number; actor: AuditActor },
+  {
+    change,
+    fromVersion,
+    membershipVersion,
+    actor,
+  }: { change: GrantChange; fromVersion: number; membershipVersion: number; actor: AuditActor },
 ): Promise<void> {
-  if (read.outcome === 'unbuilt') return;
+  if (read.outcome === 'unbuilt' || read.membershipVersion !== fromVersion) return;
   await states.record(
     tx,
     MEMBERSHIP_GRANTS,
@@ -147,6 +158,36 @@ export async function keepGrants(
       details: {},
     },
   );
+}
+
+/**
+ * A summary left behind its membership brought up to date by the job, in the
+ * caller's transaction, which read it for the change: what the history says,
+ * with nothing it held taken away, at the membership's version.
+ */
+export async function bringUpToDate(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  read: Extract<GrantsCheck, { readonly outcome: 'kept' }>,
+  key: { readonly orgId: string; readonly id: string },
+  {
+    summary,
+    membershipVersion,
+    actor,
+    action,
+  }: { summary: GrantSummary; membershipVersion: number; actor: AuditActor; action: 'membership_grant.built' },
+): Promise<void> {
+  // Neither set ever names the member, so no one is taken out here.
+  const upToDate = grantsAfter(read.summary, {
+    memberUserId: '',
+    granters: summary.grantedBy,
+    verifierChangedAt: summary.verifierChangedAt,
+  });
+  await states.record(tx, MEMBERSHIP_GRANTS, key, read.state, fieldsOf(upToDate, membershipVersion), {
+    actor,
+    action,
+    details: {},
+  });
 }
 
 /** The read's summary, or the tamper sign thrown: its alarm is raised, and the change's transaction rolls back. */
