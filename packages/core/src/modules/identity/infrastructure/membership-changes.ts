@@ -43,11 +43,13 @@ import { type DirectoryTables, listedMember, listedMembership } from '../../dire
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
+import { grantsToChange } from './membership-grants.ts';
 import {
+  changeMembershipRole,
+  deactivateMembership,
   type MemberCheck,
   memberOf,
   type MemberRecord,
-  MEMBERSHIPS,
   type MembershipsTransaction,
 } from './memberships.ts';
 import { tellAdminsOfGrant, tellAdminsOfRemoval } from './grant-notices.ts';
@@ -253,6 +255,9 @@ export function createMembershipChanges({
         // The admin's own are among those just locked: held again, in the same order, for consume.
         const held = await challenges.hold(tx, admin.sessionId);
         const { member, state } = await bothRead(tx, states, admin, membershipId, memberUserId, change, 'change');
+        // The member's grant summary for the change, after the memberships (ADR-006 §6, 2a; OR1).
+        const grants = await grantsToChange(tx, states, { orgId: admin.orgId, id: member.id });
+        if (grants.outcome === 'tampered') throw new ChangeRefused(503, 'INTEGRITY_FAILED');
         const consumed = await challenges.consume(
           tx,
           held,
@@ -269,19 +274,10 @@ export function createMembershipChanges({
         const signInsEnded = await endSessionsOf(tx, member.userId);
         const actor = { type: 'user' as const, id: admin.userId };
         const key = { orgId: admin.orgId, id: member.id };
+        const evidence = { signInsEnded, ...stepUpDetails(consumed) };
+        const read = { key, member, grants, actor, evidence };
         if (change.kind === 'role') {
-          await states.record(
-            tx,
-            MEMBERSHIPS,
-            key,
-            state,
-            { role: change.role },
-            {
-              actor,
-              action: 'membership.role_changed',
-              details: { roleFrom: member.role, roleTo: change.role, signInsEnded, ...stepUpDetails(consumed) },
-            },
-          );
+          await changeMembershipRole(tx, states, { ...read, state, roleTo: change.role });
           await tellAdminsOfGrant(tx, outbox, {
             orgId: admin.orgId,
             membershipId: member.id,
@@ -296,13 +292,7 @@ export function createMembershipChanges({
             role: member.role,
           });
         } else {
-          const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
-            actor,
-            action: 'membership.deactivated',
-            details: { role: member.role, signInsEnded, ...stepUpDetails(consumed) },
-          });
-          if (moved.outcome !== 'changed')
-            throw new Error(`a membership read as active did not move: ${moved.outcome}`);
+          await deactivateMembership(tx, states, read);
           // Told to the admins (the S68 audit): who is removed, with the role they held.
           await tellAdminsOfRemoval(tx, outbox, {
             orgId: admin.orgId,

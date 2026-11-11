@@ -554,6 +554,19 @@ export const PLAIN_WORDS = {
     broke: 'No account link was started, and the admin was told the bank link is unavailable.',
     next: 'Check the payment partner settings, and raise it with the partner if it repeats.',
   },
+  'grant_summaries.build_failed': {
+    happened:
+      "The signed record of who gave each member their role could not be built for one organisation's older members.",
+    broke:
+      'Nothing is refused for it: that organisation still reads its full membership history to decide who may approve, as before.',
+    next: 'It is tried again at the next run, about an hour later. If it keeps failing, check the database and the error.',
+  },
+  'grant_summaries.run_failed': {
+    happened: 'The list of organisations could not be read, so building the members’ signed role records was skipped.',
+    broke:
+      'No organisation’s older members had their record built this run; approvals still work from the full history.',
+    next: 'It is tried again at the next run, about an hour later. If it keeps failing, check the database.',
+  },
   'health.check_failed': {
     happened: "One of the API's health checks failed.",
     broke: 'The API told the uptime monitors it is unavailable.',

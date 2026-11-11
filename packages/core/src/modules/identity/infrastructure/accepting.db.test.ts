@@ -508,9 +508,10 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
       // No membership moved: confirming.ts brings it back, and tells the admins then.
       const events = await database
         .as('backup')
-        .query<{ action: string }>('select action from audit.events where subject_id = $1 order by seq', [
-          membershipId,
-        ]);
+        .query<{ action: string }>(
+          "select action from audit.events where subject_type = 'membership' and subject_id = $1 order by seq",
+          [membershipId],
+        );
       expect(events.map(({ action }) => action)).toEqual(['membership.created', 'membership.deactivated']);
       expect(await noticesIn(who.org)).toEqual([]);
     },

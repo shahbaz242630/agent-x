@@ -33,6 +33,7 @@
   {"table":"identity.factor_resets","name":"factor_resets_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.invitations","name":"invitations_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.login_flows","name":"login_flows_pkey","definition":"PRIMARY KEY (cookie_hash)"},
+  {"table":"identity.membership_grants","name":"membership_grants_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.memberships","name":"memberships_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.registered_contacts","name":"registered_contacts_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"identity.session_emails","name":"session_emails_pkey","definition":"PRIMARY KEY (session_id)"},

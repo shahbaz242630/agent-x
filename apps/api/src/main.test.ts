@@ -477,6 +477,7 @@ const EVERY_TIMER: [string, number][] = [
   ['schema_check', 300_000],
   ['mandate_expiry', 300_000],
   ['hold_history', 30_000],
+  ['grant_summaries', 3_600_000],
   ['holdings_check', 900_000],
   ['request_expiry', 300_000],
   ['request_voids', 300_000],
