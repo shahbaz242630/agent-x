@@ -11,7 +11,8 @@ const itself = (orgId: string): string => orgId;
 /** Organisations in one shard and in two others, found by trying IDs in turn. */
 function inShards(): { readonly a: string[]; readonly b: string[]; readonly c: string[] } {
   const byShard = new Map<number, string[]>();
-  for (let index = 0; [...byShard.values()].filter((ids) => ids.length >= 3).length < 3; index += 1) {
+  // Some 256 shards: a few thousand IDs fill three of them three deep.
+  for (let index = 0; index < 5000; index += 1) {
     const orgId = org(index);
     const shard = shardOfOrganisation(orgId);
     byShard.set(shard, [...(byShard.get(shard) ?? []), orgId]);

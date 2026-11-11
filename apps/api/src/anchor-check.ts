@@ -614,6 +614,13 @@ export function createAnchorCheck({
     }
   };
 
+  /**
+   * The chain's shard pinned. A turn about to read it back makes room first (PR4: the walk leaves lines waiting behind
+   * it); a hand-off's anchor never waits on a write.
+   */
+  const pinFor = (log: AnchorLog, chain: Chain, alone: boolean): Promise<(() => void) | undefined> =>
+    alone || log.holds(chain) ? log.pin(chain) : log.roomToReadBack().then(() => log.pin(chain));
+
   const checkOne = async (
     { chain, verify }: CheckedChain,
     signal: AbortSignal | undefined,
@@ -625,10 +632,8 @@ export function createAnchorCheck({
     const key = keyOf(chain);
     let release: (() => void) | undefined;
     try {
-      // A turn about to read its shard back makes room first (PR4: the walk leaves lines waiting behind it).
-      if (!alone && durable?.holds(chain) === false) await durable.roomToReadBack();
       // Its shard held while it is compared, read again first if it was let go (PL-65 PR3): one that can't be waits.
-      release = durable === undefined ? () => undefined : await durable.pin(chain);
+      release = durable === undefined ? () => undefined : await pinFor(durable, chain, alone);
       if (release === undefined) return 'unanchored';
       const last = anchors.latest(chain);
       let report: ChainReport;
