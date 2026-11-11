@@ -25,7 +25,13 @@
 // SEC-OPS-04 (B6-3d): so are an admin and an approver in the 7 days after a
 // second factor of theirs was removed, as SECOND_FACTOR_REMOVED.
 import { type Scope, SCOPES } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck, Role, SignIn } from '@agentx/core/modules/identity';
+import {
+  type LiveSession,
+  type MembershipCheck,
+  type Role,
+  type SignIn,
+  SignInFailed,
+} from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, InjectOptions } from 'fastify';
@@ -81,7 +87,13 @@ const session = (index: number): LiveSession => ({
 const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in the matrix')),
   beginStepUp: () => Promise.reject(new Error('not in the matrix')),
-  complete: () => Promise.reject(new Error('not in the matrix')),
+  // As the real one: a callback the login service refused is a SignInFailed (CO2), which the route logs and refuses.
+  complete: (returned) =>
+    Promise.reject(
+      'refused' in returned
+        ? new SignInFailed(returned.refused, 'refused at the login service')
+        : new Error('not in the matrix'),
+    ),
   signOut: () => Promise.resolve(undefined),
   holderOf: () => Promise.resolve(undefined),
   signedIn: (cookie) => {
