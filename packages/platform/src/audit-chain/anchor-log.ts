@@ -235,6 +235,9 @@ const CHANGES_LAG_MS = MOST_AHEAD_MS;
 /** How many names a list of changes holds at most: 256, about 15 KB opened, well within what a reader fetches. */
 const NAMES_A_LIST = 256;
 
+/** How many lists a write makes at most: 8, 2,048 names, past any number of shard files one write makes. */
+const LISTS_A_WRITE = 8;
+
 /** How many shards' folders a read walks again, the hourly walk spread over the runs: all 256 within the hour. */
 const WALKS_A_READ = 32;
 
@@ -1465,8 +1468,9 @@ export function createAnchorLog({
     changes: Changes | undefined;
   }): void => {
     shardsRead(shards);
-    if (changes !== undefined) changesRead(changes, countedDown(began - CHANGES_LAG_MS));
+    // The walks first: a name given up in this read, after its shard's walk, is left for that shard's next walk.
     walked(began, shards);
+    if (changes !== undefined) changesRead(changes, countedDown(began - CHANGES_LAG_MS));
     if (layout === 'moving' && markerAt !== undefined && began - markerAt.getTime() >= SETTLE_MS) settledRead = true;
   };
 
@@ -1784,7 +1788,8 @@ export function createAnchorLog({
    */
   const changesWritten = async (): Promise<void> => {
     // At most a list's worth a list, so a reader's bound always holds it, however many were carried.
-    while (unlisted.size > 0) {
+    // At most a few lists a write, the rest carried to the next: a write never loops on its own.
+    for (let lists = 0; unlisted.size > 0 && lists < LISTS_A_WRITE; lists += 1) {
       const names = [...unlisted.keys()].slice(0, NAMES_A_LIST);
       const name = `${changesFolder(epoch)}${countedDown(now().getTime())}-${randomUUID()}`;
       const files = names.map((file) => file.slice(shardsFolder(epoch).length));

@@ -1122,6 +1122,23 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect(log.latest(CHAIN)?.seq).toBe(12n);
     });
 
+    it('a name given up in the read that walks its shard is left for the shard’s next walk', async () => {
+      const { fake, log, advance } = await readOnce();
+      // Named at 92, missing: given up at 155, the read that also walks CHAIN's shard (shard 150), before it lands.
+      const missing = shardName(CHAIN, 'd', 92);
+      const walks = await everyFive({ log, advance }, fake, {
+        from: 70,
+        until: 220,
+        before: (minute) => {
+          if (minute === 90) listed(fake, 92, [missing]);
+          if (minute === 160) fake.files.set(missing, shardFile(missing, [anchorAt(CHAIN, 12n)]));
+        },
+      });
+      const walkedAt = [...walks].filter(([, shards]) => shards.includes(SHARD_OF_CHAIN)).map(([minute]) => minute);
+      expect(walkedAt).toEqual([95, 155, 215]);
+      expect(log.latest(CHAIN)?.seq).toBe(12n);
+    });
+
     it('a list that lands lets its names go: the next write lists nothing again', async () => {
       const fake = movedStore({ done: true });
       const { log } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
