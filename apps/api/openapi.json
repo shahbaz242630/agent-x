@@ -687,7 +687,7 @@
                   {
                     "type": "string",
                     "const": "STATEMENT_CHANGED",
-                    "description": "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so nothing was changed. Read them again (GET /v1/statements) and confirm with the version shown."
+                    "description": "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so this request changed nothing. Read them again (GET /v1/statements) and confirm with the version shown. A retry sent after a release changed the words is refused this way even if its first try went through: check what was done before trying again."
                   },
                   {
                     "type": "string",
@@ -17087,6 +17087,11 @@
                       "refuse",
                       "approval"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -17103,7 +17108,8 @@
                   "splitCheck",
                   "consentLimits",
                   "endsAt",
-                  "overLimit"
+                  "overLimit",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -17456,6 +17462,11 @@
                       "refuse",
                       "approval"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -17469,7 +17480,8 @@
                   "splitCheck",
                   "consentLimits",
                   "endsAt",
-                  "overLimit"
+                  "overLimit",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }

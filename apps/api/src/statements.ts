@@ -125,6 +125,9 @@ const VERSION_FIELD = /^(?:statementVersion|\w+StatementVersion)$/;
 /** A body's fields: an object's, or those of the object a transform reads. */
 const fieldsOf = (body: unknown): readonly string[] => {
   if (body instanceof z.ZodPipe) return fieldsOf(body.in);
+  // A wrapped body (optional, nullable, a union) can't hide a version field from the check.
+  if (body instanceof z.ZodOptional || body instanceof z.ZodNullable) return fieldsOf(body.unwrap());
+  if (body instanceof z.ZodUnion) return [...new Set(body.options.flatMap((option) => fieldsOf(option)))];
   return body instanceof z.ZodObject ? Object.keys(body.shape) : [];
 };
 

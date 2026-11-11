@@ -257,6 +257,7 @@ const DRAFT_SCHEMA = {
             'together. Longer catches more splitting and sends more to a person. Fixed for good.',
         ),
       ...TERM_FIELDS,
+      statementVersion: statementVersion('over_limit'),
     })
     .superRefine((body, context) => {
       if (timeZoneOf(body.timeZone) === undefined) {
@@ -272,7 +273,7 @@ const REDRAFT_SCHEMA = {
   summary: 'Draft a new version of a mandate, waiting for acceptance',
   params: MANDATE_ID,
   body: z
-    .strictObject(TERM_FIELDS)
+    .strictObject({ ...TERM_FIELDS, statementVersion: statementVersion('over_limit') })
     .superRefine(termsChecked)
     .describe('Every term of the new version: the agent, zone and window stay as they are.'),
   response: {
@@ -524,7 +525,7 @@ export function registerMandates(
     {
       schema: DRAFT_SCHEMA,
       bodyLimit: DRAFT_BODY_LIMIT,
-      config: { access: [...DRAFTING_ROLES], operation: DRAFT_OPERATION },
+      config: { access: [...DRAFTING_ROLES], operation: DRAFT_OPERATION, statements: confirmedWith('over_limit') },
     },
     async (request, reply) => {
       const member = memberOf(request);
@@ -547,7 +548,7 @@ export function registerMandates(
     {
       schema: REDRAFT_SCHEMA,
       bodyLimit: DRAFT_BODY_LIMIT,
-      config: { access: [...DRAFTING_ROLES], operation: REDRAFT_OPERATION },
+      config: { access: [...DRAFTING_ROLES], operation: REDRAFT_OPERATION, statements: confirmedWith('over_limit') },
     },
     async (request, reply) => {
       const member = memberOf(request);

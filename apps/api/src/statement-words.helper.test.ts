@@ -20,6 +20,8 @@ export const CONFIRMS: readonly (readonly [path: string, named: readonly Named[]
   ['/v1/organization/unfreeze/confirm', [['statementVersion', 'unfreeze']]],
   ['/v1/agents/{id}/suspend', [['statementVersion', 'suspend']]],
   ['/v1/agents/{id}/keys/{keyId}/rotate/confirm', [['statementVersion', 'old_key']]],
+  ['/v1/mandates', [['statementVersion', 'over_limit']]],
+  ['/v1/mandates/{id}/supersede', [['statementVersion', 'over_limit']]],
   ['/v1/mandates/{id}/suspend/confirm', [['statementVersion', 'suspend']]],
   ['/v1/mandates/{id}/accept/confirm', [['statementVersion', 'supersede', ['pendingRequests', 'carry']]]],
   ['/v1/mandates/{id}/over-limit/confirm', [['statementVersion', 'over_limit']]],

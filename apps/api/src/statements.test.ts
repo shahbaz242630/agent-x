@@ -10,10 +10,12 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import type { MembershipCheck } from '@agentx/core/modules/identity';
+import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { ContractBroken } from './contract.ts';
 import { liveSession, ONE_TIME_CODE, PASSKEY } from './live-session.helper.test.ts';
 import { MARK_FAILED_STATEMENT, MARK_FAILED_STATEMENT_VERSION } from './payment-marks.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
@@ -21,6 +23,7 @@ import { SESSION_COOKIE } from './sign-in.ts';
 import { CONFIRMS, confirmedBody, versionNow } from './statement-words.helper.test.ts';
 import {
   isStale,
+  registerStatements,
   SERVED_STATEMENTS,
   type StatementConfirmed,
   type StatementId,
@@ -298,5 +301,34 @@ describe('a route naming words names fields its body holds, and every version fi
     expect(statementProblems({ url: '/x', schema: { body: policy } })).toEqual([
       "/x: its body's monthlyCapStatementVersion names no set of words (config.statements), so it goes unchecked",
     ]);
+  });
+
+  it.each([
+    ['optional', z.strictObject({ statementVersion: z.int() }).optional()],
+    ['nullable', z.strictObject({ statementVersion: z.int() }).nullable()],
+    ['nullish', z.strictObject({ statementVersion: z.int() }).nullish()],
+    ['a union', z.union([z.strictObject({ other: z.string() }), z.strictObject({ statementVersion: z.int() })])],
+  ])('finds a version field in a body wrapped %s: a wrapper hides none from the check', (_what, wrapped) => {
+    expect(statementProblems({ url: '/x', schema: { body: wrapped } })).toEqual([
+      "/x: its body's statementVersion names no set of words (config.statements), so it goes unchecked",
+    ]);
+    // Named, it is found: only the choice this body doesn't hold is said.
+    expect(statementProblems({ url: '/x', schema: { body: wrapped }, config: { statements: named } })).toEqual([
+      "/x: its statements name pendingRequests, which its body doesn't hold",
+    ]);
+  });
+
+  it('stops the server starting with a route whose body takes a version no set names', async () => {
+    const app = Fastify();
+    registerStatements(app);
+
+    const started = (async () => {
+      app.post('/v1/unchecked', { schema: { body: z.strictObject({ statementVersion: z.int() }) } }, () => 'ok');
+      await app.ready();
+    })();
+
+    await expect(started).rejects.toThrow(ContractBroken);
+    await expect(started).rejects.toThrow('/v1/unchecked: its body');
+    await app.close();
   });
 });
