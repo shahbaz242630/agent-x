@@ -104,10 +104,10 @@ interface Statement {
 
 const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF]*)?\$/;
 /** A character that may stand inside an identifier, as Postgres's lexer allows ($ and non-ASCII among them). */
-const IDENTIFIER_CHAR = /[A-Za-z0-9_$\u0080-\uFFFF]/;
+export const IDENTIFIER_CHAR = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 
 /** Where a quoted run that opened at `start` ends: past its closing quote, a doubled quote staying inside. */
-function pastQuoted(sql: string, start: number, quote: string, backslashes: boolean): number {
+export function pastQuoted(sql: string, start: number, quote: string, backslashes: boolean): number {
   let at = start + 1;
   while (at < sql.length) {
     const char = sql[at];
