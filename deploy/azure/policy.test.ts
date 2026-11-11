@@ -595,6 +595,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pgms_wait_sampling\.query_capture_mode$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/track_io_timing$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/max_connections$/),
+      'Microsoft.Authorization/locks keep-live-database',
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -836,6 +837,29 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /minimum allowable length is 32/,
       );
     });
+  });
+
+  it('SEC-AV-06 the live database server carries a delete lock, so Azure refuses its delete and its restore points stay (S185)', () => {
+    const locks = staging.predictedResources.filter(type('Microsoft.Authorization/locks'));
+    expect(locks.map((lock) => [lock.name, at(lock.properties, 'level')])).toEqual([
+      ['keep-live-database', 'CanNotDelete'],
+    ]);
+    // Scoped to the server itself, not the group: Stage G's copies and the drill stay deletable.
+    const server = staging.predictedResources.find(SERVER);
+    expect(server).toBeDefined();
+    expect(locks[0]?.id.startsWith(`${server?.id ?? 'missing'}/providers/Microsoft.Authorization/locks/`)).toBe(true);
+    // Only a delete lock grants nothing; any other level, or none, is an access type no rule reads.
+    const LOCK = type('Microsoft.Authorization/locks');
+    expect(brokenRules(staging)).toEqual([]);
+    for (const level of ['ReadOnly', undefined]) {
+      expect(
+        brokenRules(
+          changed(LOCK, (lock) => {
+            (lock.properties as Mutable).level = level;
+          }),
+        ),
+      ).toEqual(['secret-access']);
+    }
   });
 
   it("compiles the load run's foundation (D2c): only the server's size and its measurements change, and every rule still holds", () => {
