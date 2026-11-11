@@ -210,7 +210,6 @@ const ANY_CREATE_TRIGGER = /^create (?:or replace )?(?:constraint )?trigger /;
 const CREATE_TRIGGER = new RegExp(
   String.raw`^create (?:or replace )?(?:constraint )?trigger ${NAME} (?:before|after|instead of) ${EVENT}(?: or ${EVENT})* on (?:only )?${NAME}(?: |$)`,
 );
-const ANY_DROP_TRIGGER = /^drop trigger /;
 const DROP_TRIGGER = new RegExp(String.raw`^drop trigger (?:if exists )?${NAME} on ${NAME}(?: cascade| restrict)?$`);
 const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?(?:function|procedure) ${NAME} ?\(`);
 /** An existing routine altered or dropped, under any of its three words; a drop may list several. */
@@ -312,7 +311,7 @@ function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read
     own.tables.add(nameAt(table, 1).name);
     return undefined;
   }
-  if (ANY_CREATE_TRIGGER.test(words) || ANY_DROP_TRIGGER.test(words)) return triggerRead(words, own);
+  if (ANY_CREATE_TRIGGER.test(words) || words.startsWith('drop trigger ')) return triggerRead(words, own);
   if (words.startsWith('alter trigger ')) return refused('alters a trigger');
   if (SWITCHED_TRIGGER.test(words)) return refused('switches a trigger on or off');
   const fn = CREATE_FUNCTION.exec(words);
