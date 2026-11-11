@@ -26,7 +26,7 @@ const changed = (change: (fields: Record<string, unknown>) => Record<string, unk
 const read = (bytes: Buffer, name = made().name, epoch = 1, holding = keys) =>
   readCutoverFile(holding, { bytes, name, epoch });
 
-describe('the cutover marker (PL-65)', () => {
+describe('SEC-ANC-03 the cutover marker (PL-65)', () => {
   it('is at the one name for its epoch and layout, and reads back as a marker of the sharded layout', async () => {
     const { name, bytes } = made();
     expect(name).toBe('e1/cutover/shards-v1');

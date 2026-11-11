@@ -280,7 +280,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeDefined();
   });
 
-  it('confirms nothing before its evidence is recorded, or once out of time', async () => {
+  it('SEC-HA-02 confirms nothing before its evidence is recorded, or once out of time', async () => {
     const { clock, challenges, binding } = await setUp();
     const opened = await challenges.open(app, binding);
     if (opened === undefined) throw new Error('no challenge');
