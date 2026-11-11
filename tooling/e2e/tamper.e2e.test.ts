@@ -947,13 +947,21 @@ const withoutVersions = (body: unknown): unknown =>
     ? Object.fromEntries(Object.entries(body).filter(([name]) => !/^statementVersion$|StatementVersion$/.test(name)))
     : body;
 
+/** A confirm's body as `op` (its preview or ask) takes it: without the versions of words `op` doesn't name (CO3). */
+const asSentTo = (op: Operation, body: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(body).filter(
+      ([name]) => !/^statementVersion$|StatementVersion$/.test(name) || op.schema?.properties?.[name] !== undefined,
+    ),
+  );
+
 /**
  * A successful own preview proves the policy is not failing for limits or another field before its supplier check.
  * The preview shows no words, so a confirm's body goes to it without their versions.
  */
 async function policyBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
   const preview = operation('POST', op.route.replace(/\/change(?:\/(?:preview|confirm))?$/, '/change/preview'));
-  const read = await controlSend(preview, cookieHeader(adminCookie), withoutVersions(body), routeOf(preview, own));
+  const read = await controlSend(preview, cookieHeader(adminCookie), asSentTo(preview, body), routeOf(preview, own));
   expect(read.status).toBe(200);
   expect(JSON.parse(read.text)).toMatchObject({ rejected: [] });
 }
@@ -962,7 +970,7 @@ async function policyBaseline(op: Operation, body: Record<string, unknown>): Pro
 async function referenceStepUp(op: Operation, body: Record<string, unknown>): Promise<string> {
   if (adminPage === undefined) throw new Error('the admin browser is not open');
   const ask = operation('POST', op.route.replace(/\/confirm$/, ''));
-  const opened = await controlSend(ask, cookieHeader(adminCookie), body, routeOf(ask, own));
+  const opened = await controlSend(ask, cookieHeader(adminCookie), asSentTo(ask, body), routeOf(ask, own));
   expect(opened.status).toBe(202);
   const id = z.object({ stepUpChallengeId: z.uuid() }).parse(JSON.parse(opened.text)).stepUpChallengeId;
   await adminPage.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${id}&returnTo=/tamper-signed-in`);
