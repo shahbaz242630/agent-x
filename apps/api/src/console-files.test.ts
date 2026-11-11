@@ -59,7 +59,7 @@ afterEach(closeServers);
 async function listening(files: ConsoleFiles) {
   const app = await routeServer({ consoleFiles: files });
   await app.listen({ host: '127.0.0.1', port: 0 });
-  const [address] = app.addresses();
+  const [address] = app.addresses().filter((address) => typeof address !== 'string');
   const base = `http://127.0.0.1:${String(address?.port)}`;
   return { base, app, fetch: createOutboundFetch([base]) };
 }

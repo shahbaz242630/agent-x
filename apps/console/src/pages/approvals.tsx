@@ -4,7 +4,7 @@
 // cancelled. Look A "Statement": amounts in a column, nothing shouts.
 import { Link } from '@tanstack/react-router';
 
-import { amountText, type ListedRequest, timeText, useRequestList, waitingLeft } from '../requests.ts';
+import { amountText, type ListedRequest, timeText, useRequestList, useTicking, waitingLeft } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { Loading, Retry } from './failed.tsx';
@@ -29,6 +29,7 @@ function Row({ request }: { readonly request: ListedRequest }) {
 export function Approvals({ list }: { readonly list: 'waiting' | 'all' }) {
   const { organization } = useActing();
   const requests = useRequestList(list, organization.id);
+  useTicking();
   const pages = requests.data?.pages ?? [];
   const shown = pages.flatMap((page) => page.requests);
   const unchecked = pages.reduce((count, page) => count + page.unchecked.length, 0);

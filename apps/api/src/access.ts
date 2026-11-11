@@ -78,8 +78,11 @@ import { cookieValue, SESSION_COOKIE } from './sign-in.ts';
 const PRINCIPALS = ['admin', 'approver', 'developer', 'viewer', 'person', 'agent', 'operator', 'public'] as const;
 export type Principal = (typeof PRINCIPALS)[number];
 
+/** An organisation's roles, all of them: a route every member may call names these. */
+export const EVERY_MEMBER = ['admin', 'approver', 'developer', 'viewer'] as const satisfies readonly Principal[];
+
 /** An organisation's roles: each is a signed-in person too, so `person` beside one adds nothing. */
-const ROLES: readonly Principal[] = ['admin', 'approver', 'developer', 'viewer'];
+const ROLES: readonly Principal[] = EVERY_MEMBER;
 
 /** Whether a route's access names any of an organisation's roles: it then takes the organisation's header. */
 export const namesRole = (access: readonly unknown[]): boolean =>
@@ -127,6 +130,12 @@ export function memberInSessionOf(request: Pick<FastifyRequest, 'member' | 'pers
   const { member, person } = request;
   if (member === null || person === null) throw new Error("a member's route ran without a member");
   return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
+}
+
+/** A member's route's caller: their organisation, and who they are. The hooks let no one else through. */
+export function memberOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
+  const { orgId, userId } = memberInSessionOf(request);
+  return { orgId, userId };
 }
 
 /** A route's use case: without it the route is still documented, and no one reaches it, as no one holds a role. */

@@ -29,7 +29,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { memberInSessionOf, need } from './access.ts';
+import { EVERY_MEMBER, memberInSessionOf, memberOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
@@ -74,9 +74,6 @@ import {
   stepUpAskedWith,
 } from './route-schemas.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
-
-/** Every member may see the organisation's mandates. */
-const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /**
  * The most a draft's body may be: a purpose of at most 200 code points once
@@ -183,6 +180,12 @@ const VERSION = z
       .array(z.string())
       .describe(
         'Where the monthly cap the organisation’s policies hold the agent to (agentMonthlyCap) is below these terms: payments past it are refused. Empty when they fit.',
+      ),
+    splitCheckWarning: z
+      .string()
+      .nullable()
+      .describe(
+        'Said while these terms switch the split check off (decision 43, ADR-014 §5): orders to one supplier are then weighed one at a time. Null while it is on.',
       ),
   })
   .register(API_SCHEMAS, { id: 'MandateVersion', description: 'One version of a mandate’s terms, made once.' });
@@ -441,12 +444,6 @@ const SHOW_SCHEMA = {
   response: { 200: MANDATE_DETAILS },
 };
 
-function memberOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a mandates route ran without a member');
-  return { orgId: member.orgId, userId: person.userId };
-}
-
 const mandateBody = (mandate: MandateRecord) => ({
   id: mandate.id,
   agentId: mandate.agentId,
@@ -454,6 +451,10 @@ const mandateBody = (mandate: MandateRecord) => ({
   splitWindowHours: mandate.splitWindowHours,
   status: mandate.status,
 });
+
+/** Decision 43 (S184): the split check off is never quiet. */
+const SPLIT_CHECK_OFF =
+  'the split check is off: orders to one supplier are weighed one at a time, so an order split into smaller ones can stay under the approval threshold (the exact duplicate is still refused)';
 
 const versionOf = ({ version: v, overLimit, consentWarnings, capWarnings }: VersionShown) => ({
   id: v.id,
@@ -474,6 +475,7 @@ const versionOf = ({ version: v, overLimit, consentWarnings, capWarnings }: Vers
   draftedAt: v.draftedAt.toISOString(),
   consentWarnings: [...consentWarnings],
   capWarnings: [...capWarnings],
+  splitCheckWarning: v.splitCheck ? null : SPLIT_CHECK_OFF,
 });
 
 const detailsOf = ({ mandate, current, pending, agentMonthlyCap: { cap, from } }: MandateView) => ({
@@ -686,25 +688,21 @@ export function registerMandates(
     },
   );
 
-  routes.get(
-    '/v1/mandates',
-    { schema: LIST_SCHEMA, config: { access: [...READING_ROLES] } },
-    async (request, reply) => {
-      const { orgId } = memberOf(request);
-      const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_MANDATES_A_PAGE };
-      const listed = await need(registry).list(orgId, page, request.id);
-      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return {
-        mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
-        next: listed.next,
-        unchecked: [...listed.unchecked],
-      };
-    },
-  );
+  routes.get('/v1/mandates', { schema: LIST_SCHEMA, config: { access: [...EVERY_MEMBER] } }, async (request, reply) => {
+    const { orgId } = memberOf(request);
+    const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_MANDATES_A_PAGE };
+    const listed = await need(registry).list(orgId, page, request.id);
+    if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
+    return {
+      mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
+      next: listed.next,
+      unchecked: [...listed.unchecked],
+    };
+  });
 
   routes.get(
     '/v1/mandates/:id',
-    { schema: SHOW_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: SHOW_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(registry).show(orgId, request.params.id, request.id);

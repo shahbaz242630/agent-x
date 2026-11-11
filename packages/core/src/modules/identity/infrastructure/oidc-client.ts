@@ -114,7 +114,11 @@ export type SignInFailure =
    * The login service answered with a sign-in made before this flow began:
    * one it kept, not the fresh one asked for (`prompt=login`; the S68 audit).
    */
-  | 'stale_authentication';
+  | 'stale_authentication'
+  /** The login service sent the browser back saying no (`error=`: the person cancelled, or was refused there). */
+  | 'provider_refused'
+  /** The browser came back with no code or no state: the address cut short. */
+  | 'callback_incomplete';
 
 export class SignInFailed extends Error {
   override readonly name = 'SignInFailed';

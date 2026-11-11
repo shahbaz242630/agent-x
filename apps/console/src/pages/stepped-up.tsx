@@ -3,12 +3,14 @@
 // once more and confirms it, or doesn't; either way the address is cleaned.
 // A challenge with nothing kept for it (another tab's, already confirmed,
 // storage cleared) is said: the change wasn't made, and can be asked again.
+// Back with `?stepUpFailed=<challenge>` instead (CO2: the API refused the
+// fresh sign-in), the change kept for it is forgotten and that is said.
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
-import { isRefusal } from '../api.ts';
-import { confirm, forget, pendingFor, STEPPED } from '../step-up.ts';
+import { isRefusal, isUuid } from '../api.ts';
+import { confirm, forget, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
 type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'failed';
@@ -17,16 +19,34 @@ export function SteppedUp() {
   const pathname = useRouterState({ select: ({ location }) => location.pathname });
   // The raw query, not the router's parsed one, which reads values as JSON.
   const query = useRouterState({ select: ({ location }) => location.searchStr });
-  const challenge = new URLSearchParams(query).get(STEPPED) ?? undefined;
+  const params = new URLSearchParams(query);
+  const challenge = params.get(STEPPED) ?? undefined;
+  // Only a challenge's ID, as the API sends: a link made up with anything else says nothing.
+  const failed = params.get(STEP_UP_FAILED);
+  const failedFor = failed !== null && isUuid(failed) ? failed : undefined;
   const pending = useMemo(() => (challenge === undefined ? undefined : pendingFor(challenge)), [challenge]);
   const [sent, setSent] = useState<Sent>('ready');
   const queries = useQueryClient();
   const navigate = useNavigate();
-  if (challenge === undefined) return null;
+  useEffect(() => {
+    // Its sign-in was refused: the change is never confirmed with it, so nothing is kept for it.
+    if (failedFor !== undefined) forget(failedFor);
+  }, [failedFor]);
   const close = () => {
     setSent('ready');
     void navigate({ to: pathname, search: {}, replace: true });
   };
+  if (failedFor !== undefined) {
+    return (
+      <section className="notice stepped" role="alert">
+        <p>{t('stepUp.signInFailed')}</p>
+        <button type="button" className="secondary" onClick={close}>
+          {t('stepUp.close')}
+        </button>
+      </section>
+    );
+  }
+  if (challenge === undefined) return null;
   if (pending === undefined) {
     return (
       <section className="notice stepped" role="alert">

@@ -30,20 +30,17 @@
 // 7. repairs (chain-restore.ts) and writes the outcome beside its start
 // It exits 0 once the chain is repaired; 1 when anything is refused or fails.
 // The integrity hold stays: the organisation's admin clears it with a step-up.
-import { type AuditTables, REPAIR_ROLE, repairRoleProblems } from '@agentx/core/modules/audit';
-import { schemaSoundAtStart } from '@agentx/core/schema-check';
+//
+// The same job plans and repairs an organisation's authority rows from the
+// drill's copy too (PL-29 follow-up, state-restore-main.ts): a request file
+// whose first word is `state-recovery-plan` or `state-restore` goes there.
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
-import { APP_ROLE, createDatabase, type Database, transactionsReadOnly } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createLogger, createStartupLogger, guardOutputs, type Logger } from '@agentx/platform/observability';
-import { createOutboundFetch } from '@agentx/platform/outbound';
-import { azureBlobOrigins, azureWriteOnceStore, BlobStoreFailed, folderWriteOnceStore } from '@agentx/platform/storage';
 
 import { outcomeLine, type RestoreFacts, restoreChain, restoreFile } from './chain-restore.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 import {
-  anchorLogOf,
-  evidenceStoreOf,
   flagAlone,
   type OperatorOptions,
   type OperatorProcess,
@@ -52,19 +49,11 @@ import {
   REQUEST_FLAG,
   requestWords,
 } from './main.ts';
-import {
-  CHAIN_RESTORE,
-  CHAIN_RESTORE_USAGE,
-  NO_ANCHORS_PROBLEM,
-  NO_STORE_PROBLEM,
-  PLAN_DIGEST_HEX,
-  UUID_V7,
-} from './request.ts';
+import { CHAIN_RESTORE, CHAIN_RESTORE_USAGE, PLAN_DIGEST_HEX, UUID_V7 } from './request.ts';
+import { onRestoreSides, OWNER_LOGIN_NOTE, storedPlanProblems } from './restore-job.ts';
+import { isStateCommand, stateRun } from './state-restore-main.ts';
 
 const SERVICE = 'chain-restore';
-
-/** How the repair's connections are named in Postgres's own views. */
-const APPLICATION_NAME = 'agentx-chain-restore';
 
 /**
  * The one key the repair holds, to check the chain with; the operator's own signature and its rebases (E11) it checks
@@ -72,10 +61,6 @@ const APPLICATION_NAME = 'agentx-chain-restore';
  */
 const RESTORE_HELD_KEYS = ['audit-mac'] as const;
 const RESTORE_CHECKED_KEYS = ['operator-signing', 'audit-rebase'] as const;
-
-/** What the owner's login sets off (playbook I), said in every run's first lines. */
-export const OWNER_LOGIN_NOTE =
-  'this run logs in as agentx_owner, so the "login by the owner role outside a deploy" SEV-1 alert fires for it by design: note this run in the incident log';
 
 /** What the repair was asked, once read and checked. */
 interface Asked {
@@ -86,13 +71,9 @@ interface Asked {
   readonly discardFork: boolean;
 }
 
-/** The repair's request, from its file alone, or the problems: none repeats what the file holds. */
-function restoreAsked(argv: readonly string[]): Asked | Problems {
-  if (argv[0] !== REQUEST_FLAG)
-    return problem(`${CHAIN_RESTORE} runs only from a request file: ${CHAIN_RESTORE_USAGE}`);
-  const read = requestWords(argv);
-  if ('problems' in read) return read;
-  const [command, orgFlag, orgId, planFlag, planId, digestFlag, digest, idFlag, id, ...more] = read.words;
+/** The chain repair's request, from its file's words, or the problems: none repeats what the file holds. */
+function restoreAsked(words: readonly string[]): Asked | Problems {
+  const [command, orgFlag, orgId, planFlag, planId, digestFlag, digest, idFlag, id, ...more] = words;
   const flag = flagAlone(more);
   const shaped =
     command === CHAIN_RESTORE &&
@@ -113,86 +94,29 @@ function restoreAsked(argv: readonly string[]): Asked | Problems {
   return { orgId: String(orgId), planId: String(planId), digest: String(digest), restoreId: id, ...flag };
 }
 
-/** The settings' problems for a repair, before anything connects. */
-function settingsProblems(config: OperatorConfig, store: unknown, anchors: unknown): string[] {
-  const { user, drillHost, host } = config.db;
-  return [
-    ...(user === REPAIR_ROLE ? [] : [`AGENTX_DB_USER must be ${REPAIR_ROLE}: only the owner may repair a chain`]),
-    ...(store === undefined ? [NO_STORE_PROBLEM] : []),
-    ...(anchors === undefined ? [NO_ANCHORS_PROBLEM] : []),
-    // Both are lower case (the config refuses a host that isn't), so one comparison tells them apart.
-    ...(drillHost === null || drillHost === host
-      ? ["AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST"]
-      : []),
-  ];
+/** The command a request file asks the job for, by its first word: the chain's repair, or the authority rows' plan or repair. */
+async function jobRun(config: OperatorConfig, keys: KeyProvider, argv: readonly string[], logger: Logger) {
+  if (argv[0] !== REQUEST_FLAG) {
+    logger.error('operator.refused', {
+      problems: [`${CHAIN_RESTORE} runs only from a request file: ${CHAIN_RESTORE_USAGE}`],
+    });
+    return 1;
+  }
+  const read = requestWords(argv);
+  if ('problems' in read) {
+    logger.error('operator.refused', { problems: read.problems });
+    return 1;
+  }
+  if (isStateCommand(read.words[0])) return stateRun(config, keys, read.words, logger);
+  return restoreRun(config, keys, read.words, logger);
 }
 
-/**
- * Whether the store said the file isn't there: Azure's 404, or the folder's
- * own refusal (development and test). BlobStoreFailed carries its answer in
- * these fixed words alone (packages/platform/src/storage/write-once.ts).
- */
-const missingFile = (error: unknown): boolean =>
-  error instanceof BlobStoreFailed &&
-  (error.message.includes('the blob service answered 404 ') || error.message.endsWith('no file of that name'));
-
-/**
- * Why the plan asked for can't be applied, from its own file in the evidence
- * store (chain-recovery-plan's): none there, not this organisation's plan of
- * that ID, a plan that was refused, or another digest than the one asked. Its
- * first line is its summary; the rows after it are what the repair makes again.
- */
-async function storedPlanProblems({ evidence }: OperatorConfig, asked: Asked): Promise<string[]> {
-  const { container, directory } = evidence;
-  let reader;
-  if (container !== null) {
-    reader = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
-  } else if (directory === null) {
-    return [];
-  } else {
-    reader = folderWriteOnceStore(directory);
-  }
-  const name = `${asked.orgId}/chain-recovery-${asked.planId}.ndjson`;
-  let summary: Readonly<Record<string, unknown>>;
-  try {
-    const text = (await reader.get(name)).toString('utf8');
-    const parsed: unknown = JSON.parse(text.slice(0, text.indexOf('\n')));
-    summary = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-  } catch (error) {
-    // No such file, or a first line that isn't JSON. Anything else (the network, a timeout) is the caller's failure.
-    if (!(missingFile(error) || error instanceof SyntaxError)) throw error;
-    return [
-      `the plan ${asked.planId} has no readable file in the evidence store (${name}): make the plan first, or check its ID`,
-    ];
-  }
-  if (summary.k !== 'plan' || summary.planId !== asked.planId || summary.orgId !== asked.orgId) {
-    return [`the file ${name} is not this organisation's plan ${asked.planId}`];
-  }
-  if (summary.ok !== true) {
-    return [`the plan ${asked.planId} was refused (${String(summary.reason)}): there is nothing to apply`];
-  }
-  return summary.digest === asked.digest
-    ? []
-    : [`the digest asked is not the plan ${asked.planId}'s: copy it again from the plan's line`];
-}
-
-/** Opens one connection to a server as the owner. */
-const ownerOn = (config: OperatorConfig, logger: Logger, to: { host: string; readOnly: boolean }) =>
-  createDatabase<AuditTables>({ ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME }, logger);
-
-/** Why either connection can't be used: the copy read-only, both the owner and unable to bypass the walls. */
-async function connectionProblems(copy: Database<AuditTables>, live: Database<AuditTables>): Promise<string[]> {
-  const [copyRole, liveRole] = await Promise.all([repairRoleProblems(copy), repairRoleProblems(live)]);
-  return [
-    ...((await transactionsReadOnly(copy)) ? [] : ["the drill's copy is not read-only, so nothing was read"]),
-    ...copyRole.map((text) => `the drill's copy: ${text}`),
-    ...liveRole.map((text) => `the live server: ${text}`),
-  ];
-}
+/** The chain's plan: the file chain-recovery-plan keeps it in, and its summary's `k`. */
+const CHAIN_PLAN = { file: 'chain-recovery', line: 'plan' } as const;
 
 /** Repairs as asked: the exit code. */
-async function restoreRun(config: OperatorConfig, keys: KeyProvider, argv: readonly string[], logger: Logger) {
-  const asked = restoreAsked(argv);
+async function restoreRun(config: OperatorConfig, keys: KeyProvider, words: readonly string[], logger: Logger) {
+  const asked = restoreAsked(words);
   if ('problems' in asked) {
     logger.error('operator.refused', { problems: asked.problems });
     return 1;
@@ -201,55 +125,30 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, argv: reado
   const log = logger.child({ orgId });
   log.info('operator.starting', { command: CHAIN_RESTORE, role: config.db.user, keys: keys.describe() });
   log.info('operator.chain_restore_owner_login', { restoreId, note: OWNER_LOGIN_NOTE });
-  const store = evidenceStoreOf(config);
-  // A chain's rebase line is checked with `audit-rebase`'s public half (E11), as the planner checks it with the key.
-  const anchors = anchorLogOf(config, keys, logger);
-  const refused = settingsProblems(config, store, anchors);
-  if (store === undefined || anchors === undefined || config.db.drillHost === null || refused.length > 0) {
-    log.error('operator.refused', { problems: refused });
-    return 1;
-  }
-  const copy = ownerOn(config, logger, { host: config.db.drillHost, readOnly: true });
-  const live = ownerOn(config, logger, { host: config.db.host, readOnly: false });
   const facts = { restoreId, planId, orgId, digest, discardFork, release: config.release, run: config.run };
-  try {
-    // Before either connection is used: a repair applies only the plan kept as evidence.
-    const planProblems = await storedPlanProblems(config, asked);
-    if (planProblems.length > 0) {
-      log.error('operator.refused', { restoreId, problems: planProblems });
-      return 1;
-    }
-    const problems = await connectionProblems(copy, live);
-    if (problems.length > 0) {
-      log.error('operator.refused', { problems });
-      return 1;
-    }
-    await anchors.read();
-    if (anchors.state() !== 'read') {
-      log.error('operator.refused', {
-        problems: ["the chains' anchors' store couldn't be read whole, so no repair can be checked against it"],
-      });
-      return 1;
-    }
-    if (!(await schemaSoundAtStart({ database: live, appRole: APP_ROLE, logger }))) return 1;
-    return await repaired(store, facts, log, () =>
-      restoreChain({
-        copy,
-        live,
-        keys,
-        orgId,
-        anchor: anchors.latest({ kind: 'organisation', orgId }),
-        digest,
-        discardFork,
-      }),
-    );
-  } catch (error) {
-    log.error('operator.failed', { command: CHAIN_RESTORE, restoreId, err: error });
-    return 1;
-  } finally {
-    await copy.destroy();
-    await live.destroy();
-  }
+  return onRestoreSides(
+    config,
+    keys,
+    log,
+    {
+      command: CHAIN_RESTORE,
+      liveReadOnly: false,
+      before: () => storedPlanProblems(config, asked, CHAIN_PLAN),
+      said: { restoreId },
+    },
+    ({ copy, live, store, anchors }) =>
+      repaired(store, facts, log, () =>
+        restoreChain({
+          copy,
+          live,
+          keys,
+          orgId,
+          anchor: anchors.latest({ kind: 'organisation', orgId }),
+          digest,
+          discardFork,
+        }),
+      ),
+  );
 }
 
 /**
@@ -301,7 +200,7 @@ export async function runChainRestore(host: OperatorProcess, options: OperatorOp
     return 1;
   }
   const logger = createLogger({ service: SERVICE, config, destination });
-  const code = await restoreRun(config, keys, options.argv, logger);
+  const code = await jobRun(config, keys, options.argv, logger);
   logger.flush();
   host.exitCode = code;
   return code;

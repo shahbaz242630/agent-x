@@ -38,6 +38,7 @@ export {
   keysOnceIssued,
   MOST_KEYS_LISTED,
   oneKeyIssueAtATime,
+  revokeKey,
   roomForAKey,
   TooManyAgentKeys,
 } from './infrastructure/agent-keys.ts';
