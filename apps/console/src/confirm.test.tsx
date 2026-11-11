@@ -78,7 +78,8 @@ describe('the shared confirm', () => {
     await userEvent.click(pause);
     await userEvent.click(confirmButton());
 
-    expect(onConfirm).toHaveBeenCalledWith('pause');
+    // With the version of the words shown, which the change sends back (CO3).
+    expect(onConfirm).toHaveBeenCalledWith('pause', 3);
   });
 
   it('shows a change with no choice in its words, ready to confirm', async () => {
@@ -88,7 +89,7 @@ describe('the shared confirm', () => {
     expect(screen.queryByRole('radio')).toBeNull();
     await userEvent.click(confirmButton());
 
-    expect(onConfirm).toHaveBeenCalledWith('confirm');
+    expect(onConfirm).toHaveBeenCalledWith('confirm', 1);
   });
 
   it.each([
@@ -134,13 +135,16 @@ describe('the shared confirm', () => {
         arrive = resolve;
       });
 
-    shown('mark_failed', false, queries);
+    const { onConfirm } = shown('mark_failed', false, queries);
 
     expect(await screen.findByRole('status')).toHaveProperty('textContent', 'Loading…');
     expect(screen.queryByText('Marking this payment failed frees it.')).toBeNull();
     expect(confirmButton()).toHaveProperty('disabled', true);
     arrive(new Response(JSON.stringify(changed)));
     expect(await screen.findByText('New words, version 2.')).toBeDefined();
+    await userEvent.click(confirmButton());
+    // The version of the words read afresh, never the one read before (CO3).
+    expect(onConfirm).toHaveBeenCalledWith('confirm', 2);
   });
 
   it('confirms a change the API states no words for in the console’s own, reading none', async () => {
@@ -175,7 +179,8 @@ describe('the shared confirm', () => {
     );
     await userEvent.click(screen.getByRole('button', { name: 'Go' }));
 
-    expect(onConfirm).toHaveBeenCalledWith('confirm');
+    // The console's own words have no version to send back.
+    expect(onConfirm).toHaveBeenCalledWith('confirm', undefined);
     expect(fetch).not.toHaveBeenCalled();
   });
 

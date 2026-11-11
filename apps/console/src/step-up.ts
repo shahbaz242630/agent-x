@@ -107,8 +107,12 @@ function challengeIn(status: number, body: unknown): string | undefined {
 export interface Asked {
   /** The ask's answer, which may say how the change would come out (an approve that would reject, 6B1). */
   readonly answer: unknown;
-  /** Keeps the change and leaves to sign in again, under `label` if what was asked turned out otherwise. */
-  readonly stepUp: (label?: string) => 'stepping';
+  /**
+   * Keeps the change and leaves to sign in again, under `label` if what was
+   * asked turned out otherwise, its confirm sending `confirmed` too: what the
+   * person confirmed once the ask answered (the version of the words shown, CO3).
+   */
+  readonly stepUp: (label?: string, confirmed?: Readonly<Record<string, unknown>>) => 'stepping';
 }
 
 /**
@@ -122,8 +126,15 @@ export async function askFirst(change: Change): Promise<{ readonly done: unknown
   if (challenge === undefined) return { done: answered.body };
   return {
     answer: answered.body,
-    stepUp: (shown = label) => {
-      keep({ challenge, label: shown, confirmPath, body, organization, idempotencyKey: crypto.randomUUID() });
+    stepUp: (shown = label, confirmed = {}) => {
+      keep({
+        challenge,
+        label: shown,
+        confirmPath,
+        body: { ...body, ...confirmed },
+        organization,
+        idempotencyKey: crypto.randomUUID(),
+      });
       goTo(stepUpAddress(challenge, window.location.pathname));
       return 'stepping';
     },
