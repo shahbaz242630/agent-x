@@ -888,7 +888,8 @@ describe('writes come on a schedule of their own during a run', () => {
     const run = check.run();
     await vi.advanceTimersByTimeAsync(0);
     await new Promise((resolve) => setImmediate(resolve));
-    expect(started).toEqual(all);
+    // Everyone, in the store's walk: a shard at a time (PL-65 PR4), so not in the list's order.
+    expect(started.toSorted()).toEqual(all);
     expect(lines(capture, 'audit.anchor_check_done')).toEqual([]);
     await vi.advanceTimersByTimeAsync(59_999);
     expect(lines(capture, 'audit.anchor_check_done')).toEqual([]);

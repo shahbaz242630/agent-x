@@ -63,13 +63,13 @@ import {
   OLD_EDIT_DAYS,
   type PassRecord,
   type Progress,
-  shardOf,
   signPass,
   signProgress,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { shardWalk } from './anchor-walk.ts';
 import { Stopped } from './background.ts';
 
 /** The rotation's reads of one organisation's chain, each in a transaction of its own under its wall. */
@@ -241,6 +241,8 @@ export interface RotationOptions {
     pin(chain: Chain): Promise<(() => void) | undefined>;
     /** What is last known of a chain, held or let go, with no read: what the share, the order and lateness go by. */
     lastKnown(chain: Chain): LastKnown | undefined;
+    /** Near the budget, what waits written, before a shard is read back (PR4: each step leaves a line waiting). */
+    roomToReadBack(): Promise<void>;
   };
 }
 
@@ -285,8 +287,7 @@ const FAILED = Symbol('failed');
 
 const chainOf = (orgId: string) => ({ kind: 'organisation', orgId }) as const;
 
-/** An organisation's chain's shard in the anchors' store (PL-65). */
-const shardOfOrg = (orgId: string): number => shardOf(`organisation:${orgId}`);
+const itself = (orgId: string): string => orgId;
 
 export function createRotation({
   checks,
@@ -342,6 +343,7 @@ export function createRotation({
   /** `work` with the chain's shard pinned, read again first if it was let go; MISSED if it can't be (said by the log). */
   const pinned = async <T>(orgId: string, work: () => Promise<T>): Promise<T | typeof MISSED> => {
     if (shards === undefined) return work();
+    if (!shards.holds(chainOf(orgId))) await shards.roomToReadBack();
     const release = await shards.pin(chainOf(orgId));
     if (release === undefined) return MISSED;
     try {
@@ -424,31 +426,21 @@ export function createRotation({
   };
 
   /**
-   * Where shards are let go (PR3), the days grouped by shard, so each shard is read back once a run however many of its
-   * days are due; the groups oldest first, by the longest-waiting day in each, so a shard late in number never waits
-   * behind others run after run. A day missed keeps when it was due, and ages to the front.
-   */
-  const inShards = (queue: readonly Day[]): readonly Day[] => {
-    const groups = new Map<number, Day[]>();
-    for (const day of queue) {
-      const shard = shardOfOrg(day.orgId);
-      const group = groups.get(shard);
-      if (group === undefined) groups.set(shard, [day]);
-      else group.push(day);
-    }
-    // A fold, not Math.min(...): a spread of a very long group would overflow the stack.
-    const oldest = (group: readonly Day[]): number =>
-      group.reduce((least, day) => Math.min(least, day.dueAt), Number.POSITIVE_INFINITY);
-    return [...groups.values()].toSorted((one, other) => oldest(one) - oldest(other)).flat();
-  };
-
-  /**
-   * The days waiting, oldest first (by shard, oldest group first, where shards are let go), until the run ends. One whose
-   * read fails goes to the back, where it was, and the rest go on.
+   * The days waiting, oldest first, until the run ends. Where shards are let go (PR3), a shard at a time (anchor-walk.ts),
+   * so each is read back once a run however many of its days are due: the shards by the longest-waiting day in each, so
+   * one late in number never waits behind others run after run. A day missed keeps when it was due, and ages to the
+   * front. One whose read fails goes to the back, where it was, and the rest go on.
    */
   const takeDays = async (listed: ReadonlySet<string>, signal: AbortSignal): Promise<void> => {
     const queue = [...days.values()];
-    const ordered = shards === undefined ? queue : inShards(queue);
+    const ordered =
+      shards === undefined
+        ? queue
+        : shardWalk(
+            queue,
+            (day) => day.orgId,
+            (day) => day.dueAt,
+          );
     for (const day of ordered) {
       if (signal.aborted) return;
       // Gone from the list (its own alarm).
@@ -469,13 +461,20 @@ export function createRotation({
     }
   };
 
-  /** The listed, the chains passed longest ago first, those never passed before all. */
-  const oldestFirst = (listed: readonly string[]): readonly string[] =>
-    listed
-      // A chain whose shard is let go by its last pass known: one passed lately doesn't jump the queue to be read back.
-      .map((orgId) => ({ orgId, at: knownOf(orgId).passedAt ?? 0 }))
+  /**
+   * The listed, the chains passed longest ago first, those never passed before all. A chain whose shard is let go by its
+   * last pass known: one passed lately doesn't jump the queue to be read back. Where shards are let go (PR4), a shard at
+   * a time (anchor-walk.ts): the shards by the chain in each passed longest ago, so a round reads each shard back once;
+   * after a restart the round begins again with the shards waiting longest, as the store's signed passes say.
+   */
+  const oldestFirst = (listed: readonly string[]): readonly string[] => {
+    const passedAt = (orgId: string): number => knownOf(orgId).passedAt ?? 0;
+    if (shards !== undefined) return shardWalk(listed, itself, passedAt);
+    return listed
+      .map((orgId) => ({ orgId, at: passedAt(orgId) }))
       .sort((one, other) => one.at - other.at)
       .map(({ orgId }) => orgId);
+  };
 
   /**
    * The next chain to pass: one whose read didn't come back first, then one under way, then by the round's order; a new
@@ -604,7 +603,7 @@ export function createRotation({
       if (known.held) owed(orgId);
       else if (known.seq !== undefined && known.passAt === undefined) away.push(orgId);
     }
-    const byShard = away.toSorted((one, other) => shardOfOrg(one) - shardOfOrg(other));
+    const byShard = shardWalk(away, itself, () => 0);
     for (const orgId of byShard) {
       if (signal.aborted) return;
       await pinned(orgId, () => {

@@ -174,6 +174,8 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
     } satisfies PassRecord,
     shards: {
       holds: here,
+      // Nothing waits here to be written: no room to make.
+      roomToReadBack: () => Promise.resolve(),
       // What the log last knew of it, with no read: here, what it holds.
       lastKnown: (chain: Chain) => ({
         seq: anchors.latest(chain)?.seq,
@@ -1501,5 +1503,81 @@ describe('over a log that lets shards go (PL-65 PR3): each step pins its chain�
     expect(BigInt(String(made.lines('audit.anchor_rotation_done')[0]?.budget))).toBeGreaterThan(0n);
     expect(made.missed).toEqual([]);
     expect(logs.lines().filter((line) => line.event === 'audit.anchor_shards_churning')).toEqual([]);
+  });
+});
+
+describe('the full pass walks the store a shard at a time (PL-65 PR4)', () => {
+  /** The shards a sequence of organisations comes in, each run of the same shard counted once. */
+  const shardRuns = (orgIds: readonly string[]): number[] =>
+    orgIds
+      .map((orgId) => shardOf(`organisation:${orgId}`))
+      .filter((shard, index, all) => index === 0 || all[index - 1] !== shard);
+
+  it('a round takes each shard’s chains together, the shard passed longest ago first, whatever its number', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards });
+    const orgs = Array.from({ length: 300 }, (_, index) => `${ORG_PREFIX}${String(5000 + index).padStart(12, '0')}`);
+    // The chain passed longest ago, in the shard last in number among them; the rest passed since, in an order of their own.
+    const late = orgs.reduce((one, other) =>
+      shardOf(`organisation:${other}`) > shardOf(`organisation:${one}`) ? other : one,
+    );
+    for (const [index, orgId] of orgs.entries()) {
+      made.anchor(orgId, 5n);
+      const passedAt = orgId === late ? AT.getTime() - 3 * DAY : AT.getTime() - DAY + ((index * 7919) % 600) * 60_000;
+      shards.inner.passes.keepPass(signPass(keys, chainOf(orgId), point(5n), new Date(passedAt)));
+      shards.letGo(orgId);
+    }
+    // A first run, then a whole round's worth of time: the round's every chain passed, in its order.
+    await made.run(orgs);
+    made.clock.advanceBy(3 * DAY);
+    await made.run(orgs);
+    const passed = made.calls.filter((call) => call.check === 'pass').map((call) => call.orgId);
+    expect(new Set(passed)).toEqual(new Set(orgs));
+    expect(passed[0]).toBe(late);
+    // The round, each chain once (a chain's steps one after another), up to the last chain's: what of the share is left
+    // after it begins the next round.
+    const round = passed.filter((orgId, index) => passed.indexOf(orgId) === index);
+    expect(round).toHaveLength(orgs.length);
+    expect(
+      passed
+        .slice(0, passed.lastIndexOf(round.at(-1) ?? '') + 1)
+        .filter((orgId, index, all) => all[index - 1] !== orgId),
+    ).toEqual(round);
+    // A shard's chains together: each shard comes once in the round's order.
+    const runs = shardRuns(round);
+    expect(new Set(runs).size).toBe(runs.length);
+    expect(made.failed).toEqual([]);
+    expect(made.missed).toEqual([]);
+  });
+
+  it('after a restart the round begins again with the shard passed longest ago, as the store’s signed passes say', async () => {
+    const shards = lettingGo({ sticky: true });
+    const orgs = Array.from({ length: 60 }, (_, index) => `${ORG_PREFIX}${String(7000 + index).padStart(12, '0')}`);
+    for (const [index, orgId] of orgs.entries()) {
+      shards.inner.anchors.keep(signAnchor(keys, chainOf(orgId), point(5n), AT));
+      const passedAt = AT.getTime() - DAY + index * 60_000;
+      shards.inner.passes.keepPass(signPass(keys, chainOf(orgId), point(5n), new Date(passedAt)));
+      shards.letGo(orgId);
+    }
+    // The last process passed the first twenty, longest ago first: those are now the newest.
+    for (const orgId of orgs.slice(0, 20)) {
+      shards.inner.passes.keepPass(signPass(keys, chainOf(orgId), point(5n), new Date(AT.getTime() - 60_000)));
+    }
+    const made = rotating({ shards });
+    const first: string[] = [];
+    const ending = new AbortController();
+    made.answer.pass = (orgId, _cursor, target) => {
+      first.push(orgId);
+      if (first.length === 5) ending.abort();
+      return Promise.resolve({ ok: true, ...target, to: target.seq });
+    };
+    made.clock.advanceBy(3 * DAY);
+    await made.run(orgs, ending.signal);
+    // Begun with the shard whose chain was passed longest ago of those the last process never reached.
+    const ofShard = (orgId: string): number => shardOf(`organisation:${orgId}`);
+    const waiting = orgs.slice(20);
+    const oldestShard = ofShard(waiting[0] ?? '');
+    expect(ofShard(first[0] ?? '')).toBe(oldestShard);
+    expect(orgs.slice(0, 20).filter((orgId) => ofShard(orgId) !== oldestShard)).not.toContain(first[0]);
   });
 });

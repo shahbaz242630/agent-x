@@ -260,13 +260,17 @@ const EVICT_TO = 0.8;
 
 /**
  * What an organisation seen in the store, whose shard is let go, is counted at: its chain's name, and what is last known
- * of it (its place, when its last pass began, when its place was owed), in a map.
+ * of it (its place and when it was signed, when its last pass began, when its place was owed), in a map.
  */
 const SEEN_NAME_BYTES = 160;
 
-/** What is last known of a chain: its anchored place, when its last pass began, and when its place reached was owed. */
+/**
+ * What is last known of a chain: its anchored place and when that anchor was signed (PR4: what the anchor check's walk
+ * orders and judges lateness by), when its last pass began, and when its place reached was owed.
+ */
 export interface LastKnown {
   readonly seq?: bigint | undefined;
+  readonly anchoredAt?: number | undefined;
   readonly passedAt?: number | undefined;
   readonly placeAt?: number | undefined;
 }
@@ -276,6 +280,16 @@ export interface LastKnown {
  * read once over. Past it, what is read each hour is the whole store again, at about a dozen calls a shard.
  */
 const CHURN_RELOADS = SHARDS;
+
+/**
+ * A chain's anchored place last known, given an anchor line of it: the highest place wins, as in `merge`, and the same
+ * place signed again later (an idle chain checked since) moves its time on.
+ */
+const anchoredOf = (was: LastKnown, seq: bigint, at: number): Pick<LastKnown, 'seq' | 'anchoredAt'> => {
+  if (was.seq === undefined || seq > was.seq) return { seq, anchoredAt: at };
+  if (seq === was.seq) return { seq, anchoredAt: Math.max(was.anchoredAt ?? at, at) };
+  return { seq: was.seq, anchoredAt: was.anchoredAt };
+};
 
 /** The platform chain's shard: never let go, as more than the anchor check reads its anchor (job-list.ts). */
 const PLATFORM_SHARD = shardOf('platform');
@@ -353,6 +367,13 @@ export interface AnchorLog extends AnchorStore, PassRecord {
    * chain goes by, never reading a shard back for it. Nothing for a chain never seen.
    */
   lastKnown(chain: Chain): LastKnown | undefined;
+  /**
+   * For a walk about to read a shard back (PR4): near the budget, what waits to be written is written now, so the shards
+   * it holds may go. A walk signing each chain again as it passes leaves a line waiting in every shard behind it, none of
+   * which may go until written, and the next shard would find no room, its organisations waiting until the next write.
+   * Nothing while writes are failing (each would wait out the store), or with room enough. Never throws.
+   */
+  roomToReadBack(): Promise<void>;
   /**
    * What is held, by this log's count against what it can hold; the records its tables really use, and the bytes their
    * buffers take; and how many shards are held.
@@ -753,7 +774,7 @@ export function createAnchorLog({
     const was = seenElsewhere.get(chain) ?? {};
     const ms = at.getTime();
     const later = (known: number | undefined): number => Math.max(known ?? ms, ms);
-    if (kind === 'a') seenElsewhere.set(chain, { ...was, seq: was.seq === undefined || seq > was.seq ? seq : was.seq });
+    if (kind === 'a') seenElsewhere.set(chain, { ...was, ...anchoredOf(was, seq, ms) });
     else if (kind === 'p') seenElsewhere.set(chain, { ...was, passedAt: later(was.passedAt) });
     else seenElsewhere.set(chain, { ...was, placeAt: later(was.placeAt) });
   };
@@ -1837,6 +1858,13 @@ export function createAnchorLog({
     return isResident(shard);
   };
 
+  /** See `roomToReadBack` on AnchorLog. */
+  const roomToReadBack = async (): Promise<void> => {
+    if (!evicts || layout !== 'sharded' || writeFailingSince !== undefined) return;
+    if (heldBytes(0) <= mostFileBytes * EVICT_TO || waitingShards().size === 0) return;
+    await flushed();
+  };
+
   /** Past what can be held with no read under way to count its own: shards let go now. */
   const trimmed = (): void => {
     if (running === 0) letGo(undefined);
@@ -2284,6 +2312,14 @@ export function createAnchorLog({
     }
   };
 
+  /** What has moved, written: one write at a time, a second call joining the first. Never throws. */
+  const flushed = (): Promise<void> => {
+    flushing ??= writeDue().finally(() => {
+      flushing = undefined;
+    });
+    return flushing;
+  };
+
   return Object.freeze({
     epoch,
     latest: (chain: Chain) => latest(chainName(chain)),
@@ -2364,8 +2400,10 @@ export function createAnchorLog({
       const name = chainName(chain);
       // Held: what is held, its shard's place in the queue to go untouched. Let go: what was last seen of it.
       if (!evicts || isResident(shardOfChain(name))) {
+        const anchor = anchors.get(name);
         const known = {
-          seq: anchors.get(name)?.seq,
+          seq: anchor?.seq,
+          anchoredAt: anchor?.at.getTime(),
           passedAt: sides.p.get(name)?.at.getTime(),
           placeAt: sides.u.get(name)?.at.getTime(),
         };
@@ -2404,12 +2442,8 @@ export function createAnchorLog({
         elsewhere: seenElsewhere.size,
       };
     },
-    flush(): Promise<void> {
-      flushing ??= writeDue().finally(() => {
-        flushing = undefined;
-      });
-      return flushing;
-    },
+    flush: flushed,
+    roomToReadBack,
     writeFailed,
   });
 }
