@@ -816,10 +816,14 @@ export function createAnchorCheck({
     takeAnswers(asked, answers);
   };
 
-  /** Those of them with an anchor held, each with it: what a probe asks of. */
+  /**
+   * Those of them with an anchor held, each with it: what a probe asks of. Read from the log without counting their
+   * shards as used (PR4), so the probe's list order doesn't decide which shard goes first.
+   */
   const withAnchors = (orgIds: readonly string[]) =>
     orgIds.flatMap((orgId) => {
-      const anchor = anchors.latest({ kind: 'organisation', orgId });
+      const chain = { kind: 'organisation', orgId } as const;
+      const anchor = durable !== undefined && anchors === durable ? durable.heldAnchor(chain) : anchors.latest(chain);
       return anchor === undefined ? [] : [{ orgId, from: anchor }];
     });
 
@@ -885,6 +889,18 @@ export function createAnchorCheck({
       if (!(error instanceof Stopped)) sayProbeMissed(away.length, error);
     } finally {
       release();
+    }
+  };
+
+  // The organisation whose turn the walk last took, so the log hears when the walk leaves its shard.
+  let walkedFrom: string | undefined;
+  /** The walk takes this organisation's turn: if that leaves the last one's shard, the log lets that shard go first. */
+  const walkTo = (orgId: string): void => {
+    if (durable === undefined) return;
+    const from = walkedFrom;
+    walkedFrom = orgId;
+    if (from !== undefined && shardOfOrganisation(from) !== shardOfOrganisation(orgId)) {
+      durable.walkedPast({ kind: 'organisation', orgId: from });
     }
   };
 
@@ -959,6 +975,7 @@ export function createAnchorCheck({
     signal: AbortSignal,
   ): Promise<Outcome> => {
     let ranMs: number | undefined;
+    walkTo(orgId);
     // Awaited only where there is one, so a run with every shard held takes its turns as before, tick for tick.
     const away = listed.has(orgId) ? probedAway(from, orgId, signal) : undefined;
     if (away !== undefined) await away;

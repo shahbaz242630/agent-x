@@ -762,6 +762,37 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
       expect(log.memoryHeld().bytes).toBeLessThanOrEqual(log.memoryHeld().mostBytes);
     });
 
+    it('a hand-off’s read back mid-walk, every shard held waiting: refused for memory, then read whole once the next write lands', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      // A walk signing each chain again as it passes, with no write between: read back until one finds no room, as every
+      // shard held then has a line waiting, none of which may go.
+      made.clock.at = new Date(made.clock.at.getTime() + MINUTE);
+      for (const chain of held(log)) log.keep(anchorOf(chain, 7n, made.clock.at));
+      let refused: Chain | undefined;
+      for (const chain of letGo(log)) {
+        const release = await log.pin(chain);
+        if (release === undefined) {
+          refused = chain;
+          break;
+        }
+        log.keep(anchorOf(chain, 7n, made.clock.at));
+        release();
+      }
+      const away = refused ?? PLATFORM;
+      expect(refused).toBeDefined();
+      expect(made.lines('audit.anchor_shard_unreadable')).toEqual([expect.objectContaining({ reason: 'memory' })]);
+      // The scheduled write: what it wrote goes at once, down to the headroom, so the hand-off's next try is read whole.
+      await log.flush();
+      expect(log.memoryHeld().bytes).toBeLessThanOrEqual(log.memoryHeld().mostBytes * 0.8);
+      const release = await log.pin(away);
+      expect(release).toBeDefined();
+      expect(log.latest(away)?.seq).toBe(6n);
+      release?.();
+      expect(made.lines('audit.anchor_shard_unreadable')).toHaveLength(1);
+    });
+
     it('no write first with room enough, with nothing waiting, while writes fail, or in a log that holds every shard', async () => {
       const made = await world();
       const roomy = logOf(made, { evicts: true });

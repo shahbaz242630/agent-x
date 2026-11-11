@@ -133,6 +133,32 @@ describe('SEC-ANC-06 the anchor check walks the store a shard at a time (PL-65 P
     expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(BUDGET);
   });
 
+  it('past the budget, a round reads back only the shards that don’t fit: those the walk passed go first', async () => {
+    // About two thirds of the 235 shards fit: before the walk told the log what it passed, least-recently-used let go
+    // exactly what came next, and every round read back all 234.
+    const budget = 230_000;
+    const { fake, chains, at } = await shardedStore(ORGS);
+    const after = process(fake, chains.organizations, at, { evicts: true, mostFileBytes: budget });
+    const shards = new Set(ORGS.map(shardOfOrganisation));
+    await after.check.run();
+    for (let round = 0; round < 2; round += 1) {
+      after.clock.advanceBy(10 * MINUTE);
+      const heldAtStart = new Set(
+        ORGS.filter((orgId) => after.log.holds({ kind: 'organisation', orgId })).map(shardOfOrganisation),
+      );
+      const loadedBefore = after.lines('audit.anchor_shard_loaded').length;
+      await after.check.run();
+      const loaded = after.lines('audit.anchor_shard_loaded').slice(loadedBefore);
+      // The bound: the shards not held as the round begins, read back once each, and none of those held.
+      expect(heldAtStart.size).toBeGreaterThan(100);
+      expect(loaded.length).toBeLessThanOrEqual(shards.size - heldAtStart.size);
+      const heldNames = new Set([...heldAtStart].map((shard) => shard.toString(16).padStart(2, '0')));
+      expect(loaded.filter(({ shard }) => heldNames.has(String(shard)))).toEqual([]);
+      expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(budget);
+      for (const orgId of ORGS) expect(chains.given.get(orgId)?.at(-1)).toBe(3n);
+    }
+  });
+
   it('chains in shards let go are probed as the walk reaches their shard, once a shard, and those unmoved read no further', async () => {
     const orgIds = many(120, 3000);
     const { fake, chains, at } = await shardedStore(orgIds);

@@ -375,6 +375,18 @@ export interface AnchorLog extends AnchorStore, PassRecord {
    */
   roomToReadBack(): Promise<void>;
   /**
+   * For a walk (PR4): it has gone past the chain's shard, and won't want it again this round. Such a shard goes first when
+   * room is needed, the one passed last before those passed earlier: in a walk that repeats, the shard passed longest
+   * ago is the one it reaches soonest, so least-recently-used would let go exactly what comes next. Used again, it is as
+   * any other. Nothing in a log that holds every shard.
+   */
+  walkedPast(chain: Chain): void;
+  /**
+   * The chain's anchor where its shard is held, as `latest`, without counting the shard as used (PR4): for the run's
+   * probe, which reads every held anchor in the list's order and would otherwise reorder what goes first.
+   */
+  heldAnchor(chain: Chain): Anchor | undefined;
+  /**
    * What is held, by this log's count against what it can hold; the records its tables really use, and the bytes their
    * buffers take; and how many shards are held.
    */
@@ -803,12 +815,17 @@ export function createAnchorLog({
     return false;
   };
   /** A chain's anchor, a copy: one that is a rebase's is known to `keep` by it as such, as the one object was before. */
-  const latest = (chain: string): Anchor | undefined => {
-    if (!visible(chain)) return undefined;
+  const latestUnmarked = (chain: string): Anchor | undefined => {
     const anchor = anchors.get(chain);
     if (anchor !== undefined && anchors.marked(chain)) fromRebase.add(anchor);
     return anchor;
   };
+  const latest = (chain: string): Anchor | undefined => (visible(chain) ? latestUnmarked(chain) : undefined);
+  // How many shards a walk has gone past, and when each held was last passed, by that count (PR4): those passed go
+  // first, the one passed last first, then the rest least recently used. A repeating walk wants next what it passed
+  // longest ago, so this keeps what it will reach soonest.
+  let walkedPasses = 0;
+  const walkPassedAt = new Float64Array(SHARDS);
   /** Whether the chain's newest rebase is later than `at`: whatever was dated then is passed over. */
   const rebasedAfter = (chain: string, at: Date): boolean => {
     const rebase = rebases.get(chain);
@@ -1048,8 +1065,8 @@ export function createAnchorLog({
    * first, until what is held is under `EVICT_TO` of it, or none is left that may go. `stage`, a read's lines yet to be
    * merged, counts and goes with its shard.
    */
-  const letGo = (stage: PackedLines<Anchor> | undefined): void => {
-    if (!evicts || layout !== 'sharded' || heldBytes(stage?.size ?? 0) <= mostFileBytes) return;
+  const letGo = (stage: PackedLines<Anchor> | undefined, past = mostFileBytes): void => {
+    if (!evicts || layout !== 'sharded' || heldBytes(stage?.size ?? 0) <= past) return;
     const waiting = waitingShards();
     const tables = stage === undefined ? heldTables : [...heldTables, stage];
     const counts = new Float64Array(SHARDS);
@@ -1064,7 +1081,10 @@ export function createAnchorLog({
     let bytes = heldBytes(stage?.size ?? 0);
     const byUse = Array.from({ length: SHARDS }, (_, shard) => shard)
       .filter((shard) => (counts[shard] ?? 0) > 0 && evictable(shard, waiting))
-      .toSorted((one, other) => (usedAt[one] ?? 0) - (usedAt[other] ?? 0));
+      .toSorted(
+        (one, other) =>
+          (walkPassedAt[other] ?? 0) - (walkPassedAt[one] ?? 0) || (usedAt[one] ?? 0) - (usedAt[other] ?? 0),
+      );
     for (const shard of byUse) {
       if (bytes <= mostFileBytes * EVICT_TO) break;
       victims.add(shard);
@@ -1094,7 +1114,10 @@ export function createAnchorLog({
         table.delete(chain);
       }
     }
-    for (const shard of shards) resident[shard] = false;
+    for (const shard of shards) {
+      resident[shard] = false;
+      walkPassedAt[shard] = 0;
+    }
     const folders = [...shards].map((shard) => shardFolder(epoch, shard));
     const ofThem = (name: string): boolean => folders.some((folderName) => name.startsWith(folderName));
     for (const name of written) if (ofThem(name)) written.delete(name);
@@ -1762,6 +1785,11 @@ export function createAnchorLog({
         kind: error.kind,
         fileAt: error.fileAt,
         mostBytes: mostFileBytes,
+        // What the floor is made of (PR4): every organisation seen in a shard let go is still counted, about 160 bytes
+        // each, so past enough of them no shard has room to be read back.
+        elsewhere: seenElsewhere.size,
+        elsewhereBytes: seenElsewhere.size * SEEN_NAME_BYTES,
+        heldBytes: heldBytes(0),
       });
       if (state !== 'read') state = 'unreadable';
     } finally {
@@ -2307,8 +2335,10 @@ export function createAnchorLog({
     } catch (error) {
       writeFailed(error);
     } finally {
-      // What was written waits no more, so its shard may go.
+      // What was written waits no more, so its shard may go: and near the budget, down to `EVICT_TO` now (PR4), so the
+      // next read back, a hand-off's among them, finds room at once rather than failing on shards that were waiting.
       trimmed();
+      if (running === 0) letGo(undefined, mostFileBytes * EVICT_TO);
     }
   };
 
@@ -2444,6 +2474,18 @@ export function createAnchorLog({
     },
     flush: flushed,
     roomToReadBack,
+    walkedPast(chain: Chain) {
+      if (!evicts) return;
+      const shard = shardOfChain(chainName(chain));
+      if (!isResident(shard)) return;
+      // Kept however it is used after, until it is let go or read back: a walk's lanes still on it use it as it leaves.
+      walkedPasses += 1;
+      walkPassedAt[shard] = walkedPasses;
+    },
+    heldAnchor(chain: Chain) {
+      const name = chainName(chain);
+      return !evicts || isResident(shardOfChain(name)) ? latestUnmarked(name) : undefined;
+    },
     writeFailed,
   });
 }

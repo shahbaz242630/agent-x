@@ -1,8 +1,11 @@
 // The anchors' store walked shard by shard (PL-65 PR4). Where the anchor log lets shards go past its memory budget (PR3),
 // work taken in any other order reads a shard back for one chain, lets it go for another's, and reads it back again: past
 // the budget, every chain a read of the store. So the anchor check's turns, the rotation's days and its full pass each
-// take their organisations a shard at a time, each shard's together, and the log's least-recently-used rule then lets a
-// shard go only once the walk has gone past it: each shard read at most once a pass, whatever the budget.
+// take their organisations a shard at a time, each shard's together: each shard read back at most once a pass. And as
+// the walk leaves a shard it tells the log (`walkedPast`), which then lets that shard go before any other, the one passed
+// last first. A walk that repeats wants next the shard it passed longest ago, which least-recently-used would let go
+// first; this way what the budget holds at a round's end is still held when the next round reaches it, and a round reads
+// back about the shards that don't fit, not nearly all of them.
 //
 // The walk's place is its own order, kept as each kind of work keeps its place today (the check's turns, the pass's
 // round, between runs in a process), and after a restart made again from what the store itself says: the shards whose

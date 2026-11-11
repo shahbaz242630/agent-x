@@ -174,8 +174,9 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
     } satisfies PassRecord,
     shards: {
       holds: here,
-      // Nothing waits here to be written: no room to make.
+      // Nothing waits here to be written: no room to make; nor an order to let shards go in.
       roomToReadBack: () => Promise.resolve(),
+      walkedPast: () => undefined,
       // What the log last knew of it, with no read: here, what it holds.
       lastKnown: (chain: Chain) => ({
         seq: anchors.latest(chain)?.seq,

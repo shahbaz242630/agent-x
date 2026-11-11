@@ -69,7 +69,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { shardWalk } from './anchor-walk.ts';
+import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { Stopped } from './background.ts';
 
 /** The rotation's reads of one organisation's chain, each in a transaction of its own under its wall. */
@@ -243,6 +243,8 @@ export interface RotationOptions {
     lastKnown(chain: Chain): LastKnown | undefined;
     /** Near the budget, what waits written, before a shard is read back (PR4: each step leaves a line waiting). */
     roomToReadBack(): Promise<void>;
+    /** The walk has gone past the chain's shard: it goes first when room is needed (PR4). */
+    walkedPast(chain: Chain): void;
   };
 }
 
@@ -340,9 +342,16 @@ export function createRotation({
     return { held: true, seq: anchors.latest(chain)?.seq, passedAt, passAt };
   };
 
+  // The organisation whose shard the rotation last pinned, so the log hears when its walk leaves that shard (PR4).
+  let walkedFrom: string | undefined;
+
   /** `work` with the chain's shard pinned, read again first if it was let go; MISSED if it can't be (said by the log). */
   const pinned = async <T>(orgId: string, work: () => Promise<T>): Promise<T | typeof MISSED> => {
     if (shards === undefined) return work();
+    if (walkedFrom !== undefined && shardOfOrganisation(walkedFrom) !== shardOfOrganisation(orgId)) {
+      shards.walkedPast(chainOf(walkedFrom));
+    }
+    walkedFrom = orgId;
     if (!shards.holds(chainOf(orgId))) await shards.roomToReadBack();
     const release = await shards.pin(chainOf(orgId));
     if (release === undefined) return MISSED;
