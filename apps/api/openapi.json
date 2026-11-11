@@ -81,6 +81,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_KEYS_TOO_MANY",
+                    "description": "The agent has had 100 keys, ended ones included, the most Agent X keeps for one agent, so it can't be given another. Register it again as a new agent to give it a key. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_KEY_ENDED",
                     "description": "The agent key this request was made with was ended at once after it was approved, so it wasn't handed to the bank, and the money held for it was freed. The agent asks again with a live key."
                   },
@@ -1878,6 +1883,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "splitCheckWarning": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1898,7 +1909,8 @@
           "draftedBy",
           "draftedAt",
           "consentWarnings",
-          "capWarnings"
+          "capWarnings",
+          "splitCheckWarning"
         ],
         "additionalProperties": false,
         "description": "One version of a mandate’s terms, made once."
@@ -3739,106 +3751,6 @@
         ],
         "additionalProperties": false,
         "description": "A link to the organisation’s bank account."
-      },
-      "FundingSource": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "ACTIVE",
-              "SUSPENDED",
-              "ENDED"
-            ]
-          },
-          "availability": {
-            "type": "string",
-            "enum": [
-              "PENDING",
-              "ACTIVE",
-              "SUSPENDED",
-              "UNAVAILABLE"
-            ]
-          },
-          "consentStatus": {
-            "type": "string"
-          },
-          "consentExpiresAt": {
-            "type": "string",
-            "format": "date-time",
-            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
-          },
-          "holderName": {
-            "type": "string"
-          },
-          "accountType": {
-            "type": "string",
-            "enum": [
-              "retail",
-              "sme",
-              "corporate"
-            ]
-          },
-          "hint": {
-            "type": "string"
-          },
-          "controls": {
-            "type": "object",
-            "properties": {
-              "currency": {
-                "type": "string"
-              },
-              "period": {
-                "type": "string",
-                "enum": [
-                  "day",
-                  "week",
-                  "month",
-                  "year"
-                ]
-              },
-              "maxPaymentMinor": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]*$"
-              },
-              "maxPeriodMinor": {
-                "type": "string",
-                "pattern": "^[1-9][0-9]*$"
-              },
-              "maxPeriodPayments": {
-                "type": "integer",
-                "minimum": -9007199254740991,
-                "maximum": 9007199254740991
-              }
-            },
-            "required": [
-              "currency",
-              "period",
-              "maxPaymentMinor",
-              "maxPeriodMinor",
-              "maxPeriodPayments"
-            ],
-            "additionalProperties": false
-          }
-        },
-        "required": [
-          "id",
-          "status",
-          "availability",
-          "consentStatus",
-          "consentExpiresAt",
-          "holderName",
-          "accountType",
-          "hint",
-          "controls"
-        ],
-        "additionalProperties": false,
-        "description": "The organisation’s bank account as Agent X holds it: never an account number or a balance."
       },
       "FundingSourceShown": {
         "type": "object",
@@ -13845,7 +13757,7 @@
                     "source": {
                       "anyOf": [
                         {
-                          "$ref": "#/components/schemas/FundingSource"
+                          "$ref": "#/components/schemas/FundingSourceShown"
                         },
                         {
                           "type": "null"
@@ -13875,7 +13787,7 @@
                     "source": {
                       "anyOf": [
                         {
-                          "$ref": "#/components/schemas/FundingSource"
+                          "$ref": "#/components/schemas/FundingSourceShown"
                         },
                         {
                           "type": "null"
@@ -13968,7 +13880,7 @@
                     "sources": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/FundingSource"
+                        "$ref": "#/components/schemas/FundingSourceShown"
                       }
                     },
                     "next": {
@@ -14076,7 +13988,7 @@
                     "sources": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/FundingSource"
+                        "$ref": "#/components/schemas/FundingSourceShown"
                       }
                     },
                     "next": {

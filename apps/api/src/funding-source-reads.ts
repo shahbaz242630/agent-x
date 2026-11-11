@@ -4,7 +4,8 @@
 // INTEGRITY_FAILED, and holds the organisation.
 //
 // - `list` and `show`: for the organisation's members, every source, ENDED
-//   ones too, as Agent X holds it.
+//   ones too, as Agent X holds it, each with its consent-expiry choice in
+//   force (decision 21; a page's choices read in one trip, PM5).
 // An agent's sources are its mandate's (agent-mandate.ts, Phase 2 B5).
 import { type SourceRecord, sourcesPage } from '@agentx/core/modules/funding-sources';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
@@ -13,7 +14,7 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { consentExpiryOf } from './consent-expiry-choice.ts';
+import { consentExpiryOf, withConsentExpiries } from './consent-expiry-choice.ts';
 import { createFundingSourceWork, type FundingSourceTables } from './funding-source-work.ts';
 import { type Refused, refused } from './refused.ts';
 
@@ -23,14 +24,26 @@ export interface SourcePage {
   readonly limit: number;
 }
 
-export type SourcesListed =
+/** A source with its admin's choice for when its consent runs out (decision 21, E7), or null: none (so cancel). */
+interface SourceWithChoice {
+  readonly source: SourceRecord;
+  readonly consentExpiry: PendingChoice | null;
+}
+
+/** A page of sources, as the agent's own read lists its mandate's (agent-mandate.ts) or members read theirs. */
+type Listed<Source> =
   | {
       readonly outcome: 'listed';
-      readonly sources: readonly SourceRecord[];
+      readonly sources: readonly Source[];
       readonly next: string | null;
       readonly unchecked: readonly string[];
     }
   | Refused;
+
+export type SourcesListed = Listed<SourceRecord>;
+
+/** The organisation's sources as its members read them: each with its consent-expiry choice. */
+type SourcesChosenListed = Listed<SourceWithChoice>;
 
 export type SourceShown =
   | {
@@ -42,7 +55,7 @@ export type SourceShown =
   | Refused;
 
 export interface FundingSourceReads {
-  list(orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed>;
+  list(orgId: string, page: SourcePage, correlationId: string): Promise<SourcesChosenListed>;
   show(orgId: string, sourceId: string, correlationId: string): Promise<SourceShown>;
 }
 
@@ -61,9 +74,11 @@ export function createFundingSourceReads({
 
   return {
     async list(orgId, page, correlationId) {
-      const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-        sourcesPage(tx, states, orgId, page),
-      );
+      const listed = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+        const read = await sourcesPage(tx, states, orgId, page);
+        if (read.outcome === 'tampered') return read;
+        return { ...read, sources: await withConsentExpiries(tx, states, orgId, read.sources) };
+      });
       if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       return listed;
     },

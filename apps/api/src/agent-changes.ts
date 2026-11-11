@@ -239,6 +239,24 @@ export function createAgentChanges({
   };
 
   /**
+   * The agent's keys, read as `lock` asks, with room for the one a hand-over
+   * issues: AGENT_KEYS_TOO_MANY at 100 (AG2), at the ask too, so no one signs
+   * in again for a hand-over that can never be confirmed.
+   */
+  const keysWithRoom = async (
+    tx: AgentTx,
+    states: SignedStates,
+    orgId: string,
+    agentId: string,
+    lock: 'share' | 'change',
+  ) => {
+    const listed = await agentKeysOf(tx, states, orgId, agentId, lock);
+    if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
+    if (!roomForAKey(listed.keys)) throw new AgentRefused(409, 'AGENT_KEYS_TOO_MANY');
+    return listed.keys;
+  };
+
+  /**
    * The admin's membership and the new owner's, locked (`share`) in one
    * statement in order of membership ID (ADR-006 §6 level 2a), then the admin
    * checked, then the new owner's verified, then the agent for change (3):
@@ -384,6 +402,7 @@ export function createAgentChanges({
         brakeOf(member, agentId),
         async (tx, states) => {
           const read = await handOverRead(tx, states, member, agentId, owner);
+          await keysWithRoom(tx, states, member.orgId, read.agent.id, 'share');
           // Counted early, so an ask that can't be confirmed today is refused now.
           await work.keyBudgetLeft(tx, member.orgId, clock.now());
           return stepUps.ask(tx, member, {
@@ -410,9 +429,7 @@ export function createAgentChanges({
           const read = await handOverRead(tx, states, member, agentId, owner);
           const now = clock.now();
           await work.keyBudgetLeft(tx, member.orgId, now);
-          const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
-          if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-          roomForAKey(listed.keys);
+          const agentKeys = await keysWithRoom(tx, states, member.orgId, read.agent.id, 'change');
           const shown = await work.shown(tx, member.orgId, read.agent);
           const consumed = await stepUps.consumed(
             tx,
@@ -432,7 +449,7 @@ export function createAgentChanges({
             details: stepUpDetails(consumed),
           });
           await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
-          for (const old of listed.keys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
+          for (const old of agentKeys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
             await revokeKey(
               tx,
               states,
@@ -441,7 +458,7 @@ export function createAgentChanges({
             );
           }
           // Keys are in order of ID, so the newest live one is the last.
-          const newest = listed.keys.filter((listedKey) => isLiveKey(listedKey, now)).at(-1);
+          const newest = agentKeys.filter((listedKey) => isLiveKey(listedKey, now)).at(-1);
           const issued = await work.issueKey(tx, states, {
             orgId: member.orgId,
             agentId: read.agent.id,
@@ -456,7 +473,7 @@ export function createAgentChanges({
             listedKey.status === 'ACTIVE' ? { ...listedKey, status: 'REVOKED' as const } : listedKey;
           answered = {
             agent: { ...shown, owner: read.owner },
-            keys: keysOnceIssued(listed.keys, revoked, issued.issued),
+            keys: keysOnceIssued(agentKeys, revoked, issued.issued),
           };
           key = issued.text;
           return { status: 201, resourceId: read.agent.id };

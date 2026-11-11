@@ -15,7 +15,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useState } from 'react';
 
-import { api, ApiError, isRefusal, isSignedOut } from '../api.ts';
+import { api, ApiError, isRefusal, isSignedOut, isUuid } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import {
   amountText,
@@ -25,6 +25,7 @@ import {
   type RequestDetails,
   timeText,
   useRequest,
+  useTicking,
   waitingLeft,
 } from '../requests.ts';
 import { endSession, useActing } from '../session.tsx';
@@ -353,14 +354,15 @@ function WeighedConfirm({
 export function RequestPage({ id }: { readonly id: string }) {
   const { organization } = useActing();
   const request = useRequest(id, organization.id);
+  useTicking();
   const back = (
     <Link to="/approvals" className="back">
       {t('request.back')}
     </Link>
   );
-  if (request.isPending) return <Loading />;
-  if (request.isError) {
-    const missing = request.error instanceof ApiError && request.error.status === 404;
+  // An address that isn't a request's ID names none: not found, as the API's 404 is, never a failure to retry.
+  const missing = !isUuid(id) || (request.error instanceof ApiError && request.error.status === 404);
+  if (missing || request.isError) {
     return (
       <section className="stack">
         {back}
@@ -368,6 +370,7 @@ export function RequestPage({ id }: { readonly id: string }) {
       </section>
     );
   }
+  if (request.isPending) return <Loading />;
   const shown = request.data;
   const left = waitingLeft(shown);
   return (

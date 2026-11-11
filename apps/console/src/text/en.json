@@ -44,6 +44,7 @@
   "stepUp.failed": "Agent X couldn't be reached, so the change isn't made yet. Try confirming again.",
   "stepUp.lost": "A change you signed in again for can't be found in this window, so it wasn't made. Ask for it again if you still want it.",
   "stepUp.close": "Close",
+  "stepUp.signInFailed": "Signing in again didn't go through, so Agent X didn't make the change. Ask for it again if you still want it.",
   "approvals.title": "Approvals",
   "approvals.waiting": "Waiting for approval",
   "approvals.all": "All requests",
