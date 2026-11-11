@@ -14,6 +14,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 import type { ApproveAsked, Approved, SpendRequestApprovals } from './spend-request-approvals.ts';
 import type { SessionMember } from './use-case-work.ts';
 
@@ -114,7 +115,7 @@ const post = (url: string, idempotencyKey: string, payload?: unknown): InjectOpt
     'idempotency-key': idempotencyKey,
     ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
   },
-  ...(payload === undefined ? {} : { payload: JSON.stringify(payload) }),
+  ...(payload === undefined ? {} : { payload: JSON.stringify(worded(url, payload)) }),
 });
 
 const ask = (payload?: unknown, id = REQUEST_ID) => post(`/v1/spend-requests/${id}/approve`, 'approve-1', payload);

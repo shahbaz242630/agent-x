@@ -4,7 +4,9 @@
 // A challenge with nothing kept for it (another tab's, already confirmed,
 // storage cleared) is said: the change wasn't made, and can be asked again.
 // Back with `?stepUpFailed=<challenge>` instead (CO2: the API refused the
-// fresh sign-in), the change kept for it is forgotten and that is said.
+// fresh sign-in), the change kept for it is forgotten and that is said. A
+// confirm refused for words that changed since they were read (CO3) says so:
+// asked again, the person reads them as they are now.
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
@@ -13,7 +15,16 @@ import { isRefusal, isUuid } from '../api.ts';
 import { confirm, forget, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
-type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'failed';
+type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed';
+
+/** What a confirm's refusal says: the words changed since read (CO3), or refused otherwise. */
+const refusedAs = (error: unknown): Sent => {
+  if (!isRefusal(error)) return 'failed';
+  return error.code === 'STATEMENT_CHANGED' ? 'wordsChanged' : 'refused';
+};
+
+/** Each end's words, with the change named. */
+const ENDED = { done: 'stepUp.done', refused: 'stepUp.refused', wordsChanged: 'stepUp.wordsChanged' } as const;
 
 export function SteppedUp() {
   const pathname = useRouterState({ select: ({ location }) => location.pathname });
@@ -65,13 +76,13 @@ export function SteppedUp() {
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
     } catch (error) {
-      setSent(isRefusal(error) ? 'refused' : 'failed');
+      setSent(refusedAs(error));
     }
   };
-  if (sent === 'done' || sent === 'refused') {
+  if (sent === 'done' || sent === 'refused' || sent === 'wordsChanged') {
     return (
       <section className={sent === 'done' ? 'stepped' : 'notice stepped'} role="status">
-        <p>{t(sent === 'done' ? 'stepUp.done' : 'stepUp.refused', { change: pending.label })}</p>
+        <p>{t(ENDED[sent], { change: pending.label })}</p>
         <button type="button" className="secondary" onClick={close}>
           {t('stepUp.close')}
         </button>

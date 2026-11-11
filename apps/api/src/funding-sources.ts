@@ -74,6 +74,7 @@ import {
   STEP_UP_CONFIRM,
   stepUpAsked,
 } from './route-schemas.ts';
+import { confirmedWith, statementVersion } from './statements.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 import { CONSENT_EXPIRY } from './consent-expiry-choice.ts';
 
@@ -158,8 +159,11 @@ const LINK_WITH_SOURCE = z.object({
   ),
 });
 
+/** The consent-expiry choice, with the version of its words shown (CO3). */
+const CONSENT_EXPIRY_FIELDS = { consentExpiry: CONSENT_EXPIRY, statementVersion: statementVersion('consent_expiry') };
+
 /** A link's confirm: the admin's choice for when the source's consent runs out, kept if it links (decision 21). */
-const CONFIRM_BODY = z.strictObject({ consentExpiry: CONSENT_EXPIRY }).describe('The admin’s consent-expiry choice.');
+const CONFIRM_BODY = z.strictObject(CONSENT_EXPIRY_FIELDS).describe('The admin’s consent-expiry choice.');
 
 const CONFIRM_SCHEMA = {
   summary: 'Ask the partner how the link ended, once back from the bank',
@@ -239,14 +243,14 @@ const SOURCE_CHANGED = SOURCE_SHOWN.describe('The source, as the change left it.
 const CONSENT_EXPIRY_SCHEMA = {
   summary: 'Choose what happens to a bank account’s pending requests when its consent runs out',
   params: SOURCE_ID,
-  body: z.strictObject({ consentExpiry: CONSENT_EXPIRY }).describe('The admin’s choice.'),
+  body: z.strictObject(CONSENT_EXPIRY_FIELDS).describe('The admin’s choice.'),
   response: { 200: SOURCE_CHANGED },
 };
 
 const SUSPEND_SCHEMA = {
   summary: 'Suspend a bank account: the brake, at once and with no step-up, its pending requests cancelled or paused',
   params: SOURCE_ID,
-  body: SUSPEND_BODY,
+  body: SUSPEND_BODY.extend({ statementVersion: statementVersion('suspend') }),
   response: { 200: SOURCE_CHANGED },
 };
 
@@ -311,7 +315,11 @@ export function registerFundingSources(
     {
       schema: CONFIRM_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...LINKING_ROLES], operation: LINK_CONFIRM_OPERATION },
+      config: {
+        access: [...LINKING_ROLES],
+        operation: LINK_CONFIRM_OPERATION,
+        statements: confirmedWith('consent_expiry'),
+      },
     },
     async (request, reply) => {
       const member = memberOf(request);
@@ -383,7 +391,7 @@ export function registerFundingSources(
     {
       schema: SUSPEND_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
+      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION, statements: confirmedWith('suspend') },
     },
     async (request, reply) => {
       const member = memberOf(request);
@@ -403,7 +411,11 @@ export function registerFundingSources(
     {
       schema: CONSENT_EXPIRY_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...CONSENT_EXPIRY_ROLES], operation: CONSENT_EXPIRY_OPERATION },
+      config: {
+        access: [...CONSENT_EXPIRY_ROLES],
+        operation: CONSENT_EXPIRY_OPERATION,
+        statements: confirmedWith('consent_expiry'),
+      },
     },
     async (request, reply) => {
       const member = memberOf(request);

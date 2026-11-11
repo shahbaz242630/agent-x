@@ -112,6 +112,7 @@ import {
   REACTIVATE_BODY,
   SUSPEND_BODY,
 } from './suspensions.ts';
+import { confirmedWith, statementVersion } from './statements.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -342,6 +343,7 @@ const DETAILS_CONFIRM_SCHEMA = {
       ...DETAIL_FIELDS,
       pendingRequests: DETAILS_PENDING_REQUESTS,
       stepUpChallengeId: STEP_UP_SIGNED_IN,
+      statementVersion: statementVersion('supplier_details'),
     })
     .transform((body, context) => ({
       stepUpChallengeId: body.stepUpChallengeId,
@@ -384,7 +386,7 @@ const REMITTANCE_CONFIRM_SCHEMA = {
 const SUSPEND_SCHEMA = {
   summary: 'Suspend a supplier: the brake, at once and with no step-up, its pending requests cancelled or paused',
   params: SUPPLIER_ID,
-  body: SUSPEND_BODY,
+  body: SUSPEND_BODY.extend({ statementVersion: statementVersion('suspend') }),
   response: { 200: SUPPLIER_CHANGED },
 };
 
@@ -400,8 +402,8 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the supplier, once signed in again for it',
   params: SUPPLIER_ID,
-  body: STEP_UP_CONFIRM.extend(REACTIVATE_BODY.shape).describe(
-    'The step-up signed in again for, and the choice it was asked with.',
+  body: STEP_UP_CONFIRM.extend({ ...REACTIVATE_BODY.shape, statementVersion: statementVersion('reactivate') }).describe(
+    'The step-up signed in again for, the choice it was asked with, and its words’ version.',
   ),
   response: { 200: SUPPLIER_CHANGED },
 };
@@ -542,6 +544,7 @@ const PASSED = z
       .max(64)
       .describe('The account’s UAE IBAN, spaces allowed: passed to the payment partner, never kept or logged.'),
     pendingRequests: PAYEE_PENDING_REQUESTS,
+    statementVersion: statementVersion('payee'),
   })
   .transform((body, context): { readonly payee: PayeeDetails; readonly pendingRequests: PendingChoice } => {
     const name = visibleName(body.name, SUPPLIER_NAME_MOST);
@@ -564,8 +567,8 @@ const PAYEE_PASS_THROUGH_SCHEMA = {
 
 /** A start's body: the admin's choice for the supplier's pending requests alone (decision 8). */
 const PAYEE_START_BODY = z
-  .strictObject({ pendingRequests: PAYEE_PENDING_REQUESTS })
-  .describe('The admin’s choice for the supplier’s pending requests.');
+  .strictObject({ pendingRequests: PAYEE_PENDING_REQUESTS, statementVersion: statementVersion('payee') })
+  .describe('The admin’s choice for the supplier’s pending requests, and its words’ version.');
 
 const PAYEE_START_SCHEMA = {
   summary: 'Start registering a supplier’s bank details with the payment partner, through its own form',
@@ -753,7 +756,11 @@ export function registerSuppliers(
     {
       schema: SUSPEND_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
+      config: {
+        access: [...SUSPENDING_ROLES],
+        operation: SUSPEND_OPERATION,
+        statements: confirmedWith('suspend'),
+      },
     },
     async (request, reply) => {
       const member = memberOf(request);
@@ -833,7 +840,11 @@ export function registerSuppliers(
     {
       schema: DETAILS_CONFIRM_SCHEMA,
       bodyLimit: ADD_BODY_LIMIT + CHALLENGE_BODY_LIMIT,
-      config: { access: [...ADDING_ROLES], operation: DETAILS_CONFIRM_OPERATION },
+      config: {
+        access: [...ADDING_ROLES],
+        operation: DETAILS_CONFIRM_OPERATION,
+        statements: confirmedWith('supplier_details'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -873,7 +884,11 @@ export function registerSuppliers(
     {
       schema: REACTIVATE_CONFIRM_SCHEMA,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_CONFIRM_OPERATION },
+      config: {
+        access: [...REACTIVATING_ROLES],
+        operation: REACTIVATE_CONFIRM_OPERATION,
+        statements: confirmedWith('reactivate'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -893,7 +908,11 @@ export function registerSuppliers(
     {
       schema: PAYEE_START_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...REGISTERING_ROLES], operation: PAYEE_START_OPERATION },
+      config: {
+        access: [...REGISTERING_ROLES],
+        operation: PAYEE_START_OPERATION,
+        statements: confirmedWith('payee'),
+      },
     },
     async (request, reply) => {
       const member = memberOf(request);
@@ -913,7 +932,11 @@ export function registerSuppliers(
     {
       schema: PAYEE_PASS_THROUGH_SCHEMA,
       bodyLimit: PASS_THROUGH_BODY_LIMIT,
-      config: { access: [...REGISTERING_ROLES], operation: PAYEE_PASS_THROUGH_OPERATION },
+      config: {
+        access: [...REGISTERING_ROLES],
+        operation: PAYEE_PASS_THROUGH_OPERATION,
+        statements: confirmedWith('payee'),
+      },
     },
     async (request, reply) => {
       const member = memberOf(request);

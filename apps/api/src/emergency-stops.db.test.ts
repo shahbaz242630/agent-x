@@ -69,6 +69,7 @@ import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicyChanges, POLICY_OPERATIONS } from './policy-changes.ts';
 import { closeServers, COOKIE, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 import { createSpendRequestDecisions, DECIDE_OPERATION } from './spend-request-decisions.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSupplierChanges, SUSPEND_OPERATION as SUPPLIER_SUSPEND } from './supplier-changes.ts';
@@ -570,7 +571,7 @@ async function admin(w: World) {
       method: 'POST',
       url,
       headers: { ...headers, 'idempotency-key': key },
-      payload,
+      payload: worded(url, payload) as object,
     };
     return api.inject(request);
   };
