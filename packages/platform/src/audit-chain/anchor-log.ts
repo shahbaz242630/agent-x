@@ -377,8 +377,9 @@ export interface AnchorLog extends AnchorStore, PassRecord {
   /**
    * For a walk (PR4): it has gone past the chain's shard, and won't want it again this round. Such a shard goes first when
    * room is needed, the one passed last before those passed earlier: in a walk that repeats, the shard passed longest
-   * ago is the one it reaches soonest, so least-recently-used would let go exactly what comes next. Used again, it is as
-   * any other. Nothing in a log that holds every shard.
+   * ago is the one it reaches soonest, so least-recently-used would let go exactly what comes next. The mark stays, even
+   * if used again (a walk's lanes still on it use it as it leaves), until the shard is let go or read back. Nothing in
+   * a log that holds every shard.
    */
   walkedPast(chain: Chain): void;
   /**
