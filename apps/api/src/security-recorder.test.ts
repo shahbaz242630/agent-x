@@ -317,6 +317,61 @@ describe('SEC-AV-07 a failed write loses no count, and a malformed one is never 
   });
 });
 
+describe('MO4 a crash says the counts it loses', () => {
+  it('logs and drops every count still held, writing none', async () => {
+    const { recorder, written, events } = setUp();
+    recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.10'));
+
+    recorder.drop();
+
+    expect(written).toEqual([]);
+    expect(events('security.events_unwritten')).toMatchObject([{ level: 'error', events: 2, count: 3 }]);
+    // Dropped: a flush after has nothing left to write or to say.
+    await recorder.flush(Number.POSITIVE_INFINITY);
+    expect(written).toEqual([]);
+    expect(events('security.events_unwritten')).toHaveLength(1);
+  });
+
+  it('counts a write under way at the crash as in flight: written or not, the store may never have it', async () => {
+    let release: () => void = () => undefined;
+    const capture = new LogCapture();
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: capture,
+    });
+    const recorder = createSecurityRecorder({
+      write: () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      now: () => START,
+      logger,
+    });
+    recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.9'));
+    const writing = recorder.flush(Number.POSITIVE_INFINITY);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    recorder.drop();
+
+    expect(capture.lines().filter((line) => line.event === 'security.events_unwritten')).toMatchObject([
+      { events: 0, count: 0, inFlightEvents: 1, inFlightCount: 2 },
+    ]);
+    release();
+    await writing;
+  });
+
+  it('says nothing when nothing is held', () => {
+    const { recorder, events } = setUp();
+    recorder.drop();
+    expect(events('security.events_unwritten')).toEqual([]);
+  });
+});
+
 describe('SEC-AV-07 the recorder never holds up the API as it stops', () => {
   /** Enough failed sign-ins, each from its own address, for three batches. */
   const threeBatches = (recorder: { note(event: SecurityEventNote): void }) => {

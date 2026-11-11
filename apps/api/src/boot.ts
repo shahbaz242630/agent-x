@@ -9,8 +9,9 @@
 // And it stops cleanly on SIGTERM or SIGINT: HTTP first where there is any, so
 // every request in flight is answered, then the background work, then the
 // recorder's last counts, then the pool. A crash is logged before the process
-// exits. Every exit writes the logger's held-back line counts first, so none
-// are lost.
+// exits, with whatever counts the parts made since still hold (the security
+// recorder's, MO4). Every exit writes the logger's held-back line counts
+// first, so none are lost.
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
 import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
@@ -140,6 +141,8 @@ export interface Booted {
   readonly keys: KeyProvider;
   readonly logger: Logger;
   readonly database: Database<ApiTables>;
+  /** Adds what a crash writes after its own line, before the process exits: a part's counts it would otherwise lose. */
+  readonly atCrash: (last: () => void) => void;
 }
 
 /**
@@ -250,12 +253,21 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   }
 
   const logger = createLogger({ service: SERVICE, config, destination });
+  const lastWords: (() => void)[] = [];
   host.on('uncaughtException', (error, origin) => {
     // Node runs this in the context of what threw. That is usually the culprit, but a throw from an old connection's
     // socket is in whoever opened it (logger.ts). So the line names the work, in a field of its own, and doesn't claim it.
     const workAtCrash = workUnderWay();
     asNoWork(() => {
       logger.error('api.crashed', { err: error, origin, ...(workAtCrash && { workAtCrash }) });
+      for (const last of lastWords) {
+        // A hook that throws must never keep the process from its flush and exit below.
+        try {
+          last();
+        } catch {
+          // Its count is lost; the crash line above is already written.
+        }
+      }
     });
     logger.flush();
     host.exit(1);
@@ -303,7 +315,16 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     return undefined;
   }
   logger.info('api.start_recorded', { seq: recorded });
-  return { host, config, keys, logger, database };
+  return {
+    host,
+    config,
+    keys,
+    logger,
+    database,
+    atCrash: (last) => {
+      lastWords.push(last);
+    },
+  };
 }
 
 /** The lease on the jobs, where this process has them: this process's own, by an ID of its own. */
