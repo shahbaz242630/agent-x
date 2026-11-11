@@ -58,7 +58,14 @@ const leadership: Leadership = {
 function namesWith(env: Record<string, string>) {
   const config = loadConfig(env);
   const logger = createLogger({ service: 'api', config, destination: new LogCapture() });
-  const booted = { host: {} as Booted['host'], config, keys, logger, database: untouched as Booted['database'] };
+  const booted: Booted = {
+    host: {} as Booted['host'],
+    config,
+    keys,
+    logger,
+    database: untouched as Booted['database'],
+    atCrash: () => undefined,
+  };
   return oneCopyJobs(booted, sharedParts(booted, leadership), leadership).jobs.map(({ name }) => name);
 }
 

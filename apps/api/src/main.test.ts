@@ -1440,6 +1440,37 @@ describe('the API logs a crash before it exits', () => {
     expect(crashed).not.toHaveProperty('runId');
   });
 
+  it('MO4 says the security events counted and not yet written, after its own line, then exits 1', async () => {
+    // Held near one instant, so the 12 requests can't straddle a minute and start the limit's count again (S43).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-03T10:00:05.000Z'));
+    try {
+      const { host, server, capture } = await start({
+        ...ENV,
+        AGENTX_RATE_LIMIT_PER_MINUTE: '10',
+        AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
+        AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
+        AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '10',
+      });
+      if (server === undefined) throw new Error('the server should have started');
+      // Past the address's limit: each refusal is a security event, held for the minute's write.
+      for (let request = 0; request < 12; request += 1) await server.inject('/health');
+
+      host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
+
+      expect(host.exits).toEqual([1]);
+      const ending = capture
+        .lines()
+        .filter(({ event }) => event === 'api.crashed' || event === 'security.events_unwritten');
+      expect(ending).toMatchObject([
+        { event: 'api.crashed' },
+        { event: 'security.events_unwritten', level: 'error', events: 1, count: 2 },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('4D2e Stage F has no work to name on a crash outside any', async () => {
     const { host, capture } = await start();
     host.emit('uncaughtException', new TypeError('bad state'), 'uncaughtException');
