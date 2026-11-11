@@ -6,6 +6,17 @@
 //    written is refused before any lookup.
 // 2. The key's ID looked up in the directory, for its organisation alone:
 //    where to look, never what is found there.
+// 2a. At the door (AG1, PL-67): the key's secret checked against its row as
+//    read, unlocked, outside the organisation's share of the connections, on
+//    one trip of its own (readAloneOnOneTrip, its lock waits bounded at 5 s).
+//    A caller holding only a key's ID is refused here, never taking a place in
+//    that share, a lock or a brake's wait, so it can't slow the organisation's
+//    agents. An ID not listed is read for under no organisation and compared
+//    with a MAC of zeros: the same trip, the same one verifyMac, so how long
+//    the answer takes doesn't tell a listed ID. Only the steps below are
+//    believed: the row read here grants nothing. A row tampered with to refuse
+//    the true secret is refused here as a wrong one, unalarmed; every other
+//    read of the key (its listing, a rotation) still alarms on it.
 // 3. Inside that organisation's withSignedStates, each statement limited to
 //    10 seconds, ahead of all else on one trip, its agent's brake (4D2e C3): a
 //    kill switch waiting goes first, however many checks a stolen key sends, and
@@ -49,6 +60,7 @@ import {
   isStatementLimit,
   lockWaitBoundedAlone,
   OrganisationBusy,
+  readAloneOnOneTrip,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -164,6 +176,48 @@ export async function agentKeyAt(
   };
 }
 
+/** Where an ID the directory doesn't list is read for: no organisation is this one, so no row is found. */
+const NO_ORGANISATION = '00000000-0000-0000-0000-000000000000';
+
+/** What a key's secret is compared with when there is no MAC to compare it with: the same one verify either way. */
+const NO_MAC = Buffer.alloc(32);
+
+/** The door's answer: the secret proven; no row to judge (step 3 judges a listed one); or why it was refused. */
+type AtTheDoor = 'proven' | 'unread' | 'wrong_secret' | 'key_not_held';
+
+/**
+ * Step 2a: the secret against the key's row as read, outside any share, one trip. Exactly one verifyMac whatever is
+ * found, so a listed ID's wrong secret and an unlisted ID's take the same path, on the same one trip.
+ */
+async function secretAtTheDoor(
+  database: Kysely<Tables>,
+  keys: KeyProvider,
+  orgId: string | undefined,
+  { keyId, secret }: PresentedKey,
+): Promise<AtTheDoor> {
+  const [row] = await readAloneOnOneTrip(
+    database,
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a refusal alone, never a grant: a secret proven here is checked again on the key's verified read (step 3, AG1)
+    database.selectFrom('agents.agent_keys').select(['secret_mac', 'secret_key_version']).where('id', '=', keyId),
+    { orgId: orgId ?? NO_ORGANISATION, lockWaitBounded: true },
+  );
+  const pepper = keys.describe().find(({ purpose }) => purpose === 'agent-key-pepper');
+  const held = row !== undefined && pepper?.versions.some(({ version }) => version === row.secret_key_version) === true;
+  const version = held ? row.secret_key_version : pepper?.current;
+  // No pepper at all: nothing can be verified, so nothing is (and every key with a row is one it doesn't hold).
+  const matches =
+    version !== undefined &&
+    keys.verifyMac(
+      'agent-key-pepper',
+      version,
+      keySecretMessage(keyId, secret),
+      held ? Buffer.from(row.secret_mac, 'hex') : NO_MAC,
+    );
+  if (row === undefined) return 'unread';
+  if (!held) return 'key_not_held';
+  return matches ? 'proven' : 'wrong_secret';
+}
+
 export interface AgentKeyChecker {
   /** Whether the key text an agent sent may act: the same `refused` for every reason, logged with it. */
   check(text: string, correlationId: string): Promise<KeyChecked>;
@@ -197,11 +251,16 @@ export function createAgentKeyCheck({
       const presented = parseAgentKey(text);
       if (presented === undefined) return answer(refused('malformed'), null);
       const orgId = await listedAgentKey(database, presented.keyId);
-      if (orgId === undefined) return answer(refused('unlisted'), presented.keyId);
-      // Counted against the organisation's share: it locks the agent's and key's rows, and waiting behind a change
-      // of them, every copy would hold a connection, the agents of one organisation filling the pool (PL-63).
       const started = performance.now();
       try {
+        const atTheDoor = await secretAtTheDoor(database, keys, orgId, presented);
+        if (orgId === undefined) return answer(refused('unlisted'), presented.keyId);
+        // A listed ID with no row behind it goes on: step 3's read judges it, missing or tampered, and alarms.
+        if (atTheDoor === 'wrong_secret' || atTheDoor === 'key_not_held') {
+          return answer(refused(atTheDoor), presented.keyId);
+        }
+        // Counted against the organisation's share: it locks the agent's and key's rows, and waiting behind a change
+        // of them, every copy would hold a connection, the agents of one organisation filling the pool (PL-63).
         const checked = await asAgentTraffic(() =>
           withSignedStates(database, orgId, { keys, ids, logger: log, correlationId }, (tx, states) =>
             agentKeyAt(tx, states, { keys, now: clock.now() }, orgId, presented),
@@ -212,7 +271,10 @@ export function createAgentKeyCheck({
         if (!isStatementLimit(error) && !isRetryable(error)) throw error;
         // Answered busy, never a 500 (partner, 4D2e C3): the agent sends it again, and nothing of it was kept.
         const waitedMs = Math.round(performance.now() - started);
-        log.child({ orgId }).warn('agent_key.check_in_trouble', { keyId: presented.keyId, waitedMs });
+        (orgId === undefined ? log : log.child({ orgId })).warn('agent_key.check_in_trouble', {
+          keyId: presented.keyId,
+          waitedMs,
+        });
         throw new OrganisationBusy(waitedMs);
       }
     },
