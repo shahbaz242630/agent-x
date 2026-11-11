@@ -222,6 +222,8 @@ export type Request =
       readonly loadRun: boolean;
       /** Stage G's throwaway copy (tooling/load/throwaway.ts), by its server's name: only with `loadRun`. */
       readonly loadDatabase?: string;
+      /** A real restore's switch (AZ25, playbook L): the API stopped before the deployment and confirmed stopped after it. */
+      readonly apiStopped?: boolean;
     } & ServerFlags)
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
@@ -268,7 +270,7 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts secrets --all [--back-to-generation <n>]
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...] [--back-to-generation <n>]
   node deploy/azure/deploy.ts secrets --keys [--back-to-generation <n>]
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]] [--back-to-generation <n>]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]] [--api-stopped] [--back-to-generation <n>]
   (--first-server and --back-to-generation only where deploy.ts asks for them: playbook L, AZ25)
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
@@ -280,11 +282,23 @@ function parseApps(options: readonly string[]): Request {
   for (let at = 0; at < options.length; at += 1) {
     at += appsOption(asked, options[at], options[at + 1] ?? '');
   }
-  const { commit, keepRunning, loadRun, loadDatabase } = asked;
+  const { commit, keepRunning, loadRun, loadDatabase, apiStopped } = asked;
   if (loadDatabase !== undefined && !loadRun) {
     throw new UsageError("--load-database is Stage G's load run alone: give --load-run with it");
   }
-  return { command: 'apps', commit, keepRunning, loadRun, ...(loadDatabase === undefined ? {} : { loadDatabase }) };
+  if (apiStopped === true && (keepRunning || loadRun)) {
+    throw new UsageError(
+      "--api-stopped is a real restore's switch alone (playbook L): it keeps the API stopped, so never with --keep-running or --load-run",
+    );
+  }
+  return {
+    command: 'apps',
+    commit,
+    keepRunning,
+    loadRun,
+    ...(loadDatabase === undefined ? {} : { loadDatabase }),
+    ...(apiStopped === true ? { apiStopped } : {}),
+  };
 }
 
 /** What `apps` was asked so far. */
@@ -293,6 +307,7 @@ interface AppsAsked {
   keepRunning: boolean;
   loadRun: boolean;
   loadDatabase?: string;
+  apiStopped?: boolean;
 }
 
 /** One of apps's options taken into `asked`, each at most once: how many words past it were its value. */
@@ -305,6 +320,10 @@ function appsOption(asked: AppsAsked, option: string | undefined, value: string)
     asked.loadRun = true;
     return 0;
   }
+  if (option === '--api-stopped' && asked.apiStopped !== true) {
+    asked.apiStopped = true;
+    return 0;
+  }
   if (option === '--commit' && asked.commit === undefined && COMMIT.test(value)) {
     asked.commit = value;
     return 1;
@@ -314,7 +333,7 @@ function appsOption(asked: AppsAsked, option: string | undefined, value: string)
     return 1;
   }
   throw new UsageError(
-    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit, each at most once',
+    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped and --back-to-generation <n>, each at most once',
   );
 }
 
@@ -2098,6 +2117,76 @@ async function verifiedLoadImage(steps: Steps, images: Images, release: string):
 /** The app the API's jobs run in apart from it (apps.bicep `jobsApp`, 4D2e D13): staging has it in a load run alone. */
 const JOBS_APP = 'ca-agentx-stg-jobs';
 
+/** The API, which runs the hand-offs in its own process on staging (apps/api/src/handoff.ts, decision 1). */
+const API_APP = 'ca-agentx-stg-api';
+
+const apiUrl = (subscription: string, action = ''): string =>
+  `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${API_APP}${action}?api-version=${ENVIRONMENT_API}`;
+
+/** The API's running state as Azure reads it (`Stopped` once stopped), or empty when it can't be read. */
+function apiRunningStatus(steps: Steps, subscription: string): string {
+  const read = steps.az.run(['rest', '--method', 'get', '--url', apiUrl(subscription)]);
+  if (read.status !== 0) return '';
+  try {
+    return text((JSON.parse(read.stdout) as { properties?: { runningStatus?: unknown } }).properties?.runningStatus);
+  } catch {
+    return '';
+  }
+}
+
+/** Says the API is stopped by Azure's own read, or returns false having said so. */
+function stopAndConfirm(steps: Steps, subscription: string): boolean {
+  const stopped = steps.az.run(['rest', '--method', 'post', '--url', apiUrl(subscription, '/stop')]);
+  return stopped.status === 0 && apiRunningStatus(steps, subscription) === 'Stopped';
+}
+
+/** What to run once the API is stopped on the restored server (playbook L step 4). */
+const THEN_PAUSE = `Set the hand-off pause on the new server now (jobs.ts run db-setup, migrate if needed, then operator.ts handoff-pause), and only then start the API (playbook L: its /start, api-version ${ENVIRONMENT_API}).`;
+
+/**
+ * `apps --api-stopped` (AZ25, playbook L): a restored server doesn't hold the hand-off pause set after its point, and
+ * no job can reach it before this deployment moves their host, so the API (whose own process hands payments off on
+ * staging) is stopped first, and the deployment is sent only once Azure reads it stopped.
+ */
+function stopApi(steps: Steps, subscription: string): void {
+  if (!stopAndConfirm(steps, subscription)) {
+    throw new Error(
+      `${API_APP} couldn't be confirmed stopped before the deployment, so the API could hand payments off from a server that doesn't hold the pause yet. Stop it in the Azure portal (Container Apps, ${API_APP}, Stop), then run apps --api-stopped again. Nothing was deployed.`,
+    );
+  }
+  steps.terminal.say(
+    `${API_APP} is stopped: it stays stopped through this deployment, and stays so if the what-if is declined (start it as playbook L says).`,
+  );
+}
+
+/** Sends the apps deployment, the API stopped around it when asked (`--api-stopped`): whether it went, and stayed so. */
+async function sendApps(
+  steps: Steps,
+  subscription: string,
+  values: Readonly<Record<string, string>>,
+  apiStopped: boolean,
+): Promise<boolean> {
+  if (apiStopped) stopApi(steps, subscription);
+  if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return false;
+  return !apiStopped || keptStopped(steps, subscription);
+}
+
+/**
+ * After the deployment: whether a deployment starts a stopped app isn't proven (rehearse on staging first: playbook L,
+ * Outstanding-Work AT5), so the API is stopped again at once and read back. Never reported done unless Azure reads it
+ * stopped.
+ */
+function keptStopped(steps: Steps, subscription: string): boolean {
+  if (stopAndConfirm(steps, subscription)) {
+    steps.terminal.say(`Deployed, and ${API_APP} is still stopped. ${THEN_PAUSE}`);
+    return true;
+  }
+  steps.terminal.say(
+    `Deployed, but ${API_APP} couldn't be confirmed stopped: it may be running on a server without the hand-off pause, and handing payments off. Stop it now in the Azure portal (Container Apps, ${API_APP}, Stop) and check it reads Stopped. ${THEN_PAUSE}`,
+  );
+  return false;
+}
+
 /** Says what Azure left of every app and job after an apps deploy, and the load test's jobs when a plain one left them; the apps' names. */
 function sayWhatIsDeployed(steps: Steps, subscription: string, loadRun: boolean): readonly string[] {
   const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
@@ -2170,7 +2259,14 @@ const REMOVAL_READS = 60;
 
 async function deployApps(
   steps: Steps,
-  { commit, keepRunning, loadRun, loadDatabase, server }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
+  {
+    commit,
+    keepRunning,
+    loadRun,
+    loadDatabase,
+    server,
+    apiStopped,
+  }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
 ): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
@@ -2233,7 +2329,7 @@ async function deployApps(
     [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
   };
   checkPolicy(steps, values);
-  if ((await sendWithWhatIf(steps, subscription, 'apps', values)) === undefined) return 1;
+  if (!(await sendApps(steps, subscription, values, apiStopped === true))) return 1;
   const appsLeft = sayWhatIsDeployed(steps, subscription, loadRun);
   await removeLeftJobsApp(steps, subscription, appsLeft, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");

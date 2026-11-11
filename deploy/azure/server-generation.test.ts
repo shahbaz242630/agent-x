@@ -99,7 +99,23 @@ describe('server names by generation', () => {
     expect(verdict(0, [], none)).toBe('go');
     expect(verdict(0, undefined, none)).toBe('go');
     expect(verdict(0, [base], none)).toBe('refused');
-    expect(verdict(0, [base], none, { firstServer: true })).toBe('go');
+    // --first-server is for an empty group alone: any server listed at all, a copy's or the environment's, refuses it.
+    for (const listed of [base, 'psql-agentx-stg-before', 'psql-agentx-stg-drill', 'psql-agentx-stg-g-a1b2c3d4']) {
+      expect(verdict(0, [listed], none, { firstServer: true })).toBe('refused');
+    }
+    for (const copy of ['psql-agentx-stg-before', 'psql-agentx-stg-drill', 'psql-agentx-stg-g-a1b2c3d4', 'other']) {
+      const answer = serverGenerationVerdict({
+        short: 'stg',
+        generation: 0,
+        vault: read,
+        servers: [copy],
+        said: { firstServer: true },
+      });
+      expect(answer).toMatchObject({
+        kind: 'refused',
+        why: expect.stringContaining('--first-server is for an empty group alone') as unknown,
+      });
+    }
     expect(verdict(1, [], none, { firstServer: true })).toBe('refused');
     // A foundation ran (the vault is there) and the live server is missing, or can't be seen: a loss until said.
     expect(verdict(0, [])).toBe('refused');

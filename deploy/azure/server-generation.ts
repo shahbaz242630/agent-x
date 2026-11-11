@@ -123,7 +123,7 @@ const LIVE_MISSING =
   "The live database server is missing: the key vault shows a foundation ran here before, but there's no server of the environment's own";
 /** What to do about a live server missing: look for a loss and restore first, never a new empty one by default. */
 const checkForLoss = (part: GenerationAsked['part']): string =>
-  `Check whether it was lost or deleted and restore it first (playbook L), then ${thenRun(part)}; only for a server that was never made, run foundation --first-server, which makes it new and empty.`;
+  `Check whether it was lost or deleted and restore it first (playbook L), then ${thenRun(part)}; only for a server that was never made, in a group holding no server at all, run foundation --first-server, which makes it new and empty.`;
 
 /**
  * Whether a hand deploy may be sent for the generation asked. It may when the generation's server is already there
@@ -147,8 +147,8 @@ export function serverGenerationVerdict(asked: GenerationAsked): GenerationVerdi
 }
 
 /** No key vault: a first deploy, so generation 0 and no server of any kind, or nothing goes. */
-function noVaultVerdict({ generation, servers, said = {}, part }: GenerationAsked): GenerationVerdict {
-  if (generation === 0 && (servers === undefined || servers.length === 0 || said.firstServer === true)) {
+function noVaultVerdict({ generation, servers, part }: GenerationAsked): GenerationVerdict {
+  if (generation === 0 && (servers === undefined || servers.length === 0)) {
     return {
       kind: 'go',
       server: undefined,
@@ -206,24 +206,40 @@ function readVerdict(asked: GenerationAsked, suffix: string, servers: readonly s
       said: `The database server is ${wanted} (generation ${String(generation)}), which is there.${kept}`,
     };
   }
-  if (generation === 0 && own.length === 0) {
-    if (said.firstServer === true) {
-      return {
-        kind: 'go',
-        server: wanted,
-        said: `--first-server: the deployment makes ${wanted}, new and empty, though the key vault shows a foundation ran here before.`,
-      };
-    }
-    return refused(
-      `${LIVE_MISSING} (${servers.length === 0 ? 'no server at all' : 'only ' + servers.join(', ')}). ${checkForLoss(part)}`,
-    );
-  }
+  if (generation === 0 && own.length === 0) return liveMissingVerdict(wanted, servers, said, part);
   const where =
     newest === undefined
       ? `the group holds no server of its own (${servers.length === 0 ? 'none at all' : 'only ' + servers.join(', ')})`
       : `the newest server there is generation ${String(newest)}`;
   return refused(
     `database-generation.json names the database server's generation ${String(generation)}, ${wanted}, and ${where}: it ${whichWay(generation, newest)}. A foundation would make it new and empty and the apps would reach it, while the data stays on the old one. First restore it under that name (playbook L: az postgres flexible-server restore --name ${wanted}, the same subnet, private zone and zone), check it, then ${thenRun(part)}.`,
+  );
+}
+
+/**
+ * Generation 0 with no server of the environment's own though a foundation ran: a lost live server until the operator
+ * says `--first-server`, and that only in a group holding no server at all. Any copy there (-before, -drill, Stage
+ * G's) means data to look at, never a new, empty server beside it.
+ */
+function liveMissingVerdict(
+  wanted: string,
+  servers: readonly string[],
+  said: ServerSaid,
+  part: GenerationAsked['part'],
+): GenerationVerdict {
+  if (said.firstServer === true && servers.length === 0) {
+    return {
+      kind: 'go',
+      server: wanted,
+      said: `--first-server: the deployment makes ${wanted}, new and empty, though the key vault shows a foundation ran here before.`,
+    };
+  }
+  const firstRefused =
+    said.firstServer === true
+      ? ' --first-server is for an empty group alone, and this one holds a copy: never a new, empty server beside it.'
+      : '';
+  return refused(
+    `${LIVE_MISSING} (${servers.length === 0 ? 'no server at all' : 'only ' + servers.join(', ')}). ${checkForLoss(part)}${firstRefused}`,
   );
 }
 

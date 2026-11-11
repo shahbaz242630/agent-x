@@ -207,7 +207,7 @@ describe('parseArguments', () => {
       [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
       [
         ['apps', '--commit'],
-        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit/,
+        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped and --back-to-generation <n>/,
       ],
       // Stage G's copy (4D2e): its name alone, never staging's own server, and only in a load run.
       [['apps', '--load-run', '--load-database'], /--load-database with the throwaway copy/],
@@ -732,6 +732,9 @@ interface AzAnswers {
   readonly removeRefused?: boolean;
   /** How many reads of a removed app still find it (default one); Infinity for one that never goes. */
   readonly removalReads?: number;
+  /** The API's running state, one a read, the last repeated (default Stopped); and whether Azure refuses its stop. */
+  readonly apiStates?: readonly string[];
+  readonly stopRefused?: boolean;
   /** The jobs app's identity: there (default), missing, or unreadable. */
   readonly jobsIdentity?: 'there' | 'missing' | 'unreadable';
   /** The environment's certificates after the deployment. */
@@ -826,6 +829,7 @@ class RecordingAz implements Az {
   #readings = 0;
   #limitApplied = false;
   #appReads = 0;
+  #apiReads = 0;
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
@@ -928,6 +932,7 @@ class RecordingAz implements Az {
   /** A Resource Manager call: the jobs app's removal and its reads back (4D2e D13), or a read (`#rest`). */
   #restCall(args: readonly string[]): AzResult {
     const url = args[args.indexOf('--url') + 1] ?? '';
+    if (url.includes('/containerApps/ca-agentx-stg-api')) return this.#api(args[2], url);
     if (args[2] === 'get' && url.includes('/containerApps/')) {
       this.#appReads += 1;
       return this.#appReads <= (this.options.removalReads ?? 1)
@@ -940,6 +945,20 @@ class RecordingAz implements Az {
         : { status: 0, stdout: '', stderr: '' };
     }
     return this.#rest(url);
+  }
+
+  /** The API app (AZ25 `--api-stopped`): a stop, or a read of its running state, one answer a read, the last repeated. */
+  #api(method: string | undefined, url: string): AzResult {
+    if (method === 'post') {
+      if (!url.includes('/stop?')) throw new Error(`unexpected API action ${url}`);
+      return this.options.stopRefused === true
+        ? { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) may not stop' }
+        : json({});
+    }
+    const states = this.options.apiStates ?? ['Stopped'];
+    const state = states[Math.min(this.#apiReads, states.length - 1)];
+    this.#apiReads += 1;
+    return json({ name: 'ca-agentx-stg-api', properties: { runningStatus: state } });
   }
 
   /** A write of the migration job's tags, as the options say Azure takes it. */
@@ -1421,7 +1440,7 @@ describe('deploy foundation', () => {
       await refused(
         0,
         { servers: [] },
-        /^The live database server is missing: the key vault shows a foundation ran here before.*\(no server at all\)\. Check whether it was lost or deleted and restore it first \(playbook L\), then run foundation again; only for a server that was never made, run foundation --first-server/,
+        /^The live database server is missing: the key vault shows a foundation ran here before.*\(no server at all\)\. Check whether it was lost or deleted and restore it first \(playbook L\), then run foundation again; only for a server that was never made, in a group holding no server at all, run foundation --first-server/,
       );
       await refused(0, { servers: 'unreadable' }, /no telling the live server is there/);
       const made = await foundation(0, { servers: [] }, ['--first-server']);
@@ -1432,6 +1451,15 @@ describe('deploy foundation', () => {
       const unread = await foundation(0, { servers: 'unreadable' }, ['--first-server']);
       expect(unread.status).toBe(0);
       expect(unread.terminal.said).toContainEqual(expect.stringMatching(/^--first-server: the key vault or/));
+      // An empty group alone: any server listed, a copy's or any other, refuses --first-server, vault or none.
+      for (const copy of ['psql-agentx-stg-before', 'psql-agentx-stg-drill', 'psql-agentx-stg-g-a1b2c3d4']) {
+        const beside = await foundation(0, { servers: [{ name: copy }] }, ['--first-server']);
+        expect((beside.error as Error).message).toMatch(/--first-server is for an empty group alone/);
+        expect(beside.az.deployment).toBeUndefined();
+        const noVault = await foundation(0, { vaults: [], servers: [{ name: copy }] }, ['--first-server']);
+        expect((noVault.error as Error).message).toMatch(/^The group holds no key vault.*and the group holds /);
+        expect(noVault.az.deployment).toBeUndefined();
+      }
       // Never a later generation, which only a restore makes.
       await refused(1, { servers: [] }, /names a server that is not there yet/);
       const later = await foundation(1, { servers: [{ name: OWN_SERVER }] }, ['--first-server']);
@@ -1936,6 +1964,60 @@ describe('deploy apps', () => {
       command === 'apps'
         ? run(['apps', ...flags], { answers, images: recordingImages(), az: new RecordingAz(options), generation })
         : run(['secrets', '--keys', ...flags], { answers: ['y'], az: new RecordingAz(options), generation });
+
+    describe('apps --api-stopped: no hand-off from a restored server before its pause (AZ25, playbook L)', () => {
+      const stopped = (options: AzAnswers = {}) =>
+        run(['apps', '--api-stopped'], { answers, images: recordingImages(), az: new RecordingAz(options) });
+      const apiCalls = (az: RecordingAz) =>
+        az.calls
+          .filter((call) => (call.args[call.args.indexOf('--url') + 1] ?? '').includes('ca-agentx-stg-api'))
+          .map(
+            (call) => `${String(call.args[2])} ${call.args.some((arg) => arg.includes('/stop?')) ? 'stop' : 'read'}`,
+          );
+
+      it('stops the API before sending, sends, stops it again and reads it stopped, saying the pause comes next', async () => {
+        const done = await stopped();
+        expect(done.error).toBeUndefined();
+        expect(done.status).toBe(0);
+        expect(apiCalls(done.az)).toEqual(['post stop', 'get read', 'post stop', 'get read']);
+        const sequence = done.az.sequence;
+        expect(sequence.indexOf('rest --method post')).toBeLessThan(sequence.indexOf('deployment group create'));
+        expect(sequence.lastIndexOf('rest --method post')).toBeGreaterThan(sequence.indexOf('deployment group show'));
+        expect(done.terminal.said).toContainEqual(
+          expect.stringMatching(/^Deployed, and ca-agentx-stg-api is still stopped\. Set the hand-off pause/),
+        );
+        for (const call of done.az.calls) expect(call.args).not.toContain('start');
+      });
+
+      it('sends nothing when the API cannot be confirmed stopped first', async () => {
+        for (const options of [{ stopRefused: true }, { apiStates: ['Running'] }, { apiStates: [''] }]) {
+          const done = await stopped(options);
+          expect((done.error as Error).message).toMatch(
+            /^ca-agentx-stg-api couldn't be confirmed stopped before the deployment.*Nothing was deployed\.$/,
+          );
+          expect(done.az.deployment).toBeUndefined();
+        }
+      });
+
+      it('never reports done when the API reads running after the deployment', async () => {
+        const done = await stopped({ apiStates: ['Stopped', 'Running'] });
+        expect(done.az.deployment).toBeDefined();
+        expect(done.status).toBe(1);
+        expect(done.terminal.said).toContainEqual(
+          expect.stringMatching(/^Deployed, but ca-agentx-stg-api couldn't be confirmed stopped/),
+        );
+      });
+
+      it('is never taken with --keep-running or --load-run, and leaves plain apps as it was', async () => {
+        expect(() => parseArguments(['apps', '--api-stopped', '--keep-running'])).toThrow(UsageError);
+        expect(() => parseArguments(['apps', '--load-run', '--api-stopped'])).toThrow(UsageError);
+        expect(() => parseArguments(['apps', '--api-stopped', '--api-stopped'])).toThrow(UsageError);
+        expect(parseArguments(['apps', '--api-stopped'])).toMatchObject({ apiStopped: true });
+        expect(parseArguments(['apps'])).not.toHaveProperty('apiStopped');
+        const plain = await run(['apps'], { answers, images: recordingImages() });
+        expect(apiCalls(plain.az)).toEqual([]);
+      });
+    });
 
     it('secrets and apps go back to an older generation beside a newer one only with --back-to-generation', async () => {
       const both = {
