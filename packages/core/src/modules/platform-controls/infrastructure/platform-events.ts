@@ -5,23 +5,27 @@
 // anchor check (A2b): an event planted to make a copy look done, or one
 // deleted, breaks it.
 //
-// Each fact is compared as `(details::jsonb ->> '<name>')`, its name written
-// into the SQL, so a read by the facts 0082 indexes (event, person, subject,
-// and `at` for the latest time) is a few index entries, however many events of
-// the action the chain holds (SA2). The containment test stays beside it, so
-// what matches is exactly what matched before: a string fact, equal.
+// Each fact is compared as `(details::jsonb ->> <name>)`. The facts 0082
+// indexes (event, person, subject, and `at` for the latest time) are written
+// out exactly as the indexes key them, fixed text, so a read by one of them is
+// a few index entries however many events of the action the chain holds (SA2);
+// any other name goes as a bound value. The containment test stays beside
+// each, so what matches is exactly what matched before: a string fact, equal.
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import type { PlatformControlsTables } from './tables.ts';
 
-/** A fact's name, as the SQL may hold it written out. */
-const FACT_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+/** The facts 0082 indexes, each exactly as its index keys it. */
+const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
+  ['event', sql<string | null>`(details::jsonb ->> 'event')`],
+  ['person', sql<string | null>`(details::jsonb ->> 'person')`],
+  ['subject', sql<string | null>`(details::jsonb ->> 'subject')`],
+  ['at', sql<string | null>`(details::jsonb ->> 'at')`],
+]);
 
-/** A fact of the details, as 0082's indexes key it; a name that couldn't be written out safely throws. */
-function fact(name: string): RawBuilder<string | null> {
-  if (!FACT_NAME.test(name)) throw new TypeError(`Not a fact's name: ${JSON.stringify(name)}`);
-  return sql<string | null>`(details::jsonb ->> ${sql.lit(name)})`;
-}
+/** A fact of the details: one 0082 indexes as its index keys it, any other by a bound name. */
+const fact = (name: string): RawBuilder<string | null> =>
+  INDEXED_FACTS.get(name) ?? sql<string | null>`(details::jsonb ->> ${name})`;
 
 type Reader = Kysely<PlatformControlsTables> | Transaction<PlatformControlsTables>;
 

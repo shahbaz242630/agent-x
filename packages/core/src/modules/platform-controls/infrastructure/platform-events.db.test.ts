@@ -6,6 +6,7 @@
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
+import { type Compilable, sql, type Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createPlatformChain } from './platform-chain.ts';
@@ -73,10 +74,11 @@ describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.v
     await expect(latestPlatformTime(app, 'kind.unreadable', 'at')).rejects.toThrow(/not a time as toISOString/);
   });
 
-  it('refuses a fact’s name it could not write into the SQL safely', async () => {
-    await expect(platformEventWith(app, 'idp.event_copied', { "event') or (true": 'x' })).rejects.toThrow(
-      /Not a fact's name/,
-    );
+  it('binds a fact’s name it doesn’t index as a value, never as SQL', async () => {
+    await chain.recordAlone(app, { actor: ACTOR, action: 'kind.named', details: { org: 'x' } });
+
+    expect(await platformEventWith(app, 'kind.named', { org: 'x' })).toBe(true);
+    expect(await platformEventWith(app, 'kind.named', { "org') is not null or ('": 'x' })).toBe(false);
   });
 });
 
@@ -93,39 +95,45 @@ describe(`the copier's and the restriction's reads, from 0082's indexes (SA2, Po
    * Postgres on its own statistics, no kind of scan set aside; the rows are made and
    * planned in one transaction, rolled back. Only the nodes that read the chain are kept.
    */
-  async function plansOf(reads: Readonly<Record<string, { sql: string; parameters: readonly unknown[] }>>) {
-    const admin = await database.connect('admin');
+  async function plansOf(
+    reads: (tx: Transaction<PlatformControlsTables>) => Readonly<Record<string, Compilable>>,
+  ): Promise<Record<string, PlanNode[]>> {
+    const owner = createDatabase<PlatformControlsTables>(
+      { ...database.connection('owner'), maxConnections: 1 },
+      testLogger(),
+    );
+    const plans: Record<string, PlanNode[]> = {};
+    const rolledBack = new Error('rolled back');
     try {
-      await admin.query('begin');
-      await admin.query(
-        `insert into platform_controls.audit_events
-           (seq, id, recorded_at, actor_type, actor_id, action, details, prev_hash, hash, mac, mac_key_version)
-         select 1000000 + g, gen_random_uuid(), now(), 'system', 'api', 'idp.event_copied',
-                json_build_object(
-                  'event', 'user:' || g || ':1', 'org', 'none', 'type', 'user.human.mfa.otp.removed', 'by', 'other',
-                  'person', 'p-' || (g % 500), 'subject', 's-' || (g % 500),
-                  'at', to_char(timestamp '2026-01-01' + g * interval '1 second', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                )::text,
-                decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1
-         from generate_series(1, $1::int) as g`,
-        [COPIED],
-      );
-      await admin.query('analyze platform_controls.audit_events');
-      const plans: Record<string, PlanNode[]> = {};
-      for (const [name, read] of Object.entries(reads)) {
-        const [row] = await admin.query<{ 'QUERY PLAN': [{ Plan: PlanNode }] }>(
-          `explain (format json) ${read.sql}`,
-          read.parameters,
-        );
-        plans[name] = nodes(row?.['QUERY PLAN'][0].Plan ?? {}).filter(
-          (node) => node['Relation Name'] === 'audit_events' || node['Index Name'] !== undefined,
-        );
-      }
-      return plans;
+      await owner.transaction().execute(async (tx) => {
+        await sql`
+          insert into platform_controls.audit_events
+            (seq, id, recorded_at, actor_type, actor_id, action, details, prev_hash, hash, mac, mac_key_version)
+          select 1000000 + g, gen_random_uuid(), now(), 'system', 'api', 'idp.event_copied',
+                 json_build_object(
+                   'event', 'user:' || g || ':1', 'org', 'none', 'type', 'user.human.mfa.otp.removed', 'by', 'other',
+                   'person', 'p-' || (g % 500), 'subject', 's-' || (g % 500),
+                   'at', to_char(timestamp '2026-01-01' + g * interval '1 second', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 )::text,
+                 decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1
+          from generate_series(1, ${COPIED}::int) as g`.execute(tx);
+        await sql`analyze platform_controls.audit_events`.execute(tx);
+        for (const [name, read] of Object.entries(reads(tx))) {
+          const explained = await sql<{ 'QUERY PLAN': [{ Plan: PlanNode }] }>`explain (format json) ${read}`.execute(
+            tx,
+          );
+          plans[name] = nodes(explained.rows[0]?.['QUERY PLAN'][0].Plan ?? {}).filter(
+            (node) => node['Relation Name'] === 'audit_events' || node['Index Name'] !== undefined,
+          );
+        }
+        throw rolledBack;
+      });
+    } catch (error) {
+      if (error !== rolledBack) throw error;
     } finally {
-      await admin.query('rollback');
-      await admin.end();
+      await owner.destroy();
     }
+    return plans;
   }
 
   const indexesOf = (plan: readonly PlanNode[] | undefined) =>
@@ -137,17 +145,17 @@ describe(`the copier's and the restriction's reads, from 0082's indexes (SA2, Po
       oneOf: { type: ['user.human.mfa.otp.removed'] },
       noneOf: { by: ['self'] },
     };
-    const plans = await plansOf({
-      copied: platformEventWithRead(app, 'idp.event_copied', { event: 'user:77:1', org: 'none' }).compile(),
-      copiedAnywhere: platformEventWithRead(app, 'idp.event_copied', { event: 'user:77:1' }).compile(),
-      cursor: latestPlatformTimeRead(app, 'idp.event_copied', 'at').compile(),
-      restriction: latestPlatformTimeOfRead(app, 'at', [
+    const plans = await plansOf((tx) => ({
+      copied: platformEventWithRead(tx, 'idp.event_copied', { event: 'user:77:1', org: 'none' }),
+      copiedAnywhere: platformEventWithRead(tx, 'idp.event_copied', { event: 'user:77:1' }),
+      cursor: latestPlatformTimeRead(tx, 'idp.event_copied', 'at'),
+      restriction: latestPlatformTimeOfRead(tx, 'at', [
         { ...removed, facts: { person: 'p-7' } },
         { action: 'idp.event_copied', facts: { person: 'p-7', counts: 'yes' } },
         { action: 'person.second_factors_removed', facts: { person: 'p-7' } },
         { ...removed, facts: { subject: 's-7' } },
-      ]).compile(),
-    });
+      ]),
+    }));
 
     for (const plan of Object.values(plans)) {
       expect(plan.map((node) => node['Node Type'])).not.toContain('Seq Scan');
