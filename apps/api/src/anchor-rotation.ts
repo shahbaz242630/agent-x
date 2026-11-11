@@ -436,7 +436,9 @@ export function createRotation({
       if (group === undefined) groups.set(shard, [day]);
       else group.push(day);
     }
-    const oldest = (group: readonly Day[]): number => Math.min(...group.map((day) => day.dueAt));
+    // A fold, not Math.min(...): a spread of a very long group would overflow the stack.
+    const oldest = (group: readonly Day[]): number =>
+      group.reduce((least, day) => Math.min(least, day.dueAt), Number.POSITIVE_INFINITY);
     return [...groups.values()].toSorted((one, other) => oldest(one) - oldest(other)).flat();
   };
 
