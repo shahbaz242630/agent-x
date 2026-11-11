@@ -10,7 +10,7 @@ import { createKeyProvider, type KeyMaterial, type KeyProvider } from '../keys/k
 import type { Message } from '../keys/message.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import { type Anchor, signAnchor, signPass, signProgress } from './anchor.ts';
-import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
+import { anchoredOf, type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import { type Chain, chainName } from './chain.ts';
 import { cutoverFile, shardsDoneFile } from './cutover.ts';
 import { rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
@@ -791,6 +791,57 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
       expect(log.latest(away)?.seq).toBe(6n);
       release?.();
       expect(made.lines('audit.anchor_shard_unreadable')).toHaveLength(1);
+    });
+
+    it('a chain’s place last known, line by line: the higher place and its time, the same place’s later time, never a lower', () => {
+      expect(anchoredOf({}, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 100 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 6n, 50)).toEqual({ seq: 6n, anchoredAt: 50 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 5n, 300)).toEqual({ seq: 5n, anchoredAt: 300 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 300 }, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 300 });
+      expect(anchoredOf({ seq: 5n }, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 100 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 4n, 900)).toEqual({ seq: 5n, anchoredAt: 100 });
+    });
+
+    it('a write that lands past the headroom lets shards go at once, down to it, so the next read back finds room', async () => {
+      const made = await world();
+      const log = tight(made, 12);
+      await log.read();
+      // Shards read back past the headroom, within the budget: nothing yet lets one go.
+      const { mostBytes } = log.memoryHeld();
+      for (const chain of letGo(log)) {
+        if (log.memoryHeld().bytes > mostBytes * 0.8) break;
+        (await log.pin(chain))?.();
+      }
+      expect(log.memoryHeld().bytes).toBeGreaterThan(mostBytes * 0.8);
+      expect(log.memoryHeld().bytes).toBeLessThanOrEqual(mostBytes);
+      const evictions = made.lines('audit.anchor_shards_evicted').length;
+      const before = { bytes: log.memoryHeld().bytes, held: held(log).length };
+      await log.flush();
+      // Let go by the log's count of lines, as any letting go is: what it holds now is less, its shards fewer.
+      expect(made.lines('audit.anchor_shards_evicted')).toHaveLength(evictions + 1);
+      expect(log.memoryHeld().bytes).toBeLessThan(before.bytes);
+      expect(held(log).length).toBeLessThan(before.held);
+    });
+
+    it('a held anchor read for the probe: as `latest`, nothing for a shard let go, and the shard not counted as used', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      const [older = PLATFORM, newer = PLATFORM] = held(log);
+      // `older` used before every other shard held, `newer` after them all: the least recently used goes first.
+      for (const chain of [older, ...held(log).filter((one) => one !== older && one !== newer), newer]) {
+        (await log.pin(chain))?.();
+      }
+      expect(log.heldAnchor(older)?.seq).toBe(6n);
+      expect(log.heldAnchor(letGo(log)[0] ?? PLATFORM)).toBeUndefined();
+      // Read for the probe, then room needed: `older` still goes before `newer`.
+      log.heldAnchor(older);
+      for (const chain of letGo(log)) {
+        if (!log.holds(older)) break;
+        (await log.pin(chain))?.();
+      }
+      expect(log.holds(older)).toBe(false);
+      expect(log.holds(newer)).toBe(true);
     });
 
     it('no write first with room enough, with nothing waiting, while writes fail, or in a log that holds every shard', async () => {

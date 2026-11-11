@@ -133,6 +133,8 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
   const unreadable = new Set<string>();
   const pins = new Map<string, number>();
   const refused: string[] = [];
+  // The shards the walk told the log it left, by the organisation it left them at.
+  const walked: string[] = [];
   const ofName = (name: string): string => name.slice('organisation:'.length);
   const idOf = (chain: Chain): string => (chain.kind === 'organisation' ? chain.orgId : 'platform');
   const here = (chain: Chain): boolean => !away.has(idOf(chain));
@@ -149,6 +151,7 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
     };
   return {
     away,
+    walked,
     unreadable,
     refused,
     pins,
@@ -176,7 +179,9 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
       holds: here,
       // Nothing waits here to be written: no room to make; nor an order to let shards go in.
       roomToReadBack: () => Promise.resolve(),
-      walkedPast: () => undefined,
+      walkedPast: (chain: Chain) => {
+        walked.push(idOf(chain));
+      },
       // What the log last knew of it, with no read: here, what it holds.
       lastKnown: (chain: Chain) => ({
         seq: anchors.latest(chain)?.seq,
@@ -1547,6 +1552,9 @@ describe('the full pass walks the store a shard at a time (PL-65 PR4)', () => {
     // A shard's chains together: each shard comes once in the round's order.
     const runs = shardRuns(round);
     expect(new Set(runs).size).toBe(runs.length);
+    // And the log told each time the walk left one, so those go first when room is needed.
+    expect(shards.walked.length).toBeGreaterThanOrEqual(runs.length - 1);
+    expect(shardRuns(shards.walked)).toHaveLength(shards.walked.length);
     expect(made.failed).toEqual([]);
     expect(made.missed).toEqual([]);
   });

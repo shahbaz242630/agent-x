@@ -251,6 +251,58 @@ describe('SEC-ANC-06 the anchor check walks the store a shard at a time (PL-65 P
     expect(after.lines('audit.anchor_shard_unreadable').length).toBeGreaterThan(0);
   });
 
+  it('after a restart, chains in shards let go are judged late by when their anchors were signed, never read back for it', async () => {
+    const orgIds = many(40, 11_000);
+    const { fake, chains, at } = await shardedStore(orgIds);
+    const capture = new LogCapture();
+    const logger = testLogger(capture);
+    // Two hours on: every anchor older than the bound.
+    const clock = new FixedClock(new Date(at.getTime() + 120 * MINUTE));
+    const log = createAnchorLog({
+      store: fake.store,
+      keys,
+      logger,
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: STALE_MS,
+      evicts: true,
+      mostFileBytes: 11_000,
+    });
+    let answered = false;
+    const organizations: OrganisationChains = {
+      ...chains.organizations,
+      // One turn completes, then the database hangs: the run's time ends with the rest unreached.
+      verify: (orgId, anchor) => {
+        if (answered) return new Promise(() => undefined);
+        answered = true;
+        return chains.organizations.verify(orgId, anchor);
+      },
+    };
+    const check = createAnchorCheck({
+      chains: [],
+      organizations,
+      keys,
+      clock,
+      logger,
+      staleAfterMs: STALE_MS,
+      deadlineMs: 120_000,
+      durable: log,
+      lanes: 1,
+      runWithinMs: 200,
+    });
+    await log.read();
+    const away = orgIds.filter((orgId) => !log.holds({ kind: 'organisation', orgId }));
+    expect(away.length).toBeGreaterThan(10);
+    const loaded = capture.lines().filter((line) => line.event === 'audit.anchor_shard_loaded').length;
+    await check.run();
+    const behind = capture.lines().filter((line) => line.event === 'audit.anchor_check_behind');
+    expect(behind).toEqual([expect.objectContaining({ level: 'error', organisations: orgIds.length - 1 })]);
+    // Judged with no shard read back but the one turn's.
+    expect(capture.lines().filter((line) => line.event === 'audit.anchor_shard_loaded').length).toBeLessThanOrEqual(
+      loaded + 1,
+    );
+  });
+
   it('late shards are reached: restarts each cut short after a few chains still reach every one, the longest waiting first', async () => {
     const orgIds = many(40, 9000);
     const { fake, chains, at } = await shardedStore(orgIds);

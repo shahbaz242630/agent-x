@@ -285,7 +285,7 @@ const CHURN_RELOADS = SHARDS;
  * A chain's anchored place last known, given an anchor line of it: the highest place wins, as in `merge`, and the same
  * place signed again later (an idle chain checked since) moves its time on.
  */
-const anchoredOf = (was: LastKnown, seq: bigint, at: number): Pick<LastKnown, 'seq' | 'anchoredAt'> => {
+export const anchoredOf = (was: LastKnown, seq: bigint, at: number): Pick<LastKnown, 'seq' | 'anchoredAt'> => {
   if (was.seq === undefined || seq > was.seq) return { seq, anchoredAt: at };
   if (seq === was.seq) return { seq, anchoredAt: Math.max(was.anchoredAt ?? at, at) };
   return { seq: was.seq, anchoredAt: was.anchoredAt };
