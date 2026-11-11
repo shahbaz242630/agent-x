@@ -14,6 +14,7 @@ import {
   rangesText,
   readRanges,
   refreshed,
+  writablePrefix,
 } from './github-ranges.ts';
 
 const PINNED: GithubRanges = {
@@ -189,6 +190,18 @@ describe('main', () => {
     expect(await main(['--write'], answering(withoutLast), save)).toBe(0);
     const written = JSON.parse(save.mock.calls[0]?.[0] ?? '{}') as GithubRanges;
     expect(written.registry.prefixes).toEqual([...withoutLast].sort());
+  });
+
+  it('with --write, writes nothing GitHub gives that is not a plain IPv4 range of /22 or narrower', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    for (const odd of ['10.0.0.0/8', '2001:db8::/32', '300.1.1.1/32', 'x', '1.2.3.4']) {
+      const save = vi.fn<(text: string) => void>();
+      expect(await main(['--write'], answering([...pinned.registry.prefixes, odd]), save)).toBe(1);
+      expect(save).not.toHaveBeenCalled();
+    }
+    expect(writablePrefix('20.201.28.151/32')).toBe(true);
+    expect(writablePrefix('185.199.108.0/22')).toBe(true);
+    expect(writablePrefix('185.199.108.0/21')).toBe(false);
   });
 
   it('with --write, still fails when a refusal is left after the update: the daily run then emails it', async () => {

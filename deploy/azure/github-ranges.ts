@@ -197,6 +197,20 @@ export function refreshed(pinned: GithubRanges, live: LiveRanges, today: string)
   };
 }
 
+/**
+ * Whether a prefix may go in the file as GitHub gave it: plain IPv4, every part a byte, no wider than a /22 (what the
+ * file's own test holds it to). The daily workflow writes with no one reading first (S186), so meta's answer is
+ * checked here, not only in CI after.
+ */
+export const writablePrefix = (prefix: string): boolean => {
+  const found = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(prefix);
+  if (found === null) return false;
+  const [, a, b, c, d, bits] = found.map(Number);
+  return (
+    [a, b, c, d].every((part) => part !== undefined && part <= 255) && bits !== undefined && bits >= 22 && bits <= 32
+  );
+};
+
 /** The file as it is written: JSON with a trailing newline, the shape Prettier leaves it in. */
 export const rangesText = (ranges: GithubRanges): string => `${JSON.stringify(ranges, null, 2)}\n`;
 
@@ -247,6 +261,15 @@ export async function main(
     return 0;
   }
   const updated = refreshed(pinned, current, new Date().toISOString().slice(0, 10));
+  const unfit = [...updated.registry.prefixes, ...updated.downloads.prefixes].filter(
+    (prefix) => !writablePrefix(prefix),
+  );
+  if (unfit.length > 0) {
+    console.log(
+      `Not written: GitHub's answer holds ${unfit.join(', ')}, which is not a plain IPv4 range of /22 or narrower. The file is unchanged; read ${META} by hand before allowing anything wider.`,
+    );
+    return 1;
+  }
   if (prefixesDiffer(updated, pinned)) {
     save(rangesText(updated));
     console.log(`Wrote ${RANGES_FILE}. A changed range is a deployment change: redeploy before the next image pull.`);
