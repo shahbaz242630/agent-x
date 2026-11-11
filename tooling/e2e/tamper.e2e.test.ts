@@ -48,6 +48,8 @@ import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
 import { AED, mandateWorld, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { createSpendRequestDecisions } from '../../apps/api/src/spend-request-decisions.ts';
 import { spendWorld } from '../../apps/api/src/spend-world.helper.test.ts';
+import { worded } from '../../apps/api/src/statement-words.helper.test.ts';
+import { PAYEE_STATEMENT_VERSION } from '../../apps/api/src/suspensions.ts';
 import { APP_KEYS, OPERATOR_KEYS } from '../../deploy/compose/prepare.ts';
 import { apiAnswers } from './api-sign-in.ts';
 import { API_ORIGIN, execIn, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
@@ -736,7 +738,7 @@ async function payeeControls(tenant: Tenant, adminCookie: string): Promise<strin
     const registered = await controlSend(
       op,
       { ...cookieHeader(adminCookie), 'agentx-organization': tenant.world.org },
-      { name, iban, pendingRequests: 'pause' },
+      { name, iban, pendingRequests: 'pause', statementVersion: PAYEE_STATEMENT_VERSION },
       op.route.replace('{id}', supplier),
     );
     expect(registered.status).toBe(201);
@@ -1363,8 +1365,14 @@ async function foreignResources(op: Operation, body: unknown): Promise<void> {
 }
 
 /** Every body used by any phase must start valid before the attack changes it. */
+/** A body's own fields but the versions of words a sample made up (CO3): `worded` gives each the version now. */
+const withoutVersions = (body: unknown): unknown =>
+  typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? Object.fromEntries(Object.entries(body).filter(([name]) => !/^statementVersion$|StatementVersion$/.test(name)))
+    : body;
+
 function baseline(op: Operation): unknown {
-  const body = op.schema === undefined ? undefined : sample(op.schema, own);
+  const body = op.schema === undefined ? undefined : worded(op.route, withoutVersions(sample(op.schema, own)));
   if (op.schema !== undefined)
     expect(z.fromJSONSchema(op.schema).safeParse(body).success, `${op.method} ${op.route}: invalid baseline`).toBe(
       true,

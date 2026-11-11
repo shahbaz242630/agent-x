@@ -266,6 +266,8 @@ export const REASON_CODES = {
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   SOURCE_NOT_USABLE:
     "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it.",
+  STATEMENT_CHANGED:
+    "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so nothing was changed. Read them again (GET /v1/statements) and confirm with the version shown.",
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_ADDS_SPENT:

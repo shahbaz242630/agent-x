@@ -73,6 +73,7 @@ import {
   stepUpAsked,
   stepUpAskedWith,
 } from './route-schemas.ts';
+import { confirmedWith, type StatementConfirmed, statementVersion, versionWithChoice } from './statements.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /**
@@ -339,10 +340,17 @@ const ACCEPT_SCHEMA = {
 const confirmWith = <Shape extends z.ZodRawShape>(shape: Shape) =>
   STEP_UP_CONFIRM.extend(shape).describe('The step-up signed in again for, and the choice it was asked with.');
 
+/** An acceptance's words, confirmed with its choice alone: a first version has none (CO3). */
+const ACCEPT_WORDS: readonly StatementConfirmed[] = [
+  { id: 'supersede', field: 'statementVersion', with: 'pendingRequests' },
+];
+
 const ACCEPT_CONFIRM_SCHEMA = {
   summary: 'Accept the draft, once signed in again for it with a passkey',
   params: MANDATE_ID,
-  body: confirmWith(PENDING_CHOICE),
+  body: confirmWith({ ...PENDING_CHOICE, statementVersion: statementVersion('supersede').optional() }).superRefine(
+    versionWithChoice('pendingRequests'),
+  ),
   response: {
     200: MANDATE_DETAILS.describe(
       'The mandate with the draft in force (ACTIVE, if it was its first), the version it replaced superseded.',
@@ -389,13 +397,13 @@ const OVER_LIMIT_SCHEMAS = {
   confirm: {
     summary: 'Choose what happens past the mandate’s limits, once signed in again for it with a passkey',
     params: MANDATE_ID,
-    body: confirmWith(OVER_LIMIT_BODY.shape),
+    body: confirmWith({ ...OVER_LIMIT_BODY.shape, statementVersion: statementVersion('over_limit') }),
     response: { 200: MANDATE_DETAILS.describe('The mandate, its version in force holding the choice.') },
   },
 };
 
 /** A suspend's confirm: the step-up, and the choice it was asked with. */
-const SUSPEND_CONFIRM = confirmWith(SUSPEND_BODY.shape);
+const SUSPEND_CONFIRM = confirmWith({ ...SUSPEND_BODY.shape, statementVersion: statementVersion('suspend') });
 
 /** The move as its body names it: a suspend with its choice, which its schema requires (decision 7). */
 const chosenFrom = (move: MandateMove, body: object | null | undefined): MoveChosen => {
@@ -584,7 +592,7 @@ export function registerMandates(
     {
       schema: ACCEPT_CONFIRM_SCHEMA,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...ACCEPTING_ROLES], operation: ACCEPT_CONFIRM_OPERATION },
+      config: { access: [...ACCEPTING_ROLES], operation: ACCEPT_CONFIRM_OPERATION, statements: ACCEPT_WORDS },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -628,7 +636,11 @@ export function registerMandates(
       {
         schema: schemas.confirm,
         bodyLimit: CHALLENGE_BODY_LIMIT,
-        config: { access: [...MOVING_ROLES], operation: MOVE_OPERATIONS[move].confirm },
+        config: {
+          access: [...MOVING_ROLES],
+          operation: MOVE_OPERATIONS[move].confirm,
+          ...(move === 'suspend' && { statements: confirmedWith('suspend') }),
+        },
       },
       async (request, reply) => {
         const member = memberInSessionOf(request);
@@ -671,7 +683,11 @@ export function registerMandates(
     {
       schema: OVER_LIMIT_SCHEMAS.confirm,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...MOVING_ROLES], operation: OVER_LIMIT_OPERATIONS.confirm },
+      config: {
+        access: [...MOVING_ROLES],
+        operation: OVER_LIMIT_OPERATIONS.confirm,
+        statements: confirmedWith('over_limit'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
