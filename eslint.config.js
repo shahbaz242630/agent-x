@@ -304,6 +304,36 @@ const apiSendHooks = [
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
 const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
 
+/** The product's bans with the state repair's steps, which only the operator's repair (and the audit module) may import. */
+const stateRepairBans = {
+  paths: [
+    ...productImportBans,
+    {
+      name: '@agentx/core/modules/audit',
+      importNames: stateRepairSteps,
+      message: stateRepairOnly,
+    },
+  ],
+  patterns: [
+    {
+      group: ['**/modules/audit', '**/audit/index', '**/audit/index.ts', '**/audit/infrastructure/state-repair*'],
+      importNames: stateRepairSteps,
+      message: stateRepairOnly,
+    },
+  ],
+};
+
+/**
+ * PM3: the live adapter moves money only once boot.ts has noted the start it
+ * recorded live (startedLive); nothing else may note one.
+ */
+const startRecordBan = {
+  name: '@agentx/platform/config',
+  importNames: ['recordedStartWith'],
+  message:
+    "PM3: only the API's boot (apps/api/src/boot.ts) notes the start it recorded, which the live adapter checks.",
+};
+
 export default defineConfig([
   globalIgnores([
     '**/node_modules/',
@@ -404,30 +434,15 @@ export default defineConfig([
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          paths: [
-            ...productImportBans,
-            {
-              name: '@agentx/core/modules/audit',
-              importNames: stateRepairSteps,
-              message: stateRepairOnly,
-            },
-          ],
-          patterns: [
-            {
-              group: [
-                '**/modules/audit',
-                '**/audit/index',
-                '**/audit/index.ts',
-                '**/audit/infrastructure/state-repair*',
-              ],
-              importNames: stateRepairSteps,
-              message: stateRepairOnly,
-            },
-          ],
-        },
+        { paths: [...stateRepairBans.paths, startRecordBan], patterns: stateRepairBans.patterns },
       ],
     },
+  },
+
+  // The start's own file notes the partner its recorded start names (PM3).
+  {
+    files: ['apps/api/src/boot.ts'],
+    rules: { 'no-restricted-imports': ['error', stateRepairBans] },
   },
 
   // The API's contract: only its own two files set how every route checks, answers and fails.
