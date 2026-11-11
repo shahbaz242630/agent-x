@@ -13,6 +13,7 @@ import { gunzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
+import { SHARD_FILE, shardHex, shardOf } from '../../packages/platform/src/audit-chain/shards.ts';
 import { API_PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import { createTestDatabase, type TestDatabase } from '../../packages/testing/src/db/test-database.ts';
 import { writeTestKeys } from '../../packages/testing/src/keys.ts';
@@ -196,9 +197,16 @@ describe(`the API process (Postgres ${server.version})`, () => {
         { timeout: 30_000, interval: 100 },
       );
       expect(said.find((line) => line.event === 'audit.anchors_read')?.chains).toBe(0);
-      const files = readdirSync(path.join(folder, 'e1', 'snapshots'));
-      expect(files).toHaveLength(1);
-      const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'snapshots', String(files[0])))).toString('utf8');
+      // PR2's sharded store: the platform chain's snapshot in its shard's folder, a signed list of it under `changes/`.
+      const shard = shardHex(shardOf('platform'));
+      expect(readdirSync(path.join(folder, 'e1', 'shards')).toSorted()).toEqual(['changes', shard].toSorted());
+      expect(readdirSync(path.join(folder, 'e1', 'shards', 'changes'))).toHaveLength(1);
+      const files = readdirSync(path.join(folder, 'e1', 'shards', shard));
+      expect(files).toEqual([expect.stringMatching(SHARD_FILE)]);
+      expect(String(files[0])).toMatch(/-s$/);
+      const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'shards', shard, String(files[0])))).toString(
+        'utf8',
+      );
       expect(
         text.split('\n').map((line) => {
           if (line === '') return 'end';

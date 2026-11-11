@@ -25,7 +25,8 @@ export function anchorLogOf(
     readonly alertAfterMs: number;
   },
 ): AnchorLog | undefined {
-  const shared = { ...services, epoch, now: () => clock.now() };
+  // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it.
+  const shared = { ...services, epoch, now: () => clock.now(), cutOver: true };
   if (container !== null) {
     const fetch = createOutboundFetch(azureBlobOrigins(container));
     return createAnchorLog({ ...shared, store: azureWriteOnceStore({ settings: container, fetch }) });
