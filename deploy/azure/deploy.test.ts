@@ -35,6 +35,7 @@ import {
   type DnsLookup,
   keyProblems,
   doorRecords,
+  isOwnServer,
   HiddenLine,
   type Images,
   LOAD_VARIABLES,
@@ -56,6 +57,7 @@ import {
   RESOURCE_GROUP,
   retriedWhileOffline,
   secretValues,
+  servedServerOf,
   shapedForPolicy,
   type Steps,
   type Terminal,
@@ -205,7 +207,7 @@ describe('parseArguments', () => {
       [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
       [
         ['apps', '--commit'],
-        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, and --commit with one full 40-hex commit/,
+        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped and --back-to-generation <n>/,
       ],
       // Stage G's copy (4D2e): its name alone, never staging's own server, and only in a load run.
       [['apps', '--load-run', '--load-database'], /--load-database with the throwaway copy/],
@@ -684,7 +686,7 @@ interface AzAnswers {
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
   /** What the server list answers: the servers (by default one, named), or a failure. */
-  readonly servers?: readonly unknown[] | 'unreadable';
+  readonly servers?: readonly unknown[] | 'unreadable' | Readonly<Record<string, never>>;
   /** The server's max_connections as Azure shows it: by default the load size's 120. */
   readonly connectionLimit?: string;
   /** What `az bicep version` prints. */
@@ -730,6 +732,9 @@ interface AzAnswers {
   readonly removeRefused?: boolean;
   /** How many reads of a removed app still find it (default one); Infinity for one that never goes. */
   readonly removalReads?: number;
+  /** The API's running state, one a read, the last repeated (default Stopped); and whether Azure refuses its stop. */
+  readonly apiStates?: readonly string[];
+  readonly stopRefused?: boolean;
   /** The jobs app's identity: there (default), missing, or unreadable. */
   readonly jobsIdentity?: 'there' | 'missing' | 'unreadable';
   /** The environment's certificates after the deployment. */
@@ -808,6 +813,9 @@ const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPT
 /** The resource group's log alerts, as the tool lists them (at the API the Bicep writes them with). */
 const ALERTS_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/scheduledQueryRules?api-version=2026-03-01`;
 
+/** Staging's server at generation 0, under the suffix of the vault the fake lists (`kv-agentx-stg-abcdef`). */
+const OWN_SERVER = 'psql-agentx-stg-abcdef';
+
 /** An az call that succeeded, answering with the value as JSON. */
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
 
@@ -821,6 +829,7 @@ class RecordingAz implements Az {
   #readings = 0;
   #limitApplied = false;
   #appReads = 0;
+  #apiReads = 0;
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
@@ -833,7 +842,7 @@ class RecordingAz implements Az {
       const { servers } = this.options;
       return servers === 'unreadable'
         ? { status: 1, stdout: '', stderr: 'ERROR: ResourceGroupNotFound' }
-        : json(servers ?? [{ name: 'psql-agentx-stg-abcdef' }]);
+        : json(servers ?? [{ name: OWN_SERVER }]);
     }
     if (limit === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
     if (args[2] === 'restart') {
@@ -923,6 +932,7 @@ class RecordingAz implements Az {
   /** A Resource Manager call: the jobs app's removal and its reads back (4D2e D13), or a read (`#rest`). */
   #restCall(args: readonly string[]): AzResult {
     const url = args[args.indexOf('--url') + 1] ?? '';
+    if (url.includes('/containerApps/ca-agentx-stg-api')) return this.#api(args[2], url);
     if (args[2] === 'get' && url.includes('/containerApps/')) {
       this.#appReads += 1;
       return this.#appReads <= (this.options.removalReads ?? 1)
@@ -935,6 +945,20 @@ class RecordingAz implements Az {
         : { status: 0, stdout: '', stderr: '' };
     }
     return this.#rest(url);
+  }
+
+  /** The API app (AZ25 `--api-stopped`): a stop, or a read of its running state, one answer a read, the last repeated. */
+  #api(method: string | undefined, url: string): AzResult {
+    if (method === 'post') {
+      if (!url.includes('/stop?')) throw new Error(`unexpected API action ${url}`);
+      return this.options.stopRefused === true
+        ? { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) may not stop' }
+        : json({});
+    }
+    const states = this.options.apiStates ?? ['Stopped'];
+    const state = states[Math.min(this.#apiReads, states.length - 1)];
+    this.#apiReads += 1;
+    return json({ name: 'ca-agentx-stg-api', properties: { runningStatus: state } });
   }
 
   /** A write of the migration job's tags, as the options say Azure takes it. */
@@ -1032,6 +1056,8 @@ interface Scenario {
   readonly checkout?: Checkout | null;
   /** The log alerts the deployment would create: none unless given. */
   readonly planned?: readonly PlannedAlert[];
+  /** The database server's generation the foundation names (AZ25): database-generation.json's unless given. */
+  readonly generation?: number;
 }
 
 /** One run of the tool, with everything it touched. */
@@ -1058,6 +1084,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
     ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
     ...(scenario.checkout === null ? {} : { checkout: () => scenario.checkout ?? { head: COMMIT, clean: true } }),
+    ...(scenario.generation === undefined ? {} : { generation: scenario.generation }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -1075,6 +1102,7 @@ describe('deploy foundation', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      'keyvault list --subscription',
       'postgres flexible-server list',
       'resource show --subscription',
       'deployment sub create',
@@ -1239,12 +1267,10 @@ describe('deploy foundation', () => {
   });
 
   it.each([
-    ['a server autogrow has grown', [{ storage: { storageSizeGb: 64 } }], '64'],
-    ['a server at the least', [{ storage: { storageSizeGb: 32 } }], '32'],
-    ['no server yet', [], '32'],
-    ['a list that says nothing of it', [{}], '32'],
-    ['a size that is no number', [{ storage: { storageSizeGb: '64' } }], '32'],
-    ['a list that fails, as a first deploy has no group', 'unreadable', '32'],
+    ['a server autogrow has grown', [{ name: OWN_SERVER, storage: { storageSizeGb: 64 } }], '64'],
+    ['a server at the least', [{ name: OWN_SERVER, storage: { storageSizeGb: 32 } }], '32'],
+    ['a list that says nothing of it', [{ name: OWN_SERVER }], '32'],
+    ['a size that is no number', [{ name: OWN_SERVER, storage: { storageSizeGb: '64' } }], '32'],
     // Stage G's copy or the drill's beside it (4D2e): staging's own server's disk, wherever the list puts it.
     [
       "staging's own server after a copy's",
@@ -1270,6 +1296,209 @@ describe('deploy foundation', () => {
       expect(asked?.args).toEqual(expect.arrayContaining(['--resource-group', 'rg-agentx-staging']));
     },
   );
+
+  describe("the database server's generation: never a new, empty server in the live one's place (AZ25)", () => {
+    const disk = (gb: number) => ({ storage: { storageSizeGb: gb } });
+    const foundation = (generation: number, options: AzAnswers, flags: readonly string[] = []) => {
+      const admin = aPaste();
+      return run(['foundation', ...flags], {
+        answers: ['y', 'ops@example.invalid'],
+        hidden: [admin, admin],
+        az: new RecordingAz(options),
+        generation,
+      });
+    };
+    /** Nothing deleted, restarted or written but the deployment itself and its record: the old server stays as it was. */
+    const touchedNoServer = (az: RecordingAz) => {
+      for (const call of az.calls) expect(call.args).not.toContain('delete');
+      expect(az.calls.filter((call) => call.args[0] === 'postgres').map((call) => call.args[2])).not.toContain(
+        'update',
+      );
+    };
+    const refused = async (generation: number, options: AzAnswers, why: RegExp) => {
+      const done = await foundation(generation, options);
+      expect(done.error).toMatchObject({ message: expect.stringMatching(why) as unknown });
+      expect((done.error as Error).message).toMatch(/Nothing was deployed\.$/);
+      // Refused on reads alone, before any question past the subscription or any password.
+      expect(done.az.deployment).toBeUndefined();
+      expect(done.terminal.hiddenQuestions).toEqual([]);
+      expect(done.terminal.questions).toHaveLength(1);
+      expect(done.az.sequence).toEqual([
+        'account show --output',
+        'bicep version',
+        'keyvault list --subscription',
+        'postgres flexible-server list',
+      ]);
+      touchedNoServer(done.az);
+    };
+
+    it('refuses a generation raised before its server was restored, naming the server to restore', async () => {
+      await refused(
+        1,
+        { servers: [{ name: OWN_SERVER }] },
+        /generation 1, psql-agentx-stg-abcdef-r1, and the newest server there is generation 0: it names a server that is not there yet\. .*az postgres flexible-server restore --name psql-agentx-stg-abcdef-r1/,
+      );
+    });
+
+    it('refuses a generation going back to a server no longer there, or skipping ahead', async () => {
+      await refused(
+        0,
+        { servers: [{ name: `${OWN_SERVER}-r1` }] },
+        /goes back to a generation whose server is no longer there/,
+      );
+      await refused(
+        1,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }] },
+        /goes back to a generation whose server is no longer there/,
+      );
+      await refused(
+        3,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] },
+        /skips ahead \(the next generation is 2\)/,
+      );
+    });
+
+    it("refuses a lost live server beside a drill's, a -before or a Stage G copy: the data is somewhere", async () => {
+      for (const copy of ['psql-agentx-stg-drill', 'psql-agentx-stg-before', 'psql-agentx-stg-g-a1b2c3d4']) {
+        await refused(
+          0,
+          { servers: [{ name: copy }] },
+          new RegExp(`^The live database server is missing: .*\\(only ${copy}\\)\\. Check whether it was lost`),
+        );
+      }
+    });
+
+    it('refuses any later generation when the vault or the servers cannot be read, never guessing', async () => {
+      await refused(1, { vaults: [] }, /holds no key vault, so no foundation has run here, but .* generation 1/);
+      await refused(1, { vaults: ['kv-agentx-stg-abcdef', 'kv-agentx-stg-other1'] }, /couldn't be read/);
+      await refused(1, { servers: 'unreadable' }, /couldn't be read/);
+      // A list Azure answers with something other than a list reads as unread, never as no servers.
+      await refused(1, { servers: {} }, /the key vault or the servers couldn't be read/);
+      await refused(0, { servers: {} }, /couldn't be read, so there's no telling the live server is there/);
+    });
+
+    it('deploys a restored generation, its disk read from it, and leaves the earlier one as it was', async () => {
+      const done = await foundation(1, {
+        servers: [
+          { name: OWN_SERVER, ...disk(128) },
+          { name: 'psql-agentx-stg-drill', ...disk(256) },
+          { name: `${OWN_SERVER}-r1`, ...disk(64) },
+        ],
+      });
+      expect(done.error).toBeUndefined();
+      expect(done.status).toBe(0);
+      expect(done.az.deployment?.values).toMatchObject({ AGENTX_AZURE_DATABASE_DISK_GB: '64' });
+      expect(done.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef-r1 (generation 1), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef.',
+      );
+      touchedNoServer(done.az);
+    });
+
+    it('refuses going back while a newer server is there: two live databases', async () => {
+      await refused(
+        0,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] },
+        /a newer server of the environment's is there \(psql-agentx-stg-abcdef-r1\): going back would leave two live databases.*run foundation --back-to-generation 0\./,
+      );
+      // The flag names the very generation the file does, or it is refused too.
+      const wrong = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, [
+        '--back-to-generation',
+        '1',
+      ]);
+      expect(wrong.error).toMatchObject({
+        message: expect.stringMatching(/^--back-to-generation 1 doesn't match database-generation\.json/) as unknown,
+      });
+      expect(wrong.az.deployment).toBeUndefined();
+    });
+
+    it('goes back with --back-to-generation naming it, or past a skipped one, only while that server is there', async () => {
+      const back = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, [
+        '--back-to-generation',
+        '0',
+      ]);
+      expect(back.status).toBe(0);
+      expect(back.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef (generation 0), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef-r1.',
+      );
+      const skipped = await foundation(2, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }] });
+      expect(skipped.status).toBe(0);
+      touchedNoServer(back.az);
+      touchedNoServer(skipped.az);
+    });
+
+    it('makes the first server on its own only where no foundation ran: no key vault yet', async () => {
+      for (const servers of [[], 'unreadable'] as const) {
+        const first = await foundation(0, { vaults: [], servers });
+        expect(first.status).toBe(0);
+        expect(first.terminal.said).toContain(
+          'No key vault yet, so no foundation has run here: the deployment makes the first database server, generation 0.',
+        );
+      }
+    });
+
+    it('refuses a live server missing where a foundation ran, or a list it cannot read, unless --first-server', async () => {
+      await refused(
+        0,
+        { servers: [] },
+        /^The live database server is missing: the key vault shows a foundation ran here before.*\(no server at all\)\. Check whether it was lost or deleted and restore it first \(playbook L\), then run foundation again; only for a server that was never made, in a group holding no server at all, run foundation --first-server/,
+      );
+      await refused(0, { servers: 'unreadable' }, /no telling the live server is there/);
+      const made = await foundation(0, { servers: [] }, ['--first-server']);
+      expect(made.status).toBe(0);
+      expect(made.terminal.said).toContain(
+        '--first-server: the deployment makes psql-agentx-stg-abcdef, new and empty, though the key vault shows a foundation ran here before.',
+      );
+      const unread = await foundation(0, { servers: 'unreadable' }, ['--first-server']);
+      expect((unread.error as Error).message).toMatch(
+        /--first-server goes only once the key vault and the servers are both read/,
+      );
+      expect(unread.az.deployment).toBeUndefined();
+      // An empty group alone: any server listed, a copy's or any other, refuses --first-server, vault or none.
+      for (const copy of ['psql-agentx-stg-before', 'psql-agentx-stg-drill', 'psql-agentx-stg-g-a1b2c3d4']) {
+        const beside = await foundation(0, { servers: [{ name: copy }] }, ['--first-server']);
+        expect((beside.error as Error).message).toMatch(/--first-server is for an empty group alone/);
+        expect(beside.az.deployment).toBeUndefined();
+        const noVault = await foundation(0, { vaults: [], servers: [{ name: copy }] }, ['--first-server']);
+        expect((noVault.error as Error).message).toMatch(/^The group holds no key vault.*and the group holds /);
+        expect(noVault.az.deployment).toBeUndefined();
+      }
+      // Never a later generation, which only a restore makes.
+      await refused(1, { servers: [] }, /names a server that is not there yet/);
+      const later = await foundation(1, { servers: [{ name: OWN_SERVER }] }, ['--first-server']);
+      expect(later.az.deployment).toBeUndefined();
+    });
+
+    it('takes --first-server on foundation alone, and --back-to-generation only with a generation', () => {
+      expect(parseArguments(['foundation', '--first-server', '--load-size'])).toEqual({
+        command: 'foundation',
+        loadSize: true,
+        alwaysOn: false,
+        server: { firstServer: true },
+      });
+      expect(parseArguments(['secrets', '--back-to-generation', '0', '--keys'])).toEqual({
+        command: 'secrets',
+        plan: { kind: 'keys' },
+        server: { backTo: 0 },
+      });
+      expect(parseArguments(['apps', '--back-to-generation', '12'])).toMatchObject({ server: { backTo: 12 } });
+      expect(() => parseArguments(['apps', '--first-server'])).toThrow(UsageError);
+      expect(() => parseArguments(['foundation', '--first-server', '--first-server'])).toThrow(UsageError);
+      for (const value of [undefined, 'x', '-1', '100', '01']) {
+        expect(() =>
+          parseArguments(['foundation', '--back-to-generation', ...(value === undefined ? [] : [value])]),
+        ).toThrow('--back-to-generation takes the generation database-generation.json names');
+      }
+    });
+
+    it('names generation 0 for staging today, so the next foundation changes no name', async () => {
+      const admin = aPaste();
+      const done = await run(['foundation'], { answers: ['y', 'ops@example.invalid'], hidden: [admin, admin] });
+      expect(done.status).toBe(0);
+      expect(done.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef (generation 0), which is there.',
+      );
+    });
+  });
 
   it('restarts the database when its connection limit is waiting on one, and only then, naming the server (S167)', async () => {
     const admin = aPaste();
@@ -1491,6 +1720,9 @@ describe('deploy secrets', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      // The database server's generation checked first (AZ25): the vault's suffix, then the servers.
+      'keyvault list --subscription',
+      'postgres flexible-server list',
       'keyvault list --subscription',
       'rest --method get',
       'deployment group create',
@@ -1729,6 +1961,146 @@ const CLIENT_ID = '338719472394810051';
 describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
 
+  describe("secrets and apps follow the database server's generation, never lead it (AZ25)", () => {
+    const part = (command: 'secrets' | 'apps', generation: number, options: AzAnswers, flags: string[] = []) =>
+      command === 'apps'
+        ? run(['apps', ...flags], { answers, images: recordingImages(), az: new RecordingAz(options), generation })
+        : run(['secrets', '--keys', ...flags], { answers: ['y'], az: new RecordingAz(options), generation });
+
+    describe('apps --api-stopped: no hand-off from a restored server before its pause (AZ25, playbook L)', () => {
+      const stopped = (options: AzAnswers = {}) =>
+        run(['apps', '--api-stopped'], { answers, images: recordingImages(), az: new RecordingAz(options) });
+      const apiCalls = (az: RecordingAz) =>
+        az.calls
+          .filter((call) => (call.args[call.args.indexOf('--url') + 1] ?? '').includes('ca-agentx-stg-api'))
+          .map(
+            (call) => `${String(call.args[2])} ${call.args.some((arg) => arg.includes('/stop?')) ? 'stop' : 'read'}`,
+          );
+
+      it('stops the API before sending, sends, stops it again and reads it stopped, saying the pause comes next', async () => {
+        const done = await stopped();
+        expect(done.error).toBeUndefined();
+        expect(done.status).toBe(0);
+        expect(apiCalls(done.az)).toEqual(['post stop', 'get read', 'post stop', 'get read']);
+        const sequence = done.az.sequence;
+        expect(sequence.indexOf('rest --method post')).toBeLessThan(sequence.indexOf('deployment group create'));
+        expect(sequence.lastIndexOf('rest --method post')).toBeGreaterThan(sequence.indexOf('deployment group show'));
+        expect(done.terminal.said).toContainEqual(
+          expect.stringMatching(/^Deployed, and ca-agentx-stg-api is still stopped\. Set the hand-off pause/),
+        );
+        for (const call of done.az.calls) expect(call.args).not.toContain('start');
+      });
+
+      it("sends nothing, stopping nothing, beside a load run's jobs app", async () => {
+        const beside = await stopped({ listedApps: ['ca-agentx-stg-api', 'ca-agentx-stg-jobs'] });
+        expect((beside.error as Error).message).toMatch(
+          /^ca-agentx-stg-jobs, a load run's jobs app, is there: it runs the hand-offs too.*Remove it first.*Nothing was deployed\.$/,
+        );
+        expect(beside.az.deployment).toBeUndefined();
+        expect(apiCalls(beside.az)).toEqual([]);
+      });
+
+      it('sends nothing when the API cannot be confirmed stopped first', async () => {
+        for (const options of [{ stopRefused: true }, { apiStates: ['Running'] }, { apiStates: [''] }]) {
+          const done = await stopped(options);
+          expect((done.error as Error).message).toMatch(
+            /^ca-agentx-stg-api couldn't be confirmed stopped before the deployment.*Nothing was deployed\.$/,
+          );
+          expect(done.az.deployment).toBeUndefined();
+        }
+      });
+
+      it('never reports done when the API reads running after the deployment', async () => {
+        const done = await stopped({ apiStates: ['Stopped', 'Running'] });
+        expect(done.az.deployment).toBeDefined();
+        expect(done.status).toBe(1);
+        expect(done.terminal.said).toContainEqual(
+          expect.stringMatching(/^Deployed, but ca-agentx-stg-api couldn't be confirmed stopped/),
+        );
+      });
+
+      it('is never taken with --keep-running or --load-run, and leaves plain apps as it was', async () => {
+        expect(() => parseArguments(['apps', '--api-stopped', '--keep-running'])).toThrow(UsageError);
+        expect(() => parseArguments(['apps', '--load-run', '--api-stopped'])).toThrow(UsageError);
+        expect(() => parseArguments(['apps', '--api-stopped', '--api-stopped'])).toThrow(UsageError);
+        expect(parseArguments(['apps', '--api-stopped'])).toMatchObject({ apiStopped: true });
+        expect(parseArguments(['apps'])).not.toHaveProperty('apiStopped');
+        const plain = await run(['apps'], { answers, images: recordingImages() });
+        expect(apiCalls(plain.az)).toEqual([]);
+      });
+    });
+
+    it('secrets and apps go back to an older generation beside a newer one only with --back-to-generation', async () => {
+      const both = {
+        servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+        after: [...COPIED_SECRETS, ...CREATED_ONCE],
+      };
+      for (const command of ['secrets', 'apps'] as const) {
+        const refusedBack = await part(command, 0, both);
+        expect((refusedBack.error as Error).message).toMatch(
+          new RegExp(`two live databases.*run ${command} --back-to-generation 0\\.`),
+        );
+        expect(refusedBack.az.deployment).toBeUndefined();
+        const back = await part(command, 0, both, ['--back-to-generation', '0']);
+        expect(back.status).toBe(0);
+        for (const call of back.az.calls) expect(call.args).not.toContain('delete');
+      }
+    });
+    const refusals: readonly [number, AzAnswers, RegExp][] = [
+      [1, { servers: [{ name: OWN_SERVER }] }, /it names a server that is not there yet/],
+      [0, { servers: [{ name: `${OWN_SERVER}-r1` }] }, /goes back to a generation whose server is no longer there/],
+      [
+        0,
+        { servers: [{ name: 'psql-agentx-stg-before' }] },
+        /server of the environment's own \(only psql-agentx-stg-before\)/,
+      ],
+      [
+        1,
+        { vaults: ['kv-agentx-stg-abcdef', 'kv-agentx-stg-other1'] },
+        /the key vault or the servers couldn't be read/,
+      ],
+      [0, { servers: [] }, /^The live database server is missing/],
+      [0, { servers: {} }, /no telling the live server is there/],
+      [1, { servers: 'unreadable' }, /the key vault or the servers couldn't be read/],
+    ];
+
+    for (const command of ['secrets', 'apps'] as const) {
+      it(`${command} refuses a generation whose server isn't there, naming the restore, then foundation, then ${command}`, async () => {
+        for (const [generation, options, why] of refusals) {
+          const done = await part(command, generation, options);
+          expect(done.error).toMatchObject({ message: expect.stringMatching(why) as unknown });
+          const message = (done.error as Error).message;
+          expect(message).toMatch(new RegExp(`then run foundation, then ${command} again.* Nothing was deployed\\.$`));
+          expect(message).toMatch(/[Rr]estore it/);
+          expect(done.az.deployment).toBeUndefined();
+          expect(done.az.sequence).toEqual([
+            'account show --output',
+            'bicep version',
+            'keyvault list --subscription',
+            'postgres flexible-server list',
+          ]);
+          expect(done.terminal.hiddenQuestions).toEqual([]);
+          for (const call of done.az.calls) expect(call.args).not.toContain('delete');
+        }
+      });
+
+      it(`${command} goes ahead once the generation's server is there, keeping the earlier one`, async () => {
+        const done = await part(command, 1, {
+          servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+          // A keys run ends green only with every key there afterwards.
+          after: [...COPIED_SECRETS, ...CREATED_ONCE],
+        });
+        expect(done.error).toBeUndefined();
+        expect(done.status).toBe(0);
+        expect(done.az.deployment).toBeDefined();
+        expect(done.terminal.said).toContain(
+          'The database server is psql-agentx-stg-abcdef-r1 (generation 1), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef.',
+        );
+        for (const call of done.az.calls) expect(call.args).not.toContain('delete');
+      });
+    }
+  });
+
   it("sends nothing, and asks nothing past the subscription, while the vault lacks the API's client secret (B2-6)", async () => {
     const images = recordingImages();
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
@@ -1795,6 +2167,8 @@ describe('deploy apps', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      'keyvault list --subscription',
+      'postgres flexible-server list',
       // The vault holds the API's client secret (B2-6), its directory token and the email key (B5-3), which the
       // API reads: three, a full page, and the empty page Azure ends with.
       'keyvault list --subscription',
@@ -1958,7 +2332,13 @@ describe('deploy apps', () => {
     expect(waiting.error).toMatchObject({
       message: `The database allows 120 connections, and a change of it waits on a restart, but the load run is counted against 120: the API would be refused connections. ${next}`,
     });
-    for (const options of [{ limit: 'unreadable' }, { servers: [] }, { servers: 'unreadable' }] as const) {
+    // No server, or a list that can't be read, is the generation's check to refuse first (AZ25).
+    for (const servers of [[], 'unreadable'] as const) {
+      const missing = await loadRun({ servers });
+      expect((missing.error as Error | undefined)?.message).toMatch(/live (database )?server is (missing|there)/);
+      expect(missing.az.deployment).toBeUndefined();
+    }
+    for (const options of [{ limit: 'unreadable' }] as const) {
       const unread = await loadRun(options);
       expect({ options, message: (unread.error as Error | undefined)?.message }).toEqual({
         options,
@@ -2036,9 +2416,52 @@ describe('deploy apps', () => {
         { name: COPY },
       ]);
       expect((two.error as Error | undefined)?.message).toMatch(
-        /^The database's connection limit couldn't be read \(rg-agentx-staging holds 2 database servers of its own, not one\)/,
+        /^The database's connection limit couldn't be read \(rg-agentx-staging holds 2 database servers of its own at generation 0, not one\)/,
       );
       expect(two.az.deployment).toBeUndefined();
+    });
+
+    it("reads the configured generation's server beside the one before it and a -before copy (AZ25)", async () => {
+      const restored = await run(['apps', '--load-run'], {
+        answers,
+        images: recordingImages(),
+        generation: 1,
+        az: new RecordingAz({
+          servers: [{ name: 'psql-agentx-stg-before' }, { name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+        }),
+      });
+      expect(restored.status).toBe(0);
+      const asked = restored.az.calls.find((call) => call.args[2] === 'parameter');
+      expect(asked?.args).toEqual(expect.arrayContaining(['--server-name', `${OWN_SERVER}-r1`]));
+      const live = await run(['apps', '--load-run'], {
+        answers,
+        images: recordingImages(),
+        az: new RecordingAz({ servers: [{ name: 'psql-agentx-stg-before' }, { name: OWN_SERVER }] }),
+      });
+      expect(live.status).toBe(0);
+      expect(live.az.calls.find((call) => call.args[2] === 'parameter')?.args).toEqual(
+        expect.arrayContaining(['--server-name', OWN_SERVER]),
+      );
+    });
+
+    it('counts staging own servers at every generation, never a -before, -drill or Stage G copy', () => {
+      for (const own of [OWN_SERVER, `${OWN_SERVER}-r1`, `${OWN_SERVER}-r42`]) expect(isOwnServer(own)).toBe(true);
+      for (const other of [
+        'psql-agentx-stg-before',
+        'psql-agentx-stg-drill',
+        COPY,
+        `${OWN_SERVER}-r0`,
+        `${OWN_SERVER}-before`,
+        'psql-agentx-prd-abcdef',
+      ]) {
+        expect(isOwnServer(other)).toBe(false);
+      }
+      expect(servedServerOf([{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }], 2)).toEqual({
+        name: `${OWN_SERVER}-r2`,
+      });
+      expect(() => servedServerOf([{ name: OWN_SERVER }], 1)).toThrow(
+        'rg-agentx-staging holds 0 database servers of its own at generation 1, not one',
+      );
     });
   });
 
