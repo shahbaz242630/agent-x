@@ -23,6 +23,7 @@ import { askWorkspace, jobName, type JobSteps, type StageGJob, unfinishedRuns, w
 import { LOAD_SERVER_CONNECTIONS } from './policy.ts';
 import { record } from './release.ts';
 import type { LogLine, StepWindow } from '../../tooling/load/stageg-background.ts';
+import { THROWAWAY_ANCHORS_CONTAINER, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
 
 /** The load size (main.bicep `postgresSkus.load`; a test holds the two equal). */
 export const LOAD_SKU = { name: 'Standard_D2ads_v5', tier: 'GeneralPurpose' } as const;
@@ -55,6 +56,16 @@ export const MEASURED_SETTINGS: Readonly<Record<string, string>> = {
   'pgms_wait_sampling.query_capture_mode': 'all',
   track_io_timing: 'on',
 };
+
+/**
+ * Throws unless `name` is a Stage G throwaway copy's (throwaway.ts), before any delete is sent (S185): this adapter
+ * holds the rule itself, not only its caller, so staging's own server, the drill's or a mistyped name is never deleted.
+ */
+function refuseUnlessThrowaway(name: string): void {
+  // Staging's own `psql-agentx-stg-<suffix>` and the drill's can never fit the copy's name (throwaway.ts).
+  const problem = throwawayServerProblem(name);
+  if (problem !== undefined) throw new Error(`${problem} Nothing was deleted.`);
+}
 
 /** Everything the runner asks of Azure. */
 export interface StageGAzure {
@@ -320,6 +331,7 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       return { limit: Number(shown.value), waiting: shown.isConfigPendingRestart === true };
     },
     deleteServer: (name) => {
+      refuseUnlessThrowaway(name);
       ok(server('delete', '--name', name, '--yes'), `deleting ${name}`);
     },
     jobHost: (job) => {
@@ -378,14 +390,21 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       ).value;
       return (Array.isArray(listed) ? listed : []).map((each) => text(record(each).name));
     },
-    deleteContainer: (account, container) =>
-      az.run([
-        'rest',
-        '--method',
-        'delete',
-        '--url',
-        `${groupUrl}/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}?api-version=2025-01-01`,
-      ]).status === 0,
+    deleteContainer: (account, container) => {
+      // Its own guard, not only the caller's (S185): staging's `audit-anchors` is never a name it will send.
+      if (!THROWAWAY_ANCHORS_CONTAINER.test(container)) {
+        throw new Error(`${container} isn't a throwaway copy's anchors container: nothing was removed.`);
+      }
+      return (
+        az.run([
+          'rest',
+          '--method',
+          'delete',
+          '--url',
+          `${groupUrl}/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}?api-version=2025-01-01`,
+        ]).status === 0
+      );
+    },
   };
 }
 
