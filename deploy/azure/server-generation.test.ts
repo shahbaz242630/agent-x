@@ -4,13 +4,17 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  baseServerOf,
   generationOf,
   generationsProblems,
   MOST_GENERATIONS,
   readGenerations,
   serverGenerationVerdict,
   serverNameOf,
+  type ServerSaid,
   suffixOfVault,
+  type VaultRead,
+  vaultRead,
 } from './server-generation.ts';
 import { deploymentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
@@ -58,30 +62,66 @@ describe('server names by generation', () => {
       'psql-agentx-stg-abcdef-before',
       'psql-agentx-prd-abcdef',
       'psql-agentx-stg-zzzzzz',
+      // Another suffix's later generation is no generation of this one's.
+      'psql-agentx-stg-zzzzzz-r1',
     ]) {
       expect(generationOf(other, 'stg', 'abcdef')).toBeUndefined();
     }
     expect(suffixOfVault('kv-agentx-stg-abcdef', 'stg')).toBe('abcdef');
     expect(suffixOfVault('kv-agentx-stg-abcdefg', 'stg')).toBeUndefined();
     expect(suffixOfVault('kv-agentx-prd-abcdef', 'stg')).toBeUndefined();
+    expect(baseServerOf('psql-agentx-stg-abcdef-r12')).toBe('psql-agentx-stg-abcdef');
+    expect(baseServerOf('psql-agentx-stg-abcdef')).toBe('psql-agentx-stg-abcdef');
   });
 
-  it('refuses a generation whose server is missing whatever else is there, and goes only to one that is', () => {
-    const verdict = (generation: number, servers: readonly string[] | undefined, suffix: string | null = 'abc123') =>
-      serverGenerationVerdict({ short: 'stg', generation, suffix: suffix ?? undefined, servers }).kind;
+  it('reads the vault list as none, one with its suffix, or unread', () => {
+    expect(vaultRead([], 'stg')).toEqual({ kind: 'none' });
+    expect(vaultRead(['kv-agentx-stg-abc123'], 'stg')).toEqual({ kind: 'read', suffix: 'abc123' });
+    for (const listed of [undefined, {}, ['kv-agentx-stg-abc123', 'kv-agentx-stg-def456'], ['other'], [7]]) {
+      expect(vaultRead(listed, 'stg')).toEqual({ kind: 'unread' });
+    }
+  });
+
+  it('goes only to a generation whose server is there and none newer, or a first deploy, unless the operator says', () => {
+    const read: VaultRead = { kind: 'read', suffix: 'abc123' };
+    const verdict = (
+      generation: number,
+      servers: readonly string[] | undefined,
+      vault: VaultRead = read,
+      said: ServerSaid = {},
+    ) => serverGenerationVerdict({ short: 'stg', generation, vault, servers, said }).kind;
     const base = 'psql-agentx-stg-abc123';
+    const none: VaultRead = { kind: 'none' };
+    const unread: VaultRead = { kind: 'unread' };
     expect(verdict(0, [base])).toBe('go');
     expect(verdict(1, [base, `${base}-r1`])).toBe('go');
-    expect(verdict(0, [])).toBe('go');
-    expect(verdict(0, undefined)).toBe('go');
-    expect(verdict(0, [base], null)).toBe('go');
+    // The one true first deploy: no vault yet, nothing or nothing readable in the group.
+    expect(verdict(0, [], none)).toBe('go');
+    expect(verdict(0, undefined, none)).toBe('go');
+    expect(verdict(0, [base], none)).toBe('refused');
+    expect(verdict(0, [base], none, { firstServer: true })).toBe('go');
+    expect(verdict(1, [], none, { firstServer: true })).toBe('refused');
+    // A foundation ran (the vault is there) and the live server is missing, or can't be seen: a loss until said.
+    expect(verdict(0, [])).toBe('refused');
+    expect(verdict(0, undefined)).toBe('refused');
+    expect(verdict(0, [base], unread)).toBe('refused');
+    expect(verdict(0, ['psql-agentx-stg-before'])).toBe('refused');
+    expect(verdict(0, [], read, { firstServer: true })).toBe('go');
+    expect(verdict(0, undefined, read, { firstServer: true })).toBe('go');
+    expect(verdict(0, [base], unread, { firstServer: true })).toBe('go');
+    expect(verdict(1, undefined, read, { firstServer: true })).toBe('refused');
+    // Two live databases: back to an older generation only when the operator names it.
+    expect(verdict(0, [base, `${base}-r1`])).toBe('refused');
+    expect(verdict(0, [base, `${base}-r1`], read, { backTo: 0 })).toBe('go');
+    expect(verdict(0, [base, `${base}-r1`], read, { backTo: 1 })).toBe('refused');
+    expect(verdict(1, [base, `${base}-r1`], read, { backTo: 0 })).toBe('refused');
+    expect(verdict(1, [base, `${base}-r1`, `${base}-r2`], read, { backTo: 1 })).toBe('go');
     expect(verdict(1, [base])).toBe('refused');
     expect(verdict(2, [base])).toBe('refused');
     expect(verdict(0, [`${base}-r1`])).toBe('refused');
     expect(verdict(1, [])).toBe('refused');
-    expect(verdict(0, ['psql-agentx-stg-before'])).toBe('refused');
     expect(verdict(1, undefined)).toBe('refused');
-    expect(verdict(1, [base, `${base}-r1`], null)).toBe('refused');
+    expect(verdict(1, [base, `${base}-r1`], unread)).toBe('refused');
     // Another environment's suffix is not this one's server.
     expect(verdict(1, [base, 'psql-agentx-stg-zzzzzz-r1'])).toBe('refused');
   });

@@ -68,8 +68,8 @@ const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()]
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { deploymentSnapshot, environmentSnapshot, inCopy } from './snapshot.ts';
-import { throwawayHost, throwawayIdOf, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
-import { readGenerations, serverGenerationVerdict, suffixOfVault } from './server-generation.ts';
+import { throwawayHost, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
+import { readGenerations, type ServerSaid, serverGenerationVerdict, vaultRead } from './server-generation.ts';
 
 const ENVIRONMENT = 'staging';
 const REGION = 'uaenorth';
@@ -207,20 +207,54 @@ export type SecretPlan =
   | { readonly kind: 'rotate'; readonly names: ReadonlySet<string> }
   | { readonly kind: 'keys' };
 
+/** What the operator said of the database server's generation (AZ25): left out unless a flag was given. */
+interface ServerFlags {
+  readonly server?: ServerSaid;
+}
+
 export type Request =
-  | { readonly command: 'foundation'; readonly loadSize: boolean; readonly alwaysOn: boolean }
-  | { readonly command: 'secrets'; readonly plan: SecretPlan }
-  | {
+  | ({ readonly command: 'foundation'; readonly loadSize: boolean; readonly alwaysOn: boolean } & ServerFlags)
+  | ({ readonly command: 'secrets'; readonly plan: SecretPlan } & ServerFlags)
+  | ({
       readonly command: 'apps';
       readonly commit: string | undefined;
       readonly keepRunning: boolean;
       readonly loadRun: boolean;
       /** Stage G's throwaway copy (tooling/load/throwaway.ts), by its server's name: only with `loadRun`. */
       readonly loadDatabase?: string;
-    }
+    } & ServerFlags)
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
   | { readonly command: 'certificates' };
+
+/** The generation flags taken out of a command's options, wherever they stand, and the options left. */
+function takeServerFlags(
+  command: 'foundation' | 'secrets' | 'apps',
+  options: readonly string[],
+): { readonly rest: string[]; readonly flags: ServerFlags } {
+  const rest: string[] = [];
+  let firstServer = false;
+  let backTo: number | undefined;
+  for (let at = 0; at < options.length; at += 1) {
+    const option = options[at];
+    if (option === '--first-server' && command === 'foundation' && !firstServer) {
+      firstServer = true;
+    } else if (option === '--back-to-generation' && backTo === undefined) {
+      const value = options[at + 1] ?? '';
+      if (!/^(?:0|[1-9]\d?)$/.test(value)) {
+        throw new UsageError(
+          '--back-to-generation takes the generation database-generation.json names, a whole number from 0 to 99',
+        );
+      }
+      backTo = Number(value);
+      at += 1;
+    } else if (option !== undefined) {
+      rest.push(option);
+    }
+  }
+  const server: ServerSaid = { ...(firstServer ? { firstServer } : {}), ...(backTo === undefined ? {} : { backTo }) };
+  return { rest, flags: Object.keys(server).length === 0 ? {} : { server } };
+}
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -230,11 +264,12 @@ export class UsageError extends Error {
 }
 
 export const USAGE = `Usage, from your own terminal window:
-  node deploy/azure/deploy.ts foundation [--load-size] [--always-on]
-  node deploy/azure/deploy.ts secrets --all
-  node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
-  node deploy/azure/deploy.ts secrets --keys
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]]
+  node deploy/azure/deploy.ts foundation [--load-size] [--always-on] [--first-server] [--back-to-generation <n>]
+  node deploy/azure/deploy.ts secrets --all [--back-to-generation <n>]
+  node deploy/azure/deploy.ts secrets --rotate <secret name> [...] [--back-to-generation <n>]
+  node deploy/azure/deploy.ts secrets --keys [--back-to-generation <n>]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]] [--back-to-generation <n>]
+  (--first-server and --back-to-generation only where deploy.ts asks for them: playbook L, AZ25)
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
   node deploy/azure/deploy.ts certificates`;
@@ -296,25 +331,24 @@ function loadDatabaseOf(name: string): string {
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
-  const [command, ...rest] = argv;
-  if (command === 'foundation') {
-    const known = ['--load-size', '--always-on'];
-    if (rest.every((option) => known.includes(option)) && new Set(rest).size === rest.length) {
-      return { command, loadSize: rest.includes('--load-size'), alwaysOn: rest.includes('--always-on') };
-    }
-    throw new UsageError(
-      `foundation takes only --load-size (the load run's database size) and --always-on (the alerts on the jobs stopping, for apps --keep-running), each once, not ${rest.join(' ')}`,
-    );
-  }
+  const [command, ...options] = argv;
   if (command === 'alerts' || command === 'dns' || command === 'certificates') {
-    if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
+    if (options.length > 0) throw new UsageError(`${command} takes no options, not ${options.join(' ')}`);
     return { command };
   }
-  if (command === 'apps') return parseApps(rest);
-  if (command !== 'secrets') {
+  if (command !== 'foundation' && command !== 'apps' && command !== 'secrets') {
     throw new UsageError(`say foundation, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`);
   }
-  return { command, plan: parseSecretPlan(rest) };
+  const { rest, flags } = takeServerFlags(command, options);
+  if (command === 'apps') return { ...parseApps(rest), ...flags };
+  if (command === 'secrets') return { command, plan: parseSecretPlan(rest), ...flags };
+  const known = ['--load-size', '--always-on'];
+  if (rest.every((option) => known.includes(option)) && new Set(rest).size === rest.length) {
+    return { command, loadSize: rest.includes('--load-size'), alwaysOn: rest.includes('--always-on'), ...flags };
+  }
+  throw new UsageError(
+    `foundation takes only --load-size (the load run's database size), --always-on (the alerts on the jobs stopping, for apps --keep-running), --first-server and --back-to-generation <n> (playbook L), each once, not ${rest.join(' ')}`,
+  );
 }
 
 /** The plan a secrets run's options ask for, or a UsageError saying why it can't be done. */
@@ -1085,7 +1119,12 @@ function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, c
   return true;
 }
 
-async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boolean): Promise<number> {
+async function deployFoundation(
+  steps: Steps,
+  loadSize: boolean,
+  alwaysOn: boolean,
+  server?: ServerSaid,
+): Promise<number> {
   const commit = sentFrom(steps, 'foundation');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
@@ -1094,7 +1133,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
       "GitHub's published addresses have changed, and an image pull would fail. Run node deploy/azure/github-ranges.ts, take the change, and redeploy from a merged commit.",
     );
   }
-  const disk = generationServer(steps, subscription, 'foundation');
+  const disk = generationServer(steps, subscription, 'foundation', server);
   const email = await steps.terminal.ask('Address the alerts go to: ');
   if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
   steps.terminal.say(
@@ -1131,11 +1170,38 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
   return 1;
 }
 
-/** The restore drill's copy (apps.bicep `drillDatabaseHost`): beside staging's server only while a drill runs. */
-const DRILL_SERVER = 'psql-agentx-stg-drill';
+/**
+ * Staging's own server's name at any generation (names.bicep): the six-character suffix, then `-r<n>` after
+ * generation 0. The drill's copy, `-drill`, and a Stage G copy, `-g-<id>`, never fit it.
+ */
+const OWN_SERVER_NAME = /^psql-agentx-stg-[a-z0-9]{6}(?:-r([1-9]\d?))?$/;
 
-/** Whether a server in the group is staging's own: not the drill's copy nor a Stage G copy, which sit beside it a while. */
-export const isOwnServer = (name: string): boolean => name !== DRILL_SERVER && throwawayIdOf(name) === undefined;
+/** A real restore's copy of the live server at "now" (playbook L), which six letters would otherwise pass for a suffix. */
+const BEFORE_SERVER = 'psql-agentx-stg-before';
+
+/** Whether a server in the group is staging's own, at any generation: not the drill's, a `-before` or a Stage G copy. */
+export const isOwnServer = (name: string): boolean => OWN_SERVER_NAME.test(name) && name !== BEFORE_SERVER;
+
+/**
+ * Staging's own server at the generation database-generation.json names, among the group's servers (AZ25): during a
+ * real restore the previous generation sits beside it, kept until signed off. An error when there isn't exactly one.
+ */
+export function servedServerOf<T extends { readonly name?: unknown }>(
+  listed: readonly T[],
+  generation: number = readGenerations().staging,
+): T {
+  const served = listed.filter(({ name }) => {
+    const own = text(name);
+    return isOwnServer(own) && Number(OWN_SERVER_NAME.exec(own)?.[1] ?? 0) === generation;
+  });
+  const [found] = served;
+  if (served.length !== 1 || found === undefined) {
+    throw new Error(
+      `${RESOURCE_GROUP} holds ${String(served.length)} database servers of its own at generation ${String(generation)}, not one`,
+    );
+  }
+  return found;
+}
 
 /** The environment's three letters (names.bicep `shortName`). */
 const SHORT = 'stg';
@@ -1157,8 +1223,24 @@ function readOrNothing<T>(read: () => T): T | undefined {
  * which it refuses. A first deploy has no server to read; a read that fails gives the least, and a grown disk is then
  * refused by the deployment.
  */
-function generationServer(steps: Steps, subscription: string, part: 'foundation' | 'secrets' | 'apps'): number {
-  const vault = readOrNothing(() => vaultIn(steps, subscription));
+function generationServer(
+  steps: Steps,
+  subscription: string,
+  part: 'foundation' | 'secrets' | 'apps',
+  said: ServerSaid = {},
+): number {
+  const vaults = readOrNothing(() =>
+    azJson(steps.az, [
+      'keyvault',
+      'list',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--query',
+      '[].name',
+    ]),
+  );
   const listed = readOrNothing(() => {
     const servers = azJson(steps.az, [
       'postgres',
@@ -1175,9 +1257,10 @@ function generationServer(steps: Steps, subscription: string, part: 'foundation'
   const verdict = serverGenerationVerdict({
     short: SHORT,
     generation: steps.generation ?? readGenerations().staging,
-    suffix: vault === undefined ? undefined : suffixOfVault(vault, SHORT),
+    vault: vaultRead(vaults, SHORT),
     servers: listed?.map(({ name }) => text(name)),
     part,
+    said,
   });
   if (verdict.kind === 'refused') throw new Error(verdict.why);
   steps.terminal.say(verdict.said);
@@ -1277,18 +1360,14 @@ function settleDatabase(steps: Steps, subscription: string, host: string, loadSi
 }
 
 /**
- * The resource group's database servers by name, and of them staging's own: the one that is neither the restore
- * drill's copy nor a Stage G copy (tooling/load/throwaway.ts), both of which sit beside it only for a while.
+ * The resource group's database servers by name, and of them staging's own at the configured generation (AZ25): not
+ * the drill's, a `-before` or a Stage G copy (tooling/load/throwaway.ts), nor a previous generation kept beside it.
  */
 function databaseServers(steps: Steps, subscription: string): { names: readonly string[]; staging: string } {
   const where = ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
   const listed = azJson(steps.az, ['postgres', 'flexible-server', 'list', ...where]) as readonly { name?: unknown }[];
   const names = listed.map(({ name }) => text(name));
-  const own = names.filter(isOwnServer);
-  if (own.length !== 1) {
-    throw new Error(`${RESOURCE_GROUP} holds ${String(own.length)} database servers of its own, not one`);
-  }
-  return { names, staging: own[0] ?? '' };
+  return { names, staging: text(servedServerOf(listed, steps.generation).name) };
 }
 
 /** A database's connection limit, as Azure has it now, and whether a change of it waits on a restart. */
@@ -1716,11 +1795,11 @@ async function confirmRotateEverything(steps: Steps, held: number): Promise<void
   }
 }
 
-async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
+async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid): Promise<number> {
   const commit = sentFrom(steps, 'secrets');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
-  generationServer(steps, subscription, 'secrets');
+  generationServer(steps, subscription, 'secrets', server);
   const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
   if (plan.kind === 'all' && existing.length > 0) await confirmRotateEverything(steps, existing.length);
@@ -2091,13 +2170,13 @@ const REMOVAL_READS = 60;
 
 async function deployApps(
   steps: Steps,
-  { commit, keepRunning, loadRun, loadDatabase }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
+  { commit, keepRunning, loadRun, loadDatabase, server }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
 ): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
-  generationServer(steps, subscription, 'apps');
+  generationServer(steps, subscription, 'apps', server);
   if (loadRun) {
     confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
@@ -2173,9 +2252,9 @@ async function deployApps(
 export async function deploy(request: Request, steps: Steps): Promise<number> {
   switch (request.command) {
     case 'foundation':
-      return deployFoundation(steps, request.loadSize, request.alwaysOn);
+      return deployFoundation(steps, request.loadSize, request.alwaysOn, request.server);
     case 'secrets':
-      return deploySecrets(steps, request.plan);
+      return deploySecrets(steps, request.plan, request.server);
     case 'apps':
       return deployApps(steps, request);
     case 'alerts':

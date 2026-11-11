@@ -185,6 +185,8 @@ describe("Stage G's Azure", () => {
     const bicep = readFileSync(path.join(import.meta.dirname, 'main.bicep'), 'utf8');
     expect(bicep).toContain(`name: '${LOAD_SKU.name}'\n    tier: '${LOAD_SKU.tier}'`);
     expect(evidenceAccountOf('psql-agentx-stg-q1w2e3')).toBe('stagentxstgq1w2e3');
+    // A restored generation's server keeps the store its suffix names (AZ25).
+    expect(evidenceAccountOf('psql-agentx-stg-q1w2e3-r2')).toBe('stagentxstgq1w2e3');
   });
 
   it('restores staging into its subnet and private zone, sizes the copy, and removes it', () => {
@@ -270,6 +272,15 @@ describe("Stage G's Azure", () => {
     expect(() => stagingServerOf([])).toThrow('holds 0 database servers of its own');
     expect(() => stagingServerOf('nothing')).toThrow('holds 0');
     expect(() => stagingServerOf([{ ...STAGING_SERVER, network: {} }])).toThrow('no ID, subnet or private zone');
+  });
+
+  it("finds the configured generation's server beside the one before it, never a -before copy (AZ25)", () => {
+    const restored = { ...STAGING_SERVER, id: `${STAGING_SERVER.id}-r1`, name: `${STAGING_SERVER.name}-r1` };
+    const before = { ...STAGING_SERVER, id: '/x/psql-agentx-stg-before', name: 'psql-agentx-stg-before' };
+    expect(stagingServerOf([before, STAGING_SERVER, restored], 1).name).toBe('psql-agentx-stg-q1w2e3-r1');
+    expect(stagingServerOf([before, restored, STAGING_SERVER], 0).name).toBe('psql-agentx-stg-q1w2e3');
+    expect(stagingServerOf([before, STAGING_SERVER]).name).toBe('psql-agentx-stg-q1w2e3');
+    expect(() => stagingServerOf([STAGING_SERVER], 1)).toThrow('holds 0 database servers of its own at generation 1');
   });
 
   it("reads a job's host, its runs, stops one, and runs load-mark with no request", async () => {

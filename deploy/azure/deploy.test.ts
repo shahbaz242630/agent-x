@@ -35,6 +35,7 @@ import {
   type DnsLookup,
   keyProblems,
   doorRecords,
+  isOwnServer,
   HiddenLine,
   type Images,
   LOAD_VARIABLES,
@@ -56,6 +57,7 @@ import {
   RESOURCE_GROUP,
   retriedWhileOffline,
   secretValues,
+  servedServerOf,
   shapedForPolicy,
   type Steps,
   type Terminal,
@@ -684,7 +686,7 @@ interface AzAnswers {
   /** The database's connection limit: applied, waiting on a restart that takes, one that doesn't, one Azure refuses, or no read at all. */
   readonly limit?: 'applied' | 'waiting' | 'stays' | 'refused' | 'unreadable';
   /** What the server list answers: the servers (by default one, named), or a failure. */
-  readonly servers?: readonly unknown[] | 'unreadable';
+  readonly servers?: readonly unknown[] | 'unreadable' | Readonly<Record<string, never>>;
   /** The server's max_connections as Azure shows it: by default the load size's 120. */
   readonly connectionLimit?: string;
   /** What `az bicep version` prints. */
@@ -1248,10 +1250,8 @@ describe('deploy foundation', () => {
   it.each([
     ['a server autogrow has grown', [{ name: OWN_SERVER, storage: { storageSizeGb: 64 } }], '64'],
     ['a server at the least', [{ name: OWN_SERVER, storage: { storageSizeGb: 32 } }], '32'],
-    ['no server yet', [], '32'],
     ['a list that says nothing of it', [{ name: OWN_SERVER }], '32'],
     ['a size that is no number', [{ name: OWN_SERVER, storage: { storageSizeGb: '64' } }], '32'],
-    ['a list that fails, as a first deploy has no group', 'unreadable', '32'],
     // Stage G's copy or the drill's beside it (4D2e): staging's own server's disk, wherever the list puts it.
     [
       "staging's own server after a copy's",
@@ -1280,9 +1280,9 @@ describe('deploy foundation', () => {
 
   describe("the database server's generation: never a new, empty server in the live one's place (AZ25)", () => {
     const disk = (gb: number) => ({ storage: { storageSizeGb: gb } });
-    const foundation = (generation: number, options: AzAnswers) => {
+    const foundation = (generation: number, options: AzAnswers, flags: readonly string[] = []) => {
       const admin = aPaste();
-      return run(['foundation'], {
+      return run(['foundation', ...flags], {
         answers: ['y', 'ops@example.invalid'],
         hidden: [admin, admin],
         az: new RecordingAz(options),
@@ -1339,16 +1339,23 @@ describe('deploy foundation', () => {
       );
     });
 
-    it("refuses a first server beside a drill's, a -before or a Stage G copy: the data is somewhere", async () => {
+    it("refuses a lost live server beside a drill's, a -before or a Stage G copy: the data is somewhere", async () => {
       for (const copy of ['psql-agentx-stg-drill', 'psql-agentx-stg-before', 'psql-agentx-stg-g-a1b2c3d4']) {
-        await refused(0, { servers: [{ name: copy }] }, new RegExp(`no server of its own \\(only ${copy}\\)`));
+        await refused(
+          0,
+          { servers: [{ name: copy }] },
+          new RegExp(`^The live database server is missing: .*\\(only ${copy}\\)\\. Check whether it was lost`),
+        );
       }
     });
 
     it('refuses any later generation when the vault or the servers cannot be read, never guessing', async () => {
-      await refused(1, { vaults: [] }, /the key vault or the servers couldn't be read/);
+      await refused(1, { vaults: [] }, /holds no key vault, so no foundation has run here, but .* generation 1/);
       await refused(1, { vaults: ['kv-agentx-stg-abcdef', 'kv-agentx-stg-other1'] }, /couldn't be read/);
       await refused(1, { servers: 'unreadable' }, /couldn't be read/);
+      // A list Azure answers with something other than a list reads as unread, never as no servers.
+      await refused(1, { servers: {} }, /the key vault or the servers couldn't be read/);
+      await refused(0, { servers: {} }, /couldn't be read, so there's no telling the live server is there/);
     });
 
     it('deploys a restored generation, its disk read from it, and leaves the earlier one as it was', async () => {
@@ -1368,8 +1375,28 @@ describe('deploy foundation', () => {
       touchedNoServer(done.az);
     });
 
-    it('deploys back to an earlier generation, or past a skipped one, only while that server is there', async () => {
-      const back = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] });
+    it('refuses going back while a newer server is there: two live databases', async () => {
+      await refused(
+        0,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] },
+        /a newer server of the environment's is there \(psql-agentx-stg-abcdef-r1\): going back would leave two live databases.*run foundation --back-to-generation 0\./,
+      );
+      // The flag names the very generation the file does, or it is refused too.
+      const wrong = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, [
+        '--back-to-generation',
+        '1',
+      ]);
+      expect(wrong.error).toMatchObject({
+        message: expect.stringMatching(/^--back-to-generation 1 doesn't match database-generation\.json/) as unknown,
+      });
+      expect(wrong.az.deployment).toBeUndefined();
+    });
+
+    it('goes back with --back-to-generation naming it, or past a skipped one, only while that server is there', async () => {
+      const back = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, [
+        '--back-to-generation',
+        '0',
+      ]);
       expect(back.status).toBe(0);
       expect(back.terminal.said).toContain(
         'The database server is psql-agentx-stg-abcdef (generation 0), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef-r1.',
@@ -1380,17 +1407,57 @@ describe('deploy foundation', () => {
       touchedNoServer(skipped.az);
     });
 
-    it('makes the first server only at generation 0 in a group holding none, or one not read yet', async () => {
-      const first = await foundation(0, { servers: [] });
-      expect(first.status).toBe(0);
-      expect(first.terminal.said).toContain(
-        'The group holds no database server yet: the foundation makes psql-agentx-stg-abcdef, the first, empty.',
+    it('makes the first server on its own only where no foundation ran: no key vault yet', async () => {
+      for (const servers of [[], 'unreadable'] as const) {
+        const first = await foundation(0, { vaults: [], servers });
+        expect(first.status).toBe(0);
+        expect(first.terminal.said).toContain(
+          'No key vault yet, so no foundation has run here: the deployment makes the first database server, generation 0.',
+        );
+      }
+    });
+
+    it('refuses a live server missing where a foundation ran, or a list it cannot read, unless --first-server', async () => {
+      await refused(
+        0,
+        { servers: [] },
+        /^The live database server is missing: the key vault shows a foundation ran here before.*\(no server at all\)\. Check whether it was lost or deleted and restore it first \(playbook L\), then run foundation again; only for a server that was never made, run foundation --first-server/,
       );
-      const unread = await foundation(0, { servers: 'unreadable' });
+      await refused(0, { servers: 'unreadable' }, /no telling the live server is there/);
+      const made = await foundation(0, { servers: [] }, ['--first-server']);
+      expect(made.status).toBe(0);
+      expect(made.terminal.said).toContain(
+        '--first-server: the deployment makes psql-agentx-stg-abcdef, new and empty, though the key vault shows a foundation ran here before.',
+      );
+      const unread = await foundation(0, { servers: 'unreadable' }, ['--first-server']);
       expect(unread.status).toBe(0);
-      expect(unread.terminal.said).toContainEqual(
-        expect.stringMatching(/couldn't be read, as before a first foundation/),
-      );
+      expect(unread.terminal.said).toContainEqual(expect.stringMatching(/^--first-server: the key vault or/));
+      // Never a later generation, which only a restore makes.
+      await refused(1, { servers: [] }, /names a server that is not there yet/);
+      const later = await foundation(1, { servers: [{ name: OWN_SERVER }] }, ['--first-server']);
+      expect(later.az.deployment).toBeUndefined();
+    });
+
+    it('takes --first-server on foundation alone, and --back-to-generation only with a generation', () => {
+      expect(parseArguments(['foundation', '--first-server', '--load-size'])).toEqual({
+        command: 'foundation',
+        loadSize: true,
+        alwaysOn: false,
+        server: { firstServer: true },
+      });
+      expect(parseArguments(['secrets', '--back-to-generation', '0', '--keys'])).toEqual({
+        command: 'secrets',
+        plan: { kind: 'keys' },
+        server: { backTo: 0 },
+      });
+      expect(parseArguments(['apps', '--back-to-generation', '12'])).toMatchObject({ server: { backTo: 12 } });
+      expect(() => parseArguments(['apps', '--first-server'])).toThrow(UsageError);
+      expect(() => parseArguments(['foundation', '--first-server', '--first-server'])).toThrow(UsageError);
+      for (const value of [undefined, 'x', '-1', '100', '01']) {
+        expect(() =>
+          parseArguments(['foundation', '--back-to-generation', ...(value === undefined ? [] : [value])]),
+        ).toThrow('--back-to-generation takes the generation database-generation.json names');
+      }
     });
 
     it('names generation 0 for staging today, so the next foundation changes no name', async () => {
@@ -1865,16 +1932,42 @@ describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
 
   describe("secrets and apps follow the database server's generation, never lead it (AZ25)", () => {
-    const part = (command: 'secrets' | 'apps', generation: number, options: AzAnswers) =>
+    const part = (command: 'secrets' | 'apps', generation: number, options: AzAnswers, flags: string[] = []) =>
       command === 'apps'
-        ? run(['apps'], { answers, images: recordingImages(), az: new RecordingAz(options), generation })
-        : run(['secrets', '--keys'], { answers: ['y'], az: new RecordingAz(options), generation });
+        ? run(['apps', ...flags], { answers, images: recordingImages(), az: new RecordingAz(options), generation })
+        : run(['secrets', '--keys', ...flags], { answers: ['y'], az: new RecordingAz(options), generation });
+
+    it('secrets and apps go back to an older generation beside a newer one only with --back-to-generation', async () => {
+      const both = {
+        servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+        after: [...COPIED_SECRETS, ...CREATED_ONCE],
+      };
+      for (const command of ['secrets', 'apps'] as const) {
+        const refusedBack = await part(command, 0, both);
+        expect((refusedBack.error as Error).message).toMatch(
+          new RegExp(`two live databases.*run ${command} --back-to-generation 0\\.`),
+        );
+        expect(refusedBack.az.deployment).toBeUndefined();
+        const back = await part(command, 0, both, ['--back-to-generation', '0']);
+        expect(back.status).toBe(0);
+        for (const call of back.az.calls) expect(call.args).not.toContain('delete');
+      }
+    });
     const refusals: readonly [number, AzAnswers, RegExp][] = [
       [1, { servers: [{ name: OWN_SERVER }] }, /it names a server that is not there yet/],
       [0, { servers: [{ name: `${OWN_SERVER}-r1` }] }, /goes back to a generation whose server is no longer there/],
-      [3, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, /skips ahead/],
-      [0, { servers: [{ name: 'psql-agentx-stg-before' }] }, /no server of its own \(only psql-agentx-stg-before\)/],
-      [1, { vaults: [] }, /the key vault or the servers couldn't be read/],
+      [
+        0,
+        { servers: [{ name: 'psql-agentx-stg-before' }] },
+        /server of the environment's own \(only psql-agentx-stg-before\)/,
+      ],
+      [
+        1,
+        { vaults: ['kv-agentx-stg-abcdef', 'kv-agentx-stg-other1'] },
+        /the key vault or the servers couldn't be read/,
+      ],
+      [0, { servers: [] }, /^The live database server is missing/],
+      [0, { servers: {} }, /no telling the live server is there/],
       [1, { servers: 'unreadable' }, /the key vault or the servers couldn't be read/],
     ];
 
@@ -1885,7 +1978,7 @@ describe('deploy apps', () => {
           expect(done.error).toMatchObject({ message: expect.stringMatching(why) as unknown });
           const message = (done.error as Error).message;
           expect(message).toMatch(new RegExp(`then run foundation, then ${command} again.* Nothing was deployed\\.$`));
-          if (!message.includes("couldn't be read")) expect(message).toMatch(/First restore it under that name/);
+          expect(message).toMatch(/[Rr]estore it/);
           expect(done.az.deployment).toBeUndefined();
           expect(done.az.sequence).toEqual([
             'account show --output',
@@ -2146,7 +2239,13 @@ describe('deploy apps', () => {
     expect(waiting.error).toMatchObject({
       message: `The database allows 120 connections, and a change of it waits on a restart, but the load run is counted against 120: the API would be refused connections. ${next}`,
     });
-    for (const options of [{ limit: 'unreadable' }, { servers: [] }, { servers: 'unreadable' }] as const) {
+    // No server, or a list that can't be read, is the generation's check to refuse first (AZ25).
+    for (const servers of [[], 'unreadable'] as const) {
+      const missing = await loadRun({ servers });
+      expect((missing.error as Error | undefined)?.message).toMatch(/live (database )?server is (missing|there)/);
+      expect(missing.az.deployment).toBeUndefined();
+    }
+    for (const options of [{ limit: 'unreadable' }] as const) {
       const unread = await loadRun(options);
       expect({ options, message: (unread.error as Error | undefined)?.message }).toEqual({
         options,
@@ -2224,9 +2323,52 @@ describe('deploy apps', () => {
         { name: COPY },
       ]);
       expect((two.error as Error | undefined)?.message).toMatch(
-        /^The database's connection limit couldn't be read \(rg-agentx-staging holds 2 database servers of its own, not one\)/,
+        /^The database's connection limit couldn't be read \(rg-agentx-staging holds 2 database servers of its own at generation 0, not one\)/,
       );
       expect(two.az.deployment).toBeUndefined();
+    });
+
+    it("reads the configured generation's server beside the one before it and a -before copy (AZ25)", async () => {
+      const restored = await run(['apps', '--load-run'], {
+        answers,
+        images: recordingImages(),
+        generation: 1,
+        az: new RecordingAz({
+          servers: [{ name: 'psql-agentx-stg-before' }, { name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+        }),
+      });
+      expect(restored.status).toBe(0);
+      const asked = restored.az.calls.find((call) => call.args[2] === 'parameter');
+      expect(asked?.args).toEqual(expect.arrayContaining(['--server-name', `${OWN_SERVER}-r1`]));
+      const live = await run(['apps', '--load-run'], {
+        answers,
+        images: recordingImages(),
+        az: new RecordingAz({ servers: [{ name: 'psql-agentx-stg-before' }, { name: OWN_SERVER }] }),
+      });
+      expect(live.status).toBe(0);
+      expect(live.az.calls.find((call) => call.args[2] === 'parameter')?.args).toEqual(
+        expect.arrayContaining(['--server-name', OWN_SERVER]),
+      );
+    });
+
+    it('counts staging own servers at every generation, never a -before, -drill or Stage G copy', () => {
+      for (const own of [OWN_SERVER, `${OWN_SERVER}-r1`, `${OWN_SERVER}-r42`]) expect(isOwnServer(own)).toBe(true);
+      for (const other of [
+        'psql-agentx-stg-before',
+        'psql-agentx-stg-drill',
+        COPY,
+        `${OWN_SERVER}-r0`,
+        `${OWN_SERVER}-before`,
+        'psql-agentx-prd-abcdef',
+      ]) {
+        expect(isOwnServer(other)).toBe(false);
+      }
+      expect(servedServerOf([{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }], 2)).toEqual({
+        name: `${OWN_SERVER}-r2`,
+      });
+      expect(() => servedServerOf([{ name: OWN_SERVER }], 1)).toThrow(
+        'rg-agentx-staging holds 0 database servers of its own at generation 1, not one',
+      );
     });
   });
 
