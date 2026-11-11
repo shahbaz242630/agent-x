@@ -294,6 +294,11 @@ function parseApps(options: readonly string[]): Request {
       "--api-stopped is a real restore's switch alone (playbook L): it keeps the API stopped, so never with --keep-running or --load-run",
     );
   }
+  if (loadRun && migrateFirst === true) {
+    throw new UsageError(
+      "--migrate-first is never with --load-run: it migrates staging's own server, not Stage G's copy, and a load run's API doesn't serve CI's release; run apps --migrate-first alone first, then the load run",
+    );
+  }
   if (apiStopped === true && migrateFirst === true) {
     throw new UsageError(
       "--migrate-first is never with --api-stopped: a restore's API stays stopped, and playbook L runs migrate on the new server once the deployment has moved the jobs to it",

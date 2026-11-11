@@ -2440,7 +2440,7 @@ describe('deploy apps', () => {
       expect(stopped.terminal.said.join('\n')).toContain("The database's migrations aren't checked here");
     });
 
-    it('needs a way to read them, and takes --migrate-first once, never with --api-stopped', async () => {
+    it('needs a way to read them, and takes --migrate-first once, never with --api-stopped or --load-run', async () => {
       const done = await run(['apps'], { answers, images: recordingImages(), migrations: null });
       expect(done.error).toEqual(new Error("No way to read the database's migrations was given."));
       expect(parseArguments(['apps', '--migrate-first'])).toMatchObject({ migrateFirst: true });
@@ -2448,6 +2448,10 @@ describe('deploy apps', () => {
       expect(() => parseArguments(['apps', '--migrate-first', '--migrate-first'])).toThrow(UsageError);
       expect(() => parseArguments(['apps', '--migrate-first', '--api-stopped'])).toThrow(
         /--migrate-first is never with --api-stopped/,
+      );
+      // S186 review: migrate reaches staging's own server alone, never Stage G's copy.
+      expect(() => parseArguments(['apps', '--migrate-first', '--load-run'])).toThrow(
+        /--migrate-first is never with --load-run/,
       );
     });
   });
