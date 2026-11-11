@@ -68,8 +68,19 @@ class StandIn implements SignIn {
     return Promise.resolve({ url: `${LOGIN_URL}&prompt=login`, flowId: FLOW_ID });
   }
 
+  /** When set, the step-up a refused callback's flow was for: as the sign-in, it answers StepUpFailed with it. */
+  refusedStepUp: { returnTo: string; challengeId: string } | undefined;
+
   complete(input: CallbackInput) {
     this.completed.push(input);
+    if ('refused' in input) {
+      const detail = 'sent back without a sign-in';
+      return Promise.reject(
+        this.refusedStepUp === undefined
+          ? new SignInFailed(input.refused, detail)
+          : new StepUpFailed(input.refused, detail, undefined, this.refusedStepUp),
+      );
+    }
     if (this.failWith !== undefined) return Promise.reject(this.failWith);
     return Promise.resolve({
       userId: USER_ID,
@@ -232,7 +243,7 @@ describe('coming back from the login service', () => {
     ],
     ['no code', '?state=a-state', 'callback_incomplete'],
     ['no state', '?code=a-code', 'callback_incomplete'],
-  ])('refuses as SIGN_IN_FAILED when %s, asking nothing of the sign-in', async (_, query, failure) => {
+  ])('refuses a sign-in as SIGN_IN_FAILED when %s, its flow taken, no cookie set', async (_, query, failure) => {
     const standIn = new StandIn();
     const { app, capture, noted } = await server(standIn);
 
@@ -243,7 +254,9 @@ describe('coming back from the login service', () => {
 
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual(errorBody('SIGN_IN_FAILED', response.headers['x-correlation-id'] as string));
-    expect(standIn.completed).toEqual([]);
+    expect(response.headers['set-cookie']).toBeUndefined();
+    // Only the flow is asked for, with why: no code or state is ever passed on.
+    expect(standIn.completed).toEqual([{ flowId: FLOW_ID, previousCookie: undefined, refused: failure }]);
     expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'auth.sign_in_failed', failure }));
     expect(noted).toEqual([{ kind: 'sign_in_failed', reason: failure, ip: '203.0.113.9' }]);
   });
@@ -851,19 +864,30 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     ['no second factor', 'no_second_factor', USER_ID],
     ['no live session', 'session_missing', undefined],
   ] as const)(
-    'refuses a step-up back with %s as STEP_UP_FAILED, leaving the cookies',
+    'refuses a step-up back with %s, sending the browser back to its page to say so (CO2), the session cookie left',
     async (_what, failure, userId) => {
       const standIn = new StandIn();
-      standIn.failWith = new StepUpFailed(failure, 'test', userId);
-      const { app, noted } = await server(standIn);
+      // The page's own query (`?stepped=`, which would offer the change to confirm) is dropped.
+      const back = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+      standIn.failWith = new StepUpFailed(failure, 'test', userId, back);
+      const { app, noted, capture } = await server(standIn);
 
       const response = await app.inject(
         callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
       );
 
-      expect(response.statusCode).toBe(403);
-      expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
-      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(response.statusCode).toBe(302);
+      expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}`);
+      expect(setCookies(response.headers['set-cookie'])).toEqual([
+        `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+      ]);
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({
+          event: 'auth.step_up_failed',
+          failure,
+          correlationId: expect.any(String) as unknown,
+        }),
+      );
       expect(noted).toEqual([
         {
           kind: 'sign_in_failed',
@@ -874,6 +898,46 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
       ]);
     },
   );
+
+  it.each([
+    ['cancelled or refused at the login service', '?error=access_denied&state=a-state', 'provider_refused'],
+    ['back with no code', '?state=a-state', 'callback_incomplete'],
+  ] as const)(
+    'sends a step-up %s back to its page to say so (CO2), the flow cookie cleared, the session left',
+    async (_what, query, failure) => {
+      const standIn = new StandIn();
+      standIn.refusedStepUp = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+      const { app, noted, capture } = await server(standIn);
+
+      const response = await app.inject({
+        ...callback(query, `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+        remoteAddress: '203.0.113.9',
+      });
+
+      expect(response.statusCode).toBe(302);
+      expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}`);
+      expect(setCookies(response.headers['set-cookie'])).toEqual([
+        `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+      ]);
+      expect(standIn.completed).toEqual([{ flowId: FLOW_ID, previousCookie: SESSION_ID, refused: failure }]);
+      expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'auth.step_up_failed', failure }));
+      expect(noted).toEqual([{ kind: 'sign_in_failed', reason: `step_up_${failure}`, ip: '203.0.113.9' }]);
+    },
+  );
+
+  it('answers a step-up failure that names no page to go back to as STEP_UP_FAILED, leaving the cookies', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new StepUpFailed('challenge_missing', 'test', USER_ID);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+    );
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
 });
 
 describe('reading our cookies', () => {

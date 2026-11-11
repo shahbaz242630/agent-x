@@ -5,7 +5,7 @@
 // the API's words when its supplier changed), cancel at once in one click
 // (partner decision 10); refusals in plain words; and no decision buttons for a viewer.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -148,6 +148,28 @@ describe('the approvals lists (6B1)', () => {
     expect(read?.headers.get('agentx-organization')).toBe(ORG.id);
   });
 
+  it('counts the time left down while the page stays open, with nothing else changing', async () => {
+    // The clock and the page's own tick alone: the reads and the waits for them keep real timers.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    try {
+      signedIn();
+      answer('GET /v1/approvals', { status: 200, body: { waiting: [listed(ID)], next: null, unchecked: [] } });
+      open('/approvals');
+      const row = await screen.findByRole('link', { name: /Gulf Office Supplies LLC/ });
+      expect(within(row).getByText('Phase 4 demo agent · 22 h left')).toBeDefined();
+      const reads = sent.length;
+
+      act(() => {
+        vi.advanceTimersByTime(3_600_000);
+      });
+
+      expect(within(row).getByText('Phase 4 demo agent · 21 h left')).toBeDefined();
+      expect(sent).toHaveLength(reads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('says when nothing waits, and lists all requests with their status on the other tab', async () => {
     signedIn();
     answer('GET /v1/approvals', { status: 200, body: { waiting: [], next: null, unchecked: [] } });
@@ -254,6 +276,14 @@ describe('one request’s page (6B1)', () => {
     expect(await screen.findByText(/This request can't be found in this organisation/)).toBeDefined();
     // A refusal answers the same however often it is asked: never read again.
     expect(sentTo('GET', `/v1/spend-requests/${ID}`)).toHaveLength(1);
+  });
+
+  it('says an address that names no request can’t be found, asking the API nothing', async () => {
+    signedIn();
+    open('/approvals/not-a-request');
+    expect(await screen.findByText(/This request can't be found in this organisation/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(sent.filter((one) => one.path.startsWith('/v1/spend-requests'))).toEqual([]);
   });
 
   it('says a request that couldn’t load failed, with a retry', async () => {
