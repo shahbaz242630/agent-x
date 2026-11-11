@@ -54,20 +54,30 @@
 // signs it again as its own (anchor-check.ts). One badly signed, or not a rebase file, is the alarm,
 // once a process; one dated past the clock waits, the alarm each read until its time.
 //
+// The sharded store (PL-65 PR2, shards.ts): a process this version runs moves the store on to it at its first write after
+// a whole read (`cutOver`, the API's): the signed cutover marker first (cutover.ts), then every file in the shards, each
+// shard's first a snapshot. Until the record that the migration is done is there, a read takes the old files and every
+// shard's alike, the highest place winning as ever: a shard with no sound snapshot of its own stands on the old files.
+// The record is written once a read begun an hour past the marker has found every shard holding chains with a snapshot
+// made since it last read an old file of theirs, by when every older version has seen the marker and stopped anchoring;
+// from then on the old files are read no more, unless a shard's own snapshots are all spoiled back to its first file,
+// when they stand under it again. A version from before the marker reads none of the store once it is there (PR0). A
+// line in another shard's file is skipped, and the alarm (`misplaced`). All shards are held, as the old store was: taking
+// them in and out of memory is PR3.
+//
 // So the API identity's token alone (add and read) can raise alarms, and can make payments
 // wait after a restart: by more than a day's spoiled snapshots named newer than the last
-// sound one, or by a file under `deltas/` or `snapshots/` too large to fetch within a read's
-// deadline, or put beyond a plain read (its own encryption key, the archive tier, an encoding
-// fetch undoes): those two folders are still fetched whole and unguarded, from before PL-65,
-// not closed here (a PR2 item), each until an operator acts. It can't move an anchor back,
-// nor stop a running process anchoring. Under `cutover/` and `shards/`, and with a rebase
-// file, it can raise the alarm alone: only a marker signed with `audit-anchor`, at its one
-// name, says the store has moved on (PL-65), and a marker or rebase is never fetched past
-// 4 KB, one too large or unreadable being no marker or rebase. Taking the
-// marker's name first only makes the migration's write of it refused, which stops the
-// migration loudly before any shard, payments unaffected. Whoever also holds the
-// `audit-anchor` signing key can write anything a file may hold, a marker too, which makes
-// payments wait for good: nothing here guards against them; nor against whoever holds
+// sound one, in the old files or in a shard, each until an operator acts. A file is never
+// fetched past what this process can hold (`getAtMost`): one larger, or put beyond a plain
+// read (its own encryption key, the archive tier, an encoding fetch undoes), is a spoiled
+// file, the alarm, and the read goes on. It can't move an anchor back, nor stop a running
+// process anchoring. Under `cutover/` and `shards/`, and with a rebase file, it can raise
+// the alarm alone: only a marker signed with `audit-anchor`, at its one name, moves the
+// store on, and a marker, a record or a rebase is never fetched past 4 KB, one too large
+// or unreadable being none. Taking the marker's or the record's name first only makes the
+// migration's write of it refused: the alarm, and the migration stops there, payments
+// unaffected. Whoever also holds the `audit-anchor` signing key can write anything a file
+// may hold, a marker too: nothing here guards against them; nor against whoever holds
 // `audit-rebase`.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
@@ -90,8 +100,27 @@ import {
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
 import { type PackedLines, packedLines, type Taken } from './packed-lines.ts';
-import { cutoverFolder, cutoverName, readCutoverFile } from './cutover.ts';
+import {
+  cutoverFile,
+  cutoverFolder,
+  cutoverName,
+  readCutoverFile,
+  readShardsDoneFile,
+  type RecordRead,
+  shardsDoneFile,
+  shardsDoneName,
+} from './cutover.ts';
 import { isCount, MOST_FILE_BYTES, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
+import {
+  bodyHash,
+  closingV2Message,
+  SHARD_FILE,
+  shardFolder,
+  shardHex,
+  shardOf,
+  SHARDS,
+  shardsFolder,
+} from './shards.ts';
 
 /** How often every chain's anchor is written whole, where something moved. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
@@ -175,6 +204,19 @@ const ORGANISATION = 'organisation:';
  */
 const LATER_KINDS: ReadonlySet<unknown> = new Set(['r']);
 
+/** How many names a shard's list asks: its snapshot and the dozen deltas since, at a restart; a few, each run after. */
+const SHARD_FILES_A_PAGE = 100;
+
+/**
+ * How long after the cutover marker the migration waits before it says it is done (PR2): every older version reads the
+ * store each run, sees the marker and anchors no more, far sooner. What one wrote to the old files before that, a read
+ * begun after this takes into the shards.
+ */
+const SETTLE_MS = 60 * 60_000;
+
+/** What a name this process wrote, and has not yet listed past, is counted at against what it can hold. */
+const WRITTEN_NAME_BYTES = 160;
+
 /** How many rebase files a list asks: there are a handful in an epoch. */
 const REBASES_A_PAGE = 100;
 
@@ -209,16 +251,6 @@ class BeyondMemory extends Error {
   }
 }
 
-/** The store holds a signed cutover marker for this epoch: this version must not read it. */
-class MovedOn extends Error {
-  readonly file: string;
-
-  constructor(file: string) {
-    super('the anchor store has moved on to a later layout');
-    this.file = file;
-  }
-}
-
 export interface AnchorLog extends AnchorStore, PassRecord {
   /** The epoch anchors kept here must be signed for. */
   readonly epoch: number;
@@ -248,6 +280,9 @@ export interface AnchorLog extends AnchorStore, PassRecord {
 /** A file made, not yet known to be in the store. Tried again under the same name, with the same bytes. */
 interface Unsent {
   readonly kind: Kind;
+  /** Its shard, for a file in the sharded layout; and for a snapshot made while moving, the stamp it was taken at. */
+  readonly shard?: number;
+  readonly seedStamp?: number;
   readonly name: string;
   readonly bytes: Buffer;
   /** How many of its lines are anchors, finished full passes and passes' places reached, in that order. */
@@ -414,11 +449,26 @@ async function* linesIn(bytes: Buffer, opened: { bytes: number }): AsyncGenerato
  */
 async function readFile(
   keys: KeyProvider,
-  { bytes, name, epoch, mostBytes }: { bytes: Buffer; name: string; epoch: number; mostBytes: number },
+  {
+    bytes,
+    name,
+    epoch,
+    mostBytes,
+    belongs,
+  }: {
+    bytes: Buffer;
+    name: string;
+    epoch: number;
+    mostBytes: number;
+    /** A shard's file: whether a chain is that shard's. Its lines are trusted whole if its version 2 closing line holds. */
+    belongs?: ((chain: string) => boolean) | undefined;
+  },
   keep: (anchor: Anchor | Progress, kind: LineKind) => void,
 ) {
+  const whole = belongs !== undefined && (await closesWhole(keys, { bytes, name, epoch, mostBytes }));
   const opened = { bytes: 0 };
   let bad = 0;
+  let misplaced = 0;
   let body = 0;
   const judged = (fields: unknown): void => {
     body += 1;
@@ -429,9 +479,12 @@ async function readFile(
     if (
       lineKind === undefined ||
       read === undefined ||
-      !isSigned(keys, read.line.keyVersion, read.message, read.line.signature)
+      (!whole && !isSigned(keys, read.line.keyVersion, read.message, read.line.signature))
     ) {
       bad += 1;
+    } else if (belongs !== undefined && !belongs(read.line.chain)) {
+      // Signed, but not this shard's: a line copied in from another shard's file, which says nothing here.
+      misplaced += 1;
     } else if (opened.bytes <= mostBytes) {
       keep(read.line, lineKind);
     }
@@ -439,7 +492,7 @@ async function readFile(
   let last: unknown;
   let any = false;
   for await (const line of linesIn(bytes, opened)) {
-    if (opened.bytes > mostBytes && (bad > 0 || line === '' || opened.bytes > mostBytes * MOST_READ_PAST)) {
+    if (opened.bytes > mostBytes && (bad + misplaced > 0 || line === '' || opened.bytes > mostBytes * MOST_READ_PAST)) {
       throw new BrokenFile('past what can be held, and not a sound file');
     }
     if (line !== '') {
@@ -452,7 +505,38 @@ async function readFile(
   const closing = kindOf(last) === 'c';
   if (any && !closing) judged(last);
   const past = opened.bytes > mostBytes;
-  return { bad, past, closed: closing && closes(keys, last, name, epoch, body) };
+  return { bad, misplaced, past, closed: whole || (closing && closes(keys, last, name, epoch, body)) };
+}
+
+/**
+ * Whether a shard's file ends in a version 2 closing line signed for its own name, its epoch, its count of lines and the
+ * hash of every byte before it: then each line in it is as signed as that line, and needs no check of its own. A pass of
+ * its own over the file, holding a line at a time. Anything else is no, and the file is read a line at a time, as the
+ * old files are, which says what is wrong with it.
+ */
+async function closesWhole(
+  keys: KeyProvider,
+  { bytes, name, epoch, mostBytes }: { bytes: Buffer; name: string; epoch: number; mostBytes: number },
+): Promise<boolean> {
+  const body = bodyHash();
+  const opened = { bytes: 0 };
+  let last: string | undefined;
+  try {
+    for await (const line of linesIn(bytes, opened)) {
+      if (opened.bytes > mostBytes * MOST_READ_PAST) return false;
+      if (last !== undefined) body.add(last);
+      last = line;
+    }
+  } catch {
+    // Not gzip, or a line longer than any of ours: the read a line at a time says so.
+    return false;
+  }
+  const fields = parsed(last ?? '');
+  if (kindOf(fields) !== 'c') return false;
+  const said = fields as Record<string, unknown>;
+  if (said.v !== 2 || !isCount(said.kv) || typeof said.sig !== 'string') return false;
+  const message = closingV2Message(name, epoch, body.lines, body.digest());
+  return isSigned(keys, said.kv, message, Buffer.from(said.sig, 'base64'));
 }
 
 /** Gzipped lines, made a line at a time: the whole as one string has the same limit as on the way in. */
@@ -473,6 +557,7 @@ export function createAnchorLog({
   epoch,
   alertAfterMs,
   mostFileBytes = heapsFileBytes(),
+  cutOver = false,
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -484,6 +569,11 @@ export function createAnchorLog({
   readonly alertAfterMs: number;
   /** What this process may hold of the store, and open of one file (a fifth of its heap), unless a test says. */
   readonly mostFileBytes?: number;
+  /**
+   * Whether this process moves the store on to the sharded layout (PL-65 PR2) at its first write after a whole read: the
+   * API's jobs, which anchor. Whatever this says, a store moved on is read and written as the shards.
+   */
+  readonly cutOver?: boolean;
 }): AnchorLog {
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   // Every table packed (packed-lines.ts, PL-65): each line a record, not an object. Where the same object stood in two
@@ -500,9 +590,34 @@ export function createAnchorLog({
   // marked in `anchors`, and each copy of one `latest` gives out, so a copy kept back is still a rebase's.
   const rebases = new Map<string, Rebase>();
   const rebaseFilesRead = new Set<string>();
-  // Whether a file at the marker's name that is none, another name under `cutover/`, and a name under `shards/` have been
-  // said: each the alarm once a process.
-  const said = { marker: false, cutover: false, shards: false };
+  // Whether a file at the marker's name that is none, another name under `cutover/`, a name under `shards/` with no
+  // marker, and a file at the done record's name that is none, have been said: each the alarm once a process.
+  const said = { marker: false, cutover: false, shards: false, done: false };
+  // Which layout the store is in, as this process last read it (PL-65 PR2): the old files alone; moved on, the old files
+  // and the shards read together; or the migration done, the shards alone. Files are never taken away, so it only moves on.
+  let layout: 'old' | 'moving' | 'sharded' = 'old';
+  // When the marker was signed, and whether a whole read begun `SETTLE_MS` after it has been: then the migration can end.
+  let markerAt: Date | undefined;
+  let settledRead = false;
+  // The marker's or the record's name held by something else: said, and the migration goes no further in this process.
+  let migrationStopped = false;
+  // When the shards' writes last looked at how near the edge what is held is.
+  let nearSaidAt: number | undefined;
+  /**
+   * Each shard's marks, as the old files' `deltasFrom` and `snapshotFrom` are: the newest sound file listed, and the newest
+   * sound snapshot read or written, counted down. While moving: the stamp a snapshot of its own was taken at, and the
+   * stamp given when a read last took a line of it from the old files. Its snapshot stands for it once the first is later.
+   */
+  const shardMarks = Array.from({ length: SHARDS }, () => ({
+    from: undefined as string | undefined,
+    snapshotFrom: undefined as string | undefined,
+    seeded: 0,
+    old: 0,
+  }));
+  const seeded = (shard: number): boolean => {
+    const marks = shardMarks[shard];
+    return marks !== undefined && marks.seeded > marks.old;
+  };
   const fromRebase = new WeakSet<Anchor>();
   /** A chain's anchor, a copy: one that is a rebase's is known to `keep` by it as such, as the one object was before. */
   const latest = (chain: string): Anchor | undefined => {
@@ -536,7 +651,10 @@ export function createAnchorLog({
    * bytes (~144 a line: random hashes barely compress) aren't counted: one file is unsent at a time, so they are bounded
    * by one snapshot, and the edge measured by resident memory (S184) includes them.
    */
-  const besideLines = (): number => takenLines * TAKEN_LINE_BYTES + (unsent?.stamps.length ?? 0) * UNSENT_LINE_BYTES;
+  const besideLines = (): number =>
+    takenLines * TAKEN_LINE_BYTES +
+    (unsent?.stamps.length ?? 0) * UNSENT_LINE_BYTES +
+    written.size * WRITTEN_NAME_BYTES;
   /** A line this process made, read back from its own text: `readsBack` held when the file was made, so it does. */
   const readBack = (kind: LineKind, text: string): Anchor | Progress => {
     const read = signedLineOf(kind, parsed(text) as Record<string, unknown>, epoch);
@@ -592,35 +710,70 @@ export function createAnchorLog({
 
   const countdownOf = (kind: Kind, name: string): string => name.slice(folder(kind).length, folder(kind).length + 13);
 
-  /** Into `stage`, as read, what a file changes, and whether it stands for what it should: every line sound and closed for its name. Anything wrong is the alarm. A failed call to the store is thrown. */
-  const opened = async (kind: Kind, name: string, stage: PackedLines<Anchor>): Promise<{ sound: boolean }> => {
-    const bytes = await store.get(name);
-    const fileAt = whenNamed(countdownOf(kind, name));
+  /**
+   * Into `stage`, as read, what a file changes, and whether it stands for what it should: every line sound and closed for
+   * its name. Anything wrong is the alarm. A failed call to the store is thrown. Never fetched past what this process can
+   * hold (PL-65): a file larger, or one a plain read can't fetch, is a spoiled file, the alarm, and the read goes on. A
+   * shard's file (`shard`) holds that shard's chains alone. While moving, an old file's lines say which shards' snapshots
+   * no longer stand for them (`touched`).
+   */
+  const opened = async (
+    { kind, countdown, shard }: { kind: Kind; countdown: string; shard?: number },
+    name: string,
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+  ): Promise<{ sound: boolean }> => {
+    const got = await store.getAtMost(name, mostFileBytes);
+    if (got === 'missing') throw new Error('a file listed and then not there');
+    const fileAt = whenNamed(countdown);
+    const where = { kind, fileAt, ...(shard === undefined ? {} : { shard: shardHex(shard) }) };
+    if (typeof got === 'string') {
+      alarm('file', { ...where, problem: got, mostBytes: mostFileBytes });
+      return { sound: false };
+    }
+    const belongs = shard === undefined ? undefined : (chain: string) => shardOf(chain) === shard;
+    const take = lineTaken(stage, kind, fileAt);
+    const moving = shard === undefined && layout === 'moving';
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
-        // Dated before the chain's rebase: the chain as it was, passed over.
-        // Each line read a new one, as each was a new object: stamped as it comes in.
-        if (lineKind === 'a') {
-          if (!rebasedAfter(line.chain, line.at)) staged(stage, line, stamped(), kind, fileAt);
-        } else if (isPlace(line)) {
-          if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, stamped(), kind, fileAt);
-        } else passLine(stage, line, stamped(), kind, fileAt);
+      file = await readFile(keys, { bytes: got, name, epoch, mostBytes: mostFileBytes, belongs }, (line, lineKind) => {
+        if (moving) touched.add(shardOf(line.chain));
+        take(line, lineKind);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
-      alarm('file', { kind, fileAt, err: error });
+      alarm('file', { ...where, err: error });
       return { sound: false };
     }
-    const { bad, closed, past } = file;
+    return { sound: judgedFile(file, where) };
+  };
+
+  /** What takes a file's lines in as each is read: dated before its chain's rebase, the chain as it was, passed over. */
+  const lineTaken =
+    (stage: PackedLines<Anchor>, kind: Kind, fileAt: string) =>
+    (line: Anchor | Progress, lineKind: LineKind): void => {
+      // Each line read a new one, as each was a new object: stamped as it comes in.
+      if (lineKind === 'a') {
+        if (!rebasedAfter(line.chain, line.at)) staged(stage, line, stamped(), kind, fileAt);
+      } else if (isPlace(line)) {
+        if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, stamped(), kind, fileAt);
+      } else passLine(stage, line, stamped(), kind, fileAt);
+    };
+
+  /** Whether a file read stands for what it should; anything wrong the alarm. Sound but past what can be held, thrown. */
+  const judgedFile = (
+    { bad, misplaced, closed, past }: Awaited<ReturnType<typeof readFile>>,
+    where: { kind: Kind; fileAt: string },
+  ): boolean => {
     if (past) {
-      if (bad === 0 && closed) throw new BeyondMemory(kind, fileAt);
-      alarm('file', { kind, fileAt });
-      return { sound: false };
+      if (bad + misplaced === 0 && closed) throw new BeyondMemory(where.kind, where.fileAt);
+      alarm('file', where);
+      return false;
     }
-    if (bad > 0) alarm('signature', { kind, fileAt, lines: bad });
-    if (!closed) alarm('unclosed', { kind, fileAt });
-    return { sound: bad === 0 && closed };
+    if (bad > 0) alarm('signature', { ...where, lines: bad });
+    if (misplaced > 0) alarm('misplaced', { ...where, lines: misplaced });
+    if (!closed) alarm('unclosed', where);
+    return bad + misplaced === 0 && closed;
   };
 
   /** Highest place wins. The same place with another hash is the alarm, and the older stays: the chain then says which it holds. */
@@ -686,13 +839,13 @@ export function createAnchorLog({
    * The snapshots not read yet, newest first, back to the first with nothing wrong: `base`, the one deltas count from.
    * Thrown if none is left to stand for the whole, as with a failed call: what's in memory already does, once there is any.
    */
-  const newerSnapshots = async (foreign: { count: number }, stage: PackedLines<Anchor>) => {
+  const newerSnapshots = async (foreign: { count: number }, stage: PackedLines<Anchor>, touched: Set<number>) => {
     let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
       if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
-      const file = await opened('snapshots', name, stage);
+      const file = await opened({ kind: 'snapshots', countdown }, name, stage, touched);
       if (file.sound) return { base: countdown, sound: countdown };
       spoiled += 1;
     }
@@ -704,7 +857,12 @@ export function createAnchorLog({
    * Every delta this process didn't write, newer than the last it listed or, with
    * none yet, than the snapshot: one of the same millisecond may hold more than it.
    */
-  const newerDeltas = async (snapshot: string | undefined, foreign: { count: number }, stage: PackedLines<Anchor>) => {
+  const newerDeltas = async (
+    snapshot: string | undefined,
+    foreign: { count: number },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+  ) => {
     let newest: string | undefined;
     let files = 0;
     for await (const name of filesOf('deltas', DELTAS_A_PAGE, foreign)) {
@@ -718,7 +876,7 @@ export function createAnchorLog({
         continue;
       }
       files += 1;
-      const file = await opened('deltas', name, stage);
+      const file = await opened({ kind: 'deltas', countdown: countdownOf('deltas', name) }, name, stage, touched);
       if (file.sound) newest ??= name;
     }
     return { newest, files };
@@ -814,71 +972,238 @@ export function createAnchorLog({
   const holdsOther = (page: WriteOncePage, except?: string): boolean =>
     page.names.some((name) => name !== except) || page.foreign > 0 || page.next !== undefined;
 
-  /**
-   * Thrown if the store holds a signed cutover marker for this epoch, at its one name, asked at every read as a rollback may
-   * come at any time; never more than a marker's size fetched. Anything else there, any other name under `cutover/`, and any
-   * name under `shards/` is the alarm, once a process each, and moves nothing: the read goes on with today's files.
-   */
-  const refuseMovedOn = async (foreign: { count: number }): Promise<void> => {
-    const name = cutoverName(epoch);
+  /** A record at its one name, never fetched past a record's size: signed for it, or why not; nothing, if none is there. */
+  const recordAt = async (
+    name: string,
+    read: (holding: KeyProvider, file: { bytes: Buffer; name: string; epoch: number }) => Promise<RecordRead>,
+  ): Promise<RecordRead | undefined> => {
     const got = await store.getAtMost(name, MOST_FILE_BYTES);
-    if (got !== 'missing') {
-      const read =
-        typeof got === 'string' ? { problem: 'file' } : await readCutoverFile(keys, { bytes: got, name, epoch });
-      if ('marker' in read) throw new MovedOn(name);
-      if (!said.marker) alarm('cutover', { problem: read.problem, file: name });
-      said.marker = true;
+    if (got === 'missing') return undefined;
+    return typeof got === 'string' ? { problem: 'file' } : read(keys, { bytes: got, name, epoch });
+  };
+
+  /** A record read at its name: when it was signed, if it is one; anything else there the alarm, once a process. */
+  const signedAt = async (
+    name: string,
+    read: Parameters<typeof recordAt>[1],
+    which: 'marker' | 'done',
+  ): Promise<Date | undefined> => {
+    const got = await recordAt(name, read);
+    if (got === undefined || 'marker' in got) return got?.at;
+    if (!said[which]) alarm('cutover', { problem: got.problem, file: name });
+    said[which] = true;
+    return undefined;
+  };
+
+  /** Whether a folder's first page holds any name but `except`: its foreign names counted either way. */
+  const foreignPage = async (
+    folderName: string,
+    most: number,
+    foreign: { count: number },
+    except?: string,
+  ): Promise<boolean> => {
+    const page = await store.list(folderName, most);
+    foreign.count += page.foreign;
+    return holdsOther(page, except);
+  };
+
+  /**
+   * Which layout the store is in, asked at every read until the migration is done (PL-65): a marker signed for this epoch
+   * at its one name moves it on, and after it the record that the migration is done, to the shards alone. Anything else
+   * at either name, any other name under `cutover/`, and any name under `shards/` with no marker is the alarm, once a
+   * process each, and moves nothing: the read goes on as before.
+   */
+  const layoutRead = async (foreign: { count: number }): Promise<void> => {
+    const marker = cutoverName(epoch);
+    if (layout === 'old') {
+      markerAt = await signedAt(marker, readCutoverFile, 'marker');
+      if (markerAt !== undefined) layout = 'moving';
     }
-    if (!said.cutover) {
-      const page = await store.list(cutoverFolder(epoch), 2);
-      foreign.count += page.foreign;
-      if (holdsOther(page, name)) {
-        said.cutover = true;
-        alarm('cutover', { problem: 'name' });
-      }
+    if (layout === 'moving' && (await signedAt(shardsDoneName(epoch), readShardsDoneFile, 'done')) !== undefined) {
+      layout = 'sharded';
     }
-    if (!said.shards) {
-      const page = await store.list(`e${String(epoch)}/shards/`, 1);
-      foreign.count += page.foreign;
-      if (holdsOther(page)) {
-        said.shards = true;
-        alarm('shards', {});
-      }
+    if (!said.cutover && (await foreignPage(cutoverFolder(epoch), 2, foreign, marker))) {
+      said.cutover = true;
+      alarm('cutover', { problem: 'name' });
+    }
+    if (layout === 'old' && !said.shards && (await foreignPage(shardsFolder(epoch), 1, foreign))) {
+      said.shards = true;
+      alarm('shards', {});
     }
   };
 
-  const catchUp = async (): Promise<void> => {
-    try {
-      const foreign = { count: 0 };
-      await refuseMovedOn(foreign);
-      const stage = packedLines<Anchor>(false);
-      // First, so every line read after is judged against them.
-      await readRebases(foreign);
-      const snapshots = await newerSnapshots(foreign, stage);
-      const deltas = await newerDeltas(snapshots.base, foreign, stage);
-      // Only now, with every call answered: a part read could look like a chain never anchored, or settle a fork.
-      for (const { line, stamp } of stage.held()) merge(anchors, line, stamp);
-      if (snapshots.sound !== undefined) snapshotFrom = snapshots.sound;
-      if (deltas.newest !== undefined) deltasFrom = deltas.newest;
-      if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
-      if (state !== 'read') {
-        logger.info('audit.anchors_read', {
-          epoch,
-          chains: anchors.size,
-          snapshot: snapshots.sound !== undefined,
-          deltas: deltas.files,
-        });
+  /**
+   * One shard's walk, newest first: at the first read, back to its newest sound snapshot (and any file of the same
+   * moment), past at most a day's spoiled ones; after that, back to the newest sound file listed (`from`). What it found,
+   * kept only once the whole read is: the newest sound file and snapshot, and whether it reached the shard's first file
+   * with no sound snapshot (`bare`), so the old files must stand under it.
+   */
+  const shardWalk = (from: string | undefined) => {
+    const walk = {
+      newest: undefined as string | undefined,
+      snapshot: undefined as string | undefined,
+      base: undefined as string | undefined,
+      spoiled: 0,
+      files: 0,
+    };
+    return {
+      /** Whether the walk stops before this file: everything older is held already. */
+      past: (name: string, countdown: string): boolean =>
+        from === undefined ? walk.base !== undefined && countdown > walk.base : name >= from,
+      /** Whether this file, a snapshot, is one the first read looks back past for a sound one. */
+      first: (kind: Kind): boolean => from === undefined && walk.base === undefined && kind === 'snapshots',
+      /** A file of this process's own, or one read: sound, it moves the marks. */
+      met(name: string, countdown: string, kind: Kind, sound: boolean, first: boolean): void {
+        if (!sound) {
+          if (first) walk.spoiled += 1;
+          return;
+        }
+        walk.newest ??= name;
+        if (kind === 'snapshots') walk.snapshot ??= countdown;
+        if (first) walk.base = countdown;
+      },
+      walk,
+      found: () => ({
+        newest: walk.newest,
+        snapshot: walk.snapshot,
+        bare: from === undefined && walk.base === undefined && walk.files > 0,
+      }),
+    };
+  };
+
+  /** One shard's files not read yet, newest first, snapshots and deltas together, as the old files are read. */
+  const readShard = async (
+    shard: number,
+    foreign: { count: number },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+  ) => {
+    const start = shardFolder(epoch, shard);
+    const walking = shardWalk(shardMarks[shard]?.from);
+    let after: string | undefined;
+    do {
+      const page = await store.list(start, SHARD_FILES_A_PAGE, after);
+      foreign.count += page.foreign;
+      for (const name of page.names) {
+        const reading = { shard, name, rest: name.slice(start.length), walking, stage, touched, foreign };
+        if (await shardFileRead(reading)) return walking.found();
       }
+      after = page.next;
+    } while (after !== undefined);
+    return walking.found();
+  };
+
+  /** One name listed in a shard's folder: read, passed over, or where the walk stops (true). */
+  const shardFileRead = async ({
+    shard,
+    name,
+    rest,
+    walking,
+    stage,
+    touched,
+    foreign,
+  }: {
+    shard: number;
+    name: string;
+    rest: string;
+    walking: ReturnType<typeof shardWalk>;
+    stage: PackedLines<Anchor>;
+    touched: Set<number>;
+    foreign: { count: number };
+  }): Promise<boolean> => {
+    const countdown = rest.slice(0, 13);
+    const kind: Kind = rest.endsWith('-s') ? 'snapshots' : 'deltas';
+    if (!ourShardFile(shard, rest, kind, foreign)) return false;
+    if (walking.past(name, countdown)) return true;
+    if (written.delete(name)) {
+      // A snapshot of its own stands for the shard as this process held it: the walk need go back no further.
+      walking.met(name, countdown, kind, true, walking.first(kind));
+      return false;
+    }
+    const first = walking.first(kind);
+    if (first && walking.walk.spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(walking.walk.spoiled));
+    walking.walk.files += 1;
+    const file = await opened({ kind, countdown, shard }, name, stage, touched);
+    walking.met(name, countdown, kind, file.sound, first);
+    return false;
+  };
+
+  /** Whether a name in a shard's folder is one this log would write, and not dated past the clock: else counted, never read. */
+  const ourShardFile = (shard: number, rest: string, kind: Kind, foreign: { count: number }): boolean => {
+    if (!SHARD_FILE.test(rest)) {
+      foreign.count += 1;
+      return false;
+    }
+    const countdown = rest.slice(0, 13);
+    if (LAST_MS - Number(countdown) <= now().getTime() + MOST_AHEAD_MS) return true;
+    foreign.count += 1;
+    alarm('future', { kind, shard: shardHex(shard), fileAt: whenNamed(countdown) });
+    return false;
+  };
+
+  /** Every shard's files not read yet, one shard at a time. */
+  const readShards = async (foreign: { count: number }, stage: PackedLines<Anchor>, touched: Set<number>) => {
+    const found = [];
+    for (let shard = 0; shard < SHARDS; shard += 1) found.push(await readShard(shard, foreign, stage, touched));
+    return found;
+  };
+
+  /** The old files not read yet: the snapshots back to a sound one, and every delta since. */
+  const readOld = async (foreign: { count: number }, stage: PackedLines<Anchor>, touched: Set<number>) => {
+    const snapshots = await newerSnapshots(foreign, stage, touched);
+    const deltas = await newerDeltas(snapshots.base, foreign, stage, touched);
+    return { snapshots, deltas };
+  };
+
+  /** A read's marks, kept only once the whole read is: the newest sound file and snapshot of each shard. */
+  const shardsRead = (found: Awaited<ReturnType<typeof readShards>>): void => {
+    for (const [shard, { newest, snapshot }] of found.entries()) {
+      const marks = shardMarks[shard];
+      if (marks === undefined) continue;
+      if (newest !== undefined) marks.from = newest;
+      if (snapshot !== undefined && (marks.snapshotFrom === undefined || snapshot < marks.snapshotFrom))
+        marks.snapshotFrom = snapshot;
+    }
+  };
+
+  /**
+   * Every file not read yet: the rebases first, so every line read after is judged against them; then the shards once
+   * the store has moved on, and the old files while moving, or once moved only under a shard whose own snapshots are
+   * all spoiled. Merged in only once every call is answered: a part read could look like a chain never anchored.
+   */
+  const readWhole = async (began: number, touched: Set<number>): Promise<void> => {
+    const foreign = { count: 0 };
+    await layoutRead(foreign);
+    const stage = packedLines<Anchor>(false);
+    await readRebases(foreign);
+    const shards = layout === 'old' ? [] : await readShards(foreign, stage, touched);
+    const bare = shards.some((found) => found.bare);
+    const old = layout === 'sharded' && !bare ? undefined : await readOld(foreign, stage, touched);
+    for (const { line, stamp } of stage.held()) merge(anchors, line, stamp);
+    if (old?.snapshots.sound !== undefined) snapshotFrom = old.snapshots.sound;
+    if (old?.deltas.newest !== undefined) deltasFrom = old.deltas.newest;
+    shardsRead(shards);
+    if (layout === 'moving' && markerAt !== undefined && began - markerAt.getTime() >= SETTLE_MS) settledRead = true;
+    if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
+    if (state === 'read') return;
+    logger.info('audit.anchors_read', {
+      epoch,
+      chains: anchors.size,
+      snapshot: old?.snapshots.sound !== undefined,
+      deltas: old?.deltas.files ?? 0,
+      ...(layout === 'old' ? {} : { layout, shardSnapshots: shards.filter((found) => found.snapshot).length }),
+    });
+  };
+
+  const catchUp = async (): Promise<void> => {
+    const began = now().getTime();
+    // Shards an old file's line was read for while moving: their snapshots stand for them no longer.
+    const touched = new Set<number>();
+    try {
+      await readWhole(began, touched);
       readFailingSince = undefined;
       state = 'read';
     } catch (error) {
-      if (error instanceof MovedOn) {
-        // Unreadable even after a whole read: what this process holds may be older than the later layout's anchors, so
-        // it anchors nothing more, and after a start payments wait. Files are never taken away, so it stays so.
-        logger.error('audit.anchor_store_moved_on', { epoch, file: error.file });
-        state = 'unreadable';
-        return;
-      }
       if (!(error instanceof BeyondMemory)) {
         readFailed(error);
         return;
@@ -890,6 +1215,15 @@ export function createAnchorLog({
         mostBytes: mostFileBytes,
       });
       if (state !== 'read') state = 'unreadable';
+    } finally {
+      // Read whole or not, what it took from the old files is held now, and no snapshot taken before stands for it.
+      if (touched.size > 0) {
+        const stamp = stamped();
+        for (const shard of touched) {
+          const marks = shardMarks[shard];
+          if (marks !== undefined) marks.old = stamp;
+        }
+      }
     }
   };
 
@@ -936,29 +1270,62 @@ export function createAnchorLog({
     unsent = undefined;
   };
 
-  /** A file in the store: nothing to read in a delta of ours, and a snapshot is the newest. */
+  /** Where a file of this process's is, for its alarms: its kind, and its shard if it has one. */
+  const whereOf = (file: Unsent): Record<string, unknown> => ({
+    kind: file.kind,
+    ...(file.shard === undefined ? {} : { shard: shardHex(file.shard) }),
+  });
+
+  /** What a shard's file name counts down from: the same place in every shard's folder. */
+  const shardCountdown = (name: string): string => {
+    const at = shardFolder(epoch, 0).length;
+    return name.slice(at, at + 13);
+  };
+
+  /** What this flush wrote into the shards, said once at its end: a line a file would be up to 256 lines a minute. */
+  const wrote = { files: 0, snapshots: 0, lines: 0, sides: 0 };
+
+  /**
+   * A file in the store: nothing to read in a delta of ours, and a snapshot is the newest. In a shard, neither kind is read
+   * back, and a snapshot taken while moving stands for its shard from the stamp it was taken at.
+   */
   const stored = (file: Unsent): void => {
     unsent = undefined;
-    if (file.kind === 'deltas') written.add(file.name);
-    else snapshotFrom = countdownOf('snapshots', file.name);
-    logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines, sides: file.passes + file.places });
+    const marks = file.shard === undefined ? undefined : shardMarks[file.shard];
+    if (marks === undefined) {
+      if (file.kind === 'deltas') written.add(file.name);
+      else snapshotFrom = countdownOf('snapshots', file.name);
+      logger.info('audit.anchors_written', { kind: file.kind, lines: file.lines, sides: file.passes + file.places });
+      return;
+    }
+    written.add(file.name);
+    if (file.kind === 'snapshots') {
+      marks.snapshotFrom = shardCountdown(file.name);
+      marks.seeded = Math.max(marks.seeded, file.seedStamp ?? 0);
+      wrote.snapshots += 1;
+    }
+    wrote.files += 1;
+    wrote.lines += file.lines;
+    wrote.sides += file.passes + file.places;
   };
 
   /**
    * Into the store, or thrown. A name taken already holds this file if an answer was lost; if it holds anything else, that
    * is the alarm. Only then are the file's lines read back from its bytes: a lost answer reads nothing back (at the edge
    * that would be the whole file, uncounted), and a read-back that throws can't stop a file that did land. A line kept
-   * while the name was fetched is later than the file's, and `waitAgain` lets it win.
+   * while the name was fetched is later than the file's, and `waitAgain` lets it win. What holds the name is never fetched
+   * past this file's own size: anything larger, or beyond a plain read, is other bytes.
    */
   const send = async (file: Unsent): Promise<void> => {
     try {
       await store.put(file.name, file.bytes);
     } catch (error) {
       if (!(error instanceof OverwriteRefused)) throw error;
-      const held = await store.get(file.name);
-      if (!held.equals(file.bytes)) {
+      const held = await store.getAtMost(file.name, file.bytes.length);
+      if (held === 'missing') throw new Error('a name refused as taken, and then not there', { cause: error });
+      if (typeof held === 'string' || !held.equals(file.bytes)) {
         // The alarm first: a read-back that throws must not hide the overwrite behind a write failure.
-        alarm('overwrite', { kind: file.kind });
+        alarm('overwrite', whereOf(file));
         overwritten(await restored(file));
         return;
       }
@@ -971,40 +1338,66 @@ export function createAnchorLog({
     for (const [chain, stamp] of lines.stamps()) if (waiting.stampOf(chain) === stamp) waiting.delete(chain);
   };
 
-  /** The next file's lines, as they are now: every chain's anchor when a snapshot is due, what moved otherwise. */
-  const taken = (kind: Kind) => {
-    const all = (): boolean => true;
+  /**
+   * The next file's lines, as they are now: every chain's anchor when a snapshot is due, what moved otherwise; of one
+   * shard's chains alone, for a shard's file.
+   */
+  const taken = (kind: Kind, shard: number | undefined) => {
+    const ours = (_chain: string, _line: unknown, at: number): boolean => shard === undefined || at === shard;
     // A chain still at its rebase is left to the rebase's own file: its anchor isn't signed with this key.
-    const lines = kind === 'snapshots' ? anchors.take((chain) => !anchors.marked(chain)) : pending.take(all);
+    const lines =
+      kind === 'snapshots'
+        ? anchors.take((chain, line, at) => ours(chain, line, at) && !anchors.marked(chain))
+        : pending.take(ours);
     const from = kind === 'snapshots' ? sides : pendingSides;
-    const passes = from.p.take(all);
-    const places = from.u.take((_chain, line) => kind === 'deltas' || !overtaken(line()));
+    const passes = from.p.take(ours);
+    const places = from.u.take((chain, line, at) => ours(chain, line, at) && (kind === 'deltas' || !overtaken(line())));
     return { lines, passes, places };
   };
 
   /**
    * The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. What it takes from the
    * tables is let go as soon as its bytes are made (PL-65 review): an unsent file holds its bytes, a stamp a line and any
-   * line its own text can't give back, never the tables' records, so a store away for hours costs nothing more.
+   * line its own text can't give back, never the tables' records, so a store away for hours costs nothing more. A shard's
+   * file is named in its folder and closes with a version 2 line, over the hash of every line before it.
    */
-  const madeFile = async (): Promise<Unsent> => {
+  const madeFile = async ({ kind, shard }: { kind: Kind; shard?: number }): Promise<Unsent> => {
     const at = now().getTime();
-    const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
-    const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
-    const { lines, passes, places } = taken(kind);
+    // Taken before the lines are: an old file's line read after it leaves the shard's snapshot standing for less.
+    const seedStamp = shard !== undefined && kind === 'snapshots' && layout === 'moving' ? stamped() : undefined;
+    const { lines, passes, places } = taken(kind, shard);
     const count = lines.size + passes.size + places.size;
     takenLines += count;
     try {
-      const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
-      const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
-      const closing = JSON.stringify({
-        k: 'c',
-        name,
-        epoch,
-        lines: count,
-        kv: keyVersion,
-        sig: signature.toString('base64'),
-      });
+      const id = `${countedDown(at)}-${randomUUID()}`;
+      const name =
+        shard === undefined ? `${folder(kind)}${id}` : `${shardFolder(epoch, shard)}${id}-${kind.slice(0, 1)}`;
+      const body = bodyHash();
+      const closing = (): string => {
+        if (shard === undefined) {
+          const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
+          return JSON.stringify({
+            k: 'c',
+            name,
+            epoch,
+            lines: count,
+            kv: keyVersion,
+            sig: signature.toString('base64'),
+          });
+        }
+        const hash = body.digest();
+        const { signature, keyVersion } = keys.sign('audit-anchor', closingV2Message(name, epoch, count, hash));
+        return JSON.stringify({
+          k: 'c',
+          v: 2,
+          name,
+          epoch,
+          lines: count,
+          body: hash,
+          kv: keyVersion,
+          sig: signature.toString('base64'),
+        });
+      };
       const stamps = new Float64Array(count);
       const kept = new Map<number, Anchor | Progress>();
       let made = 0;
@@ -1020,18 +1413,31 @@ export function createAnchorLog({
               stamps[made] = stamp;
               if (!readsBack(line, lineKind)) kept.set(made, line);
               made += 1;
-              yield `${lineOf(line, lineKind)}\n`;
+              const text = lineOf(line, lineKind);
+              body.add(text);
+              yield `${text}\n`;
             }
           }
-          yield `${closing}\n`;
+          yield `${closing()}\n`;
         })(),
       );
-      nearMemory(kind);
+      if (shard === undefined) nearMemory(kind);
       // Only what this file holds: `keep` may have run while it was made.
       settled(pending, lines);
       settled(pendingSides.p, passes);
       settled(pendingSides.u, places);
-      return { kind, name, bytes, lines: lines.size, passes: passes.size, places: places.size, stamps, kept };
+      return {
+        kind,
+        ...(shard === undefined ? {} : { shard }),
+        ...(seedStamp === undefined ? {} : { seedStamp }),
+        name,
+        bytes,
+        lines: lines.size,
+        passes: passes.size,
+        places: places.size,
+        stamps,
+        kept,
+      };
     } finally {
       lines.release();
       passes.release();
@@ -1042,7 +1448,7 @@ export function createAnchorLog({
 
   /**
    * In the budget's own count, so it is said long before a read of this many would be refused; with each snapshot, so
-   * hourly, not each minute's delta.
+   * hourly, not each minute's delta; in the shards, once a flush that made any.
    */
   const nearMemory = (kind: Kind): void => {
     const held = linesHeld();
@@ -1058,12 +1464,125 @@ export function createAnchorLog({
     }
   };
 
+  /** Whether the old files' snapshot is due: none yet, or an hour since the last. */
+  const oldKind = (): Kind => {
+    const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
+    return lastSnapshot === undefined || now().getTime() - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
+  };
+
+  /** Whether a shard's snapshot is due: none yet, an hour since its last, or, while moving, none standing for it. */
+  const shardKind = (shard: number): Kind => {
+    const from = shardMarks[shard]?.snapshotFrom;
+    if (from === undefined || now().getTime() - (LAST_MS - Number(from)) >= SNAPSHOT_EVERY_MS) return 'snapshots';
+    return layout === 'moving' && !seeded(shard) ? 'snapshots' : 'deltas';
+  };
+
+  /** The tables of every chain held, and of what waits to be written: a shard needs a file for a chain of either. */
+  const heldTables = [anchors, sides.p, sides.u] as const;
+  const waitingTables = [pending, pendingSides.p, pendingSides.u] as const;
+
+  /** Each shard holding a chain of these tables that `wanted` says yes to: one pass, by the shard each line keeps. */
+  const shardsIn = (tables: typeof heldTables, wanted: (shard: number) => boolean, into: Set<number>): Set<number> => {
+    for (const table of tables) {
+      for (const chain of table.keys()) {
+        const shard = table.shardOf(chain);
+        if (shard !== undefined && wanted(shard)) into.add(shard);
+      }
+    }
+    return into;
+  };
+
+  /** The shards a flush writes a file for: those with lines waiting and, while moving, those whose snapshot no longer stands. */
+  const shardsDue = (): number[] => {
+    const due = shardsIn(waitingTables, () => true, new Set<number>());
+    if (layout === 'moving') shardsIn(heldTables, (shard) => !seeded(shard), due);
+    return [...due].toSorted((one, other) => one - other);
+  };
+
+  /** Every shard's file due, one at a time, so one file at most is ever unsent; what was written said once. */
+  const shardFilesDue = async (): Promise<void> => {
+    Object.assign(wrote, { files: 0, snapshots: 0, lines: 0, sides: 0 });
+    try {
+      for (const shard of shardsDue()) {
+        unsent = await madeFile({ kind: shardKind(shard), shard });
+        await send(unsent);
+      }
+    } finally {
+      if (wrote.files > 0) logger.info('audit.anchors_written', { kind: 'shards', ...wrote });
+      // Shards' snapshots fall due at their own times: said at most hourly, as the old files' one snapshot was.
+      const at = now().getTime();
+      if (wrote.snapshots > 0 && (nearSaidAt === undefined || at - nearSaidAt >= SNAPSHOT_EVERY_MS)) {
+        nearSaidAt = at;
+        nearMemory('snapshots');
+      }
+    }
+  };
+
+  /**
+   * A record written at its one name, or found there already, signed: when it was signed. Anything else at the name is
+   * the alarm, once a process as when a read finds it (`which`), and the migration goes no further in this process.
+   */
+  const recordWritten = async (
+    file: { readonly name: string; readonly bytes: Buffer },
+    at: Date,
+    read: Parameters<typeof recordAt>[1],
+    which: 'marker' | 'done',
+  ): Promise<Date | undefined> => {
+    try {
+      await store.put(file.name, file.bytes);
+      return at;
+    } catch (error) {
+      if (!(error instanceof OverwriteRefused)) throw error;
+      const there = await recordAt(file.name, read);
+      if (there === undefined) throw new Error('a name refused as taken, and then not there', { cause: error });
+      if ('marker' in there) return there.at;
+      migrationStopped = true;
+      if (!said[which]) alarm('cutover', { problem: there.problem, file: file.name });
+      said[which] = true;
+      return undefined;
+    }
+  };
+
+  /** Whether the migration's first step is due: this process is set to take it, and has read the old store whole. */
+  const cutOverDue = (): boolean => cutOver && layout === 'old' && state === 'read' && !migrationStopped;
+
+  /** The migration's first step: the marker. */
+  const cutOverNow = async (): Promise<void> => {
+    const at = now();
+    const signed = await recordWritten(cutoverFile(keys, { epoch, at }), at, readCutoverFile, 'marker');
+    if (signed === undefined) return;
+    layout = 'moving';
+    markerAt = signed;
+    logger.info('audit.anchor_store_cutover', { epoch, file: cutoverName(epoch), at: signed.toISOString() });
+  };
+
+  /**
+   * The migration's last step: the record that it is done, once a read begun an hour past the marker has been, and every
+   * shard holding chains has a snapshot standing for it, with nothing unsent. From then on the old files are read no more.
+   */
+  const doneDue = async (): Promise<void> => {
+    if (layout !== 'moving' || !settledRead || unsent !== undefined || migrationStopped) return;
+    if (shardsIn(heldTables, (shard) => !seeded(shard), new Set<number>()).size > 0) return;
+    const at = now();
+    const done = await recordWritten(shardsDoneFile(keys, { epoch, at }), at, readShardsDoneFile, 'done');
+    if (done === undefined) return;
+    layout = 'sharded';
+    logger.info('audit.anchor_store_sharded', { epoch, file: shardsDoneName(epoch) });
+  };
+
   const writeDue = async (): Promise<void> => {
     try {
       if (unsent !== undefined) await send(unsent);
-      if (unsent === undefined && pending.size + pendingSides.p.size + pendingSides.u.size > 0) {
-        unsent = await madeFile();
-        await send(unsent);
+      // Only when due: an await here would let `keep` run before the next file takes what waits.
+      if (unsent === undefined && cutOverDue()) await cutOverNow();
+      if (unsent === undefined && layout === 'old') {
+        if (pending.size + pendingSides.p.size + pendingSides.u.size > 0) {
+          unsent = await madeFile({ kind: oldKind() });
+          await send(unsent);
+        }
+      } else if (unsent === undefined) {
+        await shardFilesDue();
+        await doneDue();
       }
       writeFailingSince = undefined;
     } catch (error) {
@@ -1113,7 +1632,11 @@ export function createAnchorLog({
     },
     rebasedAfter: (chain: Chain, at: Date) => rebasedAfter(chainName(chain), at),
     lastFileAt() {
-      const times = [deltasFrom === undefined ? undefined : countdownOf('deltas', deltasFrom), snapshotFrom]
+      const countdowns = [deltasFrom === undefined ? undefined : countdownOf('deltas', deltasFrom), snapshotFrom];
+      for (const marks of shardMarks) {
+        countdowns.push(marks.from === undefined ? undefined : shardCountdown(marks.from), marks.snapshotFrom);
+      }
+      const times = countdowns
         .filter((countdown) => countdown !== undefined)
         .map((countdown) => LAST_MS - Number(countdown));
       return times.length === 0 ? undefined : new Date(Math.max(...times));

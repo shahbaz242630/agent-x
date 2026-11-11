@@ -1,6 +1,11 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
 
-import { createFakeWriteOnceStore, type FakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
+import {
+  createFakeWriteOnceStore as createFake,
+  type FakeWriteOnceStore,
+  LogCapture,
+  testLogger,
+} from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
@@ -10,6 +15,7 @@ import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import { type Chain, chainName } from './chain.ts';
 import { cutoverFile } from './cutover.ts';
 import { type Rebase, rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
+import { shardHex, shardOf } from './shards.ts';
 
 const keyMaterial = (fill: number): KeyMaterial =>
   byPurpose((purpose) => ({
@@ -26,6 +32,26 @@ const LATER_KEYS = createKeyProvider(
     return { current: version, versions: new Map([[version, Buffer.alloc(32, PURPOSES.indexOf(purpose) + 70)]]) };
   }) satisfies KeyMaterial,
 );
+
+/** How many deltas and snapshots each store fetched (PL-65: as markers and rebases are, never past a bound). */
+const fileGetsOf = new WeakMap<FakeWriteOnceStore, { count: number }>();
+const FILE_NAME = /\/(?:deltas|snapshots)\/|\/shards\/[0-9a-f]{2}\//;
+/** The fake store, counting the fetches of the files that hold anchors apart from the markers' and rebases'. */
+function createFakeWriteOnceStore(): FakeWriteOnceStore {
+  const fake = createFake();
+  const counted = { count: 0 };
+  fileGetsOf.set(fake, counted);
+  const fetch = fake.store.getAtMost.bind(fake.store);
+  Object.assign(fake.store, {
+    getAtMost(name: string, most: number) {
+      if (FILE_NAME.test(name)) counted.count += 1;
+      return fetch(name, most);
+    },
+  });
+  return fake;
+}
+/** The deltas and snapshots fetched, to set or read. */
+const fileGets = (fake: FakeWriteOnceStore): { count: number } => fileGetsOf.get(fake) ?? { count: 0 };
 
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
@@ -261,7 +287,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       }
       expect(files(fake, 'deltas')).toHaveLength(12);
       fake.calls.lists = 0;
-      fake.calls.gets = 0;
+      fileGets(fake).count = 0;
 
       // As the hour's up only a minute on, its first write stays a delta.
       const { log, lines } = logOver(fake, 1, keys, new Date(START.getTime() + 59 * MINUTE));
@@ -270,7 +296,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       await log.read();
 
       // One name each of the later layout's two folders (PL-65), the rebases' list (E11), the snapshots' and the deltas'.
-      expect(fake.calls).toMatchObject({ lists: 5, gets: 13 });
+      expect(fake.calls.lists).toBe(5);
+      expect(fileGets(fake).count).toBe(13);
       expect(log.state()).toBe('read');
       expect(log.latest(CHAIN)).toMatchObject({ seq: 12n, macKeyVersion: 2, keyVersion: 1 });
       expect(log.latest(CHAIN)?.hash).toEqual(Buffer.alloc(32, 12));
@@ -296,7 +323,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       expect(log.latest(CHAIN)?.seq).toBe(51n);
       expect(log.latest(OTHER_CHAIN)).toBeUndefined();
-      expect(fake.calls.gets).toBe(2);
+      expect(fileGets(fake).count).toBe(2);
     });
 
     it('takes the highest place of a chain, whichever file it is in', async () => {
@@ -319,7 +346,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       await log.read();
 
       // The later layout's two folders (PL-65), the rebases' list (E11), then the snapshots' and two pages of deltas.
-      expect(fake.calls).toMatchObject({ lists: 6, gets: 101 });
+      expect(fake.calls.lists).toBe(6);
+      expect(fileGets(fake).count).toBe(101);
       expect(log.latest(CHAIN)?.seq).toBe(101n);
     });
 
@@ -340,7 +368,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       fake.files.set(nameOf('snapshots', 0), fileOf(nameOf('snapshots', 0), anchorAt(CHAIN, 1n)));
       fake.files.set(nameOf('deltas', 5), fileOf(nameOf('deltas', 5), anchorAt(OTHER_CHAIN, 2n)));
       const { log, lines } = logOver(fake);
-      fake.instead.get = (name) => (name.includes('/deltas/') ? failing() : fake.real.get(name));
+      fake.instead.getAtMost = (name, most) =>
+        name.includes('/deltas/') ? failing() : fake.real.getAtMost(name, most);
       await log.read();
 
       expect(log.state()).toBe('unreadable');
@@ -354,7 +383,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       ]);
       expect(lines('audit.anchors_read')).toEqual([]);
 
-      delete fake.instead.get;
+      delete fake.instead.getAtMost;
       await log.read();
       expect(log.state()).toBe('read');
       expect(log.latest(CHAIN)?.seq).toBe(1n);
@@ -371,7 +400,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
     });
 
-    describe('a store moved on to a later layout (PL-65): only a signed cutover marker stops this version reading', () => {
+    describe('a store moved on to the shards (PL-65): only a signed cutover marker moves this version on', () => {
       /** A store this version could read whole, a chain anchored at 5. */
       const readable = (): FakeWriteOnceStore => {
         const fake = createFakeWriteOnceStore();
@@ -391,27 +420,29 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const movedOn = (lines: (event: string) => Record<string, unknown>[]) => lines('audit.anchor_store_moved_on');
       const alarms = (lines: (event: string) => Record<string, unknown>[]) => lines('audit.integrity_failed');
 
-      it('a signed marker for this epoch fails the read closed, with its own alarm, and nothing of the old files is taken', async () => {
+      it('a signed marker for this epoch moves the read on: the old files and every shard read together, no alarm', async () => {
         const fake = readable();
         put(fake, marker());
         const { log, lines } = logOver(fake);
         await log.read();
 
-        expect(log.state()).toBe('unreadable');
-        expect(log.latest(CHAIN)).toBeUndefined();
-        expect(log.organisations()).toEqual([]);
-        expect(movedOn(lines)).toEqual([expect.objectContaining({ level: 'error', epoch: 1, file: MARKER })]);
-        expect(lines('audit.anchor_store_unreadable')).toEqual([]);
-        expect(lines('audit.anchors_read')).toEqual([]);
-        // The marker alone fetched, and no more than a marker's size of it.
-        expect(fake.calls).toMatchObject({ gets: 0, smallGets: 1 });
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(5n);
+        expect(alarms(lines)).toEqual([]);
+        expect(movedOn(lines)).toEqual([]);
+        expect(lines('audit.anchors_read')).toEqual([
+          expect.objectContaining({ layout: 'moving', chains: 1, snapshot: true, shardSnapshots: 0 }),
+        ]);
+        // The marker, the record that the migration is done, `cutover/`, the rebases, 256 shards, the old two folders.
+        expect(fake.calls.lists).toBe(1 + 1 + 256 + 2);
+        expect(fake.calls.gets).toBe(0);
       });
 
       it('asks the one name, a marker’s size at most, and one or two names of each folder', async () => {
         const fake = readable();
         const asked: string[] = [];
         fake.instead.getAtMost = (name, most) => {
-          asked.push(`get ${name} ${String(most)}`);
+          if (/^e1\/(?:cutover|shards)\//.test(name)) asked.push(`get ${name} ${String(most)}`);
           return fake.real.getAtMost(name, most);
         };
         fake.instead.list = (start, most, after) => {
@@ -523,15 +554,16 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(alarms(lines).map((line) => line.problem)).toEqual(['file', 'name']);
       });
 
-      it('a signed marker beside other names still counts', async () => {
+      it('a signed marker beside other names still counts, the others the alarm', async () => {
         const fake = readable();
         for (const name of ['e1/cutover/a', 'e1/cutover/b', 'e1/cutover/z']) fake.files.set(name, gzipSync(''));
         put(fake, marker());
         const { log, lines } = logOver(fake);
         await log.read();
 
-        expect(log.state()).toBe('unreadable');
-        expect(movedOn(lines)).toHaveLength(1);
+        expect(log.state()).toBe('read');
+        expect(lines('audit.anchors_read')).toEqual([expect.objectContaining({ layout: 'moving' })]);
+        expect(alarms(lines)).toEqual([expect.objectContaining({ reason: 'cutover', problem: 'name' })]);
       });
 
       it.each(['e1/cutover/', 'e1/shards/'])(
@@ -580,19 +612,22 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(lines('audit.anchor_store_unreadable')).toHaveLength(1);
       });
 
-      it('a process already reading stops anchoring when a marker appears, and stays so at every read after', async () => {
+      it('a process already reading moves on when a marker appears, and reads the shards from then on', async () => {
         const fake = readable();
         const { log, lines } = logOver(fake);
         await log.read();
         expect(log.state()).toBe('read');
 
         put(fake, marker());
+        const shard = `e1/shards/${shardHex(shardOf(chainName(CHAIN)))}/`;
+        const name = `${shard}${nameOf('deltas', 30).slice('e1/deltas/'.length)}-d`;
+        fake.files.set(name, fileOf(name, anchorAt(CHAIN, 6n)));
         await log.read();
-        expect(log.state()).toBe('unreadable');
-        await log.read();
-        expect(log.state()).toBe('unreadable');
-        expect(movedOn(lines)).toHaveLength(2);
-        expect(lines('audit.anchor_store_read_failed')).toEqual([]);
+        expect(log.state()).toBe('read');
+        expect(log.latest(CHAIN)?.seq).toBe(6n);
+        expect(movedOn(lines)).toEqual([]);
+        // A version 1 closing line in a shard is still one signed for its name: read a line at a time, sound.
+        expect(alarms(lines)).toEqual([]);
       });
     });
 
@@ -814,11 +849,11 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
         const { log, lines } = logOver(fake);
         await log.read();
-        fake.calls.gets = 0;
+        fileGets(fake).count = 0;
 
         await log.read();
 
-        expect(fake.calls.gets).toBe(1);
+        expect(fileGets(fake).count).toBe(1);
         expect(lines('audit.integrity_failed')).toHaveLength(2);
       });
 
@@ -831,7 +866,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         const { log } = logOver(fake);
         await log.read();
 
-        expect(fake.calls.gets).toBe(2);
+        expect(fileGets(fake).count).toBe(2);
         expect(log.latest(OTHER_CHAIN)).toBeUndefined();
       });
 
@@ -906,14 +941,14 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         await reached.log.read();
         expect(reached.log.state()).toBe('read');
         expect(reached.log.latest(CHAIN)?.seq).toBe(3n);
-        expect(fake.calls.gets).toBe(25);
+        expect(fileGets(fake).count).toBe(25);
 
         fake.files.set(nameOf('snapshots', 60), spoiled(nameOf('snapshots', 60)));
-        fake.calls.gets = 0;
+        fileGets(fake).count = 0;
         const past = logOver(fake);
         await past.log.read();
         expect(past.log.state()).toBe('unreadable');
-        expect(fake.calls.gets).toBe(25);
+        expect(fileGets(fake).count).toBe(25);
       });
 
       it('what it found goes in the next snapshot, so a later restart needs neither older file', async () => {
@@ -927,11 +962,11 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         await log.read();
         log.keep(anchorAt(CHAIN, 5n));
         await log.flush();
-        fake.calls.gets = 0;
+        fileGets(fake).count = 0;
 
         const later = logOver(fake);
         await later.log.read();
-        expect(fake.calls.gets).toBe(1);
+        expect(fileGets(fake).count).toBe(1);
         expect(later.log.latest(CHAIN)?.seq).toBe(5n);
         expect(later.log.latest(OTHER_CHAIN)?.seq).toBe(4n);
       });
@@ -941,16 +976,16 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         const { log, lines, advance } = await started(fake);
         advance(60);
         fake.files.set(nameOf('snapshots', 60, 7), spoiled(nameOf('snapshots', 60, 7)));
-        fake.calls.gets = 0;
+        fileGets(fake).count = 0;
         await log.read();
 
         expect(log.state()).toBe('read');
-        expect(fake.calls.gets).toBe(1);
+        expect(fileGets(fake).count).toBe(1);
         expect(log.latest(PLATFORM)?.seq).toBe(1n);
         expect(lines('audit.anchor_store_read_failed')).toEqual([]);
 
         await log.read();
-        expect(fake.calls.gets).toBe(2);
+        expect(fileGets(fake).count).toBe(2);
       });
     });
 
@@ -1169,10 +1204,10 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(nameOf('deltas', 1, 8), fileOf(nameOf('deltas', 1, 8), anchorAt(CHAIN, 8n)));
         advance(1);
         await log.read();
-        fake.calls.gets = 0;
+        fileGets(fake).count = 0;
         await log.read();
 
-        expect(fake.calls.gets).toBe(0);
+        expect(fileGets(fake).count).toBe(0);
       });
     });
 
@@ -1190,7 +1225,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
           await log.read();
 
           expect(log.latest(CHAIN)?.seq).toBe(4n);
-          expect(fake.calls.gets).toBe(2);
+          expect(fileGets(fake).count).toBe(2);
           expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 1 })]);
           expect(lines('audit.integrity_failed')).toEqual([
             expect.objectContaining({
@@ -1244,7 +1279,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
         expect(log.state()).toBe('read');
         expect(log.latest(CHAIN)?.seq).toBe(3n);
-        expect(fake.calls.gets).toBe(1);
+        expect(fileGets(fake).count).toBe(1);
       });
     });
 
@@ -1263,14 +1298,16 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       it('signed and sound is capacity, with the true reason: never `file`, and payments wait', async () => {
         const fake = createFakeWriteOnceStore();
         const name = nameOf('snapshots', 0);
-        fake.files.set(name, fileOf(name, anchorAt(CHAIN, 3n), anchorAt(OTHER, 4n)));
-        const { log, capture } = limited(fake, 200);
+        // The same line again and again: small to fetch (the bound is on the bytes fetched, PL-65), large opened.
+        const again = Array.from({ length: 20 }, () => anchorAt(CHAIN, 3n));
+        fake.files.set(name, fileOf(name, ...again, anchorAt(OTHER, 4n)));
+        const { log, capture } = limited(fake, 1000);
         await log.read();
         expect(log.state()).toBe('unreadable');
         expect(log.latest(CHAIN)).toBeUndefined();
         expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([]);
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory')).toEqual([
-          expect.objectContaining({ level: 'error', kind: 'snapshots', mostBytes: 200 }),
+          expect.objectContaining({ level: 'error', kind: 'snapshots', mostBytes: 1000 }),
         ]);
         expect(capture.lines().filter((line) => line.event === 'audit.anchor_store_unreadable')).toEqual([]);
       });
@@ -1391,7 +1428,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         await log.read();
         expect(log.state()).toBe('read');
         const big = nameOf('snapshots', 60);
-        const many = Array.from({ length: 20 }, (_, index) => anchorAt(CHAIN, BigInt(index + 10)));
+        // Small to fetch, large opened: the bound on what is fetched (PL-65) is not what refuses it.
+        const many = Array.from({ length: 20 }, () => anchorAt(CHAIN, 10n));
         fake.files.set(big, fileOf(big, ...many));
         await log.read();
         expect(log.state()).toBe('read');
@@ -1547,8 +1585,9 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(snapshot, fileOf(snapshot, anchorAt(chain(0), 7n), anchorAt(chain(50), 1n)));
         const delta = nameOf('deltas', 61);
         fake.files.set(delta, fileOf(delta, anchorAt(chain(1), 7n)));
-        const real = (name: string) => fake.real.get(name);
-        fake.instead.get = (name) => (name === delta ? Promise.reject(new Error('the store is away')) : real(name));
+        const real = (name: string, most: number) => fake.real.getAtMost(name, most);
+        fake.instead.getAtMost = (name, most) =>
+          name === delta ? Promise.reject(new Error('the store is away')) : real(name, most);
         await log.read();
         expect(log.state()).toBe('read');
         expect(log.latest(chain(0))?.seq).toBe(7n);
@@ -1556,9 +1595,9 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
         // Nothing moved the marks: the next read opens that snapshot again, and takes all of it.
         const opened: string[] = [];
-        fake.instead.get = (name) => {
+        fake.instead.getAtMost = (name, most) => {
           opened.push(name);
-          return real(name);
+          return real(name, most);
         };
         await log.read();
         expect(opened).toContain(snapshot);
@@ -1600,8 +1639,9 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         fake.files.set(delta, fileOf(delta, other));
         const failed = nameOf('deltas', 4);
         fake.files.set(failed, fileOf(failed, anchorAt(chain(1), 1n)));
-        const real = (name: string) => fake.real.get(name);
-        fake.instead.get = (name) => (name === failed ? Promise.reject(new Error('the store is away')) : real(name));
+        const real = (name: string, most: number) => fake.real.getAtMost(name, most);
+        fake.instead.getAtMost = (name, most) =>
+          name === failed ? Promise.reject(new Error('the store is away')) : real(name, most);
         await log.read();
         expect(log.latest(chain(0))).toEqual(held);
         expect(capture.lines().filter((line) => line.reason === 'fork')).toEqual([]);
@@ -1729,7 +1769,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       await log.read();
 
       expect(log.latest(CHAIN)?.seq).toBe(2n);
-      expect(fake.calls.gets).toBe(1);
+      expect(fileGets(fake).count).toBe(1);
       expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ level: 'warn', files: 2 })]);
     });
 
@@ -1766,33 +1806,33 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       advance(5);
       log.keep(anchorAt(CHAIN, 2n));
       await log.flush();
-      fake.calls.gets = 0;
+      fileGets(fake).count = 0;
 
       await log.read();
-      expect(fake.calls.gets).toBe(0);
+      expect(fileGets(fake).count).toBe(0);
 
       fake.files.set(
         nameOf('deltas', 10, 7),
         fileOf(nameOf('deltas', 10, 7), anchorAt(CHAIN, 8n), anchorAt(OTHER_CHAIN, 1n)),
       );
       await log.read();
-      expect(fake.calls.gets).toBe(1);
+      expect(fileGets(fake).count).toBe(1);
       expect(log.latest(CHAIN)?.seq).toBe(8n);
       expect(log.organisations().toSorted()).toEqual([ORG, OTHER_ORG].toSorted());
 
       // And never again.
       await log.read();
-      expect(fake.calls.gets).toBe(1);
+      expect(fileGets(fake).count).toBe(1);
     });
 
     it('reads no delta older than the snapshot it wrote itself', async () => {
       const fake = createFakeWriteOnceStore();
       const { log } = await started(fake);
       fake.files.set(nameOf('deltas', -60, 7), fileOf(nameOf('deltas', -60, 7), anchorAt(CHAIN, 8n)));
-      fake.calls.gets = 0;
+      fileGets(fake).count = 0;
       await log.read();
 
-      expect(fake.calls.gets).toBe(0);
+      expect(fileGets(fake).count).toBe(0);
       expect(log.latest(CHAIN)).toBeUndefined();
     });
 
@@ -1800,14 +1840,14 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       const fake = createFakeWriteOnceStore();
       const { log, advance } = await started(fake);
       advance(60);
-      fake.calls.gets = 0;
+      fileGets(fake).count = 0;
       fake.files.set(nameOf('snapshots', 60, 7), fileOf(nameOf('snapshots', 60, 7), anchorAt(CHAIN, 8n)));
       fake.files.set(nameOf('snapshots', -60, 8), fileOf(nameOf('snapshots', -60, 8), anchorAt(OTHER_CHAIN, 8n)));
       await log.read();
 
       expect(log.latest(CHAIN)?.seq).toBe(8n);
       expect(log.latest(OTHER_CHAIN)).toBeUndefined();
-      expect(fake.calls.gets).toBe(1);
+      expect(fileGets(fake).count).toBe(1);
     });
 
     it('a read that fails once the store has been read leaves things as they are, with a warning', async () => {
@@ -1991,13 +2031,13 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       log.keep(anchorAt(CHAIN, 2n));
       await log.flush();
       delete fake.instead.put;
-      fake.instead.get = failing;
+      fake.instead.getAtMost = failing;
       await log.flush();
 
       expect(lines('audit.anchor_store_write_failed')).toHaveLength(2);
       expect(lines('audit.integrity_failed')).toEqual([]);
       const puts = fake.calls.puts;
-      delete fake.instead.get;
+      delete fake.instead.getAtMost;
       await log.flush();
       expect(fake.calls.puts).toBe(puts + 1);
       expect(lines('audit.anchor_store_write_failed')).toHaveLength(2);
@@ -2106,7 +2146,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
 
       it('a file made and sent lets go of what it took (K4)', async () => {
         const fake = createFakeWriteOnceStore();
-        const { log, capture } = limited(fake, 11 * KEPT_LINE + 50);
+        // The five deltas' names this process wrote and has not listed past yet count too, at 160 each (PL-65 PR2).
+        const { log, capture } = limited(fake, 11 * KEPT_LINE + 5 * 160 + 50);
         await log.read();
         for (let index = 0; index < 10; index += 1) log.keep(anchorAt(orgChain(index), 1n));
         await log.flush();
@@ -2602,9 +2643,9 @@ describe('a rebase moves a chain on (4D2e E11)', () => {
     const after = logOver(fake);
     await after.log.read();
     expect(after.log.latest(CHAIN)?.seq).toBe(4n);
-    fake.calls.gets = 0;
+    fileGets(fake).count = 0;
     await after.log.read();
-    expect(fake.calls.gets).toBe(0);
+    expect(fileGets(fake).count).toBe(0);
   });
 
   it("the platform chain's rebase is said without an organisation", async () => {
@@ -2842,7 +2883,7 @@ describe('a rebase moves a chain on (4D2e E11)', () => {
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ check: 'anchor_store', reason: 'rebase', problem: 'file', file: name }),
     ]);
-    expect(fake.calls.gets).toBe(1);
+    expect(fileGets(fake).count).toBe(1);
   });
 
   it('a rebase file there but unreadable by a plain read is no rebase: the alarm, and the read goes on', async () => {
