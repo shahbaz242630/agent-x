@@ -12,6 +12,7 @@ import './route-server.helper.test.ts';
 import { BUSY_RETRY_SECONDS, errorBody } from './errors.ts';
 import { answerAsked, answerRefusal, canonicalJson, idempotentRequest } from './idempotent-writes.ts';
 import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
+import { NOTHING, NOTHING_BODY_LIMIT } from './route-schemas.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -92,6 +93,24 @@ async function withWrite(answer: (asked: IdempotentRequest) => IdempotentWrite) 
       return reply.code(outcome.result.status).send({ id: outcome.result.resourceId });
     },
   );
+  // Two bodiless writes, as the API's own: one taking nothing (NOTHING), one an optional field or nothing (an approve's).
+  for (const [path, body] of [
+    ['archive', NOTHING],
+    ['approve', z.strictObject({ recheck: z.literal(true).optional() }).nullish()],
+  ] as const) {
+    app.post(
+      `/v1/items/:id/${path}`,
+      {
+        config: { access: ['person'], operation: `items.${path}` },
+        bodyLimit: NOTHING_BODY_LIMIT,
+        schema: { params: z.object({ id: z.uuid() }), body, response: { '2xx': z.object({ id: z.uuid() }) } },
+      },
+      (request, reply) => {
+        asked.push(idempotentRequest(request, ORG));
+        return reply.code(200).send({ id: ITEM });
+      },
+    );
+  }
   await app.ready();
   return { app, asked };
 }
@@ -158,6 +177,51 @@ describe('SEC-DP-07 the request the store is asked about', () => {
   });
 });
 
+describe('SEC-DP-07 a bodiless write asks the same with its body left out or sent empty (CO4)', () => {
+  /** The signed-in person's bodiless write to `path`: no body at all when `body` is undefined. */
+  const bodiless = (path: string, body?: unknown): InjectOptions => ({
+    method: 'POST',
+    url: `/v1/items/${ITEM}/${path}`,
+    headers: {
+      origin: PUBLIC_ORIGIN,
+      cookie: `${SESSION_COOKIE}=${COOKIE}`,
+      'idempotency-key': 'k-1',
+      ...(body !== undefined && { 'content-type': 'application/json' }),
+    },
+    ...(body !== undefined && { payload: JSON.stringify(body) }),
+  });
+
+  it.each(['archive', 'approve'])('asks the same about %s sent with no body and with {}', async (path) => {
+    const { app, asked } = await withWrite(() => DONE);
+    expect((await app.inject(bodiless(path))).statusCode).toBe(200);
+    expect((await app.inject(bodiless(path, {}))).statusCode).toBe(200);
+
+    expect(asked).toHaveLength(2);
+    expect(asked[0]?.payload).toBe(`{"body":{},"params":{"id":"${ITEM}"},"query":{}}`);
+    expect(asked[1]?.payload).toBe(asked[0]?.payload);
+  });
+
+  it('still asks differently about a body that says something, whichever way nothing was sent', async () => {
+    const { app, asked } = await withWrite(() => DONE);
+    await app.inject(bodiless('approve'));
+    await app.inject(bodiless('approve', {}));
+    await app.inject(bodiless('approve', { recheck: true }));
+
+    const [missing, empty, recheck] = asked.map((request) => request.payload);
+    expect(missing).toBe(empty);
+    expect(recheck).not.toBe(missing);
+    expect(recheck).toBe(`{"body":{"recheck":true},"params":{"id":"${ITEM}"},"query":{}}`);
+  });
+
+  it('asks the same about a JSON null, which a bodiless route reads as nothing too', async () => {
+    const { app, asked } = await withWrite(() => DONE);
+    await app.inject(bodiless('approve', {}));
+    await app.inject(bodiless('approve', null));
+
+    expect(asked.map((request) => request.payload)).toEqual([asked[0]?.payload, asked[0]?.payload]);
+  });
+});
+
 describe('what a write route can never hand the store', () => {
   /** A request as a route would see it, with parts changed. */
   const requestLike = (changes: {
@@ -201,7 +265,7 @@ describe('what a write route can never hand the store', () => {
   });
 
   it('takes a request with no params, query or body as empty ones', () => {
-    expect(idempotentRequest(requestLike({}), ORG).payload).toBe('{"body":null,"params":{},"query":{}}');
+    expect(idempotentRequest(requestLike({}), ORG).payload).toBe('{"body":{},"params":{},"query":{}}');
   });
 });
 

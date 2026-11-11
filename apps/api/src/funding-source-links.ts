@@ -73,7 +73,7 @@ import type { Partner } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { CONSENT_EXPIRY_CHOSEN, consentExpiryDetails } from './consent-expiry-choice.ts';
+import { CONSENT_EXPIRY_CHOSEN, consentExpiryDetails, consentExpiryOf } from './consent-expiry-choice.ts';
 import {
   asked,
   createFundingSourceWork,
@@ -105,6 +105,11 @@ export type LinkingMember = FundingSourceMember;
 interface LinkWithSource {
   readonly link: LinkRecord;
   readonly source: SourceRecord | null;
+  /**
+   * The source's consent-expiry choice in force, or null (none made, or no source): the one kept, which for a
+   * second admin's confirm of a link already settled is the first's, not theirs (PM5, E7 review 40).
+   */
+  readonly consentExpiry: PendingChoice | null;
 }
 
 export type LinkStartWrite =
@@ -212,15 +217,23 @@ export function createFundingSourceLinks({
 
   const adminIn = work.memberIn;
 
-  /** The link and the source it made, read (`share`): NOT_FOUND, or INTEGRITY_FAILED for a source that can't be believed. */
-  const withSource = async (tx: FundingSourceTx, states: SignedStates, orgId: string, linkId: string) => {
+  /**
+   * The link and the source it made, with the source's choice in force, read (`share`): NOT_FOUND, or
+   * INTEGRITY_FAILED for a source or a choice that can't be believed.
+   */
+  const withSource = async (
+    tx: FundingSourceTx,
+    states: SignedStates,
+    orgId: string,
+    linkId: string,
+  ): Promise<LinkWithSource> => {
     const link = await linkOf(tx, { orgId, id: linkId }, 'share');
     if (link === undefined) throw new FundingSourceRefused(404, 'NOT_FOUND');
-    if (link.sourceId === null) return { link, source: null };
+    if (link.sourceId === null) return { link, source: null, consentExpiry: null };
     const read = await sourceOf(tx, states, { orgId, id: link.sourceId }, 'share');
     if (read.outcome === 'tampered') throw new FundingSourceRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') throw new Error(`a settled link names a source that isn't there: ${linkId}`);
-    return { link, source: read.source };
+    return { link, source: read.source, consentExpiry: await consentExpiryOf(tx, states, orgId, read.source.id) };
   };
 
   /** Refused past the day's budget of link starts (LINK_STARTS_SPENT). */

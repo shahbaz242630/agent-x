@@ -719,8 +719,8 @@ async function eventsWithHead(
   return rows;
 }
 
-/** The most histories recordedHistories reads in one statement. */
-const MOST_HISTORIES_READ = 8;
+/** The most histories recordedHistories (and so gatherHistories) reads in one statement: a caller with more reads them in parts. */
+export const MOST_HISTORIES_READ = 8;
 
 /**
  * Each history's events as recordedEvents picks one's (`which`, at most

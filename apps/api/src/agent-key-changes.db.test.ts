@@ -17,7 +17,6 @@ import {
   MOST_KEYS_LISTED,
   parseAgentKey,
   type Scope,
-  TooManyAgentKeys,
 } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import {
@@ -749,7 +748,8 @@ describe('a rotation’s answer, made before the chain head (ADR-006 §6, 4D2e)'
     expect(agent).toEqual(await readBack(org, key.agentId));
 
     const newest = { agentId: key.agentId, keyId: agent.keys.at(-1)?.id ?? '' };
-    await expect(rotate(developer, newest)).rejects.toBeInstanceOf(TooManyAgentKeys);
+    // AG2: refused in plain words, no longer a failure (500).
+    expect(await rotate(developer, newest)).toEqual(refusal(409, 'AGENT_KEYS_TOO_MANY'));
     expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
     expect(await check(text ?? '')).toMatchObject({ outcome: 'accepted' });
     expect(await readBack(org, key.agentId)).toEqual(agent);
@@ -763,7 +763,7 @@ describe('a rotation’s answer, made before the chain head (ADR-006 §6, 4D2e)'
     await stepUp(developer, challengeId);
     await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 1);
 
-    await expect(rotateConfirm(developer, key, challengeId)).rejects.toBeInstanceOf(TooManyAgentKeys);
+    expect(await rotateConfirm(developer, key, challengeId)).toEqual(refusal(409, 'AGENT_KEYS_TOO_MANY'));
 
     expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
     expect((await eventsAbout(org, key.keyId)).map(({ action }) => action)).toEqual(['agent_key.issued']);
@@ -1230,6 +1230,21 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(readsUnderTheHead(sent)).toEqual([]);
   });
 
+  it(`refuses a hand-over's confirm asked before the agent reached ${String(MOST_KEYS_LISTED)} keys: nothing changed`, async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    await keysLongEnded(org, key.agentId, MOST_KEYS_LISTED - 1);
+
+    expect(await handOverConfirm(admin, key.agentId, next.membershipId, challengeId)).toEqual(
+      refusal(409, 'AGENT_KEYS_TOO_MANY'),
+    );
+    expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
+  });
+
   it(`hands over up to ${String(MOST_KEYS_LISTED)} keys, and no further: nothing changed past it`, async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1241,11 +1256,8 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(agent.keys).toHaveLength(MOST_KEYS_LISTED);
     expect(agent).toEqual(await readBack(org, key.agentId));
 
-    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, admin.membershipId));
-    await stepUp(admin, challengeId);
-    await expect(handOverConfirm(admin, key.agentId, admin.membershipId, challengeId)).rejects.toBeInstanceOf(
-      TooManyAgentKeys,
-    );
+    // Refused at the ask (AG2), so no one signs in again for it.
+    expect(await handOverAsk(admin, key.agentId, admin.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_TOO_MANY'));
     expect(await keysIn(org)).toBe(MOST_KEYS_LISTED);
     expect(await readBack(org, key.agentId)).toEqual(agent);
   });
