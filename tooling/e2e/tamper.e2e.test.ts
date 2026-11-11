@@ -941,10 +941,19 @@ async function denialBaseline(op: Operation, body: Record<string, unknown>): Pro
   expect(JSON.parse(read.text)).toMatchObject({ decision: 'REQUIRE_APPROVAL' });
 }
 
-/** A successful own preview proves the policy is not failing for limits or another field before its supplier check. */
+/** A body's own fields but the versions of words a confirm sends back (CO3): `worded` gives each the version now. */
+const withoutVersions = (body: unknown): unknown =>
+  typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? Object.fromEntries(Object.entries(body).filter(([name]) => !/^statementVersion$|StatementVersion$/.test(name)))
+    : body;
+
+/**
+ * A successful own preview proves the policy is not failing for limits or another field before its supplier check.
+ * The preview shows no words, so a confirm's body goes to it without their versions.
+ */
 async function policyBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
   const preview = operation('POST', op.route.replace(/\/change(?:\/(?:preview|confirm))?$/, '/change/preview'));
-  const read = await controlSend(preview, cookieHeader(adminCookie), body, routeOf(preview, own));
+  const read = await controlSend(preview, cookieHeader(adminCookie), withoutVersions(body), routeOf(preview, own));
   expect(read.status).toBe(200);
   expect(JSON.parse(read.text)).toMatchObject({ rejected: [] });
 }
@@ -1365,12 +1374,6 @@ async function foreignResources(op: Operation, body: unknown): Promise<void> {
 }
 
 /** Every body used by any phase must start valid before the attack changes it. */
-/** A body's own fields but the versions of words a sample made up (CO3): `worded` gives each the version now. */
-const withoutVersions = (body: unknown): unknown =>
-  typeof body === 'object' && body !== null && !Array.isArray(body)
-    ? Object.fromEntries(Object.entries(body).filter(([name]) => !/^statementVersion$|StatementVersion$/.test(name)))
-    : body;
-
 function baseline(op: Operation): unknown {
   const body = op.schema === undefined ? undefined : worded(op.route, withoutVersions(sample(op.schema, own)));
   if (op.schema !== undefined)
