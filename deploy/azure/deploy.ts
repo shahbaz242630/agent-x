@@ -2149,6 +2149,25 @@ const THEN_PAUSE = `Set the hand-off pause on the new server now (jobs.ts run db
  * staging) is stopped first, and the deployment is sent only once Azure reads it stopped.
  */
 function stopApi(steps: Steps, subscription: string): void {
+  // A load run's jobs app runs the hand-offs too (4D2e D13): it would move to the new host with the rest, unpaused.
+  const apps = azJson(steps.az, [
+    'containerapp',
+    'list',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--query',
+    '[].{name: name, state: properties.provisioningState}',
+  ]);
+  if (!Array.isArray(apps) || apps.some((app) => text((app as { name?: unknown }).name) === JOBS_APP)) {
+    const found = Array.isArray(apps)
+      ? JOBS_APP + ", a load run's jobs app, is there"
+      : "The apps couldn't be read, so " + JOBS_APP + ", a load run's jobs app, can't be told absent";
+    throw new Error(
+      `${found}: it runs the hand-offs too, and would move to the new server unpaused. Remove it first (Azure portal, Container Apps, ${JOBS_APP}, Delete, or a plain apps run), then run apps --api-stopped again. Nothing was deployed.`,
+    );
+  }
   if (!stopAndConfirm(steps, subscription)) {
     throw new Error(
       `${API_APP} couldn't be confirmed stopped before the deployment, so the API could hand payments off from a server that doesn't hold the pause yet. Stop it in the Azure portal (Container Apps, ${API_APP}, Stop), then run apps --api-stopped again. Nothing was deployed.`,

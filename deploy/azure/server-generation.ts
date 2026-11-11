@@ -162,16 +162,14 @@ function noVaultVerdict({ generation, servers, part }: GenerationAsked): Generat
 
 /** The vault or the servers unread: only `foundation --first-server` at generation 0 goes, never a guess. */
 function unreadVerdict({ generation, said = {}, part }: GenerationAsked): GenerationVerdict {
-  if (generation === 0 && said.firstServer === true) {
-    return {
-      kind: 'go',
-      server: undefined,
-      said: "--first-server: the key vault or the servers couldn't be read, so the deployment makes or settles generation 0 as named.",
-    };
-  }
   if (generation === 0) {
+    // --first-server never goes on an unread list: it may hide a copy, and a first server is for an empty group alone.
+    const firstRefused =
+      said.firstServer === true
+        ? ' --first-server goes only once the key vault and the servers are both read and the group holds no server at all.'
+        : '';
     return refused(
-      `The key vault or the database servers couldn't be read, so there's no telling the live server is there: a foundation would make it new and empty if it isn't. Run ${part ?? 'foundation'} again once Azure answers. ${checkForLoss(part)}`,
+      `The key vault or the database servers couldn't be read, so there's no telling the live server is there: a foundation would make it new and empty if it isn't. Run ${part ?? 'foundation'} again once Azure answers. ${checkForLoss(part)}${firstRefused}`,
     );
   }
   return refused(

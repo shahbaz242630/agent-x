@@ -1449,8 +1449,10 @@ describe('deploy foundation', () => {
         '--first-server: the deployment makes psql-agentx-stg-abcdef, new and empty, though the key vault shows a foundation ran here before.',
       );
       const unread = await foundation(0, { servers: 'unreadable' }, ['--first-server']);
-      expect(unread.status).toBe(0);
-      expect(unread.terminal.said).toContainEqual(expect.stringMatching(/^--first-server: the key vault or/));
+      expect((unread.error as Error).message).toMatch(
+        /--first-server goes only once the key vault and the servers are both read/,
+      );
+      expect(unread.az.deployment).toBeUndefined();
       // An empty group alone: any server listed, a copy's or any other, refuses --first-server, vault or none.
       for (const copy of ['psql-agentx-stg-before', 'psql-agentx-stg-drill', 'psql-agentx-stg-g-a1b2c3d4']) {
         const beside = await foundation(0, { servers: [{ name: copy }] }, ['--first-server']);
@@ -1987,6 +1989,15 @@ describe('deploy apps', () => {
           expect.stringMatching(/^Deployed, and ca-agentx-stg-api is still stopped\. Set the hand-off pause/),
         );
         for (const call of done.az.calls) expect(call.args).not.toContain('start');
+      });
+
+      it("sends nothing, stopping nothing, beside a load run's jobs app", async () => {
+        const beside = await stopped({ listedApps: ['ca-agentx-stg-api', 'ca-agentx-stg-jobs'] });
+        expect((beside.error as Error).message).toMatch(
+          /^ca-agentx-stg-jobs, a load run's jobs app, is there: it runs the hand-offs too.*Remove it first.*Nothing was deployed\.$/,
+        );
+        expect(beside.az.deployment).toBeUndefined();
+        expect(apiCalls(beside.az)).toEqual([]);
       });
 
       it('sends nothing when the API cannot be confirmed stopped first', async () => {

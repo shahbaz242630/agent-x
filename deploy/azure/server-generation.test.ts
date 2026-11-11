@@ -123,8 +123,8 @@ describe('server names by generation', () => {
     expect(verdict(0, [base], unread)).toBe('refused');
     expect(verdict(0, ['psql-agentx-stg-before'])).toBe('refused');
     expect(verdict(0, [], read, { firstServer: true })).toBe('go');
-    expect(verdict(0, undefined, read, { firstServer: true })).toBe('go');
-    expect(verdict(0, [base], unread, { firstServer: true })).toBe('go');
+    expect(verdict(0, undefined, read, { firstServer: true })).toBe('refused');
+    expect(verdict(0, [base], unread, { firstServer: true })).toBe('refused');
     expect(verdict(1, undefined, read, { firstServer: true })).toBe('refused');
     // Two live databases: back to an older generation only when the operator names it.
     expect(verdict(0, [base, `${base}-r1`])).toBe('refused');
