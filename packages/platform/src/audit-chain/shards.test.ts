@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { gzipSync } from 'node:zlib';
 
+import { ANCHOR_SHARD_VECTORS } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, KeyError, type KeyProvider } from '../keys/key-provider.ts';
@@ -22,14 +23,8 @@ import {
 } from './shards.ts';
 
 describe('SEC-ANC-04 the anchors’ shards (PL-65 PR2)', () => {
-  // Golden: the database's generated column (PR4) must give these same shards, `get_byte(sha256(name), 0)`.
-  it.each([
-    ['platform', 210],
-    ['organisation:0199a0f0-0000-7000-8000-000000000001', 150],
-    ['organisation:0199a0f0-0000-7000-8000-000000000002', 213],
-    ['organisation:00000000-0000-7000-8000-000000000000', 16],
-    ['organisation:ffffffff-ffff-7fff-bfff-ffffffffffff', 226],
-  ])('%s is in shard %i: the first byte of the SHA-256 of its name', (chain, shard) => {
+  // Golden: the database's generated column (0082, PR4) is held to these same shards (organizations.db.test.ts).
+  it.each(ANCHOR_SHARD_VECTORS)('%s is in shard %i: the first byte of the SHA-256 of its name', (chain, shard) => {
     expect(shardOf(chain)).toBe(shard);
   });
 

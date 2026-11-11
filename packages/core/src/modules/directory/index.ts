@@ -26,5 +26,5 @@ export {
   type SettledOrgWork,
   settleOrgWorkPage,
 } from './infrastructure/org-work.ts';
-export { listedOrganizations, registerOrganization } from './infrastructure/organizations.ts';
+export { listedByShard, listedOrganizations, registerOrganization } from './infrastructure/organizations.ts';
 export type { DirectoryTables } from './infrastructure/tables.ts';
