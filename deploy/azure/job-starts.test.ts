@@ -132,7 +132,7 @@ const oneRun = (containers: readonly unknown[], startTime = LATELY, initContaine
   runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, startTime, containers, initContainers)] },
 });
 
-describe('the job-start watch', () => {
+describe('SEC-OPS-14 the job-start watch', () => {
   it('passes a run that ran its job as deployed, and reads no run older than the window', async () => {
     const world: World = {
       jobs: [

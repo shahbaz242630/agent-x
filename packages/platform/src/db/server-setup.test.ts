@@ -102,7 +102,7 @@ describe('loadBootstrap', () => {
   });
 });
 
-describe('adminClientConfig', () => {
+describe('SEC-OPS-10 adminClientConfig', () => {
   it("pins every connection the job opens to pg_catalog, so nothing planted elsewhere can stand in for Postgres's own (security review, S13)", () => {
     const config = adminClientConfig({
       host: 'db',
@@ -175,7 +175,7 @@ const ROLES: readonly RoleRow[] = [
   role('zitadel'),
 ];
 
-describe('roleProblems', () => {
+describe('SEC-OPS-10 roleProblems', () => {
   it('passes the five roles as db/bootstrap makes them, members of nothing', () => {
     expect(roleProblems(ROLES, [])).toEqual([]);
   });
@@ -232,7 +232,7 @@ const GRANTS: readonly GrantRow[] = [
   { name: 'agentx', grantee: 'agentx_operator', privilege: 'CONNECT' },
 ];
 
-describe('databaseProblems', () => {
+describe('SEC-OPS-10 databaseProblems', () => {
   it('passes the two databases owned by their roles, the app, backup and operator roles let into the app database only', () => {
     expect(databaseProblems('agentx', DATABASES, GRANTS)).toEqual([]);
   });
@@ -277,7 +277,7 @@ describe('databaseProblems', () => {
   });
 });
 
-describe('publicSchemaProblems', () => {
+describe('SEC-TEN-11 publicSchemaProblems', () => {
   const clean = { owner: 'agentx_owner', publicPrivileges: [], planted: 0, adminSchema: undefined };
 
   it.each(['agentx_owner', 'pg_database_owner', undefined])(

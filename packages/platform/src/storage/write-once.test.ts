@@ -185,7 +185,7 @@ function countsForeignNames(make: () => { store: WriteOnceStore; plant: (name: s
   });
 }
 
-describe('4D2e E3 the write-once store on Azure', () => {
+describe('SEC-ANC-01 4D2e E3 the write-once store on Azure', () => {
   behavesAsWriteOnce(() => azure().store);
   countsForeignNames(() => {
     const { store, blobs } = azure();
@@ -447,7 +447,7 @@ describe('4D2e E3 the write-once store on Azure', () => {
   });
 });
 
-describe('4D2e E3 the write-once store on a local folder', () => {
+describe('SEC-ANC-01 4D2e E3 the write-once store on a local folder', () => {
   let folder: string;
 
   beforeEach(() => {

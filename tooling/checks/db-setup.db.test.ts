@@ -136,7 +136,7 @@ const selfGrants = () =>
      where m.member = 'cloud_admin'::regrole and m.grantor = m.member`,
   );
 
-describe(`the database set-up job on an Azure-like server (Postgres ${server.version})`, () => {
+describe(`SEC-OPS-10 the database set-up job on an Azure-like server (Postgres ${server.version})`, () => {
   it("stops at the roles when the admin can't give agentx_backup BYPASSRLS, and leaves the server as it was", async () => {
     const attempt = setUp({ user: 'weak_admin', login: weakAdminLogin }, newLogins());
     await expect(attempt).rejects.toMatchObject({ code: '42501' });
@@ -247,7 +247,7 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     }
   });
 
-  it("gives the public schema Azure's admin group owns to the database's owner, and takes PUBLIC off it", async () => {
+  it("SEC-TEN-11 gives the public schema Azure's admin group owns to the database's owner, and takes PUBLIC off it", async () => {
     expect(
       await asSuperuser(
         "select pg_catalog.pg_get_userbyid(nspowner) as owner from pg_catalog.pg_namespace where nspname = 'public'",
@@ -304,7 +304,7 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
     await expect(queryAs('agentx_operator', logins.operator, APP_DATABASE, 'select 1 as one')).resolves.toHaveLength(1);
   });
 
-  it('puts back what PUBLIC was given on the public schema since', async () => {
+  it('SEC-TEN-11 puts back what PUBLIC was given on the public schema since', async () => {
     await asSuperuser('grant create on schema public to public', APP_DATABASE);
     await setUp(cloudAdmin(), logins);
     expect(
