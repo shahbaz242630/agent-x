@@ -32,9 +32,13 @@
 //   The callback then checks the fresh sign-in against the challenge,
 //   records its evidence there and gives the session a new cookie ID
 //   (SEC-HA-07), keeping its record, and sends the browser back to confirm
-//   the change. Anything wrong is STEP_UP_FAILED, 403: this change is not
+//   the change. Anything wrong is STEP_UP_FAILED: this change is not
 //   confirmed, and a live session stays as it was; noted as a security
 //   event with the person (`sign_in_failed`, reason `step_up_<failure>`).
+//   Wrong at the callback, the browser is sent back to the page the change
+//   was asked on (its path, its query dropped) with `?stepUpFailed=<challenge>`,
+//   for the console to say so there (CO2); wrong at the start, before the
+//   browser left the console, it is a 403.
 //   The session cookie is SameSite=Strict, so the login service must be on
 //   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
 //   browser would bring no session back and every step-up would fail.
@@ -180,6 +184,17 @@ const SIGN_OUT_SCHEMA = {
   },
 };
 
+/** The query a step-up's page comes back with when it failed at the login service's return: the challenge it was for. */
+const STEP_UP_FAILED_QUERY = 'stepUpFailed';
+
+/**
+ * The page a failed step-up was asked on, said failed: its path alone (its
+ * query held `?stepped=`, which would offer the change to confirm), with the
+ * challenge, so the console forgets the change it kept for it.
+ */
+const failedStepUpPage = ({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string =>
+  `${returnTo.split('?', 1)[0] ?? '/'}?${new URLSearchParams({ [STEP_UP_FAILED_QUERY]: challengeId }).toString()}`;
+
 /** Sign-out reads no body; this is the smallest limit the contract takes. */
 const SIGN_OUT_BODY_LIMIT = 1;
 
@@ -188,16 +203,13 @@ const PUBLIC = { access: ['public'] } as const;
 /** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
 const UNAVAILABLE_RETRY_SECONDS = 15;
 
-/** Why a sign-in failed: the sign-in's own failures, or the login service's answer before them. */
-type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete';
-
 export function registerSignIn(
   app: FastifyInstance,
   { signIn, sessionSeconds, loginSessions, logger, securityEvents }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
-  const failed = (request: FastifyRequest, reply: FastifyReply, failure: CallbackFailure, reason?: string) => {
+  const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
       .child({ correlationId: request.id })
       .warn('auth.sign_in_failed', reason === undefined ? { failure } : { failure, reason });
@@ -229,7 +241,11 @@ export function registerSignIn(
       request.id,
     );
   };
-  /** Logs a failed step-up, notes it as a security event with the person, and refuses it: they stay signed in. */
+  /**
+   * Logs a failed step-up, notes it as a security event with the person, and
+   * refuses it: they stay signed in. Back from the login service, the browser
+   * goes back to the change's page, saying so; at the start, a 403.
+   */
   const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
     const { failure, userId } = failed;
     logger
@@ -241,7 +257,12 @@ export function registerSignIn(
       ip: request.ip,
       ...(userId !== undefined && { userId }),
     });
-    return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
+    if (failed.back === undefined) return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
+    return reply
+      .code(302)
+      .header('location', failedStepUpPage(failed.back))
+      .header('set-cookie', cookie(FLOW_COOKIE, '', 'Lax', 0))
+      .send({});
   };
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
@@ -266,17 +287,18 @@ export function registerSignIn(
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
     const { code, state, error } = request.query;
-    if (error !== undefined || code === undefined || state === undefined) {
-      // The login service said no (the person cancelled, say), or the address was cut short.
-      return failed(request, reply, error === undefined ? 'callback_incomplete' : 'provider_refused');
-    }
+    // The login service said no (the person cancelled, say), or the address was cut short: the flow is still taken,
+    // so a step-up's browser goes back to its page (CO2), and a sign-in's is refused as before.
+    const returned =
+      error !== undefined || code === undefined || state === undefined
+        ? { refused: error === undefined ? ('callback_incomplete' as const) : ('provider_refused' as const) }
+        : { code, state };
     let done;
     try {
       done = await signIn.complete({
         flowId: cookieValue(request.headers.cookie, FLOW_COOKIE),
-        code,
-        state,
         previousCookie: cookieValue(request.headers.cookie, SESSION_COOKIE),
+        ...returned,
       });
     } catch (thrown) {
       if (thrown instanceof StepUpFailed) return stepUpFailed(request, reply, thrown);

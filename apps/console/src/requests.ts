@@ -5,8 +5,9 @@
 // shows them. A request whose records failed Agent X's integrity check is
 // never listed: its ID comes back in `unchecked`, which the page says.
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 
-import { api } from './api.ts';
+import { api, isUuid } from './api.ts';
 import { t } from './text.ts';
 
 export type Status =
@@ -106,9 +107,11 @@ export function useRequestList(list: 'waiting' | 'all', organization: string) {
   });
 }
 
+/** One request in full; asked for only by a UUID, as any other address names no request (shown as not found). */
 export function useRequest(id: string, organization: string) {
   return useQuery({
     queryKey: ['requests', organization, 'one', id],
+    enabled: isUuid(id),
     queryFn: () => api.get<RequestDetails>(`/v1/spend-requests/${encodeURIComponent(id)}`, { organization }),
   });
 }
@@ -155,6 +158,22 @@ export function leftText(
   if (left <= 0) return null;
   const minutes = Math.floor(left / 60_000);
   return minutes >= 60 ? { hours: Math.floor(minutes / 60) } : { minutes: Math.max(minutes, 1) };
+}
+
+/** How often a page showing a time left reads the clock again: under the minute it is said in. */
+const TICK_MS = 30_000;
+
+/** Draws its caller again every TICK_MS while shown, so a time left counts down with no other change (6B1's note). */
+export function useTicking(): void {
+  const [, setTicks] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTicks((ticks) => ticks + 1);
+    }, TICK_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
 }
 
 /** What's left before a waiting request expires, as its row and page say it. */

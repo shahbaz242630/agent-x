@@ -4,6 +4,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Confirm } from './confirm.tsx';
@@ -186,6 +187,82 @@ describe('the shared confirm', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
     expect(onCancel).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps Tab and Shift+Tab going round its own controls, never out to the page behind it', async () => {
+    render(<button type="button">Behind</button>);
+    shown('mark_failed');
+    await screen.findByText('Marking this payment failed frees it.');
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+
+    await userEvent.tab();
+    expect(document.activeElement).toBe(confirmButton());
+    await userEvent.tab();
+    expect(document.activeElement).toBe(cancel);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(confirmButton());
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(cancel);
+  });
+
+  it('brings focus that leaves it some other way back to Cancel', () => {
+    render(<button type="button">Behind</button>);
+    shown('mark_failed');
+
+    screen.getByRole('button', { name: 'Behind' }).focus();
+
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  });
+
+  it('keeps focus on itself while every control is disabled, the change being sent', async () => {
+    render(<button type="button">Behind</button>);
+    shown('mark_failed', true);
+    const dialog = screen.getByRole('dialog');
+
+    screen.getByRole('button', { name: 'Behind' }).focus();
+    expect(document.activeElement).toBe(dialog);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(dialog);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('gives focus back to what opened it once it closes', async () => {
+    function Opener() {
+      const [open, setOpen] = useState(false);
+      return (
+        <QueryClientProvider client={new QueryClient()}>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(true);
+            }}
+          >
+            Open
+          </button>
+          {open && (
+            <Confirm
+              text="Cancelling ends it now."
+              title="Cancel it?"
+              confirmLabel="Go"
+              onConfirm={vi.fn()}
+              onCancel={() => {
+                setOpen(false);
+              }}
+            />
+          )}
+        </QueryClientProvider>
+      );
+    }
+    render(<Opener />);
+    const opener = screen.getByRole('button', { name: 'Open' });
+
+    await userEvent.click(opener);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+    await userEvent.keyboard('{Escape}');
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 
   it('can’t be pressed twice while the change is being sent', async () => {
