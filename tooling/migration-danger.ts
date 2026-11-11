@@ -23,7 +23,7 @@
 import { IDENTIFIER_CHAR, type Migration, pastQuoted, statements } from './migration-order.ts';
 
 /** What a migration may not do, each by a short name an exception gives. */
-export type DangerRule =
+type DangerRule =
   | 'drop'
   | 'drop-column'
   | 'truncate'

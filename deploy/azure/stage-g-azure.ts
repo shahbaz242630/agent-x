@@ -395,15 +395,8 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       if (!THROWAWAY_ANCHORS_CONTAINER.test(container)) {
         throw new Error(`${container} isn't a throwaway copy's anchors container: nothing was removed.`);
       }
-      return (
-        az.run([
-          'rest',
-          '--method',
-          'delete',
-          '--url',
-          `${groupUrl}/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}?api-version=2025-01-01`,
-        ]).status === 0
-      );
+      const containerUrl = `${groupUrl}/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}?api-version=2025-01-01`;
+      return az.run(['rest', '--method', 'delete', '--url', containerUrl]).status === 0;
     },
   };
 }
