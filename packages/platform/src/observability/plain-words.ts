@@ -604,6 +604,11 @@ export const PLAIN_WORDS = {
     broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',
     next: "It is checked against the bank's record. If this keeps happening, the bank's service may be slow or down.",
   },
+  'partner.live_refused': {
+    happened: "The live bank adapter refused to send a payment because this copy of the API didn't start in live mode.",
+    broke: 'Nothing was sent to the bank. The payment is marked unknown and never sent again.',
+    next: 'Treat it as a wiring fault: stop and check this release before any more payments. See the live-money gate.',
+  },
   'handoff.partner_failed': {
     happened: 'Handing a payment to the bank failed in an unexpected way.',
     broke: 'Whether the bank took it is not known, so it is marked unknown and never sent again.',

@@ -52,6 +52,7 @@ import {
   stepRun,
 } from '../../tooling/load/stageg.ts';
 import {
+  THROWAWAY_ANCHORS_CONTAINER,
   throwawayAnchorsContainer,
   throwawayHost,
   throwawayIdOf,
@@ -922,15 +923,13 @@ async function remove(steps: StageGSteps, named: string | undefined): Promise<nu
   return 0;
 }
 
-const ANCHORS_CONTAINER = /^audit-anchors-g-[a-z0-9]{8}$/;
-
 /** What happens to one recorded anchors container: what is said, and whether it stays on the list. */
 function anchorsFate(
   steps: StageGSteps,
   each: Anchors,
   { account, servers, listed }: { account: string; servers: readonly string[]; listed: ReadonlySet<string> },
 ): { said: string; kept: boolean } {
-  if (!ANCHORS_CONTAINER.test(each.container)) {
+  if (!THROWAWAY_ANCHORS_CONTAINER.test(each.container)) {
     return {
       said: `${each.container} isn't a copy's anchors container: left alone, and dropped from the list.`,
       kept: false,

@@ -30,7 +30,7 @@ import { refusedProxyEntries } from './proxies.ts';
  * The standard allows `*` in a host name, but it would only ever match a host
  * literally called that, so it's refused rather than mistaken for a wildcard.
  */
-function isCanonicalOrigin(entry: string): boolean {
+export function isCanonicalOrigin(entry: string): boolean {
   if (!URL.canParse(entry)) return false;
   const url = new URL(entry);
   return (url.protocol === 'https:' || url.protocol === 'http:') && url.origin === entry && !url.host.includes('*');

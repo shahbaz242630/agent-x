@@ -39,12 +39,14 @@ import { schemaSoundAtStart, whileServerFull } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import {
+  type CheckedDeclaration,
   type Config,
   ConfigError,
   configFingerprint,
   gateRefOf,
   loadConfig,
   partnerName,
+  recordedStartWith,
 } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
@@ -132,6 +134,8 @@ export interface RunOptions {
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   /** Where log lines go; stdout when not given. */
   readonly destination?: LoggerOptions['destination'];
+  /** The real partner's adapter as declared and checked: BUILT_PARTNER (loadConfig's default) when not given; tests give their own. */
+  readonly partner?: CheckedDeclaration | undefined;
 }
 
 /** A process that has started: read its config, opened its pool and recorded its start. */
@@ -235,12 +239,14 @@ async function connectDatabase(config: Config, logger: Logger): Promise<Database
  */
 export async function boot(host: ApiProcess, options: RunOptions): Promise<Booted | undefined> {
   guardOutputs(host);
+  // A new start isn't live until it is recorded (startedLive), whatever a start before it was.
+  recordedStartWith(undefined);
   const { destination } = options;
 
   let config: Config;
   let keys: KeyProvider;
   try {
-    config = loadConfig(options.env);
+    config = loadConfig(options.env, options.partner);
     // Every key but the operator's own, which it checks the operator's events with the public half of (PL-57).
     keys = loadKeys(config.keys, API_PURPOSES, OPERATOR_ONLY);
   } catch (error) {
@@ -315,6 +321,8 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     return undefined;
   }
   logger.info('api.start_recorded', { seq: recorded });
+  // Only now may a live adapter move money: its start, and a live one's gate reference, is on the chain (startedLive).
+  recordedStartWith(config.partner);
   return {
     host,
     config,
