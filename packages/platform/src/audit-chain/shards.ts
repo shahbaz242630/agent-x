@@ -9,10 +9,11 @@
 // lines: a sound file costs one signature check, not one a line. Its lines keep their own signatures, so a file whose
 // closing line fails is read a line at a time, as the old files are.
 //
-// Each write also leaves a signed list of the shard files it is about to write, `e<epoch>/shards/changes/<when>-<id>`,
-// written before them: after its first read a process lists that one folder each run, back to the last it read, and
-// fetches what is named there, never 256 folders (a list of the whole `shards/` prefix would page through every file
-// written since the epoch began). A file named and not there yet is looked for again for an hour.
+// Each write then leaves a signed list of the shard files it wrote, `e<epoch>/shards/changes/<when>-<id>`, after them,
+// so no name is known before its file is there: after its first read a process lists that one folder each run, back to
+// the last list it read, and fetches what is named there, never 256 folders (a list of the whole `shards/` prefix would
+// page through every file written since the epoch began). A writer stopped before its list leaves files no list names:
+// each shard's folder is walked again hourly, a few each run, so they are found within the hour.
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 
@@ -88,7 +89,7 @@ const changesMessage = (name: string, epoch: number, files: readonly string[]): 
   ...files,
 ];
 
-/** A list of the shard files a write is about to make, signed with the `audit-anchor` key for its own name. */
+/** A list of shard files a write made, signed with the `audit-anchor` key for its own name. */
 export function changesFile(keys: KeyProvider, name: string, epoch: number, files: readonly string[]): Buffer {
   const { signature, keyVersion } = keys.sign('audit-anchor', changesMessage(name, epoch, files));
   const line = JSON.stringify({ k: 'changes', name, epoch, files, kv: keyVersion, sig: signature.toString('base64') });

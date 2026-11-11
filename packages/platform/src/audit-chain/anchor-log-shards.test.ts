@@ -278,6 +278,28 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect(alarms()).toEqual([]);
     });
 
+    it('no record while a shard’s snapshot does not stand for it (its new one’s name taken)', async () => {
+      const fake = oldStore();
+      const { log, advance, alarms } = logOver(fake, { cutOver: true });
+      await log.read();
+      await log.flush();
+      advance(61);
+      // An old line read: CHAIN's shard must be snapshotted again before the record.
+      fake.files.set(oldName('deltas', 65), oldFile(oldName('deltas', 65), anchorAt(CHAIN, 9n)));
+      await log.read();
+      fake.instead.put = async (name, bytes) => {
+        if (SHARD_FILE_NAME.test(name)) await fake.real.put(name, Buffer.from('someone else'));
+        return fake.real.put(name, bytes);
+      };
+      await log.flush();
+      expect(alarms()).toEqual([expect.objectContaining({ reason: 'overwrite' })]);
+      expect(fake.files.has(DONE)).toBe(false);
+      delete fake.instead.put;
+      advance(1);
+      await log.flush();
+      expect(fake.files.has(DONE)).toBe(true);
+    });
+
     it('writes the record once, and never while a read is in flight', async () => {
       const fake = oldStore();
       let donePuts = 0;
@@ -451,12 +473,20 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       log.keep(anchorAt(OTHER_CHAIN, 1n));
       await log.flush();
       fake.files.set(DONE, gzipSync('someone else'));
+      let donePuts = 0;
+      fake.instead.put = (name, bytes) => {
+        if (name === DONE) donePuts += 1;
+        return fake.real.put(name, bytes);
+      };
       advance(61);
       await log.read();
       await log.flush();
       await log.read();
       await log.flush();
+      await log.flush();
 
+      // Tried once, then the migration goes no further in this process.
+      expect(donePuts).toBe(1);
       expect(alarms()).toEqual([
         expect.objectContaining({ check: 'anchor_store', reason: 'cutover', problem: 'file', file: DONE }),
       ]);
@@ -895,45 +925,136 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect(log.latest(CHAIN)?.seq).toBe(12n);
     });
 
-    it('a list’s name taken first: the alarm, the files written all the same, and the hourly walk finds them', async () => {
+    it.each([
+      ['its name taken first (the alarm)', () => Promise.reject(new OverwriteRefused())],
+      ['the store away', () => Promise.reject(new Error('the store is away'))],
+    ])('a list that fails, %s: the files written all the same, and named in the next list', async (_, failing) => {
       const fake = movedStore({ done: true });
-      const { log, alarms, lines } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      const { log, lines } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
       await log.read();
       const other = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
       await other.log.read();
-      fake.instead.put = (name, bytes) =>
-        name.includes('/changes/') ? Promise.reject(new OverwriteRefused()) : fake.real.put(name, bytes);
+      fake.instead.put = (name, bytes) => (name.includes('/changes/') ? failing() : fake.real.put(name, bytes));
       log.keep(anchorAt(CHAIN, 6n));
       await log.flush();
       delete fake.instead.put;
-      expect(alarms()).toEqual([expect.objectContaining({ reason: 'overwrite', kind: 'changes' })]);
-      expect(lines('audit.anchor_store_write_failed')).toEqual([]);
-      expect(shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name))).toHaveLength(1);
-      // Another copy finds it by no list; within the hour its walk does.
-      other.advance(30);
+      const [file] = shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name));
+      expect(file).toBeDefined();
       await other.log.read();
       expect(other.log.latest(CHAIN)).toBeUndefined();
-      other.advance(31);
+      // The next write, with nothing of its own to write, lists what no list named yet.
+      await log.flush();
+      const listsMade = [...fake.files.keys()].filter((name) => name.includes('/changes/'));
+      expect(listsMade).toHaveLength(1);
+      expect(linesOf(fake.files.get(defined(listsMade[0])))[0]?.files).toEqual([
+        defined(file).slice('e1/shards/'.length),
+      ]);
       await other.log.read();
       expect(other.log.latest(CHAIN)?.seq).toBe(6n);
+      expect(lines('audit.integrity_failed').length + lines('audit.anchor_store_write_failed').length).toBe(1);
     });
 
-    it('files written and their list never (the writer stopped): the next hourly walk finds them', async () => {
+    /** Reads, a minute apart, until `done` says so: how many it took, and the lists each asked. */
+    const readsUntil = async (made: ReturnType<typeof logOver>, fake: FakeWriteOnceStore, done: () => boolean) => {
+      const lists: number[] = [];
+      for (let read = 1; read <= 9; read += 1) {
+        const before = fake.calls.lists;
+        await made.log.read();
+        lists.push(fake.calls.lists - before);
+        if (done()) return { reads: read, lists };
+        made.advance(1);
+      }
+      return { reads: Number.POSITIVE_INFINITY, lists };
+    };
+
+    it('files written and their list never (the writer stopped): the hourly walk finds them, 32 shards a read', async () => {
       const fake = movedStore({ done: true });
-      const { log, advance } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
-      await log.read();
-      // Another process's files, as it wrote them before it stopped: no list names them.
+      const made = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await made.log.read();
+      // Another process's file, as it wrote it before it stopped: no list names it.
       const delta = shardName(CHAIN, 'd', 75);
       fake.files.set(delta, shardFile(delta, [anchorAt(CHAIN, 12n)]));
-      advance(10);
-      await log.read();
-      expect(log.latest(CHAIN)).toBeUndefined();
-      const lists = fake.calls.lists;
-      advance(51);
+      made.advance(10);
+      await made.log.read();
+      expect(made.log.latest(CHAIN)).toBeUndefined();
+      made.advance(51);
+      const { reads, lists } = await readsUntil(made, fake, () => made.log.latest(CHAIN)?.seq === 12n);
+      // Shard 150 among the fifth 32 walked; each read lists 32 folders, `cutover/`, the rebases and the changes'.
+      expect(reads).toBe(Math.floor(shardOf(chainName(CHAIN)) / 32) + 1);
+      expect(new Set(lists)).toEqual(new Set([32 + 3]));
+    });
+
+    it('a walk passes over every file read since the last, fetching nothing again', async () => {
+      const { fake, log, advance } = await readOnce();
+      const file = shardName(CHAIN, 'd', 71);
+      fake.files.set(file, shardFile(file, [anchorAt(CHAIN, 12n)]));
+      listed(fake, 71, [file]);
       await log.read();
       expect(log.latest(CHAIN)?.seq).toBe(12n);
-      // The walk: 256 lists, about once an hour.
-      expect(fake.calls.lists - lists).toBe(256 + 3);
+      const fetched: string[] = [];
+      fake.instead.getAtMost = (name, most) => {
+        fetched.push(name);
+        return fake.real.getAtMost(name, most);
+      };
+      advance(61);
+      for (let read = 0; read < 8; read += 1) {
+        await log.read();
+        advance(1);
+      }
+      expect(fetched).toEqual([]);
+    });
+
+    it('a read that fails mid-walk keeps no shard walked; the next takes the same ones and moves on', async () => {
+      const { fake, log, advance } = await readOnce();
+      advance(61);
+      const walked: string[] = [];
+      let failing = true;
+      fake.instead.list = (start, most, after) => {
+        if (/^e1\/shards\/[0-9a-f]{2}\/$/.test(start)) walked.push(start);
+        if (failing && start === 'e1/shards/10/') return Promise.reject(new Error('the store is away'));
+        return fake.real.list(start, most, after);
+      };
+      await log.read();
+      failing = false;
+      expect(walked.at(-1)).toBe('e1/shards/10/');
+      walked.length = 0;
+      await log.read();
+      expect(walked[0]).toBe('e1/shards/00/');
+      expect(walked).toHaveLength(32);
+      walked.length = 0;
+      await log.read();
+      expect(walked[0]).toBe('e1/shards/20/');
+    });
+
+    it('a walk reaches back a little before the last began: a file named minutes before it, landing after, is found', async () => {
+      const { fake, log, advance } = await readOnce();
+      // Named three minutes before the first walk (at 70), landing after it, in no list: within the 5 minutes' margin.
+      const late = shardName(CHAIN, 'd', 67);
+      fake.files.set(late, shardFile(late, [anchorAt(CHAIN, 12n)]));
+      advance(61);
+      const made = { log, advance } as unknown as ReturnType<typeof logOver>;
+      const { reads } = await readsUntil(made, fake, () => log.latest(CHAIN)?.seq === 12n);
+      expect(reads).toBeLessThanOrEqual(8);
+    });
+
+    it('a walk reaches back past the oldest file of its own no list has named yet', async () => {
+      const fake = movedStore({ done: true });
+      const made = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await made.log.read();
+      // Its own file at 75, every list after failing, for hours.
+      fake.instead.put = (name, bytes) =>
+        name.includes('/changes/') ? Promise.reject(new Error('the store is away')) : fake.real.put(name, bytes);
+      made.advance(5);
+      made.log.keep(anchorAt(OTHER_CHAIN, 1n));
+      await made.log.flush();
+      made.advance(61);
+      await readsUntil(made, fake, () => false);
+      // Another's file named at 80, landing only now, after every shard's last walk began.
+      const late = shardName(CHAIN, 'd', 80);
+      fake.files.set(late, shardFile(late, [anchorAt(CHAIN, 12n)]));
+      made.advance(61);
+      const { reads } = await readsUntil(made, fake, () => made.log.latest(CHAIN)?.seq === 12n);
+      expect(reads).toBeLessThanOrEqual(8);
     });
 
     it('a forged list named minutes ahead hides no real list after it (review probe)', async () => {
