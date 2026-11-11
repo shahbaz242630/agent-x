@@ -69,6 +69,7 @@ import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { deploymentSnapshot, environmentSnapshot, inCopy } from './snapshot.ts';
 import { throwawayHost, throwawayIdOf, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
+import { readGenerations, serverGenerationVerdict, suffixOfVault } from './server-generation.ts';
 
 const ENVIRONMENT = 'staging';
 const REGION = 'uaenorth';
@@ -894,6 +895,8 @@ export interface Steps {
   readonly dns?: DnsLookup;
   /** The folder this runs from, which apps sends the Bicep of (git.ts). */
   readonly checkout?: () => Checkout;
+  /** The database server's generation the foundation names: database-generation.json's unless given (AZ25). */
+  readonly generation?: number;
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
@@ -1091,6 +1094,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
       "GitHub's published addresses have changed, and an image pull would fail. Run node deploy/azure/github-ranges.ts, take the change, and redeploy from a merged commit.",
     );
   }
+  const disk = foundationServer(steps, subscription);
   const email = await steps.terminal.ask('Address the alerts go to: ');
   if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
   steps.terminal.say(
@@ -1102,7 +1106,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
     [ADMIN_PASSWORD]: admin,
     [DATABASE_SIZE]: loadSize ? 'load' : 'normal',
     [ALWAYS_ON]: alwaysOn ? 'true' : 'false',
-    [DATABASE_DISK]: String(diskNow(steps, subscription)),
+    [DATABASE_DISK]: String(disk),
   };
   steps.terminal.say(
     loadSize
@@ -1133,13 +1137,28 @@ const DRILL_SERVER = 'psql-agentx-stg-drill';
 /** Whether a server in the group is staging's own: not the drill's copy nor a Stage G copy, which sit beside it a while. */
 export const isOwnServer = (name: string): boolean => name !== DRILL_SERVER && throwawayIdOf(name) === undefined;
 
-/**
- * The disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so sending the
- * first size would ask Azure to shrink it, which it refuses, and no foundation could run. A first deploy has no
- * server to read; a read that fails sends the least, and a grown disk is then refused by the deployment, not harmed.
- */
-function diskNow(steps: Steps, subscription: string): number {
+/** The environment's three letters (names.bicep `shortName`). */
+const SHORT = 'stg';
+
+/** A read that fails, as undefined: the generation's verdict then decides what an unread group allows. */
+function readOrNothing<T>(read: () => T): T | undefined {
   try {
+    return read();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The database server the foundation names, checked before anything is asked or sent (AZ25, server-generation.ts): a
+ * generation whose server isn't there is refused, since the deployment would make it new and empty and point the apps
+ * at it. Then its disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so
+ * sending the first size would ask Azure to shrink it, which it refuses, and no foundation could run. A first deploy
+ * has no server to read; a read that fails sends the least, and a grown disk is then refused by the deployment.
+ */
+function foundationServer(steps: Steps, subscription: string): number {
+  const vault = readOrNothing(() => vaultIn(steps, subscription));
+  const listed = readOrNothing(() => {
     const servers = azJson(steps.az, [
       'postgres',
       'flexible-server',
@@ -1148,12 +1167,20 @@ function diskNow(steps: Steps, subscription: string): number {
       subscription,
       '--resource-group',
       RESOURCE_GROUP,
-    ]) as readonly { name?: unknown; storage?: { storageSizeGb?: unknown } }[];
-    const size = servers.find(({ name }) => isOwnServer(text(name)))?.storage?.storageSizeGb;
-    return typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
-  } catch {
-    return LEAST_DISK_GB;
-  }
+    ]);
+    if (!Array.isArray(servers)) throw new TypeError('Azure listed no servers');
+    return servers as readonly { name?: unknown; storage?: { storageSizeGb?: unknown } }[];
+  });
+  const verdict = serverGenerationVerdict({
+    short: SHORT,
+    generation: steps.generation ?? readGenerations().staging,
+    suffix: vault === undefined ? undefined : suffixOfVault(vault, SHORT),
+    servers: listed?.map(({ name }) => text(name)),
+  });
+  if (verdict.kind === 'refused') throw new Error(verdict.why);
+  steps.terminal.say(verdict.said);
+  const size = listed?.find(({ name }) => text(name) === verdict.server)?.storage?.storageSizeGb;
+  return typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
 }
 
 /** One of the two rules on the jobs having stopped (main.bicep's name), which foundation sets together. */

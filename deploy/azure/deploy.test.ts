@@ -808,6 +808,9 @@ const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPT
 /** The resource group's log alerts, as the tool lists them (at the API the Bicep writes them with). */
 const ALERTS_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/scheduledQueryRules?api-version=2026-03-01`;
 
+/** Staging's server at generation 0, under the suffix of the vault the fake lists (`kv-agentx-stg-abcdef`). */
+const OWN_SERVER = 'psql-agentx-stg-abcdef';
+
 /** An az call that succeeded, answering with the value as JSON. */
 const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
 
@@ -833,7 +836,7 @@ class RecordingAz implements Az {
       const { servers } = this.options;
       return servers === 'unreadable'
         ? { status: 1, stdout: '', stderr: 'ERROR: ResourceGroupNotFound' }
-        : json(servers ?? [{ name: 'psql-agentx-stg-abcdef' }]);
+        : json(servers ?? [{ name: OWN_SERVER }]);
     }
     if (limit === 'unreadable') return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
     if (args[2] === 'restart') {
@@ -1032,6 +1035,8 @@ interface Scenario {
   readonly checkout?: Checkout | null;
   /** The log alerts the deployment would create: none unless given. */
   readonly planned?: readonly PlannedAlert[];
+  /** The database server's generation the foundation names (AZ25): database-generation.json's unless given. */
+  readonly generation?: number;
 }
 
 /** One run of the tool, with everything it touched. */
@@ -1058,6 +1063,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
     ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
     ...(scenario.checkout === null ? {} : { checkout: () => scenario.checkout ?? { head: COMMIT, clean: true } }),
+    ...(scenario.generation === undefined ? {} : { generation: scenario.generation }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -1075,6 +1081,7 @@ describe('deploy foundation', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      'keyvault list --subscription',
       'postgres flexible-server list',
       'resource show --subscription',
       'deployment sub create',
@@ -1239,11 +1246,11 @@ describe('deploy foundation', () => {
   });
 
   it.each([
-    ['a server autogrow has grown', [{ storage: { storageSizeGb: 64 } }], '64'],
-    ['a server at the least', [{ storage: { storageSizeGb: 32 } }], '32'],
+    ['a server autogrow has grown', [{ name: OWN_SERVER, storage: { storageSizeGb: 64 } }], '64'],
+    ['a server at the least', [{ name: OWN_SERVER, storage: { storageSizeGb: 32 } }], '32'],
     ['no server yet', [], '32'],
-    ['a list that says nothing of it', [{}], '32'],
-    ['a size that is no number', [{ storage: { storageSizeGb: '64' } }], '32'],
+    ['a list that says nothing of it', [{ name: OWN_SERVER }], '32'],
+    ['a size that is no number', [{ name: OWN_SERVER, storage: { storageSizeGb: '64' } }], '32'],
     ['a list that fails, as a first deploy has no group', 'unreadable', '32'],
     // Stage G's copy or the drill's beside it (4D2e): staging's own server's disk, wherever the list puts it.
     [
@@ -1270,6 +1277,129 @@ describe('deploy foundation', () => {
       expect(asked?.args).toEqual(expect.arrayContaining(['--resource-group', 'rg-agentx-staging']));
     },
   );
+
+  describe("the database server's generation: never a new, empty server in the live one's place (AZ25)", () => {
+    const disk = (gb: number) => ({ storage: { storageSizeGb: gb } });
+    const foundation = (generation: number, options: AzAnswers) => {
+      const admin = aPaste();
+      return run(['foundation'], {
+        answers: ['y', 'ops@example.invalid'],
+        hidden: [admin, admin],
+        az: new RecordingAz(options),
+        generation,
+      });
+    };
+    /** Nothing deleted, restarted or written but the deployment itself and its record: the old server stays as it was. */
+    const touchedNoServer = (az: RecordingAz) => {
+      for (const call of az.calls) expect(call.args).not.toContain('delete');
+      expect(az.calls.filter((call) => call.args[0] === 'postgres').map((call) => call.args[2])).not.toContain(
+        'update',
+      );
+    };
+    const refused = async (generation: number, options: AzAnswers, why: RegExp) => {
+      const done = await foundation(generation, options);
+      expect(done.error).toMatchObject({ message: expect.stringMatching(why) as unknown });
+      expect((done.error as Error).message).toMatch(/Nothing was deployed\.$/);
+      // Refused on reads alone, before any question past the subscription or any password.
+      expect(done.az.deployment).toBeUndefined();
+      expect(done.terminal.hiddenQuestions).toEqual([]);
+      expect(done.terminal.questions).toHaveLength(1);
+      expect(done.az.sequence).toEqual([
+        'account show --output',
+        'bicep version',
+        'keyvault list --subscription',
+        'postgres flexible-server list',
+      ]);
+      touchedNoServer(done.az);
+    };
+
+    it('refuses a generation raised before its server was restored, naming the server to restore', async () => {
+      await refused(
+        1,
+        { servers: [{ name: OWN_SERVER }] },
+        /generation 1, psql-agentx-stg-abcdef-r1, and the newest server there is generation 0: it names a server that is not there yet\. .*az postgres flexible-server restore --name psql-agentx-stg-abcdef-r1/,
+      );
+    });
+
+    it('refuses a generation going back to a server no longer there, or skipping ahead', async () => {
+      await refused(
+        0,
+        { servers: [{ name: `${OWN_SERVER}-r1` }] },
+        /goes back to a generation whose server is no longer there/,
+      );
+      await refused(
+        1,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }] },
+        /goes back to a generation whose server is no longer there/,
+      );
+      await refused(
+        3,
+        { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] },
+        /skips ahead \(the next generation is 2\)/,
+      );
+    });
+
+    it("refuses a first server beside a drill's, a -before or a Stage G copy: the data is somewhere", async () => {
+      for (const copy of ['psql-agentx-stg-drill', 'psql-agentx-stg-before', 'psql-agentx-stg-g-a1b2c3d4']) {
+        await refused(0, { servers: [{ name: copy }] }, new RegExp(`no server of its own \\(only ${copy}\\)`));
+      }
+    });
+
+    it('refuses any later generation when the vault or the servers cannot be read, never guessing', async () => {
+      await refused(1, { vaults: [] }, /the key vault or the servers couldn't be read/);
+      await refused(1, { vaults: ['kv-agentx-stg-abcdef', 'kv-agentx-stg-other1'] }, /couldn't be read/);
+      await refused(1, { servers: 'unreadable' }, /couldn't be read/);
+    });
+
+    it('deploys a restored generation, its disk read from it, and leaves the earlier one as it was', async () => {
+      const done = await foundation(1, {
+        servers: [
+          { name: OWN_SERVER, ...disk(128) },
+          { name: 'psql-agentx-stg-drill', ...disk(256) },
+          { name: `${OWN_SERVER}-r1`, ...disk(64) },
+        ],
+      });
+      expect(done.error).toBeUndefined();
+      expect(done.status).toBe(0);
+      expect(done.az.deployment?.values).toMatchObject({ AGENTX_AZURE_DATABASE_DISK_GB: '64' });
+      expect(done.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef-r1 (generation 1), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef.',
+      );
+      touchedNoServer(done.az);
+    });
+
+    it('deploys back to an earlier generation, or past a skipped one, only while that server is there', async () => {
+      const back = await foundation(0, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] });
+      expect(back.status).toBe(0);
+      expect(back.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef (generation 0), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef-r1.',
+      );
+      const skipped = await foundation(2, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r2` }] });
+      expect(skipped.status).toBe(0);
+      touchedNoServer(back.az);
+      touchedNoServer(skipped.az);
+    });
+
+    it('makes the first server only at generation 0 in a group holding none, or one not read yet', async () => {
+      const first = await foundation(0, { servers: [] });
+      expect(first.status).toBe(0);
+      expect(first.terminal.said).toContain(
+        'The group holds no database server yet: the deployment makes psql-agentx-stg-abcdef, the first, empty.',
+      );
+      const unread = await foundation(0, { servers: 'unreadable' });
+      expect(unread.status).toBe(0);
+      expect(unread.terminal.said).toContainEqual(expect.stringMatching(/couldn't be read, as on a first deploy/));
+    });
+
+    it('names generation 0 for staging today, so the next foundation changes no name', async () => {
+      const admin = aPaste();
+      const done = await run(['foundation'], { answers: ['y', 'ops@example.invalid'], hidden: [admin, admin] });
+      expect(done.status).toBe(0);
+      expect(done.terminal.said).toContain(
+        'The database server is psql-agentx-stg-abcdef (generation 0), which is there.',
+      );
+    });
+  });
 
   it('restarts the database when its connection limit is waiting on one, and only then, naming the server (S167)', async () => {
     const admin = aPaste();
