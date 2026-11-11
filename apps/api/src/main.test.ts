@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events';
+import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
+import { type CheckedDeclaration, declarePartner, startedLive } from '@agentx/platform/config';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
 import { API_PURPOSES } from '@agentx/platform/keys';
 import { type Output, withLogContext } from '@agentx/platform/observability';
@@ -13,6 +15,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
+import { boot } from './boot.ts';
 import { type ApiProcess, runApi } from './main.ts';
 import type { buildServer } from './server.ts';
 
@@ -889,6 +892,86 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
     expect(events()).toContain('api.listen_failed');
     await expect(built.at(-1)?.inject('/health')).rejects.toThrow();
     expect(fake.created.map((database) => database.destroyed)).toEqual([false, true]);
+  });
+});
+
+describe('SEC-OPS-07 a live start: production, the gate reference on the platform chain, and only then live (ADR-014 §4, PM3)', () => {
+  const GATE_REF = `LMG-v4-sha256:${'cd'.repeat(32)}`;
+  const LIVE_ORIGIN = 'https://pay.bank.example';
+  /** A partner's adapter as Phase 5 will declare it; a boot sends it nothing. */
+  const PARTNER = declarePartner({ liveOrigins: [LIVE_ORIGIN], sandboxOrigins: ['https://sandbox.bank.example'] });
+  const LIVE = {
+    ...ENV,
+    AGENTX_ENV: 'production',
+    AGENTX_ROLE: 'web',
+    AGENTX_PARTNER_MODE: 'live',
+    AGENTX_LIVE_MONEY_GATE_REF: GATE_REF,
+    AGENTX_RELEASE: 'r-live',
+    AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
+    AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: LIVE_ORIGIN,
+  };
+
+  /** Production names its port: one free a moment ago. */
+  const live = async (): Promise<Record<string, string>> => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const address = probe.address();
+    await new Promise((resolve) => probe.close(resolve));
+    return { ...LIVE, AGENTX_HTTP_PORT: String(typeof address === 'object' && address !== null ? address.port : 0) };
+  };
+
+  /**
+   * Boots as every role does first (boot.ts): config, keys, the database and
+   * the start recorded. What the web side then serves is the release image's
+   * (the console, the place file), which a checkout hasn't got.
+   */
+  async function bootLive(partner: CheckedDeclaration) {
+    const host = new FakeProcess();
+    const capture = new LogCapture();
+    const booted = await boot(host, { env: await live(), destination: capture, partner });
+    await booted?.database.destroy();
+    return { host, booted, capture };
+  }
+
+  it('records the gate reference beside the hash in platform.started, and is live only once that is recorded', async () => {
+    expect(startedLive()).toBe(false);
+    const { booted, capture } = await bootLive(PARTNER);
+    expect(booted?.config.partner).toEqual({ mode: 'live', gateRef: GATE_REF });
+
+    const starting = capture.lines().find((line) => line.event === 'api.starting');
+    expect(capture.lines().find((line) => line.event === 'api.partner')).toEqual(
+      expect.objectContaining({ level: 'info', mode: 'live' }),
+    );
+    // What start-record.ts writes as platform.started's details (main.db.test.ts reads them back from the chain).
+    expect(startRecord.written).toEqual([{ configHash: starting?.configHash, release: 'r-live', gateRef: GATE_REF }]);
+    expect(startedLive()).toBe(true);
+  });
+
+  it('is not live when its start could not be recorded, and refuses to start', async () => {
+    await bootLive(PARTNER);
+    expect(startedLive()).toBe(true);
+    startRecord.result = () => Promise.reject(new Error('the database went away'));
+
+    const { host, booted, capture } = await bootLive(PARTNER);
+    expect(booted).toBeUndefined();
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.start_not_recorded' }));
+    expect(host.exitCode).toBe(1);
+    expect(startedLive()).toBe(false);
+  });
+
+  it('refuses to start live today: no partner adapter is built, so nothing goes live before Phase 5', async () => {
+    await bootLive(PARTNER);
+    expect(startedLive()).toBe(true);
+    startRecord.written.length = 0;
+    const { host, server, capture } = await start(await live());
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBe(1);
+    expect(startRecord.written).toEqual([]);
+    expect(capture.lines().find((line) => line.event === 'api.start_refused')?.problems).toEqual([
+      "AGENTX_PARTNER_MODE: live is not built yet; only fake is, until the partner's adapter (Phase 5)",
+    ]);
+    expect(startedLive()).toBe(false);
   });
 });
 
