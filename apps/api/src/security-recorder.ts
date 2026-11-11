@@ -103,6 +103,8 @@ export function createSecurityRecorder({
   let unaddressed = 0;
   /** Writes one after another, so a flush never races the minute's run. */
   let writing: Promise<void> = Promise.resolve();
+  /** Counts taken out for a write and not yet written or put back: what a crash mid-write would lose (MO4). */
+  let inFlight: readonly SecurityEvent[] = [];
 
   const add = (event: Omit<SecurityEvent, 'count'>, count: number): void => {
     let key = keyOf(event);
@@ -140,29 +142,37 @@ export function createSecurityRecorder({
    */
   const writeBefore = async (before: number, stopNow: () => boolean): Promise<void> => {
     const taken = takeBefore(before);
-    for (let start = 0; start < taken.length; start += MOST_EVENTS_A_BATCH) {
-      if (stopNow()) {
-        for (const event of taken.slice(start)) add(event, event.count);
-        return;
-      }
-      const batch = taken.slice(start, start + MOST_EVENTS_A_BATCH);
-      try {
-        await write(batch);
-      } catch (error) {
-        if (error instanceof RangeError) {
-          // Malformed by our own hand: writing it again would fail again.
-          logger.error('security.events_refused', { events: batch.length, err: error });
-          continue;
+    inFlight = taken;
+    try {
+      for (let start = 0; start < taken.length; start += MOST_EVENTS_A_BATCH) {
+        if (stopNow()) {
+          for (const event of taken.slice(start)) add(event, event.count);
+          return;
         }
-        const left = taken.slice(start);
-        for (const event of left) add(event, event.count);
-        logger.warn('security.events_write_failed', { events: left.length, err: error });
-        return;
+        const batch = taken.slice(start, start + MOST_EVENTS_A_BATCH);
+        try {
+          await write(batch);
+        } catch (error) {
+          if (error instanceof RangeError) {
+            // Malformed by our own hand: writing it again would fail again.
+            logger.error('security.events_refused', { events: batch.length, err: error });
+            inFlight = taken.slice(start + MOST_EVENTS_A_BATCH);
+            continue;
+          }
+          const left = taken.slice(start);
+          for (const event of left) add(event, event.count);
+          logger.warn('security.events_write_failed', { events: left.length, err: error });
+          return;
+        }
+        inFlight = taken.slice(start + MOST_EVENTS_A_BATCH);
+        logger.info('security.events_written', {
+          events: batch.length,
+          count: batch.reduce((sum, event) => sum + event.count, 0),
+        });
       }
-      logger.info('security.events_written', {
-        events: batch.length,
-        count: batch.reduce((sum, event) => sum + event.count, 0),
-      });
+    } finally {
+      // Written, refused or put back in held: none is in flight now.
+      inFlight = [];
     }
   };
 
@@ -184,10 +194,16 @@ export function createSecurityRecorder({
 
   /** Whatever is still held is lost as the process ends: counted here, so the log says what the store never got. */
   const dropHeld = (): void => {
-    if (held.size === 0) return;
+    // A crash mid-write: the batch under way may or may not have been written, and those after it never will be.
+    const flying = inFlight.reduce((sum, event) => sum + event.count, 0);
+    if (held.size === 0 && flying === 0) return;
     let count = 0;
     for (const entry of held.values()) count += entry.count;
-    logger.error('security.events_unwritten', { events: held.size, count });
+    logger.error('security.events_unwritten', {
+      events: held.size,
+      count,
+      ...(flying > 0 && { inFlightEvents: inFlight.length, inFlightCount: flying }),
+    });
     held.clear();
   };
 

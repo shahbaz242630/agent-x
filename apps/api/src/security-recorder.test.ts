@@ -334,6 +334,37 @@ describe('MO4 a crash says the counts it loses', () => {
     expect(events('security.events_unwritten')).toHaveLength(1);
   });
 
+  it('counts a write under way at the crash as in flight: written or not, the store may never have it', async () => {
+    let release: () => void = () => undefined;
+    const capture = new LogCapture();
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: capture,
+    });
+    const recorder = createSecurityRecorder({
+      write: () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      now: () => START,
+      logger,
+    });
+    recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.9'));
+    const writing = recorder.flush(Number.POSITIVE_INFINITY);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    recorder.drop();
+
+    expect(capture.lines().filter((line) => line.event === 'security.events_unwritten')).toMatchObject([
+      { events: 0, count: 0, inFlightEvents: 1, inFlightCount: 2 },
+    ]);
+    release();
+    await writing;
+  });
+
   it('says nothing when nothing is held', () => {
     const { recorder, events } = setUp();
     recorder.drop();
