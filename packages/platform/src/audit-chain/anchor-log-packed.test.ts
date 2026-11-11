@@ -15,7 +15,11 @@ import type { Chain } from './chain.ts';
 import type { PackedLines, Stamped, Taken } from './packed-lines.ts';
 import { rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
 
-const run = vi.hoisted(() => ({ objects: false, ids: 0 }));
+const run = vi.hoisted(() => ({
+  objects: false,
+  ids: 0,
+  tables: [] as { readonly size: number; readonly records: number }[],
+}));
 
 /** Each object's identity, as a number: in the object form a line's stamp is the object itself, as `===` was. */
 const identities = new WeakMap<object, number>();
@@ -23,7 +27,8 @@ let identitiesGiven = 0;
 const identityOf = (line: object): number => {
   const known = identities.get(line);
   if (known !== undefined) return known;
-  identitiesGiven += 1;
+  // Below zero, so never one of the log's own stamps, which count up from one.
+  identitiesGiven -= 1;
   identities.set(line, identitiesGiven);
   return identitiesGiven;
 };
@@ -38,12 +43,17 @@ function objectLines<T extends Anchor>(): PackedLines<T> {
     get size() {
       return index.size;
     },
+    get records() {
+      return index.size;
+    },
     has: (chain) => index.has(chain),
     get: (chain) => index.get(chain)?.line,
     stampOf: (chain) => index.get(chain)?.stamp,
     marked: (chain) => index.get(chain)?.marked ?? false,
-    set(line, _stamp, marked = false) {
-      index.set(line.chain, { line, stamp: identityOf(line), marked });
+    set(line, stamp, marked = false) {
+      // An identity given back (a file's lines read back from its bytes) stands for the object it was, as the old form
+      // put that very object back; a stamp of the log's own is a new object's, so its identity.
+      index.set(line.chain, { line, stamp: stamp < 0 ? stamp : identityOf(line), marked });
     },
     delete(chain) {
       index.delete(chain);
@@ -74,7 +84,12 @@ vi.mock('./packed-lines.ts', async (importOriginal) => {
   const real = await importOriginal<typeof import('./packed-lines.ts')>();
   return {
     ...real,
-    packedLines: <T extends Anchor>(places: boolean) => (run.objects ? objectLines<T>() : real.packedLines<T>(places)),
+    packedLines: <T extends Anchor>(places: boolean) => {
+      if (run.objects) return objectLines<T>();
+      const table = real.packedLines<T>(places);
+      run.tables.push(table);
+      return table;
+    },
   };
 });
 
@@ -103,6 +118,10 @@ function defined<T>(value: T | undefined): T {
   if (value === undefined) throw new Error('the test expected a value here');
   return value;
 }
+
+/** The packed tables holding more records than lines: none, once nothing is taken. */
+const recordsLeft = () =>
+  run.tables.filter(({ size, records }) => records !== size).map(({ size, records }) => ({ size, records }));
 
 /** A small, seeded random source, so a failing seed can be run again. */
 function randomFrom(seed: number) {
@@ -263,6 +282,7 @@ async function subjectStep(world: World, log: AnchorLog): Promise<void> {
 async function story(seed: number, objects: boolean) {
   run.objects = objects;
   run.ids = 0;
+  run.tables = [];
   const random = randomFrom(seed);
   const world: World = { random, fake: createFakeWriteOnceStore(), chains: 2 + random.below(12), clock: START };
   const now = () => world.clock;
@@ -288,6 +308,8 @@ async function story(seed: number, objects: boolean) {
     else if (pick < 4) damage(world);
     else await subjectStep(world, log);
     views.push(viewOf(log, world.chains, world.clock));
+    // Between steps nothing is taken: every table holds a record a line, and no more, whatever came before.
+    expect(recordsLeft()).toEqual([]);
   }
   const files = [...world.fake.files].toSorted(([one], [other]) => (one < other ? -1 : 1));
   // The wall clock's time apart, which no two runs share, and an error's stack, which names the line of the test's call.
@@ -366,6 +388,7 @@ describe('a copy of a rebase`s anchor, kept back, is still the rebase`s', () => 
 describe('a file that could not be made', () => {
   it('lets its lines go and leaves them waiting: the next write holds them', async () => {
     run.objects = false;
+    run.tables = [];
     const fake = createFakeWriteOnceStore();
     let refuse = true;
     const failing: typeof keys = {
@@ -390,6 +413,7 @@ describe('a file that could not be made', () => {
     await log.flush();
     expect(fake.files.size).toBe(0);
     expect(capture.lines().filter((said) => said.event === 'audit.anchor_store_write_failed')).toHaveLength(1);
+    expect(recordsLeft()).toEqual([]);
     refuse = false;
     await log.flush();
     const [[, bytes]] = [...fake.files] as [[string, Buffer]];
@@ -421,5 +445,89 @@ describe('a place reached, its own pass begun when', () => {
     log.keepProgress(place);
     expect(log.lastProgress(chainOf(3))).toEqual(place);
     expect(log.lastProgress(chainOf(3))?.began).toEqual(began);
+  });
+});
+
+describe('what a file holds of the tables, let go as soon as its bytes are made (PL-65 review)', () => {
+  const started = async (fake: FakeWriteOnceStore, clock: { at: Date }) => {
+    run.objects = false;
+    run.tables = [];
+    const log = createAnchorLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(new LogCapture()),
+      now: () => clock.at,
+      epoch: 1,
+      alertAfterMs: MINUTE,
+    });
+    await log.read();
+    return log;
+  };
+  const point = (seq: number) => ({ seq: BigInt(seq), hash: Buffer.alloc(32, seq % 256), macKeyVersion: 1 });
+  const chains = 50;
+  const keepAll = (log: AnchorLog, seq: number, at: Date) => {
+    for (let index = 1; index <= chains; index += 1) {
+      log.keep(signAnchor(keys, chainOf(index), point(seq), at, 1));
+      log.keepPass(signPass(keys, chainOf(index), point(seq), at, 1));
+    }
+  };
+
+  it('a write that lands leaves a record a line, and no more', async () => {
+    const fake = createFakeWriteOnceStore();
+    const clock = { at: START };
+    const log = await started(fake, clock);
+    keepAll(log, 1, START);
+    await log.flush();
+    expect(fake.files.size).toBe(1);
+    expect(recordsLeft()).toEqual([]);
+  });
+
+  it('a store away for many writes: each tried again, the records stay one a line however many lines are kept', async () => {
+    const fake = createFakeWriteOnceStore();
+    const clock = { at: START };
+    const log = await started(fake, clock);
+    fake.instead.put = () => Promise.reject(new Error('the store is away'));
+    keepAll(log, 1, START);
+    await log.flush();
+    for (let round = 2; round <= 40; round += 1) {
+      clock.at = new Date(START.getTime() + round * MINUTE);
+      keepAll(log, round, clock.at);
+      await log.flush();
+    }
+    expect(fake.files.size).toBe(0);
+    // 50 chains, each an anchor and a pass, in the held tables and the waiting ones: 200 records, after 4,000 lines kept.
+    expect(recordsLeft()).toEqual([]);
+    expect(run.tables.reduce((sum, { records }) => sum + records, 0)).toBe(4 * chains);
+    delete fake.instead.put;
+    await log.flush();
+    // The file unsent all that time, then one of what moved since it was made.
+    expect(fake.files.size).toBe(2);
+    expect(recordsLeft()).toEqual([]);
+  });
+
+  it('a name taken by other bytes: the lines wait again from the file`s own bytes, a record a line', async () => {
+    const fake = createFakeWriteOnceStore();
+    const clock = { at: START };
+    const log = await started(fake, clock);
+    keepAll(log, 1, START);
+    fake.instead.put = (name) => {
+      fake.files.set(name, gzipSync(`{"k":"x"}${EOL}`));
+      return Promise.reject(new OverwriteRefused());
+    };
+    await log.flush();
+    expect(recordsLeft()).toEqual([]);
+    delete fake.instead.put;
+    await log.flush();
+    const written = [...fake.files.values()].map((bytes) =>
+      bytes[0] === 0x1f ? gunzipSync(bytes).toString('utf8') : '',
+    );
+    // The first file's lines, sent again under a new name: every chain's anchor and pass.
+    expect(written.filter((text) => text.includes(`"k":"a"`))).toHaveLength(1);
+    expect(
+      written
+        .find((text) => text.includes(`"k":"a"`))
+        ?.split(EOL)
+        .filter((line) => line !== ''),
+    ).toHaveLength(2 * chains + 1);
   });
 });

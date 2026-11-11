@@ -43,6 +43,12 @@ interface Model {
   readonly lines: Map<string, { line: Anchor; stamp: number; marked: boolean }>;
 }
 
+/** How many of the model's lines a record holds: those with none of `lineOf`'s odd fields. */
+const fitting = (model: Model): number =>
+  [...model.lines.values()].filter(
+    ({ line }) => line.seq < 2n ** 64n && line.hash.length === 32 && line.signature.length === 64,
+  ).length;
+
 const takenOf = (taken: Taken<Anchor>) => ({
   lines: [...taken.lines()],
   stamps: [...taken.stamps()],
@@ -87,11 +93,16 @@ describe.each([false, true])('a packed table, places %s', (places) => {
         expect(table.has(chain)).toBe(model.lines.has(chain));
         expect(table.stampOf(chain)).toBe(model.lines.get(chain)?.stamp);
         expect(table.marked(chain)).toBe(model.lines.get(chain)?.marked ?? false);
+        // With nothing taken, a record a line that fits and none more; with something taken, the ones it reads besides.
+        if (open.length === 0) expect(table.records).toBe(fitting(model));
+        else expect(table.records).toBeGreaterThanOrEqual(fitting(model));
       }
       expect([...table.held()]).toEqual(
         [...model.lines.values()].map(({ line, stamp: kept }) => ({ line, stamp: kept })),
       );
       for (const { taken, was } of open) expect(takenOf(taken)).toEqual(was);
+      for (const { taken } of open) taken.release();
+      expect(table.records).toBe(fitting(model));
     },
   );
 });
@@ -166,5 +177,65 @@ describe('a line read back', () => {
     table.delete(chainOf(2));
     table.set(at(3n, 3), 3);
     expect([...table.held()].map(({ line }) => line.seq)).toEqual([3n]);
+  });
+});
+
+describe('the records a table holds (PL-65 review)', () => {
+  const line = (index: number, seq = 1n): Anchor => ({
+    chain: chainOf(index),
+    seq,
+    hash: Buffer.alloc(32, index % 256),
+    macKeyVersion: 1,
+    at: new Date(AT.getTime() + index),
+    keyVersion: 1,
+    signature: Buffer.alloc(64, 1),
+  });
+
+  it('one chain set ten times while a file holds it, then let go and set again: one record', () => {
+    const table = packedLines<Anchor>(false);
+    const taken = table.take(() => true);
+    for (let time = 1; time <= 10; time += 1) table.set(line(1, BigInt(time)), time);
+    expect(table.records).toBe(10);
+    taken.release();
+    expect(table.records).toBe(1);
+    table.set(line(1, 11n), 11);
+    expect(table.records).toBe(1);
+    expect(table.get(chainOf(1))?.seq).toBe(11n);
+  });
+
+  it('a chain deleted, another set, nothing taken: its record reused', () => {
+    const table = packedLines<Anchor>(false);
+    table.set(line(1), 1);
+    table.delete(chainOf(1));
+    table.set(line(2), 2);
+    expect(table.records).toBe(1);
+  });
+
+  it('a line that fits, the same chain`s next that doesn`t, then another chain`s that fits: one record', () => {
+    const table = packedLines<Anchor>(false);
+    table.set(line(1), 1);
+    table.set({ ...line(1), hash: Buffer.alloc(31) }, 2);
+    expect(table.records).toBe(0);
+    table.set(line(2), 3);
+    expect(table.records).toBe(1);
+    expect(table.get(chainOf(1))?.hash).toHaveLength(31);
+  });
+
+  it.each([false, true])('past one buffer of records (places %s): every line reads back as it went in', (places) => {
+    const table = packedLines<Anchor | Progress>(places);
+    const count = 2100;
+    for (let index = 0; index < count; index += 1) {
+      const each = line(index, BigInt(index * 3 + 1));
+      table.set(places ? { ...each, began: new Date(AT.getTime() - index) } : each, index + 1);
+    }
+    expect(table.records).toBe(count);
+    for (let index = 0; index < count; index += 1) {
+      const back = defined(table.get(chainOf(index)));
+      expect(back.seq).toBe(BigInt(index * 3 + 1));
+      expect(back.hash).toEqual(Buffer.alloc(32, index % 256));
+      expect(back.at).toEqual(new Date(AT.getTime() + index));
+      expect(table.stampOf(chainOf(index))).toBe(index + 1);
+      if (places) expect((back as Progress).began).toEqual(new Date(AT.getTime() - index));
+    }
   });
 });

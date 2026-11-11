@@ -56,6 +56,8 @@ export interface Taken<T> {
 /** One line a chain, as a Map of the lines would hold them. */
 export interface PackedLines<T extends Anchor> {
   readonly size: number;
+  /** How many records are in use: one a line that fits, and those a file taken may still read, until released. */
+  readonly records: number;
   has(chain: string): boolean;
   get(chain: string): T | undefined;
   stampOf(chain: string): number | undefined;
@@ -149,18 +151,25 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
   };
 
   const take = (keep: (chain: string, line: () => T) => boolean): Taken<T> => {
-    const got: (readonly [string, Entry<T>])[] = [];
-    for (const [chain, entry] of index) if (keep(chain, () => lineOf(chain, entry))) got.push([chain, entry]);
+    // Two flat arrays, a reference each a line, not a pair each: a snapshot takes every chain.
+    const chains: string[] = [];
+    const entries: Entry<T>[] = [];
+    for (const [chain, entry] of index) {
+      if (keep(chain, () => lineOf(chain, entry))) {
+        chains.push(chain);
+        entries.push(entry);
+      }
+    }
+    // The two arrays are the same length, so a chain is always there for an entry.
+    const each = function* <R>(made: (chain: string, entry: Entry<T>) => R): Generator<R> {
+      for (const [at, entry] of entries.entries()) yield made(chains[at] ?? '', entry);
+    };
     taken += 1;
     let open = true;
     return Object.freeze({
-      size: got.length,
-      *lines() {
-        for (const [chain, entry] of got) yield { line: lineOf(chain, entry), stamp: stampIn(entry) };
-      },
-      *stamps() {
-        for (const [chain, entry] of got) yield [chain, stampIn(entry)] as const;
-      },
+      size: entries.length,
+      lines: () => each((chain, entry) => ({ line: lineOf(chain, entry), stamp: stampIn(entry) })),
+      stamps: () => each((chain, entry) => [chain, stampIn(entry)] as const),
       release() {
         if (!open) return;
         open = false;
@@ -175,6 +184,9 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
   return Object.freeze({
     get size() {
       return index.size;
+    },
+    get records() {
+      return used - free.length;
     },
     has: (chain: string) => index.has(chain),
     get(chain: string) {
