@@ -7,7 +7,6 @@ import type {
   ContactChangeWrite,
   ContactWithAddress,
   InvitingAdmin,
-  LiveSession,
   MembershipCheck,
   Role,
 } from '@agentx/core/modules/identity';
@@ -17,6 +16,7 @@ import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { ListContacts } from './registered-contacts.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -24,17 +24,7 @@ import { SESSION_COOKIE } from './sign-in.ts';
 const CONTACT = '0199a0f0-0000-7000-8000-0000000000e6';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-27T09:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-09-27T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-27T09:10:00.000Z'),
-  endsAt: new Date('2099-09-27T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-09-27T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-27T09:00:00.000Z', { endless: true });
 
 const ADMIN = {
   outcome: 'active',

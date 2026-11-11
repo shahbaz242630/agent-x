@@ -430,8 +430,8 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
 
       await Promise.all([after.check.run(), after.check.anchorOrganisation(ORG)]);
 
-      // One read: its rebases' list (E11), its snapshots' and its deltas'.
-      expect(fake.calls.lists).toBe(3);
+      // One read: the later layout's two folders (PL-65), its rebases' list (E11), its snapshots' and its deltas'.
+      expect(fake.calls.lists).toBe(5);
       expect(chains.given[ORG]).toEqual([undefined, 3n, 3n]);
     });
 
@@ -596,7 +596,7 @@ describe('the anchor check over the write-once store (4D2e E, PL-58)', () => {
       const fake = createFakeWriteOnceStore();
       const chains = chainsHolding({ [ORG]: ok(3n) });
       await process(fake, chains.organizations).check.finish();
-      expect(fake.calls).toEqual({ puts: 0, lists: 0, gets: 0 });
+      expect(fake.calls).toEqual({ puts: 0, lists: 0, gets: 0, smallGets: 0 });
 
       const memoryOnly = createAnchorCheck({
         chains: [],

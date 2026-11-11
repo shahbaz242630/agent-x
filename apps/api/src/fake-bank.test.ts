@@ -3,13 +3,14 @@
 // or turning down a link waiting under a session, only the caller's
 // organisation's, and 404 wherever the partner isn't the fake. Who reaches
 // the routes is the access hook's (role-matrix.test.ts).
-import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
+import type { MembershipCheck } from '@agentx/core/modules/identity';
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import { findLeaks, FixedClock, SequentialIds } from '@agentx/testing';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -18,18 +19,7 @@ const LINK_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
 const IBANS = SANDBOX_ACCOUNTS.flatMap((account) => account.AccountIdentifiers.map((each) => each.Identification));
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-01T08:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-01T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-01T08:10:00.000Z'),
-  endsAt: new Date('2099-10-01T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-01T08:00:00.000Z', { endless: true });
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
 
