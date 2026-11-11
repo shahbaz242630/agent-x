@@ -94,6 +94,36 @@ jobs:
 
   # The image main last published, scanned again each week, so an advisory
   # published since its release still reaches code scanning when nothing merges.
+  certificates:
+    # Decision 50 (S184): Azure's managed certificates renew themselves; this
+    # says so in time if one hasn't (playbook: keep the apps answering, then
+    # redeploy certificates). The hosts come from the secret, never the log.
+    name: Staging's certificates last 30 more days
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ORIGIN: ${{ secrets.STAGING_APP_ORIGIN }}
+    steps:
+      - name: Read each host's certificate end date
+        run: |
+          if [ -z "$ORIGIN" ]; then echo 'The repository secret STAGING_APP_ORIGIN is not set.'; exit 1; fi
+          app="${ORIGIN#https://}"
+          app="${app%%/*}"
+          domain="${app#app.}"
+          echo "::add-mask::$app"
+          echo "::add-mask::$domain"
+          echo "::add-mask::auth.$domain"
+          short=0
+          for part in app auth; do
+            host="$part.$domain"
+            end=$(echo | timeout 60 openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+            if [ -z "$end" ]; then echo "The $part host's certificate could not be read: check the host answers (Incident playbook, certificates)."; short=1; continue; fi
+            days=$(( ($(date -d "$end" +%s) - $(date +%s)) / 86400 ))
+            echo "The $part host's certificate ends $end ($days days)."
+            if [ "$days" -lt 30 ]; then echo "The $part host's certificate has under 30 days left and Azure has not renewed it: keep the apps answering and redeploy certificates (Incident playbook)."; short=1; fi
+          done
+          exit "$short"
+
   image-scan:
     name: Image vulnerability scan (Grype)
     if: github.ref == 'refs/heads/main'
