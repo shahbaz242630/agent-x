@@ -900,12 +900,31 @@ export function createAnchorLog({
       alarm('file', { ...where, problem: got, mostBytes: mostFileBytes });
       return { sound: false };
     }
+    return readJudged({ bytes: got, name, shard, kind, fileAt, where }, stage, touched);
+  };
+
+  /**
+   * A file fetched: its lines taken in as read, then judged. Apart from `opened`, which fetches it, so each stays short.
+   * A shard's file, or its lines, past what can be held lets that shard go where it may (`outgrown`).
+   */
+  const readJudged = async (
+    {
+      bytes,
+      name,
+      shard,
+      kind,
+      fileAt,
+      where,
+    }: { bytes: Buffer; name: string; shard: number | undefined; kind: Kind; fileAt: string; where: Where },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+  ): Promise<{ sound: boolean }> => {
     const belongs = shard === undefined ? undefined : (chain: string) => shardOf(chain) === shard;
     const take = lineTaken(stage, kind, fileAt);
     const moving = shard === undefined && layout === 'moving';
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      file = await readFile(keys, { bytes: got, name, epoch, mostBytes: mostFileBytes, belongs }, (line, lineKind) => {
+      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes, belongs }, (line, lineKind) => {
         if (moving) touched.add(shardOf(line.chain));
         take(line, lineKind);
       });
@@ -952,6 +971,13 @@ export function createAnchorLog({
         if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, stamped(), kind, fileAt);
       } else passLine(stage, line, stamped(), kind, fileAt);
     };
+
+  /** Where a file is, for its alarms: its kind, when it was named, and its shard if it has one. */
+  interface Where {
+    kind: Kind;
+    fileAt: string;
+    shard?: string;
+  }
 
   /** Whether a file read stands for what it should; anything wrong the alarm. Sound but past what can be held, thrown. */
   const judgedFile = (
@@ -1064,16 +1090,24 @@ export function createAnchorLog({
    * read, so reading one again reads every file of it. Its organisations still count as seen.
    */
   const purged = (shards: ReadonlySet<number>, stage: PackedLines<Anchor> | undefined): void => {
-    for (const table of stage === undefined ? heldTables : [...heldTables, stage]) {
-      const kind: LineKind = table === sides.p ? 'p' : table === sides.u ? 'u' : 'a';
-      for (const chain of table.keys()) {
-        if (!shards.has(table.shardOf(chain) ?? -1)) continue;
-        const line = table.get(chain);
-        if (line !== undefined) elsewhere(chain, kind, line);
-        table.delete(chain);
-      }
-    }
+    for (const table of stage === undefined ? heldTables : [...heldTables, stage]) purgedFrom(table, shards);
     for (const shard of shards) resident[shard] = false;
+    namesForgotten(shards);
+  };
+
+  /** One table's lines of these shards out, each as what is last known of its chain: a table at a time, kept short. */
+  const purgedFrom = (table: PackedLines<Anchor>, shards: ReadonlySet<number>): void => {
+    const kind: LineKind = table === sides.p ? 'p' : table === sides.u ? 'u' : 'a';
+    for (const chain of table.keys()) {
+      if (!shards.has(table.shardOf(chain) ?? -1)) continue;
+      const line = table.get(chain);
+      if (line !== undefined) elsewhere(chain, kind, line);
+      table.delete(chain);
+    }
+  };
+
+  /** Every name of these shards' files this process would pass over as read, forgotten: reading one again reads them. */
+  const namesForgotten = (shards: ReadonlySet<number>): void => {
     const folders = [...shards].map((shard) => shardFolder(epoch, shard));
     const ofThem = (name: string): boolean => folders.some((folderName) => name.startsWith(folderName));
     for (const name of written) if (ofThem(name)) written.delete(name);
@@ -1613,22 +1647,32 @@ export function createAnchorLog({
   const changesRead = ({ newest, missing, gotten, givenUp, snapshots }: Changes, floor: string): void => {
     // Not of a shard let go part way: its read again must read them.
     for (const name of gotten) if (takes(shardOfName(name))) readSinceWalk.set(name, 0);
+    const from = changesMoved(newest, floor);
+    for (const name of refusedChanges)
+      if (name.slice(changesFolder(epoch).length, -37) > from) refusedChanges.delete(name);
+    for (const name of [...gotten, ...givenUp]) awaited.delete(name);
+    lostKept(givenUp);
+    for (const [name, at] of missing) awaited.set(name, at);
+    for (const [shard, countdown] of snapshots) snapshotMet(shard, countdown);
+  };
+
+  /** The newest list of changes read moved on to: where the next read of them stops. Apart, to keep `changesRead` short. */
+  const changesMoved = (newest: Changes['newest'], floor: string): string => {
     if (newest !== undefined && newest.countdown === changesFrom?.countdown) {
       for (const name of newest.names) changesFrom.names.add(name);
     } else if (newest !== undefined) changesFrom = newest;
     // At the first read with no list since the walk's few minutes: from there on.
     else changesFrom ??= { countdown: floor, names: new Set() };
-    const from = changesFrom.countdown;
-    for (const name of refusedChanges)
-      if (name.slice(changesFolder(epoch).length, -37) > from) refusedChanges.delete(name);
-    for (const name of [...gotten, ...givenUp]) awaited.delete(name);
+    return changesFrom.countdown;
+  };
+
+  /** Names a list gave and the store never did, for an hour: each shard's next walk reaches back past the oldest. */
+  const lostKept = (givenUp: readonly string[]): void => {
     for (const name of givenUp) {
       const shard = shardOfName(name);
       const at = LAST_MS - Number(name.slice(shardsFolder(epoch).length + 3, shardsFolder(epoch).length + 16));
       lost.set(shard, Math.min(at, lost.get(shard) ?? at));
     }
-    for (const [name, at] of missing) awaited.set(name, at);
-    for (const [shard, countdown] of snapshots) snapshotMet(shard, countdown);
   };
 
   /** A sound snapshot of a shard read: its newest counts when the next is due. */

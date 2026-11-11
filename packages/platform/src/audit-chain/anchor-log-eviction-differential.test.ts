@@ -132,6 +132,131 @@ const kept = async (one: ReturnType<typeof side>, chain: Chain, keep: (log: Anch
   }
 };
 
+/** One step: its chain, its next place, and what both sides share. */
+interface Step {
+  readonly chain: Chain;
+  readonly name: string;
+  readonly seq: bigint;
+  readonly point: { seq: bigint; hash: Buffer; macKeyVersion: number };
+  readonly clock: { at: Date };
+  readonly both: readonly [ReturnType<typeof side>, ReturnType<typeof side>];
+  readonly seqs: Map<string, bigint>;
+  readonly random: ReturnType<typeof randomFrom>;
+  readonly id: number;
+}
+
+/** Each side's writer keeps a line made once for both. */
+const keptOnBoth = async (step: Step, keep: (log: AnchorLog) => void): Promise<void> => {
+  for (const one of step.both) await kept(one, step.chain, keep);
+};
+
+/** Each side's writer and reader read. */
+const readBoth = async (step: Step): Promise<void> => {
+  for (const one of step.both) {
+    await one.writer.read();
+    await one.reader.read();
+  }
+};
+
+/** What a step does, by a roll below 100: each up to its bound. A table, so each action stays short. */
+const ACTIONS: readonly (readonly [number, (step: Step) => Promise<void>])[] = [
+  [
+    35,
+    (step) => {
+      step.seqs.set(step.name, step.seq);
+      const anchor = signAnchor(keys, step.chain, step.point, step.clock.at, 1);
+      return keptOnBoth(step, (log) => {
+        log.keep(anchor);
+      });
+    },
+  ],
+  [
+    42,
+    (step) => {
+      const pass = signPass(keys, step.chain, step.point, step.clock.at, 1);
+      return keptOnBoth(step, (log) => {
+        log.keepPass(pass);
+      });
+    },
+  ],
+  [
+    48,
+    (step) => {
+      const began = new Date(step.clock.at.getTime() - MINUTE);
+      const place = signProgress(keys, step.chain, step.point, { at: step.clock.at, began }, 1);
+      return keptOnBoth(step, (log) => {
+        log.keepProgress(place);
+      });
+    },
+  ],
+  [
+    62,
+    async (step) => {
+      for (const one of step.both) await one.writer.flush();
+    },
+  ],
+  [72, readBoth],
+  [
+    82,
+    async (step) => {
+      // The readers pin a few chains at random: shards go and come back.
+      for (const _pin of [1, 2, 3, 4, 5]) {
+        const other = CHAINS[step.random.below(CHAINS.length)] ?? { kind: 'platform' };
+        for (const one of step.both) (await one.reader.pin(other))?.();
+      }
+    },
+  ],
+  [
+    90,
+    (step) => {
+      step.clock.at = new Date(step.clock.at.getTime() + (1 + step.random.below(70)) * MINUTE);
+      return Promise.resolve();
+    },
+  ],
+  [
+    93,
+    async (step) => {
+      for (const one of step.both) await one.writer.flush();
+      for (const one of step.both) one.restart();
+      await readBoth(step);
+    },
+  ],
+  [
+    96,
+    async (step) => {
+      const rebase = signRebase(keys, 1, {
+        id: idOf(step.id),
+        chain: step.name,
+        seq: step.seq,
+        hash: Buffer.alloc(32, 200),
+        macKeyVersion: 2,
+        at: step.clock.at,
+        reason: 'repaired',
+        evidence: 'INC-2026-11-11',
+        from: null,
+      });
+      step.seqs.set(step.name, step.seq);
+      for (const one of step.both) {
+        one.fake.files.set(rebaseFileName(1, rebase.id), rebaseFile(rebase));
+        await one.writer.read();
+      }
+    },
+  ],
+  [
+    100,
+    (step) => {
+      // A spoiled file in the chain's shard and a forged list of changes, the same on both.
+      const named = `${countdown(step.clock.at)}-${idOf(step.id)}`;
+      const ahead = new Date(step.clock.at.getTime() + step.random.below(4 * MINUTE));
+      for (const one of step.both) {
+        one.fake.files.set(`e1/shards/${shardHex(shardOf(step.name))}/${named}-d`, gzipSync('spoiled'));
+        one.fake.files.set(`e1/shards/changes/${countdown(ahead)}-${idOf(step.id)}`, gzipSync('forged'));
+      }
+      return Promise.resolve();
+    },
+  ],
+];
+
 async function run(seed: number) {
   const random = randomFrom(seed);
   const clock = { at: new Date(START.getTime() + 62 * MINUTE) };
@@ -147,75 +272,9 @@ async function run(seed: number) {
     const name = chainName(chain);
     const seq = (seqs.get(name) ?? 0n) + BigInt(1 + random.below(3));
     const point = { seq, hash: Buffer.alloc(32, Number(seq % 251n) + seed), macKeyVersion: 2 };
+    const step: Step = { chain, name, seq, point, clock, both, seqs, random, id: at + 1 };
     const roll = random.below(100);
-    if (roll < 35) {
-      seqs.set(name, seq);
-      const anchor = signAnchor(keys, chain, point, clock.at, 1);
-      for (const one of both)
-        await kept(one, chain, (log) => {
-          log.keep(anchor);
-        });
-    } else if (roll < 42) {
-      const pass = signPass(keys, chain, point, clock.at, 1);
-      for (const one of both)
-        await kept(one, chain, (log) => {
-          log.keepPass(pass);
-        });
-    } else if (roll < 48) {
-      const began = new Date(clock.at.getTime() - MINUTE);
-      const place = signProgress(keys, chain, point, { at: clock.at, began }, 1);
-      for (const one of both)
-        await kept(one, chain, (log) => {
-          log.keepProgress(place);
-        });
-    } else if (roll < 62) {
-      for (const one of both) await one.writer.flush();
-    } else if (roll < 72) {
-      for (const one of both) {
-        await one.writer.read();
-        await one.reader.read();
-      }
-    } else if (roll < 82) {
-      // The readers pin a few chains at random: shards go and come back.
-      for (let pins = 0; pins < 5; pins += 1) {
-        const other = CHAINS[random.below(CHAINS.length)] ?? { kind: 'platform' };
-        for (const one of both) (await one.reader.pin(other))?.();
-      }
-    } else if (roll < 90) {
-      clock.at = new Date(clock.at.getTime() + (1 + random.below(70)) * MINUTE);
-    } else if (roll < 93) {
-      for (const one of both) await one.writer.flush();
-      for (const one of both) one.restart();
-      for (const one of both) {
-        await one.writer.read();
-        await one.reader.read();
-      }
-    } else if (roll < 96) {
-      const rebase = signRebase(keys, 1, {
-        id: idOf(at + 1),
-        chain: name,
-        seq,
-        hash: Buffer.alloc(32, 200),
-        macKeyVersion: 2,
-        at: clock.at,
-        reason: 'repaired',
-        evidence: 'INC-2026-11-11',
-        from: null,
-      });
-      seqs.set(name, seq);
-      for (const one of both) {
-        one.fake.files.set(rebaseFileName(1, rebase.id), rebaseFile(rebase));
-        await one.writer.read();
-      }
-    } else {
-      // A spoiled file in the chain's shard and a forged list of changes, the same on both.
-      const named = `${countdown(clock.at)}-${idOf(at + 1)}`;
-      const ahead = new Date(clock.at.getTime() + random.below(4 * MINUTE));
-      for (const one of both) {
-        one.fake.files.set(`e1/shards/${shardHex(shardOf(name))}/${named}-d`, gzipSync('spoiled'));
-        one.fake.files.set(`e1/shards/changes/${countdown(ahead)}-${idOf(at + 1)}`, gzipSync('forged'));
-      }
-    }
+    await ACTIONS.find(([upTo]) => roll < upTo)?.[1](step);
   }
   for (const one of both) await one.writer.flush();
   clock.at = new Date(clock.at.getTime() + MINUTE);

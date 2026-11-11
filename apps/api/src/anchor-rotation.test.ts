@@ -1381,17 +1381,14 @@ describe('over a log that lets shards go (PL-65 PR3): each step pins its chainâ€
     const shardOfOrg = (orgId: string): number => shardOf(`organisation:${orgId}`);
     // The longest waiting, due at 08:05, in a shard late in number; the rest due after it, in shards before it.
     const candidates = Array.from({ length: 30 }, (_, nth) => orgInSlot(97, nth));
-    const late = candidates.reduce((one, other) => (shardOfOrg(other) > shardOfOrg(one) ? other : one));
-    const rest: string[] = [];
-    for (let slot = 98; rest.length < 8; slot += 1) {
-      for (let nth = 0; ; nth += 1) {
-        const orgId = orgInSlot(slot, nth);
-        if (shardOfOrg(orgId) < shardOfOrg(late)) {
-          rest.push(orgId);
-          break;
-        }
-      }
-    }
+    const late = candidates.reduce((one, other) => (shardOfOrg(other) > shardOfOrg(one) ? other : one), orgInSlot(97));
+    // In each of the next eight slots, the first organisation in a shard numbered below it.
+    const lowerIn = (slot: number): string => {
+      let nth = 0;
+      while (shardOfOrg(orgInSlot(slot, nth)) >= shardOfOrg(late)) nth += 1;
+      return orgInSlot(slot, nth);
+    };
+    const rest = Array.from({ length: 8 }, (_, index) => lowerIn(98 + index));
     // Listed last, so its day is also the last added: only its age puts it first.
     const orgs = [...rest, late];
     for (const orgId of orgs) {

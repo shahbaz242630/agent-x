@@ -597,48 +597,20 @@ export function createAnchorCheck({
   };
 
   const checkOne = async (
-    { chain, verify }: CheckedChain,
+    checked: CheckedChain,
     signal: AbortSignal | undefined,
     alone = false,
     ran: (ms: number) => void = () => undefined,
   ): Promise<Outcome> => {
+    const { chain } = checked;
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
-    const key = keyOf(chain);
     let release: (() => void) | undefined;
     try {
       // Its shard held while it is compared, read again first if it was let go (PL-65 PR3): one that can't be waits.
       release = durable === undefined ? () => undefined : await durable.pin(chain);
       if (release === undefined) return 'unanchored';
-      const last = anchors.latest(chain);
-      let report: ChainReport;
-      let cutOff = false;
-      const began = performance.now();
-      try {
-        if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
-        inFlight.add(key);
-        checkBegan.set(key, clock.now().getTime());
-        const checking = Promise.resolve().then(() => verify(last));
-        // Handled here too, so a check that ends after its deadline never goes unhandled.
-        void checking.then(
-          (ending) => {
-            ended(key);
-            if (cutOff) landedLate(chain, log, ending, last, alone);
-          },
-          (error: unknown) => {
-            ended(key);
-            if (cutOff) failedLate(chain, log, error);
-          },
-        );
-        report = await withinDeadline(checking, deadlineMs, signal);
-      } catch (error) {
-        cutOff = true;
-        if (error instanceof Stopped) return 'unchecked';
-        if (error instanceof PastDeadline) ran(performance.now() - began);
-        return failedOutcome(chain, log, error, alone);
-      }
-      ran(performance.now() - began);
-      return compared(chain, log, report, last, alone);
+      return await checkHeld(checked, signal, { alone, ran, log });
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
       log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
@@ -646,6 +618,44 @@ export function createAnchorCheck({
     } finally {
       release?.();
     }
+  };
+
+  /** One chain's check, its shard held: apart from `checkOne`, which holds it and catches what escapes, to keep each short. */
+  const checkHeld = async (
+    { chain, verify }: CheckedChain,
+    signal: AbortSignal | undefined,
+    { alone, ran, log }: { alone: boolean; ran: (ms: number) => void; log: Logger },
+  ): Promise<Outcome> => {
+    const key = keyOf(chain);
+    const last = anchors.latest(chain);
+    let report: ChainReport;
+    let cutOff = false;
+    const began = performance.now();
+    try {
+      if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
+      inFlight.add(key);
+      checkBegan.set(key, clock.now().getTime());
+      const checking = Promise.resolve().then(() => verify(last));
+      // Handled here too, so a check that ends after its deadline never goes unhandled.
+      void checking.then(
+        (ending) => {
+          ended(key);
+          if (cutOff) landedLate(chain, log, ending, last, alone);
+        },
+        (error: unknown) => {
+          ended(key);
+          if (cutOff) failedLate(chain, log, error);
+        },
+      );
+      report = await withinDeadline(checking, deadlineMs, signal);
+    } catch (error) {
+      cutOff = true;
+      if (error instanceof Stopped) return 'unchecked';
+      if (error instanceof PastDeadline) ran(performance.now() - began);
+      return failedOutcome(chain, log, error, alone);
+    }
+    ran(performance.now() - began);
+    return compared(chain, log, report, last, alone);
   };
 
   /**
