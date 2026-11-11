@@ -191,7 +191,30 @@ describe('a migration adding a trigger to a table already built', () => {
     ).toEqual([]);
   });
 
-  it('quoted and in capitals, is read as Postgres folds it', () => {
+  it('on a quoted table in capitals, is on another table than its lower-case name, as Postgres keeps them', () => {
+    expect(
+      refusedOf(`CREATE TABLE "App"."Things" (id uuid);
+        CREATE TRIGGER marks AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard();`),
+    ).toEqual([
+      "0002_later.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers",
+    ]);
+    expect(
+      refusedOf(`CREATE TABLE "App"."Things" (id uuid);
+        CREATE TRIGGER marks AFTER UPDATE ON "App"."Things" FOR EACH ROW EXECUTE FUNCTION app.guard();`),
+    ).toEqual([]);
+  });
+
+  it('firing on a quoted column holding " on x ", is read on its own table', () => {
+    expect(
+      refusedOf(`CREATE TABLE app.fresh (id uuid);
+        CREATE TRIGGER marks AFTER UPDATE OF "a on app.fresh b", status ON app.things
+          FOR EACH ROW EXECUTE FUNCTION app.guard();`),
+    ).toEqual([
+      "0002_later.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers",
+    ]);
+  });
+
+  it('quoted in lower case, is read as Postgres folds it', () => {
     expect(
       refusedOf(
         `CREATE TRIGGER "marks" AFTER UPDATE ON "app"."things" FOR EACH ROW EXECUTE FUNCTION app.guard();`,
@@ -259,6 +282,41 @@ describe('a migration doing what no coming entry describes', () => {
       'running SQL from a DO block',
       "DO $$ BEGIN EXECUTE 'create trigger t after update on app.things'; END $$;",
       'runs a DO block naming a trigger, a function or EXECUTE',
+    ],
+    ['dropping it as a routine', 'DROP ROUTINE app.guard();', 'alters or drops app.guard'],
+    ['altering it as a routine', 'ALTER ROUTINE app.guard() SECURITY DEFINER;', 'alters or drops app.guard'],
+    ['dropping it as a procedure', 'DROP PROCEDURE IF EXISTS app.guard();', 'alters or drops app.guard'],
+    [
+      'dropping it second in a list',
+      'DROP FUNCTION app.nothere(int, text), app.guard() CASCADE;',
+      'alters or drops app.guard',
+    ],
+    ['renaming a trigger', 'ALTER TRIGGER guarded ON app.things RENAME TO other;', 'alters a trigger'],
+    [
+      'a DO block with a quoted string body',
+      "DO 'BEGIN EXECUTE ''drop trigger guarded on app.things''; END';",
+      'runs a DO block naming a trigger, a function or EXECUTE',
+    ],
+    [
+      'a DO block with its language quoted',
+      'DO LANGUAGE "plpgsql" $$ BEGIN EXECUTE 1; END $$;',
+      'runs a DO block naming a trigger, a function or EXECUTE',
+    ],
+    [
+      'writing a function without its schema',
+      'SET search_path = app; CREATE OR REPLACE FUNCTION guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;',
+      'writes guard without its schema',
+    ],
+    [
+      'a trigger on a table without its schema',
+      'CREATE TRIGGER marks AFTER UPDATE ON things FOR EACH ROW EXECUTE FUNCTION app.guard();',
+      'names the table things without its schema',
+    ],
+    ['dropping a function without its schema', 'DROP FUNCTION guard();', 'alters or drops guard without its schema'],
+    [
+      'a trigger in a form the reader cannot parse',
+      'CREATE TRIGGER marks AFTER UPSERT ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard();',
+      'makes or drops a trigger in a form this check cannot read',
     ],
     [
       'writing a body outside dollar quotes',
@@ -364,6 +422,16 @@ describe('parseComing', () => {
       'definition',
     ],
     ['an entry that is not an object', JSON.stringify({ triggers: [], bodies: ['f.f'] }), 'function, body'],
+    [
+      'a body with more after its hash',
+      JSON.stringify({ triggers: [], bodies: [{ function: 'app.f', body: 'a'.repeat(64) + 'zz' }] }),
+      'SHA-256',
+    ],
+    [
+      'a body with more before its hash',
+      JSON.stringify({ triggers: [], bodies: [{ function: 'app.f', body: 'x' + 'a'.repeat(64) }] }),
+      'SHA-256',
+    ],
   ])('refuses %s', (_what, json, says) => {
     expect(() => parseComing(json)).toThrow(says);
   });

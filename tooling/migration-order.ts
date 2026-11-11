@@ -16,8 +16,11 @@
 // before it" is, for a migration not yet on main, where its branch meets main; for
 // one on main, the main commit before the one that brought it. So the coming entry
 // and its migration can never arrive in one merge. A change no coming entry can
-// describe (a trigger dropped and not made again, switched on or off, a function
-// altered or dropped, SQL run from inside a DO block) is refused outright. Once a
+// describe (a trigger dropped and not made again, altered, switched on or off; a
+// function, procedure or routine altered or dropped; a DO block naming a trigger,
+// a routine or EXECUTE, however quoted) is refused outright, as is a trigger or
+// routine named without its schema (its meaning hangs on the search_path) or in a
+// form this reader can't parse whole. Quoted names keep their case. Once a
 // migration has built an entry, it must leave coming.json in that same change, so
 // the list only ever holds what is still to come.
 //
@@ -93,7 +96,7 @@ export type Change =
   | { readonly kind: 'body'; readonly function: string; readonly body: string }
   | { readonly kind: 'refused'; readonly what: string };
 
-/** A statement as read: its words, lower case, with every body taken out (each a `$$`), and those bodies. */
+/** A statement as read: its words (unquoted ones lower case), with every body taken out (each a `$$`), and those bodies. */
 interface Statement {
   readonly words: string;
   readonly bodies: readonly string[];
@@ -131,7 +134,10 @@ function pastComment(sql: string, start: number): number {
   return at;
 }
 
-/** The statements of a migration, with strings and quoted names kept, comments gone and bodies taken out. */
+/**
+ * The statements of a migration, with strings and quoted names kept as written, comments gone and bodies taken out.
+ * Every other word is lower-cased, as Postgres folds an unquoted name; a quoted one keeps its case, as Postgres does.
+ */
 export function statements(sql: string): Statement[] {
   const found: Statement[] = [];
   let words = '';
@@ -139,7 +145,7 @@ export function statements(sql: string): Statement[] {
   let at = 0;
   const end = () => {
     const said = words.replaceAll(/\s+/g, ' ').trim();
-    if (said !== '') found.push({ words: said.toLowerCase(), bodies });
+    if (said !== '') found.push({ words: said, bodies });
     [words, bodies] = ['', []];
   };
   while (at < sql.length) {
@@ -163,7 +169,7 @@ export function statements(sql: string): Statement[] {
       end();
       at += 1;
     } else {
-      words += char;
+      words += char.toLowerCase();
       at += 1;
     }
   }
@@ -171,25 +177,67 @@ export function statements(sql: string): Statement[] {
   return found;
 }
 
-/** A name as Postgres folds it: unquoted, lower case (it is read from the lower-cased words). */
-const named = (name: string): string => name.replaceAll('"', '');
-
 /** The SHA-256 of a body, as schema-guard.ts reads Postgres's own (prosrc, in UTF-8). */
 const hashOf = (body: string): string => createHash('sha256').update(body, 'utf8').digest('hex');
 
-const NAME = String.raw`("[^"]+"|[a-z_][a-z0-9_$]*)(?:\.("[^"]+"|[a-z_][a-z0-9_$]*))?`;
-const qualified = (match: RegExpExecArray, at: number): string =>
-  named(match[at + 1] === undefined ? (match[at] ?? '') : `${match[at] ?? ''}.${match[at + 1]}`);
+/** One part of a name: quoted (its case kept, a doubled quote inside) or not (already lower case). */
+const PART = String.raw`(?:"(?:[^"]|"")+"|[a-z_][a-z0-9_$]*)`;
+/** A name, its schema optional: each part captured. */
+const NAME = String.raw`(${PART})(?:\.(${PART}))?`;
+
+/** A name read: its parts unquoted and joined, and whether its schema was given. */
+interface Named {
+  readonly name: string;
+  readonly qualified: boolean;
+}
+
+const unquoted = (part: string): string => (part.startsWith('"') ? part.slice(1, -1).replaceAll('""', '"') : part);
+const nameAt = (match: RegExpExecArray, at: number): Named => {
+  const [first = '', second] = [match[at], match[at + 1]];
+  return second === undefined
+    ? { name: unquoted(first), qualified: false }
+    : { name: `${unquoted(first)}.${unquoted(second)}`, qualified: true };
+};
+
+/** A column a trigger fires on an update of. */
+const COLUMNS = String.raw`${PART}(?: ?, ?${PART})*`;
+/** One event a trigger fires on. */
+const EVENT = String.raw`(?:insert|delete|truncate|update(?: of ${COLUMNS})?)`;
 
 const CREATE_TABLE = new RegExp(String.raw`^create (?:unlogged )?table (?:if not exists )?${NAME}`);
+const ANY_CREATE_TRIGGER = /^create (?:or replace )?(?:constraint )?trigger /;
+/** Its whole head, word by word to the table, so a quoted column holding " on x " can't be read as the table. */
 const CREATE_TRIGGER = new RegExp(
-  String.raw`^create (?:or replace )?(?:constraint )?trigger ${NAME} .*? on (?:only )?${NAME}(?: |$)`,
+  String.raw`^create (?:or replace )?(?:constraint )?trigger ${NAME} (?:before|after|instead of) ${EVENT}(?: or ${EVENT})* on (?:only )?${NAME}(?: |$)`,
 );
-const DROP_TRIGGER = new RegExp(String.raw`^drop trigger (?:if exists )?${NAME} on ${NAME}`);
-const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?function ${NAME} ?\(`);
-const ALTER_FUNCTION = new RegExp(String.raw`^(?:alter|drop) function (?:if exists )?${NAME}`);
+const ANY_DROP_TRIGGER = /^drop trigger /;
+const DROP_TRIGGER = new RegExp(String.raw`^drop trigger (?:if exists )?${NAME} on ${NAME}(?: cascade| restrict)?$`);
+const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?(?:function|procedure) ${NAME} ?\(`);
+/** An existing routine altered or dropped, under any of its three words; a drop may list several. */
+const ALTER_ROUTINE = /^(?:alter|drop) (?:function|procedure|routine) (?:if exists )?(.*)$/;
 const SWITCHED_TRIGGER = /^alter table .* (?:enable|disable)(?: replica| always)? trigger /;
-const DYNAMIC = /\b(?:trigger|function|execute)\b/i;
+const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
+
+/** Each name in a list such as `a.b(int), c.d()`: commas inside the parentheses are an argument list's. */
+function namesListed(list: string): Named[] {
+  const items: string[] = [];
+  let depth = 0;
+  let item = '';
+  for (const char of list) {
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    if (char === ',' && depth === 0) {
+      items.push(item);
+      item = '';
+    } else item += char;
+  }
+  items.push(item);
+  const head = new RegExp(String.raw`^ ?${NAME}`);
+  return items.flatMap((one) => {
+    const found = head.exec(one);
+    return found === null ? [{ name: one.trim(), qualified: false }] : [nameAt(found, 1)];
+  });
+}
 
 /** What the migrations have built so far, read in turn, or what one migration builds. */
 interface Built {
@@ -218,48 +266,62 @@ export interface NewFunction {
 
 type Read = Change | Dropped | NewFunction | undefined;
 
+const refused = (what: string): Change => ({ kind: 'refused', what });
+
+/** A name given without its schema: what it means hangs on the search_path, so no coming entry can match it. */
+const unqualified = (what: string, { name }: Named): Change => refused(`${what} ${name} without its schema`);
+
 /** A function written: its body's change against what earlier migrations wrote, or a new function. */
-function written(name: string, bodies: readonly string[], before: Built, own: Built): Read {
+function written(fn: Named, bodies: readonly string[], before: Built, own: Built): Read {
+  if (!fn.qualified) return unqualified('writes', fn);
   const [body] = bodies;
-  if (body === undefined) return { kind: 'refused', what: `writes ${name} with no dollar-quoted body` };
+  if (body === undefined) return refused(`writes ${fn.name} with no dollar-quoted body`);
   const hash = hashOf(body);
-  own.bodies.set(name, hash);
-  const was = before.bodies.get(name);
-  if (was === undefined) return { kind: 'new', function: name, body: hash };
-  return was === hash ? undefined : { kind: 'body', function: name, body: hash };
+  own.bodies.set(fn.name, hash);
+  const was = before.bodies.get(fn.name);
+  if (was === undefined) return { kind: 'new', function: fn.name, body: hash };
+  return was === hash ? undefined : { kind: 'body', function: fn.name, body: hash };
 }
 
-/** A trigger made or dropped, on a table this migration didn't itself build. */
+/** A trigger made or dropped, on a table this migration didn't itself build. One the reader can't parse is refused. */
 function triggerRead(words: string, own: Built): Read {
-  const made = CREATE_TRIGGER.exec(words);
-  if (made !== null) {
-    const [name, table] = [qualified(made, 1), qualified(made, 3)];
-    own.triggers.add(`${table} ${name}`);
-    return own.tables.has(table) ? undefined : { kind: 'trigger', table, name };
+  const made = CREATE_TRIGGER.exec(words) ?? DROP_TRIGGER.exec(words);
+  if (made === null) return refused('makes or drops a trigger in a form this check cannot read');
+  const [name, table] = [nameAt(made, 1).name, nameAt(made, 3)];
+  if (!table.qualified) return unqualified('names the table', table);
+  if (ANY_CREATE_TRIGGER.test(words)) {
+    own.triggers.add(`${table.name} ${name}`);
+    return own.tables.has(table.name) ? undefined : { kind: 'trigger', table: table.name, name };
   }
-  const dropped = DROP_TRIGGER.exec(words);
-  if (dropped === null) return undefined;
-  const [name, table] = [qualified(dropped, 1), qualified(dropped, 3)];
-  return own.tables.has(table) ? undefined : { kind: 'dropped', table, name };
+  return own.tables.has(table.name) ? undefined : { kind: 'dropped', table: table.name, name };
+}
+
+/** Routines altered or dropped: refused for any an earlier migration wrote, or named without a schema. */
+function routinesRead(list: string, before: Built): Read {
+  const names = namesListed(list);
+  const loose = names.find((one) => !one.qualified);
+  if (loose !== undefined) return unqualified('alters or drops', loose);
+  const known = names.find((one) => before.bodies.has(one.name));
+  return known === undefined ? undefined : refused(`alters or drops ${known.name}`);
 }
 
 /** What one statement changes that the image before it must be told, given what earlier migrations built. */
 function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read {
   const table = CREATE_TABLE.exec(words);
   if (table !== null) {
-    own.tables.add(qualified(table, 1));
+    own.tables.add(nameAt(table, 1).name);
     return undefined;
   }
-  if (CREATE_TRIGGER.test(words) || DROP_TRIGGER.test(words)) return triggerRead(words, own);
-  if (SWITCHED_TRIGGER.test(words)) return { kind: 'refused', what: 'switches a trigger on or off' };
+  if (ANY_CREATE_TRIGGER.test(words) || ANY_DROP_TRIGGER.test(words)) return triggerRead(words, own);
+  if (words.startsWith('alter trigger ')) return refused('alters a trigger');
+  if (SWITCHED_TRIGGER.test(words)) return refused('switches a trigger on or off');
   const fn = CREATE_FUNCTION.exec(words);
-  if (fn !== null) return written(qualified(fn, 1), bodies, before, own);
-  const altered = ALTER_FUNCTION.exec(words);
-  if (altered !== null && before.bodies.has(qualified(altered, 1))) {
-    return { kind: 'refused', what: `alters or drops ${qualified(altered, 1)}` };
-  }
-  if (/^do(?: language [a-z]+)? \$\$/.test(words) && bodies.some((body) => DYNAMIC.test(body))) {
-    return { kind: 'refused', what: 'runs a DO block naming a trigger, a function or EXECUTE' };
+  if (fn !== null) return written(nameAt(fn, 1), bodies, before, own);
+  const routines = ALTER_ROUTINE.exec(words);
+  if (routines !== null) return routinesRead(routines[1] ?? '', before);
+  // Any DO, however its body is quoted or its language named, that names a trigger, a routine or EXECUTE anywhere.
+  if (/^do\b/.test(words) && [words, ...bodies].some((text) => DYNAMIC.test(text))) {
+    return refused('runs a DO block naming a trigger, a function or EXECUTE');
   }
   return undefined;
 }

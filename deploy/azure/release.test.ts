@@ -17,6 +17,7 @@ import { jobName, JOBS_API } from './jobs.ts';
 import {
   changes,
   check,
+  COMING_FIRST,
   decide,
   type Decision,
   type Folder,
@@ -473,11 +474,24 @@ describe('deciding a release', () => {
 
     it('stops when the image staging runs did not carry it as coming: it would page as it migrates', () => {
       expect(decideFrom({ [BUILT]: builtSql })).toEqual({
-        kind: 'by-hand',
+        kind: 'coming-first',
         reasons: [
-          `0082_marks.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers, and staging runs ${OLD}: release a commit carrying it in coming.json first, then this one (decision 49)`,
+          `0082_marks.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers (staging runs ${OLD})`,
         ],
       });
+    });
+
+    it('never asks for a hand deploy, which would go round it: the coming entry first, before any other reason', async () => {
+      const line = history(
+        [OLD, NEW],
+        { [OLD]: [ADDS, 'deploy/azure/apps.bicep'] },
+        { [OLD]: { [BUILT]: builtSql }, [NEW]: { [BUILT]: builtSql, [ADDS]: addsSql } },
+      );
+      const { status, said } = await checked(staging(OLD), line);
+      expect(status).toBe(1);
+      expect(said).toContain(`A release of ${NEW} stops here, red: ${COMING_FIRST}`);
+      expect(COMING_FIRST).toContain('never a hand deploy');
+      expect(said.filter((one) => one.includes('needs a hand deploy'))).toEqual([]);
     });
 
     it('goes ahead when it did', () => {

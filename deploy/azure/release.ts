@@ -389,6 +389,11 @@ export type Decision =
   | { readonly kind: 'load-run' }
   | { readonly kind: 'past' }
   | { readonly kind: 'by-hand'; readonly reasons: readonly string[] }
+  /**
+   * A migration staging's image wasn't told is coming (decision 49): a hand deploy is exactly what must not follow, as
+   * it goes round this gate and the old image would raise a false tamper alarm as the migration runs.
+   */
+  | { readonly kind: 'coming-first'; readonly reasons: readonly string[] }
   | {
       readonly kind: 'release';
       readonly updates: ReadonlyMap<Workload, Container>;
@@ -435,10 +440,7 @@ function notYetComing(release: string, commit: string, changed: readonly string[
     .filter((name) => MIGRATION_NAME.test(name))
     .map((name) => ({ name, sql: history.fileAt(commit, `${folder}${name}`) ?? '' }));
   const coming = parseComing(history.fileAt(release, COMING_FILE));
-  return refusals(migrations, added, () => coming).map(
-    (line) =>
-      `${line}, and staging runs ${release}: release a commit carrying it in coming.json first, then this one (decision 49)`,
-  );
+  return refusals(migrations, added, () => coming).map((line) => `${line} (staging runs ${release})`);
 }
 
 /**
@@ -498,7 +500,8 @@ export function decide(
     }
     notComing.push(...notYetComing(release, commit, changed, history));
   }
-  for (const line of notComing) reasons.add(line);
+  // Before any hand deploy: once the coming entries are released, a rerun says what a person still has to deploy.
+  if (notComing.length > 0) return { kind: 'coming-first', reasons: notComing };
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
   return {
     kind: 'release',
@@ -690,6 +693,10 @@ function sayDeployed(decision: Decision, say: (line: string) => void): void {
 export const LOAD_RUN_UP =
   'A load run is up (the API runs as AGENTX_ROLE web, beside the jobs app): finish it (load.ts finish, then a plain apps), or run apps --load-run again after merging. This release changed nothing, red.';
 
+/** What to do when a migration wasn't shipped as coming first (decision 49): never the hand deploy a red usually asks. */
+export const COMING_FIRST =
+  "the image staging runs wasn't told what this release's migration adds. Release a commit carrying it in coming.json first, then this one; never a hand deploy, which goes round this check and raises the false tamper alarm it prevents (decision 49).";
+
 /**
  * A decision that leaves nothing to update, said: the status to end with, or
  * nothing when there are updates to make.
@@ -705,6 +712,11 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
   }
   if (decision.kind === 'load-run') {
     say(LOAD_RUN_UP);
+    return 1;
+  }
+  if (decision.kind === 'coming-first') {
+    say(`A release of ${commit} stops here, red: ${COMING_FIRST}`);
+    for (const reason of decision.reasons) say(`  ${reason}`);
     return 1;
   }
   if (decision.kind === 'by-hand') {
