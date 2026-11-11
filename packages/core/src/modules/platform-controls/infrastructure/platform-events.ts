@@ -5,7 +5,7 @@
 // anchor check (A2b): an event planted to make a copy look done, or one
 // deleted, breaks it.
 //
-// Each fact is compared as `(details::jsonb ->> <name>)`. The facts 0082
+// Each fact is compared as `(details::jsonb ->> <name>)`. The facts 0084
 // indexes (event, person, subject, and `at` for the latest time) are written
 // out exactly as the indexes key them, fixed text, so a read by one of them is
 // a few index entries however many events of the action the chain holds (SA2);
@@ -15,7 +15,7 @@ import { type Expression, type Kysely, type RawBuilder, sql, type Transaction } 
 
 import type { PlatformControlsTables } from './tables.ts';
 
-/** The facts 0082 indexes, each exactly as its index keys it. */
+/** The facts 0084 indexes, each exactly as its index keys it. */
 const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
   ['event', sql<string | null>`(details::jsonb ->> 'event')`],
   ['person', sql<string | null>`(details::jsonb ->> 'person')`],
@@ -23,13 +23,13 @@ const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
   ['at', sql<string | null>`(details::jsonb ->> 'at')`],
 ]);
 
-/** A fact of the details: one 0082 indexes as its index keys it, any other by a bound name. */
+/** A fact of the details: one 0084 indexes as its index keys it, any other by a bound name. */
 const fact = (name: string): RawBuilder<string | null> =>
   INDEXED_FACTS.get(name) ?? sql<string | null>`(details::jsonb ->> ${name})`;
 
 type Reader = Kysely<PlatformControlsTables> | Transaction<PlatformControlsTables>;
 
-/** The read latestPlatformTime runs: the greatest `name` by byte order, from 0082's index for `at`. */
+/** The read latestPlatformTime runs: the greatest `name` by byte order, from 0084's index for `at`. */
 export const latestPlatformTimeRead = (db: Reader, action: string, name: string) =>
   db
     .selectFrom('platform_controls.audit_events')

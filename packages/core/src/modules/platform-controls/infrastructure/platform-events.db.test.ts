@@ -2,7 +2,7 @@
 // migrated schema, as the app role: only events of the action asked for
 // count, whatever the others hold. B6-3d: the latest time among events of
 // several kinds, each by its action and facts. SA2: the copier's and the
-// restriction's reads planned on 0082's indexes, on a chain of thousands.
+// restriction's reads planned on 0084's indexes, on a chain of thousands.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
@@ -82,7 +82,7 @@ describe(`the platform chain's events by their facts (B6-2b, Postgres ${server.v
   });
 });
 
-describe(`the copier's and the restriction's reads, from 0082's indexes (SA2, Postgres ${server.version})`, () => {
+describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Postgres ${server.version})`, () => {
   type PlanNode = Readonly<Record<string, unknown>>;
   const nodes = (plan: PlanNode): PlanNode[] => [
     plan,
