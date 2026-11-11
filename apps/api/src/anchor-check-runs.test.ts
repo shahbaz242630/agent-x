@@ -656,6 +656,38 @@ describe('how long a turn may take (the bound) and what is said past it', () => 
     for (const release of running.values()) release();
   });
 
+  it('an organisation recorded on two runs in a row is new only on the first: the second gives it no turn out of order', async () => {
+    vi.useFakeTimers();
+    const [recorded = '', held = '', last = ''] = orgs(3);
+    // The held one's check holds the lane its first time only.
+    let holding = true;
+    const { organizations, started, release } = directory([recorded, held, last], (orgId) => {
+      if (orgId !== held || !holding) return ok(1n);
+      holding = false;
+      return undefined;
+    });
+    const { check } = checking(
+      { ...organizations, recorded: () => Promise.resolve([recorded]) },
+      { lanes: 1, runWithinMs: 1000 },
+    );
+    // The first run: the recorded one, then one whose check holds the lane until the run's time is up; the last waits.
+    const first = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await first;
+    expect(started).toEqual([recorded, held]);
+    release(held);
+    await settled();
+    started.length = 0;
+    // The second: the round goes on where it was. Recorded again, but seen already, it is no new one to take first.
+    const second = check.run();
+    await settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    await second;
+    expect(started).toContain(last);
+    expect(started).not.toContain(recorded);
+  });
+
   it('after a restart a chain’s wait counts from its anchor in the store, so restarts can’t hide one left out', async () => {
     const clock = new FixedClock(AT);
     const durable = logOver(clock);

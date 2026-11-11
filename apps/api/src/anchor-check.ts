@@ -119,6 +119,7 @@ import {
   type CheckedPoint,
   createMemoryAnchorStore,
   createMemoryPassRecord,
+  sameAnchor,
   signAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -388,10 +389,9 @@ export function createAnchorCheck({
     void work.then(end, end);
     return withinDeadline(work, deadlineMs, signal);
   };
-  // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed. Every one in the
-  // store comes here, past any cap: with `firstSeen`, counted in the anchor log's memory budget (anchor-log.ts, PL-65).
-  const seen = new Set<string>();
-  // When each organisation was first seen, so its stale period starts then, not when the process began.
+  // Every organisation this process has seen listed or recorded, so one that leaves the list is noticed, and when it was
+  // first seen, so its stale period starts then, not when the process began. Every one in the store comes here, past any
+  // cap, counted in the anchor log's memory budget (anchor-log.ts, PL-65): one map, its keys what a set of them would be.
   const firstSeen = new Map<string, number>();
   // When the list was last read whole, so a list never read is the alarm in time too.
   let listRead: number | undefined;
@@ -458,7 +458,8 @@ export function createAnchorCheck({
     // A store's read past its deadline, or another copy's anchor, can land during the check, and the head read before
     // it says nothing against it: an honest copy may have moved on since. The next run compares with it, the alarm a run
     // late at most, one interval and that run's length; Tx A compares with it at once, so a payment is refused meanwhile.
-    if (anchors.latest(chain) !== last) return 'unanchored';
+    // By what it says, not by identity: the anchor log gives a new copy at each read (packed-lines.ts, PL-65).
+    if (!sameAnchor(anchors.latest(chain), last)) return 'unanchored';
     // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
     if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
     if (last?.seq === report.seq) {
@@ -824,8 +825,7 @@ export function createAnchorCheck({
   };
 
   const remember = (orgId: string): void => {
-    if (seen.has(orgId)) return;
-    seen.add(orgId);
+    if (firstSeen.has(orgId)) return;
     firstSeen.set(orgId, clock.now().getTime());
   };
 
@@ -901,7 +901,7 @@ export function createAnchorCheck({
 
   /** Whether this one, new to the check, takes a note: while the cap has room. */
   const noted = (orgId: string): boolean => {
-    if (seen.has(orgId) || seen.size >= mostOrganisations) return false;
+    if (firstSeen.has(orgId) || firstSeen.size >= mostOrganisations) return false;
     remember(orgId);
     return true;
   };
@@ -915,7 +915,7 @@ export function createAnchorCheck({
     const fresh = read.recorded.filter((orgId) => noted(orgId));
     const past: string[] = [];
     for (const orgId of read.listed) {
-      if (seen.has(orgId)) continue;
+      if (firstSeen.has(orgId)) continue;
       if (noted(orgId)) fresh.push(orgId);
       else past.push(orgId);
     }
@@ -926,7 +926,7 @@ export function createAnchorCheck({
         most: mostOrganisations,
       });
     }
-    for (const orgId of seen) if (!listedNow.has(orgId)) gone.add(orgId);
+    for (const orgId of firstSeen.keys()) if (!listedNow.has(orgId)) gone.add(orgId);
     pastCap = past;
     pastCapNow = new Set(past);
     inUse = read.listed.filter((orgId) => !pastCapNow.has(orgId));
@@ -949,7 +949,7 @@ export function createAnchorCheck({
       logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'list' });
     }
     const { fresh, unlisted: gone } = typeof read === 'string' ? { fresh: [], unlisted: [] } : adopted(read);
-    const listed = inUse ?? [...seen];
+    const listed = inUse ?? [...firstSeen.keys()];
     turns.begin(listed, fresh, gone, pastCap);
     if (turns.pastCapStarts()) pastCapSince = clock.now().getTime();
     probed = await probeAll(from, [...listed, ...pastCap], cap, stop);
@@ -988,7 +988,7 @@ export function createAnchorCheck({
   const sayLate = (): void => {
     const at = clock.now().getTime();
     const overCeiling = sayOverCeiling(at);
-    const late = (inUse ?? [...seen]).filter(
+    const late = (inUse ?? [...firstSeen.keys()]).filter(
       (orgId) => at - lastKnown(orgId) >= reachWithinMs && !overCeiling.has(orgId),
     );
     const pastLate = pastCap.length > 0 && at - pastCapSince >= reachWithinMs ? pastCap : [];
