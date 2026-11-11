@@ -1384,11 +1384,13 @@ describe('deploy foundation', () => {
       const first = await foundation(0, { servers: [] });
       expect(first.status).toBe(0);
       expect(first.terminal.said).toContain(
-        'The group holds no database server yet: the deployment makes psql-agentx-stg-abcdef, the first, empty.',
+        'The group holds no database server yet: the foundation makes psql-agentx-stg-abcdef, the first, empty.',
       );
       const unread = await foundation(0, { servers: 'unreadable' });
       expect(unread.status).toBe(0);
-      expect(unread.terminal.said).toContainEqual(expect.stringMatching(/couldn't be read, as on a first deploy/));
+      expect(unread.terminal.said).toContainEqual(
+        expect.stringMatching(/couldn't be read, as before a first foundation/),
+      );
     });
 
     it('names generation 0 for staging today, so the next foundation changes no name', async () => {
@@ -1621,6 +1623,9 @@ describe('deploy secrets', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      // The database server's generation checked first (AZ25): the vault's suffix, then the servers.
+      'keyvault list --subscription',
+      'postgres flexible-server list',
       'keyvault list --subscription',
       'rest --method get',
       'deployment group create',
@@ -1859,6 +1864,57 @@ const CLIENT_ID = '338719472394810051';
 describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
 
+  describe("secrets and apps follow the database server's generation, never lead it (AZ25)", () => {
+    const part = (command: 'secrets' | 'apps', generation: number, options: AzAnswers) =>
+      command === 'apps'
+        ? run(['apps'], { answers, images: recordingImages(), az: new RecordingAz(options), generation })
+        : run(['secrets', '--keys'], { answers: ['y'], az: new RecordingAz(options), generation });
+    const refusals: readonly [number, AzAnswers, RegExp][] = [
+      [1, { servers: [{ name: OWN_SERVER }] }, /it names a server that is not there yet/],
+      [0, { servers: [{ name: `${OWN_SERVER}-r1` }] }, /goes back to a generation whose server is no longer there/],
+      [3, { servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }] }, /skips ahead/],
+      [0, { servers: [{ name: 'psql-agentx-stg-before' }] }, /no server of its own \(only psql-agentx-stg-before\)/],
+      [1, { vaults: [] }, /the key vault or the servers couldn't be read/],
+      [1, { servers: 'unreadable' }, /the key vault or the servers couldn't be read/],
+    ];
+
+    for (const command of ['secrets', 'apps'] as const) {
+      it(`${command} refuses a generation whose server isn't there, naming the restore, then foundation, then ${command}`, async () => {
+        for (const [generation, options, why] of refusals) {
+          const done = await part(command, generation, options);
+          expect(done.error).toMatchObject({ message: expect.stringMatching(why) as unknown });
+          const message = (done.error as Error).message;
+          expect(message).toMatch(new RegExp(`then run foundation, then ${command} again.* Nothing was deployed\\.$`));
+          if (!message.includes("couldn't be read")) expect(message).toMatch(/First restore it under that name/);
+          expect(done.az.deployment).toBeUndefined();
+          expect(done.az.sequence).toEqual([
+            'account show --output',
+            'bicep version',
+            'keyvault list --subscription',
+            'postgres flexible-server list',
+          ]);
+          expect(done.terminal.hiddenQuestions).toEqual([]);
+          for (const call of done.az.calls) expect(call.args).not.toContain('delete');
+        }
+      });
+
+      it(`${command} goes ahead once the generation's server is there, keeping the earlier one`, async () => {
+        const done = await part(command, 1, {
+          servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
+          // A keys run ends green only with every key there afterwards.
+          after: [...COPIED_SECRETS, ...CREATED_ONCE],
+        });
+        expect(done.error).toBeUndefined();
+        expect(done.status).toBe(0);
+        expect(done.az.deployment).toBeDefined();
+        expect(done.terminal.said).toContain(
+          'The database server is psql-agentx-stg-abcdef-r1 (generation 1), which is there. Kept as they are, with their restore points, never changed or deleted by this deployment: psql-agentx-stg-abcdef.',
+        );
+        for (const call of done.az.calls) expect(call.args).not.toContain('delete');
+      });
+    }
+  });
+
   it("sends nothing, and asks nothing past the subscription, while the vault lacks the API's client secret (B2-6)", async () => {
     const images = recordingImages();
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
@@ -1925,6 +1981,8 @@ describe('deploy apps', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      'keyvault list --subscription',
+      'postgres flexible-server list',
       // The vault holds the API's client secret (B2-6), its directory token and the email key (B5-3), which the
       // API reads: three, a full page, and the empty page Azure ends with.
       'keyvault list --subscription',

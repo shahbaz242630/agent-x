@@ -69,7 +69,13 @@ export interface GenerationAsked {
   readonly suffix: string | undefined;
   /** Every server the resource group holds, by name, or undefined when they couldn't be read. */
   readonly servers: readonly string[] | undefined;
+  /** The hand deploy asking (foundation unless given): secrets and apps follow the foundation, never lead it. */
+  readonly part?: 'foundation' | 'secrets' | 'apps';
 }
+
+/** What to run once the generation's server is restored and checked: the foundation first, then the part asked. */
+const thenRun = (part: GenerationAsked['part']): string =>
+  part === undefined || part === 'foundation' ? 'run foundation again' : `run foundation, then ${part} again`;
 
 export type GenerationVerdict =
   | {
@@ -90,8 +96,14 @@ const NOTHING_SENT = 'Nothing was deployed.';
  * new, empty server and point the apps at it, so it is refused: a generation raised before its restore, one going
  * back to a server no longer there, one skipping ahead, or one that can't be checked because Azure couldn't be read.
  */
-export function serverGenerationVerdict({ short, generation, suffix, servers }: GenerationAsked): GenerationVerdict {
-  if (suffix === undefined || servers === undefined) return unreadVerdict(generation);
+export function serverGenerationVerdict({
+  short,
+  generation,
+  suffix,
+  servers,
+  part,
+}: GenerationAsked): GenerationVerdict {
+  if (suffix === undefined || servers === undefined) return unreadVerdict(generation, part);
   const wanted = serverNameOf(short, suffix, generation);
   const own = servers
     .map((name) => ({ name, generation: generationOf(name, short, suffix) }))
@@ -115,7 +127,7 @@ export function serverGenerationVerdict({ short, generation, suffix, servers }: 
     return {
       kind: 'go',
       server: wanted,
-      said: `The group holds no database server yet: the deployment makes ${wanted}, the first, empty.`,
+      said: `The group holds no database server yet: the foundation makes ${wanted}, the first, empty.`,
     };
   }
   const newest = own.at(-1)?.generation;
@@ -125,22 +137,22 @@ export function serverGenerationVerdict({ short, generation, suffix, servers }: 
       : `the newest server there is generation ${String(newest)}`;
   return {
     kind: 'refused',
-    why: `database-generation.json names the database server's generation ${String(generation)}, ${wanted}, and ${where}: it ${whichWay(generation, newest)}. The deployment would make it new and empty and point the apps at it, while the data stays on the old one. Restore it first under that name (playbook L: az postgres flexible-server restore --name ${wanted}, the same subnet, private zone and zone), check it, then run foundation again. ${NOTHING_SENT}`,
+    why: `database-generation.json names the database server's generation ${String(generation)}, ${wanted}, and ${where}: it ${whichWay(generation, newest)}. A foundation would make it new and empty and the apps would reach it, while the data stays on the old one. First restore it under that name (playbook L: az postgres flexible-server restore --name ${wanted}, the same subnet, private zone and zone), check it, then ${thenRun(part)}. ${NOTHING_SENT}`,
   };
 }
 
 /** Without the vault's suffix or the servers, only generation 0 goes: the name every first deploy makes. */
-function unreadVerdict(generation: number): GenerationVerdict {
+function unreadVerdict(generation: number, part: GenerationAsked['part']): GenerationVerdict {
   if (generation === 0) {
     return {
       kind: 'go',
       server: undefined,
-      said: "The database server's generation is 0, its first name: the group's servers couldn't be read, as on a first deploy, so the deployment makes or settles that one.",
+      said: "The database server's generation is 0, its first name: the group's servers couldn't be read, as before a first foundation, which makes or settles that one.",
     };
   }
   return {
     kind: 'refused',
-    why: `database-generation.json names the database server's generation ${String(generation)}, but the key vault or the servers couldn't be read, so there's no telling that its server was restored: the deployment could make it new and empty and point the apps at it. ${NOTHING_SENT}`,
+    why: `database-generation.json names the database server's generation ${String(generation)}, but the key vault or the servers couldn't be read, so there's no telling that its server was restored: a foundation could make it new and empty and the apps would reach it. Restore it first if it isn't there (playbook L), then ${thenRun(part)} once Azure answers. ${NOTHING_SENT}`,
   };
 }
 

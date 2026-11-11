@@ -1094,7 +1094,7 @@ async function deployFoundation(steps: Steps, loadSize: boolean, alwaysOn: boole
       "GitHub's published addresses have changed, and an image pull would fail. Run node deploy/azure/github-ranges.ts, take the change, and redeploy from a merged commit.",
     );
   }
-  const disk = foundationServer(steps, subscription);
+  const disk = generationServer(steps, subscription, 'foundation');
   const email = await steps.terminal.ask('Address the alerts go to: ');
   if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
   steps.terminal.say(
@@ -1150,13 +1150,14 @@ function readOrNothing<T>(read: () => T): T | undefined {
 }
 
 /**
- * The database server the foundation names, checked before anything is asked or sent (AZ25, server-generation.ts): a
- * generation whose server isn't there is refused, since the deployment would make it new and empty and point the apps
- * at it. Then its disk as the server has it: autogrow changes it and the deployment can't know (S168 review), so
- * sending the first size would ask Azure to shrink it, which it refuses, and no foundation could run. A first deploy
- * has no server to read; a read that fails sends the least, and a grown disk is then refused by the deployment.
+ * The database server the hand deploys name, checked before anything is asked or sent (AZ25, server-generation.ts): a
+ * generation whose server isn't there is refused by foundation, secrets and apps alike, since a foundation would make
+ * it new and empty and the apps would reach it. Then its disk as the server has it, for the foundation: autogrow
+ * changes it and the deployment can't know (S168 review), so sending the first size would ask Azure to shrink it,
+ * which it refuses. A first deploy has no server to read; a read that fails gives the least, and a grown disk is then
+ * refused by the deployment.
  */
-function foundationServer(steps: Steps, subscription: string): number {
+function generationServer(steps: Steps, subscription: string, part: 'foundation' | 'secrets' | 'apps'): number {
   const vault = readOrNothing(() => vaultIn(steps, subscription));
   const listed = readOrNothing(() => {
     const servers = azJson(steps.az, [
@@ -1176,6 +1177,7 @@ function foundationServer(steps: Steps, subscription: string): number {
     generation: steps.generation ?? readGenerations().staging,
     suffix: vault === undefined ? undefined : suffixOfVault(vault, SHORT),
     servers: listed?.map(({ name }) => text(name)),
+    part,
   });
   if (verdict.kind === 'refused') throw new Error(verdict.why);
   steps.terminal.say(verdict.said);
@@ -1718,6 +1720,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   const commit = sentFrom(steps, 'secrets');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
+  generationServer(steps, subscription, 'secrets');
   const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
   if (plan.kind === 'all' && existing.length > 0) await confirmRotateEverything(steps, existing.length);
@@ -2094,6 +2097,7 @@ async function deployApps(
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
+  generationServer(steps, subscription, 'apps');
   if (loadRun) {
     confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
