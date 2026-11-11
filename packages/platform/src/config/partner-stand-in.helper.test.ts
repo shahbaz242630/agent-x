@@ -13,7 +13,8 @@ export const STAND_IN: PartnerDeclaration = { liveOrigins: [STAND_IN_LIVE], sand
 export function reachingStandIn(env: Env): Env {
   const allowed = env.AGENTX_OUTBOUND_ALLOWED_ORIGINS;
   // An empty allowlist is a test of that setting's own refusal: left for it to see.
-  if (env.AGENTX_PARTNER_MODE !== 'live' || allowed === '' || allowed?.split(',').includes(STAND_IN_LIVE)) return env;
+  if (env.AGENTX_PARTNER_MODE !== 'live' || allowed === '' || new Set(allowed?.split(',')).has(STAND_IN_LIVE))
+    return env;
   return {
     ...env,
     AGENTX_OUTBOUND_ALLOWED_ORIGINS: allowed === undefined ? STAND_IN_LIVE : `${allowed},${STAND_IN_LIVE}`,

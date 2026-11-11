@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events';
-import { createServer } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -912,14 +911,8 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     AGENTX_OUTBOUND_ALLOWED_ORIGINS: LIVE_ORIGIN,
   };
 
-  /** Production names its port: one free a moment ago. */
-  const live = async (): Promise<Record<string, string>> => {
-    const probe = createServer();
-    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
-    const address = probe.address();
-    await new Promise((resolve) => probe.close(resolve));
-    return { ...LIVE, AGENTX_HTTP_PORT: String(typeof address === 'object' && address !== null ? address.port : 0) };
-  };
+  /** Production names its port; `boot` never listens on it, so any number does (only the web side serves). */
+  const live = (): Record<string, string> => ({ ...LIVE, AGENTX_HTTP_PORT: '8080' });
 
   /**
    * Boots as every role does first (boot.ts): config, keys, the database and
@@ -929,7 +922,7 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
   async function bootLive(partner: CheckedDeclaration) {
     const host = new FakeProcess();
     const capture = new LogCapture();
-    const booted = await boot(host, { env: await live(), destination: capture, partner });
+    const booted = await boot(host, { env: live(), destination: capture, partner });
     await booted?.database.destroy();
     return { host, booted, capture };
   }
@@ -964,7 +957,7 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     await bootLive(PARTNER);
     expect(startedLive()).toBe(true);
     startRecord.written.length = 0;
-    const { host, server, capture } = await start(await live());
+    const { host, server, capture } = await start(live());
     expect(server).toBeUndefined();
     expect(host.exitCode).toBe(1);
     expect(startRecord.written).toEqual([]);
