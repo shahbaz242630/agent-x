@@ -10,7 +10,8 @@
 // statement) is confirmed with the console's own words instead (6B1).
 // It is modal for the keyboard too (WAI-ARIA's dialog pattern): focus starts
 // on Cancel, Tab and Shift+Tab go round its own controls only, focus that
-// leaves it some other way is brought back, Escape cancels, and on closing
+// leaves it some other way is brought back (to the pop-up itself while every
+// control is disabled, the change being sent), Escape cancels, and on closing
 // focus goes back to what was pressed to open it.
 import { useQuery } from '@tanstack/react-query';
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
@@ -50,7 +51,12 @@ function tabRound(event: KeyboardEvent<HTMLElement>): void {
   const inside = [...event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
   const first = inside[0];
   const last = inside.at(-1);
-  if (first === undefined || last === undefined) return;
+  if (first === undefined || last === undefined) {
+    // Every control disabled (the change being sent): focus stays on the pop-up itself.
+    event.preventDefault();
+    event.currentTarget.focus();
+    return;
+  }
   const from = event.shiftKey ? first : last;
   if (document.activeElement !== from && inside.includes(document.activeElement as HTMLElement)) return;
   event.preventDefault();
@@ -96,7 +102,10 @@ export function Confirm({
     cancel.current?.focus();
     // Focus that leaves the pop-up some other way than Tab (a click on the page behind it) comes back to Cancel.
     const keepIn = (event: FocusEvent) => {
-      if (event.target instanceof Node && dialog.current?.contains(event.target) === false) cancel.current?.focus();
+      if (!(event.target instanceof Node) || dialog.current?.contains(event.target) !== false) return;
+      // Cancel is disabled while the change is being sent: then the pop-up itself holds focus.
+      if (cancel.current?.disabled === false) cancel.current.focus();
+      else dialog.current.focus();
     };
     document.addEventListener('focusin', keepIn);
     return () => {
@@ -117,6 +126,7 @@ export function Confirm({
     <div className="veil">
       <section
         ref={dialog}
+        tabIndex={-1}
         className="dialog"
         role="dialog"
         aria-modal="true"

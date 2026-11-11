@@ -214,6 +214,19 @@ describe('the shared confirm', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
   });
 
+  it('keeps focus on itself while every control is disabled, the change being sent', async () => {
+    render(<button type="button">Behind</button>);
+    shown('mark_failed', true);
+    const dialog = screen.getByRole('dialog');
+
+    screen.getByRole('button', { name: 'Behind' }).focus();
+    expect(document.activeElement).toBe(dialog);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(dialog);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(dialog);
+  });
+
   it('gives focus back to what opened it once it closes', async () => {
     function Opener() {
       const [open, setOpen] = useState(false);
