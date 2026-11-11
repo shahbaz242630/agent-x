@@ -2,14 +2,15 @@
 // it must be GitHub's own and must still be current. These check the refresher
 // that keeps them so (github-ranges.ts) without touching the network: the live
 // answers are stand-ins, and the checked-in file is read as it is.
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   covers,
   type GithubRanges,
   type LiveRanges,
+  main,
   META,
-  rangeProblems,
+  rangeDrift,
   rangesText,
   readRanges,
   refreshed,
@@ -61,46 +62,133 @@ describe('covers', () => {
   });
 });
 
-describe('rangeProblems', () => {
+const KEPT = 'it stays allowed until the file is refreshed; refresh it at the next weekly read';
+const ADDED = '203.0.113.0/24';
+const REMOVED = '20.201.28.144/32';
+/** The stand-in file with one more registry prefix, which GitHub no longer lists. */
+const PINNED_EXTRA: GithubRanges = {
+  ...PINNED,
+  registry: { ...PINNED.registry, prefixes: ['192.0.2.0/24', REMOVED] },
+};
+
+describe('rangeDrift', () => {
   it('says nothing while the pinned ranges match what GitHub publishes and answers from', () => {
-    expect(rangeProblems(PINNED, LIVE)).toEqual([]);
+    expect(rangeDrift(PINNED, LIVE)).toEqual({ refusals: [], notes: [] });
   });
 
-  it('notices a field that has moved on, or gone', () => {
+  it('refuses on a range GitHub has added, which the file does not allow yet', () => {
     expect(
-      rangeProblems(
-        PINNED,
-        liveWith({ meta: { packages: ['192.0.2.0/24', '203.0.113.0/24'], web: ['198.51.100.0/24'] } }),
-      ),
-    ).toEqual(['registry: the "packages" field has changed; run with --write to take it']);
-    expect(rangeProblems(PINNED, liveWith({ meta: { web: ['198.51.100.0/24'] } }))).toEqual([
+      rangeDrift(PINNED, liveWith({ meta: { packages: ['192.0.2.0/24', ADDED], web: ['198.51.100.0/24'] } })),
+    ).toEqual({
+      refusals: [
+        `registry: GitHub now publishes ${ADDED} under "packages", which the file doesn't allow yet; run with --write to take it`,
+      ],
+      notes: [],
+    });
+  });
+
+  it('only notes a range GitHub stopped listing: it is still allowed, and breaks no pull', () => {
+    expect(rangeDrift(PINNED_EXTRA, LIVE)).toEqual({
+      refusals: [],
+      notes: [`registry: GitHub no longer lists ${REMOVED}; ${KEPT}`],
+    });
+  });
+
+  it('refuses when ranges were added and removed at once', () => {
+    const drift = rangeDrift(
+      PINNED_EXTRA,
+      liveWith({ meta: { packages: ['192.0.2.0/24', ADDED], web: ['198.51.100.0/24'] } }),
+    );
+    expect(drift.refusals).toHaveLength(1);
+    expect(drift.notes).toEqual([`registry: GitHub no longer lists ${REMOVED}; ${KEPT}`]);
+  });
+
+  it('refuses on a field that has gone', () => {
+    expect(rangeDrift(PINNED, liveWith({ meta: { web: ['198.51.100.0/24'] } })).refusals).toEqual([
       `registry: ${META} no longer publishes a "packages" field`,
     ]);
   });
 
-  it('notices a hand-pinned prefix GitHub no longer publishes anywhere', () => {
-    expect(rangeProblems(PINNED, liveWith({ meta: { packages: ['192.0.2.0/24'] } }))).toEqual([
-      `downloads: 198.51.100.0/24 is pinned by hand but ${META} no longer publishes it anywhere`,
-    ]);
+  it('only notes a hand-pinned prefix GitHub no longer publishes anywhere', () => {
+    expect(rangeDrift(PINNED, liveWith({ meta: { packages: ['192.0.2.0/24'] } }))).toEqual({
+      refusals: [],
+      notes: [
+        'downloads: GitHub no longer lists 198.51.100.0/24, pinned by hand; it stays allowed until it is taken out by hand',
+      ],
+    });
   });
 
-  it('notices a host that has moved out of its allowed prefixes, which is what breaks a pull', () => {
+  it('refuses on a host that has moved out of its allowed prefixes, which is what breaks a pull', () => {
     expect(
-      rangeProblems(
+      rangeDrift(
         PINNED,
         liveWith({ addresses: { 'registry.example': ['192.0.2.7', '203.0.113.4'], 'downloads.example': ['1.1.1.1'] } }),
-      ),
+      ).refusals,
     ).toEqual([
       'registry: registry.example answers from 203.0.113.4, which no allowed prefix covers',
       'downloads: downloads.example answers from 1.1.1.1, which no allowed prefix covers',
     ]);
   });
 
-  it('notices a host that resolves to nothing, rather than reading it as agreement', () => {
-    expect(rangeProblems(PINNED, liveWith({ addresses: { 'registry.example': [] } }))).toEqual([
+  it('refuses on a host that resolves to nothing, rather than reading it as agreement', () => {
+    expect(rangeDrift(PINNED, liveWith({ addresses: { 'registry.example': [] } })).refusals).toEqual([
       'registry: registry.example resolved to no address',
       'downloads: downloads.example resolved to no address',
     ]);
+  });
+});
+
+/**
+ * The command the foundation deploy runs, against the checked-in file and
+ * stand-in answers built from it: its exit code is the deploy's go or stop.
+ */
+describe('main', () => {
+  const pinned = readRanges();
+  const firstAddress = (prefixes: readonly string[]): string => prefixes[0]?.split('/')[0] ?? '';
+  /** GitHub's answer with the registry field as given, each host inside the file's first prefix. */
+  const answering =
+    (registry: readonly string[]): (() => Promise<LiveRanges>) =>
+    () =>
+      Promise.resolve({
+        meta: { packages: [...registry], web: [...pinned.downloads.prefixes] },
+        addresses: {
+          [pinned.registry.host]: [firstAddress(pinned.registry.prefixes)],
+          [pinned.downloads.host]: [firstAddress(pinned.downloads.prefixes)],
+        },
+      });
+  const withoutLast = pinned.registry.prefixes.slice(0, -1);
+  const last = pinned.registry.prefixes.at(-1) ?? '';
+  const said = (): string[] => vi.mocked(console.log).mock.calls.map(([line]) => String(line));
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('goes ahead with a plain note when GitHub only removed a range', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    expect(await main([], answering(withoutLast))).toBe(0);
+    expect(said()).toContain(`registry: GitHub no longer lists ${last}; ${KEPT}`);
+    expect(said().at(-1)).toMatch(/^Going ahead/);
+  });
+
+  it('refuses when GitHub added a range, alone or beside a removal', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    expect(await main([], answering([...pinned.registry.prefixes, ADDED]))).toBe(1);
+    expect(await main([], answering([...withoutLast, ADDED]))).toBe(1);
+  });
+
+  it('refuses, as it always has, when GitHub cannot be read', async () => {
+    await expect(main([], () => Promise.reject(new Error('meta answered 503')))).rejects.toThrow('503');
+  });
+
+  it('with --write, writes only when a prefix moved', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const save = vi.fn<(text: string) => void>();
+    expect(await main(['--write'], answering(pinned.registry.prefixes), save)).toBe(0);
+    expect(save).not.toHaveBeenCalled();
+    expect(await main(['--write'], answering(withoutLast), save)).toBe(0);
+    const written = JSON.parse(save.mock.calls[0]?.[0] ?? '{}') as GithubRanges;
+    expect(written.registry.prefixes).toEqual([...withoutLast].sort());
   });
 });
 
@@ -112,7 +200,7 @@ describe('refreshed', () => {
     expect(updated.downloads).toEqual(PINNED.downloads);
     expect(updated.refreshed).toBe('2026-10-01');
     // What it writes is what a second run reads back with nothing left to say.
-    expect(rangeProblems(updated, live)).toEqual([]);
+    expect(rangeDrift(updated, live)).toEqual({ refusals: [], notes: [] });
     expect(rangesText(updated).endsWith('}\n')).toBe(true);
   });
 });

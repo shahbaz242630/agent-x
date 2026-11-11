@@ -14,10 +14,16 @@
  * Proved against our own image before the rules were written (S18).
  *
  * **Refreshing:** `node deploy/azure/github-ranges.ts` fetches meta, resolves
- * both hosts and reports any drift (exit 1); `--write` updates the file. It is
- * on the weekly list and must be run before a deploy, because a stale range
- * breaks an image pull. It is never run in CI: it needs the network, and a
- * GitHub outage must not fail our build.
+ * both hosts and reports any drift; `--write` updates the file. Only drift that
+ * can break a pull refuses (exit 1): a range GitHub publishes that the file
+ * doesn't hold, a field gone, or a host answering from outside the file. A
+ * range GitHub merely stopped listing is printed as a note and passes (exit 0):
+ * keeping one more address allowed for a few days breaks nothing, and GitHub
+ * drops one every few days (S185). A meta or DNS read that fails still refuses.
+ * The foundation deploy runs it first; a daily workflow
+ * (github-ranges-refresh.yml) runs `--write` and pushes a
+ * `data/github-ranges-<day>` branch whenever the file would change. It is never
+ * run in CI: it needs the network, and a GitHub outage must not fail our build.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -107,43 +113,71 @@ export function covers(prefix: string, address: string): boolean {
 
 const sorted = (prefixes: readonly string[]): string[] => [...prefixes].sort();
 
-const same = (one: readonly string[], other: readonly string[]): boolean =>
-  sorted(one).join(' ') === sorted(other).join(' ');
-
 /** Every prefix meta publishes anywhere, so a hand-pinned group can be held to addresses GitHub owns. */
 const everyPublished = (meta: LiveRanges['meta']): ReadonlySet<string> =>
   new Set(Object.values(meta).flatMap((value) => prefixList(value) ?? []));
 
 /**
- * Why the pinned ranges no longer match GitHub, a line each, or nothing at all.
- * Three ways they can go wrong: a group copied from a meta field has fallen
- * behind it; a group pinned by hand names a prefix meta no longer publishes;
- * or a host now answers from an address no pinned prefix covers, which is the
- * one that breaks a pull.
+ * How the pinned ranges differ from GitHub, a line each. `refusals` can break a
+ * pull, so a deploy stops on any: a published field that now holds a prefix
+ * the file doesn't, or is gone; or a host answering from an address no pinned
+ * prefix covers. `notes` can't: a prefix GitHub stopped listing is still
+ * allowed, one address more than needed until the file is refreshed.
  */
-export function rangeProblems(pinned: GithubRanges, live: LiveRanges): string[] {
-  const problems: string[] = [];
-  const published = everyPublished(live.meta);
-  for (const [name, group] of groupsOf(pinned)) {
-    if (group.publishedUnder !== null) {
-      const current = prefixList(live.meta[group.publishedUnder]);
-      if (current === undefined) {
-        problems.push(`${name}: ${META} no longer publishes a "${group.publishedUnder}" field`);
-      } else if (!same(group.prefixes, current)) {
-        problems.push(`${name}: the "${group.publishedUnder}" field has changed; run with --write to take it`);
-      }
-    } else {
-      for (const prefix of group.prefixes.filter((prefix) => !published.has(prefix))) {
-        problems.push(`${name}: ${prefix} is pinned by hand but ${META} no longer publishes it anywhere`);
-      }
-    }
-    const addresses = live.addresses[group.host] ?? [];
-    if (addresses.length === 0) problems.push(`${name}: ${group.host} resolved to no address`);
-    for (const address of addresses.filter((address) => !group.prefixes.some((prefix) => covers(prefix, address)))) {
-      problems.push(`${name}: ${group.host} answers from ${address}, which no allowed prefix covers`);
-    }
+export interface RangeDrift {
+  readonly refusals: readonly string[];
+  readonly notes: readonly string[];
+}
+
+const KEPT = 'it stays allowed until the file is refreshed; refresh it at the next weekly read';
+
+/** How one group's prefixes differ from what meta publishes for them. */
+function listingDrift(name: string, group: RangeGroup, meta: LiveRanges['meta']): RangeDrift {
+  if (group.publishedUnder === null) {
+    const published = everyPublished(meta);
+    return {
+      refusals: [],
+      notes: group.prefixes
+        .filter((prefix) => !published.has(prefix))
+        .map(
+          (prefix) =>
+            `${name}: GitHub no longer lists ${prefix}, pinned by hand; it stays allowed until it is taken out by hand`,
+        ),
+    };
   }
-  return problems;
+  const field = group.publishedUnder;
+  const current = prefixList(meta[field]);
+  if (current === undefined)
+    return { refusals: [`${name}: ${META} no longer publishes a "${field}" field`], notes: [] };
+  return {
+    refusals: sorted(current.filter((prefix) => !group.prefixes.includes(prefix))).map(
+      (prefix) =>
+        `${name}: GitHub now publishes ${prefix} under "${field}", which the file doesn't allow yet; run with --write to take it`,
+    ),
+    notes: sorted(group.prefixes.filter((prefix) => !current.includes(prefix))).map(
+      (prefix) => `${name}: GitHub no longer lists ${prefix}; ${KEPT}`,
+    ),
+  };
+}
+
+/** Why a group's host can't be reached through its prefixes: no address, or one outside them all. */
+function addressRefusals(name: string, group: RangeGroup, live: LiveRanges): string[] {
+  const addresses = live.addresses[group.host] ?? [];
+  if (addresses.length === 0) return [`${name}: ${group.host} resolved to no address`];
+  return addresses
+    .filter((address) => !group.prefixes.some((prefix) => covers(prefix, address)))
+    .map((address) => `${name}: ${group.host} answers from ${address}, which no allowed prefix covers`);
+}
+
+export function rangeDrift(pinned: GithubRanges, live: LiveRanges): RangeDrift {
+  const refusals: string[] = [];
+  const notes: string[] = [];
+  for (const [name, group] of groupsOf(pinned)) {
+    const listing = listingDrift(name, group, live.meta);
+    refusals.push(...listing.refusals, ...addressRefusals(name, group, live));
+    notes.push(...listing.notes);
+  }
+  return { refusals, notes };
 }
 
 /** The pinned ranges brought up to date: every published group takes its meta field, and the day is today's. */
@@ -175,26 +209,47 @@ async function live(ranges: GithubRanges): Promise<LiveRanges> {
   return { meta, addresses };
 }
 
-async function main(argv: readonly string[]): Promise<number> {
+/** Whether two files hold different prefixes, whatever day each says it was checked. */
+const prefixesDiffer = (one: GithubRanges, other: GithubRanges): boolean =>
+  rangesText({ ...one, refreshed: '' }) !== rangesText({ ...other, refreshed: '' });
+
+/**
+ * Exit 0 when nothing can break a pull (notes alone pass), 1 when something
+ * can. A read of GitHub that fails rejects, which exits non-zero: the deploy
+ * refuses on it, as it always has. `--write` writes only when a prefix moves,
+ * so a day with nothing new leaves the file, and the daily branch, alone.
+ */
+export async function main(
+  argv: readonly string[],
+  readLive: (ranges: GithubRanges) => Promise<LiveRanges> = live,
+  save: (text: string) => void = (text) => {
+    writeFileSync(RANGES_FILE, text, 'utf8');
+  },
+): Promise<number> {
   const write = argv.includes('--write');
   const pinned = readRanges();
-  const current = await live(pinned);
-  const problems = rangeProblems(pinned, current);
-  if (problems.length === 0) {
+  const current = await readLive(pinned);
+  const { refusals, notes } = rangeDrift(pinned, current);
+  if (refusals.length === 0 && notes.length === 0) {
     console.log(`GitHub's ranges are unchanged since ${pinned.refreshed}; nothing to do.`);
     return 0;
   }
-  for (const problem of problems) console.log(problem);
+  for (const line of [...refusals, ...notes]) console.log(line);
   if (!write) {
-    console.log('Run with --write to take the published ranges, then read the change before committing it.');
-    return 1;
+    if (refusals.length > 0) {
+      console.log('Run with --write to take the published ranges, then read the change before committing it.');
+      return 1;
+    }
+    console.log('Going ahead: GitHub only stopped listing an address, and keeping it allowed breaks no pull.');
+    return 0;
   }
-  const today = new Date().toISOString().slice(0, 10);
-  const updated = refreshed(pinned, current, today);
-  writeFileSync(RANGES_FILE, rangesText(updated), 'utf8');
-  const left = rangeProblems(updated, current);
+  const updated = refreshed(pinned, current, new Date().toISOString().slice(0, 10));
+  if (prefixesDiffer(updated, pinned)) {
+    save(rangesText(updated));
+    console.log(`Wrote ${RANGES_FILE}. A changed range is a deployment change: redeploy before the next image pull.`);
+  }
+  const left = rangeDrift(updated, current).refusals;
   for (const problem of left) console.log(`still wrong after the update: ${problem}`);
-  console.log(`Wrote ${RANGES_FILE}. A changed range is a deployment change: redeploy before the next image pull.`);
   return left.length === 0 ? 0 : 1;
 }
 

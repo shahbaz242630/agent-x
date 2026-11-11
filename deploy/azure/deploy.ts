@@ -1178,7 +1178,7 @@ async function deployFoundation(
   confirmBicep(steps);
   if (!steps.rangesCurrent()) {
     throw new Error(
-      "GitHub's published addresses have changed, and an image pull would fail. Run node deploy/azure/github-ranges.ts, take the change, and redeploy from a merged commit.",
+      "GitHub's published addresses have changed: it publishes one the file doesn't allow yet, or couldn't be read, and an image pull could fail. Run node deploy/azure/github-ranges.ts --write (or take the waiting data/github-ranges-* branch), merge the change, and redeploy from the merged commit.",
     );
   }
   const { disk } = generationServer(steps, subscription, 'foundation', server);
@@ -2619,7 +2619,7 @@ function realMigrations(az: Az, say: (line: string) => void): Migrations {
   };
 }
 
-/** Whether GitHub's ranges match the pinned file, by running the refresher's own check. */
+/** Whether nothing GitHub publishes now could break a pull, by the refresher's own check (a removed range alone passes). */
 function rangesCurrent(): boolean {
   const done = spawnSync(process.execPath, [path.join(AZURE_DIR, 'github-ranges.ts')], {
     stdio: 'inherit',
