@@ -17,6 +17,7 @@ import type { FundingSourceReads, SourcePage, SourceShown } from './funding-sour
 import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 
 const LINK_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000d2';
@@ -201,7 +202,7 @@ const post = (path: string, payload: unknown = {}, key = 'k-1'): InjectOptions =
     'idempotency-key': key,
     'content-type': 'application/json',
   },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(`/v1/funding-sources/link-sessions${path}`, payload)),
 });
 
 /** A record whose events can't be checked now (Phase 3 A1b). */
@@ -338,7 +339,7 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
     const { app, calls } = await withLinks({});
 
     expect((await app.inject(post('/not-a-link/confirm'))).statusCode).toBe(400);
-    expect((await app.inject(post(`/${LINK_ID}/confirm`, { sourceId: SOURCE_ID }))).statusCode).toBe(400);
+    expect((await app.inject(post(`/${LINK_ID}/confirm`, { sourceId: 'x' }))).statusCode).toBe(400);
     expect(calls).toEqual([]);
   });
 });
@@ -498,7 +499,7 @@ const change = (path: string, payload: unknown = {}): InjectOptions => ({
     'idempotency-key': 'k-1',
     'content-type': 'application/json',
   },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(`/v1/funding-sources/${SOURCE_ID}/${path}`, payload)),
 });
 
 const CHALLENGE_ID = '0199a0f0-0000-7000-8000-0000000000c1';
@@ -535,7 +536,7 @@ describe('POST /v1/funding-sources/:id/suspend: the brake (D2-4b)', () => {
   it.each([
     ['no choice: there is no default', {}],
     ['a choice of its own', { pendingRequests: 'keep' }],
-    ['more than its choice', { pendingRequests: 'pause', status: 'SUSPENDED' }],
+    ['more than its choice', { pendingRequests: 'pause', more: 1 }],
   ])('refuses %s, before the use case runs', async (_what, body) => {
     const asked: Asked[] = [];
     const { app } = await withLinks({}, asked);

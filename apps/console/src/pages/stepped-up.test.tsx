@@ -97,6 +97,17 @@ describe('back from a step-up', () => {
     expect(await screen.findByText(/Agent X didn't make this change/)).toBeDefined();
   });
 
+  it('says a change refused for words changed since they were read, and to ask again to read them (CO3)', async () => {
+    confirmAnswer = () => json(409, { error: { code: 'STATEMENT_CHANGED' } });
+    backFromStepUp();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+
+    expect(await screen.findByText(/The words you confirmed it with have changed/)).toBeDefined();
+    expect(screen.getByText(/Ask for it again to read them as they are now/)).toBeDefined();
+    expect(sessionStorage).toHaveLength(0);
+  });
+
   it('says a failure on the way, and the change can be confirmed again', async () => {
     confirmAnswer = () => json(503, { error: { code: 'UNAVAILABLE' } });
     backFromStepUp();

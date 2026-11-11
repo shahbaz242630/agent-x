@@ -275,7 +275,7 @@ function Actions({ request }: { readonly request: RequestDetails }) {
           names={names}
           busy={busy}
           onCancel={close}
-          onConfirm={(label) => void run(() => Promise.resolve(open.stepUp(label)))}
+          onConfirm={(label, confirmed) => void run(() => Promise.resolve(open.stepUp(label, confirmed)))}
         />
       )}
       {open.kind === 'reject' && (
@@ -323,7 +323,8 @@ function WeighedConfirm({
   readonly names: Readonly<Record<'amount' | 'supplier', string>>;
   readonly busy: boolean;
   readonly onCancel: () => void;
-  readonly onConfirm: (label: string) => void;
+  /** With the label kept, and what the confirm sends back: the version of the API's words shown, if any (CO3). */
+  readonly onConfirm: (label: string, confirmed: Readonly<Record<string, unknown>>) => void;
 }) {
   const rejects = open.answer.rejection !== null;
   const label = t(rejects ? 'request.rejectInsteadLabel' : 'request.approveLabel', names);
@@ -332,8 +333,8 @@ function WeighedConfirm({
     confirmLabel: t(rejects ? 'request.cannotApproveConfirm' : 'request.recheckConfirm'),
     busy,
     onCancel,
-    onConfirm: () => {
-      onConfirm(label);
+    onConfirm: (_choice: string, statementVersion?: number) => {
+      onConfirm(label, statementVersion === undefined ? {} : { statementVersion });
     },
   };
   const body = (

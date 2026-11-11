@@ -84,7 +84,16 @@ export const shardsDoneFile = (keys: KeyProvider, made: Made): { readonly name: 
   recordFile('done', keys, made);
 
 /** Why a file under the folder is no marker: not one of the form, another epoch's or layout's, or not signed for it. */
-export type CutoverProblem = 'file' | 'epoch' | 'layout' | 'signature';
+type CutoverProblem = 'file' | 'epoch' | 'layout' | 'signature';
+
+/** What a record read says: signed for its name, with when; or why it is none. */
+export type RecordRead = { readonly marker: true; readonly at: Date } | { readonly problem: CutoverProblem };
+
+interface Named {
+  readonly bytes: Buffer;
+  readonly name: string;
+  readonly epoch: number;
+}
 
 /** What a record read says: signed for its name, with when; or why it is none. */
 export type RecordRead = { readonly marker: true; readonly at: Date } | { readonly problem: CutoverProblem };

@@ -33,6 +33,7 @@ import {
   UNFREEZING_ROLES,
 } from './organization-changes.ts';
 import { CHALLENGE_BODY_LIMIT, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
+import { confirmedWith, statementVersion } from './statements.ts';
 import { FREEZE_BODY, UNFREEZE_PENDING_REQUESTS } from './suspensions.ts';
 
 /** The most a freeze's body may be: a choice and a confirmation, with room to spare. */
@@ -69,7 +70,7 @@ const REASON = z
 
 const FREEZE_SCHEMA = {
   summary: 'Freeze your organisation: the brake, at once and with no step-up, its pending requests cancelled or held',
-  body: FREEZE_BODY,
+  body: FREEZE_BODY.extend({ statementVersion: statementVersion('freeze') }),
   response: { 200: CHANGED },
 };
 
@@ -89,8 +90,13 @@ const UNFREEZE_SCHEMA = {
 const UNFREEZE_CONFIRM_SCHEMA = {
   summary: 'Unfreeze your organisation, once signed in again for it',
   body: z
-    .strictObject({ reason: REASON, pendingRequests: UNFREEZE_PENDING_REQUESTS, stepUpChallengeId: STEP_UP_SIGNED_IN })
-    .describe('The same reason and choice as asked with, and the step-up signed in again for.'),
+    .strictObject({
+      reason: REASON,
+      pendingRequests: UNFREEZE_PENDING_REQUESTS,
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
+      statementVersion: statementVersion('unfreeze'),
+    })
+    .describe('The same reason and choice as asked with, the step-up signed in again for, and the words’ version.'),
   response: { 200: CHANGED },
 };
 
@@ -117,7 +123,7 @@ export function registerOrganization(app: FastifyInstance, { changes }: { change
     {
       schema: FREEZE_SCHEMA,
       bodyLimit: FREEZE_BODY_LIMIT,
-      config: { access: [...FREEZING_ROLES], operation: FREEZE_OPERATION },
+      config: { access: [...FREEZING_ROLES], operation: FREEZE_OPERATION, statements: confirmedWith('freeze') },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -155,7 +161,11 @@ export function registerOrganization(app: FastifyInstance, { changes }: { change
     {
       schema: UNFREEZE_CONFIRM_SCHEMA,
       bodyLimit: UNFREEZE_BODY_LIMIT + CHALLENGE_BODY_LIMIT,
-      config: { access: [...UNFREEZING_ROLES], operation: UNFREEZE_CONFIRM_OPERATION },
+      config: {
+        access: [...UNFREEZING_ROLES],
+        operation: UNFREEZE_CONFIRM_OPERATION,
+        statements: confirmedWith('unfreeze'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);

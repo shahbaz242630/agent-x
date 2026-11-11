@@ -364,6 +364,10 @@ describe('one request’s page (6B1)', () => {
       expect(goTo).toHaveBeenCalledWith(expect.stringContaining(`challenge=${CHALLENGE}`));
     });
     expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).toContain('Approve AED 2,500.00');
+    // Its confirm sends back the version of the re-check's words shown (CO3).
+    expect(JSON.parse(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`) ?? 'null')).toMatchObject({
+      body: { recheck: true, statementVersion: 1 },
+    });
   });
 
   it('says an approve its rules now stop would reject it, with each rule, and keeps it as a reject', async () => {
@@ -384,6 +388,8 @@ describe('one request’s page (6B1)', () => {
     });
     const kept: unknown = JSON.parse(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`) ?? 'null');
     expect(kept).toMatchObject({ label: 'Reject AED 2,500.00 to Gulf Office Supplies LLC, as your rules now stop it' });
+    // The console's own words: no version of the API's to send back.
+    expect(kept).toHaveProperty('body', {});
   });
 
   it('keeps nothing when the person backs out of an approve answer', async () => {

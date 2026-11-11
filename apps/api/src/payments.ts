@@ -24,6 +24,7 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { confirmedWith, statementVersion } from './statements.ts';
 import {
   APPROVE_CONFIRM_OPERATION,
   APPROVE_OPERATION,
@@ -66,6 +67,9 @@ const EVIDENCE = z
 
 const CONFIRMED = z.literal(MARK_FAILED_CONFIRMED).describe(`What you confirm: ${MARK_FAILED_STATEMENT}`);
 
+/** The version of the words a confirm was shown (CO3), sent back with the step-up. */
+const MARK_WORDS = statementVersion('mark_failed');
+
 const PROPOSAL = z
   .object({
     id: z.uuid().describe('The proposal.'),
@@ -105,8 +109,15 @@ const PROPOSE_CONFIRM_SCHEMA = {
   summary: 'Propose marking a payment failed, once signed in again for it: a second admin must confirm it',
   params: PAYMENT_ID,
   body: z
-    .strictObject({ evidenceRef: EVIDENCE, confirmed: CONFIRMED, stepUpChallengeId: STEP_UP_SIGNED_IN })
-    .describe('The same reference and confirmation as the ask, and the step-up signed in again for.'),
+    .strictObject({
+      evidenceRef: EVIDENCE,
+      confirmed: CONFIRMED,
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
+      statementVersion: MARK_WORDS,
+    })
+    .describe(
+      'The same reference and confirmation as the ask, the step-up signed in again for, and the words’ version.',
+    ),
   response: { 201: PROPOSAL.describe('The proposal, OPEN; the payment stays as it was.') },
 };
 
@@ -127,8 +138,8 @@ const APPROVE_CONFIRM_SCHEMA = {
   summary: 'Mark a payment failed, confirming another admin’s proposal, once signed in again for it',
   params: PAYMENT_ID,
   body: z
-    .strictObject({ confirmed: CONFIRMED, stepUpChallengeId: STEP_UP_SIGNED_IN })
-    .describe('The same confirmation as the ask, and the step-up signed in again for.'),
+    .strictObject({ confirmed: CONFIRMED, stepUpChallengeId: STEP_UP_SIGNED_IN, statementVersion: MARK_WORDS })
+    .describe('The same confirmation as the ask, the step-up signed in again for, and the words’ version.'),
   response: {
     200: z
       .object({
@@ -180,7 +191,7 @@ export function registerPayments(app: FastifyInstance, { marks }: { marks: Payme
     {
       schema: PROPOSE_CONFIRM_SCHEMA,
       bodyLimit: MARK_BODY_LIMIT,
-      config: { access, operation: PROPOSE_CONFIRM_OPERATION },
+      config: { access, operation: PROPOSE_CONFIRM_OPERATION, statements: confirmedWith('mark_failed') },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -218,7 +229,7 @@ export function registerPayments(app: FastifyInstance, { marks }: { marks: Payme
     {
       schema: APPROVE_CONFIRM_SCHEMA,
       bodyLimit: MARK_BODY_LIMIT,
-      config: { access, operation: APPROVE_CONFIRM_OPERATION },
+      config: { access, operation: APPROVE_CONFIRM_OPERATION, statements: confirmedWith('mark_failed') },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
