@@ -10,7 +10,8 @@ export {
   signPass,
   signProgress,
 } from './anchor.ts';
-export { type AnchorLog, createAnchorLog } from './anchor-log.ts';
+export { type AnchorLog, createAnchorLog, type LastKnown } from './anchor-log.ts';
+export { shardOf } from './shards.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';
 export { OPERATOR_ID, operatorSignature, sealedSigned } from './operator-signature.ts';
 export {

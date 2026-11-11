@@ -55,6 +55,7 @@ import {
   type AnchorStore,
   type Chain,
   CHAIN_START,
+  type LastKnown,
   type ChainProblem,
   type ChainReport,
   type ChainStep,
@@ -62,6 +63,7 @@ import {
   OLD_EDIT_DAYS,
   type PassRecord,
   type Progress,
+  shardOf,
   signPass,
   signProgress,
 } from '@agentx/platform/audit-chain';
@@ -237,6 +239,8 @@ export interface RotationOptions {
   readonly shards?: {
     holds(chain: Chain): boolean;
     pin(chain: Chain): Promise<(() => void) | undefined>;
+    /** What is last known of a chain, held or let go, with no read: what the share, the order and lateness go by. */
+    lastKnown(chain: Chain): LastKnown | undefined;
   };
 }
 
@@ -281,6 +285,9 @@ const FAILED = Symbol('failed');
 
 const chainOf = (orgId: string) => ({ kind: 'organisation', orgId }) as const;
 
+/** An organisation's chain's shard in the anchors' store (PL-65). */
+const shardOfOrg = (orgId: string): number => shardOf(`organisation:${orgId}`);
+
 export function createRotation({
   checks,
   anchors,
@@ -317,26 +324,19 @@ export function createRotation({
   // A share cut short by time, still owed: read on top of the next run's.
   let carried = 0n;
 
-  // Each organisation's anchored place and last pass as last read with its shard held (PR3): what a chain whose shard is
-  // let go counts as, for the pass's share and its lateness, never as never anchored.
-  const known = new Map<string, { readonly seq: bigint | undefined; readonly passAt: number | undefined }>();
-
-  /** What is known of a chain: as held now, or as last known if its shard is let go (`held` false). */
+  /**
+   * What is known of a chain, never reading a shard back for it (PR3): held, as held now; let go (`held` false), as the
+   * log last knew it. Its anchored place, when its last pass began, and since when it has gone unpassed.
+   */
   const knownOf = (orgId: string) => {
     const chain = chainOf(orgId);
-    if (shards?.holds(chain) === false) return { held: false, ...known.get(orgId) };
-    const seq = anchors.latest(chain)?.seq;
-    const passAt = (passes.lastPass(chain)?.at ?? passes.lastProgress(chain)?.at)?.getTime();
-    known.set(orgId, { seq, passAt });
-    return { held: true, seq, passAt };
-  };
-
-  /** A chain's anchored place for the pass's share: one let go before it was ever seen read again once, to know it. */
-  const seqOf = async (orgId: string): Promise<bigint> => {
-    const now = knownOf(orgId);
-    if (now.held || known.has(orgId)) return now.seq ?? 0n;
-    await pinned(orgId, () => Promise.resolve());
-    return known.get(orgId)?.seq ?? 0n;
+    if (shards?.holds(chain) === false) {
+      const known = shards.lastKnown(chain);
+      return { held: false, seq: known?.seq, passedAt: known?.passedAt, passAt: known?.passedAt ?? known?.placeAt };
+    }
+    const passedAt = passes.lastPass(chain)?.at.getTime();
+    const passAt = passedAt ?? passes.lastProgress(chain)?.at.getTime();
+    return { held: true, seq: anchors.latest(chain)?.seq, passedAt, passAt };
   };
 
   /** `work` with the chain's shard pinned, read again first if it was let go; MISSED if it can't be (said by the log). */
@@ -347,7 +347,6 @@ export function createRotation({
     try {
       return await work();
     } finally {
-      knownOf(orgId);
       release();
     }
   };
@@ -426,7 +425,11 @@ export function createRotation({
 
   /** The days waiting, oldest first, until the run ends. One whose read fails goes to the back, where it was, and the rest go on. */
   const takeDays = async (listed: ReadonlySet<string>, signal: AbortSignal): Promise<void> => {
-    for (const day of [...days.values()]) {
+    // Where shards are let go, in shard order, so each is read back once a run however many days fall in it.
+    const queue = [...days.values()];
+    const ordered =
+      shards === undefined ? queue : queue.toSorted((one, other) => shardOfOrg(one.orgId) - shardOfOrg(other.orgId));
+    for (const day of ordered) {
       if (signal.aborted) return;
       // Gone from the list (its own alarm).
       if (!listed.has(day.orgId)) {
@@ -449,7 +452,8 @@ export function createRotation({
   /** The listed, the chains passed longest ago first, those never passed before all. */
   const oldestFirst = (listed: readonly string[]): readonly string[] =>
     listed
-      .map((orgId) => ({ orgId, at: passes.lastPass(chainOf(orgId))?.at.getTime() ?? 0 }))
+      // A chain whose shard is let go by its last pass known: one passed lately doesn't jump the queue to be read back.
+      .map((orgId) => ({ orgId, at: knownOf(orgId).passedAt ?? 0 }))
       .sort((one, other) => one.at - other.at)
       .map(({ orgId }) => orgId);
 
@@ -566,15 +570,25 @@ export function createRotation({
   };
 
   /** Every listed chain anchored and never owed a pass yet: owed one from now, in the store, so no restart moves it. */
-  const markOwed = async (listed: readonly string[]): Promise<void> => {
+  const markOwed = async (listed: readonly string[], signal: AbortSignal): Promise<void> => {
     const now = clock.now().getTime();
-    for (const orgId of listed) {
+    const owed = (orgId: string): void => {
       const chain = chainOf(orgId);
-      // Known passed already, its shard let go: nothing to mark, and nothing read again for it.
-      if (shards?.holds(chain) === false && known.get(orgId)?.passAt !== undefined) continue;
+      if (anchors.latest(chain) === undefined || passes.lastPass(chain) !== undefined) return;
+      if (passes.lastProgress(chain) === undefined) passes.keepProgress(placeLine(orgId, CHAIN_START, now, now));
+    };
+    // Those whose shard is let go, anchored and with no pass or place known: read back for it, each shard once.
+    const away: string[] = [];
+    for (const orgId of listed) {
+      const known = knownOf(orgId);
+      if (known.held) owed(orgId);
+      else if (known.seq !== undefined && known.passAt === undefined) away.push(orgId);
+    }
+    const byShard = away.toSorted((one, other) => shardOfOrg(one) - shardOfOrg(other));
+    for (const orgId of byShard) {
+      if (signal.aborted) return;
       await pinned(orgId, () => {
-        if (anchors.latest(chain) === undefined || passes.lastPass(chain) !== undefined) return Promise.resolve();
-        if (passes.lastProgress(chain) === undefined) passes.keepProgress(placeLine(orgId, CHAIN_START, now, now));
+        owed(orgId);
         return Promise.resolve();
       });
     }
@@ -629,9 +643,8 @@ export function createRotation({
     signal: AbortSignal,
     stopping: AbortSignal | undefined,
   ) => {
-    // A chain whose shard is let go counts at its last known place: the share doesn't shrink as shards go.
-    let total = 0n;
-    for (const orgId of listed) total += await seqOf(orgId);
+    // A chain whose shard is let go counts at its last known place, nothing read back: the share doesn't shrink as shards go.
+    const total = listed.reduce((sum, orgId) => sum + (knownOf(orgId).seq ?? 0n), 0n);
     const at = clock.now().getTime();
     // A round's worth at most, carried part and all: past that a whole round is being asked for in one run anyway.
     const budget = smallest(passBudget(total, at - (lastPassAt ?? at)) + carried, total);
@@ -710,7 +723,7 @@ export function createRotation({
         await takeDays(listedNow, signal);
         const daysMs = Math.round(performance.now() - began);
         const { budget, slicesMs } = await takePass(listed, listedNow, signal, stopping);
-        await markOwed(listed);
+        await markOwed(listed, signal);
         sayLate(listed);
         logger.info('audit.anchor_rotation_done', {
           due,

@@ -34,7 +34,7 @@ const CHAINS: readonly Chain[] = [
   })),
 ];
 /** Every organisation seen, and about six shards' lines: a few of the fifty-odd the chains fall in. */
-const TIGHT_BYTES = Math.ceil((60 * 100 + 6 * 700) / 0.8);
+const TIGHT_BYTES = Math.ceil((60 * 160 + 3 * 700) / 0.8);
 
 /** A small, seeded random source, so a failing seed can be run again. */
 function randomFrom(seed: number) {

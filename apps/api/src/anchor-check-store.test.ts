@@ -999,7 +999,7 @@ describe('the anchor check over shards let go (PL-65 PR3)', () => {
 
   /** A process that lets shards go, at a budget holding a few of the forty organisations' shards. */
   const tight = (fake: FakeWriteOnceStore, chains: OrganisationChains, at: Date) =>
-    process(fake, chains, [], keys, 1, { at, evicts: true, mostFileBytes: 8_000 });
+    process(fake, chains, [], keys, 1, { at, evicts: true, mostFileBytes: 11_000 });
 
   it('a chain wound back in a shard let go: its shard read again and compared, the alarm, never anchored afresh', async () => {
     const { fake, chains, at } = await shardedStore();
@@ -1024,7 +1024,7 @@ describe('the anchor check over shards let go (PL-65 PR3)', () => {
     expect(after.lines('audit.anchor_shards_evicted').length).toBeGreaterThan(0);
     for (const orgId of ORGS) expect(chains.given[orgId]?.slice(given[orgId])).toEqual([3n]);
     expect(after.lines('audit.integrity_failed')).toEqual([]);
-    expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(8_000);
+    expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(11_000);
   });
 
   it('a shard that can’t be read again: nothing compared, nothing anchored, and Tx A still waits', async () => {

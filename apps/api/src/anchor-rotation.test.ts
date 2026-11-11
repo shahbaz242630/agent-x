@@ -6,17 +6,20 @@ import {
   type ChainStep,
   type CheckedPoint,
   createMemoryAnchorStore,
+  type AnchorLog,
   type AnchorStore,
   type Chain,
+  createAnchorLog,
   createMemoryPassRecord,
   type PassRecord,
   type Progress,
+  shardOf,
   signAnchor,
   signPass,
   signProgress,
 } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
+import { createFakeWriteOnceStore, FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -114,6 +117,8 @@ interface Rotating {
   readonly after?: { readonly anchors: AnchorStore; readonly passes: PassRecord };
   /** A log that lets shards go (PL-65 PR3), as `lettingGo` makes one. */
   readonly shards?: ReturnType<typeof lettingGo>;
+  /** A real anchors' log, its anchors, passes and shards all, at this clock. */
+  readonly over?: { readonly log: AnchorLog; readonly clock: FixedClock };
 }
 
 /**
@@ -146,6 +151,7 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
     away,
     unreadable,
     refused,
+    pins,
     letGo,
     /** What the log holds, let go or not. */
     inner: { anchors, passes },
@@ -168,6 +174,12 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
     } satisfies PassRecord,
     shards: {
       holds: here,
+      // What the log last knew of it, with no read: here, what it holds.
+      lastKnown: (chain: Chain) => ({
+        seq: anchors.latest(chain)?.seq,
+        passedAt: passes.lastPass(chain)?.at.getTime(),
+        placeAt: passes.lastProgress(chain)?.at.getTime(),
+      }),
       pin: (chain: Chain): Promise<(() => void) | undefined> => {
         const orgId = idOf(chain);
         if (unreadable.has(orgId)) return Promise.resolve(undefined);
@@ -187,9 +199,10 @@ function lettingGo({ sticky = false }: { sticky?: boolean } = {}) {
 
 function rotating(more: Rotating = {}) {
   const capture = new LogCapture();
-  const clock = new FixedClock(more.started ?? AT);
-  const anchors = more.shards?.anchors ?? more.after?.anchors ?? createMemoryAnchorStore();
-  const passes = more.shards?.passes ?? more.after?.passes ?? createMemoryPassRecord();
+  const clock = more.over?.clock ?? new FixedClock(more.started ?? AT);
+  const anchors = more.over?.log ?? more.shards?.anchors ?? more.after?.anchors ?? createMemoryAnchorStore();
+  const passes = more.over?.log ?? more.shards?.passes ?? more.after?.passes ?? createMemoryPassRecord();
+  const shards = more.over?.log ?? more.shards?.shards;
   const { checks, calls, answer } = fakeChecks();
   const failed: [string, RotationCheck, ChainProblem][] = [];
   const missed: [string, RotationCheck, unknown][] = [];
@@ -214,15 +227,18 @@ function rotating(more: Rotating = {}) {
       missed.push([orgId, check, error]);
       return Promise.resolve();
     },
-    ...(more.shards === undefined ? {} : { shards: more.shards.shards }),
+    ...(shards === undefined ? {} : { shards }),
   });
   const anchor = (orgId: string, seq: bigint, at = clock.now()): Anchor => {
     const signed = signAnchor(keys, chainOf(orgId), point(seq), at);
     (more.shards?.inner.anchors ?? anchors).keep(signed);
     return signed;
   };
-  const run = (listed: readonly string[], signal = new AbortController().signal, stopping?: AbortSignal) =>
-    rotation.run(listed, signal, stopping);
+  const run = async (listed: readonly string[], signal = new AbortController().signal, stopping?: AbortSignal) => {
+    await rotation.run(listed, signal, stopping);
+    // Every shard a run pinned, released by its end.
+    if (more.shards !== undefined) expect([...more.shards.pins.values()].filter((count) => count !== 0)).toEqual([]);
+  };
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
   return { rotation, run, clock, anchors, passes, calls, answer, failed, missed, anchor, lines, capture };
 }
@@ -1300,6 +1316,20 @@ describe('over a log that lets shards go (PL-65 PR3): each step pins its chainâ€
     ]);
   });
 
+  it('the passâ€™s order goes by the last pass known: a chain let go, passed lately, is not taken for one never passed', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards, epoch: 1 });
+    const [lately, longAgo] = [orgInSlot(1), orgInSlot(2)];
+    for (const orgId of [lately, longAgo]) made.anchor(orgId, 864n * 10_000n);
+    shards.inner.passes.keepPass(signPass(keys, chainOf(lately), point(1n), new Date(AT.getTime() - 3_600_000)));
+    shards.inner.passes.keepPass(signPass(keys, chainOf(longAgo), point(1n), new Date(AT.getTime() - 5 * DAY)));
+    shards.letGo(lately);
+    shards.letGo(longAgo);
+    await made.run([lately, longAgo]);
+    expect(made.calls.filter((call) => call.check === 'pass').map((call) => call.orgId)[0]).toBe(longAgo);
+    expect(made.calls.some((call) => call.orgId === lately)).toBe(false);
+  });
+
   it('a chain let go and never read again in this process: unchecked, so late once the 7 days pass', async () => {
     const shards = lettingGo();
     const made = rotating({ shards, started: new Date(AT.getTime() - PASS_LATE_MS) });
@@ -1342,5 +1372,93 @@ describe('over a log that lets shards go (PL-65 PR3): each step pins its chainâ€
     await made.run([orgId]);
     expect(shards.refused).toEqual([]);
     expect(shards.inner.passes.lastProgress(chainOf(orgId))?.seq).toBe(0n);
+  });
+
+  it('owed marks for chains let go are read back in shard order, and stop with the run', async () => {
+    const shards = lettingGo({ sticky: true });
+    const pinned: string[] = [];
+    const stopping = new AbortController();
+    const pin = shards.shards.pin;
+    shards.shards.pin = (chain) => {
+      pinned.push(chain.kind === 'organisation' ? chain.orgId : 'platform');
+      return pin(chain);
+    };
+    const made = rotating({ shards });
+    // Empty chains, never passed or owed: no share and no day due, only their owed marks to make.
+    const orgs = [orgInSlot(1), orgInSlot(2), orgInSlot(3), orgInSlot(4), orgInSlot(5)];
+    for (const orgId of orgs) {
+      made.anchor(orgId, 0n);
+      shards.letGo(orgId);
+    }
+    const byShard = orgs.toSorted((one, other) => shardOf(`organisation:${one}`) - shardOf(`organisation:${other}`));
+    await made.run(orgs);
+    expect(pinned).toEqual(byShard);
+    for (const orgId of orgs) expect(shards.inner.passes.lastProgress(chainOf(orgId))?.seq).toBe(0n);
+
+    // Stopped as the first is read back: no more read back.
+    const again = lettingGo({ sticky: true });
+    const more = rotating({ shards: again });
+    const first: string[] = [];
+    const pinAgain = again.shards.pin;
+    again.shards.pin = (chain) => {
+      first.push(chain.kind === 'organisation' ? chain.orgId : 'platform');
+      stopping.abort();
+      return pinAgain(chain);
+    };
+    for (const orgId of orgs) {
+      more.anchor(orgId, 0n);
+      again.letGo(orgId);
+    }
+    await more.run(orgs, stopping.signal);
+    expect(first).toHaveLength(1);
+  });
+
+  it('a restart over a store past the budget: the first run reads no shard back to size its share, each at most once', async () => {
+    const fake = createFakeWriteOnceStore();
+    const logs = new LogCapture();
+    const clock = new FixedClock(new Date(AT.getTime() - 2 * 3_600_000));
+    const logOf = (more: { cutOver?: boolean; evicts?: boolean; mostFileBytes?: number }) =>
+      createAnchorLog({
+        store: fake.store,
+        keys,
+        logger: testLogger(logs),
+        now: () => clock.now(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        ...more,
+      });
+    // The last process: 600 organisations anchored and passed, the store moved on to its shards and the move done.
+    const orgs = Array.from({ length: 600 }, (_, index) => `${ORG_PREFIX}${String(index).padStart(12, '0')}`);
+    const writer = logOf({ cutOver: true });
+    await writer.read();
+    for (const orgId of orgs) {
+      writer.keep(signAnchor(keys, chainOf(orgId), point(50n), clock.now(), 1));
+      writer.keepPass(signPass(keys, chainOf(orgId), point(50n), clock.now(), 1));
+    }
+    await writer.flush();
+    clock.advanceBy(61 * 60_000);
+    await writer.read();
+    await writer.flush();
+    expect(fake.files.has('e1/shards/done-shards-v1')).toBe(true);
+    clock.advanceBy(59 * 60_000);
+    // A restart with room for every organisation seen and a few dozen shards.
+    const log = logOf({ evicts: true, mostFileBytes: Math.ceil((orgs.length * 160 + 40 * 700) / 0.8) });
+    await log.read();
+    expect(log.state()).toBe('read');
+    const away = orgs.filter((orgId) => !log.holds(chainOf(orgId)));
+    expect(away.length).toBeGreaterThan(300);
+    const loaded = () => logs.lines().filter((line) => line.event === 'audit.anchor_shard_loaded');
+    expect(loaded()).toEqual([]);
+
+    const made = rotating({ over: { log, clock }, epoch: 1 });
+    await made.run(orgs);
+    // Its days (those due in the hour looked back over) and its few pass steps read back, nothing for the share.
+    const shardsLoaded = loaded().map((line) => line.shard);
+    expect(new Set(shardsLoaded).size).toBe(shardsLoaded.length);
+    expect(shardsLoaded.length).toBeLessThan(away.length / 4);
+    expect(made.lines('audit.anchor_rotation_done')).toHaveLength(1);
+    expect(BigInt(String(made.lines('audit.anchor_rotation_done')[0]?.budget))).toBeGreaterThan(0n);
+    expect(made.missed).toEqual([]);
+    expect(logs.lines().filter((line) => line.event === 'audit.anchor_shards_churning')).toEqual([]);
   });
 });

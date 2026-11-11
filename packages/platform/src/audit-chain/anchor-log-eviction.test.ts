@@ -139,7 +139,7 @@ async function world(chains: readonly Chain[] = CHAINS) {
 const tight = (made: Made, shards = 8, holding = keys): AnchorLog =>
   logOf(made, { evicts: true, mostFileBytes: budgetFor(shards), holding });
 
-/** Each organisation seen counts 100, each chain held 340, each name read 160: `shards` of these, with room to spare. */
+/** Each organisation seen counts 100 here (160 in the log, the rest of its room), each chain held 340, each name read 160: `shards` of these, with room to spare. */
 const budgetFor = (shards: number): number => Math.ceil((CHAINS.length * 100 + (shards + 1) * 500) / 0.8);
 
 const held = (log: AnchorLog, chains: readonly Chain[] = CHAINS): Chain[] => chains.filter((chain) => log.holds(chain));
@@ -218,7 +218,7 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
 
     it('the platform chain’s shard is never let go', async () => {
       const made = await world();
-      const log = tight(made, 1);
+      const log = tight(made, 3);
       await log.read();
       for (const chain of CHAINS) (await log.pin(chain))?.();
       expect(log.holds(PLATFORM)).toBe(true);
@@ -726,6 +726,33 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
     });
   });
 
+  describe('what is last known, with no read', () => {
+    it('of a chain held, of one let go (its place, its pass and its place reached kept), and of one never seen', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      const [chain = PLATFORM] = held(log);
+      const point = { seq: 6n, hash: Buffer.alloc(32, 6), macKeyVersion: 2 };
+      const passedAt = new Date(made.clock.at.getTime() - MINUTE);
+      log.keepPass(signPass(keys, chain, point, passedAt, 1));
+      log.keepProgress(signProgress(keys, chain, point, { at: made.clock.at, began: made.clock.at }, 1));
+      expect(log.lastKnown(chain)).toEqual({ seq: 6n, passedAt: passedAt.getTime(), placeAt: made.clock.at.getTime() });
+      await log.flush();
+      const lists = made.fake.calls.lists;
+      await evicted(log, chain);
+      const gets = made.fake.calls.smallGets;
+      expect(log.lastKnown(chain)).toEqual({ seq: 6n, passedAt: passedAt.getTime(), placeAt: made.clock.at.getTime() });
+      // Said with no call to the store.
+      expect(made.fake.calls.smallGets).toBe(gets);
+      expect(made.fake.calls.lists).toBeGreaterThan(lists);
+      expect(log.holds(chain)).toBe(false);
+      // Let go at the first read, never held since: what that read saw of it.
+      const away = letGo(log).find((one) => one !== chain) ?? PLATFORM;
+      expect(log.lastKnown(away)?.seq).toBe(6n);
+      expect(log.lastKnown(organisation(999_999))).toBeUndefined();
+    });
+  });
+
   describe('said, in a log that lets shards go', () => {
     it('past half the budget is how it runs: never the near-memory error a log holding every shard says', async () => {
       const made = await world();
@@ -782,7 +809,7 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
       const whole = logOf(made);
       await whole.read();
       // Every organisation seen, and about 300 lines' worth besides: under a third of the store.
-      const budget = Math.ceil((many.length * 100 + 300 * 340) / 0.8);
+      const budget = Math.ceil((many.length * 160 + 300 * 340) / 0.8);
       const log = logOf(made, { evicts: true, mostFileBytes: budget });
       await log.read();
       expect(log.state()).toBe('read');

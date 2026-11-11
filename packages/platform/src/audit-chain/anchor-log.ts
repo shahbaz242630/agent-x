@@ -258,8 +258,18 @@ const WALKS_A_READ = 32;
  */
 const EVICT_TO = 0.8;
 
-/** What an organisation seen in the store, whose shard is let go, is counted at: its chain's name in a set. */
-const SEEN_NAME_BYTES = 100;
+/**
+ * What an organisation seen in the store, whose shard is let go, is counted at: its chain's name, and what is last known
+ * of it (its place, when its last pass began, when its place was owed), in a map.
+ */
+const SEEN_NAME_BYTES = 160;
+
+/** What is last known of a chain: its anchored place, when its last pass began, and when its place reached was owed. */
+export interface LastKnown {
+  readonly seq?: bigint | undefined;
+  readonly passedAt?: number | undefined;
+  readonly placeAt?: number | undefined;
+}
 
 /**
  * How many shards read again in an hour say the shards held are too few for the chains in use: more than every shard
@@ -338,6 +348,11 @@ export interface AnchorLog extends AnchorStore, PassRecord {
    * until the release given is called. Nothing, if it can't be read whole; the reason said.
    */
   pin(chain: Chain): Promise<(() => void) | undefined>;
+  /**
+   * What is last known of the chain, held or let go, with no read (PR3): what a caller sizing or ordering work by every
+   * chain goes by, never reading a shard back for it. Nothing for a chain never seen.
+   */
+  lastKnown(chain: Chain): LastKnown | undefined;
   /**
    * What is held, by this log's count against what it can hold; the records its tables really use, and the bytes their
    * buffers take; and how many shards are held.
@@ -728,7 +743,17 @@ export function createAnchorLog({
   const making = new Set<number>();
   let loading: number | undefined;
   const loads = new Map<number, Promise<void>>();
-  const seenElsewhere = new Set<string>();
+  const seenElsewhere = new Map<string, LastKnown>();
+  /** A line of an organisation whose shard is let go, as what is last known of it: the newest of each kind. */
+  const elsewhere = (chain: string, kind: LineKind, { seq, at }: { seq: bigint; at: Date }): void => {
+    if (!chain.startsWith(ORGANISATION)) return;
+    const was = seenElsewhere.get(chain) ?? {};
+    const ms = at.getTime();
+    const later = (known: number | undefined): number => Math.max(known ?? ms, ms);
+    if (kind === 'a') seenElsewhere.set(chain, { ...was, seq: was.seq === undefined || seq > was.seq ? seq : was.seq });
+    else if (kind === 'p') seenElsewhere.set(chain, { ...was, passedAt: later(was.passedAt) });
+    else seenElsewhere.set(chain, { ...was, placeAt: later(was.placeAt) });
+  };
   /** Whether a shard is held whole. */
   const isResident = (shard: number): boolean => resident[shard] === true;
   /** A chain's shard: as a table holding it keeps it, else worked out. */
@@ -912,8 +937,7 @@ export function createAnchorLog({
       // A shard let go is held whole or not at all: its lines are passed over, its read again takes them all (PR3).
       const shard = shardOf(line.chain);
       if (!takes(shard)) {
-        if (!isResident(shard) && lineKind === 'a' && line.chain.startsWith(ORGANISATION))
-          seenElsewhere.add(line.chain);
+        if (!isResident(shard)) elsewhere(line.chain, lineKind, line);
         return;
       }
       // Each line read a new one, as each was a new object: stamped as it comes in.
@@ -1036,9 +1060,11 @@ export function createAnchorLog({
    */
   const purged = (shards: ReadonlySet<number>, stage: PackedLines<Anchor> | undefined): void => {
     for (const table of stage === undefined ? heldTables : [...heldTables, stage]) {
+      const kind: LineKind = table === sides.p ? 'p' : table === sides.u ? 'u' : 'a';
       for (const chain of table.keys()) {
         if (!shards.has(table.shardOf(chain) ?? -1)) continue;
-        if (chain.startsWith(ORGANISATION) && table !== sides.p && table !== sides.u) seenElsewhere.add(chain);
+        const line = table.get(chain);
+        if (line !== undefined) elsewhere(chain, kind, line);
         table.delete(chain);
       }
     }
@@ -1148,7 +1174,7 @@ export function createAnchorLog({
     const moved = held === undefined || held.at < rebase.at;
     // A shard let go takes its rebases in first when it is read again (PR3).
     if (moved && takes(shardOf(rebase.chain))) rebaseAnchored(rebase);
-    else if (moved && rebase.chain.startsWith(ORGANISATION)) seenElsewhere.add(rebase.chain);
+    else if (moved) elsewhere(rebase.chain, 'a', rebase);
     const waiting = pending.get(rebase.chain);
     if (waiting !== undefined && waiting.at < rebase.at) pending.delete(rebase.chain);
     for (const places of [sides.u, pendingSides.u]) {
@@ -2319,10 +2345,25 @@ export function createAnchorLog({
     organisations() {
       // And those of shards let go, seen all the same: an organisation off the list is still missed (PR3).
       const held = [...anchors.keys()].filter((name) => name.startsWith(ORGANISATION));
-      const elsewhere = [...seenElsewhere].filter((name) => !anchors.has(name));
-      return [...held, ...elsewhere].map((name) => name.slice(ORGANISATION.length));
+      const away = [...seenElsewhere]
+        .filter(([name, known]) => known.seq !== undefined && !anchors.has(name))
+        .map(([name]) => name);
+      return [...held, ...away].map((name) => name.slice(ORGANISATION.length));
     },
     holds: (chain: Chain) => !evicts || isResident(shardOfChain(chainName(chain))),
+    lastKnown(chain: Chain) {
+      const name = chainName(chain);
+      // Held: what is held, its shard's place in the queue to go untouched. Let go: what was last seen of it.
+      if (!evicts || isResident(shardOfChain(name))) {
+        const known = {
+          seq: anchors.get(name)?.seq,
+          passedAt: sides.p.get(name)?.at.getTime(),
+          placeAt: sides.u.get(name)?.at.getTime(),
+        };
+        return Object.values(known).every((value) => value === undefined) ? undefined : known;
+      }
+      return seenElsewhere.get(name);
+    },
     async pin(chain: Chain) {
       const shard = shardOfChain(chainName(chain));
       // Counted at once, before any wait: a read meanwhile can't let it go.
