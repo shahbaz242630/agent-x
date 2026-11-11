@@ -142,7 +142,16 @@ func resourceTags(environment string) object => {
   'managed-by': 'deploy/azure'
 }
 
-func serverName(environment string, nameSuffix string) string => 'psql-agentx-${shortName(environment)}-${nameSuffix}'
+// The database server's generation, by environment (Outstanding-Work AZ25,
+// playbook L): 0 is the server made at the start, and a real restore's
+// replacement is the next one, `-r<n>`, so the live server is never deleted to
+// free its name (deleting a server deletes every restore point it has). One
+// file every deployment reads through this one, so the host, the alerts and the
+// apps all move together; deploy.ts foundation refuses a generation whose server
+// isn't there yet (server-generation.ts), so a change here never makes an empty one.
+var serverGenerations = loadJsonContent('database-generation.json')
+
+func serverName(environment string, nameSuffix string) string => 'psql-agentx-${shortName(environment)}-${nameSuffix}${serverGenerations[environment] == 0 ? '' : '-r${serverGenerations[environment]}'}'
 
 @export()
 @description('Every name, for an environment and its suffix.')

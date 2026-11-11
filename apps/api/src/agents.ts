@@ -99,6 +99,7 @@ import {
   stepUpAsked,
 } from './route-schemas.ts';
 import { OLD_KEY } from './key-rotation-choice.ts';
+import { confirmedWith, statementVersion } from './statements.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /**
@@ -208,7 +209,7 @@ const STEP_UP_ASKED = stepUpAsked(
 const SUSPEND_SCHEMA = {
   summary: 'Suspend an agent: the kill switch, at once and with no step-up, its pending requests cancelled or paused',
   params: AGENT_ID,
-  body: SUSPEND_BODY,
+  body: SUSPEND_BODY.extend({ statementVersion: statementVersion('suspend') }),
   response: { 200: AGENT_CHANGED },
 };
 
@@ -285,8 +286,8 @@ const ROTATE_SCHEMA = {
 const ROTATE_CONFIRM_SCHEMA = {
   summary: 'Rotate the key, once signed in again for it',
   params: KEY_NAMED,
-  body: STEP_UP_CONFIRM.extend(ROTATE_BODY.shape).describe(
-    'The step-up signed in again for, and the choice it was asked with.',
+  body: STEP_UP_CONFIRM.extend({ ...ROTATE_BODY.shape, statementVersion: statementVersion('old_key') }).describe(
+    'The step-up signed in again for, the choice it was asked with, and its words’ version.',
   ),
   response: {
     201: AGENT_WITH_KEYS.extend({
@@ -429,7 +430,7 @@ export function registerAgents(
     {
       schema: SUSPEND_SCHEMA,
       bodyLimit: CHOICE_BODY_LIMIT,
-      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
+      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION, statements: confirmedWith('suspend') },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);
@@ -560,7 +561,11 @@ export function registerAgents(
     {
       schema: ROTATE_CONFIRM_SCHEMA,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_CONFIRM_OPERATION },
+      config: {
+        access: [...KEY_CHANGING_ROLES],
+        operation: ROTATE_CONFIRM_OPERATION,
+        statements: confirmedWith('old_key'),
+      },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);

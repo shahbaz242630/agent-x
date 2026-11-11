@@ -15,6 +15,7 @@ import { liveSession } from './live-session.helper.test.ts';
 import type { OrganizationChanges, OrganizationChangeWrite } from './organization-changes.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { FREEZE_STATEMENT_VERSION, UNFREEZE_STATEMENT_VERSION } from './suspensions.ts';
 
 const LIVE = liveSession('2026-10-15T09:00:00.000Z');
 
@@ -67,11 +68,17 @@ async function withChanges(written: OrganizationChangeWrite) {
 
 const headers = { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: ORG, origin: PUBLIC_ORIGIN };
 
+/** The version of the words each change confirmed with words sends back, as shown (CO3: statements.test.ts refuses others). */
+const WORDS: Readonly<Record<string, number>> = {
+  '/freeze': FREEZE_STATEMENT_VERSION,
+  '/unfreeze/confirm': UNFREEZE_STATEMENT_VERSION,
+};
+
 const post = (path: string, payload: Record<string, unknown>): InjectOptions => ({
   method: 'POST',
   url: `/v1/organization${path}`,
   headers: { ...headers, 'idempotency-key': 'k-1' },
-  payload,
+  payload: path in WORDS ? { statementVersion: WORDS[path], ...payload } : payload,
 });
 
 const FROZEN: OrganizationChangeWrite = { outcome: 'changed', organization: { id: ORG, status: 'FROZEN' } };

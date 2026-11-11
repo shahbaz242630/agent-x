@@ -48,6 +48,8 @@ import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
 import { AED, mandateWorld, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { createSpendRequestDecisions } from '../../apps/api/src/spend-request-decisions.ts';
 import { spendWorld } from '../../apps/api/src/spend-world.helper.test.ts';
+import { worded } from '../../apps/api/src/statement-words.helper.test.ts';
+import { PAYEE_STATEMENT_VERSION } from '../../apps/api/src/suspensions.ts';
 import { APP_KEYS, OPERATOR_KEYS } from '../../deploy/compose/prepare.ts';
 import { apiAnswers } from './api-sign-in.ts';
 import { API_ORIGIN, execIn, localLogin, restartInPlace, SECRETS_DIR } from './compose.ts';
@@ -736,7 +738,7 @@ async function payeeControls(tenant: Tenant, adminCookie: string): Promise<strin
     const registered = await controlSend(
       op,
       { ...cookieHeader(adminCookie), 'agentx-organization': tenant.world.org },
-      { name, iban, pendingRequests: 'pause' },
+      { name, iban, pendingRequests: 'pause', statementVersion: PAYEE_STATEMENT_VERSION },
       op.route.replace('{id}', supplier),
     );
     expect(registered.status).toBe(201);
@@ -939,10 +941,27 @@ async function denialBaseline(op: Operation, body: Record<string, unknown>): Pro
   expect(JSON.parse(read.text)).toMatchObject({ decision: 'REQUIRE_APPROVAL' });
 }
 
-/** A successful own preview proves the policy is not failing for limits or another field before its supplier check. */
+/** A body's own fields but the versions of words a confirm sends back (CO3): `worded` gives each the version now. */
+const withoutVersions = (body: unknown): unknown =>
+  typeof body === 'object' && body !== null && !Array.isArray(body)
+    ? Object.fromEntries(Object.entries(body).filter(([name]) => !/^statementVersion$|StatementVersion$/.test(name)))
+    : body;
+
+/** A confirm's body as `op` (its preview or ask) takes it: without the versions of words `op` doesn't name (CO3). */
+const asSentTo = (op: Operation, body: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(body).filter(
+      ([name]) => !/^statementVersion$|StatementVersion$/.test(name) || op.schema?.properties?.[name] !== undefined,
+    ),
+  );
+
+/**
+ * A successful own preview proves the policy is not failing for limits or another field before its supplier check.
+ * The preview shows no words, so a confirm's body goes to it without their versions.
+ */
 async function policyBaseline(op: Operation, body: Record<string, unknown>): Promise<void> {
   const preview = operation('POST', op.route.replace(/\/change(?:\/(?:preview|confirm))?$/, '/change/preview'));
-  const read = await controlSend(preview, cookieHeader(adminCookie), body, routeOf(preview, own));
+  const read = await controlSend(preview, cookieHeader(adminCookie), asSentTo(preview, body), routeOf(preview, own));
   expect(read.status).toBe(200);
   expect(JSON.parse(read.text)).toMatchObject({ rejected: [] });
 }
@@ -951,7 +970,7 @@ async function policyBaseline(op: Operation, body: Record<string, unknown>): Pro
 async function referenceStepUp(op: Operation, body: Record<string, unknown>): Promise<string> {
   if (adminPage === undefined) throw new Error('the admin browser is not open');
   const ask = operation('POST', op.route.replace(/\/confirm$/, ''));
-  const opened = await controlSend(ask, cookieHeader(adminCookie), body, routeOf(ask, own));
+  const opened = await controlSend(ask, cookieHeader(adminCookie), asSentTo(ask, body), routeOf(ask, own));
   expect(opened.status).toBe(202);
   const id = z.object({ stepUpChallengeId: z.uuid() }).parse(JSON.parse(opened.text)).stepUpChallengeId;
   await adminPage.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${id}&returnTo=/tamper-signed-in`);
@@ -1364,7 +1383,7 @@ async function foreignResources(op: Operation, body: unknown): Promise<void> {
 
 /** Every body used by any phase must start valid before the attack changes it. */
 function baseline(op: Operation): unknown {
-  const body = op.schema === undefined ? undefined : sample(op.schema, own);
+  const body = op.schema === undefined ? undefined : worded(op.route, withoutVersions(sample(op.schema, own)));
   if (op.schema !== undefined)
     expect(z.fromJSONSchema(op.schema).safeParse(body).success, `${op.method} ${op.route}: invalid baseline`).toBe(
       true,

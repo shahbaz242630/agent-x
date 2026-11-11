@@ -17,6 +17,7 @@ import type { PaymentMarks } from './payment-marks.ts';
 import type { Refused } from './refused.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 import type { SessionMember } from './use-case-work.ts';
 
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
@@ -128,7 +129,7 @@ const post = (path: string, payload: unknown, id = PAYMENT_ID): InjectOptions =>
     'idempotency-key': `mark${path.replaceAll('/', '-')}`,
     'content-type': 'application/json',
   },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(`/v1/payments/${id}/failure-proposal${path}`, payload)),
 });
 
 const PROPOSE = { evidenceRef: EVIDENCE, confirmed: CONFIRMED };
