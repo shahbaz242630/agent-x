@@ -14,9 +14,10 @@
 //    agents. An ID not listed is read for under no organisation and compared
 //    with a MAC of zeros: the same trip, the same one verifyMac, so how long
 //    the answer takes doesn't tell a listed ID. Only the steps below are
-//    believed: the row read here grants nothing. A row tampered with to refuse
-//    the true secret is refused here as a wrong one, unalarmed; every other
-//    read of the key (its listing, a rotation) still alarms on it.
+//    believed: the row read here grants nothing. The row is judged against its
+//    newest signed event's pointer, version and seal first (one local HMAC,
+//    and one over zeros for an ID not listed); a row that disagrees is never
+//    refused here but goes on to step 3, which raises the alarm and the hold.
 // 3. Inside that organisation's withSignedStates, each statement limited to
 //    10 seconds, ahead of all else on one trip, its agent's brake (4D2e C3): a
 //    kill switch waiting goes first, however many checks a stolen key sends, and
@@ -67,7 +68,13 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
-import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  sealedRowJudged,
+  sealedRowRead,
+  type SignedStates,
+  withSignedStates,
+} from '../../audit/index.ts';
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { keySecretMessage, parseAgentKey, type PresentedKey, type Scope } from '../domain/agent.ts';
 import { AGENT_KEYS, agentKeyOf } from './agent-keys.ts';
@@ -182,12 +189,19 @@ const NO_ORGANISATION = '00000000-0000-0000-0000-000000000000';
 /** What a key's secret is compared with when there is no MAC to compare it with: the same one verify either way. */
 const NO_MAC = Buffer.alloc(32);
 
-/** The door's answer: the secret proven; no row to judge (step 3 judges a listed one); or why it was refused. */
+/** The door's answer: the secret proven; left to step 3 (no row, or one that disagrees with its seal); or why refused. */
 type AtTheDoor = 'proven' | 'unread' | 'wrong_secret' | 'key_not_held';
 
+/** A field of the row as read, by its column: canonical text, or null. */
+const fieldOf = (fields: readonly (readonly [string, string | null])[], column: string): string | null =>
+  fields.find(([name]) => name === column)?.[1] ?? null;
+
 /**
- * Step 2a: the secret against the key's row as read, outside any share, one trip. Exactly one verifyMac whatever is
- * found, so a listed ID's wrong secret and an unlisted ID's take the same path, on the same one trip.
+ * Step 2a: the secret against the key's row as read, outside any share, one trip, the row judged against its newest
+ * signed event first (sealedRowJudged). Exactly one seal HMAC and one verifyMac whatever is found, so a listed ID's
+ * wrong secret and an unlisted ID's take the same path, on the same one trip. A row that disagrees with its seal is
+ * never refused here: step 3 reads it, and raises the alarm and the hold, as before the door. A caller holding only
+ * an ID can't make a row disagree, so the share stays closed to them.
  */
 async function secretAtTheDoor(
   database: Kysely<Tables>,
@@ -195,15 +209,18 @@ async function secretAtTheDoor(
   orgId: string | undefined,
   { keyId, secret }: PresentedKey,
 ): Promise<AtTheDoor> {
-  const [row] = await readAloneOnOneTrip(
-    database,
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a refusal alone, never a grant: a secret proven here is checked again on the key's verified read (step 3, AG1)
-    database.selectFrom('agents.agent_keys').select(['secret_mac', 'secret_key_version']).where('id', '=', keyId),
-    { orgId: orgId ?? NO_ORGANISATION, lockWaitBounded: true },
-  );
+  const key = { orgId: orgId ?? NO_ORGANISATION, id: keyId };
+  const rows = await readAloneOnOneTrip(database, sealedRowRead(AGENT_KEYS, key), {
+    orgId: key.orgId,
+    lockWaitBounded: true,
+  });
+  const { row, agrees } = sealedRowJudged(keys, AGENT_KEYS, key, rows);
+  const sound = agrees && row.outcome === 'found' ? row : undefined;
+  const mac = sound === undefined ? null : fieldOf(sound.fields, 'secret_mac');
+  const keyVersion = Number(sound === undefined ? Number.NaN : fieldOf(sound.fields, 'secret_key_version'));
   const pepper = keys.describe().find(({ purpose }) => purpose === 'agent-key-pepper');
-  const held = row !== undefined && pepper?.versions.some(({ version }) => version === row.secret_key_version) === true;
-  const version = held ? row.secret_key_version : pepper?.current;
+  const held = mac !== null && pepper?.versions.some(({ version }) => version === keyVersion) === true;
+  const version = held ? keyVersion : pepper?.current;
   // No pepper at all: nothing can be verified, so nothing is (and every key with a row is one it doesn't hold).
   const matches =
     version !== undefined &&
@@ -211,9 +228,9 @@ async function secretAtTheDoor(
       'agent-key-pepper',
       version,
       keySecretMessage(keyId, secret),
-      held ? Buffer.from(row.secret_mac, 'hex') : NO_MAC,
+      held ? Buffer.from(mac, 'hex') : NO_MAC,
     );
-  if (row === undefined) return 'unread';
+  if (sound === undefined) return 'unread';
   if (!held) return 'key_not_held';
   return matches ? 'proven' : 'wrong_secret';
 }

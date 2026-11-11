@@ -267,7 +267,7 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
     );
   });
 
-  it('takes the same path for an unlisted ID as for a listed one with a wrong secret: one verifyMac, the same trips', async () => {
+  it('takes the same path for an unlisted ID as for a listed one with a wrong secret: one seal HMAC and one verifyMac, the same trips', async () => {
     const agent = await newAgent();
     const { id } = await issue(agent);
     const wrongSecret = Buffer.alloc(32, 0xee);
@@ -286,7 +286,8 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
         checker.check(agentKeyText(keyId, wrongSecret), '0199a0f0-0000-7000-8000-00000000c015'),
       );
       const secretChecks = verifyMac.mock.calls.filter(([purpose]) => purpose === 'agent-key-pepper');
-      return { checked, trips: times.trips, secretChecks };
+      const purposes = verifyMac.mock.calls.map(([purpose]) => purpose);
+      return { checked, trips: times.trips, secretChecks, purposes };
     };
 
     const listed = await watchedCheck(id);
@@ -303,6 +304,9 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
     ]);
     expect(notListed.secretChecks[0]?.[3]).toEqual(Buffer.alloc(32));
     expect(notListed.trips).toBe(listed.trips);
+    // Every HMAC alike: the row's seal (zeros for the unlisted ID's), then the secret.
+    expect(listed.purposes).toEqual(['audit-mac', 'agent-key-pepper']);
+    expect(notListed.purposes).toEqual(listed.purposes);
     expect(lines('agent_key.refused').map(({ reason }) => reason)).toEqual(['wrong_secret', 'unlisted']);
   });
 
@@ -321,7 +325,12 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
     );
     const checker = createAgentKeyCheck({ database: app, keys: noPepper, ids, clock, logger: testLogger(capture) });
 
-    expect(await checker.check(text, '0199a0f0-0000-7000-8000-00000000c016')).toEqual({ outcome: 'refused' });
+    const times = noStatementTimes();
+    expect(await timingStatements(times, () => checker.check(text, '0199a0f0-0000-7000-8000-00000000c016'))).toEqual({
+      outcome: 'refused',
+    });
+    // Refused at the door: the listing's trip and the door's, no transaction and so no place in the share.
+    expect(times.trips).toBe(2);
     const stranger = agentKeyText(ids.next(), Buffer.alloc(32, 1));
     expect(await checker.check(stranger, '0199a0f0-0000-7000-8000-00000000c016')).toEqual({ outcome: 'refused' });
     expect(lines('agent_key.refused').map(({ reason, keyId }) => [reason, keyId === id])).toEqual([
@@ -956,6 +965,24 @@ describe('the key check: tampered with by the owner, refused and held', () => {
     await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_mac', mac.toString('hex'));
 
     await refusedFor(`${text.slice(0, 37)}${known.toString('base64url')}`, 'tampered', id);
+    await heldFor('agent_key');
+  });
+
+  it('AG1: a key whose MAC the owner rewrote, its real agent knocking: alarmed and held, never refused at the door as a wrong secret', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_mac', 'ab'.repeat(32));
+
+    await refusedFor(text, 'tampered', id);
+    await heldFor('agent_key');
+  });
+
+  it('AG1: a key whose pepper version the owner changed to one not held: alarmed and held, never refused at the door as not held', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_key_version', 3);
+
+    await refusedFor(text, 'tampered', id);
     await heldFor('agent_key');
   });
 
