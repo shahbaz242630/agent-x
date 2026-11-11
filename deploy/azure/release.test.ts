@@ -1319,9 +1319,13 @@ class Staging {
   private patched(workload: Workload, body: string | undefined): void {
     const sent = JSON.parse(body ?? '{}') as {
       properties: {
-        template: { containers: { image: string; command: string[]; env: { name: string; value?: string }[] }[] };
+        template: {
+          revisionSuffix?: string;
+          containers: { image: string; command: string[]; env: { name: string; value?: string }[] }[];
+        };
       };
     };
+    if (workload === 'api') this.app.suffix = sent.properties.template.revisionSuffix;
     const [container] = sent.properties.template.containers;
     const build = container?.env.find((entry) => entry.name === 'AGENTX_RELEASE')?.value ?? '';
     const settleAs = workload === 'api' ? (this.apiSettleAs ?? this.settleAs) : this.settleAs;
@@ -1546,7 +1550,12 @@ describe('release', () => {
         method: 'patch',
         url: workloadUrl(SUBSCRIPTION, 'api'),
         body: {
-          properties: { template: { containers: [released(running('api', { command: ['node'] }), NEW_IMAGE, NEW)] } },
+          properties: {
+            template: {
+              revisionSuffix: '',
+              containers: [released(running('api', { command: ['node'] }), NEW_IMAGE, NEW)],
+            },
+          },
         },
       },
     ]);
@@ -1720,10 +1729,6 @@ describe('release', () => {
         'api is InProgress from an earlier change, so nothing was sent: look at it first.',
         (azure) => (azure.app.state = 'InProgress'),
       ],
-      [
-        'The API has the revision suffix "hand" set, which a release would send again.',
-        (azure) => (azure.app.suffix = 'hand'),
-      ],
     ];
     for (const [message, arrange] of cases) {
       const azure = new Staging();
@@ -1732,6 +1737,16 @@ describe('release', () => {
       expect(ended_.message).toBe(`${message}\nLeft: nothing was changed.`);
       expect(azure.writes).toEqual([]);
     }
+  });
+
+  it('clears a revision suffix set by hand with an empty one, never sending it again to be refused as taken (AZ7)', async () => {
+    const azure = new Staging();
+    azure.app.suffix = 'hand';
+    const { status } = await outcome(azure);
+    expect(status).toBe(0);
+    const [, , api] = azure.writes;
+    expect(api?.body).toMatchObject({ properties: { template: { revisionSuffix: '' } } });
+    expect(azure.app.suffix).toBe('');
   });
 
   it('runs the migration again without resending the job when it already holds the commit', async () => {

@@ -12,7 +12,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
-import { LOAD_SIGNER } from '../image/verify.ts';
+import { IMAGE_REPOSITORY, LOAD_SIGNER } from '../image/verify.ts';
 import { APP_KEYS, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57), each created once. */
@@ -734,6 +734,11 @@ interface AzAnswers {
   readonly removalReads?: number;
   /** The API's running state, one a read, the last repeated (default Stopped); and whether Azure refuses its stop. */
   readonly apiStates?: readonly string[];
+  /**
+   * The API's newest revision, one a read of the app, the last repeated (AZ7): by default named, the ready one,
+   * provisioned, running and active, with the image the deployment sent.
+   */
+  readonly revisions?: readonly RevisionRead[];
   readonly stopRefused?: boolean;
   /** The jobs app's identity: there (default), missing, or unreadable. */
   readonly jobsIdentity?: 'there' | 'missing' | 'unreadable';
@@ -745,6 +750,18 @@ interface AzAnswers {
    * from the read back.
    */
   readonly record?: 'kept' | 'no job' | 'refused' | 'lost';
+}
+
+/** How Azure has the API's newest revision at one read: a field left out is the default's. */
+interface RevisionRead {
+  readonly name?: string;
+  readonly ready?: boolean;
+  readonly image?: string;
+  readonly provisioning?: string;
+  readonly running?: string;
+  readonly active?: boolean;
+  /** The revision's own read fails. */
+  readonly unreadable?: boolean;
 }
 
 /** The migration job, which holds the records, as `az tag` names it. */
@@ -830,6 +847,8 @@ class RecordingAz implements Az {
   #limitApplied = false;
   #appReads = 0;
   #apiReads = 0;
+  #revisionReads = 0;
+  #revision: RevisionRead = {};
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
@@ -955,10 +974,39 @@ class RecordingAz implements Az {
         ? { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) may not stop' }
         : json({});
     }
+    if (url.includes('/revisions/')) return this.#revisionOf(url);
     const states = this.options.apiStates ?? ['Stopped'];
     const state = states[Math.min(this.#apiReads, states.length - 1)];
     this.#apiReads += 1;
-    return json({ name: 'ca-agentx-stg-api', properties: { runningStatus: state } });
+    const revisions = this.options.revisions ?? [{}];
+    this.#revision = revisions[Math.min(this.#revisionReads, revisions.length - 1)] ?? {};
+    this.#revisionReads += 1;
+    const name = this.#revision.name ?? 'ca-agentx-stg-api--new0001';
+    return json({
+      name: 'ca-agentx-stg-api',
+      properties: {
+        runningStatus: state,
+        latestRevisionName: name,
+        latestReadyRevisionName: this.#revision.ready === false ? 'ca-agentx-stg-api--old0001' : name,
+      },
+    });
+  }
+
+  /** A read of the revision the last read of the app named, as the options have it. */
+  #revisionOf(url: string): AzResult {
+    const { name = 'ca-agentx-stg-api--new0001', unreadable, image, provisioning, running, active } = this.#revision;
+    if (!url.includes(`/revisions/${name}?`)) throw new Error(`unexpected revision read ${url}`);
+    if (unreadable === true) return { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' };
+    const digest = this.deployment?.values?.AGENTX_AZURE_APP_IMAGE_DIGEST ?? '';
+    return json({
+      name,
+      properties: {
+        provisioningState: provisioning ?? 'Provisioned',
+        runningState: running ?? 'Running',
+        active: active ?? true,
+        template: { containers: [{ name: 'api', image: image ?? `${IMAGE_REPOSITORY}@${digest}` }] },
+      },
+    });
   }
 
   /** A write of the migration job's tags, as the options say Azure takes it. */
@@ -2026,7 +2074,8 @@ describe('deploy apps', () => {
         expect(parseArguments(['apps', '--api-stopped'])).toMatchObject({ apiStopped: true });
         expect(parseArguments(['apps'])).not.toHaveProperty('apiStopped');
         const plain = await run(['apps'], { answers, images: recordingImages() });
-        expect(apiCalls(plain.az)).toEqual([]);
+        // Never stopped: read only to wait for its new revision to be the ready one (AZ7), the app and then the revision.
+        expect(apiCalls(plain.az)).toEqual(['get read', 'get read']);
       });
     });
 
@@ -2154,6 +2203,112 @@ describe('deploy apps', () => {
     expect(secretsRunFor(['acs-access-key'])).toBe('secrets --keys');
   });
 
+  describe("waits for the API's revision of the new image to be the ready one before saying done (AZ7)", () => {
+    const apps = (az: RecordingAz) => run(['apps'], { answers, images: recordingImages(), az });
+    /** The reads of the API the wait made, app and revision alike. */
+    const apiReads = (az: RecordingAz): number =>
+      az.calls.filter((call) => call.args.some((arg) => arg.includes('/containerApps/ca-agentx-stg-api'))).length;
+
+    it('reads again while the revision starts, and goes on once it is ready', async () => {
+      const az = new RecordingAz({
+        revisions: [
+          { name: 'ca-agentx-stg-api--old0001', image: `${IMAGE_REPOSITORY}@sha256:${'e'.repeat(64)}` },
+          { ready: false, provisioning: 'Provisioning', running: 'Activating', active: false },
+          { ready: false, unreadable: true },
+          {},
+        ],
+      });
+      const done = await apps(az);
+      expect(done.status).toBe(0);
+      expect(apiReads(az)).toBe(8);
+      expect(done.terminal.said).toContain(
+        "ca-agentx-stg-api's revision ca-agentx-stg-api--new0001 runs the new image and is the ready one.",
+      );
+    });
+
+    it('stops at once on a revision that failed to start, saying how a fresh one is made', async () => {
+      for (const failed of [{ provisioning: 'Failed' }, { running: 'Failed' }, { running: 'ActivationFailed' }]) {
+        const az = new RecordingAz({
+          revisions: [{ ready: false, ...failed }],
+          listedApps: ['ca-agentx-stg-api', 'ca-agentx-stg-jobs'],
+        });
+        const done = await apps(az);
+        expect(done.status).toBe(1);
+        expect(apiReads(az)).toBe(2);
+        const said = done.terminal.said.at(-1) ?? '';
+        expect(said).toMatch(
+          /^Deployed, but ca-agentx-stg-api's revision of the new image failed to start \(ca-agentx-stg-api--new0001: /,
+        );
+        expect(said).toContain('then apps --keep-running, which makes a fresh revision, then apps.');
+        // A load run's jobs app stays until the API serves: it still holds the jobs meanwhile.
+        expect(az.calls.some((call) => call.args.includes('delete'))).toBe(false);
+      }
+    });
+
+    it('gives up after ten minutes, saying what it last read and what to look at', async () => {
+      const cases: [RevisionRead, string][] = [
+        [{ ready: false }, '(ca-agentx-stg-api--new0001: Provisioned, Running, active, not the ready one)'],
+        [
+          { provisioning: '', running: '', active: false },
+          '(ca-agentx-stg-api--new0001: no provisioning state, no running state, not active, the ready one)',
+        ],
+        [{ image: 'ghcr.io/example/other@sha256:1' }, '(Azure named no revision of the new image)'],
+        [{ name: 'not-the-api' }, '(Azure named no revision of the new image)'],
+      ];
+      for (const [revision, last] of cases) {
+        const az = new RecordingAz({ revisions: [revision] });
+        const done = await apps(az);
+        expect(done.status).toBe(1);
+        expect(apiReads(az)).toBe(revision.name === undefined ? 80 : 40);
+        const said = done.terminal.said.at(-1) ?? '';
+        expect(said).toMatch(
+          /^Deployed, but ca-agentx-stg-api's revision of the new image wasn't the ready one 10 minutes later \(/,
+        );
+        expect(said).toContain(last);
+      }
+    });
+
+    it("takes an answer Azure doesn't give as no revision yet, never as one", async () => {
+      const answersOf: AzResult[] = [
+        { status: 1, stdout: '', stderr: 'ERROR: Bad Gateway' },
+        { status: 0, stdout: 'not json', stderr: '' },
+        json(null),
+        json({ properties: 'none' }),
+      ];
+      for (const answer of answersOf) {
+        const az = new (class extends RecordingAz {
+          override run(args: readonly string[]): AzResult {
+            const url = args[args.indexOf('--url') + 1] ?? '';
+            if (args[2] === 'get' && url.includes('/containerApps/ca-agentx-stg-api?')) {
+              this.calls.push({ args });
+              return answer;
+            }
+            return super.run(args);
+          }
+        })();
+        const done = await apps(az);
+        expect(done.status).toBe(1);
+        expect(done.terminal.said.at(-1)).toContain('(Azure named no revision of the new image)');
+      }
+    });
+
+    it("finds the API's container among the revision's, or none", async () => {
+      const az = new (class extends RecordingAz {
+        override run(args: readonly string[]): AzResult {
+          const url = args[args.indexOf('--url') + 1] ?? '';
+          if (url.includes('/revisions/')) {
+            this.calls.push({ args });
+            return json({ properties: { provisioningState: 'Provisioned', template: { containers: 'none' } } });
+          }
+          return super.run(args);
+        }
+      })();
+      const done = await apps(az);
+      expect(done.status).toBe(1);
+      expect(done.terminal.said.at(-1)).toContain('(Azure named no revision of the new image)');
+    });
+  });
+
   it("deploys main's newest image only once it is verified, by digest, with the hosts as typed", async () => {
     const images = recordingImages();
     const done = await run(['apps'], { answers, images });
@@ -2178,6 +2333,9 @@ describe('deploy apps', () => {
       'deployment group show',
       'containerapp list --subscription',
       'containerapp job list',
+      // The API's newest revision, then that revision: it runs the new image and is the ready one (AZ7).
+      'rest --method get',
+      'rest --method get',
       'resource show --subscription',
     ]);
     const deployment = done.az.deployment;

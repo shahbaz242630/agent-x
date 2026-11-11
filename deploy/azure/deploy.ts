@@ -2276,6 +2276,101 @@ async function removeLeftJobsApp(
 const REMOVAL_READ_MS = 10_000;
 const REMOVAL_READS = 60;
 
+/**
+ * How often, and how many times, the API is read for its revision of the new image being the ready one (AZ7): ten
+ * minutes in all, since pulling the image into a new replica can take minutes on its own.
+ */
+const REVISION_READ_MS = 15_000;
+const REVISION_READS = 40;
+
+/** One of the API's revisions as Azure names it, held to that shape before it goes into a URL (release.ts's rule). */
+const API_REVISION = /^ca-agentx-stg-api--[a-z0-9]+$/;
+
+/** How Azure has the API's newest revision: its name, whether it is the ready one, and what it runs and how. */
+interface NewestRevision {
+  readonly name: string;
+  readonly ready: boolean;
+  readonly image: string;
+  readonly provisioning: string;
+  readonly running: string;
+  readonly active: boolean;
+}
+
+/** A read through Resource Manager as JSON properties, or undefined when Azure didn't answer it with any. */
+function armProperties(steps: Steps, url: string): Readonly<Record<string, unknown>> | undefined {
+  const read = steps.az.run(['rest', '--method', 'get', '--url', url]);
+  if (read.status !== 0) return undefined;
+  try {
+    const properties = (JSON.parse(read.stdout) as { properties?: unknown } | null)?.properties;
+    return typeof properties === 'object' && properties !== null ? (properties as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The API's newest revision, or undefined while Azure names none (or none of the API's shape) or can't be read. */
+function newestRevision(steps: Steps, subscription: string): NewestRevision | undefined {
+  const app = armProperties(steps, apiUrl(subscription));
+  const name = text(app?.latestRevisionName);
+  if (!API_REVISION.test(name)) return undefined;
+  const revision = armProperties(steps, apiUrl(subscription, `/revisions/${name}`));
+  if (revision === undefined) return undefined;
+  const containers = (revision.template as { containers?: unknown } | undefined)?.containers;
+  const api = (Array.isArray(containers) ? (containers as { name?: unknown; image?: unknown }[]) : []).find(
+    (container) => container.name === 'api',
+  );
+  return {
+    name,
+    ready: name === text(app?.latestReadyRevisionName),
+    image: text(api?.image),
+    provisioning: text(revision.provisioningState),
+    running: text(revision.runningState),
+    active: revision.active === true,
+  };
+}
+
+/** The running states Azure gives a revision whose replicas couldn't start (the portal shows the second, S174). */
+const FAILED_TO_START: ReadonlySet<string> = new Set(['Failed', 'ActivationFailed']);
+
+/** A revision's state in words, for the operator: Azure's own words for each part. */
+const revisionState = (found: NewestRevision): string =>
+  `${found.name}: ${found.provisioning || 'no provisioning state'}, ${found.running || 'no running state'}, ${found.active ? 'active' : 'not active'}, ${found.ready ? 'the ready one' : 'not the ready one'}`;
+
+/**
+ * Once the deployment has succeeded, waits until the API's newest revision runs the new image and is the ready one
+ * (AZ7): Azure calls a deployment done before the revision has started, so without this a revision that never starts
+ * (S174: the image ahead of its migration) went unseen until CI's release refused. True once it is; false, having said
+ * what happened and what to do, when it failed or wasn't ready within the wait.
+ */
+async function apiServes(steps: Steps, subscription: string, image: string): Promise<boolean> {
+  steps.terminal.say(
+    `Waiting for ${API_APP}'s revision of the new image to be the ready one (up to ${String((REVISION_READS * REVISION_READ_MS) / 60_000)} minutes: a new replica pulls the image first)...`,
+  );
+  let last = 'Azure named no revision of the new image';
+  for (let read = 0; read < REVISION_READS; read += 1) {
+    const found = newestRevision(steps, subscription);
+    if (found?.image === image) {
+      if (found.ready && found.active && found.provisioning === 'Provisioned') {
+        steps.terminal.say(`${API_APP}'s revision ${found.name} runs the new image and is the ready one.`);
+        return true;
+      }
+      // A revision that failed to start never recovers (S174): waiting longer only hides it.
+      if (found.provisioning === 'Failed' || FAILED_TO_START.has(found.running)) {
+        steps.terminal.say(
+          `Deployed, but ${API_APP}'s revision of the new image failed to start (${revisionState(found)}), so the API doesn't serve this release. A failed revision never recovers. Read why in the Azure portal (Container Apps, ${API_APP}, Revisions and replicas, its log). If the database lacked a migration (the API refuses to start ahead of one), run the migration with this image (node deploy/azure/jobs.ts run migrate), then apps --keep-running, which makes a fresh revision, then apps.`,
+        );
+        return false;
+      }
+      last = revisionState(found);
+    }
+    await (steps.sleep ?? sleepFor)(REVISION_READ_MS);
+  }
+  steps.terminal.say(
+    `Deployed, but ${API_APP}'s revision of the new image wasn't the ready one ${String((REVISION_READS * REVISION_READ_MS) / 60_000)} minutes later (${last}), so the API may not serve this release yet: the revision before it serves until it is, if there is one. Look at it in the Azure portal (Container Apps, ${API_APP}, Revisions and replicas, its log); once it reads ready, nothing more is needed, and if it failed, fix the cause and run apps again.`,
+  );
+  return false;
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2349,7 +2444,24 @@ async function deployApps(
   };
   checkPolicy(steps, values);
   if (!(await sendApps(steps, subscription, values, apiStopped === true))) return 1;
+  return afterApps(steps, subscription, { image, keepRunning, loadRun, apiStopped: apiStopped === true });
+}
+
+/** What follows a deployment that went: what Azure left, the API's new revision waited for, then what comes next. */
+async function afterApps(
+  steps: Steps,
+  subscription: string,
+  sent: {
+    readonly image: string;
+    readonly keepRunning: boolean;
+    readonly loadRun: boolean;
+    readonly apiStopped: boolean;
+  },
+): Promise<number> {
+  const { image, keepRunning, loadRun, apiStopped } = sent;
   const appsLeft = sayWhatIsDeployed(steps, subscription, loadRun);
+  // A stopped API (--api-stopped) starts no revision until playbook L starts it; a load run's jobs app stays until it serves.
+  if (!apiStopped && !(await apiServes(steps, subscription, image))) return 1;
   await removeLeftJobsApp(steps, subscription, appsLeft, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
