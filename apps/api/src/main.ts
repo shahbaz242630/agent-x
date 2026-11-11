@@ -62,6 +62,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const { role } = booted.config;
   const leadership = leadershipOf(booted);
   const parts = sharedParts(booted, leadership);
+  // A crash ends the process at once: the security events' counts not yet written are said, as a stop says them (MO4).
+  booted.atCrash(() => {
+    parts.recorder.drop();
+  });
   const oneCopy = leadership && oneCopyJobs(booted, parts, leadership);
 
   // What a stop finds, which comes at any moment from here on.

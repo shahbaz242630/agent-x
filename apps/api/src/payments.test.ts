@@ -223,7 +223,7 @@ describe('POST /v1/payments/{id}/failure-proposal…: two admins mark a payment 
     ['an approval’s confirm without the consequence', '/approve/confirm', STEPPED],
     ['a withdrawal with a field', '/withdraw', { evidenceRef: EVIDENCE }],
     ['a withdrawal’s confirm without its step-up', '/withdraw/confirm', {}],
-  ])('refuses %s before the use case runs', async (_what, path, body) => {
+  ])('SEC-DP-11 refuses %s before the use case runs', async (_what, path, body) => {
     const { app, asked } = await withMarks();
 
     expect((await app.inject(post(path, body))).statusCode).toBe(400);

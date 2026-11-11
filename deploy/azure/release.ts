@@ -30,6 +30,10 @@
 //   is now, needs no hand deploy. Bicep is asked only once a release would be
 //   red without it, and any doubt (Bicep unable to say, a record that isn't a
 //   commit, or isn't in the history) leaves it red
+// - a new migration adding a trigger to a table already built, or a new body
+//   to a guard function, is red unless the commit staging runs already carried
+//   it as coming (decision 49, tooling/migration-order.ts): otherwise the image
+//   running while it migrates raises a false tamper alarm
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
@@ -48,6 +52,13 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
+import {
+  COMING_FILE,
+  MIGRATION_NAME,
+  MIGRATIONS_FOLDER,
+  parseComing,
+  refusals,
+} from '../../tooling/migration-order.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
 import {
   ARM,
@@ -378,6 +389,11 @@ export type Decision =
   | { readonly kind: 'load-run' }
   | { readonly kind: 'past' }
   | { readonly kind: 'by-hand'; readonly reasons: readonly string[] }
+  /**
+   * A migration staging's image wasn't told is coming (decision 49): a hand deploy is exactly what must not follow, as
+   * it goes round this gate and the old image would raise a false tamper alarm as the migration runs.
+   */
+  | { readonly kind: 'coming-first'; readonly reasons: readonly string[] }
   | {
       readonly kind: 'release';
       readonly updates: ReadonlyMap<Workload, Container>;
@@ -404,6 +420,27 @@ function changedFile(
   if (unrecorded.length > 0) return { kind: 'reason', line: `${file} changed since ${release}: ${toRun(unrecorded)}` };
   const sent = deployments.map((deployment) => `${deployment} from ${String(recordFor(deployment, file))}`);
   return { kind: 'deployed', line: `${file} changed since ${release}: deployed by hand, ${sent.join(', ')}` };
+}
+
+/**
+ * Decision 49 (PL-66): each migration this release would run that adds a trigger to a table already built, or a new
+ * body to a function already written, which the image staging runs (`release`) didn't carry as coming
+ * (tooling/migration-order.ts). The check in CI holds a migration to the code before its merge, but GitHub may drop a
+ * waiting release, so that code may never have run here: this holds it to what does run, before the first write.
+ */
+function notYetComing(release: string, commit: string, changed: readonly string[], history: History): string[] {
+  const folder = `${MIGRATIONS_FOLDER}/`;
+  const added = changed
+    .filter((file) => file.startsWith(folder) && MIGRATION_NAME.test(file.slice(folder.length)))
+    .filter((file) => history.fileAt(release, file) === undefined)
+    .map((file) => file.slice(folder.length));
+  if (added.length === 0) return [];
+  const migrations = history
+    .filesIn(commit, MIGRATIONS_FOLDER)
+    .filter((name) => MIGRATION_NAME.test(name))
+    .map((name) => ({ name, sql: history.fileAt(commit, `${folder}${name}`) ?? '' }));
+  const coming = parseComing(history.fileAt(release, COMING_FILE));
+  return refusals(migrations, added, () => coming).map((line) => `${line} (staging runs ${release})`);
 }
 
 /**
@@ -449,17 +486,23 @@ export function decide(
   };
   const reasons = new Set<string>();
   const deployed = new Set<string>();
+  const notComing: string[] = [];
   for (const release of new Set(all.map(([, found]) => found.release))) {
     if (!history.isAncestor(release, commit)) {
-      reasons.add(`staging runs ${release}, which isn't in ${commit}'s history`);
+      // Nothing can be read against it, decision 49 included: say so, so the hand deploy runs no unshipped trigger or body.
+      reasons.add(`staging runs ${release}, which isn't in ${commit}'s history; ${OUTSIDE_HISTORY}`);
       continue;
     }
-    for (const file of history.changedFiles(release, commit)) {
+    const changed = history.changedFiles(release, commit);
+    for (const file of changed) {
       const found = changedFile(file, release, readers, recordFor);
       if (found?.kind === 'reason') reasons.add(found.line);
       if (found?.kind === 'deployed') deployed.add(found.line);
     }
+    notComing.push(...notYetComing(release, commit, changed, history));
   }
+  // Before any hand deploy: once the coming entries are released, a rerun says what a person still has to deploy.
+  if (notComing.length > 0) return { kind: 'coming-first', reasons: notComing };
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
   return {
     kind: 'release',
@@ -651,6 +694,14 @@ function sayDeployed(decision: Decision, say: (line: string) => void): void {
 export const LOAD_RUN_UP =
   'A load run is up (the API runs as AGENTX_ROLE web, beside the jobs app): finish it (load.ts finish, then a plain apps), or run apps --load-run again after merging. This release changed nothing, red.';
 
+/** A release outside the commit's history can't be checked against coming.json (decision 49), so the hand deploy is warned. */
+export const OUTSIDE_HISTORY =
+  'if this commit adds a migration with a trigger on a known table or a new guard function body, ship it in coming.json in a deploy first (decision 49)';
+
+/** What to do when a migration wasn't shipped as coming first (decision 49): never the hand deploy a red usually asks. */
+export const COMING_FIRST =
+  "the image staging runs wasn't told what this release's migration adds. Release a commit carrying it in coming.json first, then this one; never a hand deploy, which goes round this check and raises the false tamper alarm it prevents (decision 49).";
+
 /**
  * A decision that leaves nothing to update, said: the status to end with, or
  * nothing when there are updates to make.
@@ -666,6 +717,11 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
   }
   if (decision.kind === 'load-run') {
     say(LOAD_RUN_UP);
+    return 1;
+  }
+  if (decision.kind === 'coming-first') {
+    say(`A release of ${commit} stops here, red: ${COMING_FIRST}`);
+    for (const reason of decision.reasons) say(`  ${reason}`);
     return 1;
   }
   if (decision.kind === 'by-hand') {

@@ -17,6 +17,8 @@ import { jobName, JOBS_API } from './jobs.ts';
 import {
   changes,
   check,
+  COMING_FIRST,
+  OUTSIDE_HISTORY,
   decide,
   type Decision,
   type Folder,
@@ -335,7 +337,11 @@ describe('a released container', () => {
  * history when it comes no later; a commit off the line is in none. `changed`
  * lists what differs from each commit to NEW.
  */
-function history(line: readonly string[], changed: Readonly<Record<string, readonly string[]>> = {}): History {
+function history(
+  line: readonly string[],
+  changed: Readonly<Record<string, readonly string[]>> = {},
+  files: Readonly<Record<string, Readonly<Record<string, string>>>> = {},
+): History {
   return {
     isAncestor: (ancestor, target) =>
       line.includes(ancestor) && line.includes(target) && line.indexOf(ancestor) <= line.indexOf(target),
@@ -343,6 +349,11 @@ function history(line: readonly string[], changed: Readonly<Record<string, reado
       expect(to).toBe(NEW);
       return changed[from] ?? [];
     },
+    fileAt: (commit, file) => files[commit]?.[file],
+    filesIn: (commit, folder) =>
+      Object.keys(files[commit] ?? {})
+        .filter((file) => file.startsWith(`${folder}/`))
+        .map((file) => file.slice(folder.length + 1)),
   };
 }
 
@@ -436,6 +447,63 @@ describe('deciding a release', () => {
     expect(decided.updates.get('migrate')).toEqual(released(running('migrate'), NEW_IMAGE, NEW));
   });
 
+  describe('a new migration adding a trigger to a table already built (decision 49)', () => {
+    const BUILT = 'db/migrations/0001_built.sql';
+    const ADDS = 'db/migrations/0082_marks.sql';
+    const COMING = 'packages/platform/src/db/coming.json';
+    const builtSql = 'CREATE TABLE app.things (id uuid);';
+    const addsSql = 'CREATE TRIGGER marks AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.mark();';
+    const coming = JSON.stringify({
+      triggers: [
+        {
+          table: 'app.things',
+          name: 'marks',
+          definition: 'CREATE TRIGGER marks',
+          function: 'app.mark',
+          body: 'a'.repeat(64),
+        },
+      ],
+      bodies: [],
+    });
+    const decideFrom = (old: Readonly<Record<string, string>>) =>
+      decide(
+        both(running('api'), running('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, NEW], { [OLD]: [ADDS] }, { [OLD]: old, [NEW]: { [BUILT]: builtSql, [ADDS]: addsSql } }),
+      );
+
+    it('stops when the image staging runs did not carry it as coming: it would page as it migrates', () => {
+      expect(decideFrom({ [BUILT]: builtSql })).toEqual({
+        kind: 'coming-first',
+        reasons: [
+          `0082_marks.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers (staging runs ${OLD})`,
+        ],
+      });
+    });
+
+    it('never asks for a hand deploy, which would go round it: the coming entry first, before any other reason', async () => {
+      const line = history(
+        [OLD, NEW],
+        { [OLD]: [ADDS, 'deploy/azure/apps.bicep'] },
+        { [OLD]: { [BUILT]: builtSql }, [NEW]: { [BUILT]: builtSql, [ADDS]: addsSql } },
+      );
+      const { status, said } = await checked(staging(OLD), line);
+      expect(status).toBe(1);
+      expect(said).toContain(`A release of ${NEW} stops here, red: ${COMING_FIRST}`);
+      expect(COMING_FIRST).toContain('never a hand deploy');
+      expect(said.filter((one) => one.includes('needs a hand deploy'))).toEqual([]);
+    });
+
+    it('goes ahead when it did', () => {
+      expect(decideFrom({ [BUILT]: builtSql, [COMING]: coming }).kind).toBe('release');
+    });
+
+    it('looks no further for a migration staging already ran', () => {
+      expect(decideFrom({ [BUILT]: builtSql, [ADDS]: addsSql }).kind).toBe('release');
+    });
+  });
+
   it('stops for a hand deploy when what a person deploys changed, whatever its case, saying each file and why', () => {
     const why = (prefix: string): string => HAND_DEPLOYED.find((area) => area.prefix === prefix)?.why ?? '';
     for (const [file, prefix] of [
@@ -501,7 +569,7 @@ describe('deciding a release', () => {
     // What the API runs isn't in the commit's history: nothing it changed can be read, so a person deploys it.
     expect(decide(both(running('api'), migrate), NEW, NEW_IMAGE, history([older, NEW]))).toEqual({
       kind: 'by-hand',
-      reasons: [`staging runs ${OLD}, which isn't in ${NEW}'s history`],
+      reasons: [`staging runs ${OLD}, which isn't in ${NEW}'s history; ${OUTSIDE_HISTORY}`],
     });
     // Both are in it: the job, which fell behind, is read from its own build, so what changed since then counts.
     expect(

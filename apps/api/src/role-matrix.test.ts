@@ -25,13 +25,20 @@
 // SEC-OPS-04 (B6-3d): so are an admin and an approver in the 7 days after a
 // second factor of theirs was removed, as SECOND_FACTOR_REMOVED.
 import { type Scope, SCOPES } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck, Role, SignIn } from '@agentx/core/modules/identity';
+import {
+  type LiveSession,
+  type MembershipCheck,
+  type Role,
+  type SignIn,
+  SignInFailed,
+} from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER, type Principal } from './access.ts';
+import { CORRELATION_HEADER } from './correlation.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -80,7 +87,13 @@ const session = (index: number): LiveSession => ({
 const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in the matrix')),
   beginStepUp: () => Promise.reject(new Error('not in the matrix')),
-  complete: () => Promise.reject(new Error('not in the matrix')),
+  // As the real one: a callback the login service refused is a SignInFailed (CO2), which the route logs and refuses.
+  complete: (returned) =>
+    Promise.reject(
+      'refused' in returned
+        ? new SignInFailed(returned.refused, 'refused at the login service')
+        : new Error('not in the matrix'),
+    ),
   signOut: () => Promise.resolve(undefined),
   holderOf: () => Promise.resolve(undefined),
   signedIn: (cookie) => {
@@ -164,6 +177,8 @@ interface Operation {
 
 let app: FastifyInstance;
 let operations: Operation[];
+/** Every line the server writes: MO3 reads those written while answering. */
+const capture = new LogCapture();
 /** The paths whose GET the document shows a HEAD for too. */
 let heads: Set<string>;
 
@@ -187,7 +202,7 @@ beforeAll(async () => {
     logger: createLogger({
       service: 'api',
       config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
+      destination: capture,
     }),
     ids: new SequentialIds(),
     healthChecks: [],
@@ -325,6 +340,32 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
       }
     }
     expect(wrong).toEqual([]);
+  }, 30_000);
+
+  // MO3 (logging standard §2, 4D2e "Seeing inside" level 4): whatever a request makes the server log (an access
+  // refusal, a route that fails, a refused key, its completion), each line names that request, so one search finds
+  // all it did. Callers who reach each kind of line: no one, an agent, a refused key, an admin, one without a passkey.
+  it('MO3 names its request’s correlation ID on every line written while answering any operation', async () => {
+    const callers = CALLERS.filter(({ name }) =>
+      ['anyone', 'an agent', 'an agent whose key is refused', 'admin', 'admin with an app code'].includes(name),
+    );
+    expect(callers).toHaveLength(5);
+    const before = capture.lines().length;
+    const answered = new Set<string>();
+    for (const operation of operations) {
+      const responses = await Promise.all(callers.map((caller) => app.inject(requestFor(operation, caller))));
+      for (const response of responses) answered.add(String(response.headers[CORRELATION_HEADER]));
+    }
+    const lines = capture.lines().slice(before);
+
+    // Never vacuous: a line at least for each answer, and lines of more kinds than the completion's alone.
+    expect(lines.length).toBeGreaterThanOrEqual(answered.size);
+    expect(new Set(lines.map(({ event }) => event)).size).toBeGreaterThan(2);
+    expect(
+      lines
+        .filter(({ correlationId }) => typeof correlationId !== 'string' || !answered.has(correlationId))
+        .map(({ event }) => event),
+    ).toEqual([]);
   }, 30_000);
 
   it("refuses a GET's HEAD exactly when it refuses the GET (a HEAD's answer has no body to read its reason from)", async () => {

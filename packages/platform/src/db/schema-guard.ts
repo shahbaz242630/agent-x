@@ -47,9 +47,16 @@
 // as a planted one is the attack. So the image before a migration has to know the
 // trigger exactly, or it raises a false tamper alarm when the migration ends. That
 // knowledge can't come with the migration, as the image running then is older: it
-// lands first, in COMING_TRIGGERS, and reaches a release, and only then the
+// lands first, in coming.json's triggers, and reaches a release, and only then the
 // migration may run. Each entry is compared whole as Postgres prints it, and its
 // function by hash: release-shaped when exact, and anything else the alarm at once.
+//
+// **A guard function's body replaced** (CREATE OR REPLACE) is the same: any body but
+// the one its migration wrote is the alarm at once, as a rewritten guard is the attack.
+// So the next release's body lands first too, in coming.json's bodies, beside the one
+// held now: the exact hash release-shaped, any other the alarm at once (decision 49).
+// tooling/checks/migration-order.test.ts refuses a migration whose trigger or body the
+// release before it didn't carry as coming, and an entry left behind once built.
 //
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
@@ -66,6 +73,7 @@ import { type Kysely, sql } from 'kysely';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_KEYS from './built-keys.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
+import COMING from './coming.json' with { type: 'json' };
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
 import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
@@ -379,9 +387,21 @@ export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [...MARK_TRIGGERS, ...O
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
  * a release's and no one else's trigger as one. They leave this list for good with the migration that makes them.
- * None now: 0080's left it for BUILT_TRIGGERS.
+ * Kept in coming.json, so the CI check reads the list as an earlier commit had it, without running that commit.
  */
-const COMING_TRIGGERS: readonly WrittenTrigger[] = [];
+const COMING_TRIGGERS: readonly WrittenTrigger[] = COMING.triggers;
+
+/** A guard function's body as the next release's migration writes it: the function by name, the body by SHA-256. */
+export interface ComingBody {
+  readonly function: string;
+  readonly body: string;
+}
+
+/**
+ * The bodies the next release's migration writes over functions this image knows (this file's header), each beside
+ * the body held now, never in its place. They leave the list for good with the migration that writes them.
+ */
+const COMING_BODIES: readonly ComingBody[] = COMING.bodies;
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -565,6 +585,8 @@ export interface SchemaGuardOptions {
   readonly fixedAtCreation?: Readonly<Record<string, readonly string[]>>;
   /** The triggers a coming migration adds to a table already built. Defaults to the product's own. */
   readonly comingTriggers?: readonly WrittenTrigger[];
+  /** The bodies a coming migration writes over functions already built. Defaults to the product's own. */
+  readonly comingBodies?: readonly ComingBody[];
   /**
    * What this image was built knowing: its triggers, tables and CHECKs. Defaults to the product's own; a test names
    * another to read a database as the image before a release would.
@@ -592,7 +614,8 @@ export interface SchemaDrift {
   /**
    * What a release's migration also makes to the image before it: a CHECK not
    * as built, reworded or gone, a function this image doesn't know, a table it
-   * doesn't, with what that table's shape breaks, or a trigger it knows is coming.
+   * doesn't, with what that table's shape breaks, or a trigger or a function's
+   * body it knows is coming.
    */
   readonly releaseShaped: readonly SchemaProblem[];
 }
@@ -1512,24 +1535,52 @@ function tenantPolicyProblems(table: string, found: readonly PolicyRow[]): Schem
  * Functions: the guards and the order key above are the only ones our schemas hold, and each must still be the function its migration wrote,
  * running with its caller's rights and looking names up where it pinned them.
  */
-function functionProblems(fn: FunctionRow, ownerRole: string, bodies: ReadonlyMap<string, string>): SchemaProblem[] {
+function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
   const problems: SchemaProblem[] = [];
   if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
   if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
   if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
-  const body = bodies.get(fn.name);
-  if (body !== undefined && fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
   return problems;
 }
 
-/** Each function in our schemas that isn't one of those this image knows. */
-function unknownFunctionProblems(
-  allFunctions: readonly FunctionRow[],
-  bodies: ReadonlyMap<string, string>,
-): SchemaProblem[] {
-  return allFunctions
-    .filter((fn) => !bodies.has(fn.name))
-    .map((fn) => `${fn.name} is a function our schemas should not hold`);
+/** The bodies each function may hold: the one its migration wrote, and those a coming migration writes. */
+export interface KnownBodies {
+  readonly written: ReadonlyMap<string, string>;
+  readonly coming: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+/**
+ * How a function reads against the bodies known: one this image doesn't know, the body its
+ * migration wrote, the next release's body exactly (release-shaped), or any other (the alarm at once).
+ */
+export function bodyReads(
+  fn: { readonly name: string; readonly body: string },
+  { written, coming }: KnownBodies,
+): 'unknown' | 'as written' | 'coming' | 'other' {
+  const body = written.get(fn.name);
+  if (body === undefined) return 'unknown';
+  if (fn.body === body) return 'as written';
+  return coming.get(fn.name)?.has(fn.body) === true ? 'coming' : 'other';
+}
+
+/**
+ * The bodies known, from those the migrations wrote and those coming. A coming trigger's function this image doesn't
+ * know is a new one, held to its body as the rest are; one it knows gets a coming body beside the one it holds, never
+ * one in its place, so a coming trigger can't loosen what a known function must be.
+ */
+export function knownBodies(
+  written: ReadonlyMap<string, string>,
+  comingTriggers: readonly ComingBody[],
+  comingBodies: readonly ComingBody[],
+): KnownBodies {
+  const all = new Map(written);
+  for (const one of comingTriggers) if (!all.has(one.function)) all.set(one.function, one.body);
+  const coming = new Map<string, Set<string>>();
+  for (const one of [...comingTriggers, ...comingBodies]) {
+    if (all.get(one.function) === one.body) continue;
+    coming.set(one.function, (coming.get(one.function) ?? new Set<string>()).add(one.body));
+  }
+  return { written: all, coming };
 }
 
 /**
@@ -1937,6 +1988,7 @@ export async function liveSchemaDrift<Schema>(
     madeOnceTables = [],
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
+    comingBodies = COMING_BODIES,
     built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks, keys: builtKeys = BUILT_KEYS } = {
       triggers: BUILT_TRIGGERS,
       tables: BUILT_TABLES,
@@ -2023,10 +2075,13 @@ export async function liveSchemaDrift<Schema>(
   const comingDefinitions = new Set(comingTriggers.map(({ definition }) => definition));
   const isComing = ({ definition, enabled }: TriggerRow): boolean =>
     comingDefinitions.has(definition) && enabled === 'O';
-  const bodies = new Map([
-    ...GUARD_BODIES,
-    ...[...writtenTriggers, ...comingTriggers].map((one) => [one.function, one.body] as const),
-  ]);
+  const held = knownBodies(
+    new Map([...GUARD_BODIES, ...writtenTriggers.map((one) => [one.function, one.body] as const)]),
+    comingTriggers,
+    comingBodies,
+  );
+  const bodiesRead = (as: ReturnType<typeof bodyReads>): FunctionRow[] =>
+    allFunctions.filter((fn) => bodyReads(fn, held) === as);
   /** What a table's own shape breaks: the same rules, for those that stand and those new. */
   const shapeProblems = (
     tables: readonly RelationRow[],
@@ -2064,7 +2119,8 @@ export async function liveSchemaDrift<Schema>(
     ...[...globalTables]
       .filter((listed) => !known.has(listed))
       .map((listed) => `${listed} is listed as a global table but is not there`),
-    ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole, bodies)),
+    ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole)),
+    ...bodiesRead('other').map((fn) => `${fn.name} is not the function the migration wrote`),
     // A rewrite rule can turn any statement into a different one, silently.
     ...allRules.map((rule) => `${rule.table} carries the rewrite rule ${quoted(rule.name)}`),
     // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
@@ -2101,7 +2157,8 @@ export async function liveSchemaDrift<Schema>(
     releaseShaped: inOrder([
       ...builtCheckProblems(allChecks, builtChecks),
       ...builtKeyProblems(allKeys, builtKeys, new Set(builtTables), policy.partialUniqueIndexes),
-      ...unknownFunctionProblems(allFunctions, bodies),
+      ...bodiesRead('unknown').map((fn) => `${fn.name} is a function our schemas should not hold`),
+      ...bodiesRead('coming').map((fn) => `${fn.name} holds the body a coming migration writes`),
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
       ...gone.map((name) => `${name} is a table the migrations built, and is not there`),

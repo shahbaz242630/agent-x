@@ -22,6 +22,9 @@
 //   bank check still watches it a week. With the bank check at the same
 //   payment (forced), whichever takes it first settles it.
 // The routes' answers are payments.test.ts.
+// SEC-DP-11 ("mark failed" refused without the wait, the bank's word, step-up
+// and evidence): the wait and the step-up are tagged here; the bank's
+// reference and the confirmed consequence missing, in payments.test.ts.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createSessions, createStepUpChallenges, ESTABLISHED_DAYS, MEMBERSHIPS } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
@@ -693,7 +696,7 @@ describe('refused, changing nothing', () => {
     expect(await markNoticesOf(w)).toEqual([]);
   });
 
-  it('a payment within a day of its hand-off: PAYMENT_TOO_RECENT, proposed just past it', async () => {
+  it('SEC-DP-11 a payment within a day of its hand-off: PAYMENT_TOO_RECENT, proposed just past it', async () => {
     const { w, request, transaction } = await handedOff(REJECTED_UNPROVEN);
     // Its hand-off was two steps ago: a day on from it, to the millisecond, is still within.
     clock.advanceBy(MARK_FAILED_AFTER_MS - 2 * STEP);
@@ -730,7 +733,7 @@ describe('refused, changing nothing', () => {
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'UNKNOWN' });
   });
 
-  it('a step-up signed in with an app code: STEP_UP_FAILED, to propose and to confirm', async () => {
+  it('SEC-DP-11 a step-up signed in with an app code: STEP_UP_FAILED, to propose and to confirm', async () => {
     const { w, request, transaction, first, second } = await markable();
 
     expect(await proposed(first, transaction.id, APP_CODE)).toEqual(refused(403, 'STEP_UP_FAILED'));
@@ -740,7 +743,7 @@ describe('refused, changing nothing', () => {
     expect(await holdingsOf(w, request.id)).toEqual(HOLDS_AFTER.UNKNOWN);
   });
 
-  it('a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
+  it('SEC-DP-11 a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
     const { w, acting, transaction, first } = await markable();
     // Small: two of ALLOWED to one supplier would together need an approval (the split check).
     const other = await ask(acting, w, { amount: SMALL(REJECTED_UNPROVEN) });
