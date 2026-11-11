@@ -1406,7 +1406,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
       });
       /** What a line held costs in the budget's count (anchor-log.ts `KEPT_LINE_BYTES`). */
-      const KEPT_LINE = 600;
+      const KEPT_LINE = 340;
       /** A delta with no closing line: spoiled, its lines still counted as signed. */
       const spoiled = (fake: FakeWriteOnceStore, minutes: number, from: number, count: number): void => {
         const lines = Array.from({ length: count }, (_, index) => lineOf(anchorAt(chain(from + index), 1n)));
@@ -1603,7 +1603,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         const real = (name: string) => fake.real.get(name);
         fake.instead.get = (name) => (name === failed ? Promise.reject(new Error('the store is away')) : real(name));
         await log.read();
-        expect(log.latest(chain(0))).toBe(held);
+        expect(log.latest(chain(0))).toEqual(held);
         expect(capture.lines().filter((line) => line.reason === 'fork')).toEqual([]);
       });
 
@@ -1621,8 +1621,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
     });
 
     describe('what is held, near what a process can hold (PL-65)', () => {
-      /** The budget for 20 lines at 600 bytes, what a line held costs in its count: half of it is 10. */
-      const SIZE = 20 * 600;
+      /** The budget for 20 lines at 340 bytes, what a line held costs in its count: half of it is 10. */
+      const SIZE = 20 * 340;
       const near = async (count: number) => {
         const capture = new LogCapture();
         const fake = createFakeWriteOnceStore();
@@ -1652,7 +1652,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
           expect.objectContaining({
             level: 'error',
             kind: 'snapshots',
-            bytes: 11 * 600,
+            bytes: 11 * 340,
             mostBytes: SIZE,
             organisations: 11,
             edgeOrganisations: 10,
@@ -1676,7 +1676,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         await log.flush();
         expect(said()).toEqual([
           expect.anything(),
-          expect.objectContaining({ kind: 'snapshots', bytes: 12 * 600, organisations: 11 }),
+          expect.objectContaining({ kind: 'snapshots', bytes: 12 * 340, organisations: 11 }),
         ]);
       });
     });
@@ -2038,7 +2038,7 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         log.keep(behind);
         await log.flush();
 
-        expect(log.latest(CHAIN)).toBe(held);
+        expect(log.latest(CHAIN)).toEqual(held);
         expect(fake.calls.puts).toBe(puts);
         expect(lines('audit.integrity_failed')).toEqual([
           expect.objectContaining({
@@ -2098,7 +2098,7 @@ describe('finished full passes, kept beside the anchors (4D2e E7)', () => {
     advance(5);
     const pass = passAt(CHAIN, 4n, new Date(START.getTime() + 5 * MINUTE));
     log.keepPass(pass);
-    expect(log.lastPass(CHAIN)).toBe(pass);
+    expect(log.lastPass(CHAIN)).toEqual(pass);
     await log.flush();
 
     const [delta] = files(fake, 'deltas');

@@ -89,6 +89,7 @@ import {
   progressMessage,
 } from './anchor.ts';
 import { type Chain, chainName } from './chain.ts';
+import { type PackedLines, packedLines, type Taken } from './packed-lines.ts';
 import { cutoverFolder, cutoverName, readCutoverFile } from './cutover.ts';
 import { isCount, MOST_FILE_BYTES, type Rebase, rebaseFolder, readRebaseFile, timeIn } from './rebase.ts';
 
@@ -124,24 +125,24 @@ const MOST_AHEAD_MS = 5 * 60_000;
  * file's opened bytes against it too: past it a file is read on only to tell a sound one, capacity, from a broken one; it
  * isn't kept). By what the process has, not by a setting the store can outgrow.
  *
- * Measured (S183, Node 24, `--max-old-space-size=768`, whose heap limit reads 960 MB): a store of N organisations, each an
- * anchor and a finished pass, read whole and an hourly snapshot written. Held: 995-1,031 bytes an organisation in this log
- * at 100k-450k (840 at 20k, as the maps grow in steps), and 104-111 more in the anchor check's `seen` and `firstSeen`
- * (anchor-check.ts), which take every organisation in the store. The heap's high point, garbage and what a restart's read
- * stages with it, was 1.15 to 1.5 times what is held. 450k organisations (487 MB held, 558 MB at the high point) read and
- * wrote in that heap alone; 600k ran out of it and ended the process. So at a third, about 320 MB held at the edge (about
- * 280k organisations), under ~480 MB at the high point. The margin is less than the 480 MB left of the heap's limit: the
- * container has 1 GiB, and outside the heap sit Node's own memory (~50-80 MB) and the buffers of files fetched and of the
- * snapshot made (gzipped, ~85 MB at the edge). With the rest of the API's heap (assumed ~150 MB, not measured here) and
- * the check's notes on its first 100k organisations (~88 MB), that is ~850-900 MB at the edge's worst moment, under the
- * container's 1 GiB, ~720 MB of it heap: the refusal comes, clean and alarmed (`audit.anchor_store_beyond_memory`), before the process could
- * run out. A fifth at 340 bytes a line, before, came to much the same edge only because it counted each organisation at
- * under two thirds of its cost and left out the check's maps.
+ * Measured (S184, Node 24, `--max-old-space-size=768`, whose heap limit reads ~1 GB): a store of N organisations, each an
+ * anchor and a finished pass, read whole by a process of its own and an hourly snapshot written, the heap and the buffers
+ * outside it counted together. The lines packed (packed-lines.ts): 451 bytes an organisation at 100k (177 of it heap) and
+ * 515 at 565k (241), as the maps grow in steps, and 85-100 more in the anchor check's `firstSeen` (anchor-check.ts), which
+ * takes every organisation in the store: about 310 bytes a line at most. 565k organisations read and wrote in that heap.
+ * Before, as objects: 3,398 bytes an organisation at 100k, 996 of it heap (S183 measured the heap alone: the 2.4 KB of
+ * small buffers outside it were missed), and 111 in the check's two maps.
+ *
+ * Counted at 340 a line, past the ~310 measured, and past a file line's own length (~300, a place reached ~335), so that a
+ * sound snapshot at the edge opens within the same budget in bytes and the refusal comes from the count, as
+ * `edgeOrganisations` says. A third of a 960 MB heap is 320 MB counted: about 470k organisations, ~290 MB truly held at
+ * the edge, under the ~320 MB S183 sized the container's 1 GiB margin for (the rest of the API's heap, Node's own memory,
+ * the files fetched and the snapshot made). The warning (`NEAR_MEMORY`) comes at about 235k.
  */
 const heapsFileBytes = (): number => Math.floor(getHeapStatistics().heap_size_limit / 3);
 
-/** What a line held costs, the anchor check's share of its organisation with it: (1,031 + 111) / 2 at most, rounded up. */
-const KEPT_LINE_BYTES = 600;
+/** What a line held is counted at: about 310 measured with the check's share, rounded up past a file line's own length. */
+const KEPT_LINE_BYTES = 340;
 
 /**
  * How near what is held may come to that before it is said, at each snapshot (hourly): half, so it is said while the
@@ -241,10 +242,11 @@ interface Unsent {
   readonly kind: Kind;
   readonly name: string;
   readonly bytes: Buffer;
-  readonly lines: readonly Anchor[];
+  /** Its lines as they were made, held so until it is in the store or its name taken. */
+  readonly lines: Taken<Anchor>;
   /** The lines kept beside the anchors: finished full passes, and passes' places reached. */
-  readonly passes: readonly Anchor[];
-  readonly places: readonly Progress[];
+  readonly passes: Taken<Anchor>;
+  readonly places: Taken<Progress>;
 }
 
 const tooManySpoiled = (spoiled: number): string =>
@@ -448,23 +450,34 @@ export function createAnchorLog({
   readonly epoch: number;
   /** How long reads once the store is read, or writes, may fail before that is the alert, not just a warning. */
   readonly alertAfterMs: number;
-  /** What of a file this process can take into memory (a fifth of its heap) unless a test says. */
+  /** What this process may hold of the store, and open of one file (a third of its heap), unless a test says. */
   readonly mostFileBytes?: number;
 }): AnchorLog {
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
-  const anchors = new Map<string, Anchor>();
+  // Every table packed (packed-lines.ts, PL-65): each line a record, not an object. Where the same object stood in two
+  // tables, as `keep` puts it in `anchors` and `pending`, the same stamp does now: a file made says what it wrote by it.
+  let stamps = 0;
+  const stamped = (): number => (stamps += 1);
+  const anchors = packedLines<Anchor>(false);
   // What has moved since it was last written: one line a chain at most, however long the store stays away.
-  const pending = new Map<string, Anchor>();
+  const pending = packedLines<Anchor>(false);
   // Each chain's newest line of each side kind, and those not written yet, the same way.
-  const sides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
-  const pendingSides = { p: new Map<string, Anchor>(), u: new Map<string, Progress>() };
-  // Each chain's newest rebase, the rebase files read already, and the anchors that are a rebase's, not signed here.
+  const sides = { p: packedLines<Anchor>(false), u: packedLines<Progress>(true) };
+  const pendingSides = { p: packedLines<Anchor>(false), u: packedLines<Progress>(true) };
+  // Each chain's newest rebase, the rebase files read already, and the anchors that are a rebase's, not signed here:
+  // marked in `anchors`, and each copy of one `latest` gives out, so a copy kept back is still a rebase's.
   const rebases = new Map<string, Rebase>();
   const rebaseFilesRead = new Set<string>();
   // Whether a file at the marker's name that is none, another name under `cutover/`, and a name under `shards/` have been
   // said: each the alarm once a process.
   const said = { marker: false, cutover: false, shards: false };
   const fromRebase = new WeakSet<Anchor>();
+  /** A chain's anchor, a copy: one that is a rebase's is known to `keep` by it as such, as the one object was before. */
+  const latest = (chain: string): Anchor | undefined => {
+    const anchor = anchors.get(chain);
+    if (anchor !== undefined && anchors.marked(chain)) fromRebase.add(anchor);
+    return anchor;
+  };
   /** Whether the chain's newest rebase is later than `at`: whatever was dated then is passed over. */
   const rebasedAfter = (chain: string, at: Date): boolean => {
     const rebase = rebases.get(chain);
@@ -534,18 +547,19 @@ export function createAnchorLog({
   const countdownOf = (kind: Kind, name: string): string => name.slice(folder(kind).length, folder(kind).length + 13);
 
   /** Into `stage`, as read, what a file changes, and whether it stands for what it should: every line sound and closed for its name. Anything wrong is the alarm. A failed call to the store is thrown. */
-  const opened = async (kind: Kind, name: string, stage: Map<string, Anchor>): Promise<{ sound: boolean }> => {
+  const opened = async (kind: Kind, name: string, stage: PackedLines<Anchor>): Promise<{ sound: boolean }> => {
     const bytes = await store.get(name);
     const fileAt = whenNamed(countdownOf(kind, name));
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
       file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes }, (line, lineKind) => {
         // Dated before the chain's rebase: the chain as it was, passed over.
+        // Each line read a new one, as each was a new object: stamped as it comes in.
         if (lineKind === 'a') {
-          if (!rebasedAfter(line.chain, line.at)) staged(stage, line, kind, fileAt);
+          if (!rebasedAfter(line.chain, line.at)) staged(stage, line, stamped(), kind, fileAt);
         } else if (isPlace(line)) {
-          if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, kind, fileAt);
-        } else passLine(stage, line, kind, fileAt);
+          if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, stamped(), kind, fileAt);
+        } else passLine(stage, line, stamped(), kind, fileAt);
       });
     } catch (error) {
       if (error instanceof BeyondMemory) throw error;
@@ -564,19 +578,19 @@ export function createAnchorLog({
   };
 
   /** Highest place wins. The same place with another hash is the alarm, and the older stays: the chain then says which it holds. */
-  const merge = (into: Map<string, Anchor>, line: Anchor): void => {
+  const merge = (into: PackedLines<Anchor>, line: Anchor, stamp: number): void => {
     const held = into.get(line.chain);
     if (held === undefined || line.seq > held.seq) {
-      into.set(line.chain, line);
+      into.set(line, stamp);
       return;
     }
     if (line.seq !== held.seq) return;
     if (line.hash.equals(held.hash)) {
       // The same place signed again later: an idle chain checked since (anchor-check.ts).
-      if (line.at > held.at) into.set(line.chain, line);
+      if (line.at > held.at) into.set(line, stamp);
     } else {
       alarm('fork', { seq: line.seq }, line.chain);
-      if (line.at < held.at) into.set(line.chain, line);
+      if (line.at < held.at) into.set(line, stamp);
     }
   };
 
@@ -586,38 +600,38 @@ export function createAnchorLog({
    * process, waits for the whole read. What's held and what waits count together against what this process can hold, or a
    * read could end it, past anything a catch can see.
    */
-  const staged = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+  const staged = (stage: PackedLines<Anchor>, line: Anchor, stamp: number, kind: Kind, fileAt: string): void => {
     const held = anchors.get(line.chain);
     if (held !== undefined && (line.seq !== held.seq || line.hash.equals(held.hash))) {
-      merge(anchors, line);
+      merge(anchors, line, stamp);
       return;
     }
-    merge(stage, line);
+    merge(stage, line, stamp);
     if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
   /** Whether what's held and what this read staged are past what this process can hold. */
-  const pastMemory = (stage: Map<string, Anchor>, kind: Kind, fileAt: string): void => {
+  const pastMemory = (stage: PackedLines<Anchor>, kind: Kind, fileAt: string): void => {
     if ((linesHeld() + stage.size) * KEPT_LINE_BYTES > mostFileBytes) throw new BeyondMemory(kind, fileAt);
   };
 
   /** A finished pass as it is read: the latest begun kept, at once, as it moves nothing a check compares with. */
-  const passLine = (stage: Map<string, Anchor>, line: Anchor, kind: Kind, fileAt: string): void => {
+  const passLine = (stage: PackedLines<Anchor>, line: Anchor, stamp: number, kind: Kind, fileAt: string): void => {
     const kept = sides.p.get(line.chain);
     if (kept !== undefined && kept.at >= line.at) return;
-    sides.p.set(line.chain, line);
+    sides.p.set(line, stamp);
     pastMemory(stage, kind, fileAt);
   };
 
   /** A place reached as it is read: the latest pass's, and of that pass the furthest, kept at once. */
-  const placeLine = (stage: Map<string, Anchor>, line: Progress, kind: Kind, fileAt: string): void => {
+  const placeLine = (stage: PackedLines<Anchor>, line: Progress, stamp: number, kind: Kind, fileAt: string): void => {
     const kept = sides.u.get(line.chain);
     if (
       kept !== undefined &&
       (kept.began > line.began || (kept.began.getTime() === line.began.getTime() && kept.seq >= line.seq))
     )
       return;
-    sides.u.set(line.chain, line);
+    sides.u.set(line, stamp);
     pastMemory(stage, kind, fileAt);
   };
 
@@ -625,7 +639,7 @@ export function createAnchorLog({
    * The snapshots not read yet, newest first, back to the first with nothing wrong: `base`, the one deltas count from.
    * Thrown if none is left to stand for the whole, as with a failed call: what's in memory already does, once there is any.
    */
-  const newerSnapshots = async (foreign: { count: number }, stage: Map<string, Anchor>) => {
+  const newerSnapshots = async (foreign: { count: number }, stage: PackedLines<Anchor>) => {
     let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
@@ -643,7 +657,7 @@ export function createAnchorLog({
    * Every delta this process didn't write, newer than the last it listed or, with
    * none yet, than the snapshot: one of the same millisecond may hold more than it.
    */
-  const newerDeltas = async (snapshot: string | undefined, foreign: { count: number }, stage: Map<string, Anchor>) => {
+  const newerDeltas = async (snapshot: string | undefined, foreign: { count: number }, stage: PackedLines<Anchor>) => {
     let newest: string | undefined;
     let files = 0;
     for await (const name of filesOf('deltas', DELTAS_A_PAGE, foreign)) {
@@ -690,9 +704,7 @@ export function createAnchorLog({
     const moved = held === undefined || held.at < rebase.at;
     if (moved) {
       const { chain, seq, hash, macKeyVersion, at, keyVersion, signature } = rebase;
-      const anchor: Anchor = Object.freeze({ chain, seq, hash, macKeyVersion, at, keyVersion, signature });
-      fromRebase.add(anchor);
-      anchors.set(chain, anchor);
+      anchors.set({ chain, seq, hash, macKeyVersion, at, keyVersion, signature }, stamped(), true);
     }
     const waiting = pending.get(rebase.chain);
     if (waiting !== undefined && waiting.at < rebase.at) pending.delete(rebase.chain);
@@ -792,13 +804,13 @@ export function createAnchorLog({
     try {
       const foreign = { count: 0 };
       await refuseMovedOn(foreign);
-      const stage = new Map<string, Anchor>();
+      const stage = packedLines<Anchor>(false);
       // First, so every line read after is judged against them.
       await readRebases(foreign);
       const snapshots = await newerSnapshots(foreign, stage);
       const deltas = await newerDeltas(snapshots.base, foreign, stage);
       // Only now, with every call answered: a part read could look like a chain never anchored, or settle a fork.
-      for (const line of stage.values()) merge(anchors, line);
+      for (const { line, stamp } of stage.held()) merge(anchors, line, stamp);
       if (snapshots.sound !== undefined) snapshotFrom = snapshots.sound;
       if (deltas.newest !== undefined) deltasFrom = deltas.newest;
       if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
@@ -843,9 +855,16 @@ export function createAnchorLog({
     }
   };
 
-  /** Lines back into what waits to be written, unless a later line of the chain is waiting already. */
-  const waitAgain = <T extends Anchor>(into: Map<string, T>, lines: readonly T[]): void => {
-    for (const line of lines) if (!into.has(line.chain)) into.set(line.chain, line);
+  /** Lines back into what waits to be written, unless a later line of the chain is waiting already: with their stamps. */
+  const waitAgain = <T extends Anchor>(into: PackedLines<T>, lines: Taken<T>): void => {
+    for (const { line, stamp } of lines.lines()) if (!into.has(line.chain)) into.set(line, stamp);
+  };
+
+  /** What a file made held, let go: once it is in the store, or its lines wait again. */
+  const letGo = ({ lines, passes, places }: Pick<Unsent, 'lines' | 'passes' | 'places'>): void => {
+    lines.release();
+    passes.release();
+    places.release();
   };
 
   /** A name taken by other bytes: the alarm, and the file's lines go again under a new name. */
@@ -854,18 +873,20 @@ export function createAnchorLog({
     waitAgain(pending, file.lines);
     waitAgain(pendingSides.p, file.passes);
     waitAgain(pendingSides.u, file.places);
+    letGo(file);
     unsent = undefined;
   };
 
   /** A file in the store: nothing to read in a delta of ours, and a snapshot is the newest. */
   const stored = (file: Unsent): void => {
+    letGo(file);
     unsent = undefined;
     if (file.kind === 'deltas') written.add(file.name);
     else snapshotFrom = countdownOf('snapshots', file.name);
     logger.info('audit.anchors_written', {
       kind: file.kind,
-      lines: file.lines.length,
-      sides: file.passes.length + file.places.length,
+      lines: file.lines.size,
+      sides: file.passes.size + file.places.size,
     });
   };
 
@@ -883,38 +904,65 @@ export function createAnchorLog({
     stored(file);
   };
 
+  /** Only what a file holds stops waiting: a line kept while it was made has a stamp of its own, and still waits. */
+  const settled = <T extends Anchor>(waiting: PackedLines<T>, lines: Taken<T>): void => {
+    for (const [chain, stamp] of lines.stamps()) if (waiting.stampOf(chain) === stamp) waiting.delete(chain);
+  };
+
+  /** The next file's lines, as they are now: every chain's anchor when a snapshot is due, what moved otherwise. */
+  const taken = (kind: Kind) => {
+    const all = (): boolean => true;
+    // A chain still at its rebase is left to the rebase's own file: its anchor isn't signed with this key.
+    const lines = kind === 'snapshots' ? anchors.take((chain) => !anchors.marked(chain)) : pending.take(all);
+    const from = kind === 'snapshots' ? sides : pendingSides;
+    const passes = from.p.take(all);
+    const places = from.u.take((_chain, line) => kind === 'deltas' || !overtaken(line()));
+    return { lines, passes, places };
+  };
+
   /** The next file to write: every chain's anchor when a snapshot is due, what moved otherwise. */
   const madeFile = async (): Promise<Unsent> => {
     const at = now().getTime();
     const lastSnapshot = snapshotFrom === undefined ? undefined : LAST_MS - Number(snapshotFrom);
     const kind: Kind = lastSnapshot === undefined || at - lastSnapshot >= SNAPSHOT_EVERY_MS ? 'snapshots' : 'deltas';
-    // A chain still at its rebase is left to the rebase's own file: its anchor isn't signed with this key.
-    const lines =
-      kind === 'snapshots' ? [...anchors.values()].filter((line) => !fromRebase.has(line)) : [...pending.values()];
-    const from = kind === 'snapshots' ? sides : pendingSides;
-    const passLines = [...from.p.values()];
-    const placeLines = [...from.u.values()].filter((line) => kind === 'deltas' || !overtaken(line));
-    const count = lines.length + passLines.length + placeLines.length;
-    const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
-    const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
-    const closing = JSON.stringify({
-      k: 'c',
-      name,
-      epoch,
-      lines: count,
-      kv: keyVersion,
-      sig: signature.toString('base64'),
-    });
-    const bytes = await gzippedLines(
-      (function* lined() {
-        for (const line of lines) yield `${lineOf(line, 'a')}\n`;
-        for (const line of passLines) yield `${lineOf(line, 'p')}\n`;
-        for (const line of placeLines) yield `${lineOf(line, 'u')}\n`;
-        yield `${closing}\n`;
-      })(),
-    );
-    // In the budget's own count, so it is said long before a read of this many would be refused; with each snapshot, so
-    // hourly, not each minute's delta.
+    const { lines, passes, places } = taken(kind);
+    try {
+      const count = lines.size + passes.size + places.size;
+      const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
+      const { signature, keyVersion } = keys.sign('audit-anchor', closingMessage(name, epoch, count));
+      const closing = JSON.stringify({
+        k: 'c',
+        name,
+        epoch,
+        lines: count,
+        kv: keyVersion,
+        sig: signature.toString('base64'),
+      });
+      const bytes = await gzippedLines(
+        (function* lined() {
+          for (const { line } of lines.lines()) yield `${lineOf(line, 'a')}\n`;
+          for (const { line } of passes.lines()) yield `${lineOf(line, 'p')}\n`;
+          for (const { line } of places.lines()) yield `${lineOf(line, 'u')}\n`;
+          yield `${closing}\n`;
+        })(),
+      );
+      nearMemory(kind);
+      // Only what this file holds: `keep` may have run while it was made.
+      settled(pending, lines);
+      settled(pendingSides.p, passes);
+      settled(pendingSides.u, places);
+      return { kind, name, bytes, lines, passes, places };
+    } catch (error) {
+      letGo({ lines, passes, places });
+      throw error;
+    }
+  };
+
+  /**
+   * In the budget's own count, so it is said long before a read of this many would be refused; with each snapshot, so
+   * hourly, not each minute's delta.
+   */
+  const nearMemory = (kind: Kind): void => {
     const held = linesHeld();
     if (kind === 'snapshots' && held * KEPT_LINE_BYTES > mostFileBytes * NEAR_MEMORY) {
       logger.error('audit.anchor_store_near_memory', {
@@ -926,11 +974,6 @@ export function createAnchorLog({
         edgeOrganisations: Math.floor(mostFileBytes / KEPT_LINE_BYTES / 2),
       });
     }
-    // Only what this file holds: `keep` may have run while it was made.
-    for (const line of lines) if (pending.get(line.chain) === line) pending.delete(line.chain);
-    for (const line of passLines) if (pendingSides.p.get(line.chain) === line) pendingSides.p.delete(line.chain);
-    for (const line of placeLines) if (pendingSides.u.get(line.chain) === line) pendingSides.u.delete(line.chain);
-    return { kind, name, bytes, lines, passes: passLines, places: placeLines };
   };
 
   const writeDue = async (): Promise<void> => {
@@ -948,7 +991,7 @@ export function createAnchorLog({
 
   return Object.freeze({
     epoch,
-    latest: (chain: Chain) => anchors.get(chainName(chain)),
+    latest: (chain: Chain) => latest(chainName(chain)),
     keep(anchor: Anchor) {
       // Signed before the chain's rebase, by a check that began on the chain as it was: nothing to keep.
       if (rebasedAfter(anchor.chain, anchor.at)) return;
@@ -961,13 +1004,16 @@ export function createAnchorLog({
         alarm('behind', { seq: anchor.seq, anchorSeq: held.seq }, anchor.chain);
         return;
       }
-      anchors.set(anchor.chain, anchor);
-      pending.set(anchor.chain, anchor);
+      // One stamp in both, as one object was: a snapshot made of the anchors then says it wrote what waits.
+      const stamp = stamped();
+      anchors.set(anchor, stamp, fromRebase.has(anchor));
+      pending.set(anchor, stamp);
     },
     lastPass: (chain: Chain) => sides.p.get(chainName(chain)),
     keepPass(line: Anchor) {
-      sides.p.set(line.chain, line);
-      pendingSides.p.set(line.chain, line);
+      const stamp = stamped();
+      sides.p.set(line, stamp);
+      pendingSides.p.set(line, stamp);
       // Finished: its place reached goes on to nothing, and is no longer written.
       sides.u.delete(line.chain);
       pendingSides.u.delete(line.chain);
@@ -979,8 +1025,9 @@ export function createAnchorLog({
     keepProgress(line: Progress) {
       // A pass that began before the chain's rebase read the chain as it was: its place goes nowhere.
       if (rebasedAfter(line.chain, line.began)) return;
-      sides.u.set(line.chain, line);
-      pendingSides.u.set(line.chain, line);
+      const stamp = stamped();
+      sides.u.set(line, stamp);
+      pendingSides.u.set(line, stamp);
     },
     rebasedAfter: (chain: Chain, at: Date) => rebasedAfter(chainName(chain), at),
     lastFileAt() {

@@ -26,6 +26,24 @@ export interface Anchor extends CheckedPoint {
   readonly signature: Buffer;
 }
 
+/**
+ * Whether two anchors are the same line, field by field. The anchor log hands out a new copy at each `latest` (its lines
+ * are packed, PL-65), so whether an anchor moved can't go by identity: two lines alike in every field, the signature too,
+ * are one anchor, as a signature is the key's over all the rest.
+ */
+export function sameAnchor(one: Anchor | undefined, other: Anchor | undefined): boolean {
+  if (one === undefined || other === undefined) return one === other;
+  return (
+    one.chain === other.chain &&
+    one.seq === other.seq &&
+    one.hash.equals(other.hash) &&
+    one.macKeyVersion === other.macKeyVersion &&
+    one.at.getTime() === other.at.getTime() &&
+    one.keyVersion === other.keyVersion &&
+    one.signature.equals(other.signature)
+  );
+}
+
 /** Where the last anchor of each chain is kept. */
 export interface AnchorStore {
   latest(chain: Chain): Anchor | undefined;

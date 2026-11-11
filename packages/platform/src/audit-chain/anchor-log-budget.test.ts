@@ -1,4 +1,4 @@
-// The anchor log's default budget (PL-65): a third of the heap, each line held counted at 600 bytes, here with a heap
+// The anchor log's default budget (PL-65): a third of the heap, each line held counted at 340 bytes, here with a heap
 // so small that ten organisations, each an anchor and a finished pass, are its edge. The measurement behind the numbers
 // is in anchor-log.ts, at `heapsFileBytes`.
 import { createFakeWriteOnceStore, type FakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
@@ -10,8 +10,8 @@ import { signAnchor, signPass } from './anchor.ts';
 import { createAnchorLog } from './anchor-log.ts';
 import type { Chain } from './chain.ts';
 
-/** Three times the budget for 20 lines at 600 bytes: ten organisations' anchors and passes. */
-const { HEAP } = vi.hoisted(() => ({ HEAP: 3 * 20 * 600 }));
+/** Three times the budget for 20 lines at 340 bytes: ten organisations' anchors and passes. */
+const { HEAP } = vi.hoisted(() => ({ HEAP: 3 * 20 * 340 }));
 
 vi.mock('node:v8', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:v8')>();
@@ -68,7 +68,7 @@ async function restartOver(fake: FakeWriteOnceStore) {
   return { log, said };
 }
 
-describe('the default budget: a third of the heap, at 600 bytes a line held (PL-65)', () => {
+describe('the default budget: a third of the heap, at 340 bytes a line held (PL-65)', () => {
   it('at the edge, ten organisations, reads whole, and says it is past half', async () => {
     const { log, said } = await restartOver(await storeOf(10));
     expect(log.state()).toBe('read');
