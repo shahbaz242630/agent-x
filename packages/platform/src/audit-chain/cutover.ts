@@ -95,15 +95,6 @@ interface Named {
   readonly epoch: number;
 }
 
-/** What a record read says: signed for its name, with when; or why it is none. */
-export type RecordRead = { readonly marker: true; readonly at: Date } | { readonly problem: CutoverProblem };
-
-interface Named {
-  readonly bytes: Buffer;
-  readonly name: string;
-  readonly epoch: number;
-}
-
 /**
  * Whether the file named `name` is a marker of the sharded layout for this epoch, signed for its name with a version of
  * the `audit-anchor` key this process holds; or why not.
