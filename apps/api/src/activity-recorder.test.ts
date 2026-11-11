@@ -20,21 +20,12 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { type ActivitySink, activitySinkOf, pathIdsOf, reasonIn } from './activity-recorder.ts';
 import type { AuditLog } from './audit-log.ts';
 import { type PlaceOf, TIME_ZONE_HEADER } from './client-clues.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { ServerOptions } from './server.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-18T09:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-18T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-18T09:10:00.000Z'),
-  endsAt: new Date('2099-10-18T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-18T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-18T09:00:00.000Z', { endless: true });
 
 const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000dcba';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';

@@ -3,7 +3,7 @@
 // (role-matrix.test.ts); what the use case does in the database is
 // agent-registering.db.test.ts.
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
+import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -19,6 +19,7 @@ import type {
   RegisteringMember,
   RegistrationWrite,
 } from './agent-registering.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -27,18 +28,7 @@ const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
 const OWNER = '0199a0f0-0000-7000-8000-000000000033';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-28T09:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-09-28T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-28T09:10:00.000Z'),
-  endsAt: new Date('2099-09-28T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-09-28T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-28T09:00:00.000Z', { endless: true });
 
 const MEMBER = { outcome: 'active', id: OWNER, role: 'developer' } as const satisfies MembershipCheck;
 const REGISTERING: RegisteringMember = { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId };

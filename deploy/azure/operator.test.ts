@@ -21,6 +21,8 @@ import {
   chainRecoveryRequest,
   chainRestoreRequest,
   restoreCheckRequest,
+  stateRecoveryRequest,
+  stateRestoreRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
 import type { Az, AzResult } from './deploy.ts';
@@ -43,11 +45,15 @@ import {
   parseRebase,
   parseRecoveryPlan,
   parseRestore,
+  parseStatePlan,
+  parseStateRestore,
   recoveryPlan,
   REQUEST_SECRET,
   RESTORE_JOB,
   RESTORE_REQUEST_SECRET,
   restoreCheck,
+  stateRecoveryPlan,
+  stateRestore,
   USAGE,
 } from './operator.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
@@ -228,7 +234,19 @@ type Ending =
   | 'rebase-broken'
   | 'rebase-head-differs'
   | 'rebase-unknown'
-  | 'rebased-other';
+  | 'rebased-other'
+  | 'state-planned'
+  | 'state-plan-refused'
+  | 'state-plan-copy-broken'
+  | 'states-restored'
+  | 'state-restore-plan'
+  | 'state-restore-stale'
+  | 'state-restore-moved'
+  | 'state-restore-busy'
+  | 'state-restore-write'
+  | 'state-restore-unverified'
+  | 'state-restore-unknown'
+  | 'state-restore-done-before';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
@@ -514,6 +532,78 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   'rebase-head-differs': (id) => [rebaseRefused(id, { reason: 'head_differs', seq: '11' }), TERMINATED],
   'rebase-unknown': (id) => [rebaseRefused(id, { reason: 'something_new' }), TERMINATED],
   'rebased-other': () => [said(rebasedLine(OTHER_ID, {})), TERMINATED],
+  'state-planned': (id) => [
+    said({
+      event: 'operator.state_recovery_planned',
+      planId: id,
+      digest: 'ab'.repeat(32),
+      putBack: 2,
+      removed: 1,
+      objects: 40,
+    }),
+    TERMINATED,
+  ],
+  'state-plan-refused': (id) => [
+    said({
+      event: 'operator.state_recovery_refused',
+      planId: id,
+      reason: 'newer_than_copy',
+      subjectType: 'agent',
+      objectId: OTHER_ID,
+      problem: null,
+    }),
+    TERMINATED,
+  ],
+  'state-plan-copy-broken': (id) => [
+    said({
+      event: 'operator.state_recovery_refused',
+      planId: id,
+      reason: 'chain_broken',
+      subjectType: null,
+      objectId: null,
+      problem: 'link at 4',
+    }),
+    TERMINATED,
+  ],
+  'states-restored': (id) => [
+    said({ event: 'operator.states_restored', restoreId: id, putBack: 2, removed: 1, holdKept: true }),
+    TERMINATED,
+  ],
+  'state-restore-plan': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'plan', planRefused: 'newer_than_copy' }),
+    TERMINATED,
+  ],
+  'state-restore-stale': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'stale' }),
+    TERMINATED,
+  ],
+  'state-restore-moved': (id) => [
+    said({
+      event: 'operator.state_restore_refused',
+      restoreId: id,
+      reason: 'moved',
+      subjectType: 'agent',
+      objectId: OTHER_ID,
+    }),
+    TERMINATED,
+  ],
+  'state-restore-busy': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'busy', subjectType: 'invitation' }),
+    TERMINATED,
+  ],
+  'state-restore-write': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'write_refused', code: '23503' }),
+    TERMINATED,
+  ],
+  'state-restore-unverified': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'unverified', check: 'whole' }),
+    TERMINATED,
+  ],
+  'state-restore-unknown': (id) => [
+    said({ event: 'operator.state_restore_refused', restoreId: id, reason: 'something_new' }),
+    TERMINATED,
+  ],
+  'state-restore-done-before': (id) => [said({ event: 'operator.done_before', restoreId: id }), TERMINATED],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -546,6 +636,8 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'planned',
   'restored',
   'restored-other',
+  'state-planned',
+  'states-restored',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -798,9 +890,14 @@ class FakeAzure implements Az {
     const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
     // The ID a request names: an organisation's fifth word, an invitation's seventh, an export's eleventh.
     const at =
-      { 'invite-first-admin': 6, 'audit-export': 10, 'activity-export': 10, 'chain-restore': 8, 'chain-rebase': 12 }[
-        String(words[0])
-      ] ?? 4;
+      {
+        'invite-first-admin': 6,
+        'audit-export': 10,
+        'activity-export': 10,
+        'chain-restore': 8,
+        'state-restore': 8,
+        'chain-rebase': 12,
+      }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
@@ -2040,6 +2137,8 @@ async function drill(argv: readonly string[], script: Script) {
   const run = (): Promise<number> => {
     if (argv[0] === 'chain-restore') return chainRestore(parseRestore(argv), steps);
     if (argv[0] === 'chain-rebase') return chainRebase(parseRebase(argv), steps);
+    if (argv[0] === 'state-recovery-plan') return stateRecoveryPlan(parseStatePlan(argv), steps);
+    if (argv[0] === 'state-restore') return stateRestore(parseStateRestore(argv), steps);
     return recoveryPlan(parseRecoveryPlan(argv), steps);
   };
   const status = await run().then(
@@ -2447,5 +2546,146 @@ describe("4D2e E11 a chain's rebase, on the operator's job", () => {
       ),
     ).resolves.toBe(0);
     expect(lines.at(-1)).toMatch(/^Rebased: /);
+  });
+});
+
+describe("PL-29 follow-up: an organisation's authority rows planned and repaired, on the chain repair's job", () => {
+  const restore = (...more: string[]) => [
+    'state-restore',
+    '--org',
+    PLAN_ORG,
+    '--plan',
+    PLAN_ID,
+    '--digest',
+    DIGEST,
+    ...more,
+  ];
+
+  it("writes the plan's request onto the chain repair's job, says the owner-login alert, the plan and the repair's command", async () => {
+    const done = await drill(['state-recovery-plan', '--org', PLAN_ORG], { restore: true, ending: 'state-planned' });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    const planId = String(words[4]);
+    expect(done.az.heldAtStart).toBe(stateRecoveryRequest(PLAN_ORG, planId));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.find((line) => line.startsWith('Planning '))).toMatch(
+      /from the drill's copy, read-only on both servers\. This run logs in as the database's owner/,
+    );
+    expect(done.said.at(-2)).toBe(
+      `Planned ${planId}: 2 records to put back, 1 planted ones to remove, of 40 checked. Nothing was changed. The plan and its rows are in the evidence store as ${PLAN_ORG}/state-recovery-${planId}.ndjson.`,
+    );
+    expect(done.said.at(-1)).toBe(
+      `Once read, the repair is: node deploy/azure/operator.ts state-restore --org ${PLAN_ORG} --plan ${planId} --digest ${DIGEST}`,
+    );
+  });
+
+  it('says why a plan was refused, where, and ends 1; and a run that says nothing', async () => {
+    const newer = await drill(['state-recovery-plan', '--org', PLAN_ORG], {
+      restore: true,
+      ending: 'state-plan-refused',
+      states: ['Failed'],
+    });
+    expect(newer.status).toBe(1);
+    expect(newer.said.at(-1)).toBe(
+      `No plan: refused as newer_than_copy on agent ${OTHER_ID}. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.`,
+    );
+    const broken = await drill(['state-recovery-plan', '--org', PLAN_ORG], {
+      restore: true,
+      ending: 'state-plan-copy-broken',
+      states: ['Failed'],
+    });
+    expect(broken.said.at(-1)).toMatch(/^No plan: refused as chain_broken \(link at 4\)\./);
+    const silent = await drill(['state-recovery-plan', '--org', PLAN_ORG], { restore: true, ending: 'silent' });
+    expect(silent.said.at(-1)).toMatch(/Run the same command again: a plan only reads\.$/);
+  });
+
+  it("writes the repair's request, an earlier --id kept, and says the hold stays", async () => {
+    const done = await drill(restore(), { restore: true, ending: 'states-restored' });
+    expect(done.status).toBe(0);
+    const id = String((JSON.parse(String(done.az.heldAtStart)) as string[])[8]);
+    expect(done.az.heldAtStart).toBe(stateRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id }));
+    expect(done.said.find((line) => line.startsWith('Repairing '))).toMatch(
+      new RegExp(`^Repairing ${PLAN_ORG}'s records from plan ${PLAN_ID}, as repair ${id}\\. This run logs in as`),
+    );
+    expect(done.said.at(-1)).toBe(
+      `Repaired: 2 records put back, 1 planted ones removed; every record checks whole. The records are in the evidence store as ${PLAN_ORG}/state-restore-${id}-start.ndjson and -outcome.ndjson. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
+    );
+    const again = await drill(restore('--id', EARLIER_ID), { restore: true, ending: 'states-restored' });
+    expect(again.az.heldAtStart).toBe(
+      stateRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id: EARLIER_ID }),
+    );
+  });
+
+  it.each([
+    ['state-restore-plan', 'the plan made now is refused (newer_than_copy): make a new plan and read why'],
+    [
+      'state-restore-stale',
+      'the plan made now is not the one asked for: something changed since it was read. Make a new plan',
+    ],
+    ['state-restore-moved', `agent ${OTHER_ID} changed as the repair began: make a new plan`],
+    [
+      'state-restore-busy',
+      'a table it writes was busy with other work for more than a second, so it stopped rather than hold everyone up: run it again',
+    ],
+    [
+      'state-restore-write',
+      'the database refused a write (code 23503), so every write was rolled back: read playbook H',
+    ],
+    [
+      'state-restore-unverified',
+      'what was written did not check out (whole), so every write was rolled back: treat it as tampering (playbook B)',
+    ],
+    ['state-restore-unknown', 'something_new'],
+  ] as const)('says a %s refusal in plain words, and ends 1', async (ending, why) => {
+    const done = await drill(restore('--id', EARLIER_ID), { restore: true, ending, states: ['Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      `Not repaired, and nothing changed: ${why}. The records are in the evidence store as ${PLAN_ORG}/state-restore-${EARLIER_ID}-start.ndjson and -outcome.ndjson.`,
+    );
+  });
+
+  it("says a repair that ran before did nothing now, and lines that don't say", async () => {
+    const before = await drill(restore('--id', EARLIER_ID), {
+      restore: true,
+      ending: 'state-restore-done-before',
+      states: ['Failed'],
+    });
+    expect(before.said.at(-1)).toMatch(/^This repair's ID ran before, so nothing was done now/);
+    const silent = await drill(restore('--id', EARLIER_ID), { restore: true, ending: 'silent' });
+    expect(silent.status).toBe(1);
+    expect(silent.said.at(-1)).toMatch(/a repair that ran stops at its first record and does nothing twice\.$/);
+  });
+
+  it.each([
+    [['state-recovery-plan'], 'say state-recovery-plan --org <organisation ID>, and nothing else'],
+    [
+      ['state-recovery-plan', '--org', PLAN_ORG, '--discard-fork'],
+      'say state-recovery-plan --org <organisation ID>, and nothing else',
+    ],
+    [['state-recovery-plan', '--org', 'ORG'], "--org takes the organisation's ID: a UUIDv7, in lower case"],
+    [
+      ['state-restore', '--org', PLAN_ORG, '--plan', PLAN_ID, '--digest', DIGEST, '--discard-fork'],
+      'say state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>], and nothing else',
+    ],
+    [
+      ['state-restore', '--org', PLAN_ORG, '--plan', PLAN_ID],
+      'say state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>], and nothing else',
+    ],
+    [
+      ['state-restore', '--org', 'O', '--plan', PLAN_ID, '--digest', DIGEST],
+      "--org takes the organisation's ID: a UUIDv7, in lower case",
+    ],
+  ])('refuses %j before anything is sent', async (argv, problem) => {
+    const lines: string[] = [];
+    const az = new FakeAzure({ restore: true });
+    await expect(
+      main(
+        argv,
+        (line) => lines.push(line),
+        () => az,
+      ),
+    ).resolves.toBe(2);
+    expect(az.calls).toEqual([]);
+    expect(lines).toEqual([`${problem}\n${USAGE}`]);
   });
 });

@@ -65,7 +65,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { toldAdminsAndApprovers } from './mandate-reads.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { chosenAgain, freezeChoiceDetails, pausedOf, unfreezeChoiceDetails } from './suspensions.ts';
 import {
   createStepUps,
@@ -112,7 +112,7 @@ interface OrganizationShown {
 
 export type OrganizationChangeWrite =
   | { readonly outcome: 'changed'; readonly organization: OrganizationShown }
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | Refused
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' };

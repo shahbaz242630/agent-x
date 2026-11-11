@@ -5,7 +5,6 @@
 // use case reads is agent-mandate.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { SourceRecord } from '@agentx/core/modules/funding-sources';
-import type { LiveSession } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -13,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AgentMandates, AgentMandateShown } from './agent-mandate.ts';
 import type { SourcesListed } from './funding-source-reads.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -39,17 +39,7 @@ const KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
   [KEY_READING_ONLY, accepted(['requests:read'])],
 ]);
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-07T08:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-07T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-07T08:10:00.000Z'),
-  endsAt: new Date('2099-10-07T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-07T08:00:00.000Z', { endless: true });
 
 const FOUND: AgentMandateShown = {
   outcome: 'found',

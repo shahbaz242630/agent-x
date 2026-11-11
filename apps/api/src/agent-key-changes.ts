@@ -49,12 +49,12 @@ import {
   type AgentKeyRecord,
   agentKeysOf,
   agentOf,
-  AGENT_KEYS,
   bringKeyExpiryForward,
   isLiveKey,
   keysOnceIssued,
   MOST_LIVE_KEYS,
   oneKeyIssueAtATime,
+  revokeKey,
   roomForAKey,
   rotatedKeyExpiresAt,
 } from '@agentx/core/modules/agents';
@@ -73,9 +73,9 @@ import {
   type AgentWithKeys,
   createAgentWork,
 } from './agent-writes.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { type OldKeyChoice, rotationDetails } from './key-rotation-choice.ts';
-import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
+import { createStepUps, type Written } from './use-case-work.ts';
 
 /** Asking to rotate a key: its operation, which the step-up challenge names as its action too. */
 export const ROTATE_OPERATION = 'agents.keys.rotate';
@@ -97,7 +97,7 @@ export interface KeyNamed {
 
 /** What a key change's write answers. */
 export type AgentKeyChangeWrite =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | {
       readonly outcome: 'rotated';
       readonly agent: AgentWithKeys;
@@ -325,12 +325,10 @@ export function createAgentKeyChanges({
           const ended = { rotatedTo: issued.id, ...chosen };
           let oldNow: AgentKeyRecord;
           if (oldKey === 'end_now') {
-            movedAsRead(
-              await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.key.id }, 'revoke', {
-                actor,
-                action: 'agent_key.revoked',
-                details: { reason: 'rotated', ...ended },
-              }),
+            await revokeKey(
+              tx,
+              states,
+              { orgId: member.orgId, keyId: old.key.id, actor, details: { reason: 'rotated', ...ended } },
               "a live key didn't revoke",
             );
             oldNow = { ...old.key, status: 'REVOKED' };
@@ -391,12 +389,15 @@ export function createAgentKeyChanges({
             held,
             stepUpChallengeId,
           );
-          movedAsRead(
-            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
+          await revokeKey(
+            tx,
+            states,
+            {
+              orgId: member.orgId,
+              keyId: read.key.id,
               actor: { type: 'user', id: member.userId },
-              action: 'agent_key.revoked',
               details: stepUpDetails(consumed),
-            }),
+            },
             "a key read as ACTIVE didn't revoke",
           );
           return { status: 200, resourceId: read.agent.id };

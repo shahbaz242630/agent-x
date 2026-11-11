@@ -28,7 +28,7 @@ import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { pausedOf } from './suspensions.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
@@ -77,7 +77,7 @@ export interface SupplierView {
 /** A change of a supplier, as the use cases answer it: the supplier as it now stands, a step-up asked, or a refusal. */
 export type SupplierChangeWrite =
   | ({ readonly outcome: 'changed' } & SupplierView)
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;

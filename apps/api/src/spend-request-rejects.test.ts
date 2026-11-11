@@ -4,7 +4,6 @@
 // use case runs, a reason that can't be one, and the use case's own
 // refusals. What the use case does is spend-request-rejects.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession } from '@agentx/core/modules/identity';
 import type { SpendRequestRecord } from '@agentx/core/modules/spend-requests';
 import { money } from '@agentx/core/shared-kernel';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -12,6 +11,7 @@ import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { RejectAsked, Rejected, SpendRequestRejects } from './spend-request-rejects.ts';
@@ -25,17 +25,7 @@ const MEMBERSHIP_ID = '0199a0f0-0000-7000-8000-000000000033';
 
 const KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-13T08:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-13T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-13T08:10:00.000Z'),
-  endsAt: new Date('2099-10-07T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-13T08:00:00.000Z', { endless: true });
 
 const REJECTED: SpendRequestRecord = {
   id: REQUEST_ID,

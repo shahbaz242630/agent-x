@@ -41,7 +41,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { need } from './access.ts';
+import { EVERY_MEMBER, memberInSessionOf, memberOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import {
   type FundingSourceChanges,
@@ -76,9 +76,6 @@ import {
 } from './route-schemas.ts';
 import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 import { CONSENT_EXPIRY } from './consent-expiry-choice.ts';
-
-/** Every member may see the organisation's sources. */
-const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 const LINK = z
   .object({
@@ -173,20 +170,6 @@ const CONFIRM_SCHEMA = {
     202: LINK_WITH_SOURCE.describe('The link, still waiting for the business at its bank: ask again later.'),
   },
 };
-
-/** The route's own caller: a member the access hook found. The hooks let no one else through. */
-function memberOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a funding-sources route ran without a member');
-  return { orgId: member.orgId, userId: person.userId };
-}
-
-/** The route's caller in the session a step-up challenge is bound to. */
-function inSessionOf(request: FastifyRequest) {
-  const { person } = request;
-  if (person === null) throw new Error('a funding-sources route ran without a person');
-  return { ...memberOf(request), sessionId: person.sessionId };
-}
 
 const linkOf = (link: LinkRecord) => ({
   id: link.id,
@@ -348,7 +331,7 @@ export function registerFundingSources(
   );
   routes.get(
     '/v1/funding-sources',
-    { schema: LIST_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: LIST_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const listed = await need(reads).list(
@@ -367,7 +350,7 @@ export function registerFundingSources(
 
   routes.get(
     '/v1/funding-sources/:id',
-    { schema: SHOW_SCHEMA, config: { access: [...READING_ROLES] } },
+    { schema: SHOW_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(reads).show(orgId, request.params.id, request.id);
@@ -443,7 +426,7 @@ export function registerFundingSources(
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_OPERATION },
     },
     async (request, reply) => {
-      const member = inSessionOf(request);
+      const member = memberInSessionOf(request);
       const written = await need(changes).reactivate(
         member,
         idempotentRequest(request, member.orgId),
@@ -462,7 +445,7 @@ export function registerFundingSources(
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = inSessionOf(request);
+      const member = memberInSessionOf(request);
       const written = await need(changes).reactivateConfirm(
         member,
         idempotentRequest(request, member.orgId),

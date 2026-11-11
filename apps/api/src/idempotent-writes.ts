@@ -25,7 +25,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { BUSY_RETRY_SECONDS, sendErrorBody } from './errors.ts';
 import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 
 /** The refusals that say when to send the same request again: a wait in a decision's lines ran out. */
 const SEND_AGAIN_CODES: ReadonlySet<string> = new Set(['AGENT_BUSY', 'ORGANISATION_BUSY', 'PLATFORM_BUSY']);
@@ -143,7 +143,7 @@ export function answerRefusal(
  */
 export function answerAsked(
   answer:
-    | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+    | StepUpAsked
     | Refused
     | IdempotentWrite
     // The confirms' answers.

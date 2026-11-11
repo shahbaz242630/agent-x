@@ -60,7 +60,6 @@
 // requests (8) and their holdings (11), the step-up challenge (a
 // reactivation's held first, 0b), the chain head last.
 import {
-  AGENT_KEYS,
   type AgentKeyRecord,
   agentKeysOf,
   AGENTS,
@@ -69,6 +68,7 @@ import {
   isLiveKey,
   keysOnceIssued,
   oneKeyIssueAtATime,
+  revokeKey,
   roomForAKey,
 } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
@@ -96,7 +96,7 @@ import {
   type AgentWithKeys,
   createAgentWork,
 } from './agent-writes.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { cancelledInForce, choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
@@ -123,7 +123,7 @@ const OWNING_ROLES: readonly string[] = REGISTERING_ROLES;
 
 /** What a change's write answers. */
 export type AgentChangeWrite =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | { readonly outcome: 'changed'; readonly agent: AgentWithKeys }
   | {
       readonly outcome: 'handedOver';
@@ -450,12 +450,10 @@ export function createAgentChanges({
           });
           await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
           for (const old of agentKeys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
-            movedAsRead(
-              await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {
-                actor,
-                action: 'agent_key.revoked',
-                details: { reason: 'handed_over' },
-              }),
+            await revokeKey(
+              tx,
+              states,
+              { orgId: member.orgId, keyId: old.id, actor, details: { reason: 'handed_over' } },
               "a key read as ACTIVE didn't revoke",
             );
           }

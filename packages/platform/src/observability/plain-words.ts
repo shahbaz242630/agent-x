@@ -235,9 +235,9 @@ export const PLAIN_WORDS = {
     next: 'Raise the number it keeps notes on, if there is memory for it, and restart.',
   },
   'audit.anchor_store_near_memory': {
-    happened: 'The file of audit anchors just written is nearly too large for a process of this size to read back.',
-    broke: 'Nothing yet. A restart with a little more could make payments wait for every organisation.',
-    next: 'Give the process more memory before its next restart.',
+    happened: 'The audit anchors held have passed half of what a process of this size can read back after a restart.',
+    broke: 'Nothing yet. If organisations double, a restart would make payments wait for every one of them.',
+    next: 'Plan more memory for the process in good time: the line says how many there are, and the limit.',
   },
   'audit.anchor_store_beyond_memory': {
     happened: 'The store of audit anchors holds a sound file too large for this process to take into memory.',
@@ -248,6 +248,11 @@ export const PLAIN_WORDS = {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',
     next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
+  },
+  'audit.anchor_store_moved_on': {
+    happened: 'The app found a signed mark that the audit anchors moved to a newer layout this version cannot read.',
+    broke: 'Payments wait for every organisation. Agent decisions go on.',
+    next: 'If a newer version was rolled back, release it again. If none ever ran, treat it as a breach: playbook section H.',
   },
   'audit.anchor_store_not_set': {
     happened: 'This API was started with no store named for the audit anchors.',
@@ -967,6 +972,17 @@ export const PLAIN_WORDS = {
     happened: "An organisation's audit chain repair was refused or rolled back.",
     broke: 'Nothing was changed, and the organisation stays on hold.',
     next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
+  },
+  'operator.state_recovery_refused': {
+    happened: "A recovery plan for an organisation's tampered records was refused.",
+    broke:
+      'Nothing was changed, and the organisation stays on hold: its copy cannot put those records back as they were.',
+    next: "Read the reason and the plan's file in the evidence store, then follow playbook H.",
+  },
+  'operator.state_restore_refused': {
+    happened: "An organisation's tampered records repair was refused or rolled back.",
+    broke: 'Nothing was changed, and the organisation stays on hold.',
+    next: 'Read the reason in the line. If a table was busy, run it again; if the plan changed, make a new one. Then follow playbook H.',
   },
   'operator.done_before': {
     happened: 'An operator job was asked to do something already done.',

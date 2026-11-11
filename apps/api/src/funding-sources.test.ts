@@ -4,7 +4,7 @@
 // database is funding-source-links.db.test.ts and
 // funding-source-changes.db.test.ts.
 import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
-import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
+import type { MembershipCheck } from '@agentx/core/modules/identity';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
@@ -14,6 +14,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import type { FundingSourceChanges, SourceChangeWrite } from './funding-source-changes.ts';
 import type { FundingSourceLinks, LinkConfirmWrite, LinkingMember, LinkStartWrite } from './funding-source-links.ts';
 import type { FundingSourceReads, SourcePage, SourceShown } from './funding-source-reads.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -21,18 +22,7 @@ const LINK_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000d2';
 const AUTHORISE_URL = 'https://bank.fake-partner.invalid/authorise/fake-link-1';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-01T08:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-01T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-01T08:10:00.000Z'),
-  endsAt: new Date('2099-10-01T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-01T08:00:00.000Z', { endless: true });
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
 const LINKING: LinkingMember = { orgId: ORG, userId: LIVE.userId };
