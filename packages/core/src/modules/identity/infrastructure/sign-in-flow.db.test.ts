@@ -534,6 +534,42 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     expect(await sessionsOf(done.userId)).toEqual([]);
   });
 
+  it('takes a step-up’s flow when the login service sends the browser back without a sign-in, naming its page (CO2)', async () => {
+    const { done, challenge } = await signedInWithChallenge();
+    const { flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId, '/members/confirm');
+
+    await expect(
+      signIn.complete({ flowId, previousCookie: done.cookie, refused: 'provider_refused' }),
+    ).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      failure: 'provider_refused',
+      back: { returnTo: '/members/confirm', challengeId: challenge.challengeId },
+    });
+    // Taken: used once. The session and the challenge are as they were, so the person can ask again.
+    await expect(
+      signIn.complete({ flowId, code: 'a-code', state: 's', previousCookie: done.cookie }),
+    ).rejects.toMatchObject({
+      failure: 'flow_missing',
+    });
+    expect(await sessions.use(app, done.cookie)).toBeDefined();
+    expect(await challenges.pending(app, challenge.challengeId, done.sessionId)).toMatchObject({
+      challengeId: challenge.challengeId,
+    });
+  });
+
+  it('refuses a sign-in sent back without one as it always was, its flow taken, nowhere to go back to', async () => {
+    const { flowId } = await signIn.begin('/approvals');
+
+    await expect(
+      signIn.complete({ flowId, previousCookie: undefined, refused: 'callback_incomplete' }),
+    ).rejects.toMatchObject({ name: 'SignInFailed', failure: 'callback_incomplete' });
+    await expect(
+      signIn.complete({ flowId, code: 'a-code', state: 's', previousCookie: undefined }),
+    ).rejects.toMatchObject({
+      failure: 'flow_missing',
+    });
+  });
+
   it('keeps a login service that cannot be reached a SignInFailed, as a sign-in does', async () => {
     const { done, challenge } = await signedInWithChallenge();
     client.failWith = new SignInFailed('provider_unavailable', 'test');

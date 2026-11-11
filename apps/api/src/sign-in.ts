@@ -203,16 +203,13 @@ const PUBLIC = { access: ['public'] } as const;
 /** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
 const UNAVAILABLE_RETRY_SECONDS = 15;
 
-/** Why a sign-in failed: the sign-in's own failures, or the login service's answer before them. */
-type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete';
-
 export function registerSignIn(
   app: FastifyInstance,
   { signIn, sessionSeconds, loginSessions, logger, securityEvents }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
-  const failed = (request: FastifyRequest, reply: FastifyReply, failure: CallbackFailure, reason?: string) => {
+  const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
       .child({ correlationId: request.id })
       .warn('auth.sign_in_failed', reason === undefined ? { failure } : { failure, reason });
@@ -290,17 +287,18 @@ export function registerSignIn(
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
     const { code, state, error } = request.query;
-    if (error !== undefined || code === undefined || state === undefined) {
-      // The login service said no (the person cancelled, say), or the address was cut short.
-      return failed(request, reply, error === undefined ? 'callback_incomplete' : 'provider_refused');
-    }
+    // The login service said no (the person cancelled, say), or the address was cut short: the flow is still taken,
+    // so a step-up's browser goes back to its page (CO2), and a sign-in's is refused as before.
+    const returned =
+      error !== undefined || code === undefined || state === undefined
+        ? { refused: error === undefined ? ('callback_incomplete' as const) : ('provider_refused' as const) }
+        : { code, state };
     let done;
     try {
       done = await signIn.complete({
         flowId: cookieValue(request.headers.cookie, FLOW_COOKIE),
-        code,
-        state,
         previousCookie: cookieValue(request.headers.cookie, SESSION_COOKIE),
+        ...returned,
       });
     } catch (thrown) {
       if (thrown instanceof StepUpFailed) return stepUpFailed(request, reply, thrown);

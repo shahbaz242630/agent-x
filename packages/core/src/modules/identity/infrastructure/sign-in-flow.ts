@@ -72,14 +72,19 @@ export interface SignInCompleted {
   readonly stepUpChallengeId: string | undefined;
 }
 
-export interface CallbackInput {
+/**
+ * What the browser brought back: the code and state to finish with, or, when
+ * the login service sent it back without a sign-in, why (`refused`): its flow
+ * is still taken, so a step-up's browser can go back to its page (CO2).
+ */
+export type CallbackInput = {
   /** The flow cookie's value, if the browser sent one. */
   readonly flowId: string | undefined;
-  readonly code: string;
-  readonly state: string;
   /** The session cookie the browser brought, if any: ended at a sign-in, never kept; a step-up's own. */
   readonly previousCookie: string | undefined;
-}
+} & (
+  { readonly code: string; readonly state: string } | { readonly refused: 'provider_refused' | 'callback_incomplete' }
+);
 
 /**
  * Why a step-up failed: the sign-in's own failures on the way back (but the
@@ -228,9 +233,20 @@ export function createSignIn({
       return { url, flowId };
     },
 
-    async complete({ flowId, code, state, previousCookie }) {
+    async complete(input) {
+      const { flowId, previousCookie } = input;
       // Taken, and committed, before the login service is called: used once, whatever follows.
       const taken = flowId === undefined ? undefined : await limited((tx) => flows.take(tx, flowId));
+      if ('refused' in input) {
+        const detail = 'the login service sent the browser back without a sign-in';
+        // A step-up's: back to the change's page to say so (CO2); a sign-in's, refused as it always was.
+        if (taken?.stepUpChallengeId === undefined) throw new SignInFailed(input.refused, detail);
+        throw new StepUpFailed(input.refused, detail, undefined, {
+          returnTo: taken.returnTo,
+          challengeId: taken.stepUpChallengeId,
+        });
+      }
+      const { code, state } = input;
       if (taken === undefined) throw new SignInFailed('flow_missing', 'no flow of ours is waiting for this browser');
       if (taken.stepUpChallengeId !== undefined) {
         return completeStepUp(taken.stepUpChallengeId, taken, { code, state }, previousCookie);
