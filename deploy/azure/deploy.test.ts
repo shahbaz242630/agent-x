@@ -41,6 +41,7 @@ import {
   LOAD_VARIABLES,
   main,
   type Makers,
+  type Migrations,
   DEAD_MAN_RULE,
   parseArguments,
   issuedMissing,
@@ -66,6 +67,7 @@ import {
   VAULT_SECRETS,
 } from './deploy.ts';
 import type { Checkout } from './git.ts';
+import type { MigrationState } from './migration-state.ts';
 import { policyProblems } from './policy.ts';
 import { type EnvironmentSnapshot, environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
@@ -207,7 +209,7 @@ describe('parseArguments', () => {
       [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
       [
         ['apps', '--commit'],
-        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped and --back-to-generation <n>/,
+        /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped, --migrate-first and --back-to-generation <n>/,
       ],
       // Stage G's copy (4D2e): its name alone, never staging's own server, and only in a load run.
       [['apps', '--load-run', '--load-database'], /--load-database with the throwaway copy/],
@@ -1106,6 +1108,35 @@ interface Scenario {
   readonly planned?: readonly PlannedAlert[];
   /** The database server's generation the foundation names (AZ25): database-generation.json's unless given. */
   readonly generation?: number;
+  /** The database's migrations (AZ6): holding every one the image brings unless given, and no way to read them for null. */
+  readonly migrations?: RecordingMigrations | null;
+}
+
+/** A stand-in for the migrations' reading and running (AZ6), answering as told and recording what it was asked. */
+class RecordingMigrations implements Migrations {
+  readonly asked: string[] = [];
+  readonly #state: MigrationState;
+  readonly #runFails: boolean;
+
+  constructor(
+    state: MigrationState = { kind: 'holds', run: 'job-agentx-stg-migrate-old1x', ran: COMMIT },
+    runFails = false,
+  ) {
+    this.#state = state;
+    this.#runFails = runFails;
+  }
+
+  state(subscription: string, host: string, commit: string): Promise<MigrationState> {
+    this.asked.push(`state ${subscription} ${host} ${commit}`);
+    return Promise.resolve(this.#state);
+  }
+
+  runFirst(subscription: string, commit: string, digest: string): Promise<void> {
+    this.asked.push(`run first ${subscription} ${commit} ${digest}`);
+    return this.#runFails
+      ? Promise.reject(new Error('job-agentx-stg-migrate-new0x ended Failed, so nothing was deployed.'))
+      : Promise.resolve();
+  }
 }
 
 /** One run of the tool, with everything it touched. */
@@ -1133,6 +1164,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
     ...(scenario.checkout === null ? {} : { checkout: () => scenario.checkout ?? { head: COMMIT, clean: true } }),
     ...(scenario.generation === undefined ? {} : { generation: scenario.generation }),
+    ...(scenario.migrations === null ? {} : { migrations: scenario.migrations ?? new RecordingMigrations() }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -2306,6 +2338,117 @@ describe('deploy apps', () => {
       const done = await apps(az);
       expect(done.status).toBe(1);
       expect(done.terminal.said.at(-1)).toContain('(Azure named no revision of the new image)');
+    });
+  });
+
+  describe("never deploys the image ahead of the database's migrations (AZ6, S174)", () => {
+    const HOST = `${OWN_SERVER}.postgres.database.azure.com`;
+    const OLD = 'd'.repeat(40);
+    const behind: MigrationState = {
+      kind: 'behind',
+      run: 'job-agentx-stg-migrate-old1x',
+      ran: OLD,
+      missing: ['0090_new_rule.sql', '0091_other.sql'],
+    };
+    const apps = (migrations: RecordingMigrations, ...flags: string[]) =>
+      run(['apps', ...flags], { answers, images: recordingImages(), migrations });
+
+    it("reads what the database on staging's server holds of the image's migrations, and goes on when it holds them all", async () => {
+      const migrations = new RecordingMigrations();
+      const done = await apps(migrations);
+      expect(done.status).toBe(0);
+      expect(migrations.asked).toEqual([`state ${SUBSCRIPTION} ${HOST} ${COMMIT}`]);
+      expect(done.terminal.said).toContain(
+        `The database on ${OWN_SERVER} holds every migration this image brings (migrate's run job-agentx-stg-migrate-old1x ran ${COMMIT}).`,
+      );
+    });
+
+    it('refuses, before anything is asked or sent, when the database lacks one, saying to run it first', async () => {
+      const cases: [MigrationState, string][] = [
+        [
+          behind,
+          `The database on ${OWN_SERVER} lacks 2 migrations this image brings (0090_new_rule.sql, 0091_other.sql): migrate's newest successful run there, job-agentx-stg-migrate-old1x, ran ${OLD}.`,
+        ],
+        [
+          { ...behind, missing: ['0090_new_rule.sql'] },
+          `The database on ${OWN_SERVER} lacks 1 migration this image brings (0090_new_rule.sql)`,
+        ],
+        [
+          { kind: 'unknown', why: `Azure lists no successful run of migrate on ${HOST}` },
+          `Whether the database on ${OWN_SERVER} holds every migration this image brings can't be told: Azure lists no successful run of migrate on ${HOST}.`,
+        ],
+      ];
+      for (const [state, why] of cases) {
+        const done = await apps(new RecordingMigrations(state));
+        const message = done.error instanceof Error ? done.error.message : '';
+        expect(message).toContain(why);
+        expect(message).toContain('refuse to start, and raise a false tamper alarm (S174)');
+        expect(message).toContain('run apps again with --migrate-first added (and the same options)');
+        expect(message).toMatch(/Nothing was deployed\.$/);
+        expect(done.az.deployment).toBeUndefined();
+        expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+      }
+    });
+
+    it('with --migrate-first, runs the migration with the verified image once all is asked and checked, then deploys', async () => {
+      const az = new RecordingAz();
+      const migrations = new (class extends RecordingMigrations {
+        override runFirst(subscription: string, commit: string, digest: string): Promise<void> {
+          expect(az.deployment).toBeUndefined();
+          return super.runFirst(subscription, commit, digest);
+        }
+      })(behind);
+      const done = await run(['apps', '--migrate-first'], { answers, images: recordingImages(), az, migrations });
+      expect(done.status).toBe(0);
+      expect(migrations.asked).toEqual([
+        `state ${SUBSCRIPTION} ${HOST} ${COMMIT}`,
+        `run first ${SUBSCRIPTION} ${COMMIT} ${DIGEST}`,
+      ]);
+      expect(az.deployment).toBeDefined();
+      expect(done.terminal.said.join('\n')).toContain(
+        '--migrate-first: the migration job runs this image first, before the deployment is sent.',
+      );
+      expect(done.terminal.said.join('\n')).toContain('The migration has run.');
+    });
+
+    it('with --migrate-first, sends nothing when the run fails, and runs nothing when there is nothing to run', async () => {
+      const failing = await apps(new RecordingMigrations(behind, true), '--migrate-first');
+      expect(failing.error).toBeInstanceOf(Error);
+      expect(failing.az.deployment).toBeUndefined();
+      const current = new RecordingMigrations();
+      const done = await apps(current, '--migrate-first');
+      expect(done.status).toBe(0);
+      expect(current.asked).toHaveLength(1);
+      expect(done.terminal.said.join('\n')).toContain('--migrate-first: nothing to run first.');
+    });
+
+    it('goes on with a first deploy, whose jobs run after it, and leaves a restore to its playbook', async () => {
+      const first = await apps(new RecordingMigrations({ kind: 'no-job' }));
+      expect(first.status).toBe(0);
+      expect(first.terminal.said).toContain(
+        'No migration job yet, so this is a first deploy: run migrate after it, with the other jobs.',
+      );
+      const restore = new RecordingMigrations(behind);
+      const stopped = await run(['apps', '--api-stopped'], {
+        answers,
+        images: recordingImages(),
+        migrations: restore,
+        az: new RecordingAz({ apiStates: ['Stopped'] }),
+      });
+      expect(stopped.status).toBe(0);
+      expect(restore.asked).toEqual([]);
+      expect(stopped.terminal.said.join('\n')).toContain("The database's migrations aren't checked here");
+    });
+
+    it('needs a way to read them, and takes --migrate-first once, never with --api-stopped', async () => {
+      const done = await run(['apps'], { answers, images: recordingImages(), migrations: null });
+      expect(done.error).toEqual(new Error("No way to read the database's migrations was given."));
+      expect(parseArguments(['apps', '--migrate-first'])).toMatchObject({ migrateFirst: true });
+      expect(parseArguments(['apps'])).not.toHaveProperty('migrateFirst');
+      expect(() => parseArguments(['apps', '--migrate-first', '--migrate-first'])).toThrow(UsageError);
+      expect(() => parseArguments(['apps', '--migrate-first', '--api-stopped'])).toThrow(
+        /--migrate-first is never with --api-stopped/,
+      );
     });
   });
 

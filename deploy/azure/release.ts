@@ -1130,6 +1130,67 @@ function alreadyServed(steps: ReleaseSteps, subscription: string, api: Read, ima
   return 0;
 }
 
+/** What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door. */
+export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'>;
+
+/**
+ * `deploy.ts apps --migrate-first` (AZ6): a release's first half alone, for a hand deploy whose image brings
+ * migrations the database lacks (S174: deployed together, the API started on the new image before them, refused at
+ * start and raised a false tamper alarm). The migration job is updated to the image and run to success, exactly as a
+ * release does, and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
+ * since it checks the database while the migration runs. The run's name once it has succeeded; otherwise an error
+ * saying what it left, and the deployment isn't sent. The image was checked by the caller (verify.ts).
+ */
+export async function migrateFirst(
+  steps: MigrateFirstSteps,
+  subscription: string,
+  commit: string,
+  digest: string,
+): Promise<string> {
+  const image = `${IMAGE_REPOSITORY}@${digest}`;
+  const job = readWorkload(steps.az, subscription, 'migrate');
+  const apiRuns = readWorkload(steps.az, subscription, 'api').running.release;
+  if (!steps.history.isAncestor(apiRuns, commit)) {
+    throw new Error(
+      `The API runs ${apiRuns}, which isn't in ${commit}'s history, so whether it knows what this image's migrations add can't be checked (decision 49): the migration wasn't run, and nothing was changed.`,
+    );
+  }
+  const notComing = notYetComing(apiRuns, commit, steps.history.changedFiles(apiRuns, commit), steps.history);
+  if (notComing.length > 0) {
+    throw new Error(
+      [
+        `The migration wasn't run, and nothing was changed: ${COMING_FIRST}`,
+        ...notComing.map((line) => `  ${line}`),
+      ].join('\n'),
+    );
+  }
+  const limit = await leaving('nothing was changed.', () => {
+    settledBefore('migrate', job);
+    idle(steps, subscription);
+    return timeLimit(job);
+  });
+  const left = `the API is unchanged, on ${apiRuns}`;
+  const after = released(job.running, image, commit);
+  await leaving(`migrate may hold ${commit}, not run; ${left}.`, async () => {
+    update(steps, subscription, 'migrate', job.running, after);
+    await settledUpdate(steps, subscription, 'migrate', after);
+  });
+  const name = await leaving(
+    `migrate holds ${commit}, not run (a start that failed late may still have begun one: look at migrate's runs); ${left}.`,
+    () => startMigration(steps, subscription),
+  );
+  const status = await leaving(`migrate holds ${commit}, its run ${name} not seen to end; ${left}.`, () =>
+    ended(steps, subscription, name, image, limit),
+  );
+  if (status !== 'Succeeded') {
+    throw new Error(
+      `${name} ended ${status}, so nothing was deployed. Read its log: node deploy/azure/jobs.ts wait migrate ${name}\nLeft: migrate holds ${commit}; ${left}.`,
+    );
+  }
+  steps.say(`${name} succeeded: the database holds every migration ${commit} brings.`);
+  return name;
+}
+
 /**
  * `release`: checks the image, then does what `check` says: the migration job
  * updated and run to success, then the API updated and serving. 0 when it is
