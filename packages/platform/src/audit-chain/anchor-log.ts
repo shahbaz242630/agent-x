@@ -531,7 +531,11 @@ export function createAnchorLog({
   let unsent: Unsent | undefined;
   // Lines a file being made has taken from the tables, until its bytes are made.
   let takenLines = 0;
-  /** What a file being made, and one unsent, hold beside the tables' own records, in bytes. */
+  /**
+   * What a file being made, and one unsent, hold beside the tables' own records, in bytes. The unsent file's own gzipped
+   * bytes (~144 a line: random hashes barely compress) aren't counted: one file is unsent at a time, so they are bounded
+   * by one snapshot, and the edge measured by resident memory (S184) includes them.
+   */
   const besideLines = (): number => takenLines * TAKEN_LINE_BYTES + (unsent?.stamps.length ?? 0) * UNSENT_LINE_BYTES;
   /** A line this process made, read back from its own text: `readsBack` held when the file was made, so it does. */
   const readBack = (kind: LineKind, text: string): Anchor | Progress => {
@@ -943,17 +947,18 @@ export function createAnchorLog({
 
   /**
    * Into the store, or thrown. A name taken already holds this file if an answer was lost; if it holds anything else, that
-   * is the alarm. The file's lines are read back from its bytes while the name's are fetched, so they wait again at the
-   * moment the alarm is raised, as a line kept just then would find them.
+   * is the alarm. Only then are the file's lines read back from its bytes: a lost answer reads nothing back (at the edge
+   * that would be the whole file, uncounted), and a read-back that throws can't stop a file that did land. A line kept
+   * while the name was fetched is later than the file's, and `waitAgain` lets it win.
    */
   const send = async (file: Unsent): Promise<void> => {
     try {
       await store.put(file.name, file.bytes);
     } catch (error) {
       if (!(error instanceof OverwriteRefused)) throw error;
-      const [held, back] = await Promise.all([store.get(file.name), restored(file)]);
+      const held = await store.get(file.name);
       if (!held.equals(file.bytes)) {
-        overwritten(file, back);
+        overwritten(file, await restored(file));
         return;
       }
     }

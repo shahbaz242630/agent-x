@@ -2003,6 +2003,136 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
       expect(lines('audit.anchor_store_write_failed')).toHaveLength(2);
     });
 
+    describe('a file sent again after an overwrite is read back from its own bytes (PR1 review round 2)', () => {
+      const overwriting = (fake: FakeWriteOnceStore): void => {
+        fake.instead.put = async (name) => {
+          await fake.real.put(name, Buffer.from('someone else'));
+          throw new Error('the answer was lost');
+        };
+      };
+      const ours = (fake: FakeWriteOnceStore, kind: 'deltas' | 'snapshots') =>
+        files(fake, kind).flatMap((name) => {
+          const bytes = fake.files.get(name);
+          return bytes?.toString() === 'someone else' ? [] : linesIn(bytes);
+        });
+      const orgChain = (index: number): Chain => ({
+        kind: 'organisation',
+        orgId: `0199a0f0-0000-7000-8000-${String(index).padStart(12, '0')}`,
+      });
+      const KEPT_LINE = 340;
+      const beyond = (capture: LogCapture) =>
+        capture.lines().filter((line) => line.event === 'audit.anchor_store_beyond_memory');
+
+      it('a line sent again keeps the stamp it had, so the snapshot that holds it settles it (K1)', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log } = logOver(fake, 1, keys, START);
+        await log.read();
+        log.keep(anchorAt(CHAIN, 2n));
+        overwriting(fake);
+        await log.flush();
+        delete fake.instead.put;
+        await log.flush();
+        const puts = fake.calls.puts;
+        await log.flush();
+        expect(fake.calls.puts).toBe(puts);
+      });
+
+      it('a place a pass reached goes again too (K2)', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, advance } = await started(fake);
+        advance(5);
+        const at = new Date(START.getTime() + 5 * MINUTE);
+        log.keepProgress(
+          signProgress(keys, CHAIN, { seq: 40n, hash: Buffer.alloc(32, 40), macKeyVersion: 2 }, { at, began: at }, 1),
+        );
+        overwriting(fake);
+        await log.flush();
+        delete fake.instead.put;
+        advance(1);
+        await log.flush();
+        expect(ours(fake, 'deltas').map((line) => line.k)).toEqual(['u']);
+      });
+
+      it.each([
+        [
+          'a hash of 31 bytes',
+          (line: Anchor): Anchor => ({ ...line, hash: Buffer.alloc(31, 2) }),
+          'hash',
+          '02'.repeat(31),
+        ],
+        [
+          'a chain not of its kind',
+          (line: Anchor): Anchor => ({ ...line, chain: 'organisation:not-a-uuid' }),
+          'chain',
+          'organisation:not-a-uuid',
+        ],
+        [
+          'a place past a count',
+          (line: Anchor): Anchor => ({ ...line, seq: 10n ** 19n }),
+          'seq',
+          (10n ** 19n).toString(),
+        ],
+        ['a fractional MAC key version', (line: Anchor): Anchor => ({ ...line, macKeyVersion: 1.5 }), 'mk', 1.5],
+        ['a fractional key version', (line: Anchor): Anchor => ({ ...line, keyVersion: 1.5 }), 'kv', 1.5],
+      ] as const)(
+        "a line whose text can't give it back is kept whole and sent again as it was: %s (K5)",
+        async (_name, odd, field, value) => {
+          const fake = createFakeWriteOnceStore();
+          const { log, advance } = await started(fake);
+          advance(5);
+          log.keep(odd(anchorAt(CHAIN, 2n, new Date(START.getTime() + 5 * MINUTE))));
+          overwriting(fake);
+          await log.flush();
+          delete fake.instead.put;
+          advance(1);
+          await log.flush();
+          const again = ours(fake, 'deltas');
+          expect(again).toHaveLength(1);
+          expect(again[0]?.[field]).toEqual(value);
+        },
+      );
+
+      it('an unsent file counts its stamps against what this process can hold (K3)', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = limited(fake, 11 * KEPT_LINE + 40);
+        await log.read();
+        for (let index = 0; index < 10; index += 1) log.keep(anchorAt(orgChain(index), 1n));
+        fake.instead.put = failing;
+        await log.flush();
+        fake.files.set(nameOf('deltas', 60), fileOf(nameOf('deltas', 60), anchorAt(orgChain(10), 1n)));
+        await log.read();
+        expect(beyond(capture)).toHaveLength(1);
+      });
+
+      it('a file made and sent lets go of what it took (K4)', async () => {
+        const fake = createFakeWriteOnceStore();
+        const { log, capture } = limited(fake, 11 * KEPT_LINE + 50);
+        await log.read();
+        for (let index = 0; index < 10; index += 1) log.keep(anchorAt(orgChain(index), 1n));
+        await log.flush();
+        for (let index = 0; index < 5; index += 1) {
+          log.keep(anchorAt(orgChain(index), 2n));
+          await log.flush();
+        }
+        fake.files.set(nameOf('deltas', 24 * 60), fileOf(nameOf('deltas', 24 * 60), anchorAt(orgChain(10), 1n)));
+        await log.read();
+        expect(beyond(capture)).toEqual([]);
+        expect(log.organisations()).toHaveLength(11);
+      });
+
+      it('a file being made counts what it took against a read made meanwhile (M5)', async () => {
+        const fake = createFakeWriteOnceStore();
+        const held = 10;
+        const { log, capture } = limited(fake, (held + 1) * KEPT_LINE + 16 * held - 1);
+        await log.read();
+        for (let index = 0; index < held; index += 1) log.keep(anchorAt(orgChain(index), 1n));
+        fake.files.set(nameOf('deltas', 60), fileOf(nameOf('deltas', 60), anchorAt(orgChain(held), 1n)));
+        // The read runs while the snapshot's bytes are being gzipped: its 10 taken lines still held beside the tables.
+        await Promise.all([log.flush(), log.read()]);
+        expect(beyond(capture)).toHaveLength(1);
+      });
+    });
+
     it('writes once at a time: a second call joins the first', async () => {
       const fake = createFakeWriteOnceStore();
       const { log } = await started(fake);
