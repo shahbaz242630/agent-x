@@ -57,6 +57,7 @@ import {
 } from './policy-changes.ts';
 import { type PolicySimulations, SIMULATING_ROLES, type Simulated } from './policy-simulations.ts';
 import { WAITING_REQUESTS, type WaitingChoice, type WaitingPlan } from './policy-waiting.ts';
+import { type StatementConfirmed, statementVersion, versionWithChoice } from './statements.ts';
 import {
   AMOUNT,
   issuesOf,
@@ -374,6 +375,31 @@ const ASK_WORDS = 'Every rule of the new version, and what happens to the waitin
 const PREVIEW_WORDS = 'Every rule of the new version, as the ask sends them.';
 const CONFIRM_WORDS = 'The same rules as the ask, with the step-up it answered, signed in again for.';
 
+/**
+ * The versions of the words each confirm was shown (CO3), a field a set as its
+ * event keeps them: the organisation's cap and wait always, the waiting
+ * requests' with their choice alone.
+ */
+const ORGANIZATION_WORDS_FIELDS = {
+  monthlyCapStatementVersion: statementVersion('monthly_cap'),
+  approvalWaitStatementVersion: statementVersion('approval_wait'),
+};
+const WAITING_WORDS_FIELD = { waitingStatementVersion: statementVersion('waiting_requests').optional() };
+const waitingWordsChecked = versionWithChoice('waitingRequests', 'waitingStatementVersion');
+const WAITING_WORDS: StatementConfirmed = {
+  id: 'waiting_requests',
+  field: 'waitingStatementVersion',
+  with: 'waitingRequests',
+};
+const CONFIRM_STATEMENTS: Readonly<Record<Kind, readonly StatementConfirmed[]>> = {
+  organization: [
+    { id: 'monthly_cap', field: 'monthlyCapStatementVersion' },
+    { id: 'approval_wait', field: 'approvalWaitStatementVersion' },
+    WAITING_WORDS,
+  ],
+  mandate: [WAITING_WORDS],
+};
+
 /** Each kind's ask and confirm bodies: only the organisation's names its monthly cap choice. */
 const BODIES = {
   organization: {
@@ -383,8 +409,15 @@ const BODIES = {
       .superRefine(choiceChecked)
       .describe(ASK_WORDS),
     confirm: z
-      .strictObject({ ...ORGANIZATION_FIELDS, ...WAITING_FIELD, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .strictObject({
+        ...ORGANIZATION_FIELDS,
+        ...WAITING_FIELD,
+        stepUpChallengeId: STEP_UP_SIGNED_IN,
+        ...ORGANIZATION_WORDS_FIELDS,
+        ...WAITING_WORDS_FIELD,
+      })
       .superRefine(choiceChecked)
+      .superRefine(waitingWordsChecked)
       .describe(CONFIRM_WORDS),
   },
   mandate: {
@@ -394,8 +427,9 @@ const BODIES = {
       .superRefine(rulesChecked)
       .describe(ASK_WORDS),
     confirm: z
-      .strictObject({ ...RULE_FIELDS, ...WAITING_FIELD, stepUpChallengeId: STEP_UP_SIGNED_IN })
+      .strictObject({ ...RULE_FIELDS, ...WAITING_FIELD, stepUpChallengeId: STEP_UP_SIGNED_IN, ...WAITING_WORDS_FIELD })
       .superRefine(rulesChecked)
+      .superRefine(waitingWordsChecked)
       .describe(CONFIRM_WORDS),
   },
 };
@@ -567,7 +601,11 @@ export function registerPolicies(
       {
         schema: schemas.confirm,
         bodyLimit: RULES_BODY_LIMIT,
-        config: { access: [...CHANGING_ROLES], operation: POLICY_OPERATIONS[kind].confirm },
+        config: {
+          access: [...CHANGING_ROLES],
+          operation: POLICY_OPERATIONS[kind].confirm,
+          statements: CONFIRM_STATEMENTS[kind],
+        },
       },
       async (request, reply) => {
         const member = memberInSessionOf(request);

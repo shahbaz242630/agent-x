@@ -249,11 +249,6 @@ export const PLAIN_WORDS = {
     broke: 'Nothing: those files were left unread and the check went on without them.',
     next: 'Find out who added them from the store logs. Only the API should be able to add files there.',
   },
-  'audit.anchor_store_moved_on': {
-    happened: 'The app found a signed mark that the audit anchors moved to a newer layout this version cannot read.',
-    broke: 'Payments wait for every organisation. Agent decisions go on.',
-    next: 'If a newer version was rolled back, release it again. If none ever ran, treat it as a breach: playbook section H.',
-  },
   'audit.anchor_store_not_set': {
     happened: 'This API was started with no store named for the audit anchors.',
     broke: 'Anchors are in memory alone: a restart forgets them, and a history wound back meanwhile goes unseen.',

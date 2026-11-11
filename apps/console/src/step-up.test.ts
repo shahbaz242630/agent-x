@@ -5,7 +5,7 @@
 // it once the API has decided, but not after a failure on the way.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ask, confirm, forget, pendingFor, stepUpAddress, StepUpStorageBlocked } from './step-up.ts';
+import { ask, askFirst, confirm, forget, pendingFor, stepUpAddress, StepUpStorageBlocked } from './step-up.ts';
 
 vi.mock('./navigate.ts', () => ({ goTo: vi.fn() }));
 const { goTo } = await import('./navigate.ts');
@@ -68,6 +68,20 @@ describe('ask', () => {
       idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown,
     });
     expect(goTo).toHaveBeenCalledWith(stepUpAddress(CHALLENGE, '/more'));
+  });
+
+  it('keeps what was confirmed once the ask answered for its confirm alone: the version of the words shown (CO3)', async () => {
+    answer = () => json(202, { stepUpChallengeId: CHALLENGE });
+
+    const asked = await askFirst(CHANGE);
+    if ('done' in asked) throw new Error('a step-up was asked');
+    expect(asked.stepUp('Freeze it, as shown', { statementVersion: 3 })).toBe('stepping');
+
+    expect(JSON.parse(sent[0]?.init.body as string)).toEqual(CHANGE.body);
+    expect(pendingFor(CHALLENGE)).toMatchObject({
+      label: 'Freeze it, as shown',
+      body: { ...CHANGE.body, statementVersion: 3 },
+    });
   });
 
   it.each([

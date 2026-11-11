@@ -4,7 +4,15 @@ import { describe, expect, it } from 'vitest';
 
 import { createKeyProvider, KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { cutoverFile, cutoverName, readCutoverFile, SHARDED_LAYOUT } from './cutover.ts';
+import {
+  cutoverFile,
+  cutoverName,
+  readCutoverFile,
+  readShardsDoneFile,
+  SHARDED_LAYOUT,
+  shardsDoneFile,
+  shardsDoneName,
+} from './cutover.ts';
 
 const keysFilled = (fill: number, version = 1): KeyProvider =>
   createKeyProvider(
@@ -32,7 +40,7 @@ describe('SEC-ANC-03 the cutover marker (PL-65)', () => {
     expect(name).toBe('e1/cutover/shards-v1');
     expect(cutoverName(2)).toBe('e2/cutover/shards-v1');
     expect(JSON.parse(gunzipSync(bytes).toString('utf8'))).toMatchObject({ k: 'cutover', layout: SHARDED_LAYOUT });
-    expect(await read(bytes, name)).toEqual({ marker: true });
+    expect(await read(bytes, name)).toEqual({ marker: true, at: AT });
   });
 
   it.each([
@@ -83,5 +91,33 @@ describe('SEC-ANC-03 the cutover marker (PL-65)', () => {
       },
     };
     expect(await read(made().bytes, made().name, 1, lacking)).toEqual({ problem: 'signature' });
+  });
+});
+
+describe('SEC-ANC-04 the record that the migration to the shards is done (PL-65 PR2)', () => {
+  const done = (signing = keys, epoch = 1) => shardsDoneFile(signing, { epoch, at: AT });
+  const readDone = (bytes: Buffer, name = done().name, holding = keys) =>
+    readShardsDoneFile(holding, { bytes, name, epoch: 1 });
+
+  it('is at its one name beside the shards, and reads back with when it was signed', async () => {
+    const { name, bytes } = done();
+    expect(name).toBe('e1/shards/done-shards-v1');
+    expect(shardsDoneName(2)).toBe('e2/shards/done-shards-v1');
+    expect(JSON.parse(gunzipSync(bytes).toString('utf8'))).toMatchObject({ k: 'done', layout: SHARDED_LAYOUT });
+    expect(await readDone(bytes)).toEqual({ marker: true, at: AT });
+  });
+
+  it('a marker is no record, nor a record a marker, even copied under the other’s name', async () => {
+    expect(await readDone(made().bytes)).toEqual({ problem: 'file' });
+    expect(await read(done().bytes)).toEqual({ problem: 'file' });
+    // The same fields, the kind changed to the other's: the label signed differs, so the signature fails.
+    const asRecord = JSON.parse(gunzipSync(made().bytes).toString('utf8')) as Record<string, unknown>;
+    const forged = gzipSync(`${JSON.stringify({ ...asRecord, k: 'done', name: done().name })}
+`);
+    expect(await readDone(forged)).toEqual({ problem: 'signature' });
+  });
+
+  it('signed by another key is `signature`', async () => {
+    expect(await readDone(done(keysFilled(40)).bytes)).toEqual({ problem: 'signature' });
   });
 });

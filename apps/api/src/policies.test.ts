@@ -15,6 +15,7 @@ import { liveSession } from './live-session.helper.test.ts';
 import type { PolicyChangeAsked, PolicyChanged, PolicyChanges, PolicyView } from './policy-changes.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 
 const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d3';
@@ -127,7 +128,7 @@ const post = (url: string, payload: unknown): InjectOptions => ({
   method: 'POST',
   url,
   headers: { ...headers, 'idempotency-key': 'k-1', 'content-type': 'application/json' },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(url, payload)),
 });
 
 const RULES = {
@@ -251,7 +252,8 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
       // ASCII alone, one UTF-16 unit each.
       text.replaceAll(/./g, (c) => String.fromCharCode(92) + 'u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
     const suppliers = Array.from({ length: 100 }, (_, i) => `0199a0f0-0000-7000-8000-${String(i).padStart(12, '0')}`);
-    const body = JSON.stringify({ ...RULES_SENT, supplierIds: ['@'], stepUpChallengeId: CHALLENGE }).replace(
+    const sent = { ...RULES_SENT, supplierIds: ['@'], stepUpChallengeId: CHALLENGE };
+    const body = JSON.stringify(worded(`${path}/change/confirm`, sent)).replace(
       '"@"',
       suppliers.map((id) => `"${escaped(id)}"`).join(','),
     );

@@ -107,6 +107,7 @@ import {
   type RecheckShown,
   type SpendRequestApprovals,
 } from './spend-request-approvals.ts';
+import { type StatementConfirmed, statementVersion, versionWithChoice } from './statements.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import type { RequestShown, SpendRequestReads } from './spend-request-reads.ts';
 import {
@@ -451,12 +452,15 @@ const APPROVE_SCHEMA = {
   },
 };
 
+/** A re-check's words, confirmed with it alone (CO3): an approval with none shows none. */
+const RECHECK_WORDS: readonly StatementConfirmed[] = [{ id: 'recheck', field: 'statementVersion', with: 'recheck' }];
+
 const APPROVE_CONFIRM_SCHEMA = {
   summary: 'Approve a spend request, once signed in again for it',
   params: SPEND_REQUEST_ID,
-  body: STEP_UP_CONFIRM.extend(RECHECK).describe(
-    'The step-up signed in again for, and any `recheck` it was asked with.',
-  ),
+  body: STEP_UP_CONFIRM.extend({ ...RECHECK, statementVersion: statementVersion('recheck').optional() })
+    .superRefine(versionWithChoice('recheck'))
+    .describe('The step-up signed in again for, and any `recheck` it was asked with, with its words’ version.'),
   response: {
     200: SPEND_REQUEST_SHOWN.describe(
       'The request as it now stands: APPROVED, weighed again as everything now stands, keeping its reservation and order claim; or DENIED, rejected under your team’s rules as the ask showed, its money freed.',
@@ -645,7 +649,7 @@ export function registerSpendRequests(
     {
       schema: APPROVE_CONFIRM_SCHEMA,
       bodyLimit: CHALLENGE_BODY_LIMIT,
-      config: { access: [...DECIDING_ROLES], operation: APPROVE_CONFIRM_OPERATION },
+      config: { access: [...DECIDING_ROLES], operation: APPROVE_CONFIRM_OPERATION, statements: RECHECK_WORDS },
     },
     async (request, reply) => {
       const member = memberInSessionOf(request);

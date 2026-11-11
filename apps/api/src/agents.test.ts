@@ -22,6 +22,7 @@ import type {
 import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
@@ -193,14 +194,14 @@ const change = (path: string, payload?: unknown): InjectOptions => ({
     'idempotency-key': 'k-1',
     ...(payload !== undefined && { 'content-type': 'application/json' }),
   },
-  ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+  ...(payload !== undefined && { payload: JSON.stringify(worded(`/v1/agents/${AGENT_ID}${path}`, payload)) }),
 });
 
 const post = (path: string, payload: unknown, key = 'k-1'): InjectOptions => ({
   method: 'POST',
   url: `/v1/agents${path}`,
   headers: { ...headers, 'idempotency-key': key, 'content-type': 'application/json' },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(`/v1/agents${path}`, payload)),
 });
 
 const ASKED = { name: 'Purchasing bot', scopes: ['requests:write', 'requests:read'] };
@@ -440,8 +441,8 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
   });
 
   it.each<[string, InjectOptions]>([
-    ['a suspension with no choice: there is no default', change('/suspend')],
-    ['a suspension with an empty body', change('/suspend', {})],
+    // With the words' version alone (worded): no body at all is refused for the words first (statements.test.ts).
+    ['a suspension with no choice: there is no default', change('/suspend', {})],
     ['a suspension with a choice of its own', change('/suspend', { pendingRequests: 'keep' })],
     ['a suspension with more than its choice', change('/suspend', { pendingRequests: 'pause', reason: 'lost' })],
     ['a reactivation with a body', change('/reactivate', { now: true })],
@@ -568,7 +569,9 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
       'idempotency-key': 'k-1',
       ...(payload !== undefined && { 'content-type': 'application/json' }),
     },
-    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+    ...(payload !== undefined && {
+      payload: JSON.stringify(worded(`/v1/agents/${AGENT_ID}/keys/${KEY_ID}${path}`, payload)),
+    }),
   });
 
   it.each([
