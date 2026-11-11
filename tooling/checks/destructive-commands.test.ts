@@ -173,6 +173,16 @@ describe('the check', () => {
     expect(hitsIn('a.ts', '#x = rmSync(dir, { recursive: true });')).toHaveLength(1);
   });
 
+  it('follows block comments only in files that have them', () => {
+    for (const file of ['a.sh', 'ci.yml', 'Dockerfile']) {
+      expect(
+        hitsIn(file, '/* not a comment here\naz group delete -n rg').map(({ line }) => line),
+        file,
+      ).toEqual([2]);
+    }
+    expect(hitsIn('a.ts', '/* a comment\naz group delete -n rg')).toEqual([]);
+  });
+
   it('reads code after a block comment closes on its line', () => {
     expect(hitsIn('a.ts', '/* a\n b */ az group delete -n rg').map(({ line }) => line)).toEqual([2]);
   });

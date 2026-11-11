@@ -96,7 +96,8 @@ function codeOf(file: string, lines: readonly string[]): string[] {
   let inBlock = false;
   return lines.map((line) => {
     let rest = line;
-    if (!inBlock && /^\s*\/\*/.test(rest)) {
+    // Block comments only where the language has them: in a `#` file a line opening `/*` hides nothing after it.
+    if (!hashes && !inBlock && /^\s*\/\*/.test(rest)) {
       inBlock = true;
       rest = rest.replace(/^\s*\/\*/, '');
     }

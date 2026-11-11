@@ -126,8 +126,13 @@ const RULES: readonly (readonly [DangerRule, RegExp, string])[] = [
     new RegExp(String.raw`^(?:create|alter|drop) policy\b.* on ${GUARDED}`),
     'makes, alters or drops a policy on an audit. or security. table',
   ],
-  // The session's search_path, which outlives the statement; SET LOCAL and a function's own SET are the transaction's.
-  ['search-path', /(?:^|\bbegin )set (?:session )?search_path\b/, "sets the session's search_path"],
+  // The session's search_path, which outlives the statement, anywhere in it (ALTER DATABASE or ROLE ... SET too); SET
+  // LOCAL and a function's or procedure's own SET are the transaction's or the call's.
+  [
+    'search-path',
+    /^(?!(?:create (?:or replace )?|alter )(?:function|procedure|routine)\b).*\bset (?:session )?search_path\b/,
+    "sets the session's search_path",
+  ],
   [
     'trigger-off',
     /\bdisable trigger\b|\bsession_replication_role\b/,
@@ -141,6 +146,12 @@ const RULES: readonly (readonly [DangerRule, RegExp, string])[] = [
   // EXECUTE as a grant's privilege or a trigger's action is no dynamic SQL.
   ['dynamic-sql', /\bexecute\b(?! (?:on|function|procedure)\b)/, 'runs SQL it builds (EXECUTE)'],
 ];
+
+/**
+ * set_config on search_path for the session: its third argument anything but a written-out `true` (local). Read on the
+ * words, strings kept, since its name is a string.
+ */
+const SESSION_SET_CONFIG = /\bset_config ?\( ?'search_path' ?,(?!.*, ?true ?\))/;
 
 /** A function, procedure or DO whose body is a plain string: what it runs can't be read here. */
 const STRING_BODY = /^(?:create (?:or replace )?(?:function|procedure)\b.*\bas ''|do (?:language [a-z_]+ )?'')/;
@@ -189,10 +200,13 @@ function brokenIn(sql: string): { rule: DangerRule; what: string }[] {
     const own = /\bu ?&/.test(plain)
       ? [{ rule: 'unreadable' as const, what: 'names something in Unicode escapes (U&)' }]
       : RULES.filter(([, pattern]) => pattern.test(plain)).map(([rule, , what]) => ({ rule, what }));
+    const setConfig = SESSION_SET_CONFIG.test(words.toLowerCase())
+      ? [{ rule: 'search-path' as const, what: "sets the session's search_path (set_config)" }]
+      : [];
     const stringBody = STRING_BODY.test(plain)
       ? [{ rule: 'string-body' as const, what: 'gives a function or DO body as a plain string' }]
       : [];
-    return [...own, ...stringBody, ...bodies.flatMap((body) => brokenIn(body))];
+    return [...own, ...setConfig, ...stringBody, ...bodies.flatMap((body) => brokenIn(body))];
   });
 }
 
