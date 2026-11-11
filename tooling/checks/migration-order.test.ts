@@ -323,10 +323,47 @@ describe('a migration doing what no coming entry describes', () => {
       "CREATE OR REPLACE FUNCTION app.guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';",
       'writes app.guard with no dollar-quoted body',
     ],
+    [
+      'a new function whose body makes a trigger (then called)',
+      'CREATE FUNCTION app.helper() RETURNS void LANGUAGE sql AS $$ CREATE TRIGGER evil AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard() $$; SELECT app.helper();',
+      'writes app.helper with a body that changes triggers or routines, or runs built SQL',
+    ],
+    [
+      'a new function whose body runs built SQL',
+      "CREATE FUNCTION app.helper() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'drop function app.guard() cascade'; END $$; CALL app.helper();",
+      'writes app.helper with a body that changes triggers or routines, or runs built SQL',
+    ],
+    [
+      'attaching a known table as a partition of one with a trigger',
+      'CREATE TABLE app.p (id uuid) PARTITION BY LIST (id); ALTER TABLE app.p ATTACH PARTITION app.things DEFAULT;',
+      "attaches app.things as a partition, which takes its parent's triggers",
+    ],
   ])('is refused outright: %s', (_what, sql, what) => {
     expect(refusedOf(sql, comingTrigger({ name: 'guarded', body: HASH_A }))).toEqual([
       `0002_later.sql ${what}: no coming entry can describe that, so the image before it would raise the tamper alarm`,
     ]);
+  });
+
+  it.each([
+    [
+      'IF NOT EXISTS over a table an earlier migration built',
+      'CREATE TABLE IF NOT EXISTS app.things (id uuid); CREATE TRIGGER evil AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard();',
+    ],
+    [
+      'a $ inside identifiers, as Postgres reads them, around it',
+      'SELECT 1 AS a$$q$; CREATE TRIGGER evil AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard(); SELECT 2 AS b$$q$;',
+    ],
+    [
+      'a non-ASCII dollar tag around it',
+      "SELECT $é$ ' $é$; CREATE TRIGGER evil AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard(); SELECT $é$ ' $é$;",
+    ],
+  ])('still reads a trigger on a known table hidden by %s', (_what, sql) => {
+    expect(refusedOf(sql)).toEqual([expect.stringContaining('evil') as unknown]);
+  });
+
+  it('hashes the body after AS, not a dollar-quoted DEFAULT before it', () => {
+    const withDefault = REPLACE_BODY.replace('app.guard()', 'app.guard(x text DEFAULT $d$a$d$)');
+    expect(readMigrations(later(withDefault)).bodies.get('app.guard')).toBe(newHash());
   });
 
   it('a DO block touching no trigger or function, or a function no earlier migration wrote, is nothing to tell', () => {

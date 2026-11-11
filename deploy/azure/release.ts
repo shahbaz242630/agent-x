@@ -489,7 +489,8 @@ export function decide(
   const notComing: string[] = [];
   for (const release of new Set(all.map(([, found]) => found.release))) {
     if (!history.isAncestor(release, commit)) {
-      reasons.add(`staging runs ${release}, which isn't in ${commit}'s history`);
+      // Nothing can be read against it, decision 49 included: say so, so the hand deploy runs no unshipped trigger or body.
+      reasons.add(`staging runs ${release}, which isn't in ${commit}'s history; ${OUTSIDE_HISTORY}`);
       continue;
     }
     const changed = history.changedFiles(release, commit);
@@ -692,6 +693,10 @@ function sayDeployed(decision: Decision, say: (line: string) => void): void {
  */
 export const LOAD_RUN_UP =
   'A load run is up (the API runs as AGENTX_ROLE web, beside the jobs app): finish it (load.ts finish, then a plain apps), or run apps --load-run again after merging. This release changed nothing, red.';
+
+/** A release outside the commit's history can't be checked against coming.json (decision 49), so the hand deploy is warned. */
+export const OUTSIDE_HISTORY =
+  'if this commit adds a migration with a trigger on a known table or a new guard function body, ship it in coming.json in a deploy first (decision 49)';
 
 /** What to do when a migration wasn't shipped as coming first (decision 49): never the hand deploy a red usually asks. */
 export const COMING_FIRST =

@@ -18,6 +18,7 @@ import {
   changes,
   check,
   COMING_FIRST,
+  OUTSIDE_HISTORY,
   decide,
   type Decision,
   type Folder,
@@ -568,7 +569,7 @@ describe('deciding a release', () => {
     // What the API runs isn't in the commit's history: nothing it changed can be read, so a person deploys it.
     expect(decide(both(running('api'), migrate), NEW, NEW_IMAGE, history([older, NEW]))).toEqual({
       kind: 'by-hand',
-      reasons: [`staging runs ${OLD}, which isn't in ${NEW}'s history`],
+      reasons: [`staging runs ${OLD}, which isn't in ${NEW}'s history; ${OUTSIDE_HISTORY}`],
     });
     // Both are in it: the job, which fell behind, is read from its own build, so what changed since then counts.
     expect(

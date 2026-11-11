@@ -102,7 +102,9 @@ interface Statement {
   readonly bodies: readonly string[];
 }
 
-const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
+const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF]*)?\$/;
+/** A character that may stand inside an identifier, as Postgres's lexer allows ($ and non-ASCII among them). */
+const IDENTIFIER_CHAR = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 
 /** Where a quoted run that opened at `start` ends: past its closing quote, a doubled quote staying inside. */
 function pastQuoted(sql: string, start: number, quote: string, backslashes: boolean): number {
@@ -151,7 +153,7 @@ export function statements(sql: string): Statement[] {
   while (at < sql.length) {
     const char = sql[at] ?? '';
     const tag = char === '$' ? DOLLAR_TAG.exec(sql.slice(at))?.[0] : undefined;
-    if (tag !== undefined && !/[A-Za-z0-9_]/.test(sql[at - 1] ?? '')) {
+    if (tag !== undefined && !IDENTIFIER_CHAR.test(sql[at - 1] ?? '')) {
       const close = sql.indexOf(tag, at + tag.length);
       if (close === -1) throw new Error('a dollar-quoted body is never closed');
       bodies.push(sql.slice(at + tag.length, close));
@@ -161,7 +163,7 @@ export function statements(sql: string): Statement[] {
       words += ' ';
       at = pastComment(sql, at);
     } else if (char === "'" || char === '"') {
-      const escaped = char === "'" && /(?:^|[^A-Za-z0-9_])[Ee]$/.test(sql.slice(Math.max(0, at - 2), at));
+      const escaped = char === "'" && /[Ee]/.test(sql[at - 1] ?? '') && !IDENTIFIER_CHAR.test(sql[at - 2] ?? '');
       const past = pastQuoted(sql, at, char, escaped);
       words += sql.slice(at, past);
       at = past;
@@ -216,6 +218,11 @@ const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?(?:functio
 const ALTER_ROUTINE = /^(?:alter|drop) (?:function|procedure|routine) (?:if exists )?(.*)$/;
 const SWITCHED_TRIGGER = /^alter table .* (?:enable|disable)(?: replica| always)? trigger /;
 const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
+/** A body that makes, alters or drops a trigger or routine, or runs SQL it builds: what it would do can't be read here. */
+const BODY_DDL =
+  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)/i;
+/** A table attached as a partition takes the parent's row triggers. */
+const ATTACH_PARTITION = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?\S+ attach partition ${NAME}`);
 
 /** Each name in a list such as `a.b(int), c.d()`: commas inside the parentheses are an argument list's. */
 function namesListed(list: string): Named[] {
@@ -270,11 +277,22 @@ const refused = (what: string): Change => ({ kind: 'refused', what });
 /** A name given without its schema: what it means hangs on the search_path, so no coming entry can match it. */
 const unqualified = (what: string, { name }: Named): Change => refused(`${what} ${name} without its schema`);
 
+/**
+ * The body Postgres keeps (prosrc): the dollar-quoted text straight after AS, not one in a DEFAULT or SET before it.
+ */
+function bodyOf(words: string, bodies: readonly string[]): string | undefined {
+  const as = words.search(/\bas \$\$/);
+  if (as === -1) return undefined;
+  return bodies[(words.slice(0, as).match(/\$\$/g) ?? []).length];
+}
+
 /** A function written: its body's change against what earlier migrations wrote, or a new function. */
-function written(fn: Named, bodies: readonly string[], before: Built, own: Built): Read {
+function written(fn: Named, words: string, bodies: readonly string[], before: Built, own: Built): Read {
   if (!fn.qualified) return unqualified('writes', fn);
-  const [body] = bodies;
+  const body = bodyOf(words, bodies);
   if (body === undefined) return refused(`writes ${fn.name} with no dollar-quoted body`);
+  if (BODY_DDL.test(body))
+    return refused(`writes ${fn.name} with a body that changes triggers or routines, or runs built SQL`);
   const hash = hashOf(body);
   own.bodies.set(fn.name, hash);
   const was = before.bodies.get(fn.name);
@@ -308,14 +326,20 @@ function routinesRead(list: string, before: Built): Read {
 function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read {
   const table = CREATE_TABLE.exec(words);
   if (table !== null) {
-    own.tables.add(nameAt(table, 1).name);
+    // IF NOT EXISTS over a table an earlier migration built does nothing in Postgres: it stays "known".
+    const name = nameAt(table, 1).name;
+    if (!before.tables.has(name)) own.tables.add(name);
     return undefined;
+  }
+  const attached = ATTACH_PARTITION.exec(words);
+  if (attached !== null && before.tables.has(nameAt(attached, 1).name)) {
+    return refused(`attaches ${nameAt(attached, 1).name} as a partition, which takes its parent's triggers`);
   }
   if (ANY_CREATE_TRIGGER.test(words) || words.startsWith('drop trigger ')) return triggerRead(words, own);
   if (words.startsWith('alter trigger ')) return refused('alters a trigger');
   if (SWITCHED_TRIGGER.test(words)) return refused('switches a trigger on or off');
   const fn = CREATE_FUNCTION.exec(words);
-  if (fn !== null) return written(nameAt(fn, 1), bodies, before, own);
+  if (fn !== null) return written(nameAt(fn, 1), words, bodies, before, own);
   const routines = ALTER_ROUTINE.exec(words);
   if (routines !== null) return routinesRead(routines[1] ?? '', before);
   // Any DO, however its body is quoted or its language named, that names a trigger, a routine or EXECUTE anywhere.
