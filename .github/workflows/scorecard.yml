@@ -28,12 +28,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
-        with:
-          results_file: scorecard.sarif
-          results_format: sarif
+      # The action's own image, run by digest: ossf/scorecard-action v2.5.0's
+      # action.yaml names it by tag only, and a docker:// step is refused by the
+      # repository's allowed-actions list. Its INPUT_* settings as the action sets them.
+      - name: Scorecard (ghcr.io/ossf/scorecard-action v2.5.0, by digest)
+        env:
+          IMAGE: ghcr.io/ossf/scorecard-action:v2.5.0@sha256:1e1481c65fc2407d3fd6ab18a23c741eb4d1c0d9359ebafc4b3ab13aa61d8627
+          INPUT_RESULTS_FILE: scorecard.sarif
+          INPUT_RESULTS_FORMAT: sarif
+          INPUT_FILE_MODE: archive
           # Kept to the repository: nothing is sent to the OpenSSF.
-          publish_results: false
+          INPUT_PUBLISH_RESULTS: 'false'
+          INPUT_REPO_TOKEN: ${{ github.token }}
+          INPUT_INTERNAL_DEFAULT_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm --workdir /github/workspace \
+            --volume "$GITHUB_WORKSPACE:/github/workspace" \
+            --volume "$GITHUB_EVENT_PATH:/github/workflow/event.json:ro" \
+            --env GITHUB_EVENT_PATH=/github/workflow/event.json --env GITHUB_WORKSPACE=/github/workspace \
+            --env GITHUB_EVENT_NAME --env GITHUB_REF --env GITHUB_REPOSITORY --env GITHUB_SHA \
+            --env GITHUB_SERVER_URL --env GITHUB_API_URL --env GITHUB_ACTIONS \
+            --env INPUT_RESULTS_FILE --env INPUT_RESULTS_FORMAT --env INPUT_FILE_MODE \
+            --env INPUT_PUBLISH_RESULTS --env INPUT_REPO_TOKEN --env INPUT_INTERNAL_DEFAULT_TOKEN \
+            "$IMAGE"
 
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:

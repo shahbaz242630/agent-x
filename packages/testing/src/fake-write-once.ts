@@ -11,14 +11,14 @@ export interface FakeWriteOnceStore {
   readonly real: WriteOnceStore;
   readonly files: Map<string, Buffer>;
   /** How many of each call reached `store`. */
-  readonly calls: { puts: number; lists: number; gets: number };
+  readonly calls: { puts: number; lists: number; gets: number; smallGets: number };
   /** Set to make a call do something else. */
   readonly instead: Partial<WriteOnceStore>;
 }
 
 export function createFakeWriteOnceStore(): FakeWriteOnceStore {
   const files = new Map<string, Buffer>();
-  const calls = { puts: 0, lists: 0, gets: 0 };
+  const calls = { puts: 0, lists: 0, gets: 0, smallGets: 0 };
   const instead: Partial<WriteOnceStore> = {};
 
   const real: WriteOnceStore = {
@@ -38,6 +38,11 @@ export function createFakeWriteOnceStore(): FakeWriteOnceStore {
       const bytes = files.get(name);
       return bytes === undefined ? Promise.reject(new Error('no file of that name')) : Promise.resolve(bytes);
     },
+    getAtMost(name, mostBytes) {
+      const bytes = files.get(name);
+      if (bytes === undefined) return Promise.resolve('missing');
+      return Promise.resolve(bytes.length > mostBytes ? 'too-large' : bytes);
+    },
   };
 
   const store: WriteOnceStore = {
@@ -52,6 +57,10 @@ export function createFakeWriteOnceStore(): FakeWriteOnceStore {
     get(name) {
       calls.gets += 1;
       return (instead.get ?? real.get)(name);
+    },
+    getAtMost(name, mostBytes) {
+      calls.smallGets += 1;
+      return (instead.getAtMost ?? real.getAtMost)(name, mostBytes);
     },
   };
 

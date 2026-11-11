@@ -27,6 +27,7 @@ import type {
   VerifiedState,
 } from '../../audit/index.ts';
 import { registerAgentKey } from '../../directory/index.ts';
+import { movedAsRead } from '../../../shared-kernel/index.ts';
 import { AGENT_KEY, type AgentKeyStatus, type Scope, scopesOf, scopesText } from '../domain/agent.ts';
 import type { AgentsTransaction } from './agents.ts';
 
@@ -314,5 +315,37 @@ export async function bringKeyExpiryForward(
       action,
       details: { ...details, expiresAt: expiresAt.toISOString() },
     },
+  );
+}
+
+/**
+ * Revokes the key, which the caller's own read in this transaction found
+ * live: `agent_key.revoked` by `actor`, with `details`. One that doesn't move
+ * throws (movedAsRead, `what` its message), rolling the write back. What a
+ * revoke, a rotation ending the old key at once, and a hand-over do to a key.
+ */
+export async function revokeKey(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  {
+    orgId,
+    keyId,
+    actor,
+    details,
+  }: {
+    readonly orgId: string;
+    readonly keyId: string;
+    readonly actor: AuditActor;
+    readonly details: AuditDetails;
+  },
+  what: string,
+): Promise<void> {
+  movedAsRead(
+    await states.changeStatus(tx, AGENT_KEYS, { orgId, id: keyId }, 'revoke', {
+      actor,
+      action: 'agent_key.revoked',
+      details,
+    }),
+    what,
   );
 }

@@ -4,13 +4,14 @@
 // reads; B3's accept and B4's suspend, resume and revoke, each asked then
 // confirmed. Who reaches them is the access hook's (role-matrix.test.ts); what
 // the use case does in the database is mandate-registry.db.test.ts.
-import type { MembershipCheck, LiveSession, Role } from '@agentx/core/modules/identity';
+import type { MembershipCheck, Role } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { AcceptAsked, MandateAcceptance, MandateAccepted } from './mandate-acceptance.ts';
 import type { MandateMove, MandateMoved, MandateMoves, MoveAsked, MoveChosen } from './mandate-moves.ts';
 import { ABOVE_THE_CAP, type MandateView } from './mandate-reads.ts';
@@ -25,18 +26,7 @@ const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 const SUPPLIERS = ['0199a0f0-0000-7000-8000-0000000000e1', '0199a0f0-0000-7000-8000-0000000000e2'];
 const ADMIN = '0199a0f0-0000-7000-8000-000000000033';
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-07T09:00:00.000Z'),
-  // A passkey's sign-in, as an admin needs (ADR-012 §7).
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-07T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-07T09:10:00.000Z'),
-  endsAt: new Date('2099-10-07T21:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-07T09:00:00.000Z', { endless: true });
 
 const AED = (minor: bigint) => money(minor, 'AED');
 

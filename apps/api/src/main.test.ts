@@ -855,7 +855,13 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
       ),
     );
     expect(listening).toEqual(
-      expect.objectContaining({ event: 'api.listening', ports: server?.addresses().map((address) => address.port) }),
+      expect.objectContaining({
+        event: 'api.listening',
+        ports: server
+          ?.addresses()
+          .filter((address) => typeof address !== 'string')
+          .map((address) => address.port),
+      }),
     );
     expect(listening?.ports).toEqual([expect.any(Number)]);
     expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
@@ -876,7 +882,7 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
 
   it('logs a failure to listen, closes what it built and the pool, and exits with a failure', async () => {
     const first = await start();
-    const port = String(first.server?.addresses()[0]?.port);
+    const port = String(first.server?.addresses().find((address) => typeof address !== 'string')?.port);
     const { host, server, events } = await start({ ...ENV, AGENTX_HTTP_PORT: port });
     expect(server).toBeUndefined();
     expect(host.exitCode).toBe(1);
@@ -1104,7 +1110,7 @@ describe('4D2e D: the first try at the lease', () => {
 
   it('a failure to listen gives the lease up while the pool is still open', async () => {
     const first = await start();
-    const port = String(first.server?.addresses()[0]?.port);
+    const port = String(first.server?.addresses().find((address) => typeof address !== 'string')?.port);
     lease.released = 0;
     const { host } = await start({ ...ENV, AGENTX_HTTP_PORT: port });
     expect(host.exitCode).toBe(1);

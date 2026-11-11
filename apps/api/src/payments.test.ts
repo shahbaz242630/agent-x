@@ -6,13 +6,13 @@
 // them), and the use case's own refusals. What the use case does is
 // mark-failed.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession } from '@agentx/core/modules/identity';
 import type { FailureProposalRecord } from '@agentx/core/modules/transactions';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { liveSession } from './live-session.helper.test.ts';
 import type { PaymentMarks } from './payment-marks.ts';
 import type { Refused } from './refused.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
@@ -31,17 +31,7 @@ const CONFIRMED = 'invoice_can_be_paid_again';
 
 const KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
 
-const LIVE: LiveSession = {
-  sessionId: '0199a0f0-0000-7000-8000-000000000022',
-  userId: '0199a0f0-0000-7000-8000-000000000011',
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-10-13T08:00:00.000Z'),
-  amr: ['pwd', 'user', 'mfa'],
-  createdAt: new Date('2026-10-13T08:00:05.000Z'),
-  lastSeenAt: new Date('2026-10-13T08:10:00.000Z'),
-  endsAt: new Date('2099-10-07T20:00:05.000Z'),
-  idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
+const LIVE = liveSession('2026-10-13T08:00:00.000Z', { endless: true });
 
 const PROPOSAL: FailureProposalRecord = {
   id: PROPOSAL_ID,
