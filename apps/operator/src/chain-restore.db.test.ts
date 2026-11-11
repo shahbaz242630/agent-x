@@ -184,7 +184,7 @@ afterAll(() => {
   keyFiles.remove();
 });
 
-describe('PL-29 a chain repaired from its plan, original rows alone', () => {
+describe('SEC-DB-12 PL-29 a chain repaired from its plan, original rows alone', () => {
   it('puts back a row deleted from the middle: the chain whole again, the copy’s row exactly', async () => {
     await copied(3);
     await deleteEvent(live, 2n);
@@ -283,7 +283,7 @@ describe('PL-29 a chain repaired from its plan, original rows alone', () => {
   });
 });
 
-describe('PL-29 the repair refuses, writing nothing', () => {
+describe('SEC-DB-12 PL-29 the repair refuses, writing nothing', () => {
   it('a plan gone stale: the live chain changed after the operator read it', async () => {
     await copied(3);
     await deleteEvent(live, 2n);
@@ -406,7 +406,7 @@ describe('PL-29 the repair refuses, writing nothing', () => {
   });
 });
 
-describe('PL-29 a forged row is never written', () => {
+describe('SEC-DB-12 PL-29 a forged row is never written', () => {
   it('a copy holding a row with a wrong MAC: its plan refused', async () => {
     await copied(3);
     await tamper(theCopy(), (admin) =>

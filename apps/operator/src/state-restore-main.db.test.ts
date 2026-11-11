@@ -162,7 +162,7 @@ function stored(digest: string, summary: Readonly<Record<string, unknown>> = {})
   return planId;
 }
 
-describe('PL-29 follow-up: the authority rows’ plan and repair, run as the job runs them', () => {
+describe('SEC-DB-13 PL-29 follow-up: the authority rows’ plan and repair, run as the job runs them', () => {
   it('plans read-only as the owner, keeps the plan, then repairs from it by its digest, never twice', async () => {
     const planId = uuidV7Ids.next();
     const plan = await run(['--request', requested(stateRecoveryRequest(orgId, planId))]);
@@ -309,7 +309,7 @@ describe('PL-29 follow-up: the authority rows’ plan and repair, run as the job
   });
 });
 
-describe('PL-29 follow-up: a request the job cannot read is refused before it connects', () => {
+describe('SEC-DB-13 PL-29 follow-up: a request the job cannot read is refused before it connects', () => {
   const id = () => uuidV7Ids.next();
   it.each([
     [

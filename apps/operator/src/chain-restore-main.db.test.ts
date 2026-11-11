@@ -216,7 +216,7 @@ const records = (restoreId: string, which: 'start' | 'outcome') =>
     unknown
   >;
 
-describe('4D2e E10 the chain repair, run as its job runs it', () => {
+describe('SEC-DB-12 4D2e E10 the chain repair, run as its job runs it', () => {
   it('repairs as the owner, says the owner-login alert fires by design, keeps both records, never twice', async () => {
     const { planId, digest } = await planned();
     const restoreId = uuidV7Ids.next();

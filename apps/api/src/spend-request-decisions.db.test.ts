@@ -323,7 +323,7 @@ beforeEach(() => {
 });
 
 describe('deciding a spend request and reserving it (D4)', () => {
-  it('allows one within every limit: APPROVED, its capacity held in the agent’s month and its order claimed', async () => {
+  it('SEC-EVD-03 allows one within every limit: APPROVED, its capacity held in the agent’s month and its order claimed', async () => {
     const { w, mandateId, acting } = await ready();
 
     const request = decidedOf(await ask(acting, asking(w)));
@@ -618,7 +618,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect((await made(w.org)).requests).toBe(1);
   });
 
-  it('logs each decision once it is made, with how long it took, for the denial-surge alert, and never for its key’s replay (E2)', async () => {
+  it('SEC-EVD-03 logs each decision once it is made, with how long it took, for the denial-surge alert, and never for its key’s replay (E2)', async () => {
     const { w, acting } = await ready();
     const decided = () => capture.lines().filter((line) => line.event === 'spend_request.decided');
     const allowed = decidedOf(await ask(acting, asking(w), 'logged-once'));

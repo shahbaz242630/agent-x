@@ -4065,7 +4065,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
   });
 
-  it('release-access: CI given its role on anything but the API app and the migration job, to anyone else, or not once', () => {
+  it('SEC-OPS-12 release-access: CI given its role on anything but the API app and the migration job, to anyone else, or not once', () => {
     // The rule's own messages, so a condition another one also catches can't hide.
     const accessProblems = (snapshotted: Snapshot): string[] =>
       policyProblems(snapshotted, STAGING)
@@ -4246,7 +4246,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra(pim))).toEqual(['secret-access']);
   });
 
-  it('job-watch: the job-start watch trusted for another subject, allowed more than reading the jobs, or given its role anywhere but the group, to anyone else (S175)', () => {
+  it('SEC-OPS-14 job-watch: the job-start watch trusted for another subject, allowed more than reading the jobs, or given its role anywhere but the group, to anyone else (S175)', () => {
     // The rule's own messages, so a condition another one also catches can't hide.
     const watchProblems = (snapshotted: Snapshot, expected = STAGING): string[] =>
       policyProblems(snapshotted, expected)
@@ -4622,7 +4622,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(without(named(/^id-agentx-stg-login$/)))).toEqual(['secret-access']);
   });
 
-  it('jobs: one that starts itself, runs twice at once, retries, or runs an image a tag could move', () => {
+  it('SEC-OPS-12 jobs: one that starts itself, runs twice at once, retries, or runs an image a tag could move', () => {
     const environment = staging.predictedResources.find(ENVIRONMENT);
     expect(
       brokenRules(

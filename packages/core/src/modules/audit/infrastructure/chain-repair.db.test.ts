@@ -30,7 +30,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe("PL-29 the repair's role", () => {
+describe("SEC-DB-12 PL-29 the repair's role", () => {
   it('is the owner, logged in as itself', async () => {
     expect(REPAIR_ROLE).toBe('agentx_owner');
     expect(await repairRoleProblems(as('owner'))).toEqual([]);

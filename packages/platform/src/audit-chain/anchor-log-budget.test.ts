@@ -68,7 +68,7 @@ async function restartOver(fake: FakeWriteOnceStore) {
   return { log, said };
 }
 
-describe('the default budget: a third of the heap, at 600 bytes a line held (PL-65)', () => {
+describe('SEC-ANC-02 the default budget: a third of the heap, at 600 bytes a line held (PL-65)', () => {
   it('at the edge, ten organisations, reads whole, and says it is past half', async () => {
     const { log, said } = await restartOver(await storeOf(10));
     expect(log.state()).toBe('read');
