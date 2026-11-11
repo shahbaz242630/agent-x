@@ -21,6 +21,7 @@ import { z } from 'zod';
 import './route-server.helper.test.ts';
 import { SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
+import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 import { buildServer } from './server.ts';
 import { cookieValue, FLOW_COOKIE, SESSION_COOKIE } from './sign-in.ts';
@@ -36,17 +37,7 @@ const SESSION_SECONDS = 43_200;
 const SUBJECT = { issuer: 'https://auth.agentx.example', subject: '312000000000000042' };
 
 /** A live session, as the sign-in finds it for a request. */
-const LIVE: LiveSession = {
-  sessionId: RECORD_ID,
-  userId: USER_ID,
-  idpSessionId: 'V1_1',
-  authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
-  createdAt: new Date('2026-09-24T09:00:05.000Z'),
-  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
-  endsAt: new Date('2026-09-24T21:00:05.000Z'),
-  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
-};
+const LIVE = liveSession('2026-09-24T09:00:00.000Z', { amr: ONE_TIME_CODE });
 
 /** The stand-in: what each route asked of it, and what it answers. */
 class StandIn implements SignIn {

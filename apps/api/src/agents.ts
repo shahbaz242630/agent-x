@@ -52,7 +52,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { memberInSessionOf, need } from './access.ts';
+import { EVERY_MEMBER, memberInSessionOf, need } from './access.ts';
 import {
   type AgentRegistrations,
   REGISTER_CONFIRM_OPERATION,
@@ -348,24 +348,20 @@ export function registerAgents(
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
-  routes.get(
-    '/v1/agents',
-    { schema: LIST_SCHEMA, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
-    async (request, reply) => {
-      const { orgId } = memberInSessionOf(request);
-      const listed = await need(registrations).list(
-        orgId,
-        { after: request.query.after ?? null, limit: request.query.limit ?? MOST_AGENTS_A_PAGE },
-        request.id,
-      );
-      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return { agents: listed.agents.map(agentOf), next: listed.next, unchecked: [...listed.unchecked] };
-    },
-  );
+  routes.get('/v1/agents', { schema: LIST_SCHEMA, config: { access: [...EVERY_MEMBER] } }, async (request, reply) => {
+    const { orgId } = memberInSessionOf(request);
+    const listed = await need(registrations).list(
+      orgId,
+      { after: request.query.after ?? null, limit: request.query.limit ?? MOST_AGENTS_A_PAGE },
+      request.id,
+    );
+    if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
+    return { agents: listed.agents.map(agentOf), next: listed.next, unchecked: [...listed.unchecked] };
+  });
 
   routes.get(
     '/v1/agents/:id',
-    { schema: SHOW_SCHEMA, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
+    { schema: SHOW_SCHEMA, config: { access: [...EVERY_MEMBER] } },
     async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const found = await need(registrations).show(orgId, request.params.id, request.id);

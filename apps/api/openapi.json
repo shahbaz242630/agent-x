@@ -1878,6 +1878,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "splitCheckWarning": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1898,7 +1904,8 @@
           "draftedBy",
           "draftedAt",
           "consentWarnings",
-          "capWarnings"
+          "capWarnings",
+          "splitCheckWarning"
         ],
         "additionalProperties": false,
         "description": "One version of a mandate’s terms, made once."

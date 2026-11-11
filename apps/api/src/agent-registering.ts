@@ -44,7 +44,7 @@ import {
   type AgentWithKeys,
   createAgentWork,
 } from './agent-writes.ts';
-import type { Refused } from './refused.ts';
+import type { Refused, StepUpAsked } from './refused.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** Asking to register an agent: its operation, which the step-up challenge names as its action too. */
@@ -66,7 +66,7 @@ export interface AgentAsked {
 
 /** What a registration's write answers. */
 export type RegistrationWrite =
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | StepUpAsked
   | {
       readonly outcome: 'registered';
       readonly agent: AgentWithKeys;
