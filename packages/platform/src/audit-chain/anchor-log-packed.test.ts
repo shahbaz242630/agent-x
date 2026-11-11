@@ -47,6 +47,8 @@ function objectLines<T extends Anchor>(): PackedLines<T> {
     get records() {
       return index.size;
     },
+    // Objects, no record buffers.
+    allocatedBytes: 0,
     has: (chain) => index.has(chain),
     get: (chain) => index.get(chain)?.line,
     stampOf: (chain) => index.get(chain)?.stamp,

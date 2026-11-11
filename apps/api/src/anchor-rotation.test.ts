@@ -238,6 +238,7 @@ function rotating(more: Rotating = {}) {
     await rotation.run(listed, signal, stopping);
     // Every shard a run pinned, released by its end.
     if (more.shards !== undefined) expect([...more.shards.pins.values()].filter((count) => count !== 0)).toEqual([]);
+    if (more.over !== undefined) expect(more.over.log.memoryHeld().pinned).toBe(0);
   };
   const lines = (event: string) => capture.lines().filter((line) => line.event === event);
   return { rotation, run, clock, anchors, passes, calls, answer, failed, missed, anchor, lines, capture };
@@ -1372,6 +1373,46 @@ describe('over a log that lets shards go (PL-65 PR3): each step pins its chainâ€
     await made.run([orgId]);
     expect(shards.refused).toEqual([]);
     expect(shards.inner.passes.lastProgress(chainOf(orgId))?.seq).toBe(0n);
+  });
+
+  it('a backlog cut short run after run: days go by shard, the oldest-waiting shard first, never by shard number', async () => {
+    const shards = lettingGo({ sticky: true });
+    const made = rotating({ shards });
+    const shardOfOrg = (orgId: string): number => shardOf(`organisation:${orgId}`);
+    // The longest waiting, due at 08:05, in a shard late in number; the rest due after it, in shards before it.
+    const candidates = Array.from({ length: 30 }, (_, nth) => orgInSlot(97, nth));
+    const late = candidates.reduce((one, other) => (shardOfOrg(other) > shardOfOrg(one) ? other : one));
+    const rest: string[] = [];
+    for (let slot = 98; rest.length < 8; slot += 1) {
+      for (let nth = 0; ; nth += 1) {
+        const orgId = orgInSlot(slot, nth);
+        if (shardOfOrg(orgId) < shardOfOrg(late)) {
+          rest.push(orgId);
+          break;
+        }
+      }
+    }
+    // Listed last, so its day is also the last added: only its age puts it first.
+    const orgs = [...rest, late];
+    for (const orgId of orgs) {
+      made.anchor(orgId, 5n);
+      shards.letGo(orgId);
+    }
+    // Each run cut short by its time after one day's walk.
+    const walked: string[] = [];
+    let ending = new AbortController();
+    made.answer.walk = (orgId) => {
+      walked.push(orgId);
+      ending.abort();
+      return Promise.resolve(stepTo(5n, 5n));
+    };
+    // As many runs as days, each cut after one: every day is taken within them.
+    for (const _day of orgs) {
+      ending = new AbortController();
+      await made.run(orgs, ending.signal);
+    }
+    expect(walked[0]).toBe(late);
+    expect(new Set(walked)).toEqual(new Set(orgs));
   });
 
   it('owed marks for chains let go are read back in shard order, and stop with the run', async () => {

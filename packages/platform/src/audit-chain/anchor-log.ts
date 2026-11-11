@@ -363,6 +363,9 @@ export interface AnchorLog extends AnchorStore, PassRecord {
     readonly records: number;
     readonly allocated: number;
     readonly shards: number;
+    /** Shards pinned now, and organisations known only as let go. */
+    readonly pinned: number;
+    readonly elsewhere: number;
   };
 }
 
@@ -940,6 +943,8 @@ export function createAnchorLog({
         if (!isResident(shard)) elsewhere(line.chain, lineKind, line);
         return;
       }
+      // Read back whole: held again, so no longer counted as known elsewhere as well.
+      if (loading === shard) seenElsewhere.delete(line.chain);
       // Each line read a new one, as each was a new object: stamped as it comes in.
       if (lineKind === 'a') {
         if (!rebasedAfter(line.chain, line.at)) staged(stage, line, stamped(), kind, fileAt);
@@ -1785,7 +1790,11 @@ export function createAnchorLog({
     const foreign = { count: 0 };
     loading = shard;
     try {
-      for (const rebase of rebases.values()) if (shardOf(rebase.chain) === shard) rebaseAnchored(rebase);
+      for (const rebase of rebases.values()) {
+        if (shardOf(rebase.chain) !== shard) continue;
+        rebaseAnchored(rebase);
+        seenElsewhere.delete(rebase.chain);
+      }
       const found = { shard, ...(await readShard(shard, foreign, stage, new Set<number>(), undefined)) };
       // No sound snapshot of its own: it stands on the old files, as at a first read, read whole for it alone. Never
       // let go again, as that is a read of the whole old store.
@@ -2391,6 +2400,8 @@ export function createAnchorLog({
         records: tables.reduce((sum, table) => sum + table.records, 0),
         allocated: tables.reduce((sum, table) => sum + table.allocatedBytes, 0),
         shards: resident.filter(Boolean).length,
+        pinned: pins.filter((count) => count > 0).length,
+        elsewhere: seenElsewhere.size,
       };
     },
     flush(): Promise<void> {

@@ -423,12 +423,30 @@ export function createRotation({
     return true;
   };
 
-  /** The days waiting, oldest first, until the run ends. One whose read fails goes to the back, where it was, and the rest go on. */
+  /**
+   * Where shards are let go (PR3), the days grouped by shard, so each shard is read back once a run however many of its
+   * days are due; the groups oldest first, by the longest-waiting day in each, so a shard late in number never waits
+   * behind others run after run. A day missed keeps when it was due, and ages to the front.
+   */
+  const inShards = (queue: readonly Day[]): readonly Day[] => {
+    const groups = new Map<number, Day[]>();
+    for (const day of queue) {
+      const shard = shardOfOrg(day.orgId);
+      const group = groups.get(shard);
+      if (group === undefined) groups.set(shard, [day]);
+      else group.push(day);
+    }
+    const oldest = (group: readonly Day[]): number => Math.min(...group.map((day) => day.dueAt));
+    return [...groups.values()].toSorted((one, other) => oldest(one) - oldest(other)).flat();
+  };
+
+  /**
+   * The days waiting, oldest first (by shard, oldest group first, where shards are let go), until the run ends. One whose
+   * read fails goes to the back, where it was, and the rest go on.
+   */
   const takeDays = async (listed: ReadonlySet<string>, signal: AbortSignal): Promise<void> => {
-    // Where shards are let go, in shard order, so each is read back once a run however many days fall in it.
     const queue = [...days.values()];
-    const ordered =
-      shards === undefined ? queue : queue.toSorted((one, other) => shardOfOrg(one.orgId) - shardOfOrg(other.orgId));
+    const ordered = shards === undefined ? queue : inShards(queue);
     for (const day of ordered) {
       if (signal.aborted) return;
       // Gone from the list (its own alarm).

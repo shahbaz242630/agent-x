@@ -753,6 +753,26 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
     });
   });
 
+  describe('an organisation read back', () => {
+    it('is held again, and no longer counted as known elsewhere too', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      const away = letGo(log)[0] ?? PLATFORM;
+      const before = log.memoryHeld().elsewhere;
+      const evictedBefore = made
+        .lines('audit.anchor_shards_evicted')
+        .reduce((sum, line) => sum + Number(line.shards), 0);
+      const release = await log.pin(away);
+      const evictedSince =
+        made.lines('audit.anchor_shards_evicted').reduce((sum, line) => sum + Number(line.shards), 0) - evictedBefore;
+      // Each shard here holds one organisation: one known elsewhere for each let go since, one fewer for it.
+      expect(log.memoryHeld().elsewhere).toBe(before - 1 + evictedSince);
+      expect(log.organisations()).toContain(away.kind === 'organisation' ? away.orgId : '');
+      release?.();
+    });
+  });
+
   describe('said, in a log that lets shards go', () => {
     it('past half the budget is how it runs: never the near-memory error a log holding every shard says', async () => {
       const made = await world();
