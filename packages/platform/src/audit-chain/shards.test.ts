@@ -116,6 +116,17 @@ describe('SEC-ANC-04 a list of the shard files a write makes (PL-65 PR2)', () =>
     expect(await reading()).toBeUndefined();
   });
 
+  it('a list of every shard, about 15 KB opened, reads whole at its bound, and is none at a smaller one', async () => {
+    const files = Array.from(
+      { length: 256 },
+      (_, shard) =>
+        `${shard.toString(16).padStart(2, '0')}/8233417199999-00000000-0000-4000-8000-${String(shard).padStart(12, '0')}-d`,
+    );
+    const bytes = changesFile(keys, NAME, 1, files);
+    expect(await read(bytes)).toEqual(files);
+    expect(await readChangesFile(keys, { bytes, name: NAME, epoch: 1, most: 8192 })).toBeUndefined();
+  });
+
   it('a key version not held is none; a key store failing otherwise is thrown', async () => {
     const bytes = changesFile(keys, NAME, 1, FILES);
     const lacking: KeyProvider = {

@@ -98,9 +98,14 @@ export function changesFile(keys: KeyProvider, name: string, epoch: number, file
 /** The files a list names, if it is one signed for its own name and epoch; or nothing. */
 export async function readChangesFile(
   keys: KeyProvider,
-  { bytes, name, epoch }: { readonly bytes: Buffer; readonly name: string; readonly epoch: number },
+  {
+    bytes,
+    name,
+    epoch,
+    most = MOST_CHANGES_BYTES,
+  }: { readonly bytes: Buffer; readonly name: string; readonly epoch: number; readonly most?: number },
 ): Promise<readonly string[] | undefined> {
-  const text = await openedSmallFile(bytes, MOST_CHANGES_BYTES);
+  const text = await openedSmallFile(bytes, most);
   const lines = text?.endsWith('\n') === true ? text.slice(0, -1).split('\n') : [];
   const said = lines.length === 1 ? parsedJson(lines[0] ?? '') : undefined;
   if (typeof said !== 'object' || said === null) return undefined;

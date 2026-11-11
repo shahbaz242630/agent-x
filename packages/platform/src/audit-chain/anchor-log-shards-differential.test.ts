@@ -1,8 +1,10 @@
 // The sharded store against today's (PL-65 PR2, the design's differential test): the same random steps, from the same
 // seed, run once by processes that keep the old files and once by processes that move the store on to its shards part
 // way, each over a store of its own: many chains across the shards, hourly snapshots and deltas, restarts, spoiled files,
-// rebases. A process reading each store afresh at the end, and the writers themselves, must say the same of every
-// chain: its anchor, its last finished pass and the place a pass under way has reached.
+// rebases, lists of changes forged by someone with the store's add token. Two copies write each store in turn, as the
+// jobs' lease passes between copies (the one taking it reads first, as a run does), so each reads the other's lists. A process reading each store afresh at the end, both writers, and a third
+// beside them that only reads, must say the same of every chain: its anchor, its last finished pass and the place a pass
+// under way has reached.
 import { gzipSync } from 'node:zlib';
 
 import { createFakeWriteOnceStore, type FakeWriteOnceStore, LogCapture, testLogger } from '@agentx/testing';
@@ -57,8 +59,8 @@ function side(clock: { at: Date }, sharded: boolean) {
       alertAfterMs: 15 * MINUTE,
       cutOver,
     });
-  const state = { log: made(false), cutOver: false };
-  // A second process beside the writer, never restarted and never writing: it reads what the writer wrote, each run.
+  // Two copies that write, the lease passing between them; and a third, never writing or restarted, reading both.
+  const state = { log: made(false), second: made(false), cutOver: false };
   const watcher = made(false);
   return {
     fake,
@@ -66,10 +68,16 @@ function side(clock: { at: Date }, sharded: boolean) {
     get log() {
       return state.log;
     },
-    /** A restart, set from now on to move the store on, on the shards' side, once `cutOver` says. */
+    get second() {
+      return state.second;
+    },
+    /** The copy a step's write goes to. */
+    writer: (which: number): AnchorLog => (which === 0 ? state.log : state.second),
+    /** A restart of both copies, set from now on to move the store on, on the shards' side, once `cutOver` says. */
     restart(cutOver: boolean) {
       state.cutOver = sharded && (state.cutOver || cutOver);
       state.log = made(state.cutOver);
+      state.second = made(state.cutOver);
     },
     reader: () => made(false),
   };
@@ -105,10 +113,17 @@ interface Step {
   readonly seqs: Map<string, bigint>;
   readonly random: ReturnType<typeof randomFrom>;
   readonly id: number;
+  /** Which copy holds the lease, and writes. */
+  readonly lease: { which: number };
 }
 
 const each = async (step: Step, act: (log: AnchorLog) => unknown): Promise<void> => {
-  for (const one of step.both) await act(one.log);
+  for (const one of step.both) await act(one.writer(step.lease.which));
+};
+
+/** Every copy on both sides reads. */
+const readAll = async (step: Step): Promise<void> => {
+  for (const one of step.both) for (const log of [one.log, one.second, one.watcher]) await log.read();
 };
 
 /** What a step does, by a roll below 100: each up to its bound. */
@@ -143,13 +158,7 @@ const ACTIONS: readonly (readonly [number, (step: Step) => Promise<void>])[] = [
     },
   ],
   [70, (step) => each(step, (log) => log.flush())],
-  [
-    80,
-    async (step) => {
-      await each(step, (log) => log.read());
-      for (const one of step.both) await one.watcher.read();
-    },
-  ],
+  [80, readAll],
   [
     90,
     (step) => {
@@ -161,11 +170,19 @@ const ACTIONS: readonly (readonly [number, (step: Step) => Promise<void>])[] = [
     93,
     async (step) => {
       for (const one of step.both) one.restart(false);
-      await each(step, (log) => log.read());
+      for (const one of step.both) for (const log of [one.log, one.second]) await log.read();
     },
   ],
   [
-    96,
+    95,
+    async (step) => {
+      // The lease passes to the other copy, which reads before it writes.
+      step.lease.which = 1 - step.lease.which;
+      for (const one of step.both) await one.writer(step.lease.which).read();
+    },
+  ],
+  [
+    97,
     async (step) => {
       const rebase = signRebase(keys, 1, {
         id: idOf(step.id),
@@ -186,14 +203,26 @@ const ACTIONS: readonly (readonly [number, (step: Step) => Promise<void>])[] = [
   [
     100,
     (step) => {
-      // Spoiled files, the same in the old folders of both, and in a shard's folder of the shards' store.
+      // Spoiled files, the same in the old folders of both; in a shard's folder of the shards' store; and a forged list
+      // of changes there, named up to four minutes ahead of the clock.
       const named = `${countdown(step.clock.at)}-${idOf(step.id)}`;
       for (const one of step.both) one.fake.files.set(`e1/deltas/${named}`, gzipSync('spoiled'));
-      step.both[1].fake.files.set(`e1/shards/${shardHex(shardOf(step.name))}/${named}-d`, gzipSync('spoiled'));
+      const shards = step.both[1].fake;
+      shards.files.set(`e1/shards/${shardHex(shardOf(step.name))}/${named}-d`, gzipSync('spoiled'));
+      const ahead = new Date(step.clock.at.getTime() + step.random.below(4 * MINUTE));
+      shards.files.set(`e1/shards/changes/${countdown(ahead)}-${idOf(step.id)}`, gzipSync('forged'));
       return Promise.resolve();
     },
   ],
 ];
+
+/** Each of these copies on both sides reads, in turn. */
+const readEach = async (
+  both: Step['both'],
+  copies: (one: Step['both'][number]) => readonly AnchorLog[],
+): Promise<void> => {
+  for (const log of both.flatMap(copies)) await log.read();
+};
 
 async function run(seed: number) {
   const random = randomFrom(seed);
@@ -201,27 +230,28 @@ async function run(seed: number) {
   const both = [side(clock, false), side(clock, true)] as const;
   const cutoverAt = 5 + random.below(STEPS - 30);
   const seqs = new Map<string, bigint>();
-  for (const one of both) await one.log.read();
+  const lease = { which: 0 };
+  await readEach(both, (one) => [one.log, one.second, one.watcher]);
   for (let at = 0; at < STEPS; at += 1) {
     // A second a step, as runs are apart: the old files' reader can't order two named in one millisecond (the lists of
     // changes can, and are run without it in anchor-log-shards.test.ts).
     clock.at = new Date(clock.at.getTime() + 1000);
     if (at === cutoverAt) {
       for (const one of both) one.restart(true);
-      for (const one of both) await one.log.read();
+      await readEach(both, (one) => [one.log, one.second]);
     }
     const chain = CHAINS[random.below(CHAINS.length)] ?? { kind: 'platform' };
     const name = chainName(chain);
     const seq = (seqs.get(name) ?? 0n) + BigInt(1 + random.below(3));
     const point = { seq, hash: Buffer.alloc(32, Number(seq % 251n) + seed), macKeyVersion: 2 };
-    const step: Step = { chain, name, seq, point, clock, both, seqs, random, id: at + 1 };
+    const step: Step = { chain, name, seq, point, clock, both, seqs, random, id: at + 1, lease };
     const roll = random.below(100);
     const action = ACTIONS.find(([upTo]) => roll < upTo);
     await action?.[1](step);
   }
-  for (const one of both) await one.log.flush();
+  for (const one of both) await one.writer(lease.which).flush();
   clock.at = new Date(clock.at.getTime() + MINUTE);
-  for (const one of both) await one.watcher.read();
+  await readEach(both, (one) => [one.log, one.second, one.watcher]);
   return { old: both[0], shards: both[1], clock };
 }
 
@@ -247,6 +277,7 @@ describe('SEC-ANC-04 the sharded store reads as the old one did (PL-65 PR2, diff
         expect(said(fromShards, chain), chainName(chain)).toEqual(said(fromOld, chain));
         expect(said(shards.log, chain), chainName(chain)).toEqual(said(old.log, chain));
         expect(said(shards.watcher, chain), chainName(chain)).toEqual(said(old.watcher, chain));
+        expect(said(shards.second, chain), chainName(chain)).toEqual(said(old.second, chain));
       }
     },
   );
