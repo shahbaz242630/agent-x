@@ -138,6 +138,7 @@ const TYPES = {
   network: 'Microsoft.Network/virtualNetworks',
   roleAssignment: 'Microsoft.Authorization/roleAssignments',
   roleDefinition: 'Microsoft.Authorization/roleDefinitions',
+  lock: 'Microsoft.Authorization/locks',
   group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
@@ -3752,12 +3753,23 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
  * another's secret and each can read its own; CI's identity isn't in GRANTS,
  * so it reads none. Nothing else in the deployment grants access (ACCESS_TYPE).
  */
+/**
+ * A lock grants nothing: `CanNotDelete` only makes Azure refuse a delete (the live server's, postgres.bicep, S185). Any
+ * other level (`ReadOnly` would stop the server's own writes and key reads) stays refused as an unread access type.
+ */
+const deleteLock = (resource: PredictedResource): boolean =>
+  resource.type === TYPES.lock &&
+  typeof resource.properties === 'object' &&
+  resource.properties !== null &&
+  (resource.properties as { level?: unknown }).level === 'CanNotDelete';
+
 const secretAccess: Check = (snapshot, _expected, add) => {
   for (const resource of snapshot.predictedResources) {
     if (
       ACCESS_TYPE.test(resource.type) &&
       resource.type !== TYPES.roleAssignment &&
-      resource.type !== TYPES.roleDefinition
+      resource.type !== TYPES.roleDefinition &&
+      !deleteLock(resource)
     ) {
       add({
         rule: 'secret-access',

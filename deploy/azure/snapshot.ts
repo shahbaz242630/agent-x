@@ -128,6 +128,7 @@ const BICEP_READS: ReadonlySet<string> = new Set([
   'github-ranges.json',
   'app-keys.json',
   'dns-allowed.json',
+  'database-generation.json',
 ]);
 
 /** A throwaway copy of a deploy/azure folder, removed after `use` returns. */
