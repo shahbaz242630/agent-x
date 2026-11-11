@@ -7,13 +7,18 @@
 // out of the migrations. migration-order.ts polices triggers and routine bodies;
 // this polices what is destroyed.
 //
-// **The rule.** A migration may not drop a table, schema, database or column,
-// truncate, delete from, update or merge into an `audit.` or `security.` table,
-// switch a trigger or row-level security off, or run SQL it builds (EXECUTE), nor
-// hide any of these in a function or DO body, nor give a body as a plain string
-// this reader can't look into. A migration this reader can't parse whole is
-// refused too. The only way past is EXCEPTIONS, below: a migration number, the rule
-// and why, each one of them proved to still match (a stale one fails the check).
+// **The rule.** A migration may not drop a table, foreign table, sequence, schema,
+// database, column or what a role owns; truncate; delete from, update or merge into
+// an `audit.` or `security.` table, change one of their columns' types, or make,
+// alter or drop a policy on one; switch a trigger or row-level security off; set
+// the session's search_path; or run SQL it builds (EXECUTE). Nor may it hide any of
+// these in a function or DO body, or give a body as a plain string this reader
+// can't look into. A migration this reader can't parse whole is refused too. The
+// only way past is EXCEPTIONS, below: a migration number, the rule and why, each
+// one of them proved to still match (a stale one fails the check).
+//
+// db/bootstrap's SQL, which db-setup runs as the owner on staging, is held to the
+// same rules, its exceptions named `bootstrap/<file>`.
 //
 // tooling/checks/migration-danger.test.ts holds every migration to this. The SQL is
 // read with migration-order.ts's reader: comments are gone, strings are blanked and
@@ -28,6 +33,9 @@ type DangerRule =
   | 'drop-column'
   | 'truncate'
   | 'guarded-write'
+  | 'guarded-type'
+  | 'guarded-policy'
+  | 'search-path'
   | 'trigger-off'
   | 'row-security-off'
   | 'dynamic-sql'
@@ -46,6 +54,18 @@ export interface DangerException {
  * entry still matches a statement its migration holds, so none can outlive what it was written for.
  */
 export const EXCEPTIONS: readonly DangerException[] = [
+  {
+    migration: '0002',
+    rule: 'guarded-policy',
+    reason:
+      'tenant_isolation made with audit.events and audit.heads, the tables it walls, in the migration that builds them (Phase 1)',
+  },
+  {
+    migration: '0079',
+    rule: 'guarded-policy',
+    reason:
+      'tenant_isolation made with audit.operator_signatures and operator_signing_starts, the tables it walls, in the migration that builds them (PL-57)',
+  },
   {
     migration: '0054',
     rule: 'row-security-off',
@@ -74,9 +94,15 @@ export const EXCEPTIONS: readonly DangerException[] = [
 
 /** The schemas whose rows are evidence: never deleted, changed or merged by a migration. */
 const GUARDED = String.raw`(?:only )?(?:audit|security) ?\.`;
+/** The head of an ALTER TABLE on an evidence table. */
+const ALTER_GUARDED = String.raw`^alter table (?:if exists )?${GUARDED}`;
 
 const RULES: readonly (readonly [DangerRule, RegExp, string])[] = [
-  ['drop', /\bdrop (?:table|schema|database)\b/, 'drops a table, schema or database'],
+  [
+    'drop',
+    /\bdrop (?:table|foreign table|sequence|schema|database|owned)\b/,
+    'drops a table, foreign table, sequence, schema, database or what a role owns',
+  ],
   // In ALTER TABLE, any DROP but a constraint, default, NOT NULL, identity or generation drops a column (COLUMN is optional).
   [
     'drop-column',
@@ -90,6 +116,18 @@ const RULES: readonly (readonly [DangerRule, RegExp, string])[] = [
     new RegExp(String.raw`\b(?:delete from|update|merge into) ${GUARDED}`),
     'deletes, updates or merges rows of an audit. or security. table',
   ],
+  [
+    'guarded-type',
+    new RegExp(String.raw`${ALTER_GUARDED}.*\balter (?:column )?\S+ (?:set data )?type\b`),
+    "changes the type of an audit. or security. table's column",
+  ],
+  [
+    'guarded-policy',
+    new RegExp(String.raw`^(?:create|alter|drop) policy\b.* on ${GUARDED}`),
+    'makes, alters or drops a policy on an audit. or security. table',
+  ],
+  // The session's search_path, which outlives the statement; SET LOCAL and a function's own SET are the transaction's.
+  ['search-path', /(?:^|\bbegin )set (?:session )?search_path\b/, "sets the session's search_path"],
   [
     'trigger-off',
     /\bdisable trigger\b|\bsession_replication_role\b/,
@@ -158,6 +196,10 @@ function brokenIn(sql: string): { rule: DangerRule; what: string }[] {
   });
 }
 
+/** Whether an exception names a file: `0067` names `0067_words.sql` alone, `bootstrap/roles` names `bootstrap/roles.sql`. */
+const isNamed = (one: DangerException, name: string): boolean =>
+  name.startsWith(`${one.migration}_`) || name === `${one.migration}.sql`;
+
 /**
  * Each refusal for the migrations given, as `NNNN_name.sql rule: what`, and each exception that no longer matches
  * anything it names. Empty when every migration keeps the rule.
@@ -171,7 +213,7 @@ export function dangerRefusals(
     const broken = brokenIn(sql);
     const seen = new Set<string>();
     return broken.flatMap(({ rule, what }) => {
-      const excused = exceptions.find((one) => one.rule === rule && name.startsWith(`${one.migration}_`));
+      const excused = exceptions.find((one) => one.rule === rule && isNamed(one, name));
       if (excused !== undefined) {
         used.add(excused);
         return [];
@@ -183,10 +225,10 @@ export function dangerRefusals(
     });
   });
   const stale = exceptions
-    .filter((one) => !used.has(one) && migrations.some(({ name }) => name.startsWith(`${one.migration}_`)))
+    .filter((one) => !used.has(one) && migrations.some(({ name }) => isNamed(one, name)))
     .map((one) => `exception ${one.migration} ${one.rule} matches nothing its migration holds: take it out`);
   const orphan = exceptions
-    .filter((one) => !migrations.some(({ name }) => name.startsWith(`${one.migration}_`)))
+    .filter((one) => !migrations.some(({ name }) => isNamed(one, name)))
     .map((one) => `exception ${one.migration} ${one.rule} names no migration: take it out`);
   return [...refused, ...stale, ...orphan];
 }

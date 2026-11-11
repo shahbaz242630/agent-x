@@ -18,13 +18,20 @@ const MIGRATIONS: readonly Migration[] = readdirSync(path.join(ROOT, MIGRATIONS_
   .toSorted()
   .map((name) => ({ name, sql: readFileSync(path.join(ROOT, MIGRATIONS_FOLDER, name), 'utf8') }));
 
+/** db/bootstrap's SQL, which db-setup runs as the owner on staging: held to the same rules, as `bootstrap/<file>`. */
+const BOOTSTRAP: readonly Migration[] = readdirSync(path.join(ROOT, 'db', 'bootstrap'))
+  .filter((name) => name.endsWith('.sql'))
+  .toSorted()
+  .map((name) => ({ name: `bootstrap/${name}`, sql: readFileSync(path.join(ROOT, 'db', 'bootstrap', name), 'utf8') }));
+
 /** The refusals for one planted migration, numbered past every real one. */
 const planted = (sql: string): string[] => dangerRefusals([{ name: '9999_planted.sql', sql }], []);
 
 describe("the repository's migrations", () => {
   it('destroy nothing and switch no guard off, but for the exceptions named', () => {
     expect(MIGRATIONS.length).toBeGreaterThan(80);
-    expect(dangerRefusals(MIGRATIONS)).toEqual([]);
+    expect(BOOTSTRAP.length).toBeGreaterThan(3);
+    expect(dangerRefusals([...MIGRATIONS, ...BOOTSTRAP])).toEqual([]);
   });
 
   it('name each exception with its reason, once', () => {
@@ -35,9 +42,11 @@ describe("the repository's migrations", () => {
   it('would refuse every excepted migration without its exception', () => {
     const excepted = MIGRATIONS.filter(({ name }) => EXCEPTIONS.some((one) => name.startsWith(`${one.migration}_`)));
     expect(dangerRefusals(excepted, []).map((said) => said.split(':')[0])).toEqual([
+      '0002_audit.sql guarded-policy',
       '0054_agent_zones_signed.sql row-security-off',
       '0067_order_key_full_fold.sql drop-column',
       '0067_order_key_full_fold.sql row-security-off',
+      '0079_operator_role.sql guarded-policy',
       '0079_operator_role.sql row-security-off',
     ]);
   });
@@ -48,6 +57,18 @@ describe('a planted migration', () => {
     ['DROP TABLE audit.events;', 'drop'],
     ['drop table if exists x.y cascade;', 'drop'],
     ['DROP SCHEMA security CASCADE;', 'drop'],
+    ['DROP OWNED BY agentx_app;', 'drop'],
+    ['DROP FOREIGN TABLE a.b;', 'drop'],
+    ['DROP SEQUENCE a.s;', 'drop'],
+    ['SET search_path = audit, public;', 'search-path'],
+    ['SET SESSION search_path TO audit;', 'search-path'],
+    ['DO $$ BEGIN SET search_path = audit; END $$;', 'search-path'],
+    ['ALTER TABLE audit.events ALTER COLUMN details TYPE text;', 'guarded-type'],
+    ['alter table if exists security.events alter at set data type date;', 'guarded-type'],
+    ['DROP POLICY tenant_isolation ON audit.events;', 'guarded-policy'],
+    ['CREATE POLICY open ON audit.heads USING (true);', 'guarded-policy'],
+    ['ALTER POLICY tenant_isolation ON security.events USING (true);', 'guarded-policy'],
+    ['drop policy if exists p on only "audit"."events";', 'guarded-policy'],
     ['DROP DATABASE agentx;', 'drop'],
     ['ALTER TABLE a.b DROP COLUMN c;', 'drop-column'],
     ['ALTER TABLE a.b DROP c;', 'drop-column'],
@@ -91,13 +112,17 @@ describe('a planted migration', () => {
     "SELECT E'it\\'s DROP TABLE x';",
     'CREATE FUNCTION a.f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP = $q$DELETE$q$ THEN RETURN OLD; END IF; RETURN NEW; END $$;',
     'SELECT 1 FOR UPDATE;',
+    'SET LOCAL search_path = pg_catalog;',
+    "CREATE FUNCTION a.f() RETURNS void LANGUAGE sql SET search_path = '' AS $$ SELECT 1 $$;",
+    'CREATE POLICY tenant_isolation ON a.b USING (true);',
+    'ALTER TABLE a.b ALTER COLUMN c TYPE text;',
   ])('%s passes', (sql) => {
     expect(planted(sql)).toEqual([]);
   });
 
   it('is refused once for each rule and statement said alike', () => {
     expect(planted('DROP TABLE a.b; DROP TABLE a.b;')).toEqual([
-      '9999_planted.sql drop: drops a table, schema or database',
+      '9999_planted.sql drop: drops a table, foreign table, sequence, schema, database or what a role owns',
     ]);
   });
 });
@@ -114,6 +139,24 @@ describe('the exceptions', () => {
     expect(dangerRefusals([{ name: '0101_x.sql', sql }], excepted)).toEqual([
       '0101_x.sql drop-column: drops a column',
       'exception 0100 drop-column names no migration: take it out',
+    ]);
+  });
+
+  it('name their own migration by its number alone, and a bootstrap file by its name', () => {
+    const excepted = [
+      { migration: '0067', rule: 'drop-column' as const, reason: 'planted' },
+      { migration: 'bootstrap/roles', rule: 'drop-column' as const, reason: 'planted' },
+    ];
+    const files = ['10067_x.sql', 'x0067_y.sql', '0067.sql.bak', 'bootstrap/roles.sql', '0067_x.sql'];
+    expect(
+      dangerRefusals(
+        files.map((name) => ({ name, sql })),
+        excepted,
+      ),
+    ).toEqual([
+      '10067_x.sql drop-column: drops a column',
+      'x0067_y.sql drop-column: drops a column',
+      '0067.sql.bak drop-column: drops a column',
     ]);
   });
 

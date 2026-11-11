@@ -108,6 +108,14 @@ export const ALLOWED: readonly Allowed[] = [
     proof: TEMP_FOLDER_PROOF,
     why: 'a temporary folder this same function made, removed when it is done',
   })),
+  ...['Dockerfile', 'tooling/load/Dockerfile'].map((file) => ({
+    file,
+    match: 'rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm',
+    guard:
+      'rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-*',
+    proof: { file: CHECK, title: 'removes in an image build only absolute paths written out' },
+    why: "an image build's own package caches and unused tools, by absolute paths written out, inside the build",
+  })),
   {
     file: 'packages/platform/src/storage/block-store.ts',
     match: 'rm(blocksOf(name), { recursive',

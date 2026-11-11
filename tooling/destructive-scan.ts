@@ -10,9 +10,9 @@
 // tooling/checks/destructive-commands.test.ts runs this over every tracked file
 // (migrations aside: tooling/migration-danger.ts reads those as SQL).
 //
-// Lines read by shape, not parsed: a whole-line comment is skipped (it runs
-// nothing), everything else is matched, strings included, since an Azure command
-// is a list of strings. A false hit costs an entry; a missed one could cost the
+// Lines read by shape, not parsed: comments are skipped (codeOf says which),
+// everything else is matched, strings included, since an Azure command is a list
+// of strings; a REST method split over two lines is read across them. A false hit costs an entry; a missed one could cost the
 // server, so the shapes are wide.
 
 /** One kind of destructive command, by name. */
@@ -30,31 +30,53 @@ type DangerKind =
 /** The list, which quotes each line it names, and this file, whose shapes spell the commands: both run nothing. */
 const OWN_FILES = new Set(['tooling/destructive-allowed.ts', 'tooling/destructive-scan.ts']);
 
-/** The files read: code and scripts that can run, tests, migrations and the list aside. */
+/** Files whose comments start with `#`: shell, PowerShell, YAML, Dockerfiles and the git hooks. */
+const HASH_COMMENTS = /\.(?:sh|ps1|ya?ml)$|(?:^|\/)Dockerfile[^/]*$|^\.githooks\//;
+
+/**
+ * The files read: code and scripts that can run (Dockerfiles, the git hooks, package.json's scripts among them), tests,
+ * migrations and the list aside. db/bootstrap's SQL goes through migration-danger.ts's rules instead.
+ */
 export function isScanned(file: string): boolean {
   if (OWN_FILES.has(file) || file.startsWith('db/migrations/') || /\.test\.[cm]?[jt]sx?$/.test(file)) return false;
-  return /\.(?:ts|mts|mjs|sh|ps1|ya?ml|bicep)$/.test(file);
+  return (
+    /\.(?:[cm]?[jt]s|[jt]sx|sh|ps1|ya?ml|bicep)$/.test(file) ||
+    /(?:^|\/)(?:Dockerfile[^/]*|package\.json)$/.test(file) ||
+    /^\.githooks\/[^/.]+$/.test(file)
+  );
 }
 
+/** A quoted `delete` or `purge`. */
+const WORD = String.raw`['"\x60](?:delete|purge)['"\x60]`;
+
 const SHAPES: readonly (readonly [DangerKind, RegExp])[] = [
-  // `delete` or `purge` as a word of an argument list (`'server', 'delete'`, or ending a line), or an az line saying one.
-  ['azure-delete', /['"`](?:delete|purge)['"`]\s*(?:,|$)|,\s*['"`](?:delete|purge)['"`]|\baz\b.*\b(?:delete|purge)\b/],
-  ['rest-delete', /\bmethod\b\W{0,4}delete\b|--method\s+delete\b/i],
-  ['sql-drop', /\bdrop\s+(?:database|table|schema)\b/i],
-  ['sql-truncate', /\bTRUNCATE\b|\btruncate\s+(?:table|only)\b/],
+  // `delete` or `purge` as a word of an argument list (`'server', 'delete'`, or ending a line or a call), an az line
+  // saying one, the Azure SDK's beginDelete, or PowerShell's Remove-Az.
+  [
+    'azure-delete',
+    new RegExp(String.raw`${WORD}\s*(?:,|$)|,\s*${WORD}|\baz\b.*\b(?:delete|purge)\b|\bbeginDelete\w*\(|\bRemove-Az\w`),
+  ],
+  // Any case, given to a call or a name (`server('delete');`, `const verb = 'DELETE';`), never compared (`=== 'delete'`).
+  ['azure-delete', new RegExp(String.raw`(?:\(|(?<![=!<>])=)\s*${WORD}\s*[);]`, 'i')],
+  ['rest-delete', /\bmethod\b\W{0,4}delete\b|--method\s+delete\b|(?:\s-X\s*|--request\s+)['"]?delete\b/i],
+  ['sql-drop', /\bdrop\s+(?:database|table|schema)\b|\.drop(?:Table|Schema)\(/i],
+  // Upper case anywhere; lower case before TABLE, ONLY or a schema's name (`truncate audit.heads`).
+  ['sql-truncate', /\bTRUNCATE\b|\btruncate\s+(?:(?:table|only)\b|"?[a-z_]+"?\s*\.)/],
   ['sql-delete', /\.deleteFrom\(|\bDELETE\s+FROM\b|\bdelete from\s+(?:[a-z_]+\.[a-z_]|\$\{|")/],
   ['complete-mode', /\bmode\b\W{0,4}complete\b|--mode\s+complete\b/i],
   ['volumes-down', /\bdown\b\W{1,4}(?:-v|--volumes)\b|['"`]--volumes['"`]/],
-  // A recursive remove whose target isn't a string written out in full: what it removes is decided when it runs.
+  // A recursive remove whose target isn't a string written out in full (a variable, a glob, home): what it removes is
+  // decided when it runs.
   [
     'recursive-remove',
-    /\brm(?:Sync)?\((?!\s*['"][^'"`$]*['"]\s*[,)]).*\brecursive\b|\brm\s+-(?:rf|fr|r)\b.*\$|\bRemove-Item\b.*-Recurse/,
+    /\brm(?:dir)?(?:Sync)?\((?!\s*['"][^'"`$]*['"]\s*[,)]).*\brecursive\b|(?<![-\w])rm\s+-[\w-]*[rR].*[$*`~]|\bRemove-Item\b.*-Recurse/,
   ],
-  ['force-push', /\bpush\b.*(?:--force\b|--force-with-lease\b|\s-f\b|['"]-f['"])/],
+  ['force-push', /\bpush\b.*(?:--force\b|--force-with-lease\b|\s-f\b|['"]-f['"]|[\s'"]\+[\w/])/],
 ];
 
-/** A whole-line comment in any of the scanned languages: it runs nothing. */
-const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*|#(?!!))/;
+/** A REST method split by prettier: `'--method',` at a line's end and `'DELETE'` starting the next. */
+const SPLIT_METHOD = /--method['"`]?\s*,?\s*$/i;
+const SPLIT_DELETE = new RegExp(String.raw`^\s*${WORD}`, 'i');
 
 /** One destructive line found. */
 export interface Hit {
@@ -64,16 +86,39 @@ export interface Hit {
   readonly text: string;
 }
 
+/**
+ * What of each line is code: a `//` line, a `#` line where `#` comments, a line inside a block comment, and a block
+ * comment opening a line are left out; what follows a block comment's close on its line is read. A block comment opened
+ * after code on its line isn't followed, so the lines after it are read: more is read, never less.
+ */
+function codeOf(file: string, lines: readonly string[]): string[] {
+  const hashes = HASH_COMMENTS.test(file);
+  let inBlock = false;
+  return lines.map((line) => {
+    let rest = line;
+    if (!inBlock && /^\s*\/\*/.test(rest)) {
+      inBlock = true;
+      rest = rest.replace(/^\s*\/\*/, '');
+    }
+    if (inBlock) {
+      const close = rest.indexOf('*/');
+      if (close === -1) return '';
+      inBlock = false;
+      rest = rest.slice(close + 2);
+    }
+    if (/^\s*\/\//.test(rest) || (hashes && /^\s*#(?!!)/.test(rest))) return '';
+    return rest;
+  });
+}
+
 /** Every destructive line in one file's text. */
 export function hitsIn(file: string, text: string): Hit[] {
-  return text.split(/\r?\n/).flatMap((said, index) => {
-    if (COMMENT_LINE.test(said)) return [];
-    return SHAPES.filter(([, shape]) => shape.test(said)).map(([kind]) => ({
-      file,
-      line: index + 1,
-      kind,
-      text: said.trim(),
-    }));
+  const lines = text.split(/\r?\n/);
+  const code = codeOf(file, lines);
+  return code.flatMap((said, index) => {
+    const kinds = new Set(SHAPES.filter(([, shape]) => shape.test(said)).map(([kind]) => kind));
+    if (SPLIT_METHOD.test(said) && SPLIT_DELETE.test(code[index + 1] ?? '')) kinds.add('rest-delete');
+    return [...kinds].map((kind) => ({ file, line: index + 1, kind, text: (lines[index] ?? '').trim() }));
   });
 }
 

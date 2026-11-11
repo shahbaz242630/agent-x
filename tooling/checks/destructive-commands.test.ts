@@ -65,6 +65,21 @@ describe("the repository's destructive commands", () => {
     expect(textOf('.github/workflows/ci.yml')).not.toMatch(/runs-on: (?!ubuntu-latest)/);
   });
 
+  it('removes in an image build only absolute paths written out', () => {
+    for (const file of ['Dockerfile', 'tooling/load/Dockerfile']) {
+      const removes = textOf(file)
+        .split('\n')
+        .filter((line) => /\brm\s+-/.test(line));
+      expect(removes, file).toHaveLength(1);
+      const targets = (removes[0] ?? '')
+        .replace(/^.*?\brm\s+-rf\s+/, '')
+        .replace(/\s*\\\s*$/, '')
+        .split(/\s+/);
+      for (const target of targets)
+        expect(target, file).toMatch(/^\/(?:var\/lib\/apt\/lists|usr\/local\/lib\/node_modules|opt\/yarn-)/);
+    }
+  });
+
   it("stops only the test server's own container", () => {
     expect(textOf('tooling/test-db/docker.ts')).toMatch(
       /const id = \(\s*await dockerOk\(\s*\[\s*'run',[\s\S]*?const stop = async \(\): Promise<void> => \{\s*await dockerOk\(\['rm', '--force', '--volumes', id\]\);/,
@@ -113,6 +128,23 @@ describe('the check', () => {
     'Remove-Item $dir -Recurse -Force',
     'git push --force origin main',
     'git push -f',
+    "az.run([\n  'rest',\n  '--method',\n  'DELETE',\n  '--url',\n  url,\n]);",
+    "ok(server('delete'));",
+    "const verb = 'delete';",
+    "const verb = 'PURGE';",
+    'await sql`truncate audit.heads`.execute(db);',
+    "await db.schema.dropTable('audit.events').execute();",
+    'curl -X DELETE "$URL"',
+    'curl --request DELETE https://management.azure.com/x',
+    'rm -Rf "$DIR"',
+    'rm -r -f /var/lib/*',
+    'rm --recursive $HOME/x',
+    'rmdirSync(target, { recursive: true })',
+    'await client.beginDeleteAndWait(group, server);',
+    'Remove-AzResourceGroup -Name rg-agentx-staging -Force',
+    'git push origin +main',
+    "spawn('git', ['push', 'origin', '+HEAD:main'])",
+    '/* a note */ az postgres flexible-server delete -n x',
   ])('refuses %s when nothing names it', (line) => {
     const problems = problemsOf([], line);
     expect(problems).toHaveLength(1);
@@ -122,11 +154,27 @@ describe('the check', () => {
   it.each([
     "rmSync('tooling/load/.out', { recursive: true })",
     '// az postgres flexible-server delete in a comment runs nothing',
-    '# rm -rf $HOME in a comment runs nothing',
     'const a = { delete: 1 };',
     "switch (command) { case 'delete': break; }",
+    "if (command === 'DELETE') return;",
+    "type Verb = 'GET' | 'DELETE';",
+    '/* az group delete -n rg, closed on its line */',
+    '/**\n * az group delete -n rg\n * rm -rf $HOME\n */',
+    '/*\n az group delete -n rg */',
+    'rm -rf /var/lib/apt/lists',
+    'docker run --rm --network none "$IMAGE" whoami',
   ])('passes %s', (line) => {
     expect(problemsOf([], line)).toEqual([]);
+  });
+
+  it('reads `#` as a comment only where it is one', () => {
+    expect(hitsIn('a.sh', '# rm -rf $HOME runs nothing\n#!/bin/sh')).toEqual([]);
+    expect(hitsIn('Dockerfile', '# rm -rf $HOME')).toEqual([]);
+    expect(hitsIn('a.ts', '#x = rmSync(dir, { recursive: true });')).toHaveLength(1);
+  });
+
+  it('reads code after a block comment closes on its line', () => {
+    expect(hitsIn('a.ts', '/* a\n b */ az group delete -n rg').map(({ line }) => line)).toEqual([2]);
   });
 
   it('passes a line named with its guard and its proof', () => {
@@ -158,12 +206,33 @@ describe('the check', () => {
   });
 
   it('reads code, scripts and workflows, but no test and no migration', () => {
-    for (const file of ['a.ts', 'a.mts', 'a.mjs', 'a.sh', 'a.ps1', 'a.yml', 'a.yaml', 'main.bicep']) {
+    for (const file of [
+      'a.ts',
+      'a.mts',
+      'a.mjs',
+      'a.js',
+      'a.cjs',
+      'a.tsx',
+      'a.sh',
+      'a.ps1',
+      'a.yml',
+      'a.yaml',
+      'main.bicep',
+      'Dockerfile',
+      'tooling/load/Dockerfile',
+      'package.json',
+      'apps/api/package.json',
+      '.githooks/pre-push',
+      'tooling/migrations-notes/x.ts',
+      'db/migrations-old/x.ts',
+    ]) {
       expect(isScanned(file), file).toBe(true);
     }
     for (const file of [
       'a.test.ts',
       'a.test.mjs',
+      'a.test.tsx',
+      '.githooks/README.md',
       'db/migrations/0001_x.sql',
       'README.md',
       'a.json',

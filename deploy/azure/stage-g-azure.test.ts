@@ -417,15 +417,18 @@ describe("the adapter's own delete guard (S185)", () => {
     expect(cli.calls.filter((args) => args.includes('delete'))).toEqual([]);
   });
 
-  it.each(['audit-anchors', '', 'audit-anchors-g-abcd123', 'audit-anchors-g-abcd1234/x'])(
-    'refuses to delete the anchors container %j, sending Azure no delete',
-    (container) => {
-      const cli = new FakeCli();
-      const { azure } = azureOn(cli);
-      expect(() => azure.deleteContainer('stagentxstgq1w2e3', container)).toThrow('nothing was removed');
-      expect(cli.calls.filter((args) => args.includes('delete'))).toEqual([]);
-    },
-  );
+  it.each([
+    'audit-anchors',
+    '',
+    'audit-anchors-g-abcd123',
+    'audit-anchors-g-abcd1234/x',
+    'audit-anchors?x=audit-anchors-g-abcd1234',
+  ])('refuses to delete the anchors container %j, sending Azure no delete', (container) => {
+    const cli = new FakeCli();
+    const { azure } = azureOn(cli);
+    expect(() => azure.deleteContainer('stagentxstgq1w2e3', container)).toThrow('nothing was removed');
+    expect(cli.calls.filter((args) => args.includes('delete'))).toEqual([]);
+  });
 
   it("deletes a throwaway copy's server and anchors container", () => {
     const cli = new FakeCli();
