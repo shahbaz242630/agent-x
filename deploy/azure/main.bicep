@@ -306,6 +306,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
+    loginServiceAlertName: 'alert-agentx-${short}-login-service'
     platformFullAlertName: 'alert-agentx-${short}-platform-full'
     anchorStoppedAlertName: 'alert-agentx-${short}-anchor-stopped'
     jobsStoppedAlertName: 'alert-agentx-${short}-jobs-stopped'

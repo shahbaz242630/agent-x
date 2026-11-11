@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
+import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
@@ -76,6 +77,7 @@ export type RuleId =
   | 'denial-surge-alert'
   | 'holdings-check-alert'
   | 'handoff-queue-alert'
+  | 'login-service-alert'
   | 'platform-full-alert'
   | 'anchor-store-alert'
   | 'daily-check-alert'
@@ -360,6 +362,9 @@ const PLATFORM_FULL_LINES =
 
 /** Approved requests left standing past 15 minutes for no known reason (Phase 4 gate H8): suppliers unpaid, money held. */
 const HANDOFF_QUEUE_STALE_LINES = 'where tostring(parse_json(Log).event) == "handoff.queue_stale"';
+
+/** A change made in the login service behind Agent X, or a moment of its events the copier passed (SA2). */
+const LOGIN_SERVICE_LINES = `where tostring(parse_json(Log).event) in (${LOGIN_SERVICE_ALERT_EVENTS.map((event) => JSON.stringify(event)).join(', ')})`;
 
 /** Decision lines past their budget, counted in one line (4D2e F8, PL-52): the denial-surge alert undercounts that minute. */
 const DECISIONS_SUPPRESSED_LINES = [
@@ -3434,6 +3439,33 @@ const handoffQueueAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/**
+ * A stateless SEV-1 alert on the workspace fires on any one of the login events copier's lines for a change made in the
+ * login service behind Agent X, or a moment of its events passed (SA2), every window: exactly its list, so a line
+ * added to it is never left out of the rule.
+ */
+const loginServiceAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'stateless SEV-1',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [LOGIN_SERVICE_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'login-service-alert',
+        resource: environment.name,
+        message: `needs an enabled stateless SEV-1 alert on this deployment's workspace that fires on any one of ${LOGIN_SERVICE_ALERT_EVENTS.join(', ')}, watching every window and firing on the first`,
+      });
+    }
+  }
+};
+
 /** An enabled alert on the workspace fires on any decision turned away with the whole platform full (4D2e C, PL-63). */
 const platformFullAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -5164,6 +5196,7 @@ const CHECKS: readonly Check[] = [
   denialSurgeAlert,
   holdingsCheckAlert,
   handoffQueueAlert,
+  loginServiceAlert,
   platformFullAlert,
   anchorStoreAlert,
   dailyCheckAlert,
