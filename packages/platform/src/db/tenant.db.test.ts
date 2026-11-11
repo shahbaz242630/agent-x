@@ -444,6 +444,57 @@ describe(`a read alone on one trip (4D2e C5, Postgres ${server.version})`, () =>
     }
   });
 
+  it('reads under one organisation’s wall when given one, on the one trip, the wall and the lock bound ending with it (AG1)', async () => {
+    const single = appDatabase(1);
+    try {
+      const times = noStatementTimes();
+      const rows = await timingStatements(times, () =>
+        readAloneOnOneTrip(
+          single,
+          sql<{ labels: string | null; tenant: string; lock: string }>`
+            select (select pg_catalog.string_agg(label, ',' order by label) from probe.items) as labels,
+              pg_catalog.current_setting('app.org_id', true) as tenant,
+              pg_catalog.current_setting('lock_timeout') as lock
+          `,
+          { orgId: ORG_B.toUpperCase(), lockWaitBounded: true },
+        ),
+      );
+      const seen = await labelsSeenBy(ORG_B);
+      expect(rows).toEqual([{ labels: seen.length === 0 ? null : seen.join(','), tenant: ORG_B, lock: '5s' }]);
+      expect(times.trips).toBe(1);
+      expect(await settingOutside(single)).toBe('');
+      const { rows: after } = await sql<{
+        lock: string;
+      }>`select pg_catalog.current_setting('lock_timeout') as lock`.execute(single);
+      expect(after).toEqual([{ lock: '0' }]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('gives up on a lock after 5 seconds when bounded, not its statement’s 10 (AG1)', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table probe.items in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(
+        within(
+          20_000,
+          readAloneOnOneTrip(app, app.selectFrom('probe.items').select('label'), {
+            orgId: ORG_A,
+            lockWaitBounded: true,
+          }),
+          'the read',
+        ),
+      ).rejects.toMatchObject({ code: '55P03' });
+      expect(performance.now() - began).toBeLessThan(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it('is refused inside a transaction, which has a connection of its own already', async () => {
     await expect(
       withTenant(app, ORG_A, (tx) => readAloneOnOneTrip<ProbeSchema, unknown>(tx, sql`select 1`)),

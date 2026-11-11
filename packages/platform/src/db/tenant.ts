@@ -598,18 +598,24 @@ class CheckedConnection implements DatabaseConnection {
    * that writes: this one can't, so its commit keeps nothing. The check is judged first, whatever the read answered:
    * a connection that fails it is closed and logged, its answer or failure never used, and the read goes again on the
    * next. A read that fails on a sound one has the commit answered as a rollback, and its failure is what comes back,
-   * on a connection then closed.
+   * on a connection then closed. `tenant`: read under that organisation's wall, set with the start, and its read-back
+   * judged after the trip: one that didn't take is refused, the answer never used (nothing was written to keep).
    */
-  async readAlone<R>(query: CompiledQuery<R>): Promise<QueryResult<R>> {
+  async readAlone<R>(query: CompiledQuery<R>, { tenant, first }: ReadAloneUnder = {}): Promise<QueryResult<R>> {
     const read = await this.#sound(async (client) => {
-      const [started, answered, ended] = await Promise.allSettled([
-        startSent(client, READ_ALONE, { tenant: undefined, limited: true }),
+      const [started, , answered, ended] = await Promise.allSettled([
+        startSent(client, READ_ALONE, { tenant, limited: true }),
+        first === undefined ? undefined : this.#written(first),
         this.#written(query),
         client.query('commit'),
       ]);
       if (started.status === 'rejected') throw started.reason;
       const problem = unusable(stateFrom(started.value[1]?.rows[0] as StateRow));
       if (problem === undefined && ended.status === 'rejected') throw ended.reason;
+      const setting = (started.value[2]?.rows[0] as StateRow)?.org_id;
+      if (problem === undefined && tenant !== undefined && !sameTenant(setting, tenant)) {
+        throw new TenantContextError("the organisation setting didn't take");
+      }
       return { problem, value: answered };
     });
     if (read.status === 'rejected') {
@@ -782,11 +788,25 @@ export function sendTogether<Schema, const Statements extends readonly SentToget
 export async function readAloneOnOneTrip<Schema, Row>(
   db: Kysely<Schema>,
   read: { compile(executorProvider: QueryExecutorProvider): CompiledQuery<Row> },
+  { orgId, lockWaitBounded = false }: { readonly orgId?: string; readonly lockWaitBounded?: boolean } = {},
 ): Promise<readonly Row[]> {
   if (db.isTransaction) throw new TenantContextError('a read alone opens its own transaction');
+  if (orgId !== undefined && !UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
+  const under: ReadAloneUnder = {
+    tenant: orgId?.toLowerCase(),
+    ...(lockWaitBounded ? { first: lockWaitBoundedAlone().compile(db) } : {}),
+  };
   const query = read.compile(db);
-  const { rows } = await db.getExecutor().provideConnection((connection) => checked(connection).readAlone(query));
+  const { rows } = await db
+    .getExecutor()
+    .provideConnection((connection) => checked(connection).readAlone(query, under));
   return rows;
+}
+
+/** Where a read alone reads: under one organisation's wall, or across them; and a statement before it, if any. */
+interface ReadAloneUnder {
+  readonly tenant?: string | undefined;
+  readonly first?: CompiledQuery;
 }
 
 /** What one organisation's read in readEachTenant came to: its rows, or why it failed. */
