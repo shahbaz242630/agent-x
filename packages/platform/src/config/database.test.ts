@@ -8,6 +8,7 @@ import { ConfigError } from './common.ts';
 import { loadConfig as loadConfigWith } from './config.ts';
 import { pgVariableProblems, secretSetting } from './database.ts';
 import { loadMigrationConfig } from './migration.ts';
+import { reachingStandIn, STAND_IN } from './partner-stand-in.helper.test.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -18,7 +19,7 @@ const OWNER_LOGIN = 'owner login for these tests';
 /** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
 const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 /** A real partner's adapter as built (partner.ts), declaring no origins, so production can run live here. */
-const loadConfig = (env: Env) => loadConfigWith(env, { liveOrigins: [], sandboxOrigins: [] });
+const loadConfig = (env: Env) => loadConfigWith(reachingStandIn(env), STAND_IN);
 
 /** Production runs live (APP's); staging must name its partner, the fake in tests of anything else (ADR-014 §4). */
 const partnerFor = (environment: string): Env =>

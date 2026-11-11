@@ -173,6 +173,7 @@ const isLinkTaken = (error: unknown): boolean =>
  * the app's database, its bank for the staging demo's steps (fake-bank.ts), or
  * none, when every link answers PARTNER_UNAVAILABLE: the real partner's
  * sandbox and live service have no adapter until Phase 5, and nothing reaches them.
+ * The live one, once built, is returned only through liveOnly (live-rail.ts).
  */
 export function railFor(
   partner: Partner,
