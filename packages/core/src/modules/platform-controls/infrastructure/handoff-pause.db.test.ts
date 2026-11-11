@@ -235,7 +235,7 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     expect((await pauseNow()).pause).toEqual({ outcome: 'tampered' });
   });
 
-  it("the API's role can't move the row at all (PL-57): only the operator's role may", async () => {
+  it("SEC-OPS-13 the API's role can't move the row at all (PL-57): only the operator's role may", async () => {
     await expect(
       app
         .transaction()
@@ -300,7 +300,7 @@ describe('B1 a pause row changed past the app (FX-TAMPER): read as tampered, the
     await expect(change(false, { actor: { type: 'system', id: 'api' } })).rejects.toThrow(PlatformEventRefused);
   });
 
-  it("a resume as the operator's, sealed with the chains' MAC but signed with another key, is never believed (PL-57)", async () => {
+  it("SEC-OPS-13 a resume as the operator's, sealed with the chains' MAC but signed with another key, is never believed (PL-57)", async () => {
     await change(false);
     await change(true);
     // The API's MAC key and an operator's signing key of the forger's own, the row pointed at the forgery.

@@ -22,7 +22,7 @@ function parts(verifier: string): { iterations: number; salt: Buffer; stored: Bu
   };
 }
 
-describe('scramVerifier', () => {
+describe('SEC-OPS-10 scramVerifier', () => {
   it("writes Postgres's format with its defaults: 4096 iterations, a 16-byte salt, 32-byte keys", () => {
     const verifier = scramVerifier(login);
     expect(verifier).toMatch(SCRAM_VERIFIER);

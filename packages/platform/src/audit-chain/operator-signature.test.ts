@@ -39,7 +39,7 @@ const believed = (row: Readonly<Record<string, unknown>>, chain = ORG): boolean 
   return sealed === undefined ? undefined : sealed.mac.length > 0;
 };
 
-describe("the operator's signature on its events (PL-57)", () => {
+describe("SEC-OPS-13 the operator's signature on its events (PL-57)", () => {
   it("signs only the operator's events, and a process without its key can't sign one", () => {
     expect(operatorSignature(keys, ORG, 'api', ROW)).toBeUndefined();
     expect(operatorSignature(keys, ORG, OPERATOR_ID, ROW)).toMatchObject({ keyVersion: 1 });

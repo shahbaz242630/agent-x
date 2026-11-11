@@ -5,7 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { encodeMessage } from '../keys/message.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
-import { createMemoryAnchorStore, createMemoryPassRecord, signAnchor, signPass, signProgress } from './anchor.ts';
+import {
+  createMemoryAnchorStore,
+  createMemoryPassRecord,
+  sameAnchor,
+  signAnchor,
+  signPass,
+  signProgress,
+} from './anchor.ts';
 import type { Chain } from './chain.ts';
 
 const keys = createKeyProvider(
@@ -145,5 +152,39 @@ describe('a finished full pass (4D2e E7)', () => {
     expect(
       verify(null, encodeMessage(['audit-anchor-progress', ...fields, AT.toISOString()]), outsiders, place.signature),
     ).toBe(false);
+  });
+});
+
+describe('the same anchor, by what it says (PL-65)', () => {
+  const anchor = signAnchor(keys, PLATFORM, POINT, AT);
+
+  it('a copy alike in every field is the same anchor; none and none are too', () => {
+    expect(
+      sameAnchor(anchor, {
+        ...anchor,
+        hash: Buffer.from(anchor.hash),
+        at: new Date(AT),
+        signature: Buffer.from(anchor.signature),
+      }),
+    ).toBe(true);
+    expect(sameAnchor(undefined, undefined)).toBe(true);
+  });
+
+  it.each([
+    ['the chain', { chain: `organisation:${ORG}` }],
+    ['the place', { seq: 8n }],
+    ['the hash', { hash: Buffer.alloc(32, 8) }],
+    ["the MAC key's version", { macKeyVersion: 4 }],
+    ['the time', { at: new Date(AT.getTime() + 1) }],
+    ["the signing key's version", { keyVersion: 2 }],
+    ['the signature', { signature: Buffer.alloc(64, 1) }],
+  ])('one that differs in %s is another', (_what, change) => {
+    expect(sameAnchor(anchor, { ...anchor, ...change })).toBe(false);
+    expect(sameAnchor({ ...anchor, ...change }, anchor)).toBe(false);
+  });
+
+  it('an anchor and none are not the same, either way round', () => {
+    expect(sameAnchor(anchor, undefined)).toBe(false);
+    expect(sameAnchor(undefined, anchor)).toBe(false);
   });
 });
