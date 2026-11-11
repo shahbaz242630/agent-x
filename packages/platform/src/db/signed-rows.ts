@@ -485,6 +485,27 @@ const typedJson = (row: Readonly<Record<string, unknown>>): Record<string, unkno
     Object.entries(row).map(([column, value]) => [column, /^t\d+$/.test(column) ? typeId(value) : value]),
   );
 
+/**
+ * readSignedRow's statement with no lock, not run, its row aliased `target` and named `row_read`, as the first part of
+ * a caller's statement (a `with`), for a read alone under the row's organisation (readAloneOnOneTrip), which Postgres
+ * refuses a lock in: a key's check at the door (AG1), which may refuse on what it reads but never grants. Judged
+ * with signedRowAsRead.
+ */
+export function signedRowUnlocked(table: SignedStateTable, key: SignedRowKey): RawBuilder<unknown> {
+  checkTable(table);
+  checkKey(key);
+  return sql`row_read as materialized (
+    select target.org_id, target.id, ${columnsOf(table)} from ${sql.table(table.table)} as target
+    where target.org_id = ${key.orgId} and target.id = ${key.id}
+  )`;
+}
+
+/** The rows signedRowUnlocked's read gave, as the driver gives them, judged as readSignedRow judges one. */
+export const signedRowAsRead = (
+  table: SignedStateTable,
+  rows: readonly Readonly<Record<string, unknown>>[],
+): SignedRow => rowOf(table, rows);
+
 /** The most rows readSignedRows reads in one statement. */
 export const MOST_SIGNED_ROWS_READ = 500;
 

@@ -584,7 +584,7 @@ const isText = (value: unknown): value is string => typeof value === 'string';
  * Finds a signed-state event by its details' text: canonical JSON, where the
  * key can only appear as a key, since quotes inside a value are escaped.
  */
-const HAS_STATE_SEAL = '"stateFingerprint":';
+export const HAS_STATE_SEAL = '"stateFingerprint":';
 
 /** The head read alongside the events, if it is whole: readable and sealed. */
 function headIsWhole(keys: KeyProvider, chain: Chain, row: Readonly<Record<string, unknown>>): ChainHead | undefined {
@@ -598,7 +598,7 @@ function headIsWhole(keys: KeyProvider, chain: Chain, row: Readonly<Record<strin
 }
 
 /** The details' JSON text as an object, or nothing if it isn't one. */
-function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undefined {
+export function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undefined {
   if (typeof text !== 'string') return undefined;
   try {
     const parsed: unknown = JSON.parse(text);

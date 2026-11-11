@@ -94,6 +94,7 @@ export {
   type TamperSign,
   type VerifiedState,
 } from './infrastructure/signed-states.ts';
+export { type SealedRowAsRead, sealedRowJudged, sealedRowRead } from './infrastructure/seal-at-the-door.ts';
 export {
   INVESTIGATION_CONCLUSIONS,
   INVESTIGATION_REFERENCE_MAX,

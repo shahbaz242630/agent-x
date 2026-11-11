@@ -410,6 +410,53 @@ describe('a read alone on one trip (4D2e C5)', () => {
     ]);
   });
 
+  /** A stand-in whose start sets the organisation `setting` reads back, and that answers every other statement as READ's. */
+  const settingBack = (setting: string) => {
+    const sent: string[] = [];
+    const released: unknown[] = [];
+    const client = {
+      query: (asked: Asked) => {
+        const text = textOf(asked);
+        sent.push(text);
+        return Promise.resolve(
+          text.includes('; ')
+            ? [{ rows: [] }, { rows: [{ org_id: null, search_path: PINNED }] }, { rows: [{ org_id: setting }] }]
+            : { command: 'SELECT', rows: [{ answer: 1 }] },
+        );
+      },
+      release: (closed?: boolean) => {
+        released.push(closed);
+      },
+    };
+    return { client: client as unknown as pg.PoolClient, sent, limits: [], released };
+  };
+
+  it('reads under an organisation, set with the start, its lock waits bounded first when asked, on the one trip (AG1)', async () => {
+    const stand = settingBack(ORG);
+    const read = readAloneOnOneTrip(databaseOf(1, logger(), stand), sql`select 1 as answer`, {
+      orgId: ORG.toUpperCase(),
+      lockWaitBounded: true,
+    });
+
+    expect(await read).toEqual([{ answer: 1 }]);
+    expect(stand.sent).toHaveLength(4);
+    expect(stand.sent[0]).toContain(`pg_catalog.set_config('app.org_id', '${ORG}', true) as org_id`);
+    expect(stand.sent[1]).toContain("pg_catalog.set_config('lock_timeout', '5s', true)");
+    expect(stand.sent.slice(2)).toEqual([READ, 'commit']);
+  });
+
+  it('refuses a read whose organisation setting didn’t take, its answer never used, and closes the connection', async () => {
+    const stand = settingBack('0199a000-0000-7000-8000-0000000000ff');
+
+    await expect(
+      readAloneOnOneTrip(databaseOf(1, logger(), stand), sql`select 1 as answer`, { orgId: ORG }),
+    ).rejects.toThrow(new TenantContextError("the organisation setting didn't take"));
+    expect(stand.released).toEqual([true]);
+    await expect(
+      readAloneOnOneTrip(databaseOf(1, logger(), settingBack(ORG)), sql`select 1`, { orgId: 'not-an-id' }),
+    ).rejects.toThrow(new TenantContextError('the organisation ID is not a UUID'));
+  });
+
   it('closes a connection left with a tenant, using nothing it answered, and reads on the next', async () => {
     const poisoned = connection(ORG);
     const clean = connection(null);

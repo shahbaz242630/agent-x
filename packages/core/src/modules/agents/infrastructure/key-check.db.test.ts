@@ -227,6 +227,135 @@ describe(`the key check: its organisation's share of the connections (PL-63, Pos
   });
 });
 
+describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID, refused at the door (Postgres ${server.version})`, () => {
+  it('refuses a listed ID with a wrong secret while its organisation’s share is full: none waits for a place', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    const wrong = agentKeyText(id, Buffer.alloc(32, 0xee));
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 4, organisationShare: 1 },
+      testLogger(),
+    );
+    const letGo = Promise.withResolvers<undefined>();
+    const open = Promise.withResolvers<undefined>();
+    const full = asAgentTraffic(() =>
+      withTenant(shared, org, async () => {
+        open.resolve(undefined);
+        await letGo.promise;
+      }),
+    );
+    try {
+      await open.promise;
+      const checker = createAgentKeyCheck({ database: shared, keys, ids, clock, logger: testLogger(capture) });
+      const began = performance.now();
+      // Ten at once, as an outsider sends them: each answered, none queued behind the share's one place, whose wait
+      // is 10 s and ends busy (the share test above: a good key does wait there).
+      const answers = await within(
+        5_000,
+        Promise.all(Array.from({ length: 10 }, () => checker.check(wrong, '0199a0f0-0000-7000-8000-00000000c013'))),
+        'the wrong secrets',
+      );
+      expect(answers).toEqual(Array.from({ length: 10 }, () => ({ outcome: 'refused' })));
+      expect(performance.now() - began).toBeLessThan(5_000);
+    } finally {
+      letGo.resolve(undefined);
+      await full;
+      await shared.destroy();
+    }
+    expect(lines('agent_key.refused').map(({ reason, keyId }) => [reason, keyId])).toEqual(
+      Array.from({ length: 10 }, () => ['wrong_secret', id]),
+    );
+  });
+
+  it('takes the same path for an unlisted ID as for a listed one with a wrong secret: one seal HMAC and one verifyMac, the same trips', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    const wrongSecret = Buffer.alloc(32, 0xee);
+    const unlisted = ids.next();
+    const watchedCheck = async (keyId: string) => {
+      const verifyMac = vi.fn((...args: Parameters<typeof keys.verifyMac>) => keys.verifyMac(...args));
+      const times = noStatementTimes();
+      const checker = createAgentKeyCheck({
+        database: app,
+        keys: { ...keys, verifyMac },
+        ids,
+        clock,
+        logger: testLogger(capture),
+      });
+      const checked = await timingStatements(times, () =>
+        checker.check(agentKeyText(keyId, wrongSecret), '0199a0f0-0000-7000-8000-00000000c015'),
+      );
+      const secretChecks = verifyMac.mock.calls.filter(([purpose]) => purpose === 'agent-key-pepper');
+      const purposes = verifyMac.mock.calls.map(([purpose]) => purpose);
+      return { checked, trips: times.trips, secretChecks, purposes };
+    };
+
+    const listed = await watchedCheck(id);
+    const notListed = await watchedCheck(unlisted);
+
+    expect(listed.checked).toEqual({ outcome: 'refused' });
+    expect(notListed.checked).toEqual({ outcome: 'refused' });
+    // The same purpose, version and message's shape; only the MAC differs, the unlisted one's all zeros.
+    expect(listed.secretChecks.map((call) => call.slice(0, 3))).toEqual([
+      ['agent-key-pepper', 2, keySecretMessage(id, wrongSecret)],
+    ]);
+    expect(notListed.secretChecks.map((call) => call.slice(0, 3))).toEqual([
+      ['agent-key-pepper', 2, keySecretMessage(unlisted, wrongSecret)],
+    ]);
+    expect(notListed.secretChecks[0]?.[3]).toEqual(Buffer.alloc(32));
+    expect(notListed.trips).toBe(listed.trips);
+    // Every HMAC alike: the row's seal (zeros for the unlisted ID's), then the secret.
+    expect(listed.purposes).toEqual(['audit-mac', 'agent-key-pepper']);
+    expect(notListed.purposes).toEqual(listed.purposes);
+    expect(lines('agent_key.refused').map(({ reason }) => reason)).toEqual(['wrong_secret', 'unlisted']);
+  });
+
+  it('refuses a wrong secret at the door for a key changed since it was made: its newest seal, not its first, in two trips (M6)', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    // A second sealed state, through the real change: the door must judge the row against this one.
+    await revoke(id);
+    const times = noStatementTimes();
+
+    expect(await timingStatements(times, () => check(agentKeyText(id, Buffer.alloc(32, 0xee))))).toEqual({
+      outcome: 'refused',
+    });
+    // The listing's trip and the door's: no transaction, so no place taken in the organisation's share.
+    expect(times.trips).toBe(2);
+    expect(lines('agent_key.refused').map(({ reason, keyId }) => [reason, keyId])).toEqual([['wrong_secret', id]]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('verifies nothing when this process holds no pepper at all: a listed key refused as not held, an unlisted one as such', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    // The same keys as this process's, by the same index, but for the pepper: the organisation's seals still hold.
+    const others = PURPOSES.filter((purpose) => purpose !== 'agent-key-pepper');
+    const noPepper = createKeyProvider(
+      Object.fromEntries(
+        PURPOSES.map(
+          (purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }] as const,
+        ).filter(([purpose]) => purpose !== 'agent-key-pepper'),
+      ),
+      others,
+    );
+    const checker = createAgentKeyCheck({ database: app, keys: noPepper, ids, clock, logger: testLogger(capture) });
+
+    const times = noStatementTimes();
+    expect(await timingStatements(times, () => checker.check(text, '0199a0f0-0000-7000-8000-00000000c016'))).toEqual({
+      outcome: 'refused',
+    });
+    // Refused at the door: the listing's trip and the door's, no transaction and so no place in the share.
+    expect(times.trips).toBe(2);
+    const stranger = agentKeyText(ids.next(), Buffer.alloc(32, 1));
+    expect(await checker.check(stranger, '0199a0f0-0000-7000-8000-00000000c016')).toEqual({ outcome: 'refused' });
+    expect(lines('agent_key.refused').map(({ reason, keyId }) => [reason, keyId === id])).toEqual([
+      ['key_not_held', true],
+      ['unlisted', false],
+    ]);
+  });
+});
+
 describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`, () => {
   it('accepts a live key as its agent, in its organisation, logging nothing', async () => {
     const agent = await newAgent();
@@ -294,12 +423,14 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
     }).check(text, '0199a0f0-0000-7000-8000-00000000c011');
 
     expect(checked).toMatchObject({ outcome: 'accepted' });
-    // The signed states' own reads check the audit trail's MACs through it too.
+    // The signed states' own reads check the audit trail's MACs through it too. Twice for the secret: at the door,
+    // against the row as read (AG1), then against the key's sealed state, which alone is believed.
     const secretChecks = verifyMac.mock.calls.filter(([purpose]) => purpose === 'agent-key-pepper');
-    expect(secretChecks).toHaveLength(1);
-    const [, version, message, mac] = secretChecks[0] ?? [];
-    expect({ version, message }).toEqual({ version: 2, message: keySecretMessage(id, secret) });
-    expect(mac).toHaveLength(32);
+    expect(secretChecks).toHaveLength(2);
+    for (const [, version, message, mac] of secretChecks) {
+      expect({ version, message }).toEqual({ version: 2, message: keySecretMessage(id, secret) });
+      expect(mac).toHaveLength(32);
+    }
   });
 
   it('accepts a key until the millisecond it expires, and refuses it from then: a key rotated out', async () => {
@@ -435,13 +566,25 @@ describe(`the key check: one gather, no cache (4D2e C4, forced, Postgres ${serve
     expect(await checkedInTransaction(text)).toMatchObject({ checked: { outcome }, trips: 3 });
   });
 
-  it('takes four trips for the whole check: the listing’s one and its transaction’s three', async () => {
+  it('takes five trips for the whole check: the listing’s one, the door’s one (AG1) and its transaction’s three', async () => {
     const agent = await newAgent();
     const { text } = await issue(agent);
     const times = noStatementTimes();
 
     expect(await timingStatements(times, () => check(text))).toMatchObject({ outcome: 'accepted' });
-    expect(times.trips).toBe(4);
+    expect(times.trips).toBe(5);
+  });
+
+  it('takes two trips for a wrong secret, listed or not: the listing’s and the door’s, and no transaction (AG1)', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    for (const keyId of [id, ids.next()]) {
+      const times = noStatementTimes();
+      expect(await timingStatements(times, () => check(agentKeyText(keyId, Buffer.alloc(32, 0xee))))).toEqual({
+        outcome: 'refused',
+      });
+      expect(times.trips).toBe(2);
+    }
   });
 
   it('takes three trips for a listed key with no row', async () => {
@@ -838,6 +981,24 @@ describe('the key check: tampered with by the owner, refused and held', () => {
     await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_mac', mac.toString('hex'));
 
     await refusedFor(`${text.slice(0, 37)}${known.toString('base64url')}`, 'tampered', id);
+    await heldFor('agent_key');
+  });
+
+  it('AG1: a key whose MAC the owner rewrote, its real agent knocking: alarmed and held, never refused at the door as a wrong secret', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_mac', 'ab'.repeat(32));
+
+    await refusedFor(text, 'tampered', id);
+    await heldFor('agent_key');
+  });
+
+  it('AG1: a key whose pepper version the owner changed to one not held: alarmed and held, never refused at the door as not held', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent);
+    await (await tamper(AGENT_KEYS)).setColumn(id, 'secret_key_version', 3);
+
+    await refusedFor(text, 'tampered', id);
     await heldFor('agent_key');
   });
 
