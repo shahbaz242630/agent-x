@@ -43,6 +43,12 @@ export const MOST_KEPT_BYTES = 16 * 1024;
 
 const HOUR_MS = 60 * 60_000;
 
+/**
+ * The least time a message is kept: AGENTX_SECURITY_EVENT_RETENTION_DAYS's minimum, held here too (S185) so a
+ * setting read wrong can never have the sweep delete fresh evidence (security-events.ts holds the same floor).
+ */
+export const LEAST_RETENTION_DAYS = 30;
+
 /** A routed message the bank check hasn't taken yet. */
 export interface Nudge {
   readonly id: string;
@@ -95,6 +101,9 @@ export function createProviderEvents({
   /** How long a message is kept: the security events' retention (AGENTX_SECURITY_EVENT_RETENTION_DAYS). */
   readonly retentionDays: number;
 }): ProviderEvents {
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < LEAST_RETENTION_DAYS) {
+    throw new RangeError(`partner messages are kept at least ${String(LEAST_RETENTION_DAYS)} whole days`);
+  }
   const limited = <T>(db: Kysely<ProviderEventsTables>, work: (tx: Kysely<ProviderEventsTables>) => Promise<T>) =>
     db.transaction().execute(async (tx) => {
       await limitStatements(tx);

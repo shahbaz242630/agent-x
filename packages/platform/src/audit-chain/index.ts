@@ -5,6 +5,7 @@ export {
   createMemoryPassRecord,
   type PassRecord,
   type Progress,
+  sameAnchor,
   signAnchor,
   signPass,
   signProgress,
