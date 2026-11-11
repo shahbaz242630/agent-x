@@ -121,8 +121,9 @@ const everyPublished = (meta: LiveRanges['meta']): ReadonlySet<string> =>
  * How the pinned ranges differ from GitHub, a line each. `refusals` can break a
  * pull, so a deploy stops on any: a published field that now holds a prefix
  * the file doesn't, or is gone; or a host answering from an address no pinned
- * prefix covers. `notes` can't: a prefix GitHub stopped listing is still
- * allowed, one address more than needed until the file is refreshed.
+ * prefix covers; or a hand-pinned prefix GitHub no longer lists. `notes`
+ * can't: a published prefix GitHub stopped listing is still allowed, one
+ * address more than needed until the daily branch refreshes the file.
  */
 export interface RangeDrift {
   readonly refusals: readonly string[];
@@ -135,14 +136,16 @@ const KEPT = 'it stays allowed until the file is refreshed; refresh it at the ne
 function listingDrift(name: string, group: RangeGroup, meta: LiveRanges['meta']): RangeDrift {
   if (group.publishedUnder === null) {
     const published = everyPublished(meta);
+    // Still a refusal (S186 review): --write never touches a hand-pinned group, so a note would leave a prefix
+    // GitHub gave up, perhaps back in a shared pool, allowed for good with nothing ever saying so.
     return {
-      refusals: [],
-      notes: group.prefixes
+      refusals: group.prefixes
         .filter((prefix) => !published.has(prefix))
         .map(
           (prefix) =>
-            `${name}: GitHub no longer lists ${prefix}, pinned by hand; it stays allowed until it is taken out by hand`,
+            `${name}: GitHub no longer lists ${prefix}, pinned by hand; take it out of the file by hand (or pin what GitHub lists now), then deploy`,
         ),
+      notes: [],
     };
   }
   const field = group.publishedUnder;

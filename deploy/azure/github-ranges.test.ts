@@ -109,12 +109,12 @@ describe('rangeDrift', () => {
     ]);
   });
 
-  it('only notes a hand-pinned prefix GitHub no longer publishes anywhere', () => {
+  it('refuses a hand-pinned prefix GitHub no longer publishes anywhere: --write never takes it out', () => {
     expect(rangeDrift(PINNED, liveWith({ meta: { packages: ['192.0.2.0/24'] } }))).toEqual({
-      refusals: [],
-      notes: [
-        'downloads: GitHub no longer lists 198.51.100.0/24, pinned by hand; it stays allowed until it is taken out by hand',
+      refusals: [
+        'downloads: GitHub no longer lists 198.51.100.0/24, pinned by hand; take it out of the file by hand (or pin what GitHub lists now), then deploy',
       ],
+      notes: [],
     });
   });
 
@@ -189,6 +189,16 @@ describe('main', () => {
     expect(await main(['--write'], answering(withoutLast), save)).toBe(0);
     const written = JSON.parse(save.mock.calls[0]?.[0] ?? '{}') as GithubRanges;
     expect(written.registry.prefixes).toEqual([...withoutLast].sort());
+  });
+
+  it('with --write, still fails when a refusal is left after the update: the daily run then emails it', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const save = vi.fn<(text: string) => void>();
+    const outside = async (): Promise<LiveRanges> => {
+      const live = await answering(pinned.registry.prefixes)();
+      return { ...live, addresses: { ...live.addresses, [pinned.registry.host]: ['192.0.2.200'] } };
+    };
+    expect(await main(['--write'], outside, save)).toBe(1);
   });
 });
 
