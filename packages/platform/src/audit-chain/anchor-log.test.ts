@@ -2128,6 +2128,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         for (let index = 0; index < held; index += 1) log.keep(anchorAt(orgChain(index), 1n));
         fake.files.set(nameOf('deltas', 60), fileOf(nameOf('deltas', 60), anchorAt(orgChain(held), 1n)));
         // The read runs while the snapshot's bytes are being gzipped: its 10 taken lines still held beside the tables.
+        // `madeFile` counts them before its first await; the read's one small gunzip ends before the snapshot's
+        // gzip (a round trip a chunk, then its flush). Should that order ever flip, this fails red, never passes falsely.
         await Promise.all([log.flush(), log.read()]);
         expect(beyond(capture)).toHaveLength(1);
       });

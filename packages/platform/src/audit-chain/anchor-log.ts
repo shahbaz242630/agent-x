@@ -928,9 +928,8 @@ export function createAnchorLog({
     for (const { line, stamp } of lines.held()) if (!into.has(line.chain)) into.set(line, stamp);
   };
 
-  /** A name taken by other bytes: the alarm, and the file's lines go again under a new name. */
-  const overwritten = (file: Unsent, back: Awaited<ReturnType<typeof restored>>): void => {
-    alarm('overwrite', { kind: file.kind });
+  /** A name taken by other bytes (the alarm raised already): the file's lines go again under a new name. */
+  const overwritten = (back: Awaited<ReturnType<typeof restored>>): void => {
     waitAgain(pending, back.a);
     waitAgain(pendingSides.p, back.p);
     waitAgain(pendingSides.u, back.u);
@@ -958,7 +957,9 @@ export function createAnchorLog({
       if (!(error instanceof OverwriteRefused)) throw error;
       const held = await store.get(file.name);
       if (!held.equals(file.bytes)) {
-        overwritten(file, await restored(file));
+        // The alarm first: a read-back that throws must not hide the overwrite behind a write failure.
+        alarm('overwrite', { kind: file.kind });
+        overwritten(await restored(file));
         return;
       }
     }
