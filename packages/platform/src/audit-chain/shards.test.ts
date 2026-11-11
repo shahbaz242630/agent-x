@@ -1,10 +1,18 @@
 import { createHash } from 'node:crypto';
 
+import { gzipSync } from 'node:zlib';
+
 import { describe, expect, it } from 'vitest';
+
+import { createKeyProvider, KeyError, type KeyProvider } from '../keys/key-provider.ts';
+import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 
 import {
   bodyHash,
+  changesFile,
+  changesFolder,
   closingV2Message,
+  readChangesFile,
   SHARD_FILE,
   shardFolder,
   shardHex,
@@ -70,5 +78,59 @@ describe('SEC-ANC-04 the anchors’ shards (PL-65 PR2)', () => {
     body.add('é');
     expect(body.lines).toBe(2);
     expect(body.digest()).toBe(createHash('sha256').update('{"k":"a"}\né\n', 'utf8').digest('hex'));
+  });
+});
+
+describe('SEC-ANC-04 a list of the shard files a write makes (PL-65 PR2)', () => {
+  const keysFilled = (fill: number): KeyProvider =>
+    createKeyProvider(
+      byPurpose((purpose) => ({
+        current: 1,
+        versions: new Map([[1, Buffer.alloc(32, PURPOSES.indexOf(purpose) + fill)]]),
+      })),
+    );
+  const keys = keysFilled(3);
+  const NAME = 'e1/shards/changes/8233417199999-00000000-0000-4000-8000-000000000001';
+  const FILES = [
+    'a7/8233417199999-00000000-0000-4000-8000-000000000002-s',
+    '03/8233417199999-00000000-0000-4000-8000-000000000003-d',
+  ];
+  const read = (bytes: Buffer, name = NAME, holding = keys) => readChangesFile(holding, { bytes, name, epoch: 1 });
+
+  it('is in one folder for every shard, and reads back the files it names, signed for its own name', async () => {
+    expect(changesFolder(2)).toBe('e2/shards/changes/');
+    expect(await read(changesFile(keys, NAME, 1, FILES))).toEqual(FILES);
+    expect(await read(changesFile(keys, NAME, 1, []))).toEqual([]);
+  });
+
+  it.each([
+    ['another key', () => read(changesFile(keysFilled(40), NAME, 1, FILES))],
+    ['another name', () => read(changesFile(keys, NAME, 1, FILES), `${NAME.slice(0, -1)}9`)],
+    ['another epoch', () => read(changesFile(keys, NAME, 2, FILES))],
+    ['a file of another form', () => read(changesFile(keys, NAME, 1, ['../x']))],
+    ['not gzip', () => read(Buffer.from('nope'))],
+    ['two lines', () => read(gzipSync('{}\n{}\n'))],
+    ['not an object', () => read(gzipSync('3\n'))],
+    ['another kind', () => read(gzipSync(`${JSON.stringify({ k: 'c', files: [], kv: 1, sig: '' })}\n`))],
+  ])('%s: none', async (_, reading) => {
+    expect(await reading()).toBeUndefined();
+  });
+
+  it('a key version not held is none; a key store failing otherwise is thrown', async () => {
+    const bytes = changesFile(keys, NAME, 1, FILES);
+    const lacking: KeyProvider = {
+      ...keys,
+      verifySignature: () => {
+        throw new KeyError('no such version');
+      },
+    };
+    expect(await read(bytes, NAME, lacking)).toBeUndefined();
+    const failing: KeyProvider = {
+      ...keys,
+      verifySignature: () => {
+        throw new Error('away');
+      },
+    };
+    await expect(read(bytes, NAME, failing)).rejects.toThrow('away');
   });
 });

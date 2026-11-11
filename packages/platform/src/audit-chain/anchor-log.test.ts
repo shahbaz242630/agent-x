@@ -433,8 +433,8 @@ describe('the durable anchors (4D2e E, PL-58)', () => {
         expect(lines('audit.anchors_read')).toEqual([
           expect.objectContaining({ layout: 'moving', chains: 1, snapshot: true, shardSnapshots: 0 }),
         ]);
-        // The marker, the record that the migration is done, `cutover/`, the rebases, 256 shards, the old two folders.
-        expect(fake.calls.lists).toBe(1 + 1 + 256 + 2);
+        // `cutover/`, the rebases, 256 shards once, the changes' folder, the old two folders.
+        expect(fake.calls.lists).toBe(1 + 1 + 256 + 1 + 2);
         expect(fake.calls.gets).toBe(0);
       });
 

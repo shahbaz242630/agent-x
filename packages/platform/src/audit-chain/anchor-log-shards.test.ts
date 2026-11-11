@@ -13,7 +13,7 @@ import { type Anchor, signAnchor } from './anchor.ts';
 import { createAnchorLog } from './anchor-log.ts';
 import { type Chain, chainName } from './chain.ts';
 import { cutoverFile, shardsDoneFile } from './cutover.ts';
-import { closingV2Message, shardHex, shardOf } from './shards.ts';
+import { changesFile, closingV2Message, shardHex, shardOf } from './shards.ts';
 import { OverwriteRefused } from '../storage/write-once.ts';
 
 const keyMaterial = (fill: number): KeyMaterial =>
@@ -113,6 +113,10 @@ const put = (fake: FakeWriteOnceStore, file: { name: string; bytes: Buffer }): v
   fake.files.set(file.name, file.bytes);
 };
 const MARKER = 'e1/cutover/shards-v1';
+/** A file in a shard's own folder, not the list of changes. */
+const SHARD_FILE_NAME = /^e1\/shards\/[0-9a-f]{2}\//;
+/** A list of changes' name, `minutes` after START. */
+const changesName = (minutes: number, id = 1): string => `e1/shards/changes/${countdown(minutes)}-${idOf(id)}`;
 const DONE = 'e1/shards/done-shards-v1';
 
 /** A store an older version wrote: one snapshot, CHAIN at 5 and the platform at 1. */
@@ -195,9 +199,16 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       await log.flush();
 
       expect(order[0]).toBe(MARKER);
+      // Then the list of the shard files about to be written, naming each, before any of them.
+      expect(order[1]).toMatch(/^e1\/shards\/changes\/\d{13}-[0-9a-f-]{36}$/);
       const shards = new Set([CHAIN, OTHER_CHAIN, PLATFORM].map((chain) => shardOf(chainName(chain))));
-      expect(order.slice(1)).toHaveLength(shards.size);
-      expect(order.slice(1).every((name) => /^e1\/shards\/[0-9a-f]{2}\/\d{13}-[0-9a-f-]{36}-s$/.test(name))).toBe(true);
+      expect(order.slice(2)).toHaveLength(shards.size);
+      expect(order.slice(2).every((name) => /^e1\/shards\/[0-9a-f]{2}\/\d{13}-[0-9a-f-]{36}-s$/.test(name))).toBe(true);
+      const listed = linesOf(fake.files.get(defined(order[1])))[0];
+      expect(listed).toMatchObject({
+        k: 'changes',
+        files: order.slice(2).map((name) => name.slice('e1/shards/'.length)),
+      });
       // Nothing more in the old folders.
       expect([...fake.files.keys()].filter((name) => /^e1\/(?:deltas|snapshots)\//.test(name))).toHaveLength(1);
       const mine = defined(order.find((name) => name.includes(`/${shardHex(shardOf(chainName(CHAIN)))}/`)));
@@ -319,8 +330,8 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       await log.flush();
 
       const shard = `/${shardHex(shardOf(chainName(CHAIN)))}/`;
-      expect(order).toEqual([expect.stringContaining(shard), DONE]);
-      expect(linesOf(fake.files.get(defined(order[0])))[0]).toMatchObject({ chain: chainName(CHAIN), seq: '9' });
+      expect(order).toEqual([expect.stringContaining('/changes/'), expect.stringContaining(shard), DONE]);
+      expect(linesOf(fake.files.get(defined(order[1])))[0]).toMatchObject({ chain: chainName(CHAIN), seq: '9' });
     });
 
     it('a snapshot taken while a read takes an old file’s line in does not stand for its shard', async () => {
@@ -432,7 +443,7 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
 
     it.each([
       ['the marker', () => true],
-      ['a shard’s file', (name: string) => name.startsWith('e1/shards/')],
+      ['a shard’s file', (name: string) => SHARD_FILE_NAME.test(name)],
     ])('%s’s name refused as taken and then not there is a failed write, tried again', async (_, refused) => {
       const fake = oldStore();
       const { log, lines, alarms } = logOver(fake, { cutOver: true });
@@ -559,16 +570,24 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect(log.latest(CHAIN)?.seq).toBe(11n);
       expect(log.lastFileAt()).toEqual(new Date(START.getTime() + 61 * MINUTE));
 
+      // Another process's write: its list of changes first, then the file. A file no list names is not looked for.
       const later = shardName(CHAIN, 'd', 65);
+      const unlisted = shardName(CHAIN, 'd', 66);
       fake.files.set(later, shardFile(later, [anchorAt(CHAIN, 12n)]));
+      fake.files.set(unlisted, shardFile(unlisted, [anchorAt(CHAIN, 13n)]));
+      const changes = changesName(65);
+      put(fake, { name: changes, bytes: changesFile(keys, changes, 1, [later.slice('e1/shards/'.length)]) });
       const fetched: string[] = [];
       fake.instead.getAtMost = (name, most) => {
         fetched.push(name);
         return fake.real.getAtMost(name, most);
       };
+      const lists = fake.calls.lists;
       await log.read();
       expect(log.latest(CHAIN)?.seq).toBe(12n);
-      expect(fetched).toEqual([later]);
+      expect(fetched).toEqual([changes, later]);
+      // `cutover/`, the rebases and the one folder of changes: no shard's folder listed.
+      expect(fake.calls.lists - lists).toBe(3);
     });
 
     it('a shard whose snapshots are all spoiled stands on the old files under it', async () => {
@@ -670,7 +689,7 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       const { log, alarms } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
       await log.read();
       fake.instead.put = async (name, bytes) => {
-        if (name.startsWith('e1/shards/')) await fake.real.put(name, Buffer.from('someone else'));
+        if (SHARD_FILE_NAME.test(name)) await fake.real.put(name, Buffer.from('someone else'));
         return fake.real.put(name, bytes);
       };
       log.keep(anchorAt(CHAIN, 6n));
@@ -684,6 +703,193 @@ describe('SEC-ANC-04 the anchors’ store moved on to its shards (PL-65 PR2)', (
       expect(sound.flatMap((name) => linesOf(fake.files.get(name)).filter((line) => line.k === 'a'))).toEqual([
         expect.objectContaining({ seq: '6' }),
       ]);
+    });
+  });
+
+  describe('the lists of changes: one list call a run, after the first read (PL-65 PR2)', () => {
+    /** A moved store read once by a process of its own, at 70 minutes. */
+    const readOnce = async () => {
+      const fake = movedStore({ done: true });
+      const made = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await made.log.read();
+      return { fake, ...made };
+    };
+    const listed = (fake: FakeWriteOnceStore, minutes: number, files: readonly string[], signing = keys): string => {
+      const name = changesName(minutes);
+      fake.files.set(
+        name,
+        changesFile(
+          signing,
+          name,
+          1,
+          files.map((file) => file.slice('e1/shards/'.length)),
+        ),
+      );
+      return name;
+    };
+
+    it('a file a list names and not there yet is looked for at each read, then read once it lands', async () => {
+      const { fake, log } = await readOnce();
+      const later = shardName(CHAIN, 'd', 71);
+      listed(fake, 71, [later]);
+      await log.read();
+      expect(log.state()).toBe('read');
+      expect(log.latest(CHAIN)).toBeUndefined();
+      fake.files.set(later, shardFile(later, [anchorAt(CHAIN, 12n)]));
+      await log.read();
+      expect(log.latest(CHAIN)?.seq).toBe(12n);
+      // Read, it is looked for no more.
+      const gets = fake.calls.smallGets;
+      await log.read();
+      expect(fake.calls.smallGets).toBe(gets);
+    });
+
+    it('two lists named in the same millisecond: the one listed after the other, read later, is still read', async () => {
+      const { fake, log } = await readOnce();
+      const [first, second] = [shardName(CHAIN, 'd', 71, 1), shardName(CHAIN, 'd', 71, 2)];
+      fake.files.set(first, shardFile(first, [anchorAt(CHAIN, 12n)]));
+      fake.files.set(changesName(71, 1), changesFile(keys, changesName(71, 1), 1, [first.slice('e1/shards/'.length)]));
+      await log.read();
+      expect(log.latest(CHAIN)?.seq).toBe(12n);
+      // The same moment, an ID sorting after: by name alone it would read as older than the one read.
+      fake.files.set(second, shardFile(second, [anchorAt(CHAIN, 13n)]));
+      fake.files.set(changesName(71, 2), changesFile(keys, changesName(71, 2), 1, [second.slice('e1/shards/'.length)]));
+      await log.read();
+      expect(log.latest(CHAIN)?.seq).toBe(13n);
+      const gets = fake.calls.smallGets;
+      await log.read();
+      expect(fake.calls.smallGets).toBe(gets);
+    });
+
+    it('a file named and never landing is given up after an hour', async () => {
+      const { fake, log, advance } = await readOnce();
+      listed(fake, 71, [shardName(CHAIN, 'd', 71)]);
+      await log.read();
+      advance(62);
+      await log.read();
+      const gets = fake.calls.smallGets;
+      await log.read();
+      expect(fake.calls.smallGets).toBe(gets);
+      expect(log.state()).toBe('read');
+    });
+
+    it.each([
+      ['signed by another key', (fake: FakeWriteOnceStore) => listed(fake, 71, [shardName(CHAIN, 'd', 71)], otherKeys)],
+      [
+        'not one',
+        (fake: FakeWriteOnceStore) => {
+          fake.files.set(changesName(71), gzipSync('anything'));
+          return changesName(71);
+        },
+      ],
+      [
+        'naming a file of another form',
+        (fake: FakeWriteOnceStore) => {
+          const name = changesName(71);
+          const { signature, keyVersion } = keys.sign('audit-anchor', ['audit-anchor-changes', name, '1', 'x']);
+          const line = JSON.stringify({
+            k: 'changes',
+            name,
+            epoch: 1,
+            files: ['x'],
+            kv: keyVersion,
+            sig: signature.toString('base64'),
+          });
+          fake.files.set(name, gzipSync(`${line}\n`));
+          return name;
+        },
+      ],
+    ])('a list %s is the alarm, and names nothing', async (_, made) => {
+      const { fake, log, alarms } = await readOnce();
+      const file = shardName(CHAIN, 'd', 71);
+      fake.files.set(file, shardFile(file, [anchorAt(CHAIN, 12n)]));
+      const name = made(fake);
+      await log.read();
+      expect(log.state()).toBe('read');
+      expect(log.latest(CHAIN)).toBeUndefined();
+      expect(alarms()).toEqual([expect.objectContaining({ check: 'anchor_store', reason: 'changes', file: name })]);
+    });
+
+    it('a list too large to be one is the alarm, never fetched past its bound', async () => {
+      const { fake, log, alarms } = await readOnce();
+      const name = changesName(71);
+      fake.files.set(name, Buffer.alloc(40_000));
+      await log.read();
+      expect(alarms()).toEqual([expect.objectContaining({ reason: 'changes', file: name, problem: 'too-large' })]);
+    });
+
+    it('a list dated past the clock is passed over with the alarm; a name of another form is foreign', async () => {
+      const { fake, log, alarms, lines } = await readOnce();
+      listed(fake, 200, [shardName(CHAIN, 'd', 71)]);
+      fake.files.set('e1/shards/changes/odd', gzipSync('anything'));
+      await log.read();
+      expect(alarms()).toEqual([expect.objectContaining({ reason: 'future', kind: 'changes' })]);
+      expect(lines('audit.anchor_store_foreign')).toEqual([expect.objectContaining({ files: 2 })]);
+    });
+
+    it('a list listed and then not there is a failed read', async () => {
+      const { fake, log, lines } = await readOnce();
+      const name = listed(fake, 71, [shardName(CHAIN, 'd', 71)]);
+      fake.instead.getAtMost = (got, most) =>
+        got === name ? Promise.resolve('missing') : fake.real.getAtMost(got, most);
+      await log.read();
+      expect(lines('audit.anchor_store_read_failed')).toHaveLength(1);
+    });
+
+    it('at the first read, lists from the last few minutes are read after the walk; older ones not', async () => {
+      const fake = movedStore({ done: true });
+      const recent = shardName(CHAIN, 'd', 68);
+      listed(fake, 68, [recent]);
+      const older = changesName(50, 2);
+      fake.files.set(older, gzipSync('never fetched'));
+      const fetched: string[] = [];
+      fake.instead.getAtMost = (name, most) => {
+        fetched.push(name);
+        return fake.real.getAtMost(name, most);
+      };
+      const { log, alarms } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await log.read();
+      // The recent list's file is not there yet: the walk can't have seen it, and the list keeps it looked for.
+      expect(fetched).toContain(changesName(68));
+      expect(fetched).not.toContain(older);
+      expect(alarms()).toEqual([]);
+      fake.files.set(recent, shardFile(recent, [anchorAt(CHAIN, 12n)]));
+      await log.read();
+      expect(log.latest(CHAIN)?.seq).toBe(12n);
+    });
+
+    it('a list’s name refused as taken: the alarm, the write fails, and the next goes under another name', async () => {
+      const fake = movedStore({ done: true });
+      const { log, alarms, lines } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await log.read();
+      fake.instead.put = (name, bytes) =>
+        name.includes('/changes/') ? Promise.reject(new OverwriteRefused()) : fake.real.put(name, bytes);
+      log.keep(anchorAt(CHAIN, 6n));
+      await log.flush();
+      expect(alarms()).toEqual([expect.objectContaining({ reason: 'overwrite', kind: 'changes' })]);
+      expect(lines('audit.anchor_store_write_failed')).toHaveLength(1);
+      expect(shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name))).toEqual([]);
+      delete fake.instead.put;
+      await log.flush();
+      expect(shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name))).toHaveLength(1);
+    });
+
+    it('an unsent shard file goes again named in the next list', async () => {
+      const fake = movedStore({ done: true });
+      const { log } = logOver(fake, { at: new Date(START.getTime() + 70 * MINUTE) });
+      await log.read();
+      fake.instead.put = (name, bytes) =>
+        SHARD_FILE_NAME.test(name) ? Promise.reject(new Error('the store is away')) : fake.real.put(name, bytes);
+      log.keep(anchorAt(CHAIN, 6n));
+      await log.flush();
+      delete fake.instead.put;
+      await log.flush();
+      const [file] = shardFiles(fake).filter((name) => SHARD_FILE_NAME.test(name));
+      const lists = [...fake.files.keys()].filter((name) => name.includes('/changes/'));
+      expect(lists).toHaveLength(2);
+      for (const list of lists) {
+        expect(linesOf(fake.files.get(list))[0]?.files).toEqual([defined(file).slice('e1/shards/'.length)]);
+      }
     });
   });
 

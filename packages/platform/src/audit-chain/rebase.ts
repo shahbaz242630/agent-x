@@ -151,8 +151,8 @@ function rebaseFrom(fields: Record<string, unknown>): Rebase | undefined {
 }
 
 /** A file's bytes opened, or nothing past MOST_FILE_BYTES either way, or for bytes that aren't gzip. Shared with cutover.ts. */
-export async function openedSmallFile(bytes: Buffer): Promise<string | undefined> {
-  if (bytes.length > MOST_FILE_BYTES) return undefined;
+export async function openedSmallFile(bytes: Buffer, most = MOST_FILE_BYTES): Promise<string | undefined> {
+  if (bytes.length > most) return undefined;
   const opening = createGunzip();
   opening.end(bytes);
   const chunks: Buffer[] = [];
@@ -160,7 +160,7 @@ export async function openedSmallFile(bytes: Buffer): Promise<string | undefined
   try {
     for await (const chunk of opening as AsyncIterable<Buffer>) {
       size += chunk.length;
-      if (size > MOST_FILE_BYTES) return undefined;
+      if (size > most) return undefined;
       chunks.push(chunk);
     }
   } catch {
