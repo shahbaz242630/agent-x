@@ -95,6 +95,11 @@ export const isRefusal = (error: unknown): error is ApiError => error instanceof
 /** Whether an error means the person isn't signed in (any more): their session ended, or never was. */
 export const isSignedOut = (error: unknown): boolean => error instanceof ApiError && error.status === 401;
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Whether text is a UUID, as the API's IDs are: anything else names nothing it holds. */
+export const isUuid = (text: string): boolean => UUID.test(text);
+
 /** Where the browser goes to sign in, coming back to `returnTo` (a path of this console) after. */
 export function signInAddress(returnTo: string): string {
   return `/v1/auth/sign-in?${new URLSearchParams({ returnTo }).toString()}`;

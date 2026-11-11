@@ -11,6 +11,9 @@
 // - the payload is the request's normalized input: the canonical JSON of its
 //   parsed params, query and body, so the same request sent with its fields in
 //   another order, or its query's parameters in another order, is the same.
+//   A body left out is `{}`, as sent empty (CO4): a route takes no body at
+//   all only where its schema reads a missing one as nothing (`NOTHING`,
+//   `.nullish()`), so the two are the same request and one key covers both.
 // The store answers:
 // - done or replayed: the route answers from the resource, re-read by the ID
 //   the result names, with the result's status;
@@ -104,7 +107,7 @@ export function idempotentRequest(request: FastifyRequest, orgId: string): Idemp
     client,
     operation,
     key,
-    payload: canonicalJson({ params: request.params ?? {}, query: request.query ?? {}, body: request.body ?? null }),
+    payload: canonicalJson({ params: request.params ?? {}, query: request.query ?? {}, body: request.body ?? {} }),
   };
 }
 

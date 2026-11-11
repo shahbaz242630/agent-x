@@ -541,6 +541,7 @@ describe('POST /v1/agents/:id/owner, handing an agent to another owner with a st
   it.each<[AgentChangeWrite, number, string]>([
     [{ outcome: 'refused', status: 409, code: 'AGENT_OWNER_NOT_ELIGIBLE' }, 409, 'AGENT_OWNER_NOT_ELIGIBLE'],
     [{ outcome: 'refused', status: 409, code: 'AGENT_OWNER_UNCHANGED' }, 409, 'AGENT_OWNER_UNCHANGED'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_TOO_MANY' }, 409, 'AGENT_KEYS_TOO_MANY'],
     [{ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' }, 403, 'STEP_UP_FAILED'],
     [{ outcome: 'conflict' }, 409, 'IDEMPOTENCY_KEY_REUSED'],
   ])('answers a refusal as its status and code: %j', async (answer, status, code) => {
@@ -680,6 +681,7 @@ describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step
     [{ outcome: 'refused', status: 409, code: 'AGENT_KEY_NOT_LIVE' }, 409, 'AGENT_KEY_NOT_LIVE'],
     [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_FULL' }, 409, 'AGENT_KEYS_FULL'],
     [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_SPENT' }, 409, 'AGENT_KEYS_SPENT'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_TOO_MANY' }, 409, 'AGENT_KEYS_TOO_MANY'],
     [{ outcome: 'refused', status: 409, code: 'AGENT_KEY_REVOKED' }, 409, 'AGENT_KEY_REVOKED'],
     [{ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' }, 403, 'STEP_UP_FAILED'],
     [{ outcome: 'conflict' }, 409, 'IDEMPOTENCY_KEY_REUSED'],

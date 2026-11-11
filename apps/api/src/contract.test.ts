@@ -1310,7 +1310,6 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'FailureProposalAsked',
       'FailureProposalWithdrawAsked',
       'FakeBankAccount',
-      'FundingSource',
       'FundingSourceLink',
       'FundingSourceReactivationAsked',
       'FundingSourceShown',

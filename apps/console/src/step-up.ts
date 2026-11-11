@@ -1,7 +1,8 @@
 // The shared step-up (6A2, ADR-003 §9). A change that needs a fresh sign-in
 // is asked first: the API answers 202 with a challenge for this session. The
 // browser signs in again for it (`/v1/auth/step-up`), comes back to the same
-// page with `?stepped=<challenge>`, and the person confirms the change there,
+// page with `?stepped=<challenge>` (or `?stepUpFailed=<challenge>` when the
+// API refused the fresh sign-in), and the person confirms the change there,
 // which sends the ask's own body with the challenge to the change's confirm
 // address. A change the API makes at once (no step-up asked) is just done.
 //
@@ -9,7 +10,7 @@
 // by challenge: nothing secret (the challenge is good only for this session,
 // and only after the fresh sign-in), and gone once confirmed or dismissed. The
 // API checks everything again at the confirm whatever the console kept.
-import { api, isRefusal } from './api.ts';
+import { api, isRefusal, isUuid } from './api.ts';
 import { goTo } from './navigate.ts';
 
 /** A change asked and waiting for its step-up: where to confirm it and with what. */
@@ -44,6 +45,8 @@ export class StepUpStorageBlocked extends Error {
 const KEY = 'agentx.step-up.';
 /** The query a page comes back with from its step-up. */
 export const STEPPED = 'stepped';
+/** The query a page comes back with when its step-up failed at the login service's return: the challenge it was for (CO2). */
+export const STEP_UP_FAILED = 'stepUpFailed';
 
 const isPending = (value: unknown): value is PendingChange =>
   typeof value === 'object' &&
@@ -93,13 +96,11 @@ export function stepUpAddress(challenge: string, page: string): string {
   return `/v1/auth/step-up?${new URLSearchParams({ challenge, returnTo }).toString()}`;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** The challenge a step-up's 202 names; none for any other answer (another 202, such as a download started). */
 function challengeIn(status: number, body: unknown): string | undefined {
   if (status !== 202 || typeof body !== 'object' || body === null || !('stepUpChallengeId' in body)) return undefined;
   const { stepUpChallengeId } = body;
-  return typeof stepUpChallengeId === 'string' && UUID.test(stepUpChallengeId) ? stepUpChallengeId : undefined;
+  return typeof stepUpChallengeId === 'string' && isUuid(stepUpChallengeId) ? stepUpChallengeId : undefined;
 }
 
 /** A change the API asked a step-up for: what its ask answered, and the way on to sign in again for it. */

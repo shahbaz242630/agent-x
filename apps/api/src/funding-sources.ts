@@ -152,7 +152,10 @@ const START_SCHEMA = {
 
 const LINK_WITH_SOURCE = z.object({
   link: LINK,
-  source: SOURCE.nullable().describe('The source the link made; null unless it is linked.'),
+  source: SOURCE_SHOWN.nullable().describe(
+    'The source the link made, with the consent-expiry choice kept for it: the first confirm’s, if another admin ' +
+      'confirmed the link first with another choice. Null unless it is linked.',
+  ),
 });
 
 /** A link's confirm: the admin's choice for when the source's consent runs out, kept if it links (decision 21). */
@@ -207,7 +210,11 @@ const LIST_SCHEMA = {
   querystring: PAGE,
   response: {
     200: z
-      .object({ sources: z.array(SOURCE).describe('The sources, in order of ID.'), next: NEXT, unchecked: UNCHECKED })
+      .object({
+        sources: z.array(SOURCE_SHOWN).describe('The sources, in order of ID, each with its consent-expiry choice.'),
+        next: NEXT,
+        unchecked: UNCHECKED,
+      })
       .describe('A page of sources, each as its signed state says.'),
   },
 };
@@ -316,9 +323,10 @@ export function registerFundingSources(
         request.id,
       );
       if (isUnwritten(written)) return answerRefusal(written, request, reply);
-      return reply
-        .code(written.link.outcome === 'open' ? 202 : 200)
-        .send({ link: linkOf(written.link), source: written.source === null ? null : sourceOf(written.source) });
+      return reply.code(written.link.outcome === 'open' ? 202 : 200).send({
+        link: linkOf(written.link),
+        source: written.source === null ? null : sourceShownOf(written.source, written.consentExpiry),
+      });
     },
   );
   routes.get(
@@ -332,7 +340,11 @@ export function registerFundingSources(
         request.id,
       );
       if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return { sources: listed.sources.map(sourceOf), next: listed.next, unchecked: [...listed.unchecked] };
+      return {
+        sources: listed.sources.map(({ source, consentExpiry }) => sourceShownOf(source, consentExpiry)),
+        next: listed.next,
+        unchecked: [...listed.unchecked],
+      };
     },
   );
 
