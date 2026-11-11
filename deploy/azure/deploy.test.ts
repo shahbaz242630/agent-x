@@ -2351,7 +2351,12 @@ describe('deploy apps', () => {
       missing: ['0090_new_rule.sql', '0091_other.sql'],
     };
     const apps = (migrations: RecordingMigrations, ...flags: string[]) =>
-      run(['apps', ...flags], { answers, images: recordingImages(), migrations });
+      run(['apps', ...flags], {
+        // --migrate-first asks before it changes the database (Rule Book §1.9): yes, after every other answer.
+        answers: flags.includes('--migrate-first') ? [...answers, 'y'] : answers,
+        images: recordingImages(),
+        migrations,
+      });
 
     it("reads what the database on staging's server holds of the image's migrations, and goes on when it holds them all", async () => {
       const migrations = new RecordingMigrations();
@@ -2398,8 +2403,14 @@ describe('deploy apps', () => {
           return super.runFirst(subscription, commit, digest);
         }
       })(behind);
-      const done = await run(['apps', '--migrate-first'], { answers, images: recordingImages(), az, migrations });
+      const done = await run(['apps', '--migrate-first'], {
+        answers: [...answers, 'y'],
+        images: recordingImages(),
+        az,
+        migrations,
+      });
       expect(done.status).toBe(0);
+      expect(done.terminal.said.join(' ')).toContain("A migration can't be undone");
       expect(migrations.asked).toEqual([
         `state ${SUBSCRIPTION} ${HOST} ${COMMIT}`,
         `run first ${SUBSCRIPTION} ${COMMIT} ${DIGEST}`,
@@ -2409,6 +2420,20 @@ describe('deploy apps', () => {
         '--migrate-first: the migration job runs this image first, before the deployment is sent.',
       );
       expect(done.terminal.said.join('\n')).toContain('The migration has run.');
+    });
+
+    it('with --migrate-first, asks before the database changes: a no runs nothing and sends nothing', async () => {
+      const az = new RecordingAz();
+      const migrations = new RecordingMigrations(behind);
+      const done = await run(['apps', '--migrate-first'], {
+        answers: [...answers, 'n'],
+        images: recordingImages(),
+        az,
+        migrations,
+      });
+      expect(done.error).toBeInstanceOf(Cancelled);
+      expect(migrations.asked).toEqual([`state ${SUBSCRIPTION} ${HOST} ${COMMIT}`]);
+      expect(az.deployment).toBeUndefined();
     });
 
     it('with --migrate-first, sends nothing when the run fails, and runs nothing when there is nothing to run', async () => {

@@ -2460,6 +2460,11 @@ async function migrationsFirst(
 
 /** `--migrate-first` (AZ6), once everything is asked and checked: the migration job runs the image to success. */
 async function runMigrationFirst(steps: Steps, subscription: string, release: string, digest: string): Promise<void> {
+  // The partner's rule (Rule Book §1.9): a change to the database is confirmed before it is made, not after.
+  steps.terminal.say(
+    `--migrate-first: the migration job will run commit ${release}'s migrations on the database now, before the deployment's own what-if. A migration can't be undone; the API keeps its build until the deployment.`,
+  );
+  if (!yes(await steps.terminal.ask('Run the migration now? [y/N] '))) throw new Cancelled();
   steps.terminal.say(
     "Running the migration with this image first (a release's first half: migrate updated to it, run, and waited for)...",
   );
