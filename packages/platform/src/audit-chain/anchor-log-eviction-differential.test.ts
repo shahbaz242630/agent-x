@@ -51,25 +51,29 @@ function randomFrom(seed: number) {
 /** One side: a sharded store, the process writing it (holding all, or tight), and a tight reader beside it. */
 function side(clock: { at: Date }, tightWriter: boolean) {
   const fake = createFakeWriteOnceStore();
+  // The side's writers say into one place, its readers into another: what each let go is counted there.
+  const logs = { writers: new LogCapture(), readers: new LogCapture() };
   for (const file of [
     cutoverFile(keys, { epoch: 1, at: START }),
     shardsDoneFile(keys, { epoch: 1, at: new Date(START.getTime() + 61 * MINUTE) }),
   ])
     fake.files.set(file.name, file.bytes);
-  const made = (tight: boolean): AnchorLog =>
+  const made = (tight: boolean, said = logs.readers): AnchorLog =>
     createAnchorLog({
       store: fake.store,
       keys,
-      logger: testLogger(new LogCapture()),
+      logger: testLogger(said),
       now: () => clock.at,
       epoch: 1,
       alertAfterMs: 15 * MINUTE,
       ...(tight ? { evicts: true, mostFileBytes: TIGHT_BYTES } : {}),
     });
-  const state = { writer: made(tightWriter), reader: made(true) };
+  const state = { writer: made(tightWriter, logs.writers), reader: made(true) };
   return {
     fake,
     tightWriter,
+    evictions: (by: keyof typeof logs) =>
+      logs[by].lines().filter((line) => line.event === 'audit.anchor_shards_evicted').length,
     get writer() {
       return state.writer;
     },
@@ -77,7 +81,7 @@ function side(clock: { at: Date }, tightWriter: boolean) {
       return state.reader;
     },
     restart() {
-      state.writer = made(tightWriter);
+      state.writer = made(tightWriter, logs.writers);
       state.reader = made(true);
     },
     fresh: (tight: boolean) => made(tight),
@@ -114,7 +118,10 @@ const said = async (log: AnchorLog, chain: Chain) => {
   }
 };
 
-/** A line kept by a side's writer: its shard pinned first, as the anchor check holds a chain's while it compares. */
+/**
+ * A line kept by a side's writer: its shard pinned first, as production keeps every line: the anchor check pins a chain's
+ * shard while it compares it and keeps its anchor, the rotation while it keeps a pass or a place.
+ */
 const kept = async (one: ReturnType<typeof side>, chain: Chain, keep: (log: AnchorLog) => void): Promise<void> => {
   const release = await one.writer.pin(chain);
   if (release === undefined) throw new Error('a shard the writer could not hold');
@@ -227,7 +234,10 @@ describe('SEC-ANC-05 shards let go and read again say what shards always held sa
     'seed %i: every chain’s anchor, pass and place the same, as written and read afresh',
     async (seed) => {
       const { whole, tight } = await run(seed);
-      // The tight side did let shards go: fewer held than the chains' shards.
+      // Shards were let go during the run: by the tight writer, by each side's reader, never by the writer holding all.
+      expect(tight.evictions('writers')).toBeGreaterThan(0);
+      expect(whole.evictions('writers')).toBe(0);
+      expect(tight.evictions('readers') + whole.evictions('readers')).toBeGreaterThan(0);
       expect(tight.reader.memoryHeld().bytes).toBeLessThanOrEqual(TIGHT_BYTES);
       expect(shardFiles(tight.fake)).toBeGreaterThan(0);
       const freshWhole = whole.fresh(false);

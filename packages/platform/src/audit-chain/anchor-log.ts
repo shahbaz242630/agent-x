@@ -261,6 +261,12 @@ const EVICT_TO = 0.8;
 /** What an organisation seen in the store, whose shard is let go, is counted at: its chain's name in a set. */
 const SEEN_NAME_BYTES = 100;
 
+/**
+ * How many shards read again in an hour say the shards held are too few for the chains in use: more than every shard
+ * read once over. Past it, what is read each hour is the whole store again, at about a dozen calls a shard.
+ */
+const CHURN_RELOADS = SHARDS;
+
 /** The platform chain's shard: never let go, as more than the anchor check reads its anchor (job-list.ts). */
 const PLATFORM_SHARD = shardOf('platform');
 
@@ -999,8 +1005,9 @@ export function createAnchorLog({
     const counts = new Float64Array(SHARDS);
     for (const table of tables) {
       for (const chain of table.keys()) {
-        const shard = table.shardOf(chain) ?? 0;
-        counts[shard] = (counts[shard] ?? 0) + 1;
+        // Every chain a table holds has its shard: one without would be counted nowhere and purged with none.
+        const shard = table.shardOf(chain);
+        if (shard !== undefined) counts[shard] = (counts[shard] ?? 0) + 1;
       }
     }
     const victims = new Set<number>();
@@ -1716,6 +1723,7 @@ export function createAnchorLog({
       }
       // What keeps added since, or a read past what can be held with shards pinned, let go now if it may be.
       letGo(undefined);
+      strained();
     }
   };
 
@@ -1765,6 +1773,7 @@ export function createAnchorLog({
       usedAt[shard] = uses;
       shardsRead([found]);
       walked(began, [found]);
+      reloads += 1;
       logger.info('audit.anchor_shard_loaded', { shard: shardHex(shard), files: found.read.length });
     } catch (error) {
       purged(new Set([shard]), stage);
@@ -1796,6 +1805,38 @@ export function createAnchorLog({
   /** Past what can be held with no read under way to count its own: shards let go now. */
   const trimmed = (): void => {
     if (running === 0) letGo(undefined);
+    strained();
+  };
+
+  // Within the hour begun at `strainFrom`: shards read again, and whether what is held stayed past the budget after
+  // letting go all it could (pinned shards and lines waiting).
+  let strainFrom: number | undefined;
+  let reloads = 0;
+  let pastBudget = false;
+
+  /**
+   * In a log that lets shards go, said at most hourly, each a warning: held past the budget with nothing more that may
+   * go, or more shards read again than there are. Never the error a log that holds every shard says past half.
+   */
+  const strained = (): void => {
+    if (!evicts || layout !== 'sharded') return;
+    const at = now().getTime();
+    const bytes = heldBytes(0);
+    if (bytes > mostFileBytes) pastBudget = true;
+    strainFrom ??= at;
+    if (at - strainFrom < SNAPSHOT_EVERY_MS) return;
+    if (pastBudget) {
+      logger.warn('audit.anchor_shards_past_budget', {
+        bytes,
+        mostBytes: mostFileBytes,
+        pinned: pins.filter((count) => count > 0).length,
+        waiting: waitingShards().size,
+      });
+    }
+    if (reloads > CHURN_RELOADS) logger.warn('audit.anchor_shards_churning', { reloads, withinMs: at - strainFrom });
+    strainFrom = at;
+    reloads = 0;
+    pastBudget = false;
   };
 
   const writeFailed = (error: unknown): void => {
@@ -2027,6 +2068,8 @@ export function createAnchorLog({
    * hourly, not each minute's delta; in the shards, once a flush that made any.
    */
   const nearMemory = (kind: Kind): void => {
+    // Past half is how a log that lets shards go runs: said instead when it can't get under, or reads too much again.
+    if (evicts && layout === 'sharded') return;
     const held = linesHeld();
     if (kind === 'snapshots' && held * KEPT_LINE_BYTES > mostFileBytes * NEAR_MEMORY) {
       logger.error('audit.anchor_store_near_memory', {

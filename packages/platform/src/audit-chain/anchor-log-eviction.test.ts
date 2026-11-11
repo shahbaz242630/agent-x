@@ -726,6 +726,55 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
     });
   });
 
+  describe('said, in a log that lets shards go', () => {
+    it('past half the budget is how it runs: never the near-memory error a log holding every shard says', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      for (const chain of held(log)) log.keep(anchorOf(chain, 7n, made.clock.at));
+      made.clock.at = new Date(made.clock.at.getTime() + 61 * MINUTE);
+      await log.flush();
+      expect(log.memoryHeld().bytes).toBeGreaterThan(log.memoryHeld().mostBytes / 2);
+      expect(made.lines('audit.anchor_store_near_memory')).toEqual([]);
+    });
+
+    it('held past the budget with nothing that may go: a warning, at most hourly', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      // Lines waiting in shards never written, past what can be held: none of them may go.
+      for (const chain of oneAShard(80).slice(40, 70)) log.keep(anchorOf(chain, 1n, made.clock.at));
+      (await log.pin(CHAINS[0] ?? PLATFORM))?.();
+      expect(log.memoryHeld().bytes).toBeGreaterThan(log.memoryHeld().mostBytes);
+      expect(made.lines('audit.anchor_shards_past_budget')).toEqual([]);
+      made.clock.at = new Date(made.clock.at.getTime() + 61 * MINUTE);
+      (await log.pin(CHAINS[0] ?? PLATFORM))?.();
+      (await log.pin(CHAINS[0] ?? PLATFORM))?.();
+      expect(made.lines('audit.anchor_shards_past_budget')).toEqual([
+        expect.objectContaining({ level: 'warn', mostBytes: log.memoryHeld().mostBytes, waiting: 30 }),
+      ]);
+    });
+
+    it('more shards read again in an hour than there are: a warning that the shards held are too few', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      for (let round = 0; round < 10; round += 1) for (const chain of CHAINS) (await log.pin(chain))?.();
+      const reloads = made.lines('audit.anchor_shard_loaded').length;
+      expect(reloads).toBeGreaterThan(256);
+      expect(made.lines('audit.anchor_shards_churning')).toEqual([]);
+      made.clock.at = new Date(made.clock.at.getTime() + 61 * MINUTE);
+      (await log.pin(CHAINS[0] ?? PLATFORM))?.();
+      expect(made.lines('audit.anchor_shards_churning')).toEqual([
+        expect.objectContaining({ level: 'warn', reloads: expect.any(Number) as number }),
+      ]);
+      // A quiet hour after: nothing said.
+      made.clock.at = new Date(made.clock.at.getTime() + 61 * MINUTE);
+      (await log.pin(CHAINS[0] ?? PLATFORM))?.();
+      expect(made.lines('audit.anchor_shards_churning')).toHaveLength(1);
+    });
+  });
+
   describe('memory bounded, measured', () => {
     it('every chain pinned in turn, three times over: under the budget throughout, its records and buffers never growing', async () => {
       const many = Array.from({ length: 1100 }, (_, index) => organisation(index + 1));

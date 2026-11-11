@@ -239,6 +239,16 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was kept, as it could not be compared. Its payments wait meanwhile.',
     next: 'Nothing: that part is read back when next needed. If it repeats, give the API memory.',
   },
+  'audit.anchor_shards_churning': {
+    happened: 'In the last hour the API read back more parts of the audit anchor store than there are.',
+    broke: 'Nothing yet: anchors are compared as before, but the store is read far more and checks run slower.',
+    next: 'Give the API more memory, so more of the store stays held.',
+  },
+  'audit.anchor_shards_past_budget': {
+    happened: 'The audit anchors held stayed past what the API may hold, with nothing more it could let go.',
+    broke: 'Nothing yet: what is held is in use or waiting to be written. Memory runs higher than planned.',
+    next: 'If it keeps repeating, give the API more memory, or look at why writes to the anchor store are failing.',
+  },
   'audit.anchor_shard_unreadable': {
     happened: 'A part of the audit anchor store could not be read back into memory whole.',
     broke: 'Payments wait for the organisations in that part alone. Nobody is held.',
