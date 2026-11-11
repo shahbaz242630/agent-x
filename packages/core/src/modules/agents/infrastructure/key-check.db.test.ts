@@ -310,6 +310,22 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
     expect(lines('agent_key.refused').map(({ reason }) => reason)).toEqual(['wrong_secret', 'unlisted']);
   });
 
+  it('refuses a wrong secret at the door for a key changed since it was made: its newest seal, not its first, in two trips (M6)', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    // A second sealed state, through the real change: the door must judge the row against this one.
+    await revoke(id);
+    const times = noStatementTimes();
+
+    expect(await timingStatements(times, () => check(agentKeyText(id, Buffer.alloc(32, 0xee))))).toEqual({
+      outcome: 'refused',
+    });
+    // The listing's trip and the door's: no transaction, so no place taken in the organisation's share.
+    expect(times.trips).toBe(2);
+    expect(lines('agent_key.refused').map(({ reason, keyId }) => [reason, keyId])).toEqual([['wrong_secret', id]]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
   it('verifies nothing when this process holds no pepper at all: a listed key refused as not held, an unlisted one as such', async () => {
     const agent = await newAgent();
     const { id, text } = await issue(agent);
