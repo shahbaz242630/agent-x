@@ -45,6 +45,7 @@ describe('SEC-OPS-07 the partner’s declaration is checked where it is written 
     ['upper case', 'https://Pay.Bank.example'],
     ['the default port', 'https://pay.bank.example:443'],
     ['a trailing dot', 'https://pay.bank.example.'],
+    ['a trailing dot before a port', 'https://pay.bank.example.:8443'],
     ['plain http', 'http://pay.bank.example'],
     ['another scheme', 'wss://pay.bank.example'],
     ['no scheme', 'pay.bank.example'],

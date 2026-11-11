@@ -15,15 +15,30 @@ export class NotStartedLive extends Error {
   }
 }
 
-/** The live adapter, refusing every payment while this process's start isn't recorded live (startedLive). */
+/**
+ * The live adapter, refusing every payment while this process's start isn't
+ * recorded live (startedLive). Each other part is handed to the adapter itself,
+ * named one by one, so a class's methods keep their own `this` and a part the
+ * contract gains can't pass by unseen: the object below must name it.
+ */
 export function liveOnly(rail: FinancialRailAdapter, logger: Logger): FinancialRailAdapter {
   return {
-    ...rail,
+    identity: rail.identity,
+    authoriseOrigin: rail.authoriseOrigin,
+    formOrigin: rail.formOrigin,
+    capabilities: () => rail.capabilities(),
+    startSourceLink: (input) => rail.startSourceLink(input),
+    confirmSourceLink: (input) => rail.confirmSourceLink(input),
+    getSourceState: (ref) => rail.getSourceState(ref),
+    registerBeneficiary: (input) => rail.registerBeneficiary(input),
+    getBeneficiaryState: (ref) => rail.getBeneficiaryState(ref),
     // Asked on every payment, not once when built: what counts is the start this process recorded.
     submitApprovedIntent: (intent) => {
       if (startedLive()) return rail.submitApprovedIntent(intent);
       logger.error('partner.live_refused', { partner: rail.identity.partner });
       return Promise.reject(new NotStartedLive());
     },
+    getExecution: (ref) => rail.getExecution(ref),
+    verifyEvent: (body, headers) => rail.verifyEvent(body, headers),
   };
 }

@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { ConfigError } from './common.ts';
 import { loadConfig as loadConfigWith } from './config.ts';
 import { fingerprintedSettings } from './fingerprint.ts';
-import { gateRefOf, type PartnerDeclaration, partnerFrom, partnerName } from './partner.ts';
+import { type CheckedDeclaration, gateRefOf, type PartnerDeclaration, partnerFrom, partnerName } from './partner.ts';
+import { reachingStandIn, STAND_IN, STAND_IN_LIVE } from './partner-stand-in.helper.test.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -48,12 +49,9 @@ const DB_DEFAULTS = {
 /** The database settings a local run can't do without, for tests of the other settings' local defaults. */
 const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN, AGENTX_KEYS_DIR: KEYS_DIR };
 
-/**
- * A real partner's adapter as built (partner.ts), declaring no origins: production
- * runs live in tests of anything else. The partner's own tests declare origins.
- */
-const BUILT: PartnerDeclaration = { liveOrigins: [], sandboxOrigins: [] };
-const loadConfig = (env: Env) => loadConfigWith(env, BUILT);
+/** A real partner's adapter as built (the stand-in): production runs live in tests of anything else. */
+const BUILT: PartnerDeclaration = STAND_IN;
+const loadConfig = (env: Env) => loadConfigWith(reachingStandIn(env), BUILT);
 
 /**
  * The partner each environment runs in tests of anything else (ADR-014 §4):
@@ -71,7 +69,7 @@ const partnerFor = (environment: string): Env =>
 /** The problems loadConfig reports, or [] when it accepts the config; against the partner built here, or none (null). */
 function problemsWith(env: Env, built: PartnerDeclaration | null = BUILT): readonly string[] {
   try {
-    loadConfigWith(env, built ?? undefined);
+    loadConfigWith(built === BUILT ? reachingStandIn(env) : env, built ?? undefined);
     return [];
   } catch (error) {
     if (error instanceof ConfigError) return error.problems;
@@ -157,7 +155,8 @@ describe('config: a correct config loads', () => {
       },
       decisionGate: { active: null, perOrganisation: null, waitingPerOrganisation: 100, waitMs: 10_000 },
       db: DB_DEFAULTS,
-      outbound: { allowedOrigins: [] },
+      // Only the partner's live origin, which a live start must be able to reach.
+      outbound: { allowedOrigins: [STAND_IN_LIVE] },
       signIn: undefined,
       partner: { mode: 'live', gateRef: GATE_REF },
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
@@ -1352,6 +1351,19 @@ describe('SEC-OPS-07 config: the payment partner and the live-money switch (ADR-
   it('accepts a later version of the gate record', () => {
     const gateRef = `LMG-v123456-sha256:${'0f'.repeat(32)}`;
     expect(loadConfig({ ...MINIMAL, AGENTX_LIVE_MONEY_GATE_REF: gateRef }).partner).toEqual({ mode: 'live', gateRef });
+  });
+
+  it('checks the declaration at every start, so one cast past declarePartner is refused (PM3 review)', () => {
+    // As `BUILT_PARTNER = { ... } as CheckedDeclaration` would put it there, unchecked.
+    const empty = { liveOrigins: [], sandboxOrigins: [] } as unknown as CheckedDeclaration;
+    expect(problemsWith(allowing(STAGING, LIVE_ORIGIN), empty)).toEqual([
+      "BUILT_PARTNER: declares no live origin, so nothing would keep an app that isn't live from reaching it",
+    ]);
+    const slashed = { liveOrigins: [`${LIVE_ORIGIN}/`], sandboxOrigins: [] } as unknown as CheckedDeclaration;
+    expect(problemsWith(allowing(MINIMAL, LIVE_ORIGIN), slashed)).toContain(
+      'BUILT_PARTNER: live origin 1 is not an https origin as the allowlist writes it: ' +
+        'lowercase, no default port, path, user name or trailing dot',
+    );
   });
 
   describe('until the partner’s adapter is built (Phase 5)', () => {

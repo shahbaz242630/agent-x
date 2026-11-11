@@ -48,7 +48,7 @@ const DECLARED = 'BUILT_PARTNER';
  * and no trailing dot, which names the same host but matches no entry without one.
  */
 const isPartnerOrigin = (origin: string): boolean =>
-  isCanonicalOrigin(origin) && origin.startsWith('https://') && !origin.endsWith('.');
+  isCanonicalOrigin(origin) && origin.startsWith('https://') && !new URL(origin).hostname.endsWith('.');
 
 /** Which entries (counted from 1) are refused. */
 const refusedEntries = (origins: readonly string[], refused: (origin: string) => boolean): number[] =>
@@ -162,7 +162,8 @@ export function partnerProblems(settings: PartnerSettings, built: PartnerDeclara
     ...modeProblems(environment, mode),
     ...gateRefProblems(mode, gateRef),
     ...notBuilt,
-    ...(built === undefined ? [] : originProblems(mode, allowedOrigins, built)),
+    // Checked again at every start: a cast can put an unchecked declaration in BUILT_PARTNER.
+    ...(built === undefined ? [] : [...declarationProblems(built), ...originProblems(mode, allowedOrigins, built)]),
   ];
 }
 
