@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { KeyDescription } from '../keys/key-provider.ts';
 import { type Config, loadConfig as loadConfigWith } from './config.ts';
 import { configFingerprint, fingerprintedSettings, WATCHED_VARIABLES } from './fingerprint.ts';
+import { reachingStandIn, STAND_IN } from './partner-stand-in.helper.test.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -11,7 +12,7 @@ const DB_LOGIN = 'app login for these tests';
 /** A well-formed live-money gate reference (ADR-014 §4): production runs live, which needs one. */
 const GATE_REF = `LMG-v1-sha256:${'ab'.repeat(32)}`;
 /** A real partner's adapter as built (partner.ts), declaring no origins, so production can run live here. */
-const loadConfig = (env: Env) => loadConfigWith(env, { liveOrigins: [], sandboxOrigins: [] });
+const loadConfig = (env: Env) => loadConfigWith(reachingStandIn(env), STAND_IN);
 const SETTINGS: Env = {
   AGENTX_ENV: 'production',
   // Runs no job, so needs no anchors' store.

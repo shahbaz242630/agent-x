@@ -10,7 +10,8 @@
 // is said with each rule and what to do. Cancelling is the instant brake
 // (partner decision 10): one click, no step-up and no confirm, then said
 // done. Who may decide is the API's to say: the buttons show for an admin or
-// approver only, and the API checks again whatever is pressed.
+// approver only, and the API checks again whatever is pressed. The agent is
+// named with its ID, as two agents may share a name (SEC-AG-10).
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useState } from 'react';
@@ -85,7 +86,9 @@ function Facts({ request }: { readonly request: RequestDetails }) {
       <dt>{t('request.purpose')}</dt>
       <dd>{request.agentWrote.purpose}</dd>
       <dt>{t('request.agent')}</dt>
-      <dd>{request.agent.name}</dd>
+      <dd>
+        {request.agent.name} <span className="mono">{request.agent.id}</span>
+      </dd>
       {request.reasons.length > 0 && (
         <>
           <dt>{t('request.why')}</dt>

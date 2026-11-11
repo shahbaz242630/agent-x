@@ -1,7 +1,8 @@
 // Approvals (6B1): the requests waiting for approval, soonest to expire at the
 // top, and every request the organisation's agents made, newest first. Each
 // row opens the request's own page, where it is approved, rejected or
-// cancelled. Look A "Statement": amounts in a column, nothing shouts.
+// cancelled. Look A "Statement": amounts in a column, nothing shouts. The
+// agent is named with its ID: two agents may share a name (SEC-AG-10).
 import { Link } from '@tanstack/react-router';
 
 import { amountText, type ListedRequest, timeText, useRequestList, useTicking, waitingLeft } from '../requests.ts';
@@ -17,7 +18,7 @@ function Row({ request }: { readonly request: ListedRequest }) {
         <span className="row-main">
           <span>{request.supplier.name}</span>
           <span className="muted">
-            {request.agent.name} · {when}
+            {request.agent.name} <span className="mono">{request.agent.id}</span> · {when}
           </span>
         </span>
         <b className="amount">{amountText(request.amountMinor, request.currency)}</b>

@@ -7,17 +7,20 @@
 // - live without the partner's live origin on the outbound allowlist, or with
 //   its sandbox origin there; any other mode with its live origin there.
 // The real partner's adapter declares its origins (Phase 5); until it does,
-// the sandbox and live modes are refused as not built.
-import type { Environment, PartnerMode } from './common.ts';
+// the sandbox and live modes are refused as not built. The declaration is
+// checked where it is written (PM3, declarePartner): a live origin written
+// another way than the allowlist writes it, or none at all, would let a
+// staging app reach the live partner unseen. And the live adapter checks at
+// the point of use that this process's start was recorded live (startedLive,
+// apps/api/src/live-rail.ts).
+import { ConfigError, type Environment, type PartnerMode } from './common.ts';
+import { isCanonicalOrigin } from './settings.ts';
 
 /** What a real partner's adapter declares (ADR-014 §4): where its live service and its sandbox answer, as origins. */
 export interface PartnerDeclaration {
   readonly liveOrigins: readonly string[];
   readonly sandboxOrigins: readonly string[];
 }
-
-/** The real partner's adapter, once it is built (Phase 5). None yet: the fake alone can run. */
-export const BUILT_PARTNER: PartnerDeclaration | undefined = undefined;
 
 /** The payment partner the config names. */
 export type Partner =
@@ -37,6 +40,71 @@ export interface PartnerSettings {
 const MODE = 'AGENTX_PARTNER_MODE';
 const GATE_REF = 'AGENTX_LIVE_MONEY_GATE_REF';
 const ALLOWED = 'AGENTX_OUTBOUND_ALLOWED_ORIGINS';
+const DECLARED = 'BUILT_PARTNER';
+
+/**
+ * A partner's origin as the allowlist must hold it to match: https, written as
+ * the URL standard prints it (lowercase, no default port, path, user or query),
+ * and no trailing dot, which names the same host but matches no entry without one.
+ */
+const isPartnerOrigin = (origin: string): boolean =>
+  isCanonicalOrigin(origin) && origin.startsWith('https://') && !new URL(origin).hostname.endsWith('.');
+
+/** Which entries (counted from 1) are refused. */
+const refusedEntries = (origins: readonly string[], refused: (origin: string) => boolean): number[] =>
+  origins.flatMap((origin, index) => (refused(origin) ? [index + 1] : []));
+
+/** The adapter's own declaration (S138 review): the origin rules below are only as good as what it declares. */
+export function declarationProblems(declared: PartnerDeclaration): string[] {
+  const { liveOrigins, sandboxOrigins } = declared;
+  const notOrigins = (list: string, origins: readonly string[]) => {
+    const bad = refusedEntries(origins, (origin) => !isPartnerOrigin(origin));
+    return bad.length === 0
+      ? []
+      : [
+          `${DECLARED}: ${list} origin ${bad.join(', ')} is not an https origin as the allowlist writes it: ` +
+            'lowercase, no default port, path, user name or trailing dot',
+        ];
+  };
+  const both = refusedEntries(liveOrigins, (origin) => sandboxOrigins.includes(origin));
+  return [
+    ...(liveOrigins.length === 0
+      ? [`${DECLARED}: declares no live origin, so nothing would keep an app that isn't live from reaching it`]
+      : []),
+    ...notOrigins('live', liveOrigins),
+    ...notOrigins('sandbox', sandboxOrigins),
+    ...(both.length === 0
+      ? []
+      : [
+          `${DECLARED}: live origin ${both.join(', ')} is a sandbox origin too, so live and sandbox can't be told apart`,
+        ]),
+  ];
+}
+
+declare const checked: unique symbol;
+
+/** A declaration declarePartner has checked: the only kind BUILT_PARTNER can hold. */
+export type CheckedDeclaration = PartnerDeclaration & { readonly [checked]: true };
+
+/**
+ * The real partner's declaration, checked as the module holding it loads: a
+ * wrong one throws there, so no test and no start gets past it.
+ */
+export function declarePartner(declared: PartnerDeclaration): CheckedDeclaration {
+  const problems = declarationProblems(declared);
+  if (problems.length > 0) throw new ConfigError(problems);
+  return Object.freeze({
+    liveOrigins: Object.freeze([...declared.liveOrigins]),
+    sandboxOrigins: Object.freeze([...declared.sandboxOrigins]),
+  }) as CheckedDeclaration;
+}
+
+/**
+ * The real partner's adapter, once it is built (Phase 5), as
+ * `declarePartner({ liveOrigins: [...], sandboxOrigins: [...] })`. None yet:
+ * the fake alone can run.
+ */
+export const BUILT_PARTNER: CheckedDeclaration | undefined = undefined;
 
 /** Where each mode may run: a mode named where it may not is refused, whatever else is set. */
 function modeProblems(environment: Environment, mode: PartnerMode | undefined): string[] {
@@ -94,7 +162,8 @@ export function partnerProblems(settings: PartnerSettings, built: PartnerDeclara
     ...modeProblems(environment, mode),
     ...gateRefProblems(mode, gateRef),
     ...notBuilt,
-    ...(built === undefined ? [] : originProblems(mode, allowedOrigins, built)),
+    // Checked again at every start: a cast can put an unchecked declaration in BUILT_PARTNER.
+    ...(built === undefined ? [] : [...declarationProblems(built), ...originProblems(mode, allowedOrigins, built)]),
   ];
 }
 
@@ -115,3 +184,23 @@ export const partnerName = (partner: Partner): PartnerMode => partner.mode;
 /** The live-money gate reference a start records on the platform chain: only a live start has one. */
 export const gateRefOf = (partner: Partner): string | undefined =>
   partner.mode === 'live' ? partner.gateRef : undefined;
+
+/** The partner this process's recorded start named (boot.ts), or none before one is recorded. */
+let started: Partner | undefined;
+
+/**
+ * Notes the partner once this process's start is on the platform chain, with
+ * the gate reference a live start writes there; undefined as a start begins.
+ * Each start in a process names its own; the app starts once.
+ */
+export function recordedStartWith(partner: Partner | undefined): void {
+  started = partner;
+}
+
+/**
+ * The point-of-use check (ADR-014 §4, the S4 lesson): true only once this
+ * process's start was recorded live. The live adapter asks this itself, so a
+ * live adapter wired into a process that started as anything else still
+ * refuses to move money.
+ */
+export const startedLive = (): boolean => started?.mode === 'live';

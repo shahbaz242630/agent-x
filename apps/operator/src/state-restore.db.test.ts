@@ -317,7 +317,7 @@ afterAll(() => {
   keyFiles.remove();
 });
 
-describe('PL-29 follow-up: authority rows planned and repaired from the copy, original rows alone', () => {
+describe('SEC-DB-13 PL-29 follow-up: authority rows planned and repaired from the copy, original rows alone', () => {
   it('puts back a changed row past the status guard, keeps the hold, and the admin then clears it', async () => {
     await copied();
     const original = await rowOf(INVITATIONS.table, invitationId);
@@ -407,7 +407,7 @@ describe('PL-29 follow-up: authority rows planned and repaired from the copy, or
   });
 });
 
-describe('PL-29 follow-up: refused, never bent', () => {
+describe('SEC-DB-13 PL-29 follow-up: refused, never bent', () => {
   it('refuses a row the live log signed after the copy: restore a later copy', async () => {
     await copied();
     const app = on(live, 'app');
@@ -793,7 +793,7 @@ describe('PL-29 follow-up: the plan’s and repair’s records', () => {
   });
 });
 
-describe('PL-29 follow-up: what the database alone does not show here', () => {
+describe('SEC-DB-13 PL-29 follow-up: what the database alone does not show here', () => {
   it('rolls back a repair that would leave a guard off', async () => {
     await copied();
     await (await ownerOn(INVITATIONS)).setColumn(invitationId, 'expires_at', LATER);
@@ -1085,7 +1085,7 @@ async function worldRow(table: string, rowId: string): Promise<string | undefine
   return rows[0]?.row;
 }
 
-describe('PL-29 follow-up: originals put back past every guard the database holds', () => {
+describe('SEC-DB-13 PL-29 follow-up: originals put back past every guard the database holds', () => {
   it('puts back a made-once mandate version, a mandate fixed at creation, and a decided, carried spend request', async () => {
     const world = await seededWorld();
     expect(await verifiedNow()).toMatchObject({ outcome: 'verified' });

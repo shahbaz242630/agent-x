@@ -373,7 +373,7 @@ beforeEach(() => {
   });
 });
 
-describe('one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)', () => {
+describe('SEC-DP-14 one admin proposes, a second confirms (H10; decision 38; ADR-007 §10)', () => {
   it('a proposal leaves the payment as it was, signs it as the proposer’s and tells every admin', async () => {
     const { w, request, transaction, first } = await markable();
 
@@ -1072,7 +1072,7 @@ describe('with the bank check or another admin at the same payment (forced, ADR-
     expect((await markNoticesOf(w)).map(({ kind }) => kind)).toEqual(['payment_mark_proposed', 'payment_mark_ended']);
   });
 
-  it('two admins proposing at once: one proposal, the other FAILURE_PROPOSAL_OPEN', async () => {
+  it('SEC-DP-14 two admins proposing at once: one proposal, the other FAILURE_PROPOSAL_OPEN', async () => {
     const { w, transaction, first, second } = await markable();
     const confirms = [];
     for (const who of [first, second]) {

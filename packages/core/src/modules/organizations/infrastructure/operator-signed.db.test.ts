@@ -167,7 +167,7 @@ beforeEach(() => {
   org = newId();
 });
 
-describe(`the operator's events on an organisation's chain, believed only signed with its own key (PL-57, Postgres ${server.version})`, () => {
+describe(`SEC-OPS-13 the operator's events on an organisation's chain, believed only signed with its own key (PL-57, Postgres ${server.version})`, () => {
   it('signs each as the operator records it, and the API believes them with the public half alone', async () => {
     await created();
     await frozenBy(operator, keys);

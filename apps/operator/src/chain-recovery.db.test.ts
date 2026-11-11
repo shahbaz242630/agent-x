@@ -202,7 +202,7 @@ afterAll(() => {
   keyFiles.remove();
 });
 
-describe('PL-29 the chain recovery plan puts back only original rows', () => {
+describe('SEC-DB-12 PL-29 the chain recovery plan puts back only original rows', () => {
   it('plans nothing for a chain the copy holds whole', async () => {
     const head = await copied(3);
     const planned = await plan();
@@ -357,7 +357,7 @@ describe('PL-29 the chain recovery plan puts back only original rows', () => {
   });
 });
 
-describe('PL-29 the plan refuses what original rows cannot mend', () => {
+describe('SEC-DB-12 PL-29 the plan refuses what original rows cannot mend', () => {
   it('a fork: events written on a wound-back head, which the copy holds others in place of', async () => {
     await record(live, 1);
     const earlier = await headOf(live);
@@ -547,7 +547,7 @@ describe('PL-29 the plan refuses what original rows cannot mend', () => {
   });
 });
 
-describe("PL-57 the plan judges the operator's events as every reader does", () => {
+describe("SEC-DB-12 PL-57 the plan judges the operator's events as every reader does", () => {
   it("never keeps an operator's event past the copy without its signature: refused, or removed past a whole head", async () => {
     const head = await copied(2);
     await forgedByApi();

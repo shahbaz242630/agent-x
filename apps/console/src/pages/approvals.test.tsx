@@ -4,6 +4,7 @@
 // link in its own organisation; approve and reject by step-up (re-checked in
 // the API's words when its supplier changed), cancel at once in one click
 // (partner decision 10); refusals in plain words; and no decision buttons for a viewer.
+// Every agent is named with its ID, as two may share a name (SEC-AG-10).
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -22,6 +23,7 @@ const OTHER = {
   frozen: false,
 };
 const ID = '0199a0f0-0000-7000-8000-0000000000a1';
+const AGENT = '0199a0f0-0000-7000-8000-0000000000c1';
 const SECOND = '0199a0f0-0000-7000-8000-0000000000b2';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000c0ffe';
 /** An approve's ask, waiting for the passkey: nothing re-weighed, nothing stopping it. */
@@ -52,7 +54,7 @@ const listed = (id: string, overrides: Record<string, unknown> = {}) => ({
   reasons: [{ code: 'APPROVAL_THRESHOLD', message: 'Over the approval line.' }],
   amountMinor: 250_000,
   currency: 'AED',
-  agent: { id: '0199a0f0-0000-7000-8000-0000000000c1', name: 'Phase 4 demo agent' },
+  agent: { id: AGENT, name: 'Phase 4 demo agent' },
   supplier: { id: '0199a0f0-0000-7000-8000-0000000000d1', name: 'Gulf Office Supplies LLC' },
   fundingSourceId: '0199a0f0-0000-7000-8000-0000000000e1',
   mandateId: '0199a0f0-0000-7000-8000-0000000000f1',
@@ -141,7 +143,7 @@ describe('the approvals lists (6B1)', () => {
 
     const row = await screen.findByRole('link', { name: /Gulf Office Supplies LLC/ });
     expect(within(row).getByText('AED 2,500.00')).toBeDefined();
-    expect(within(row).getByText('Phase 4 demo agent · 22 h left')).toBeDefined();
+    expect(row.textContent).toContain(`Phase 4 demo agent ${AGENT} · 22 h left`);
     expect(row.getAttribute('href')).toBe(`/approvals/${ID}`);
     const [read] = sent.filter((one) => one.path.startsWith('/v1/approvals'));
     expect(read?.path).toBe('/v1/approvals?limit=50');
@@ -156,14 +158,14 @@ describe('the approvals lists (6B1)', () => {
       answer('GET /v1/approvals', { status: 200, body: { waiting: [listed(ID)], next: null, unchecked: [] } });
       open('/approvals');
       const row = await screen.findByRole('link', { name: /Gulf Office Supplies LLC/ });
-      expect(within(row).getByText('Phase 4 demo agent · 22 h left')).toBeDefined();
+      expect(row.textContent).toContain('22 h left');
       const reads = sent.length;
 
       act(() => {
         vi.advanceTimersByTime(3_600_000);
       });
 
-      expect(within(row).getByText('Phase 4 demo agent · 21 h left')).toBeDefined();
+      expect(row.textContent).toContain('21 h left');
       expect(sent).toHaveLength(reads);
     } finally {
       vi.useRealTimers();
@@ -182,8 +184,26 @@ describe('the approvals lists (6B1)', () => {
 
     await userEvent.click(screen.getByRole('link', { name: 'All requests' }));
 
-    expect(await screen.findByText(/Phase 4 demo agent · With the bank ·/)).toBeDefined();
+    const row = await screen.findByRole('link', { name: /With the bank/ });
+    expect(row.textContent).toContain(`Phase 4 demo agent ${AGENT} · With the bank ·`);
     expect(screen.getByRole('link', { name: 'All requests' }).getAttribute('aria-current')).toBe('page');
+  });
+
+  it('tells apart two agents that share a name by their IDs (SEC-AG-10)', async () => {
+    const twin = '0199a0f0-0000-7000-8000-0000000000c2';
+    signedIn();
+    answer('GET /v1/approvals', {
+      status: 200,
+      body: {
+        waiting: [listed(ID), listed(SECOND, { agent: { id: twin, name: 'Phase 4 demo agent' } })],
+        next: null,
+        unchecked: [],
+      },
+    });
+    open('/approvals');
+
+    const rows = await screen.findAllByRole('link', { name: /Gulf Office Supplies LLC/ });
+    expect(rows.map((row) => within(row).getByText(/^0199a0f0-/).textContent)).toEqual([AGENT, twin]);
   });
 
   it('says when no request was ever made', async () => {
@@ -250,6 +270,9 @@ describe('one request’s page (6B1)', () => {
     expect(screen.getByText('INV-2026-0417')).toBeDefined();
     expect(screen.getByText('Over the approval line.')).toBeDefined();
     expect(screen.getByText('AX-7Q2M9')).toBeDefined();
+    const agent = screen.getByText('Phase 4 demo agent', { exact: false });
+    expect(agent.textContent).toBe(`Phase 4 demo agent ${AGENT}`);
+    expect(within(agent).getByText(AGENT).className).toBe('mono');
     expect(sentTo('GET', `/v1/spend-requests/${ID}`)[0]?.headers.get('agentx-organization')).toBe(OTHER.id);
     expect(localStorage.getItem('agentx.organization')).toBe(OTHER.id);
   });

@@ -26,6 +26,11 @@ const TABLES_RULE = 'agentx/authority-tables-through-signed-state';
 const IMPORTS_RULE = 'no-restricted-imports';
 /** What the state repair's fence says (PL-29 follow-up, eslint.config.js). */
 const STATE_REPAIR = "the operator's repair alone (apps/operator) uses them";
+/** What the start's own fence says (PM3, eslint.config.js). */
+const START_RECORD = "only the API's boot (apps/api/src/boot.ts) notes the start it recorded";
+/** Code that notes a start, as only the API's boot may. */
+const NOTES_A_START =
+  "import { recordedStartWith } from '@agentx/platform/config';\n\nexport const note = recordedStartWith;\n";
 
 const REJECTED: LintCase[] = [
   {
@@ -153,6 +158,13 @@ const REJECTED: LintCase[] = [
     says: STATE_REPAIR,
   },
   {
+    name: 'SEC-OPS-07 a module other than the boot noting the start it recorded, which the live adapter trusts',
+    filePath: `${API}/notes-a-start.ts`,
+    code: NOTES_A_START,
+    rule: IMPORTS_RULE,
+    says: START_RECORD,
+  },
+  {
     name: 'an authority table that is not on the registry',
     filePath: `${CORE}/unregistered-table.ts`,
     // A name no registry will ever hold, so this stays a proof of the rule
@@ -197,6 +209,12 @@ const ALLOWED: LintCase[] = [
     name: "the operator's repair importing the state repair's steps",
     filePath: `${OPERATOR}/state-repair.ts`,
     code: "import { guardsOff } from '@agentx/core/modules/audit';\n\nexport const step = guardsOff;\n",
+    rule: IMPORTS_RULE,
+  },
+  {
+    name: "SEC-OPS-07 the API's boot noting the start it recorded",
+    filePath: 'apps/api/src/boot.ts',
+    code: NOTES_A_START,
     rule: IMPORTS_RULE,
   },
   {
