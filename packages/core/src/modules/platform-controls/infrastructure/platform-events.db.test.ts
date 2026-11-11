@@ -153,7 +153,8 @@ describe(`the copier's and the restriction's reads, from 0082's indexes (SA2, Po
         { ...removed, facts: { person: 'p-7' } },
         { action: 'idp.event_copied', facts: { person: 'p-7', counts: 'yes' } },
         { action: 'person.second_factors_removed', facts: { person: 'p-7' } },
-        { ...removed, facts: { subject: 's-7' } },
+        // As the restriction asks it: the login read in the same statement.
+        { ...removed, facts: {}, factsFrom: { subject: sql<string | null>`(select 's-7'::text)` } },
       ]),
     }));
 
@@ -240,6 +241,16 @@ describe(`the latest time among the chain's events matching any of several kinds
   it('finds no time for no kinds, or for kinds no event matches', async () => {
     expect(await latestPlatformTimeOf(app, 'at', [])).toBeUndefined();
     expect(await latestPlatformTimeOf(app, 'at', [{ action: 'kind.none', facts: {} }])).toBeUndefined();
+  });
+
+  it('matches a fact to what an expression of the same statement reads, and nothing when it reads nothing', async () => {
+    await record('kind.seven', { subject: 's-77', at: '2026-09-28T07:00:00.000Z' });
+    const by = (value: string | null) => [
+      { action: 'kind.seven', facts: {}, factsFrom: { subject: sql<string | null>`(select ${value}::text)` } },
+    ];
+
+    expect(await latestPlatformTimeOf(app, 'at', by('s-77'))).toEqual(new Date('2026-09-28T07:00:00.000Z'));
+    expect(await latestPlatformTimeOf(app, 'at', by(null))).toBeUndefined();
   });
 
   it('fails, rather than passes, on a time that isn’t one', async () => {

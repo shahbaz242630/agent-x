@@ -11,7 +11,7 @@
 // a few index entries however many events of the action the chain holds (SA2);
 // any other name goes as a bound value. The containment test stays beside
 // each, so what matches is exactly what matched before: a string fact, equal.
-import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
+import { type Expression, type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import type { PlatformControlsTables } from './tables.ts';
 
@@ -68,14 +68,20 @@ export interface PlatformEventsMatching {
   readonly oneOf?: Readonly<Record<string, readonly string[]>>;
   /** Facts none of which may be one of the values listed; a fact the details don't hold is none of them. */
   readonly noneOf?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Facts each equal to what an expression of the same statement reads (say, a subquery), so a value
+   * found elsewhere costs no trip of its own; an expression that reads nothing (null) matches no event.
+   */
+  readonly factsFrom?: Readonly<Record<string, Expression<string | null>>>;
 }
 
 /** The condition on an event's details that `matching` asks for. */
-const matches = ({ action, facts, oneOf = {}, noneOf = {} }: PlatformEventsMatching) =>
+const matches = ({ action, facts, oneOf = {}, noneOf = {}, factsFrom = {} }: PlatformEventsMatching) =>
   sql.join(
     [
       sql`action = ${action}`,
       ...Object.entries(facts).map(([name, value]) => sql`${fact(name)} = ${value}`),
+      ...Object.entries(factsFrom).map(([name, value]) => sql`${fact(name)} = ${value}`),
       sql`details::jsonb @> ${JSON.stringify(facts)}::jsonb`,
       ...Object.entries(oneOf).map(([name, values]) => sql`${fact(name)} = any(${values}::text[])`),
       ...Object.entries(noneOf).map(
