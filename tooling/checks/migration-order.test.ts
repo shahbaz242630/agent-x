@@ -326,12 +326,22 @@ describe('a migration doing what no coming entry describes', () => {
     [
       'a new function whose body makes a trigger (then called)',
       'CREATE FUNCTION app.helper() RETURNS void LANGUAGE sql AS $$ CREATE TRIGGER evil AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.guard() $$; SELECT app.helper();',
-      'writes app.helper with a body that changes triggers or routines, or runs built SQL',
+      'writes app.helper with a body that changes triggers or routines, runs built SQL, or grants',
     ],
     [
       'a new function whose body runs built SQL',
       "CREATE FUNCTION app.helper() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'drop function app.guard() cascade'; END $$; CALL app.helper();",
-      'writes app.helper with a body that changes triggers or routines, or runs built SQL',
+      'writes app.helper with a body that changes triggers or routines, runs built SQL, or grants',
+    ],
+    [
+      'a new function whose body grants a right (then called)',
+      'CREATE FUNCTION app.helper() RETURNS void LANGUAGE plpgsql AS $$ BEGIN GRANT SELECT ON app.things TO agentx_operator; END $$; SELECT app.helper();',
+      'writes app.helper with a body that changes triggers or routines, runs built SQL, or grants',
+    ],
+    [
+      'a new function whose body revokes, in SQL',
+      'CREATE FUNCTION app.helper() RETURNS void LANGUAGE sql AS $$ REVOKE SELECT ON app.things FROM agentx_app $$; SELECT app.helper();',
+      'writes app.helper with a body that changes triggers or routines, runs built SQL, or grants',
     ],
     [
       'attaching a known table as a partition of one with a trigger',
@@ -479,6 +489,16 @@ describe("a migration granting the operator's role a right (OR2b)", () => {
       'a DO block with a quoted body granting it a right',
       "DO 'BEGIN GRANT SELECT ON identity.contacts TO AGENTX_OPERATOR; END';",
       "runs a DO block naming the operator's role",
+    ],
+    [
+      'a Unicode-escaped role name',
+      String.raw`GRANT SELECT ON identity.contacts TO U&"agentx\005foperator";`,
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'the role hidden between two quoted names holding apostrophes',
+      `GRANT SELECT ("a'b") ON identity.contacts TO agentx_operator, "x'y";`,
+      "grants the operator's role a right this check can't print",
     ],
   ])('is refused outright: %s', (_what, sql, what) => {
     expect(refusedFor(sql, coming)).toEqual([`0002_later.sql ${what}${OUTRIGHT}`]);

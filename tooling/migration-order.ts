@@ -237,9 +237,12 @@ const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?(?:functio
 const ALTER_ROUTINE = /^(?:alter|drop) (?:function|procedure|routine) (?:if exists )?(.*)$/;
 const SWITCHED_TRIGGER = /^alter table .* (?:enable|disable)(?: replica| always)? trigger /;
 const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
-/** A body that makes, alters or drops a trigger or routine, or runs SQL it builds: what it would do can't be read here. */
+/**
+ * A body that makes, alters or drops a trigger or routine, runs SQL it builds, or grants or revokes (S187 review: a
+ * function the migration then calls could grant unseen): what it would do can't be read here.
+ */
 const BODY_DDL =
-  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)/i;
+  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)|\b(?:grant|revoke)\b|\bdefault\s+privileges\b/i;
 /** A table attached as a partition takes the parent's row triggers. */
 const ATTACH_PARTITION = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?\S+ attach partition ${NAME}`);
 
@@ -318,7 +321,7 @@ function written(fn: Named, words: string, bodies: readonly string[], before: Bu
   const body = bodyOf(words, bodies);
   if (body === undefined) return refused(`writes ${fn.name} with no dollar-quoted body`);
   if (BODY_DDL.test(body))
-    return refused(`writes ${fn.name} with a body that changes triggers or routines, or runs built SQL`);
+    return refused(`writes ${fn.name} with a body that changes triggers or routines, runs built SQL, or grants`);
   const hash = hashOf(body);
   own.bodies.set(fn.name, hash);
   const was = before.bodies.get(fn.name);
@@ -389,8 +392,18 @@ const plainPart = (part: string): string | undefined => {
 /** The operator's role named anywhere, in any case. */
 const OPERATOR_NAMED = new RegExp(String.raw`\b${OPERATOR_ROLE}\b`, 'i');
 
-/** Whether a statement's words, their strings taken out, name the operator's role. */
-const namesOperator = (words: string): boolean => OPERATOR_NAMED.test(words.replaceAll(/'(?:[^']|'')*'/g, "''"));
+/** A Unicode-escaped identifier or string (`U&"…"`, `U&'…'`), which could spell the role unread. */
+const UNICODE_ESCAPED = /\bu&["']/i;
+
+/**
+ * Whether a statement's words, their strings taken out, name the operator's role. A Unicode escape counts as naming
+ * it (its grant is then refused, as unreadable); a quoted name's apostrophes go first, so two can't hide the role.
+ */
+const namesOperator = (words: string): boolean =>
+  UNICODE_ESCAPED.test(words) ||
+  OPERATOR_NAMED.test(
+    words.replaceAll(/"(?:[^"]|"")*"/g, (quoted) => quoted.replaceAll("'", '')).replaceAll(/'(?:[^']|'')*'/g, "''"),
+  );
 
 /** The rights one privilege of a grant gives on its tables, as the guard prints them; undefined for a form it can't. */
 function rightsOf(privilege: string, tables: readonly string[]): string[] | undefined {
