@@ -22,7 +22,7 @@ import {
   contactAddressFor,
   countingContactsFor,
   factorRemovalsDue,
-  keptPeopleOf,
+  keptPersonReader,
   membersFor,
   resetLinkFor,
 } from '@agentx/core/modules/identity';
@@ -457,10 +457,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         // A paid supplier's email, from the payment's verified records (Phase 4 C2b).
         remittances: createRemittances({ database, ...logged }),
         // The name and address Agent X keeps of the person our team's reset is about (0049, 0087).
-        personOf: async (userId) => {
-          const kept = (await keptPeopleOf(database, keys, [userId])).get(userId.toLowerCase());
-          return kept === undefined ? undefined : { name: kept.name, email: kept.email };
-        },
+        personOf: keptPersonReader(database, keys),
         fetch: outboundFetch,
         logger,
       }),

@@ -254,5 +254,5 @@ export {
   stepUpDetails,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
-export { type KeptPerson, keptPeopleOf } from './infrastructure/user-contacts.ts';
+export { type KeptPerson, keptPeopleOf, keptPersonReader } from './infrastructure/user-contacts.ts';
 export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';
