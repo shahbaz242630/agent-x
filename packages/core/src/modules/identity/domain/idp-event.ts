@@ -122,11 +122,7 @@ export interface OurLoginChanges {
 }
 
 /** The roles our service users are given (Secrets-Register): the read-only viewers, and the resets' user manager. */
-export const OUR_SERVICE_ROLES: ReadonlySet<string> = new Set([
-  'IAM_OWNER_VIEWER',
-  'ORG_OWNER_VIEWER',
-  'ORG_USER_MANAGER',
-]);
+const OUR_SERVICE_ROLES: ReadonlySet<string> = new Set(['IAM_OWNER_VIEWER', 'ORG_OWNER_VIEWER', 'ORG_USER_MANAGER']);
 
 /** A copied event, as far as telling our own routine change apart needs it. */
 interface ChangeSeen {
