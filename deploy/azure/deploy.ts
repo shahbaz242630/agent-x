@@ -2176,7 +2176,9 @@ const THEN_PAUSE = `Set the hand-off pause on the new server now (jobs.ts run db
 /**
  * `apps --api-stopped` (AZ25, playbook L): a restored server doesn't hold the hand-off pause set after its point, and
  * no job can reach it before this deployment moves their host, so the API (whose own process hands payments off on
- * staging) is stopped first, and the deployment is sent only once Azure reads it stopped.
+ * staging) is stopped first, and the deployment is sent only once Azure reads it stopped. Staging alone (AZ26): on
+ * production the jobs app runs the hand-offs always, so it must be stopped and confirmed too before this serves there
+ * (deploy.test.ts fails the day deploy.ts learns another environment).
  */
 function stopApi(steps: Steps, subscription: string): void {
   // A load run's jobs app runs the hand-offs too (4D2e D13): it would move to the new host with the rest, unpaused.
