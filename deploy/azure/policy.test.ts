@@ -4530,6 +4530,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'Microsoft.Authorization/policyAssignments/write',
       'Microsoft.Authorization/policyAssignments/delete',
       'Microsoft.Authorization/policyExemptions/write',
+      'Microsoft.Authorization/policyDefinitions/write',
+      'Microsoft.Authorization/policyDefinitions/delete',
+      'Microsoft.Authorization/roleDefinitions/write',
+      'Microsoft.Authorization/locks/delete',
+      'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+      'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+      'Microsoft.App/containerApps/getAuthToken/action',
+      'Microsoft.App/jobs/getAuthToken/action',
+      'Microsoft.KeyVault/vaults/write',
+      'Microsoft.KeyVault/vaults/accessPolicies/write',
     ]) {
       expect(brokenRules(changed(RELEASE_ROLE, adding(action)))).toEqual(['release-identity', 'role-actions']);
     }
@@ -4946,7 +4956,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
         at(staging.predictedResources.find(DEFINITION('allowed-types'))?.properties, 'policyRule', 'if', 'not', 'in'),
       );
       // The list is staging's own types (a load run's and Stage G's are among them) and the deployments' records.
-      const made = [...staging.predictedResources.map((resource) => resource.type), 'Microsoft.Resources/deployments'];
+      // #627's activity-log alerts are allowed before they land, as the foundation that brings them is judged by it.
+      const made = [
+        ...staging.predictedResources.map((resource) => resource.type),
+        'Microsoft.Resources/deployments',
+        'Microsoft.Insights/activityLogAlerts',
+      ];
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
       expect(ALLOWED_TYPES).toHaveLength(new Set(made).size);
@@ -4958,6 +4973,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       });
       expect(policyProblemsOf(fewer)).toEqual([
         'agentx-staging-allowed-types: refuses vnet-agentx-staging, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        exactly,
+      ]);
+      // #627's alerts left out: the foundation that brings them would be refused.
+      const noAlerts = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.filter((each) => each !== 'Microsoft.Insights/activityLogAlerts');
+      });
+      expect(policyProblemsOf(noAlerts)).toEqual([
+        'agentx-staging-allowed-types: refuses an activity-log alert, which this deployment ships or a release sends: Azure would refuse our own deploy',
         exactly,
       ]);
       const more = changed(DEFINITION('allowed-types'), (definition) => {

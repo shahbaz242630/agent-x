@@ -115,6 +115,12 @@ resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
 //   (`xms_mirid`, its resource id, in every line of CI's in staging's activity
 //   log, S188), compared without case: known when this is deployed, where the
 //   identity's principal ID is known only after
+// - what a write changed it can't see: Microsoft.App writes carry no request
+//   body in the activity log (none of 2,500+ in staging's 30 days, S188), so a
+//   stolen sign-in that rewrites migrate's command and starts it passes as a
+//   release here, and the job-start watch (#594), which compares a run with the
+//   job as it is, sees nothing either. Written down (AZ2 report): the fix reads
+//   the live API and migrate templates against the commit's
 // - the activity log reaches the workspace minutes late, so each run reads the
 //   hour before and fires on any line in it: one write tells someone up to four
 //   times, and one up to 45 minutes late still does

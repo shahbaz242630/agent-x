@@ -392,14 +392,16 @@ resource jobsByHand 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
 }
 
 // An app above four replicas, the most any environment runs (production's Zitadel; staging's load run three web copies),
-// or the jobs app above one (4D2e D12-D13).
+// or the jobs app above one (4D2e D12-D13). Known gap: a request that leaves maxReplicas out passes (the field must be
+// there, so CI's partial update passes), and Azure then takes its default, 10. Whether Azure judges a PATCH on its
+// payload or on the resource after it is to settle on staging (AZ2 report): if after, the guard goes.
 resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
   name: '${prefix}-app-replicas'
   properties: {
     policyType: 'Custom'
     mode: 'Indexed'
     displayName: 'Agent X: app replicas capped'
-    description: 'The jobs app runs one replica, and no app more than four, the most any environment runs (4D2e D12-D13).'
+    description: 'The jobs app runs one replica, and no app more than four, the most any environment runs (4D2e D12-D13). Known gap: a request without maxReplicas passes, and Azure takes its default, 10.'
     metadata: {
       category: 'Agent X'
     }
@@ -498,6 +500,7 @@ resource allowedTypes 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
             'Microsoft.DBforPostgreSQL/flexibleServers'
             'Microsoft.DBforPostgreSQL/flexibleServers/configurations'
             'Microsoft.Insights/actionGroups'
+            'Microsoft.Insights/activityLogAlerts'
             'Microsoft.Insights/diagnosticSettings'
             'Microsoft.Insights/metricAlerts'
             'Microsoft.Insights/scheduledQueryRules'

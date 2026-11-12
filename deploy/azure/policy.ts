@@ -4130,9 +4130,12 @@ const jobWatch: Check = (snapshot, expected, add) => {
 /**
  * What no custom role of the deployment may allow (AZ2): writing a door (a route
  * config reaches an app whose ingress is internal, and needs nothing on the app,
- * Security-Handoff §13), the environment itself, a grant, an Azure Policy rule
- * or an exemption from one, or a secret's listing. Without case, as Azure reads
- * an action.
+ * Security-Handoff §13), the environment itself, a grant or a role, an Azure
+ * Policy rule, its assignment or an exemption from one, a secret's listing, a
+ * token minted as an app or a job (`getAuthToken`), the vault or its access
+ * policies, a federated trust (a new way to sign in as an identity), giving an
+ * identity to a resource (`assign`), or a lock's removal. Without case, as Azure
+ * reads an action.
  */
 const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
   [
@@ -4144,6 +4147,16 @@ const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
     'Microsoft.Authorization/policyAssignments/write',
     'Microsoft.Authorization/policyAssignments/delete',
     'Microsoft.Authorization/policyExemptions/write',
+    'Microsoft.Authorization/policyDefinitions/write',
+    'Microsoft.Authorization/policyDefinitions/delete',
+    'Microsoft.Authorization/roleDefinitions/write',
+    'Microsoft.Authorization/locks/delete',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+    'Microsoft.App/containerApps/getAuthToken/action',
+    'Microsoft.App/jobs/getAuthToken/action',
+    'Microsoft.KeyVault/vaults/write',
+    'Microsoft.KeyVault/vaults/accessPolicies/write',
   ].map((action) => action.toLowerCase()),
 );
 
@@ -4172,7 +4185,7 @@ const roleActions: Check = (snapshot, _expected, add) => {
         add({
           rule: 'role-actions',
           resource: role.name,
-          message: `allows ${action}: no role of ours allows a wildcard, a door's write, the environment's, a grant, a policy rule or its exemption, or a secret's listing`,
+          message: `allows ${action}: no role of ours allows a wildcard or one of FORBIDDEN_ACTIONS: a door, the environment, a grant or a role, a policy rule, its assignment or exemption, a secret's listing, an app's token, the vault, a trust, an identity's assignment or a lock's removal`,
         });
       }
       if (action.toLowerCase() === JOB_START && role.name !== ci) {
@@ -4402,6 +4415,9 @@ export const ALLOWED_TYPES: readonly string[] = [
   'Microsoft.DBforPostgreSQL/flexibleServers',
   'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
   'Microsoft.Insights/actionGroups',
+  // #627's activity-log alerts (rules changed, rules unhealthy), allowed before they land: global, with tags, so
+  // Indexed judges them, and a list that waited would refuse the foundation that brings them.
+  'Microsoft.Insights/activityLogAlerts',
   'Microsoft.Insights/diagnosticSettings',
   'Microsoft.Insights/metricAlerts',
   'Microsoft.Insights/scheduledQueryRules',
@@ -4474,13 +4490,23 @@ function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
   const ours = [...ofType(snapshot, TYPES.app), ...ofType(snapshot, TYPES.job)].filter((found) =>
     ['api', 'migrate'].includes(jobWorkloadOf(found.name)),
   );
-  return ours.flatMap((found) => [
-    { ...found, properties: { template: { containers: [{ image: at(containersOf(found)[0], 'image') }] } } },
-    changedCopy(found, {
-      'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-load@sha256:${'0'.repeat(64)}`,
-      ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
-    }),
-  ]);
+  return [
+    ...ours.flatMap((found) => [
+      { ...found, properties: { template: { containers: [{ image: at(containersOf(found)[0], 'image') }] } } },
+      changedCopy(found, {
+        'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-load@sha256:${'0'.repeat(64)}`,
+        ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
+      }),
+    ]),
+    // #627's activity-log alert, global with tags (so Indexed judges it), before it is in the snapshot.
+    {
+      id: `${groupOf(snapshot)}/providers/Microsoft.Insights/activityLogAlerts/coming`,
+      type: 'Microsoft.Insights/activityLogAlerts',
+      name: 'an activity-log alert',
+      apiVersion: '2026-01-01',
+      location: 'global',
+    },
+  ];
 }
 
 /** What is wrong with one guardrail's definition and its assignment, or nothing. */
