@@ -9,7 +9,8 @@
 //   no Microsoft Entra logins
 // - the server admin is break-glass (ADR-002): never the app, never routine
 //   work. A login by it or by the backup role raises an alert (ADR-012 §2),
-//   and so does one by the owner role anywhere but the migration job
+//   and so does one by the owner role anywhere but the migration job, and a
+//   refused login as any of the three (MO2)
 // - TLS 1.3 at least, on every connection
 
 param location string
@@ -146,6 +147,31 @@ var settings = [
     name: 'max_connections'
     value: measured ? '120' : '50'
   }
+  // MO5: what a stall like the soak's 5 s commit pause leaves behind, so it can be named. Each checkpoint writes two
+  // lines, its start and how long its writes and syncs took (Postgres 18's default, stated here because Azure may
+  // differ). A lock waited on for longer than deadlock_timeout writes who held it and the queue, and again when
+  // granted; 1 s is Postgres's default and also when it looks for a deadlock, so it isn't raised to quieten these.
+  // Both go to the login workspace with the rest of the server's log: a few MB a day; a lock storm writes about
+  // 3 KB a wait, so its 1 GB cap needs some 300,000 waits over a second in one day (Incident-Response-Playbook §J).
+  {
+    name: 'log_checkpoints'
+    value: 'on'
+  }
+  {
+    name: 'log_lock_waits'
+    value: 'on'
+  }
+  {
+    name: 'deadlock_timeout'
+    value: '1000'
+  }
+  // The server's own count of sessions by what they wait on (Lock, IO, LWLock), the oldest transaction and deadlocks,
+  // each minute, as Azure metrics kept 93 days: nothing goes to a workspace and nothing is billed. Beside the metrics
+  // always there (CPU and its credits, IOPS, disk queue depth, IOPS and bandwidth used), a stall reads as one of them.
+  {
+    name: 'metrics.collector_database_activity'
+    value: 'on'
+  }
 ]
 
 // One at a time: the server refuses a second change while one is in progress.
@@ -196,10 +222,25 @@ resource serverLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' =
 // writes it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-LOG:  `. Both login alerts
 // match from here: anchored at "connection authorized" alone, the pattern
 // matched none of the set-up job's real logins (the first real run, S19).
-var loginLineStart = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  '
+var lineStart = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-'
+var loginLineStart = '${lineStart}LOG:  '
+
+// What each login alert reads before its judged moment: Azure's most, two days, so a line that reaches the workspace
+// late is still in view when it arrives (MO2). Reading costs nothing more; a rule's price follows how often it runs.
+var lateLinesRead = 'P2D'
+
+// The login alerts that count lines take those that arrived over the last 30 minutes, run every 15: a run starting up
+// to 15 minutes late leaves no gap, and a line may notify twice, never not at all (MO2).
+var arrivedLately = 'where ingestion_time() > ago(30m)'
+
+// The roles whose refused logins raise the alert below: the two above and the owner.
+var privilegedRoles = '${adminLogin}|agentx_backup|${ownerRole}'
 
 // ADR-012 §2: a login by the server admin or the backup role raises an alert.
-// The set-up job's own login (G2) is one of them, and expected.
+// The set-up job's own login (G2) is one of them, and expected. Counted by when
+// a line arrived over the last 30 minutes of a 15-minute rhythm, reading two
+// days back: a late line is still seen, and one may notify twice, never not at
+// all (MO2; by when it happened, a line arriving after its window was missed).
 resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: 'alert-${name}-privileged-login'
   location: location
@@ -213,12 +254,13 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [loginWorkspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    overrideQueryTimeRange: lateLinesRead
     // The table appears with the server's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
+          query: 'PGSQLServerLogs | ${arrivedLately} | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Logins'
           operator: 'GreaterThan'
@@ -232,6 +274,54 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
     // Stateless: every 15 minutes with such a login notifies again. A stateful
     // alert stays fired and says nothing about a second login while it lasts.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [serverLogs]
+}
+
+// MO2: a privileged login that was refused, which the two alerts on logins that got in never see. Postgres writes one
+// FATAL line for each, whatever log_connections says: a wrong password (also what it says for a role that doesn't
+// exist), or a connection its rules refuse (no TLS, an address not allowed). Quotes in the pattern are RE2's \x22, as
+// Kusto's verbatim strings can't hold one. Judged by when a line arrives, over the last 30 minutes of a 15-minute
+// rhythm: a late line is still seen, and one may notify twice, never not at all.
+var quote = '\\x22'
+var refusedLines = '${lineStart}FATAL:  (password authentication failed for user|no pg_hba[.]conf entry for host ${quote}[^${quote}]*${quote}, user|pg_hba[.]conf rejects connection for host ${quote}[^${quote}]*${quote}, user) ${quote}(${privilegedRoles})${quote}'
+
+resource refusedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-${name}-privileged-login-refused'
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Database: a login as the owner, the server admin or the backup role was refused'
+    description: 'SEV-1. Postgres refused a login as the owner role, the server admin or the backup role (a wrong password, or a connection its rules don\'t allow). Nothing got in, but someone inside the network may be trying those logins, or a job is still using a password changed since. Check who and from where before anything else. Runbook: Incident-Response-Playbook.md section I.'
+    severity: 1
+    enabled: true
+    scopes: [loginWorkspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    overrideQueryTimeRange: lateLinesRead
+    // The table appears with the server's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'PGSQLServerLogs | ${arrivedLately} | where Message matches regex @"${refusedLines}" | summarize Refused = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Refused'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless, like the alerts beside it.
     autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]
@@ -254,39 +344,42 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // would otherwise quieten both login alerts at once).
 //
 // Azure's lines for the job reach the workspace up to 9 minutes after they
-// happen, Postgres's within 4 (S33), so logins and starts are judged only once
-// 20 minutes old, over a band of 30 minutes that two runs 15 minutes apart
-// both see: anything unpaired notifies twice, the first time within about 35
-// minutes. Each run reads the hour before it (overrideQueryTimeRange), so
-// whatever a judged login or start is paired with is always in view. Whatever
-// breaks the pairing on either side (the job renamed, Azure rewording a line
-// or leaving out the run's name, the migration opening a second connection)
-// fires it on every release. A query that stops running at all is another
-// matter (Carry-Forward.md).
+// happen, Postgres's within 4 (S33), so a login or a start is judged once it is
+// 20 minutes old, or once it arrives if it arrives later than that (MO2: judged
+// by its age alone, a line over about 35 minutes late was never judged at all).
+// The band is the last 30 minutes of those moments, which two runs 15 minutes
+// apart both see: anything unpaired notifies twice, the first time within
+// about 35 minutes of the login, or within 15 of a late line arriving. Each
+// run reads the two days before it (overrideQueryTimeRange, Azure's most), so
+// a late line and whatever it is paired with are in view. Whatever breaks the
+// pairing on either side (the job renamed, Azure rewording a line or leaving
+// out the run's name, the migration opening a second connection) fires it on
+// every release. A query that stops running at all turns the rule unhealthy,
+// which the alert-rule watch in monitoring.bicep reports.
 var ownerLoginQuery = join(
   [
     'let near = 2m;'
     'let starts = ContainerAppSystemLogs'
     '    | where _ResourceId =~ "${appsEnvironmentId}" and JobName == "${migrateJobName}" and Reason == "ContainerStarted" and isnotempty(ReplicaName)'
-    '    | project Start = TimeGenerated, Run = ReplicaName;'
+    '    | project Start = TimeGenerated, Run = ReplicaName, Judged = max_of(ingestion_time(), TimeGenerated + 20m);'
     'let logins = PGSQLServerLogs'
     '    | where Message matches regex @"${loginLineStart}connection authorized: user=${ownerRole} "'
-    '    | project Login = TimeGenerated, Message;'
+    '    | project Login = TimeGenerated, Message, Judged = max_of(ingestion_time(), TimeGenerated + 20m);'
     'let paired = logins'
     '    | extend Key = 1'
-    '    | join kind=leftouter (starts | extend Key = 1) on Key'
+    '    | join kind=leftouter (starts | project-away Judged | extend Key = 1) on Key'
     '    | extend Gap = coalesce(abs(Login - Start), 1d)'
-    '    | summarize arg_min(Gap, Run) by Login, Message;'
+    '    | summarize arg_min(Gap, Run) by Login, Message, Judged;'
     'let claims = paired'
     '    | where Gap <= near'
     '    | summarize Claims = count() by Run;'
     'let strays = paired'
-    '    | where Login between (ago(50m) .. ago(20m))'
+    '    | where Judged between (ago(30m) .. now())'
     '    | join kind=leftouter claims on Run'
     '    | where Gap > near or Claims > 1'
     '    | project Run;'
     'let unclaimed = starts'
-    '    | where Start between (ago(50m) .. ago(20m))'
+    '    | where Judged between (ago(30m) .. now())'
     '    | join kind=leftanti claims on Run'
     '    | project Run;'
     'union strays, unclaimed'
@@ -308,7 +401,7 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [loginWorkspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
-    overrideQueryTimeRange: 'PT1H'
+    overrideQueryTimeRange: lateLinesRead
     // Both tables appear with their first log lines, after this rule exists.
     skipQueryValidation: true
     criteria: {

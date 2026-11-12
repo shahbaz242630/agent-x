@@ -367,6 +367,10 @@ const EMAIL_DOMAIN = type('Microsoft.Communication/emailServices/domains');
 const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
 const LOGIN_ALERT = named(/-privileged-login$/);
 const OWNER_ALERT = named(/-owner-login$/);
+const REFUSED_ALERT = named(/-privileged-login-refused$/);
+const ACTIVITY_ALERTS = type('Microsoft.Insights/activityLogAlerts');
+const RULES_CHANGED = named(/^alert-agentx-stg-alert-rules-changed$/);
+const RULES_UNHEALTHY = named(/^alert-agentx-stg-alert-rules-unhealthy$/);
 const CAP_ALERT = named(/-log-cap-reached$/);
 const QUOTA_ALERT = named(/-log-quota$/);
 const setting = (name: string) => (resource: PredictedResource) => resource.name.endsWith(`/${name}`);
@@ -409,6 +413,12 @@ const settingsOf = (job: Mutable): Mutable[] => at(containerOf(job), 'env') as M
 const secretNamed = (job: Mutable, name: string): Mutable =>
   declaredSecrets(job).find((secret) => secret.name === name) ?? {};
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
+/** A change to an alert's query, which must change it: a pattern that no longer matches fails rather than passing unchanged. */
+const edited = (from: string | RegExp, to: string) => (alert: Mutable) => {
+  const before = String(criterion(alert).query);
+  criterion(alert).query = before.replace(from, to);
+  expect(criterion(alert).query).not.toBe(before);
+};
 /** Changes to a SEV-1 alert's timing that leave minutes unwatched, or make it wait for more than one window. */
 const LATE_OR_BLIND: readonly ((alert: Mutable) => void)[] = [
   (alert) => (inside(alert, 'properties').windowSize = 'PT5M'),
@@ -571,6 +581,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-quota',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-cap-reached',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-cap-reached',
+      'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-changed',
+      'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-unhealthy',
       'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
       'Microsoft.Consumption/budgets budget-agentx-staging',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
@@ -597,10 +609,17 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pgms_wait_sampling\.query_capture_mode$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/track_io_timing$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/max_connections$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_checkpoints$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_lock_waits$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/deadlock_timeout$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/metrics\.collector_database_activity$/),
       'Microsoft.Authorization/locks keep-live-database',
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login-refused$/,
       ),
       expect.stringMatching(/^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-owner-login$/),
       expect.stringMatching(/^Microsoft\.Insights\/metricAlerts alert-psql-agentx-stg-[a-z0-9]{6}-disk$/),
@@ -1011,6 +1030,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const pick of [COMMUNICATION, EMAIL_SERVICE, EMAIL_DOMAIN]) {
       expect(brokenRules(changed(pick, (resource) => (resource.location = 'uaenorth')))).toEqual(['in-country']);
     }
+    // Activity log alerts too (MO2): Azure offers them in Global and two European regions, never the UAE.
+    expect(brokenRules(changed(RULES_CHANGED, (alert) => (alert.location = 'uaenorth')))).toEqual(['in-country']);
+    expect(brokenRules(changed(RULES_CHANGED, (alert) => (alert.location = 'westeurope')))).toEqual(['in-country']);
     expect(brokenRules(staging, { region: 'westeurope', environment: 'staging' })).toEqual(['in-country']);
   });
 
@@ -1163,7 +1185,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').severity = 2)))).toEqual(
       expect.arrayContaining(['database-logins']),
     );
-    for (const change of LATE_OR_BLIND) {
+    for (const change of [
+      ...LATE_OR_BLIND,
+      // Counted by when it happened, so a line arriving after its window is missed, or over too short a stretch (MO2).
+      edited('where ingestion_time() > ago(30m)', 'where TimeGenerated > ago(30m)'),
+      edited('where ingestion_time() > ago(30m) | ', ''),
+      // A window no longer than the runs' rhythm: a run starting late leaves a sliver unseen.
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(20m)'),
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(15m)'),
+      // Reading too little back for a late line to be in view when it arrives.
+      (alert: Mutable) => (inside(alert, 'properties').overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => delete inside(alert, 'properties').overrideQueryTimeRange,
+    ]) {
       expect(brokenRules(changed(LOGIN_ALERT, change))).toEqual(['database-logins']);
     }
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').autoMitigate = true)))).toEqual([
@@ -1209,11 +1242,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
 
   it("owner-login-alert: no alert on the owner's logins, or one that can't fire, misjudges a deploy, or fires too late or too quietly", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
-    const edited = (from: string | RegExp, to: string) => (alert: Mutable) => {
-      const before = String(criterion(alert).query);
-      criterion(alert).query = before.replace(from, to);
-      expect(criterion(alert).query).not.toBe(before);
-    };
     expect(brokenRules(without(OWNER_ALERT))).toEqual(['owner-login-alert']);
     for (const change of [
       // Another role's logins, or another job's starts, or another deployment's, or any environment's.
@@ -1236,13 +1264,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
       edited('union strays, unclaimed', 'union strays'),
       edited('join kind=leftanti claims', 'join kind=leftsemi claims'),
       // A band judged too soon (before Azure's lines for the job arrive), or one a run can miss.
-      edited('ago(20m)', 'ago(5m)'),
-      edited('ago(50m)', 'ago(30m)'),
+      edited('TimeGenerated + 20m);\nlet logins', 'TimeGenerated + 5m);\nlet logins'),
+      edited('TimeGenerated + 20m);\nlet paired', 'TimeGenerated + 5m);\nlet paired'),
+      edited('between (ago(30m) .. now())', 'between (ago(15m) .. now())'),
+      edited('starts\n    | where Judged between (ago(30m)', 'starts\n    | where Judged between (ago(15m)'),
+      // A late line judged by its age alone again: one over about 35 minutes late never judged (MO2).
+      edited('max_of(ingestion_time(), TimeGenerated + 20m);\nlet logins', 'TimeGenerated + 20m;\nlet logins'),
+      edited('max_of(ingestion_time(), TimeGenerated + 20m);\nlet paired', 'TimeGenerated + 20m;\nlet paired'),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       ...LATE_OR_BLIND,
-      // Reading less than the hour, or running less often than the band needs.
-      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT30M'),
+      // Reading less than two days, so a late line or what it pairs with is out of view, or running less often than the band needs.
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
       (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
       (alert: Mutable) => {
         properties(alert).evaluationFrequency = 'PT30M';
@@ -1305,6 +1338,198 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(other).not.toMatch(pattern);
     }
+  });
+
+  it('refused-login-alert: no alert on a refused privileged login, or one that misses a role, a kind of refusal or a late line, or fires too quietly (MO2)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    expect(brokenRules(without(REFUSED_ALERT))).toEqual(['refused-login-alert']);
+    for (const change of [
+      // A role left out, or only the line's level wrong, or another level.
+      edited('|agentx_owner)', ')'),
+      edited('(agentx_admin|', '('),
+      edited('|agentx_backup|', '|'),
+      edited('FATAL:  ', 'LOG:  '),
+      edited('FATAL:  ', 'FATAL: '),
+      // A kind of refusal left out: a wrong password, or a connection the server's rules refuse.
+      edited('password authentication failed for user|', ''),
+      edited('|no pg_hba[.]conf entry for host', '|no pg_hba[.]conf entry for user'),
+      edited('|pg_hba[.]conf rejects connection for host \\x22[^\\x22]*\\x22, user)', ')'),
+      // Counted by when it happened, so a line arriving late falls between runs, or over too short a stretch.
+      edited('where ingestion_time() > ago(30m)', 'where TimeGenerated > ago(30m)'),
+      // A window no longer than the runs' rhythm: a run starting late leaves a sliver unseen.
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(20m)'),
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(15m)'),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+      (alert: Mutable) => (properties(alert).scopes = [idOf(MAIN_WORKSPACE)]),
+    ]) {
+      expect(brokenRules(changed(REFUSED_ALERT, change))).toEqual(['refused-login-alert']);
+    }
+    expect(brokenRules(changed(REFUSED_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'refused-login-alert',
+    ]);
+    expect(brokenRules(changed(REFUSED_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'refused-login-alert',
+    ]);
+    expect(brokenRules(changed(REFUSED_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'refused-login-alert',
+    ]);
+  });
+
+  it('SEC-DB-04 the refused-login alert matches the lines Postgres 18 writes for a refused privileged login, and no others (MO2)', () => {
+    const query = String(criterion(staging.predictedResources.find(REFUSED_ALERT) as unknown as Mutable).query);
+    const source = /matches regex @"([^"]+)"/.exec(query)?.[1];
+    expect(source).toBeDefined();
+    // Kusto's regular expressions are RE2; `\x22` and the rest read the same in JavaScript.
+    const pattern = new RegExp(source ?? '(?!)');
+    const line = (level: string, message: string, session = '6ab011c5.8f4ee') =>
+      `2026-11-12 10:00:00 UTC-${session}-${level}:  ${message}`;
+    // Postgres 18's own words for each refusal (src/backend/libpq/auth.c), the role in double quotes.
+    const badLogin = (role: string) => `password authentication failed for user "${role}"`;
+    const noEntry = (role: string) =>
+      `no pg_hba.conf entry for host "10.40.0.16", user "${role}", database "agentx", no encryption`;
+    const rejected = (role: string) =>
+      `pg_hba.conf rejects connection for host "10.40.0.16", user "${role}", database "postgres", SSL encryption`;
+    for (const role of ['agentx_owner', 'agentx_admin', 'agentx_backup']) {
+      for (const refusal of [badLogin, noEntry, rejected]) {
+        expect(line('FATAL', refusal(role))).toMatch(pattern);
+        expect(line('FATAL', refusal(role), '6ab0abcd.1')).toMatch(pattern);
+      }
+    }
+    for (const other of [
+      line('FATAL', badLogin('agentx_app')),
+      line('FATAL', badLogin('agentx_owner2')),
+      line('FATAL', badLogin('azuresu')),
+      line('FATAL', noEntry('agentx_app')),
+      line('LOG', badLogin('agentx_owner')),
+      line(
+        'DETAIL',
+        'Connection matched file "/datadrive/pg/data/pg_hba.conf" line 29: "host all all 0.0.0.0/0 scram-sha-256"',
+      ),
+      line('LOG', 'connection authorized: user=agentx_owner database=agentx'),
+      line('LOG', `statement: SELECT '${badLogin('agentx_owner')}'`),
+      `FATAL:  ${badLogin('agentx_owner')}`,
+    ]) {
+      expect(other).not.toMatch(pattern);
+    }
+  });
+
+  describe('alert-rules-watch: the alert rules themselves switched off, changed, deleted or failing (MO2)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const allOf = (alert: Mutable): Mutable[] => at(alert, 'properties', 'condition', 'allOf') as Mutable[];
+    const anyOf = (alert: Mutable): Mutable[] => allOf(alert).at(-1)?.anyOf as Mutable[];
+
+    it('holds on staging, and each watch missing is refused', () => {
+      expect(staging.predictedResources.filter(ACTIVITY_ALERTS)).toHaveLength(2);
+      // Alert processing rules, which can mute every alert, and a deleted log setting, which empties the login
+      // alerts' table while they run healthy; never the writes every foundation deploy makes to those settings.
+      const operations = anyOf(
+        structuredClone(staging.predictedResources.find(RULES_CHANGED)) as unknown as Mutable,
+      ).map((one) => one.equals);
+      expect(operations).toHaveLength(11);
+      expect(operations).toEqual(
+        expect.arrayContaining([
+          'Microsoft.AlertsManagement/actionRules/write',
+          'Microsoft.AlertsManagement/actionRules/delete',
+          'Microsoft.Insights/diagnosticSettings/delete',
+        ]),
+      );
+      expect(operations).not.toContain('Microsoft.Insights/diagnosticSettings/write');
+      expect(operations).not.toContain('Microsoft.DBforPostgreSQL/flexibleServers/configurations/write');
+      expect(brokenRules(without(ACTIVITY_ALERTS))).toEqual(['alert-rules-watch']);
+      expect(brokenRules(without(RULES_CHANGED))).toEqual(['alert-rules-watch']);
+      expect(brokenRules(without(RULES_UNHEALTHY))).toEqual(['alert-rules-watch']);
+      // The two swapped for one another's conditions still leave both watched.
+      const changedCondition = at(staging.predictedResources.find(RULES_CHANGED)?.properties, 'condition');
+      const unhealthyCondition = at(staging.predictedResources.find(RULES_UNHEALTHY)?.properties, 'condition');
+      const swapped = changed(
+        RULES_CHANGED,
+        (alert) => (properties(alert).condition = structuredClone(unhealthyCondition)),
+      );
+      expect(
+        brokenRules(
+          changed(
+            RULES_UNHEALTHY,
+            (alert) => (properties(alert).condition = structuredClone(changedCondition)),
+            swapped,
+          ),
+        ),
+      ).toEqual([]);
+    });
+
+    it('each way of switching it off, narrowing it or sending it nowhere is refused', () => {
+      const either = [RULES_CHANGED, RULES_UNHEALTHY];
+      const changes: readonly (readonly [(resource: PredictedResource) => boolean, (alert: Mutable) => void])[] = [
+        ...either.flatMap((pick) => [
+          [pick, (alert: Mutable) => (properties(alert).enabled = false)] as const,
+          // Another resource group, or a resource in this one only.
+          [pick, (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/resourceGroups/other'])] as const,
+          [pick, (alert: Mutable) => (properties(alert).scopes = [idOf(LOGIN_ALERT)])] as const,
+          [pick, (alert: Mutable) => (properties(alert).scopes = [])] as const,
+          // One more condition narrows what fires: only someone else's changes, say.
+          [pick, (alert: Mutable) => allOf(alert).push({ field: 'caller', equals: 'someone@example.com' })] as const,
+          [pick, (alert: Mutable) => allOf(alert).shift()] as const,
+          // Not a SEV-1, or no runbook.
+          [
+            pick,
+            (alert: Mutable) =>
+              (properties(alert).description = String(properties(alert).description).replace('SEV-1.', 'SEV-2.')),
+          ] as const,
+          [
+            pick,
+            (alert: Mutable) =>
+              (properties(alert).description = String(properties(alert).description).replace(/ Runbook: .*$/, '')),
+          ] as const,
+          // Sent nowhere, or to a group of nobody's.
+          [pick, (alert: Mutable) => (inside(alert, 'properties', 'actions').actionGroups = [])] as const,
+          [
+            pick,
+            (alert: Mutable) =>
+              (inside(alert, 'properties', 'actions').actionGroups = [{ actionGroupId: '/subscriptions/x/elsewhere' }]),
+          ] as const,
+          // A group of nobody's beside ours: every group it names must be this deployment's (mutation 8b).
+          [
+            pick,
+            (alert: Mutable) =>
+              (inside(alert, 'properties', 'actions').actionGroups as Mutable[]).push({
+                actionGroupId: '/subscriptions/x/elsewhere',
+              }),
+          ] as const,
+        ]),
+        // A kind of change left unwatched: each of the eleven, written or deleted (alert processing rules among them),
+        // or a diagnostic setting deleted.
+        ...Array.from(
+          { length: 11 },
+          (_unused, index) => [RULES_CHANGED, (alert: Mutable) => anyOf(alert).splice(index, 1)] as const,
+        ),
+        [
+          RULES_CHANGED,
+          (alert: Mutable) =>
+            (anyOf(alert)[1] = { field: 'operationName', equals: 'Microsoft.Insights/scheduledQueryRules/read' }),
+        ],
+        // Changes that failed, or every status, or another category.
+        [RULES_CHANGED, (alert: Mutable) => (allOf(alert)[1] = { field: 'status', equals: 'Failed' })],
+        [RULES_CHANGED, (alert: Mutable) => (allOf(alert)[0] = { field: 'category', equals: 'Security' })],
+        // A health state left out, another resource type, or another category.
+        [RULES_UNHEALTHY, (alert: Mutable) => anyOf(alert).splice(0, 1)],
+        [RULES_UNHEALTHY, (alert: Mutable) => anyOf(alert).splice(1, 1)],
+        [
+          RULES_UNHEALTHY,
+          (alert: Mutable) => (allOf(alert)[1] = { field: 'resourceType', equals: 'Microsoft.Insights/metricAlerts' }),
+        ],
+        [RULES_UNHEALTHY, (alert: Mutable) => (allOf(alert)[0] = { field: 'category', equals: 'Administrative' })],
+      ];
+      for (const [pick, change] of changes) {
+        expect(brokenRules(changed(pick, change))).toEqual(['alert-rules-watch']);
+      }
+    });
   });
 
   it('database-tls: TLS not required, or older than 1.3', () => {
@@ -1394,6 +1619,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
       everyOn,
     );
     expect(brokenRules(loadSized)).toEqual([]);
+  });
+
+  it('database-stall-evidence: checkpoints or lock waits unlogged, lock waits logged only later, or the wait counts off, on any size (MO5)', () => {
+    const SETTING = (name: string) => (resource: PredictedResource) =>
+      type('Microsoft.DBforPostgreSQL/flexibleServers/configurations')(resource) && resource.name.endsWith(`/${name}`);
+    const wrong: readonly (readonly [string, string])[] = [
+      ['log_checkpoints', 'off'],
+      ['log_lock_waits', 'off'],
+      // Lock waits under 5 s go unlogged, so the soak's pause leaves no line.
+      ['deadlock_timeout', '5000'],
+      ['deadlock_timeout', '10s'],
+      ['metrics.collector_database_activity', 'off'],
+    ];
+    const loadSized = (from: Snapshot) =>
+      changed(SERVER, (server) => (server.sku = { name: 'Standard_D2ads_v5', tier: 'GeneralPurpose' }), from);
+    for (const [name, value] of wrong) {
+      const changedOne = changed(SETTING(name), (setting) => (inside(setting, 'properties').value = value));
+      expect({ name, value, broken: brokenRules(changedOne) }).toEqual({
+        name,
+        value,
+        broken: ['database-stall-evidence'],
+      });
+      // Not stated leaves whatever the server had.
+      const unstated = staging.predictedResources.filter((resource) => !SETTING(name)(resource));
+      expect(unstated).toHaveLength(staging.predictedResources.length - 1);
+      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual([
+        'database-stall-evidence',
+      ]);
+    }
+    // The load size too: it is where a stall is most likely, and its measurements don't stand in for these.
+    expect(
+      brokenRules(
+        loadSized(changed(SETTING('log_lock_waits'), (setting) => (inside(setting, 'properties').value = 'off'))),
+      ),
+    ).toContain('database-stall-evidence');
   });
 
   it('database-network: any door wider than 5432 from the apps and the subnet itself, or a Postgres subnet without its rules', () => {
@@ -2555,9 +2815,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       ),
     ).toEqual(['alert-delivery']);
+    // The watches on the alert rules (MO2) send to the same group.
     expect(brokenRules(changed(ACTION_GROUP, (group) => (properties(group).enabled = false)))).toEqual([
       'database-disk',
       'alert-delivery',
+      'alert-rules-watch',
     ]);
     expect(
       brokenRules(
@@ -2566,7 +2828,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           properties(group).azureAppPushReceivers = [];
         }),
       ),
-    ).toEqual(['database-disk', 'alert-delivery']);
+    ).toEqual(['database-disk', 'alert-delivery', 'alert-rules-watch']);
     // A SEV-1 alert muted after it fires tells nobody of the next window; a
     // SEV-2 one may be. The log cap is a SEV-1 since S183: every alert is blind over it.
     for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT, CAP_ALERT]) {
