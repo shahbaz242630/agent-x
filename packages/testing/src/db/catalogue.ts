@@ -14,7 +14,7 @@
 // object and roll it back, but it leaves the database as it was.
 import pg from 'pg';
 
-import type { TestDatabase } from './test-database.ts';
+import type { TestConnection } from './test-database.ts';
 
 /**
  * The search path every connection here pins, which is the one the product pins
@@ -26,8 +26,20 @@ import type { TestDatabase } from './test-database.ts';
  */
 export const CATALOGUE_OPTIONS = '-c search_path=pg_catalog,pg_temp';
 
+/**
+ * The database a check reads: the migration role's connection, and the other
+ * roles' names. A test database is one; so is the compose stack's own,
+ * which the real db-setup and migrate jobs built (AZ9, tooling/e2e/schema.e2e.test.ts).
+ */
+export interface CatalogueTarget {
+  connection(role: 'owner'): TestConnection;
+  readonly server: {
+    readonly roles: Readonly<Record<'app' | 'backup' | 'operator', { readonly user: string }>>;
+  };
+}
+
 /** A connection as the migration role, with Postgres's own catalogue first on the search path. Close it with `end()`. */
-export async function openCatalogue(database: TestDatabase): Promise<pg.Client> {
+export async function openCatalogue(database: CatalogueTarget): Promise<pg.Client> {
   const client = new pg.Client({ ...database.connection('owner'), ssl: false, options: CATALOGUE_OPTIONS });
   await client.connect();
   return client;

@@ -7,7 +7,7 @@ export {
   authorityProblems,
   type AuthorityTable,
 } from './db/authority-checks.ts';
-export { CATALOGUE_OPTIONS } from './db/catalogue.ts';
+export { CATALOGUE_OPTIONS, type CatalogueTarget } from './db/catalogue.ts';
 export {
   type Confirmer,
   confirmedWhileDemoted,

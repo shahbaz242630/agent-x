@@ -1,5 +1,6 @@
 # B7 (partner S59): the free dynamic scan of staging, OWASP ZAP's API scan and
-# Schemathesis's fuzzing from the API's own OpenAPI document
+# Schemathesis's fuzzing from the API's own OpenAPI document, then (ST4) ZAP's
+# baseline scan of the pages the origin serves, the console's
 # (tooling/dast/scan.ts). Weekly and on demand, from main only, never on a
 # pull request: staging is Free Trial compute. Report only: it never blocks
 # anything. The staging address comes from the repository secret
@@ -27,7 +28,9 @@ jobs:
     name: ZAP and Schemathesis against staging
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Each scanner's own limit (ZAP's API scan 20 minutes, Schemathesis 15, the
+    # baseline about 11), their starts and the wakes between them.
+    timeout-minutes: 75
     permissions:
       contents: read
       security-events: write

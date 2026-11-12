@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   acceptedReason,
+  BASELINE_PLAN,
+  baselinePlan,
   distinct,
   documentedPath,
   type Finding,
@@ -21,7 +23,9 @@ import {
   schemathesisFindings,
   STACK_ORIGIN,
   summaryOf,
+  TOOLS,
   zapArgs,
+  zapBaselineArgs,
   zapFindings,
 } from './scan.ts';
 
@@ -141,6 +145,67 @@ describe('B7 the dynamic scan of staging', () => {
     expect(options).toContain('-config replacer.full_list(0).matchstr=Origin');
     expect(options).toContain(`-config replacer.full_list(0).replacement=${ORIGIN}`);
     expect(options).toContain('-config replacer.full_list(0).matchtype=REQ_HEADER');
+  });
+
+  it("ST4 runs ZAP's baseline from the same pinned image, as our own plan in the mounted directory", () => {
+    expect(zapBaselineArgs('/r')).toEqual([
+      'run',
+      '--rm',
+      '--volume',
+      '/r:/zap/wrk:rw',
+      SCANNER_IMAGES.zap,
+      'zap.sh',
+      '-cmd',
+      '-autorun',
+      `/zap/wrk/${BASELINE_PLAN}`,
+    ]);
+  });
+
+  // S186 review, proven with the pinned image against a logging page: ZAP's own
+  // defaults (zap-baseline.py's plan sets neither form option and excludes
+  // nothing) POSTed a form, sent a GET form and followed /v1/auth/sign-in and
+  // /v1/auth/step-up; this plan sent GET /, /about, robots.txt and sitemap.xml alone.
+  it("ST4's plan: the spider never processes or posts a form, never goes under /v1/, and stays on the origin", () => {
+    const plan = baselinePlan(ORIGIN) as {
+      env: { contexts: { name: string; urls: string[]; includePaths: string[]; excludePaths: string[] }[] };
+      jobs: { type: string; parameters: Record<string, unknown> }[];
+    };
+    const [context] = plan.env.contexts;
+    expect(context).toEqual({
+      name: 'baseline',
+      urls: [`${ORIGIN}/`],
+      includePaths: ['https://app\\.example\\.test/.*'],
+      excludePaths: ['https://app\\.example\\.test/v1/.*'],
+    });
+    const excluded = new RegExp(`^${context?.excludePaths[0] ?? ''}$`);
+    for (const path of ['/v1/auth/sign-in?returnTo=/', '/v1/auth/step-up', '/v1/auth/callback', '/v1/members']) {
+      expect(excluded.test(`${ORIGIN}${path}`), path).toBe(true);
+    }
+    expect(excluded.test(`${ORIGIN}/`)).toBe(false);
+    expect(excluded.test(`${ORIGIN}/assets/app.js`)).toBe(false);
+
+    expect(plan.jobs.map((job) => job.type)).toEqual(['passiveScan-config', 'spider', 'passiveScan-wait', 'report']);
+    expect(plan.jobs[1]?.parameters).toEqual({
+      context: 'baseline',
+      url: `${ORIGIN}/`,
+      maxDuration: 1,
+      threadCount: 2,
+      processForm: false,
+      postForm: false,
+    });
+    expect(plan.jobs[3]?.parameters).toMatchObject({ template: 'traditional-json', reportFile: 'zap-baseline.json' });
+    // Passive alone: never an active scan's attacks.
+    expect(JSON.stringify(plan)).not.toMatch(/activeScan|openapi|ajax/i);
+  });
+
+  it("ST4 reads the baseline's report as ZAP's, under its own tool", () => {
+    const found = zapFindings(ZAP_REPORT, 'zap-baseline');
+    expect(found.map((one) => one.tool)).toEqual(found.map(() => 'zap-baseline'));
+    expect(found.map(({ rule, path }) => `${rule} ${path}`)).toEqual(
+      zapFindings(ZAP_REPORT).map(({ rule, path }) => `${rule} ${path}`),
+    );
+    // ZAP's metadata probe is accepted from the API scan alone.
+    expect(found.filter((one) => acceptedReason(one) !== undefined)).toEqual([]);
   });
 
   it('runs Schemathesis from its pinned image, gently, with our Origin, never the stateful phase', () => {
@@ -351,6 +416,7 @@ describe('B7 the dynamic scan of staging', () => {
     };
 
     expect(sarif.version).toBe('2.1.0');
+    expect(sarif.runs.map((run) => run.automationDetails.id)).toEqual(TOOLS.map((tool) => `dast/${tool}/`));
     const [zap, schemathesis] = sarif.runs;
     expect(zap?.automationDetails.id).toBe('dast/zap/');
     expect(zap?.tool.driver.rules).toEqual([{ id: 'zap/40018', shortDescription: { text: 'SQL Injection' } }]);
@@ -378,6 +444,7 @@ describe('B7 the dynamic scan of staging', () => {
 
     expect(summary).toContain('zap: high 1, medium 0, low 1, info 1');
     expect(summary).toContain('schemathesis: high 0, medium 1, low 4, info 0');
+    expect(summary).toContain('zap-baseline: high 0, medium 0, low 0, info 0');
     expect(summary).toContain('accepted (listed in tooling/dast/scan.ts): 2');
     expect(summary).not.toMatch(/example\.test|\/v1\/|\/health|https?:/);
   });
