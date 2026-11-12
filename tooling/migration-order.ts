@@ -604,9 +604,12 @@ export function leftBehind(coming: Coming, reading: Reading): string[] {
 
 const HASH = /^[0-9a-f]{64}$/;
 const text = (value: unknown): value is string => typeof value === 'string' && value !== '';
+/** Postgres's table privileges, as the guard prints them: their names, not commands. */
+const TABLE_PRIVILEGES = 'SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN';
+
 /** A coming operator right as the live guard prints one: a privilege on a table, or on a column of one, named plainly. */
 const OPERATOR_RIGHT = new RegExp(
-  String.raw`^(?:(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN) on ${PLAIN_NAME}\.${PLAIN_NAME}` +
+  String.raw`^(?:(?:${TABLE_PRIVILEGES}) on ${PLAIN_NAME}\.${PLAIN_NAME}` +
     String.raw`|(?:SELECT|INSERT|UPDATE|REFERENCES) on column ${PLAIN_NAME}\.${PLAIN_NAME}\.${PLAIN_NAME})$`,
 );
 
