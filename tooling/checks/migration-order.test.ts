@@ -408,6 +408,17 @@ describe("a migration granting the operator's role a right (OR2b)", () => {
   const coming = ['SELECT on column identity.contacts.id', 'SELECT on column identity.contacts.status'];
   const OUTRIGHT = ': no coming entry can describe that, so the image before it would raise the tamper alarm';
 
+  it('reads a body naming a grant only in a comment or a string as no grant, and one granting after them as one (0089)', () => {
+    const fn = (body: string) => `CREATE FUNCTION app.helper() RETURNS trigger LANGUAGE plpgsql AS $$ ${body} $$;`;
+    const quiet =
+      "BEGIN -- a grant summary\n /* revoke */ RAISE EXCEPTION 'without its grant summary' USING errcode = 'check_violation'; RETURN NULL; END";
+    expect(refusedFor(fn(quiet))).toEqual([]);
+    const granting = String.raw`BEGIN RAISE NOTICE E'it''s a \' grant'; GRANT SELECT ON app.things TO agentx_app; END`;
+    expect(refusedFor(fn(granting))).toEqual([
+      `0002_later.sql writes app.helper with a body that changes triggers or routines, runs built SQL, or grants${OUTRIGHT}`,
+    ]);
+  });
+
   it('on a table already built, is refused for each right the code before it did not carry', () => {
     expect(refusedFor(COLUMNS, ['SELECT on column identity.contacts.id'])).toEqual([
       "0002_later.sql grants the operator's role SELECT on column identity.contacts.status, which the code before it didn't carry in coming.json's operatorRights",
