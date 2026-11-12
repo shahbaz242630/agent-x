@@ -78,7 +78,11 @@
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. Each of
 // these, and a tied page, is told at once by an alert of its own
-// (LOGIN_SERVICE_ALERT_EVENTS, SA2), whatever its level. A run
+// (LOGIN_SERVICE_ALERT_EVENTS, SA2), whatever its level; but a token or a grant
+// that is exactly one of our own routine changes (idp-event.ts
+// isOurRoutineChange: one of our actors, to one of our service users, only
+// their roles) is an info line, `idp.token_issued_by_us` or
+// `idp.rights_changed_by_us`, which no alert counts. A run
 // never throws: a feed that can't be read, or a record that can't be written,
 // is logged and the run ends; the next picks up where this one got to.
 import { holdTransactionLock, withTenant } from '@agentx/platform/db';
@@ -99,6 +103,8 @@ import {
 } from '../../platform-controls/index.ts';
 import {
   endsSessions,
+  isOurRoutineChange,
+  type OurLoginChanges,
   isToldToThePerson,
   PASSKEY_ADDED_EVENTS,
   SECOND_FACTOR_REMOVED_EVENTS,
@@ -136,6 +142,9 @@ const PAGE = 100;
 /** Who records: the API's own job. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
+/** No actor's change is ours: what a deployment that names none gets. */
+const NONE_OURS: OurLoginChanges = { actors: new Set(), serviceUsers: new Set() };
+
 /** The lock each record's transaction takes first, named for the event: only copiers take it (SA2). */
 export const COPY_LOCK = 'idp-event-copy';
 
@@ -162,6 +171,7 @@ export function createIdpEventCopier({
   issuer,
   outbox,
   factors,
+  ours = NONE_OURS,
   logger,
 }: {
   readonly database: Kysely<Tables>;
@@ -174,6 +184,8 @@ export function createIdpEventCopier({
   readonly outbox: Outbox;
   /** Which second factors a person holds, keys apart from others (the reset token's reader); undefined: every key added counts. */
   readonly factors?: SecondFactorsHeld | undefined;
+  /** Who makes our own routine changes in the login service (SA2); undefined: none is ours, every one alerts. */
+  readonly ours?: OurLoginChanges | undefined;
   readonly logger: Logger;
 }): IdpEventCopier {
   const trail = createAuditTrail({ keys, ids });
@@ -312,13 +324,28 @@ export function createIdpEventCopier({
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
       if (await copyOnce(event, person, orgId, counts)) written += 1;
     }
-    if (written > 0) {
-      const facts = { eventType: event.type, by: byWhom(event), organisations: orgs.length };
-      if (event.eventClass === 'impersonated') logger.error('idp.impersonated', facts);
-      else if (event.eventClass === 'rights_changed') logger.warn('idp.rights_changed', facts);
-      else if (event.eventClass === 'token_issued') logger.warn('idp.token_issued', facts);
-    }
+    if (written > 0) told(event, orgs.length);
     return written;
+  };
+
+  /** The line a copied event's class asks for: an alarm, a warning the alert counts, or our own routine change. */
+  const told = (event: IdpEvent, organisations: number): void => {
+    const facts = { eventType: event.type, by: byWhom(event), organisations };
+    if (event.eventClass === 'impersonated') {
+      logger.error('idp.impersonated', facts);
+      return;
+    }
+    if (event.eventClass !== 'rights_changed' && event.eventClass !== 'token_issued') return;
+    if (isOurRoutineChange(event, ours)) {
+      const target = event.member?.userId ?? event.aggregateId;
+      const mine = { eventType: event.type, editor: event.editorUserId, target };
+      if (event.eventClass === 'rights_changed') logger.info('idp.rights_changed_by_us', mine);
+      else logger.info('idp.token_issued_by_us', mine);
+    } else if (event.eventClass === 'rights_changed') {
+      logger.warn('idp.rights_changed', facts);
+    } else {
+      logger.warn('idp.token_issued', facts);
+    }
   };
 
   /** Reads and copies pages until none is left, MOST_PAGES are read, or the signal is aborted. */

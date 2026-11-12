@@ -95,6 +95,20 @@ const proxyList = text.transform((raw, ctx) => {
   return [...new Set(entries)].sort();
 });
 
+/** Login service user IDs, as Zitadel makes them (digits), comma-separated: names, never secrets. */
+const loginIdList = text.transform((raw, ctx) => {
+  const entries = raw.split(',');
+  const bad = entries.flatMap((entry, index) => (/^\d{1,30}$/.test(entry) ? [] : [index + 1]));
+  if (bad.length > 0) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `entry ${bad.join(', ')} is not a login service user ID. Write each as its digits, comma-separated with no spaces`,
+    });
+    return z.NEVER;
+  }
+  return [...new Set(entries)].sort();
+});
+
 /** A folder the platform mounts: an absolute path, so it can't depend on where the process was started. */
 const mountedFolder = text.refine(isAbsolute, { error: 'must be an absolute path, such as /mnt/secrets' });
 
@@ -277,6 +291,11 @@ const SETTINGS = {
   // and only with sign-in; read by secretSetting (database.ts).
   AGENTX_FACTOR_RESET_TOKEN: { schema: text },
   AGENTX_FACTOR_RESET_TOKEN_FILE: { schema: text },
+  // SA2: our own routine changes in the login service, told by an info line, not the alert: the logins that make them
+  // (the break-glass admin, our set-up's service user), and our API's service users they are made for (agentx-directory,
+  // agentx-resets). Both or neither; unset, every token issued and every grant alerts. IDs, not secrets.
+  AGENTX_IDP_OUR_ACTORS: { schema: loginIdList.optional() },
+  AGENTX_IDP_OUR_SERVICE_USERS: { schema: loginIdList.optional() },
   // ADR-003 §7: a console session ends after this long unused, and this long
   // after it opened however much it is used.
   AGENTX_SESSION_IDLE_MINUTES: {
@@ -473,6 +492,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DIRECTORY_TOKEN_FILE',
       'AGENTX_FACTOR_RESET_TOKEN',
       'AGENTX_FACTOR_RESET_TOKEN_FILE',
+      'AGENTX_IDP_OUR_ACTORS',
+      'AGENTX_IDP_OUR_SERVICE_USERS',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',

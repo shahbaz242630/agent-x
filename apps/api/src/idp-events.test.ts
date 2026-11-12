@@ -81,6 +81,18 @@ describe('SEC-OPS-02 the login service’s events copied as the API runs it (B6-
     expect(copierWith(withResets).copier).toBeDefined();
   });
 
+  it('SA2: takes who makes our own routine changes, both lists or neither', () => {
+    const ours = { ...EMAIL, AGENTX_IDP_OUR_ACTORS: '312000000000000007', AGENTX_IDP_OUR_SERVICE_USERS: '2,1,2' };
+
+    expect(loadConfig(ours).idpOurChanges).toEqual({ actors: ['312000000000000007'], serviceUsers: ['1', '2'] });
+    expect(copierWith(ours).copier).toBeDefined();
+    expect(loadConfig(EMAIL).idpOurChanges).toBeUndefined();
+    expect(() => loadConfig({ ...EMAIL, AGENTX_IDP_OUR_ACTORS: '7' })).toThrow(/set both, or neither/);
+    expect(() => loadConfig({ ...ours, AGENTX_IDP_OUR_SERVICE_USERS: 'agentx-resets' })).toThrow(
+      /AGENTX_IDP_OUR_SERVICE_USERS: entry 1 is not a login service user ID/,
+    );
+  });
+
   it('never throws when it can’t read where it got to: it logs, and waits for its next run', async () => {
     const { copier, capture } = copierWith(EMAIL);
 

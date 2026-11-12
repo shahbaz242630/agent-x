@@ -245,6 +245,14 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(fingerprintedSettings(loadConfig(SETTINGS)).partner).toEqual({ mode: 'live', gateRef: GATE_REF });
   });
 
+  it('SA2: names who makes our own routine login changes when set, and keeps the hash it had when not', () => {
+    const ours = { ...SETTINGS, AGENTX_IDP_OUR_ACTORS: '7', AGENTX_IDP_OUR_SERVICE_USERS: '8,9' };
+
+    expect(fingerprintedSettings(loadConfig(ours)).idpOurChanges).toEqual({ actors: ['7'], serviceUsers: ['8', '9'] });
+    expect(hashOf(ours)).not.toBe(hashOf(SETTINGS));
+    expect(fingerprintedSettings(loadConfig(SETTINGS))).not.toHaveProperty('idpOurChanges', expect.anything());
+  });
+
   it('ignores the OIDC client secret, as it does the password', () => {
     expect(hashOf({ ...SETTINGS, AGENTX_OIDC_CLIENT_SECRET: 'other pass words' })).toBe(hashOf(SETTINGS));
   });

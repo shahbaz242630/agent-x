@@ -26,7 +26,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
-import { classOfIdpEvent } from '../domain/idp-event.ts';
+import { classOfIdpEvent, type OurLoginChanges } from '../domain/idp-event.ts';
 import { COPY_LOCK, createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
 import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
@@ -128,7 +128,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
   return { feed, asked };
 }
 
-const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
+const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurLoginChanges) =>
   createIdpEventCopier({
     database: app,
     feed,
@@ -138,6 +138,7 @@ const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
     factors,
+    ours,
     logger: testLogger(capture),
   });
 
@@ -413,6 +414,52 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     // The alert's query (environment.bicep, held to the list by policy.ts) matches on `event` alone, whatever the level.
     const problems = capture.lines().filter((line) => line.level === 'warn' || line.level === 'error');
     expect(problems.map((line) => line.event).sort()).toEqual([...LOGIN_SERVICE_ALERT_EVENTS].sort());
+  });
+
+  it('SA2: tells our own routine token and grant by an info line no alert counts, and anything else our actor does as before', async () => {
+    const ADMIN = '312000000000009999';
+    const service = zitadelId();
+    const who = await person();
+    const later = (seconds: number) => new Date(clock.now().getTime() - 10 * 60_000 + seconds * 1000);
+    const grant = (userId: string, roles: string[], seconds: number) =>
+      event('instance.member.added', '312000000000000001', {
+        aggregateType: 'instance',
+        member: { userId, roles },
+        createdAt: later(seconds),
+      });
+    const events = [
+      // Ours: our admin, a token or a viewer's role for our service user.
+      event('user.token.added', service, { createdAt: later(1) }),
+      grant(service, ['IAM_OWNER_VIEWER'], 2),
+      // The same admin, any other change: a token for a person, an owner's role for our service user.
+      event('user.token.added', who.subject, { createdAt: later(3) }),
+      grant(service, ['IAM_OWNER'], 4),
+      // Another login, our kind of change; and impersonation by our admin.
+      event('user.token.added', service, { editorUserId: '312000000000000123', createdAt: later(5) }),
+      event('user.impersonated', service, { createdAt: later(6) }),
+    ];
+    const ours = { actors: new Set([ADMIN]), serviceUsers: new Set([service]) };
+
+    await copierWith(feedOf(() => events).feed, undefined, ours).run();
+
+    const told = capture
+      .lines()
+      .filter((line) => String(line.event).startsWith('idp.'))
+      .map((line) => [line.level, line.event, line.eventType]);
+    expect(told).toEqual([
+      ['info', 'idp.token_issued_by_us', 'user.token.added'],
+      ['info', 'idp.rights_changed_by_us', 'instance.member.added'],
+      ['warn', 'idp.token_issued', 'user.token.added'],
+      ['warn', 'idp.rights_changed', 'instance.member.added'],
+      ['warn', 'idp.token_issued', 'user.token.added'],
+      ['error', 'idp.impersonated', 'user.impersonated'],
+    ]);
+    expect(lines('idp.rights_changed_by_us')).toEqual([
+      expect.objectContaining({ editor: ADMIN, target: service, eventType: 'instance.member.added' }),
+    ]);
+    // Our own are lines the alert's list leaves out.
+    expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.token_issued_by_us');
+    expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.rights_changed_by_us');
   });
 
   it('reads a full page, then the next, until one is not full', async () => {
