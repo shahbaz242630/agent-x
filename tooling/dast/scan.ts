@@ -1,7 +1,9 @@
 /**
  * The free dynamic scan of staging (B7, partner S59): OWASP ZAP's API scan and
  * Schemathesis's fuzzing, each from its pinned image, against the API's own
- * `apps/api/openapi.json`, the staging origin given as AGENTX_DAST_ORIGIN.
+ * `apps/api/openapi.json`, the staging origin given as AGENTX_DAST_ORIGIN; and
+ * (ST4) ZAP's baseline scan of the pages the origin serves, the console's
+ * (Phase 6 6A1), which no document lists: its spider and passive rules alone.
  * Run by `.github/workflows/dast.yml` (weekly and on demand, never on a pull
  * request: staging is Free Trial compute) and by hand the same way:
  * `node tooling/dast/scan.ts`, with Docker running. With `--stack`, the End to
@@ -46,9 +48,13 @@ export const SARIF_FILE = 'dast.sarif';
 
 export type Severity = 'high' | 'medium' | 'low' | 'info';
 
+/** The scanners, in the order the log and the SARIF list them. */
+export const TOOLS = ['zap', 'schemathesis', 'zap-baseline'] as const;
+export type Tool = (typeof TOOLS)[number];
+
 /** One finding, as either scanner reports it: a rule, at an operation. */
 export interface Finding {
-  readonly tool: 'zap' | 'schemathesis';
+  readonly tool: Tool;
   /** Stable across runs: the scanner's rule. */
   readonly rule: string;
   readonly title: string;
@@ -183,6 +189,33 @@ export function zapArgs(origin: string, dir: string): string[] {
   ];
 }
 
+/**
+ * ST4: ZAP's baseline scan, as `docker run` arguments, writing
+ * `zap-baseline.json` in the mounted directory: its spider from the origin's
+ * root (a minute, on the origin alone) and its passive rules, which only read
+ * the answers. It sends nothing but GETs, so it needs no Origin of ours.
+ */
+export function zapBaselineArgs(origin: string, dir: string): string[] {
+  return [
+    'run',
+    '--rm',
+    '--volume',
+    `${dir}:/zap/wrk:rw`,
+    SCANNER_IMAGES.zap,
+    'zap-baseline.py',
+    '-t',
+    `${origin}/`,
+    '-m',
+    '1',
+    '-J',
+    'zap-baseline.json',
+    '-I',
+    '-s',
+    '-T',
+    '10',
+  ];
+}
+
 /** The compose stack's API, as the end-to-end tests reach it (tooling/e2e/compose.ts). */
 export const STACK_ORIGIN = 'http://localhost:8080';
 
@@ -237,15 +270,15 @@ interface ZapReport {
   }[];
 }
 
-/** The findings of ZAP's JSON report: one per rule, method and path. */
-export function zapFindings(report: ZapReport): Finding[] {
+/** The findings of ZAP's JSON report (its API scan's, or its baseline's): one per rule, method and path. */
+export function zapFindings(report: ZapReport, tool: 'zap' | 'zap-baseline' = 'zap'): Finding[] {
   // Fails closed: a report of no site is a scan that never reached the API, not a clean one.
   if (report.site === undefined || report.site.length === 0)
     throw new Error("ZAP's report holds no site: the scan didn't run");
   return report.site.flatMap((site) =>
     (site.alerts ?? []).flatMap((alert) =>
       (alert.instances ?? []).map((instance) => ({
-        tool: 'zap' as const,
+        tool,
         rule: `zap/${alert.pluginid}`,
         title: alert.name,
         severity: ZAP_SEVERITY[alert.riskcode] ?? 'high',
@@ -378,7 +411,7 @@ export function sarifOf(findings: readonly Finding[], openapiText: string): obje
     const index = lines.findIndex((line) => line.trimStart().startsWith(`${JSON.stringify(documented)}:`));
     return index === -1 ? 1 : index + 1;
   };
-  const runOf = (tool: Finding['tool'], name: string, informationUri: string) => {
+  const runOf = (tool: Tool, name: string, informationUri: string) => {
     const mine = findings.filter((finding) => finding.tool === tool);
     const rules = [...new Map(mine.map((finding) => [finding.rule, finding.title])).entries()].sort();
     return {
@@ -412,16 +445,17 @@ export function sarifOf(findings: readonly Finding[], openapiText: string): obje
     runs: [
       runOf('zap', 'OWASP ZAP API scan', 'https://www.zaproxy.org/docs/docker/api-scan/'),
       runOf('schemathesis', 'Schemathesis', 'https://schemathesis.readthedocs.io/'),
+      runOf('zap-baseline', 'OWASP ZAP baseline scan', 'https://www.zaproxy.org/docs/docker/baseline-scan/'),
     ],
   };
 }
 
 /** What the public log may show: counts by tool and severity, and how many are accepted. Never a host or a path. */
 export function summaryOf(findings: readonly Finding[], accepted: number): string[] {
-  const count = (tool: Finding['tool'], severity: Severity) =>
+  const count = (tool: Tool, severity: Severity) =>
     findings.filter((finding) => finding.tool === tool && finding.severity === severity).length;
   return [
-    ...(['zap', 'schemathesis'] as const).map(
+    ...TOOLS.map(
       (tool) =>
         `${tool}: ${(['high', 'medium', 'low', 'info'] as const).map((severity) => severity + ' ' + String(count(tool, severity))).join(', ')}`,
     ),
@@ -510,9 +544,13 @@ async function main(argv: readonly string[]): Promise<number> {
   runScanner('ZAP', zapArgs(origin, dir), [0, 1, 2]);
   await wake(origin);
   runScanner('Schemathesis', schemathesisArgs(origin, dir), [0, 1]);
+  await wake(origin);
+  runScanner('ZAP baseline', zapBaselineArgs(origin, dir), [0, 1, 2]);
+  const zapReport = (file: string) => JSON.parse(readFileSync(path.join(dir, file), 'utf8')) as ZapReport;
   const all = distinct([
-    ...zapFindings(JSON.parse(readFileSync(path.join(dir, 'zap.json'), 'utf8')) as ZapReport),
+    ...zapFindings(zapReport('zap.json')),
     ...schemathesisFindings(readFileSync(path.join(dir, 'junit.xml'), 'utf8')),
+    ...zapFindings(zapReport('zap-baseline.json'), 'zap-baseline'),
   ]);
   const open = all.filter((finding) => acceptedReason(finding) === undefined);
   const reported = open.filter((finding) => finding.severity !== 'info');

@@ -21,7 +21,9 @@ import {
   schemathesisFindings,
   STACK_ORIGIN,
   summaryOf,
+  TOOLS,
   zapArgs,
+  zapBaselineArgs,
   zapFindings,
 } from './scan.ts';
 
@@ -141,6 +143,32 @@ describe('B7 the dynamic scan of staging', () => {
     expect(options).toContain('-config replacer.full_list(0).matchstr=Origin');
     expect(options).toContain(`-config replacer.full_list(0).replacement=${ORIGIN}`);
     expect(options).toContain('-config replacer.full_list(0).matchtype=REQ_HEADER');
+  });
+
+  it("ST4 runs ZAP's baseline from the same pinned image at the origin's root: a minute's spider and its passive rules", () => {
+    const args = zapBaselineArgs(ORIGIN, '/r');
+
+    expect(args.slice(0, 6)).toEqual([
+      'run',
+      '--rm',
+      '--volume',
+      '/r:/zap/wrk:rw',
+      SCANNER_IMAGES.zap,
+      'zap-baseline.py',
+    ]);
+    expect(args).toEqual(expect.arrayContaining(['-t', `${ORIGIN}/`, '-m', '1', '-J', 'zap-baseline.json', '-I']));
+    // Passive alone: never the active scan's attacks, and no document to read.
+    expect(args.join(' ')).not.toMatch(/zap-full-scan|zap-api-scan|openapi/);
+  });
+
+  it("ST4 reads the baseline's report as ZAP's, under its own tool", () => {
+    const found = zapFindings(ZAP_REPORT, 'zap-baseline');
+    expect(found.map((one) => one.tool)).toEqual(found.map(() => 'zap-baseline'));
+    expect(found.map(({ rule, path }) => `${rule} ${path}`)).toEqual(
+      zapFindings(ZAP_REPORT).map(({ rule, path }) => `${rule} ${path}`),
+    );
+    // ZAP's metadata probe is accepted from the API scan alone.
+    expect(found.filter((one) => acceptedReason(one) !== undefined)).toEqual([]);
   });
 
   it('runs Schemathesis from its pinned image, gently, with our Origin, never the stateful phase', () => {
@@ -351,6 +379,7 @@ describe('B7 the dynamic scan of staging', () => {
     };
 
     expect(sarif.version).toBe('2.1.0');
+    expect(sarif.runs.map((run) => run.automationDetails.id)).toEqual(TOOLS.map((tool) => `dast/${tool}/`));
     const [zap, schemathesis] = sarif.runs;
     expect(zap?.automationDetails.id).toBe('dast/zap/');
     expect(zap?.tool.driver.rules).toEqual([{ id: 'zap/40018', shortDescription: { text: 'SQL Injection' } }]);
@@ -378,6 +407,7 @@ describe('B7 the dynamic scan of staging', () => {
 
     expect(summary).toContain('zap: high 1, medium 0, low 1, info 1');
     expect(summary).toContain('schemathesis: high 0, medium 1, low 4, info 0');
+    expect(summary).toContain('zap-baseline: high 0, medium 0, low 0, info 0');
     expect(summary).toContain('accepted (listed in tooling/dast/scan.ts): 2');
     expect(summary).not.toMatch(/example\.test|\/v1\/|\/health|https?:/);
   });
