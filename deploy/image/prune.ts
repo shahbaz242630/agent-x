@@ -14,6 +14,14 @@
 // other way stops the prune, red. A removed version can be restored for 30
 // days (the package's settings on GitHub).
 //
+//   node deploy/image/prune.ts verify-kept <commit> <digest of its image>
+//
+// `verify-kept` (AZ9) reads the package after a prune, as `plan` does, and
+// checks with verify.ts, the deploy's own check, that every kept image up to
+// this run's still verifies: its signature and SBOM survived the prune, so it
+// can still be deployed by hand (a rollback). Newer images are left to their
+// own runs, whose attestation may still be on its way. It removes nothing.
+//
 // CI runs `prune` after each release that went green, with the commit the run
 // is for and the digest its image job published, as the job's own token
 // (GITHUB_TOKEN and GITHUB_ACTOR, which Actions sets; `packages: write`), in a
@@ -49,8 +57,9 @@
 // with its index, or nothing is removed.
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { installedCosign } from '../../tooling/cosign/cosign.ts';
 import { type History, realHistory } from '../azure/git.ts';
-import { IMAGE_REPOSITORY } from './verify.ts';
+import { IMAGE_REPOSITORY, type Outcome, runCosign, verifyImage } from './verify.ts';
 
 /** The image's owner and package on GitHub, which make up IMAGE_REPOSITORY. */
 export const OWNER = 'shahbaz242630';
@@ -395,7 +404,52 @@ export async function prune(
   say(`The package now holds ${String(after.length)} versions, every kept image among them.`);
 }
 
-export const USAGE = 'Usage: node deploy/image/prune.ts plan|prune <40-hex commit> <sha256 digest of its image>';
+/** Checks an image as the deploy does: verify.ts with the pinned cosign. */
+export type Verify = (image: string, commit: string) => Outcome;
+
+const realVerify: Verify = (image, commit) => {
+  const binary = installedCosign();
+  return verifyImage(image, commit, (args) => runCosign(args, binary));
+};
+
+/**
+ * AZ9: every kept image up to this run's still verifies after the prune, read
+ * from the package as it is now. Throws naming each that doesn't; removes nothing.
+ */
+export async function verifyKept(
+  own: Own,
+  source: Pick<Package, 'versions'>,
+  history: Pick<History, 'isAncestor'>,
+  verify: Verify,
+  say: (line: string) => void,
+): Promise<void> {
+  const { images } = imagesToKeep(await source.versions(), own, history);
+  // This run's image is among them: imagesToKeep refuses a package without it.
+  const upTo = Math.max(...images.filter((image) => image.digest === own.digest).map((image) => image.created));
+  const checked = images.filter((image) => image.created <= upTo);
+  const refused: string[] = [];
+  for (const image of checked) {
+    const outcome = verify(`${IMAGE_REPOSITORY}@${image.digest}`, image.commit);
+    if (outcome.verified) {
+      say(`  ${image.commit}  verified`);
+    } else {
+      say(`  ${image.commit}  refused (${outcome.reason}): ${outcome.detail}`);
+      refused.push(image.commit);
+    }
+  }
+  if (refused.length > 0) {
+    throw new Error(
+      `kept images no longer verify, so none of them can be rolled back to: ${refused.join(', ')}. ` +
+        "The prune or the registry lost a signature or an SBOM: restore the removed versions from the package's settings on GitHub (kept 30 days) and fix the prune before the next merge",
+    );
+  }
+  say(`Every kept image up to this run's (${String(checked.length)}) still verifies.`);
+}
+
+export const USAGE =
+  'Usage: node deploy/image/prune.ts plan|prune|verify-kept <40-hex commit> <sha256 digest of its image>';
+
+const COMMANDS = new Set(['plan', 'prune', 'verify-kept']);
 
 export async function main(
   argv: readonly string[],
@@ -404,10 +458,12 @@ export async function main(
   history: Pick<History, 'isAncestor'> = realHistory(),
   say: (line: string) => void = console.log,
   pause: (ms: number) => Promise<unknown> = sleep,
+  verify: Verify = realVerify,
 ): Promise<number> {
   const [command, commit, digest, ...rest] = argv;
   if (
-    (command !== 'plan' && command !== 'prune') ||
+    command === undefined ||
+    !COMMANDS.has(command) ||
     commit === undefined ||
     !COMMIT.test(commit) ||
     digest === undefined ||
@@ -427,6 +483,8 @@ export async function main(
     if (command === 'plan') {
       await plan({ commit, digest }, source, history, say);
       say('Nothing was removed: this is the plan alone.');
+    } else if (command === 'verify-kept') {
+      await verifyKept({ commit, digest }, source, history, verify, say);
     } else {
       await prune({ commit, digest }, source, history, say, pause);
     }

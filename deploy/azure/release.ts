@@ -36,7 +36,9 @@
 //   running while it migrates raises a false tamper alarm
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
-//   would ask for the linked actions CI's role doesn't hold (release.bicep).
+//   would ask for the linked actions CI's role doesn't hold (release.bicep);
+//   the API's also sends an empty revision suffix, so one set by hand is
+//   cleared, never sent again and refused as taken (AZ7).
 //   Each container is Azure's own, with the image and AGENTX_RELEASE changed
 //   and nothing else; a field this tool doesn't know is refused, not guessed at
 // - only images, commits, file names and Azure's own names are printed: the
@@ -756,6 +758,9 @@ export interface ReleaseSteps extends CheckSteps {
   readonly probe: (url: string) => Promise<number | undefined>;
 }
 
+/** What running and waiting for the migration job needs: Azure, the clock, and somewhere to say what happens. */
+type RunSteps = Pick<ReleaseSteps, 'az' | 'say' | 'now' | 'sleep'>;
+
 /** How long an update of a workload may take to settle. */
 const UPDATE_WAIT_MS = 10 * 60_000;
 
@@ -795,17 +800,6 @@ function publicOrigin(api: Running): string {
   return value;
 }
 
-/**
- * A revision suffix set by hand would be sent again with CI's update and
- * refused as taken, after the migration had run: so none may be set.
- */
-function noSuffix(api: Read): void {
-  const suffix = record(api.properties.template).revisionSuffix;
-  if (suffix !== undefined && suffix !== '') {
-    throw new Error(`The API has the revision suffix ${JSON.stringify(suffix)} set, which a release would send again.`);
-  }
-}
-
 /** How long migrate's one run may take, in seconds (apps.bicep). */
 function timeLimit(job: Read): number {
   const limit = record(job.properties.configuration).replicaTimeout;
@@ -821,7 +815,7 @@ function timeLimit(job: Read): number {
  * decided: anything else there since means another deploy, not to be
  * overwritten. A workload already holding the update is sent nothing.
  */
-function update(steps: ReleaseSteps, subscription: string, workload: Workload, seen: Running, after: Container): Read {
+function update(steps: RunSteps, subscription: string, workload: Workload, seen: Running, after: Container): Read {
   const now = readWorkload(steps.az, subscription, workload);
   if (!same(now.running.container, seen.container)) {
     throw new Error(
@@ -832,7 +826,10 @@ function update(steps: ReleaseSteps, subscription: string, workload: Workload, s
     steps.say(`${workload} already holds ${buildOf(after)}: nothing to send.`);
     return now;
   }
-  const body = JSON.stringify({ properties: { template: { containers: [after] } } });
+  // The API's update also sends an empty revision suffix (AZ7): a suffix set by hand would otherwise be sent again with
+  // the containers and refused as taken, after the migration had run; empty lets Azure name the new revision itself.
+  const template = workload === 'api' ? { revisionSuffix: '', containers: [after] } : { containers: [after] };
+  const body = JSON.stringify({ properties: { template } });
   const done = steps.az.run([
     'rest',
     '--method',
@@ -858,7 +855,7 @@ function update(steps: ReleaseSteps, subscription: string, workload: Workload, s
  * this update's.
  */
 async function settledUpdate(
-  steps: ReleaseSteps,
+  steps: RunSteps,
   subscription: string,
   workload: Workload,
   after: Container,
@@ -893,7 +890,7 @@ interface Run {
 const jobUrl = (subscription: string, suffix: string): string =>
   workloadUrl(subscription, 'migrate').replace('?api-version=', `${suffix}?api-version=`);
 
-function runs(steps: ReleaseSteps, subscription: string): Run[] {
+function runs(steps: RunSteps, subscription: string): Run[] {
   const listed = get(steps.az, jobUrl(subscription, '/executions'), "migrate's runs");
   if (!Array.isArray(listed.value)) throw new Error("Azure's list of migrate's runs wasn't a list.");
   return listed.value.map((entry) => {
@@ -903,7 +900,7 @@ function runs(steps: ReleaseSteps, subscription: string): Run[] {
 }
 
 /** migrate's runs, once none is still going: two would race (apps.bicep). */
-function idle(steps: ReleaseSteps, subscription: string): Run[] {
+function idle(steps: RunSteps, subscription: string): Run[] {
   const listed = runs(steps, subscription);
   const going = listed.filter((run) => !ENDED.has(run.status));
   if (going.length > 0) {
@@ -929,7 +926,7 @@ function checkStartedRun(listed: string, named: string | undefined): void {
  * one new run listed within LIST_WAIT_MS, and the one the start named if it
  * named one.
  */
-async function startMigration(steps: ReleaseSteps, subscription: string): Promise<string> {
+async function startMigration(steps: RunSteps, subscription: string): Promise<string> {
   const known = new Set(idle(steps, subscription).map((run) => run.name));
   const done = steps.az.run(['rest', '--method', 'post', '--url', jobUrl(subscription, '/start')]);
   if (done.status !== 0) throw new Error(`Azure refused to start migrate (${azureRefusal(done.stderr)}).`);
@@ -963,7 +960,7 @@ async function startMigration(steps: ReleaseSteps, subscription: string): Promis
  * another release's.
  */
 async function ended(
-  steps: ReleaseSteps,
+  steps: RunSteps,
   subscription: string,
   name: string,
   image: string,
@@ -1133,6 +1130,67 @@ function alreadyServed(steps: ReleaseSteps, subscription: string, api: Read, ima
   return 0;
 }
 
+/** What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door. */
+export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'>;
+
+/**
+ * `deploy.ts apps --migrate-first` (AZ6): a release's first half alone, for a hand deploy whose image brings
+ * migrations the database lacks (S174: deployed together, the API started on the new image before them, refused at
+ * start and raised a false tamper alarm). The migration job is updated to the image and run to success, exactly as a
+ * release does, and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
+ * since it checks the database while the migration runs. The run's name once it has succeeded; otherwise an error
+ * saying what it left, and the deployment isn't sent. The image was checked by the caller (verify.ts).
+ */
+export async function migrateFirst(
+  steps: MigrateFirstSteps,
+  subscription: string,
+  commit: string,
+  digest: string,
+): Promise<string> {
+  const image = `${IMAGE_REPOSITORY}@${digest}`;
+  const job = readWorkload(steps.az, subscription, 'migrate');
+  const apiRuns = readWorkload(steps.az, subscription, 'api').running.release;
+  if (!steps.history.isAncestor(apiRuns, commit)) {
+    throw new Error(
+      `The API runs ${apiRuns}, which isn't in ${commit}'s history, so whether it knows what this image's migrations add can't be checked (decision 49): the migration wasn't run, and nothing was changed.`,
+    );
+  }
+  const notComing = notYetComing(apiRuns, commit, steps.history.changedFiles(apiRuns, commit), steps.history);
+  if (notComing.length > 0) {
+    throw new Error(
+      [
+        `The migration wasn't run, and nothing was changed: ${COMING_FIRST}`,
+        ...notComing.map((line) => `  ${line}`),
+      ].join('\n'),
+    );
+  }
+  const limit = await leaving('nothing was changed.', () => {
+    settledBefore('migrate', job);
+    idle(steps, subscription);
+    return timeLimit(job);
+  });
+  const left = `the API is unchanged, on ${apiRuns}`;
+  const after = released(job.running, image, commit);
+  await leaving(`migrate may hold ${commit}, not run; ${left}.`, async () => {
+    update(steps, subscription, 'migrate', job.running, after);
+    await settledUpdate(steps, subscription, 'migrate', after);
+  });
+  const name = await leaving(
+    `migrate holds ${commit}, not run (a start that failed late may still have begun one: look at migrate's runs); ${left}.`,
+    () => startMigration(steps, subscription),
+  );
+  const status = await leaving(`migrate holds ${commit}, its run ${name} not seen to end; ${left}.`, () =>
+    ended(steps, subscription, name, image, limit),
+  );
+  if (status !== 'Succeeded') {
+    throw new Error(
+      `${name} ended ${status}, so nothing was deployed. Read its log: node deploy/azure/jobs.ts wait migrate ${name}\nLeft: migrate holds ${commit}; ${left}.`,
+    );
+  }
+  steps.say(`${name} succeeded: the database holds every migration ${commit} brings.`);
+  return name;
+}
+
 /**
  * `release`: checks the image, then does what `check` says: the migration job
  * updated and run to success, then the API updated and serving. 0 when it is
@@ -1165,7 +1223,6 @@ export async function release(request: Request, steps: ReleaseSteps): Promise<nu
   const { origin, limit } = await leaving('nothing was changed.', () => {
     settledBefore('migrate', job);
     settledBefore('api', api);
-    noSuffix(api);
     idle(steps, subscription);
     return { origin: publicOrigin(api.running), limit: timeLimit(job) };
   });

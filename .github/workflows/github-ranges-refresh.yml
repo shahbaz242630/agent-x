@@ -1,0 +1,79 @@
+# GitHub's registry addresses, checked daily (S185). Staging's apps may pull
+# images only from the ranges in deploy/azure/github-ranges.json, and GitHub
+# changes what it publishes every few days. This runs the refresher
+# (deploy/azure/github-ranges.ts, our own code on bare Node, no package
+# installed) with --write, and when the file would change pushes it to a
+# `data/github-ranges-<day>` branch from the commit checked.
+# A person opens that branch's PR at the weekly read or before a foundation
+# deploy (the weekly check looks for a waiting `data/github-ranges-*` branch),
+# which starts CI. A range GitHub merely stopped listing never blocks a
+# deploy; a new one does, until the branch is merged. A failed run (GitHub
+# unreadable, or a host answering from outside every published range, which
+# no file refresh can fix) is emailed to the repository's owner.
+name: GitHub ranges (daily)
+
+on:
+  schedule:
+    - cron: '41 3 * * *' # every day, 03:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-ranges-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Check GitHub's ranges and push the refresh branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the data/github-ranges-* branch, through the API
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      # The branch only, never the PR: GitHub Actions may not open pull requests
+      # here (a repository setting that would also let workflows approve them),
+      # and a PR a person opens starts CI, which this workflow's own would not.
+      # A refusal the file can't fix still pushes what it can, then fails.
+      - name: Refresh the file and push the branch
+        run: |
+          status=0
+          node deploy/azure/github-ranges.ts --write || status=$?
+          file=deploy/azure/github-ranges.json
+          if git diff --quiet -- "${file}"; then
+            echo "GitHub's ranges need no change to ${file}." >> "$GITHUB_STEP_SUMMARY"
+            exit "${status}"
+          fi
+          branch="data/github-ranges-$(date -u +%Y-%m-%d)"
+          if ! gh api "repos/${REPO}/git/ref/heads/${branch}" > /dev/null 2>&1; then
+            gh api "repos/${REPO}/git/refs" -f "ref=refs/heads/${branch}" -f "sha=${GITHUB_SHA}" > /dev/null
+          fi
+          current=$(gh api "repos/${REPO}/contents/${file}?ref=${branch}" --jq .sha)
+          if [ "${current}" != "$(git hash-object "${file}")" ]; then
+            gh api --method PUT "repos/${REPO}/contents/${file}" -f "branch=${branch}" -f "sha=${current}" \
+              -f "message=GitHub ranges: the addresses GitHub publishes today" \
+              -f "content=$(base64 --wrap=0 "${file}")" > /dev/null
+          fi
+          {
+            echo "## GitHub's ranges have changed"
+            echo ""
+            git diff -- "${file}" | sed 's/^/    /'
+            echo ""
+            echo "**Next, by a person:** open a pull request from the branch \`${branch}\` into \`main\` (it starts CI), merge it when green, and delete any older \`data/github-ranges-*\` branch."
+            echo "A new range blocks the foundation deploy until it is merged; a removed one does not."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Branch ${branch} is ready: open its pull request into main."
+          exit "${status}"
