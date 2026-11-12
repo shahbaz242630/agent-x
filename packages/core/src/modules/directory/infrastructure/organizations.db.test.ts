@@ -1,14 +1,18 @@
 // The directory's list of organisations (0007), as the app role, and each one's shard in the anchors' store (0082).
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { ANCHOR_SHARD_VECTORS, createTestDatabase, type TestDatabase, testLogger, within } from '@agentx/testing';
-import { shardOf } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { listedByShard, listedOrganizations, registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
+
+// The anchors' shard as the design defines it (first byte of the SHA-256 of the chain's name), worked out here rather
+// than imported: the directory module may not import the audit chain (module boundaries), and shards.ts's shardOf is
+// held to the same golden vectors (ANCHOR_SHARD_VECTORS) in its own test.
+const shardOf = (chain: string): number => createHash('sha256').update(chain, 'utf8').digest().readUInt8(0);
 
 const server = inject('postgres');
 let database: TestDatabase;
