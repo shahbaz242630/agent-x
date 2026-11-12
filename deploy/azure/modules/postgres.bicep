@@ -330,6 +330,55 @@ resource refusedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   dependsOn: [serverLogs]
 }
 
+// MO6: the login alerts above read the server's lines in the login workspace. A rewritten log setting (its categories
+// switched off, or the lines sent to another workspace) leaves them running, healthy, over a table nothing reaches:
+// the rule watch (monitoring.bicep) sees a setting deleted, never one rewritten, as every foundation deploy writes
+// them. The server writes a line every few minutes at its quietest (staging, 4-12 Nov 2026: about 50,000 a day,
+// the longest gap 12 minutes), so an hour with none arriving says the lines have stopped. Counted by when lines
+// arrive, as the alerts beside it; the workspace over its cap counts as a line, as its own alert says so.
+var noLinesFor = '60m'
+
+resource linesQuiet 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-${name}-login-lines-quiet'
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Database: no server log lines arriving'
+    description: 'SEV-1. No line of the database server\'s log has reached the login alerts\' workspace for an hour, where the server writes one every few minutes. Until lines arrive again the login alerts see nothing: the server\'s log setting may have been rewritten (categories off, or another workspace), or the server is down. Runbook: Incident-Response-Playbook.md section I.'
+    severity: 1
+    enabled: true
+    scopes: [loginWorkspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT1H'
+    // A day back, for the workspace's own word on its cap (as the jobs' dead-man alerts read theirs).
+    overrideQueryTimeRange: 'P1D'
+    // The table appears with the server's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'union (PGSQLServerLogs | where ingestion_time() > ago(${noLinesFor})), (_LogOperation | where Category =~ "Ingestion" | where Detail contains "Ingestion status" | summarize arg_max(TimeGenerated, Detail) | where Detail contains "OverQuota" or TimeGenerated > ago(${noLinesFor})) | summarize Lines = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Lines'
+          operator: 'LessThan'
+          threshold: 1
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless, as every SEV-1: each 15 minutes the lines stay away notifies again.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [serverLogs]
+}
+
 // ADR-012 §2, Phase 1 A3e-2: the owner role can rewrite the walls the app's
 // checks stand on (the S32 probe), so a login by it outside a deploy raises a
 // SEV-1 alert. The migration job is the one thing that logs in as it, with one

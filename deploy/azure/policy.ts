@@ -39,6 +39,7 @@ export type RuleId =
   | 'database-logins'
   | 'owner-login-alert'
   | 'refused-login-alert'
+  | 'login-lines-alert'
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
@@ -3723,6 +3724,42 @@ const refusedLoginAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** The query of the alert on the server's lines stopping (MO6): none arrived over the hour, the cap's word aside. */
+const LOGIN_LINES_QUERY = `union (PGSQLServerLogs | where ingestion_time() > ago(60m)), ${overCap(60)} | summarize Lines = count()`;
+
+/**
+ * An enabled, stateless SEV-1 alert on the login alerts' workspace fires when no server log line has arrived there
+ * for an hour (MO6): a log setting rewritten (categories off, another workspace) leaves every login alert healthy
+ * over a table nothing reaches, and the rule watch sees only a setting deleted. Run every 15 minutes, as the login
+ * alerts are, over the hour the server's quietest gap (12 minutes on staging) never comes near.
+ */
+const loginLinesAlert: Check = (snapshot, _expected, add) => {
+  const alerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion, alert) =>
+      at(alert.properties, 'evaluationFrequency') === 'PT15M' &&
+      at(alert.properties, 'windowSize') === 'PT1H' &&
+      at(alert.properties, 'overrideQueryTimeRange') === 'P1D' &&
+      at(criterion, 'query') === LOGIN_LINES_QUERY &&
+      totals(criterion) &&
+      at(criterion, 'operator') === 'LessThan' &&
+      at(criterion, 'threshold') === 1 &&
+      at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+      at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+    loginWorkspaceIds(snapshot),
+  );
+  // No server, no lines to miss: the other login alerts are checked a server at a time.
+  if (!alerted && ofType(snapshot, TYPES.server).length > 0) {
+    add({
+      rule: 'login-lines-alert',
+      resource: 'the login workspace',
+      message:
+        "needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes, that fires when no database server log line has arrived for an hour and the workspace is not over its daily cap (MO6)",
+    });
+  }
+};
+
 /** An alert processing rule: one that removes action groups mutes every alert in its scope (MO2). */
 const PROCESSING_RULE = 'Microsoft.AlertsManagement/actionRules';
 
@@ -5393,6 +5430,7 @@ const CHECKS: readonly Check[] = [
   decisionsSuppressedAlert,
   ownerLoginAlert,
   refusedLoginAlert,
+  loginLinesAlert,
   alertRulesWatch,
   identities,
   releaseIdentity,

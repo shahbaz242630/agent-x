@@ -368,6 +368,7 @@ const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
 const LOGIN_ALERT = named(/-privileged-login$/);
 const OWNER_ALERT = named(/-owner-login$/);
 const REFUSED_ALERT = named(/-privileged-login-refused$/);
+const LINES_ALERT = named(/-login-lines-quiet$/);
 const ACTIVITY_ALERTS = type('Microsoft.Insights/activityLogAlerts');
 const RULES_CHANGED = named(/^alert-agentx-stg-alert-rules-changed$/);
 const RULES_UNHEALTHY = named(/^alert-agentx-stg-alert-rules-unhealthy$/);
@@ -620,6 +621,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login-refused$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-login-lines-quiet$/,
       ),
       expect.stringMatching(/^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-owner-login$/),
       expect.stringMatching(/^Microsoft\.Insights\/metricAlerts alert-psql-agentx-stg-[a-z0-9]{6}-disk$/),
@@ -1380,6 +1384,45 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(REFUSED_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
       'alert-delivery',
       'refused-login-alert',
+    ]);
+  });
+
+  it('login-lines-alert: no alert on the server log lines stopping, or one that waits too long, reads the wrong lines or fires too quietly (MO6)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    expect(brokenRules(without(LINES_ALERT))).toEqual(['login-lines-alert']);
+    for (const change of [
+      // Another table, or lines counted by when they happened: a late one falls outside the hour.
+      edited('union (PGSQLServerLogs |', 'union (ContainerAppSystemLogs |'),
+      edited('PGSQLServerLogs | where ingestion_time() > ago(60m)', 'PGSQLServerLogs | where TimeGenerated > ago(60m)'),
+      // A shorter hour fires on the server's quiet gaps; a longer one stays blind for longer.
+      edited('ingestion_time() > ago(60m)', 'ingestion_time() > ago(10m)'),
+      edited('ingestion_time() > ago(60m)', 'ingestion_time() > ago(180m)'),
+      // The cap's word left out (it would fire whenever the workspace is over its cap), or its stretch changed.
+      edited(/, \(_LogOperation .*\) \| summarize/, ' | summarize'),
+      edited('or TimeGenerated > ago(60m))', 'or TimeGenerated > ago(10m))'),
+      (alert: Mutable) => (criterion(alert).threshold = 0),
+      (alert: Mutable) => (criterion(alert).operator = 'GreaterThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 2),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT30M'),
+      (alert: Mutable) => (properties(alert).windowSize = 'PT2H'),
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => (properties(alert).scopes = [idOf(MAIN_WORKSPACE)]),
+    ]) {
+      expect(brokenRules(changed(LINES_ALERT, change))).toEqual(['login-lines-alert']);
+    }
+    expect(brokenRules(changed(LINES_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'login-lines-alert',
+    ]);
+    expect(brokenRules(changed(LINES_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'login-lines-alert',
+    ]);
+    expect(brokenRules(changed(LINES_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'login-lines-alert',
     ]);
   });
 
