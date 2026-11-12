@@ -10,7 +10,7 @@ import { createKeyProvider, type KeyMaterial, type KeyProvider } from '../keys/k
 import type { Message } from '../keys/message.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import { type Anchor, signAnchor, signPass, signProgress } from './anchor.ts';
-import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
+import { anchoredOf, type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import { type Chain, chainName } from './chain.ts';
 import { cutoverFile, shardsDoneFile } from './cutover.ts';
 import { rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
@@ -732,6 +732,147 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
     });
   });
 
+  describe('for the shard walk (PL-65 PR4)', () => {
+    it('what is last known says when the anchor was signed, held or let go; the same place signed again later moves it on', async () => {
+      const made = await world();
+      // Every chain checked idle and its same place signed again, later: the newest time is what is known.
+      made.clock.at = new Date(made.clock.at.getTime() + MINUTE);
+      const again = made.clock.at.getTime();
+      for (const chain of CHAINS) made.writer.keep(anchorOf(chain, 6n, made.clock.at));
+      await made.writer.flush();
+      made.clock.at = new Date(made.clock.at.getTime() + 10 * MINUTE);
+      const log = tight(made);
+      await log.read();
+      expect(letGo(log).length).toBeGreaterThan(0);
+      for (const chain of CHAINS) expect(log.lastKnown(chain)).toMatchObject({ seq: 6n, anchoredAt: again });
+      const [kept = PLATFORM] = held(log);
+      expect(log.latest(kept)?.at.getTime()).toBe(again);
+    });
+
+    it('a shard read back near the budget, every shard held with lines waiting: those written first, so it is read whole', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      // A walk that signs each chain again as it passes: every shard held has a line waiting, none of which may go.
+      made.clock.at = new Date(made.clock.at.getTime() + MINUTE);
+      for (const chain of held(log)) log.keep(anchorOf(chain, 7n, made.clock.at));
+      const away = letGo(log)[0] ?? PLATFORM;
+      const puts = made.fake.calls.puts;
+      await log.roomToReadBack();
+      expect(made.fake.calls.puts).toBeGreaterThan(puts);
+      const release = await log.pin(away);
+      expect(release).toBeDefined();
+      expect(log.latest(away)?.seq).toBe(6n);
+      release?.();
+      expect(made.lines('audit.anchor_shard_unreadable')).toEqual([]);
+      expect(log.memoryHeld().bytes).toBeLessThanOrEqual(log.memoryHeld().mostBytes);
+    });
+
+    it('a hand-off’s read back mid-walk, every shard held waiting: refused for memory, then read whole once the next write lands', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      // A walk signing each chain again as it passes, with no write between: read back until one finds no room, as every
+      // shard held then has a line waiting, none of which may go.
+      made.clock.at = new Date(made.clock.at.getTime() + MINUTE);
+      for (const chain of held(log)) log.keep(anchorOf(chain, 7n, made.clock.at));
+      let refused: Chain | undefined;
+      for (const chain of letGo(log)) {
+        const release = await log.pin(chain);
+        if (release === undefined) {
+          refused = chain;
+          break;
+        }
+        log.keep(anchorOf(chain, 7n, made.clock.at));
+        release();
+      }
+      const away = refused ?? PLATFORM;
+      expect(refused).toBeDefined();
+      expect(made.lines('audit.anchor_shard_unreadable')).toEqual([expect.objectContaining({ reason: 'memory' })]);
+      // The scheduled write: what it wrote goes at once, down to the headroom, so the hand-off's next try is read whole.
+      await log.flush();
+      expect(log.memoryHeld().bytes).toBeLessThanOrEqual(log.memoryHeld().mostBytes * 0.8);
+      const release = await log.pin(away);
+      expect(release).toBeDefined();
+      expect(log.latest(away)?.seq).toBe(6n);
+      release?.();
+      expect(made.lines('audit.anchor_shard_unreadable')).toHaveLength(1);
+    });
+
+    it('a chain’s place last known, line by line: the higher place and its time, the same place’s later time, never a lower', () => {
+      expect(anchoredOf({}, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 100 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 6n, 50)).toEqual({ seq: 6n, anchoredAt: 50 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 5n, 300)).toEqual({ seq: 5n, anchoredAt: 300 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 300 }, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 300 });
+      expect(anchoredOf({ seq: 5n }, 5n, 100)).toEqual({ seq: 5n, anchoredAt: 100 });
+      expect(anchoredOf({ seq: 5n, anchoredAt: 100 }, 4n, 900)).toEqual({ seq: 5n, anchoredAt: 100 });
+    });
+
+    it('a write that lands past the headroom lets shards go at once, down to it, so the next read back finds room', async () => {
+      const made = await world();
+      const log = tight(made, 12);
+      await log.read();
+      // Shards read back past the headroom, within the budget: nothing yet lets one go.
+      const { mostBytes } = log.memoryHeld();
+      for (const chain of letGo(log)) {
+        if (log.memoryHeld().bytes > mostBytes * 0.8) break;
+        (await log.pin(chain))?.();
+      }
+      expect(log.memoryHeld().bytes).toBeGreaterThan(mostBytes * 0.8);
+      expect(log.memoryHeld().bytes).toBeLessThanOrEqual(mostBytes);
+      const evictions = made.lines('audit.anchor_shards_evicted').length;
+      const before = { bytes: log.memoryHeld().bytes, held: held(log).length };
+      await log.flush();
+      // Let go by the log's count of lines, as any letting go is: what it holds now is less, its shards fewer.
+      expect(made.lines('audit.anchor_shards_evicted')).toHaveLength(evictions + 1);
+      expect(log.memoryHeld().bytes).toBeLessThan(before.bytes);
+      expect(held(log).length).toBeLessThan(before.held);
+    });
+
+    it('a held anchor read for the probe: as `latest`, nothing for a shard let go, and the shard not counted as used', async () => {
+      const made = await world();
+      const log = tight(made);
+      await log.read();
+      const [older = PLATFORM, newer = PLATFORM] = held(log);
+      // `older` used before every other shard held, `newer` after them all: the least recently used goes first.
+      for (const chain of [older, ...held(log).filter((one) => one !== older && one !== newer), newer]) {
+        (await log.pin(chain))?.();
+      }
+      expect(log.heldAnchor(older)?.seq).toBe(6n);
+      expect(log.heldAnchor(letGo(log)[0] ?? PLATFORM)).toBeUndefined();
+      // Read for the probe, then room needed: `older` still goes before `newer`.
+      log.heldAnchor(older);
+      for (const chain of letGo(log)) {
+        if (!log.holds(older)) break;
+        (await log.pin(chain))?.();
+      }
+      expect(log.holds(older)).toBe(false);
+      expect(log.holds(newer)).toBe(true);
+    });
+
+    it('no write first with room enough, with nothing waiting, while writes fail, or in a log that holds every shard', async () => {
+      const made = await world();
+      const roomy = logOf(made, { evicts: true });
+      await roomy.read();
+      roomy.keep(anchorOf(CHAINS[0] ?? PLATFORM, 7n, made.clock.at));
+      const log = tight(made);
+      await log.read();
+      const all = logOf(made);
+      await all.read();
+      all.keep(anchorOf(CHAINS[0] ?? PLATFORM, 7n, made.clock.at));
+      const puts = made.fake.calls.puts;
+      for (const each of [roomy, log, all]) await each.roomToReadBack();
+      expect(made.fake.calls.puts).toBe(puts);
+      // Writes failing: each would wait the store out, so none is tried.
+      for (const chain of held(log)) log.keep(anchorOf(chain, 7n, made.clock.at));
+      made.fake.instead.put = () => Promise.reject(new Error('the store is away'));
+      await log.flush();
+      const failed = made.fake.calls.puts;
+      await log.roomToReadBack();
+      expect(made.fake.calls.puts).toBe(failed);
+    });
+  });
+
   describe('what is last known, with no read', () => {
     it('of a chain held, of one let go (its place, its pass and its place reached kept), and of one never seen', async () => {
       const made = await world();
@@ -742,12 +883,15 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
       const passedAt = new Date(made.clock.at.getTime() - MINUTE);
       log.keepPass(signPass(keys, chain, point, passedAt, 1));
       log.keepProgress(signProgress(keys, chain, point, { at: made.clock.at, began: made.clock.at }, 1));
-      expect(log.lastKnown(chain)).toEqual({ seq: 6n, passedAt: passedAt.getTime(), placeAt: made.clock.at.getTime() });
+      const anchoredAt = log.latest(chain)?.at.getTime();
+      expect(anchoredAt).toBeDefined();
+      const known = { seq: 6n, anchoredAt, passedAt: passedAt.getTime(), placeAt: made.clock.at.getTime() };
+      expect(log.lastKnown(chain)).toEqual(known);
       await log.flush();
       const lists = made.fake.calls.lists;
       await evicted(log, chain);
       const gets = made.fake.calls.smallGets;
-      expect(log.lastKnown(chain)).toEqual({ seq: 6n, passedAt: passedAt.getTime(), placeAt: made.clock.at.getTime() });
+      expect(log.lastKnown(chain)).toEqual(known);
       // Said with no call to the store.
       expect(made.fake.calls.smallGets).toBe(gets);
       expect(made.fake.calls.lists).toBeGreaterThan(lists);
