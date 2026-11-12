@@ -260,9 +260,10 @@ export const PLAIN_WORDS = {
     next: 'Plan more memory for the process in good time: the line says how many there are, and the limit.',
   },
   'audit.anchor_store_beyond_memory': {
-    happened: 'The store of audit anchors holds a sound file too large for this process to take into memory.',
-    broke: 'After a start, payments wait for every organisation, as their anchors could not be read. Nobody is held.',
-    next: 'Give the process more memory, then restart it. Nothing has been tampered with.',
+    happened:
+      'The audit anchor store holds more than this process can keep in memory: a file too large, or too many organisations.',
+    broke: 'After a start, payments wait for every organisation. Nobody is held.',
+    next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',

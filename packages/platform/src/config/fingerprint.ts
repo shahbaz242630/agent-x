@@ -116,6 +116,12 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     email: config.email === undefined ? null : { endpoint: config.email.endpoint, sender: config.email.sender },
     // The token is left out: it's a secret. Whether resets are carried out at all is kept.
     factorResets: config.factorResets === undefined ? null : {},
+    // SA2: login service user IDs, names rather than secrets: who makes our own routine changes, and for whom.
+    // Unset, left out, so a deployment naming none keeps the fingerprint it had.
+    idpOurChanges:
+      config.idpOurChanges === undefined
+        ? undefined
+        : { actors: config.idpOurChanges.actors, serviceUsers: config.idpOurChanges.serviceUsers },
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     securityEvents: { retentionDays: config.securityEvents.retentionDays },
     // ADR-014 §4: a live start's gate reference too, which names the gate record, never a secret.

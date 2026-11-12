@@ -109,6 +109,39 @@ describe('the login service’s event feed (B6-2b)', () => {
     expect(JSON.stringify(events)).not.toContain('sara');
   });
 
+  it('SA2: reads a member event’s member and roles from its payload, and nothing else of it, nor of any other event’s', async () => {
+    const member = (payload: unknown, type = 'org.member.added') => ({
+      ...EVENT,
+      aggregate: { ...EVENT.aggregate, type: { type: 'org' } },
+      type: { type },
+      payload,
+    });
+    const { fetch } = zitadel(() =>
+      json({
+        events: [
+          member({ userId: '312000000000000050', roles: ['ORG_OWNER_VIEWER'], email: 'sara@example.test' }),
+          member({ userId: '312000000000000050' }, 'org.member.removed'),
+          member({ userId: '312000000000000050', roles: ['org owner'] }),
+          member({ userId: 'a;b', roles: [] }),
+          member({ userId: '312000000000000050', roles: 'ORG_OWNER' }),
+          { ...EVENT, payload: { userId: '312000000000000050', roles: ['IAM_OWNER'] } },
+        ],
+      }),
+    );
+
+    const events = await feedWith(fetch).eventsBetween(SINCE, UNTIL, 10);
+
+    expect(events.map((event) => event.member)).toEqual([
+      { userId: '312000000000000050', roles: ['ORG_OWNER_VIEWER'] },
+      { userId: '312000000000000050', roles: [] },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(JSON.stringify(events)).not.toContain('sara');
+  });
+
   it('reads an answer with no events as none', async () => {
     const { fetch } = zitadel(() => json({}));
 

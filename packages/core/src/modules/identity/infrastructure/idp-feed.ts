@@ -51,6 +51,11 @@ export interface IdpEvent {
   readonly createdAt: Date;
   /** Who made it, by Zitadel's user ID; null when Zitadel names no one. */
   readonly editorUserId: string | null;
+  /**
+   * For rights given, changed or removed (a member event), whose rights and which roles, read from its payload; absent
+   * for any other event, or when the payload doesn't hold them as Zitadel writes them (then nothing counts as ours).
+   */
+  readonly member?: { readonly userId: string; readonly roles: readonly string[] };
 }
 
 export class IdpFeedUnavailable extends Error {
@@ -96,7 +101,24 @@ function eventOf(raw: unknown): IdpEvent | undefined {
     sequence: sequenceText,
     createdAt,
     editorUserId: typeof editor === 'string' && editor !== '' ? editor : null,
+    ...memberOf(eventClass, field(raw, 'payload')),
   };
+}
+
+/** A role as Zitadel names one. */
+const ROLE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * A member event's member: its `userId` and `roles` alone (SA2: what tells our own routine grants apart), nothing else
+ * of the payload, which may hold an email address. Any other event, or a payload not as Zitadel writes it, gives none.
+ */
+function memberOf(eventClass: IdpEventClass, payload: unknown): Pick<IdpEvent, 'member'> {
+  if (eventClass !== 'rights_changed') return {};
+  const userId = field(payload, 'userId');
+  const roles = field(payload, 'roles') ?? [];
+  if (typeof userId !== 'string' || !ZITADEL_ID.test(userId)) return {};
+  if (!Array.isArray(roles) || !roles.every((role) => typeof role === 'string' && ROLE.test(role))) return {};
+  return { member: { userId, roles: roles as string[] } };
 }
 
 export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {

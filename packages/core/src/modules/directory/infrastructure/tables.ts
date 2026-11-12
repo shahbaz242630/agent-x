@@ -1,6 +1,6 @@
-import type { Generated } from 'kysely';
+import type { Generated, GeneratedAlways } from 'kysely';
 
-/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql, 0072_org_work.sql, 0073_expiry_marks.sql, 0075_void_marks.sql, 0077_reset_download_hold_marks.sql), as Kysely sees them. */
+/** The directory schema's tables (db/migrations/0007_directory.sql, 0015_memberships.sql, 0016_invitations.sql, 0027_agents.sql, 0072_org_work.sql, 0073_expiry_marks.sql, 0075_void_marks.sql, 0077_reset_download_hold_marks.sql, 0082_anchor_shard.sql), as Kysely sees them. */
 export interface DirectoryTables {
   'directory.orgs': OrgsTable;
   'directory.members': MembersTable;
@@ -11,6 +11,8 @@ export interface DirectoryTables {
 
 interface OrgsTable {
   org_id: string;
+  /** Its chain's shard in the anchors' store (0082, PL-65 PR4): Postgres works it out from the ID, and nothing writes it. */
+  anchor_shard: GeneratedAlways<number>;
 }
 
 interface MembersTable {

@@ -110,3 +110,52 @@ export const isToldToThePerson = (
   eventClass: IdpEventClass,
 ): eventClass is Exclude<IdpEventClass, 'token_issued' | 'impersonated' | 'rights_changed'> =>
   eventClass !== 'token_issued' && eventClass !== 'impersonated' && eventClass !== 'rights_changed';
+
+/**
+ * Who makes our own routine changes in the login service, as the deployment names them (SA2): the logins allowed to
+ * make them (the break-glass admin, or our set-up's service user), and our API's own service users, whose tokens and
+ * rights those changes are. Empty, nothing is ours.
+ */
+export interface OurLoginChanges {
+  readonly actors: ReadonlySet<string>;
+  readonly serviceUsers: ReadonlySet<string>;
+}
+
+/** The roles our service users are given (Secrets-Register): the read-only viewers, and the resets' user manager. */
+export const OUR_SERVICE_ROLES: ReadonlySet<string> = new Set([
+  'IAM_OWNER_VIEWER',
+  'ORG_OWNER_VIEWER',
+  'ORG_USER_MANAGER',
+]);
+
+/** A copied event, as far as telling our own routine change apart needs it. */
+interface ChangeSeen {
+  readonly type: string;
+  readonly eventClass: IdpEventClass;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly editorUserId: string | null;
+  readonly member?: { readonly userId: string; readonly roles: readonly string[] };
+}
+
+/**
+ * Whether a token issued or a grant of rights is one of our own routine changes (SA2), told by an info line rather
+ * than the alert. Both sides must hold, so one of our actors' stolen credentials stay loud for anything else:
+ * - the change is made by one of our actors;
+ * - and it is exactly a change we make: a token issued to one of our service users, or one of them given (or its
+ *   roles changed to) only roles our service users hold. A token for anyone else, a grant to anyone else or of any
+ *   other role (an owner's), a membership removed, a payload not read whole: not ours, and it alerts.
+ * Impersonation and a tied page are never ours: the copier never asks.
+ */
+export function isOurRoutineChange(event: ChangeSeen, ours: OurLoginChanges): boolean {
+  if (event.editorUserId === null || !ours.actors.has(event.editorUserId)) return false;
+  if (event.eventClass === 'token_issued') {
+    return event.aggregateType === 'user' && ours.serviceUsers.has(event.aggregateId);
+  }
+  if (event.eventClass !== 'rights_changed' || event.member === undefined) return false;
+  const granted = event.type.endsWith('.member.added') || event.type.endsWith('.member.changed');
+  const { userId, roles } = event.member;
+  return (
+    granted && ours.serviceUsers.has(userId) && roles.length > 0 && roles.every((role) => OUR_SERVICE_ROLES.has(role))
+  );
+}
