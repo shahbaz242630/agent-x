@@ -397,9 +397,16 @@ const UNICODE_ESCAPED = /\bu&["']/i;
 
 /**
  * A string or a quoted name, read left to right so whichever opens first wins (S187 review: two chained passes let a
- * `"` inside a string, or an apostrophe inside a name, move where strings end). `E'…'` strings take backslash escapes.
+ * `"` inside a string, or an apostrophe inside a name, move where strings end). `E'…'` strings take backslash escapes,
+ * an E starting one only where `statements()` (and Postgres) say so: not after an identifier's character (round 2).
  */
-const QUOTED = /\b[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"/gs;
+const QUOTED = /(?<![A-Za-z0-9_$\u0080-￿])[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"/gs;
+
+/**
+ * A statement changing how later strings are read (`standard_conforming_strings`, `backslash_quote`): this reader
+ * assumes Postgres's defaults, and every migration in a run shares one connection (round 2).
+ */
+const STRING_RULES = /\b(?:standard_conforming_strings|backslash_quote)\b/;
 
 /**
  * Whether a statement's words, their strings taken out (quoted names kept), name the operator's role. A Unicode escape
@@ -469,6 +476,9 @@ function operatorRead(words: string, own: Built): Read[] | undefined {
 
 /** What one statement changes that the image before it must be told, given what earlier migrations built. */
 function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read {
+  if (STRING_RULES.test(words) || bodies.some((body) => STRING_RULES.test(body))) {
+    return refused('changes how strings are read, which this check assumes');
+  }
   const table = CREATE_TABLE.exec(words);
   if (table !== null) {
     // IF NOT EXISTS over a table an earlier migration built does nothing in Postgres: it stays "known".

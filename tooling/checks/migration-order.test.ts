@@ -344,6 +344,16 @@ describe('a migration doing what no coming entry describes', () => {
       'writes app.helper with a body that changes triggers or routines, runs built SQL, or grants',
     ],
     [
+      'switching standard strings off for the migrations after it',
+      'SET standard_conforming_strings = off;',
+      'changes how strings are read, which this check assumes',
+    ],
+    [
+      'changing how backslashes are read, through set_config',
+      "SELECT pg_catalog.set_config('backslash_quote', 'on', false);",
+      'changes how strings are read, which this check assumes',
+    ],
+    [
       'attaching a known table as a partition of one with a trigger',
       'CREATE TABLE app.p (id uuid) PARTITION BY LIST (id); ALTER TABLE app.p ATTACH PARTITION app.things DEFAULT;',
       "attaches app.things as a partition, which takes its parent's triggers",
@@ -483,6 +493,16 @@ describe("a migration granting the operator's role a right (OR2b)", () => {
     [
       'the role after an escaped string',
       String.raw`ALTER TABLE identity.contacts ALTER COLUMN c SET DEFAULT E'\'', OWNER TO agentx_operator, ALTER COLUMN d SET DEFAULT 'z';`,
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'the role after a string led by an identifier ending in e',
+      String.raw`ALTER TABLE identity.contacts ALTER COLUMN c SET DEFAULT s.x$e'\', OWNER TO agentx_operator, ALTER COLUMN c SET DEFAULT 'z';`,
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'the role after a string led by a non-ASCII identifier ending in e',
+      String.raw`ALTER TABLE identity.contacts ALTER COLUMN c SET DEFAULT s.ée'\', OWNER TO agentx_operator, ALTER COLUMN c SET DEFAULT 'z';`,
       "names the operator's role outside a grant this check can read",
     ],
     [
