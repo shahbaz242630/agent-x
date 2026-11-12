@@ -237,6 +237,24 @@ resource emailDomain 'Microsoft.Communication/emailServices/domains@2026-03-18' 
 
 var emailEndpoint = 'https://${communication.properties.hostName}'
 
+// SA2: the login service's own routine changes, told by an info line rather than the alert: the Zitadel
+// logins that make them (the console's break-glass admin) and our API's service users they are made for
+// (agentx-directory, agentx-resets), by Zitadel user ID (not secrets; idp-ours.json, per environment).
+// An environment not in the file sets neither, and every token issued and every grant alerts.
+var idpOursFile = loadJsonContent('idp-ours.json')
+var idpOurSettings = contains(idpOursFile, environment)
+  ? [
+      {
+        name: 'AGENTX_IDP_OUR_ACTORS'
+        value: idpOursFile[environment].actors
+      }
+      {
+        name: 'AGENTX_IDP_OUR_SERVICE_USERS'
+        value: idpOursFile[environment].serviceUsers
+      }
+    ]
+  : []
+
 // The API's one origin to call out to when it sends no email (the load run):
 // Zitadel inside the environment, for sign-in.
 var zitadelOrigins = [
@@ -1736,6 +1754,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 value: zitadelInternalUrl
               }),
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
+              // The login events copier runs where sign-in does (SA2).
+              app.signsIn ? idpOurSettings : [],
               !app.keepsDownloads ? [] : app.workload == 'jobs' ? jobsDownloadsSettings : apiDownloadsSettings,
               !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings
             )

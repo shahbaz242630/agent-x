@@ -129,6 +129,8 @@ const BICEP_READS: ReadonlySet<string> = new Set([
   'app-keys.json',
   'dns-allowed.json',
   'database-generation.json',
+  // SA2: our own logins and service users in the login service, by Zitadel user ID (apps.bicep).
+  'idp-ours.json',
 ]);
 
 /** A throwaway copy of a deploy/azure folder, removed after `use` returns. */

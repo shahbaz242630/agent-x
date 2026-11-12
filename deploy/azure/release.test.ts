@@ -868,6 +868,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/database-generation.json': all,
       'deploy/azure/dns-allowed.json': ['foundation'],
       'deploy/azure/github-ranges.json': ['foundation'],
+      // SA2: our own logins and service users in the login service, read by the API's settings.
+      'deploy/azure/idp-ours.json': ['apps'],
       'deploy/azure/main.bicep': ['foundation'],
       'deploy/azure/modules/activity-downloads.bicep': ['foundation', 'apps'],
       'deploy/azure/modules/communication.bicep': ['foundation'],
