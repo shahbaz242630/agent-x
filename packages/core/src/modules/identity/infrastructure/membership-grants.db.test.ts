@@ -574,6 +574,46 @@ describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Post
     );
   });
 
+  it('refuses to deactivate a member whose summary is behind, nothing moved', async () => {
+    const alice = await add('admin');
+    const bob = await add('approver');
+    await changedByOldImage(bob, alice, 'approver', 'viewer');
+
+    await expect(deactivate(bob.id, alice.userId)).rejects.toMatchObject({
+      name: 'SignedStateFailed',
+      reason: 'tampered',
+    });
+    raisedOn(bob.id, 1);
+    const read = await withSignedStates(app, org, services(), (tx, states) =>
+      memberOf(tx, states, { orgId: org, id: bob.id }, 'share'),
+    );
+    expect(read).toMatchObject({ outcome: 'found', member: { status: 'ACTIVE' }, state: { version: 2 } });
+  });
+
+  it('keeps the hold waiting in the repair’s own transaction, so it outlives the evidence; the hold set takes it', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    await changedByOldImage(bob, alice, 'viewer', 'approver');
+
+    const inRepair = await withSignedStates(app, org, services(), async (tx, states) => {
+      const built = await buildGrantSummaries(tx, states, org);
+      const waiting = await sql<{ subject_type: string; object_id: string; reason: string }>`
+        select subject_type, object_id, reason from directory.holds_waiting where org_id = ${org}`.execute(tx);
+      return { built, waiting: waiting.rows };
+    });
+
+    expect(inRepair).toEqual({
+      built: { outcome: 'built', built: 1 },
+      waiting: [{ subject_type: 'membership_grant', object_id: bob.id, reason: 'holding' }],
+    });
+    raisedOn(bob.id, 1);
+    // Committed with the repair; the hold then recorded, which takes its row with it.
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+    expect(await database.as('backup').query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual(
+      [],
+    );
+  });
+
   it('refuses to bring back a member whose summary is behind, nothing moved', async () => {
     const alice = await add('admin');
     const bob = await add('approver');
@@ -670,7 +710,10 @@ describe(`the rule past 10,000 events, and the summaries built for members from 
     expect(await facts()).toEqual({ outcome: 'tampered', sign: 'holding' });
     expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'holding', objectId: bob.id })]);
     expect(await build()).toEqual({ outcome: 'built', built: 1 });
+    // Raised once by the rule's read and once by the build that brought it up to date; none after.
+    expect(lines('audit.integrity_failed')).toHaveLength(2);
     expect(await facts()).toMatchObject({ outcome: 'read' });
+    expect(lines('audit.integrity_failed')).toHaveLength(2);
   }, 240_000);
 
   it('builds each unbuilt summary from the history, a page at a time, as the history would decide', async () => {

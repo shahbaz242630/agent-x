@@ -214,6 +214,13 @@ export function grantsBelieved(read: GrantsCheck): Exclude<GrantsCheck, { readon
   return read;
 }
 
+/**
+ * Whether a change threw a tamper sign of a membership's (grantsBelieved; keepGrants, a summary out of step, OR1c):
+ * its alarm raised already, so the change's write answers it as INTEGRITY_FAILED, as any read found tampered with.
+ */
+export const tamperThrown = (error: unknown): boolean =>
+  error instanceof SignedStateFailed && error.reason === 'tampered';
+
 /** The most invitations one person accepted in an organisation that a membership's summary reads. */
 export const MOST_ACCEPTED = 100;
 

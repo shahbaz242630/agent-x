@@ -9,6 +9,7 @@ import {
   changeMembershipRole,
   deactivateMembership,
   memberOf,
+  MEMBERSHIPS,
   type MembershipChangeRead,
   type MembershipsTransaction,
 } from './infrastructure/memberships.ts';
@@ -47,6 +48,34 @@ export const deactivatedAsTheProduct = (
   key: { readonly orgId: string; readonly id: string },
   actor: AuditActor,
 ): Promise<void> => changed(db, services, key, actor, (tx, states, read) => deactivateMembership(tx, states, read));
+
+/**
+ * The member's role moved on past their grant summary, signed: since 0089 (OR1b) only the owner's
+ * connection, `owner`, can commit that, so the summary is left behind (OR1c's alarm).
+ */
+export const leftBehind = (
+  owner: Db,
+  services: SignedStatesServices,
+  key: { readonly orgId: string; readonly id: string },
+  roleTo: Role,
+  actor: AuditActor,
+): Promise<void> =>
+  withSignedStates(owner, key.orgId, services, async (tx, states) => {
+    const found = await memberOf(tx, states, key, 'change');
+    if (found.outcome !== 'found') throw new Error(`the membership reads as ${found.outcome}`);
+    await states.record(
+      tx,
+      MEMBERSHIPS,
+      key,
+      found.state,
+      { role: roleTo },
+      {
+        actor,
+        action: 'membership.role_changed',
+        details: { roleFrom: found.member.role, roleTo },
+      },
+    );
+  });
 
 /** The member's role changed to `roleTo` by `actor`, as the product changes one. */
 export const roleChangedAsTheProduct = (

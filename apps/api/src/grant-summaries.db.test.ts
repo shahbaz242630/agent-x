@@ -197,6 +197,10 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
     ]);
     const held = await withSignedStates(app, org, quiet(), (tx, states) => states.integrityHold(tx, org, 'none'));
     expect(held).toMatchObject({ outcome: 'held' });
+    // Its row kept with the repair went with the hold recorded.
+    expect(await database.as('backup').query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual(
+      [],
+    );
     // In step again: the next run builds nothing and raises nothing more.
     await job.run();
     expect(lines('grant_summaries.built')).toHaveLength(2);

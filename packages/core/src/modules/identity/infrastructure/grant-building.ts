@@ -9,7 +9,9 @@
 // since 0089 no image in service leaves one; two-person-facts.ts), then brought
 // up to date the same way: what the history says, with nothing it held taken
 // away. Why: only the app's keys can sign it, so without this a hold cleared
-// once someone has looked would be raised again by the very next read.
+// once someone has looked would be raised again by the very next read. Its
+// hold is kept waiting (directory.holds_waiting) in the same transaction as
+// the repair, so the hold is never lost with the evidence.
 //
 // In one transaction, withSignedStates' for the organisation: its memberships
 // read for a decision (`share`), so no change of one comes between the
@@ -17,7 +19,13 @@
 // change, after its membership (ADR-006 §6, 2a). A summary in step must hold
 // at least what the history says, and none may be ahead of its membership, or
 // it is a mismatch: the alarm, and the hold.
-import { type AuditActor, checkOf, type SignedStates, type TamperSign } from '../../audit/index.ts';
+import {
+  type AuditActor,
+  checkOf,
+  keepHoldWaitingHere,
+  type SignedStates,
+  type TamperSign,
+} from '../../audit/index.ts';
 import {
   gatherGrants,
   grantHistory,
@@ -25,7 +33,7 @@ import {
   type GrantSummary,
   summaryFromHistory,
 } from '../domain/two-person.ts';
-import { addGrants, bringUpToDate, grantsToChange } from './membership-grants.ts';
+import { addGrants, bringUpToDate, grantsToChange, MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
 import {
   behindRaised,
@@ -90,6 +98,12 @@ export async function buildGrantSummaries(
   const inStep = summariesInStep(states, orgId, verified, read.kept);
   if (inStep === undefined) return disagrees;
   behindRaised(states, orgId, inStep.behind);
+  // Why: the repair below commits the evidence away, so each alarm's hold is also kept waiting in this same
+  // transaction (with-signed-states.ts): if the hold then can't be recorded, the row outlives a restart and sets it.
+  for (const id of inStep.behind) {
+    const record = { orgId: orgId.toLowerCase(), subjectType: MEMBERSHIP_GRANTS.subject, objectId: id.toLowerCase() };
+    await keepHoldWaitingHere(tx, record, 'holding');
+  }
   const due = [...read.unbuilt, ...inStep.behind];
   if (due.length === 0) return { outcome: 'built', built: 0 };
   const whole = await wholeHistory(tx, states, orgId, verified.members, page);
