@@ -13,15 +13,16 @@ import {
   type MembershipsTransaction,
 } from './infrastructure/memberships.ts';
 import type { AuditActor, AuditTables, SignedStates, VerifiedState } from '../audit/index.ts';
-import type { Kysely } from 'kysely';
 import type { DirectoryTables } from '../directory/index.ts';
 import type { IdentityTables } from './infrastructure/tables.ts';
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
+/** The database these helpers take: what withSignedStates takes (no query builder named outside infrastructure). */
+type Db = Parameters<typeof withSignedStates<Tables, unknown>>[0];
 
 /** The membership and its summary read for a change, in their lock order, then `change` made from them. */
 function changed(
-  db: Kysely<Tables>,
+  db: Db,
   services: SignedStatesServices,
   key: { readonly orgId: string; readonly id: string },
   actor: AuditActor,
@@ -41,7 +42,7 @@ function changed(
 
 /** The member deactivated by `actor`, as the product deactivates one. */
 export const deactivatedAsTheProduct = (
-  db: Kysely<Tables>,
+  db: Db,
   services: SignedStatesServices,
   key: { readonly orgId: string; readonly id: string },
   actor: AuditActor,
@@ -49,7 +50,7 @@ export const deactivatedAsTheProduct = (
 
 /** The member's role changed to `roleTo` by `actor`, as the product changes one. */
 export const roleChangedAsTheProduct = (
-  db: Kysely<Tables>,
+  db: Db,
   services: SignedStatesServices,
   key: { readonly orgId: string; readonly id: string },
   roleTo: Role,
