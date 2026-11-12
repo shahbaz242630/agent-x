@@ -242,7 +242,7 @@ const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
  * function the migration then calls could grant unseen): what it would do can't be read here.
  */
 const BODY_DDL =
-  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)|\b(?:grant|revoke)\b|\bdefault\s+privileges\b/i;
+  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)|\b(?:grant|revoke)\b/i;
 /** A table attached as a partition takes the parent's row triggers. */
 const ATTACH_PARTITION = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?\S+ attach partition ${NAME}`);
 
@@ -396,14 +396,18 @@ const OPERATOR_NAMED = new RegExp(String.raw`\b${OPERATOR_ROLE}\b`, 'i');
 const UNICODE_ESCAPED = /\bu&["']/i;
 
 /**
- * Whether a statement's words, their strings taken out, name the operator's role. A Unicode escape counts as naming
- * it (its grant is then refused, as unreadable); a quoted name's apostrophes go first, so two can't hide the role.
+ * A string or a quoted name, read left to right so whichever opens first wins (S187 review: two chained passes let a
+ * `"` inside a string, or an apostrophe inside a name, move where strings end). `E'…'` strings take backslash escapes.
+ */
+const QUOTED = /\b[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"/gs;
+
+/**
+ * Whether a statement's words, their strings taken out (quoted names kept), name the operator's role. A Unicode escape
+ * counts as naming it, so its grant is refused as unreadable.
  */
 const namesOperator = (words: string): boolean =>
   UNICODE_ESCAPED.test(words) ||
-  OPERATOR_NAMED.test(
-    words.replaceAll(/"(?:[^"]|"")*"/g, (quoted) => quoted.replaceAll("'", '')).replaceAll(/'(?:[^']|'')*'/g, "''"),
-  );
+  OPERATOR_NAMED.test(words.replaceAll(QUOTED, (quoted) => (quoted.startsWith('"') ? quoted : "''")));
 
 /** The rights one privilege of a grant gives on its tables, as the guard prints them; undefined for a form it can't. */
 function rightsOf(privilege: string, tables: readonly string[]): string[] | undefined {

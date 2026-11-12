@@ -471,6 +471,21 @@ describe("a migration granting the operator's role a right (OR2b)", () => {
       "names the operator's role outside a grant this check can read",
     ],
     [
+      'a table whose name needs quotes',
+      'GRANT SELECT ON identity."Contacts" TO agentx_operator;',
+      "grants the operator's role a right on a table not named plainly with its schema",
+    ],
+    [
+      'the role between two strings, the first holding a double quote',
+      `ALTER TABLE identity.contacts ALTER COLUMN c SET DEFAULT 'a"', OWNER TO agentx_operator, ALTER COLUMN "d" SET DEFAULT 'z';`,
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'the role after an escaped string',
+      String.raw`ALTER TABLE identity.contacts ALTER COLUMN c SET DEFAULT E'\'', OWNER TO agentx_operator, ALTER COLUMN d SET DEFAULT 'z';`,
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
       'its default privileges',
       'ALTER DEFAULT PRIVILEGES IN SCHEMA identity GRANT SELECT ON TABLES TO agentx_operator;',
       "names the operator's role outside a grant this check can read",
@@ -602,6 +617,7 @@ describe('parseComing', () => {
     ['a name needing quotes', ['SELECT on a.B']],
     ['a schema right', ['USAGE on schema a']],
     ['more after it', ['SELECT on a.b and more']],
+    ['more before it', ['x SELECT on a.b']],
     ['not text', [1]],
   ])('refuses operator rights that are %s', (_what, operatorRights) => {
     expect(() => parseComing(JSON.stringify({ triggers: [], bodies: [], operatorRights }))).toThrow(
