@@ -18,9 +18,11 @@
 // to date from the history. An invitation a deactivated member accepts is
 // added only when they are brought back, which reads them all again.
 import type { SignedStateTable } from '@agentx/platform/db';
+import type { Transaction } from 'kysely';
 
 import {
   type AuditActor,
+  type AuditTables,
   type SignedStates,
   SignedStateFailed,
   type StateCheck,
@@ -35,7 +37,14 @@ import {
   INVITATION_GRANTS,
   NO_GRANTS,
 } from '../domain/two-person.ts';
-import type { MembershipsTransaction } from './memberships.ts';
+import type { DirectoryTables } from '../../directory/index.ts';
+import type { IdentityTables } from './tables.ts';
+
+/**
+ * A transaction on the tables a membership is added and read in, opened by withSignedStates for its organisation. Kept
+ * here, beside the grant summaries it carries, and re-exported by memberships.ts, so the two files don't import each other.
+ */
+export type MembershipsTransaction = Transaction<IdentityTables & DirectoryTables & AuditTables>;
 
 /** A membership's grant summary, as the signed state reads, records and checks it. */
 export const MEMBERSHIP_GRANTS = {

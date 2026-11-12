@@ -19,7 +19,7 @@
 // state), and then verified: the signed state must name the same person, so
 // an entry pointed at someone else's membership finds nothing.
 import type { SignedStateTable } from '@agentx/platform/db';
-import { type Kysely, type Transaction } from 'kysely';
+import type { Kysely } from 'kysely';
 
 import {
   type AuditActor,
@@ -43,6 +43,7 @@ import {
   grantsToChange,
   invitationGrantersOf,
   keepGrants,
+  type MembershipsTransaction,
 } from './membership-grants.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -59,8 +60,7 @@ export const MEMBERSHIPS = {
   rules: MEMBERSHIP,
 } as const satisfies SignedStateTable & { readonly rules: typeof MEMBERSHIP };
 
-/** A transaction on the tables a membership is added and read in, opened by withSignedStates for its organisation. */
-export type MembershipsTransaction = Transaction<IdentityTables & DirectoryTables & AuditTables>;
+export type { MembershipsTransaction } from './membership-grants.ts';
 
 export interface NewMembership {
   readonly orgId: string;
