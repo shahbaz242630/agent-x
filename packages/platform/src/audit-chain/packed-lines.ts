@@ -4,8 +4,11 @@
 // goes last. A line is a new frozen copy each time it is read, so code that must know a line moved can't go by identity:
 // each line carries a stamp instead, the anchor log's count at the moment it came in, kept with it from table to table,
 // as the same object was before (anchor-log.ts). A line that doesn't fit a record (a hash or signature of another
-// length, a place past 64 bits, a field more) is kept as it came, so nothing it says is ever lost.
+// length, a place past 64 bits, a field more) is kept as it came, so nothing it says is ever lost. Each line also keeps
+// its chain's shard (shards.ts), worked out once as the chain comes in, so a file a shard can be taken without hashing
+// every chain's name again.
 import type { Anchor, Progress } from './anchor.ts';
+import { shardOf } from './shards.ts';
 
 /** How many records a buffer holds: small, so a table that holds a few lines costs little. */
 const RECORDS_A_CHUNK = 1024;
@@ -21,8 +24,9 @@ const HASH_BYTES = 32;
 const SIGNATURE = HASH + HASH_BYTES;
 const SIGNATURE_BYTES = 64;
 const MARK = SIGNATURE + SIGNATURE_BYTES;
-const BEGAN = MARK + 1;
-/** A record's size: 137 bytes, and 145 with a pass's start. */
+const SHARD = MARK + 1;
+const BEGAN = SHARD + 1;
+/** A record's size: 138 bytes, and 146 with a pass's start. */
 const RECORD_BYTES = BEGAN;
 const PLACE_RECORD_BYTES = BEGAN + 8;
 
@@ -33,6 +37,7 @@ interface Whole<T> {
   readonly line: T;
   readonly stamp: number;
   readonly marked: boolean;
+  readonly shard: number;
 }
 
 type Entry<T> = number | Whole<T>;
@@ -58,17 +63,21 @@ export interface PackedLines<T extends Anchor> {
   readonly size: number;
   /** How many records are in use: one a line that fits, and those a file taken may still read, until released. */
   readonly records: number;
+  /** What its record buffers take, in bytes: allocated, not estimated. They are reused, never given back, so this is its peak. */
+  readonly allocatedBytes: number;
   has(chain: string): boolean;
   get(chain: string): T | undefined;
   stampOf(chain: string): number | undefined;
   /** Whether the line was set marked: the anchor log's mark for an anchor that is a rebase's. */
   marked(chain: string): boolean;
+  /** The chain's shard, if the table holds it. */
+  shardOf(chain: string): number | undefined;
   set(line: T, stamp: number, marked?: boolean): void;
   delete(chain: string): void;
   keys(): MapIterator<string>;
   held(): Generator<Stamped<T>>;
   /** The lines `keep` says yes to, held as they are now until released: what a file is made from. Its line, when asked. */
-  take(keep: (chain: string, line: () => T) => boolean): Taken<T>;
+  take(keep: (chain: string, line: () => T, shard: number) => boolean): Taken<T>;
 }
 
 /** Whether a line fits a record: every field its own length, and nothing beside them. */
@@ -116,7 +125,7 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
     (taken > 0 ? retired : free).push(slot);
   };
 
-  const write = (slot: number, line: T, stamp: number, marked: boolean): void => {
+  const write = (slot: number, line: T, stamp: number, marked: boolean, shard: number): void => {
     const [chunk, at] = where(slot);
     chunk.writeBigUInt64LE(line.seq, at + SEQ);
     chunk.writeDoubleLE(line.at.getTime(), at + AT);
@@ -126,6 +135,7 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
     line.hash.copy(chunk, at + HASH);
     line.signature.copy(chunk, at + SIGNATURE);
     chunk[at + MARK] = marked ? 1 : 0;
+    chunk[at + SHARD] = shard;
     if (places) chunk.writeDoubleLE((line as unknown as Progress).began.getTime(), at + BEGAN);
   };
 
@@ -150,12 +160,18 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
     return chunk.readDoubleLE(at + STAMP);
   };
 
-  const take = (keep: (chain: string, line: () => T) => boolean): Taken<T> => {
+  const shardIn = (entry: Entry<T>): number => {
+    if (typeof entry !== 'number') return entry.shard;
+    const [chunk, at] = where(entry);
+    return chunk[at + SHARD] ?? 0;
+  };
+
+  const take = (keep: (chain: string, line: () => T, shard: number) => boolean): Taken<T> => {
     // Two flat arrays, a reference each a line, not a pair each: a snapshot takes every chain.
     const chains: string[] = [];
     const entries: Entry<T>[] = [];
     for (const [chain, entry] of index) {
-      if (keep(chain, () => lineOf(chain, entry))) {
+      if (keep(chain, () => lineOf(chain, entry), shardIn(entry))) {
         chains.push(chain);
         entries.push(entry);
       }
@@ -188,6 +204,9 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
     get records() {
       return used - free.length;
     },
+    get allocatedBytes() {
+      return chunks.length * RECORDS_A_CHUNK * size;
+    },
     has: (chain: string) => index.has(chain),
     get(chain: string) {
       const entry = index.get(chain);
@@ -204,17 +223,23 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
       const [chunk, at] = where(entry);
       return chunk[at + MARK] === 1;
     },
+    shardOf(chain: string) {
+      const entry = index.get(chain);
+      return entry === undefined ? undefined : shardIn(entry);
+    },
     set(line: T, stamp: number, marked = false) {
       const entry = index.get(line.chain);
+      // Hashed once, as the chain comes in: a line set again keeps its chain, so its shard.
+      const shard = entry === undefined ? shardOf(line.chain) : shardIn(entry);
       if (!packs(line, places)) {
         if (typeof entry === 'number') letGo(entry);
-        index.set(line.chain, { line, stamp, marked });
+        index.set(line.chain, { line, stamp, marked, shard });
         return;
       }
       // Written over in place only while nothing taken may still read it.
       const slot = typeof entry === 'number' && taken === 0 ? entry : allocated();
       if (typeof entry === 'number' && slot !== entry) letGo(entry);
-      write(slot, line, stamp, marked);
+      write(slot, line, stamp, marked, shard);
       index.set(line.chain, slot);
     },
     delete(chain: string) {

@@ -14,6 +14,7 @@ import { type AnchorLog, createAnchorLog } from './anchor-log.ts';
 import type { Chain } from './chain.ts';
 import type { PackedLines, Stamped, Taken } from './packed-lines.ts';
 import { rebaseFile, rebaseFileName, signRebase } from './rebase.ts';
+import { shardOf } from './shards.ts';
 
 const run = vi.hoisted(() => ({
   objects: false,
@@ -46,10 +47,13 @@ function objectLines<T extends Anchor>(): PackedLines<T> {
     get records() {
       return index.size;
     },
+    // Objects, no record buffers.
+    allocatedBytes: 0,
     has: (chain) => index.has(chain),
     get: (chain) => index.get(chain)?.line,
     stampOf: (chain) => index.get(chain)?.stamp,
     marked: (chain) => index.get(chain)?.marked ?? false,
+    shardOf: (chain) => (index.has(chain) ? shardOf(chain) : undefined),
     set(line, stamp, marked = false) {
       // An identity given back (a file's lines read back from its bytes) stands for the object it was, as the old form
       // put that very object back; a stamp of the log's own is a new object's, so its identity.
@@ -64,7 +68,7 @@ function objectLines<T extends Anchor>(): PackedLines<T> {
     },
     take(keep): Taken<T> {
       const got = [...index]
-        .filter(([chain, entry]) => keep(chain, () => entry.line))
+        .filter(([chain, entry]) => keep(chain, () => entry.line, shardOf(chain)))
         .map(([chain, entry]) => ({ chain, ...entry }));
       return {
         size: got.length,

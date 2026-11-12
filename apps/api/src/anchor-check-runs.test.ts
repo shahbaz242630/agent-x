@@ -810,26 +810,72 @@ function logOver(clock: FixedClock) {
   return { log: logOn(capture), restarted: () => logOn(new LogCapture()), fake, capture };
 }
 
-describe('writes come on a schedule of their own during a run', () => {
-  /** A real zlib in `flush`: fake timers would hold it, so these let real time pass in small steps. */
-  const untilTrue = async (condition: () => boolean): Promise<void> => {
-    await vi.waitUntil(condition, { timeout: 4000, interval: 2 });
+/**
+ * The same log, with every write the check asks of it in view (CQ6): a test awaits that write itself, real zlib and all,
+ * never real time passing, so a busy machine makes it slower, not wrong. Its timers are faked, so a write comes only when
+ * the test lets the interval go by (`nextWrite`).
+ */
+function writesSeen(log: AnchorLog) {
+  const asked: Promise<void>[] = [];
+  const seen: AnchorLog = {
+    ...log,
+    flush: () => {
+      const writing = log.flush();
+      asked.push(writing);
+      return writing;
+    },
   };
+  /** One interval: the timer's write begins, exactly one, and is awaited to its end. */
+  const nextWrite = async (everyMs: number): Promise<void> => {
+    await settled();
+    const before = asked.length;
+    await vi.advanceTimersByTimeAsync(everyMs);
+    expect(asked).toHaveLength(before + 1);
+    await asked.at(-1);
+  };
+  return { log: seen, asked, nextWrite };
+}
 
+/** Every write to the store held until let go, and a promise for the first to reach it: its file made, real zlib and all. */
+function heldAtTheStore(durable: ReturnType<typeof logOver>) {
+  const { promise: letGo, resolve: release } = Promise.withResolvers<undefined>();
+  const { promise: reached, resolve: arrived } = Promise.withResolvers<undefined>();
+  durable.fake.instead.put = async (name, bytes) => {
+    arrived(undefined);
+    await letGo;
+    return durable.fake.real.put(name, bytes);
+  };
+  return {
+    reached,
+    letGo: () => {
+      release(undefined);
+    },
+  };
+}
+
+/** Timers faked but not what zlib's stream needs to finish (`setImmediate`, ticks): a write still ends on its own. */
+const fakeTimersOnly = (): void => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+};
+
+describe('writes come on a schedule of their own during a run', () => {
   it('what lanes finished is written while another hangs, with no lane waiting on the store', async () => {
+    fakeTimersOnly();
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
+    const writes = writesSeen(durable.log);
     const all = orgs(3);
     const { organizations, release } = directory(all, (orgId) => (orgId === org(1) ? undefined : ok(1n)));
     const { check, capture } = checking(organizations, {
-      durable: durable.log,
+      durable: writes.log,
       clock,
       writeEveryMs: 5,
       lanes: 2,
     });
     const run = check.run();
     // The stuck one still hanging, and the others already in the store.
-    await untilTrue(() => durable.capture.lines().some((line) => line.event === 'audit.anchors_written'));
+    await writes.nextWrite(5);
+    expect(durable.capture.lines().filter((line) => line.event === 'audit.anchors_written')).toHaveLength(1);
     expect(lines(capture, 'audit.anchor_check_done')).toEqual([]);
     const restarted = durable.restarted();
     await restarted.read();
@@ -840,37 +886,50 @@ describe('writes come on a schedule of their own during a run', () => {
   });
 
   it('a run stopped midway leaves what it finished written, as when the lease goes and nothing calls `finish`', async () => {
+    fakeTimersOnly();
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
+    const writes = writesSeen(durable.log);
     const stopping = new AbortController();
     const { organizations } = directory(orgs(3), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
-    const { check } = checking(organizations, { durable: durable.log, clock, lanes: 2 });
+    const { check } = checking(organizations, { durable: writes.log, clock, lanes: 2 });
     const run = check.run(stopping.signal);
-    await untilTrue(() => durable.log.latest({ kind: 'organisation', orgId: org(3) }) !== undefined);
+    await settled();
+    expect(durable.log.latest({ kind: 'organisation', orgId: org(3) })).toBeDefined();
+    // Nothing written yet: the timer's interval has not gone by, so what lands is the stopped run's own write.
+    expect(writes.asked).toEqual([]);
+    expect(durable.fake.files.size).toBe(0);
     stopping.abort();
     await run;
-    await untilTrue(() => durable.fake.files.size > 0);
+    expect(writes.asked).toHaveLength(1);
+    await writes.asked[0];
+    expect(durable.fake.files.size).toBeGreaterThan(0);
     const restarted = durable.restarted();
     await restarted.read();
     expect(restarted.latest({ kind: 'organisation', orgId: org(2) })?.seq).toBe(1n);
   });
 
   it('a store failing is said during a long run, and in time the alert, not only at its end', async () => {
+    fakeTimersOnly();
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
+    const writes = writesSeen(durable.log);
     await durable.log.read();
     durable.fake.instead.put = () => Promise.reject(new Error('the store is away'));
     const { organizations, release } = directory(orgs(2), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
     const { check, capture } = checking(organizations, {
-      durable: durable.log,
+      durable: writes.log,
       clock,
       writeEveryMs: 5,
       lanes: 2,
     });
     const run = check.run();
-    await untilTrue(() => durable.capture.lines().some((line) => line.event === 'audit.anchor_store_write_failed'));
+    await writes.nextWrite(5);
+    expect(lines(durable.capture, 'audit.anchor_store_write_failed')).toHaveLength(1);
+    expect(lines(durable.capture, 'audit.anchor_store_unwritable')).toEqual([]);
     clock.advanceBy(120_000);
-    await untilTrue(() => durable.capture.lines().some((line) => line.event === 'audit.anchor_store_unwritable'));
+    await writes.nextWrite(5);
+    expect(lines(durable.capture, 'audit.anchor_store_unwritable')).toHaveLength(1);
     expect(lines(capture, 'audit.anchor_check_done')).toEqual([]);
     release(org(1));
     await run;
@@ -899,28 +958,34 @@ describe('writes come on a schedule of their own during a run', () => {
   });
 
   it('no writes after the run, even with a write under way as it ends: the timer ends with it', async () => {
+    fakeTimersOnly();
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
+    const writes = writesSeen(durable.log);
     await durable.log.read();
-    const { promise: letGo, resolve: release } = Promise.withResolvers<undefined>();
-    durable.fake.instead.put = async (name, bytes) => {
-      await letGo;
-      return durable.fake.real.put(name, bytes);
-    };
+    const held = heldAtTheStore(durable);
     const { organizations, release: endCheck } = directory(orgs(2), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
-    const { check } = checking(organizations, { durable: durable.log, clock, writeEveryMs: 1 });
+    const { check } = checking(organizations, { durable: writes.log, clock, writeEveryMs: 1 });
     const running = check.run();
     // The timer's write under way, held at the store, as the run's last check ends.
-    await vi.waitUntil(() => durable.fake.calls.puts > 0, { timeout: 4000, interval: 1 });
+    await settled();
+    await vi.advanceTimersByTimeAsync(1);
+    await held.reached;
+    expect(writes.asked).toHaveLength(1);
     endCheck(org(1));
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    release(undefined);
+    await settled();
+    // The run's end joins that write rather than racing it.
+    expect(writes.asked).toHaveLength(2);
+    held.letGo();
     await running;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    // What moves after the run waits for the next: a timer gone on would write it.
+    await settled();
+    // What moves after the run waits for the next: a timer gone on would ask for a write.
     durable.log.keep(signAnchor(keys, { kind: 'organisation', orgId: org(9) }, ok(1n), AT));
+    const asked = writes.asked.length;
     const after = durable.fake.calls.puts;
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.all(writes.asked);
+    expect(writes.asked).toHaveLength(asked);
     expect(durable.fake.calls.puts).toBe(after);
   });
 });
@@ -1238,22 +1303,24 @@ describe('second round (4D2e E6 review): any number of organisations may slow it
   });
 
   it('a run’s last write takes what moved during a write already under way, so nothing waits for the next run', async () => {
+    fakeTimersOnly();
     const clock = new FixedClock(AT);
     const durable = logOver(clock);
+    const writes = writesSeen(durable.log);
     await durable.log.read();
-    const { promise: letGo, resolve: release } = Promise.withResolvers<undefined>();
-    durable.fake.instead.put = async (name, bytes) => {
-      await letGo;
-      return durable.fake.real.put(name, bytes);
-    };
+    const held = heldAtTheStore(durable);
     const { organizations, release: endCheck } = directory(orgs(2), (orgId) => (orgId === org(1) ? undefined : ok(1n)));
-    const { check } = checking(organizations, { durable: durable.log, clock, writeEveryMs: 1 });
+    const { check } = checking(organizations, { durable: writes.log, clock, writeEveryMs: 1 });
     const running = check.run();
-    await vi.waitUntil(() => durable.fake.calls.puts > 0, { timeout: 4000, interval: 1 });
+    await settled();
+    await vi.advanceTimersByTimeAsync(1);
+    await held.reached;
     // Org 1 anchors after the file under way was made.
+    expect(durable.log.latest({ kind: 'organisation', orgId: org(1) })).toBeUndefined();
     endCheck(org(1));
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    release(undefined);
+    await settled();
+    expect(writes.asked).toHaveLength(2);
+    held.letGo();
     await running;
     const restarted = durable.restarted();
     await restarted.read();

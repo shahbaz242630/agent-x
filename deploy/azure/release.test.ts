@@ -26,6 +26,7 @@ import {
   LOAD_RUN_UP,
   handDeployedList,
   main,
+  migrateFirst,
   ORDER,
   PARAMS_PATHS,
   parseArguments,
@@ -1319,9 +1320,13 @@ class Staging {
   private patched(workload: Workload, body: string | undefined): void {
     const sent = JSON.parse(body ?? '{}') as {
       properties: {
-        template: { containers: { image: string; command: string[]; env: { name: string; value?: string }[] }[] };
+        template: {
+          revisionSuffix?: string;
+          containers: { image: string; command: string[]; env: { name: string; value?: string }[] }[];
+        };
       };
     };
+    if (workload === 'api') this.app.suffix = sent.properties.template.revisionSuffix;
     const [container] = sent.properties.template.containers;
     const build = container?.env.find((entry) => entry.name === 'AGENTX_RELEASE')?.value ?? '';
     const settleAs = workload === 'api' ? (this.apiSettleAs ?? this.settleAs) : this.settleAs;
@@ -1546,7 +1551,12 @@ describe('release', () => {
         method: 'patch',
         url: workloadUrl(SUBSCRIPTION, 'api'),
         body: {
-          properties: { template: { containers: [released(running('api', { command: ['node'] }), NEW_IMAGE, NEW)] } },
+          properties: {
+            template: {
+              revisionSuffix: '',
+              containers: [released(running('api', { command: ['node'] }), NEW_IMAGE, NEW)],
+            },
+          },
         },
       },
     ]);
@@ -1720,10 +1730,6 @@ describe('release', () => {
         'api is InProgress from an earlier change, so nothing was sent: look at it first.',
         (azure) => (azure.app.state = 'InProgress'),
       ],
-      [
-        'The API has the revision suffix "hand" set, which a release would send again.',
-        (azure) => (azure.app.suffix = 'hand'),
-      ],
     ];
     for (const [message, arrange] of cases) {
       const azure = new Staging();
@@ -1732,6 +1738,16 @@ describe('release', () => {
       expect(ended_.message).toBe(`${message}\nLeft: nothing was changed.`);
       expect(azure.writes).toEqual([]);
     }
+  });
+
+  it('clears a revision suffix set by hand with an empty one, never sending it again to be refused as taken (AZ7)', async () => {
+    const azure = new Staging();
+    azure.app.suffix = 'hand';
+    const { status } = await outcome(azure);
+    expect(status).toBe(0);
+    const [, , api] = azure.writes;
+    expect(api?.body).toMatchObject({ properties: { template: { revisionSuffix: '' } } });
+    expect(azure.app.suffix).toBe('');
   });
 
   it('runs the migration again without resending the job when it already holds the commit', async () => {
@@ -2082,5 +2098,91 @@ describe('main', () => {
       ),
     ).toBe(0);
     expect(releasedLines.at(-1)).toMatch(/^Released /);
+  });
+});
+
+describe('migrateFirst: the migration run ahead of a hand deploy (deploy.ts apps --migrate-first, AZ6)', () => {
+  const BUILT = 'db/migrations/0001_built.sql';
+  const ADDS = 'db/migrations/0082_marks.sql';
+  const builtSql = 'CREATE TABLE app.things (id uuid);';
+  const addsSql = 'CREATE TRIGGER marks AFTER UPDATE ON app.things FOR EACH ROW EXECUTE FUNCTION app.mark();';
+
+  /** migrateFirst's outcome: the run's name or the error's message, and what it said. */
+  async function ranFirst(azure: Staging, line = ordinary()) {
+    const steps = azure.steps(line);
+    const done = await migrateFirst(steps, SUBSCRIPTION, NEW, digest('2')).then(
+      (name) => ({ name, message: '' }),
+      (error: unknown) => ({ name: undefined, message: error instanceof Error ? error.message : String(error) }),
+    );
+    return { ...done, said: steps.said };
+  }
+
+  it('updates the migration job to the image and runs it to success, leaving the API as it is', async () => {
+    const azure = new Staging();
+    const { name, said } = await ranFirst(azure);
+    expect(name).toBe('job-agentx-stg-migrate-new0x');
+    expect(azure.writes).toEqual([
+      {
+        method: 'patch',
+        url: workloadUrl(SUBSCRIPTION, 'migrate'),
+        body: {
+          properties: {
+            template: { containers: [released(running('migrate', { command: ['node'] }), NEW_IMAGE, NEW)] },
+          },
+        },
+      },
+      { method: 'post', url: workloadUrl(SUBSCRIPTION, 'migrate').replace('?', '/start?'), body: undefined },
+    ]);
+    expect(azure.app.release).toBe(OLD);
+    expect(said.at(-1)).toBe(
+      `job-agentx-stg-migrate-new0x succeeded: the database holds every migration ${NEW} brings.`,
+    );
+  });
+
+  it('runs the job without resending it when it already holds the image, as after a hand apps (S174)', async () => {
+    const azure = new Staging();
+    Object.assign(azure.job, { release: NEW, image: NEW_IMAGE });
+    const { name } = await ranFirst(azure);
+    expect(name).toBe('job-agentx-stg-migrate-new0x');
+    expect(methods(azure)).toEqual(['post']);
+  });
+
+  it('stops, saying what it left and how to read the log, when the run fails', async () => {
+    const azure = new Staging();
+    azure.runEndsAs = 'Failed';
+    const { message } = await ranFirst(azure);
+    expect(message).toBe(
+      `job-agentx-stg-migrate-new0x ended Failed, so nothing was deployed. Read its log: node deploy/azure/jobs.ts wait migrate job-agentx-stg-migrate-new0x\nLeft: migrate holds ${NEW}; the API is unchanged, on ${OLD}.`,
+    );
+    expect(methods(azure)).toEqual(['patch', 'post']);
+  });
+
+  it('changes nothing while the job is unsettled from an earlier change', async () => {
+    const unsettled = new Staging();
+    unsettled.job.state = 'Failed';
+    expect((await ranFirst(unsettled)).message).toBe(
+      'migrate is Failed from an earlier change, so nothing was sent: look at it first.\nLeft: nothing was changed.',
+    );
+    expect(unsettled.writes).toEqual([]);
+  });
+
+  it('is held to decision 49 against the build the API runs, as a release is, and changes nothing when it fails', async () => {
+    const notComing = new Staging();
+    const comingLine = history(
+      [OLD, NEW],
+      { [OLD]: [ADDS] },
+      { [OLD]: { [BUILT]: builtSql }, [NEW]: { [BUILT]: builtSql, [ADDS]: addsSql } },
+    );
+    const refused = await ranFirst(notComing, comingLine);
+    expect(refused.message).toBe(
+      `The migration wasn't run, and nothing was changed: ${COMING_FIRST}\n  0082_marks.sql adds marks on app.things, which the code before it didn't carry in coming.json's triggers (staging runs ${OLD})`,
+    );
+    expect(notComing.writes).toEqual([]);
+    const outside = new Staging();
+    const elsewhere = await ranFirst(outside, history([NEW]));
+    expect(elsewhere.message).toBe(
+      `The API runs ${OLD}, which isn't in ${NEW}'s history, so whether it knows what this image's migrations add can't be checked (decision 49): the migration wasn't run, and nothing was changed.`,
+    );
+    expect(outside.writes).toEqual([]);
   });
 });
