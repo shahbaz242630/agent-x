@@ -14,7 +14,7 @@ import {
   HOLDS_WAITING_EVERY_MS,
   pollHoldsWaiting,
 } from '@agentx/core/modules/audit';
-import { listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
+import { listedByShard, listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
@@ -22,6 +22,7 @@ import {
   contactAddressFor,
   countingContactsFor,
   factorRemovalsDue,
+  keptPersonReader,
   membersFor,
   resetLinkFor,
 } from '@agentx/core/modules/identity';
@@ -43,6 +44,7 @@ import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
 import { FACTOR_REMOVALS_EVERY_MS, FACTOR_REMOVALS_WHOLE_PASS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
+import { createGrantSummaryBuilding, GRANT_SUMMARIES_EVERY_MS } from './grant-summaries.ts';
 import {
   createHandoff,
   HANDOFF_EVERY_MS,
@@ -249,7 +251,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       },
     ],
     organizations: {
-      list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
+      // Shard by shard (PL-65 PR4), so those past the cap, taken in the list's order, walk the anchors' shards too.
+      list: () => listedByShard(database, undefined, JOB_ANSWER_WITHIN_MS),
       // Only those recorded since the last read, up to where the platform chain's check has reached (4D2e E8).
       recorded: recordedSince({
         since: (afterSeq, upTo) => platform.createdOrganizationsSince(database, afterSeq, upTo, JOB_ANSWER_WITHIN_MS),
@@ -304,7 +307,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
-        anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
+        anchoring: {
+          anchors: anchorStore,
+          anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal),
+          // Tx A's shard held from the lane's first anchor through Tx A, where the log lets shards go (PL-65 PR3).
+          ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
+        },
       }),
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,
@@ -448,6 +456,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         waitingRequests: createWaitingRequests({ database, ...logged, publicOrigin: config.http.publicOrigin }),
         // A paid supplier's email, from the payment's verified records (Phase 4 C2b).
         remittances: createRemittances({ database, ...logged }),
+        // The name and address Agent X keeps of the person our team's reset is about (0049, 0087).
+        personOf: keptPersonReader(database, keys),
         fetch: outboundFetch,
         logger,
       }),
@@ -504,6 +514,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       HOLD_HISTORY_EVERY_MS,
       HOUR_MS,
     ),
+    // The grant summaries of memberships added before 0085 built from each organisation's history (OR1).
+    job('grant_summaries', createGrantSummaryBuilding(organisationJob), GRANT_SUMMARIES_EVERY_MS, LONG_MS),
     // Every request's reservation and order claim checked against its signed state (Phase 2 E1).
     job(
       'holdings_check',

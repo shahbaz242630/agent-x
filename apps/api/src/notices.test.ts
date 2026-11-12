@@ -58,6 +58,7 @@ function senderWith(
       emailed: () => Promise.reject(new Error('not asked')),
       givenUp: () => Promise.reject(new Error('not asked')),
     },
+    personOf: () => Promise.reject(new Error('not asked')),
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
   });

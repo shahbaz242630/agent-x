@@ -1,58 +1,309 @@
 // The two-person rule's facts (domain/two-person.ts; ADR-012 §1, SEC-PAY-04;
-// E3-1), read in the caller's transaction: every member, verified through
-// their signed state, and the organisation's history of memberships and
-// invitations from its log, each event believed only whole. Either found
-// tampered with raises the alarm and holds the organisation.
+// E3-1; OR1), read in the caller's transaction: every membership the log made,
+// verified through its signed state, and each one's grant summary, verified
+// through its own (membership-grants.ts). Either found tampered with raises
+// the alarm and holds the organisation.
 //
-// A membership the log made but the list no longer holds is a tamper sign too
-// (gate H10's review): the organisation must never look smaller than it is.
+// The memberships are those the organisation's log made (one event each, so a
+// read bounded by the members, never by the history's length), and each must
+// be listed in the directory for the person its signed state names: one the
+// list no longer holds would make the organisation look smaller than it is
+// and open the one-person path (gate H10's review), so it is a tamper sign.
 //
-// Reads only. An event deleted from the history, to make a member look as if
-// the enterer never granted their role, breaks the chain, which the anchor
-// check finds (A2b), as for the removal restriction's reads.
-import type { SignedStates, TamperSign } from '../../audit/index.ts';
-import { HISTORY_SUBJECTS, type TwoPersonFacts, twoPersonFacts } from '../domain/two-person.ts';
-import { membersOf, type MembershipsTransaction } from './memberships.ts';
+// A summary is believed only at its membership's version. One behind it was
+// left by a change an image from before OR1 made (it writes no summary): during
+// a release's swap, or after a rollback. That is never a tamper sign (no one
+// without the app's keys can move a membership on), so the rule reads the
+// history for that organisation and the API's job brings the summary up to
+// date; one ahead of its membership no image writes, so it is a mismatch. The
+// strict check, a summary behind as the alarm, waits for a migration that
+// refuses any membership change committed without its summary, released by
+// decision 49's order (coming.json) only over an image that keeps them, so no
+// image in service can then leave one behind.
+//
+// A membership added before the summaries (0085) has none until the job builds
+// it. While any member's is unbuilt or behind, the rule reads the organisation's
+// history as it always has (at most MOST_HISTORY_EVENTS, past which it throws
+// rather than decide on part of it), and every summary in step must hold at
+// least what that history says.
+//
+// Up to MOST_GATHERED_MEMBERS members, the memberships and their summaries are
+// read on one trip (gather); more, in four statements (verifiedStates, two a
+// table). So the read is three trips for most organisations and six at most,
+// where it was one a member and two more.
+//
+// Reads only. An event deleted from the log is the anchor check's to find
+// (A2b), as for any read of the log.
+import { MOST_ROWS_GATHERED, type GatheredRow } from '@agentx/platform/db';
+
+import { checkOf, type SignedStates, type StateCheck, type TamperSign } from '../../audit/index.ts';
+import { listedMembers } from '../../directory/index.ts';
+import {
+  factsFromSummaries,
+  gatherGrants,
+  type GrantSummary,
+  grantHistory,
+  historyFacts,
+  HISTORY_SUBJECTS,
+  summaryCovers,
+  type TwoPersonFacts,
+} from '../domain/two-person.ts';
+import { type GrantsCheck, grantsFrom, MEMBERSHIP_GRANTS } from './membership-grants.ts';
+import {
+  memberFrom,
+  type MemberRecord,
+  MEMBERSHIPS,
+  type MembershipsTransaction,
+  MOST_MEMBERS,
+  TooManyMembers,
+} from './memberships.ts';
 
 /**
- * The most events about memberships and invitations one read takes: past it
- * the read throws (TooManyEventsToRead) rather than decide on part of the
- * history. About 5 an invitation, so some 2,000 invitations.
+ * The most events about memberships and invitations one read of the history
+ * takes while a summary is unbuilt: past it the read throws
+ * (TooManyEventsToRead) rather than decide on part of the history. About 5 an
+ * invitation, so some 2,000 invitations. The job that builds the summaries
+ * reads the history a page this long at a time, whatever its length.
  */
 export const MOST_HISTORY_EVENTS = 10_000;
+
+/** The most members whose memberships and summaries one gather reads, two rows each. */
+const MOST_GATHERED_MEMBERS = MOST_ROWS_GATHERED / 2;
 
 /** The rule's facts; or tampered with, with the alarm raised. */
 export type TwoPersonFactsCheck =
   ({ readonly outcome: 'read' } & TwoPersonFacts) | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+interface Tampered {
+  readonly outcome: 'tampered';
+  readonly sign: TamperSign;
+}
+
+/** The organisation's members, each verified, with the version each membership's signed state has reached. */
+export interface VerifiedMembers {
+  readonly outcome: 'verified';
+  readonly members: readonly MemberRecord[];
+  readonly versions: ReadonlyMap<string, number>;
+}
+
+/**
+ * Every membership the organisation's log made, by ID in lower case and in
+ * order, and the directory's entries as membership-and-person pairs. More
+ * than MOST_MEMBERS throws TooManyMembers, as a list of them does.
+ */
+export async function membershipsMade(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<
+  { readonly outcome: 'made'; readonly ids: readonly string[]; readonly listed: ReadonlySet<string> } | Tampered
+> {
+  // The oldest, never past the limit unseen: one more than the most there may be is enough to know there are more.
+  const made = await states.historyOf(tx, orgId, {
+    subjectTypes: [MEMBERSHIPS.subject],
+    actions: ['membership.created'],
+    limit: MOST_MEMBERS + 1,
+    oldest: true,
+  });
+  if (made.outcome === 'tampered') return made;
+  // Lower-case UUID text sorts as Postgres sorts the uuids: the lock order's.
+  const ids = [...new Set(made.events.map(({ event }) => event.subject.id.toLowerCase()))].sort();
+  if (ids.length > MOST_MEMBERS) throw new TooManyMembers();
+  const entries = await listedMembers(tx, orgId, MOST_MEMBERS + 1);
+  const listed = new Set(entries.map(({ membershipId, userId }) => pair(membershipId, userId)));
+  return { outcome: 'made', ids, listed };
+}
+
+const pair = (membershipId: string, userId: string): string => `${membershipId.toLowerCase()}:${userId.toLowerCase()}`;
+
+/**
+ * The members from their memberships' checks, each listed for its own person;
+ * or the first not to be (raised as a mismatch: the alarm, and the hold), or
+ * tampered with (its alarm already raised).
+ */
+export function membersFrom(
+  states: SignedStates,
+  orgId: string,
+  made: { readonly ids: readonly string[]; readonly listed: ReadonlySet<string> },
+  check: (id: string) => StateCheck,
+): VerifiedMembers | Tampered {
+  const members: MemberRecord[] = [];
+  const versions = new Map<string, number>();
+  for (const id of made.ids) {
+    const state = check(id);
+    if (state.outcome === 'tampered') return state;
+    // The log made it, so it has a signed state: none at all is as gone as a row deleted.
+    if (state.outcome === 'missing' || !made.listed.has(pair(id, memberFrom(id, state).userId))) {
+      states.mismatch(MEMBERSHIPS.subject, { orgId, id });
+      return { outcome: 'tampered', sign: 'deleted' };
+    }
+    members.push(memberFrom(id, state));
+    versions.set(id, state.version);
+  }
+  return { outcome: 'verified', members, versions };
+}
+
+/**
+ * The checks of the rows of `table` named `ids`, read for a decision
+ * (`share`): from what `gathered` read on one trip, or, past a gather's
+ * reach, in two statements (verifiedStates).
+ */
+async function checksOf(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+  table: GatheredRow['table'],
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, StateCheck>> {
+  if (ids.length > MOST_GATHERED_MEMBERS) return states.verifiedStates(tx, table, orgId, ids);
+  // Each answers from the gather, with no trip of its own, unless it wasn't believed there (then read alone).
+  const checks = new Map<string, StateCheck>();
+  for (const id of ids) checks.set(id, await states.verifiedState(tx, table, { orgId, id }, 'share'));
+  return checks;
+}
+
+/** A few members' memberships and summaries on one trip, every membership before any summary (ADR-006 §6, 2a). */
+async function gathered(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<void> {
+  if (ids.length === 0 || ids.length > MOST_GATHERED_MEMBERS) return;
+  const rows = (table: GatheredRow['table']): GatheredRow[] => ids.map((id) => ({ table, id: { id }, lock: 'share' }));
+  await states.gather(tx, orgId, [...rows(MEMBERSHIPS), ...rows(MEMBERSHIP_GRANTS)]);
+}
+
+/** A summary kept, as its read gives it. */
+export type KeptGrants = Extract<GrantsCheck, { readonly outcome: 'kept' }>;
+
+/**
+ * The kept summaries split by their membership's version: in step, or behind
+ * it (left by an image from before OR1, so rebuilt from the history, never an
+ * alarm); undefined for one ahead of it, which no image writes, raised as a
+ * mismatch (the alarm, and the hold).
+ */
+export function summariesInStep(
+  states: SignedStates,
+  orgId: string,
+  { versions }: VerifiedMembers,
+  kept: ReadonlyMap<string, KeptGrants>,
+): { readonly current: ReadonlyMap<string, KeptGrants>; readonly behind: readonly string[] } | undefined {
+  const current = new Map<string, KeptGrants>();
+  const behind: string[] = [];
+  for (const [id, grants] of kept) {
+    const version = versions.get(id) ?? 0;
+    if (grants.membershipVersion > version) {
+      states.mismatch(MEMBERSHIP_GRANTS.subject, { orgId, id });
+      return undefined;
+    }
+    if (grants.membershipVersion < version) behind.push(id);
+    else current.set(id, grants);
+  }
+  return { current, behind };
+}
+
+/**
+ * Whether each summary in step holds at least what the history says; the
+ * first that doesn't is raised as a mismatch (the alarm, and the hold). For a
+ * deactivated member only the verifier change is held to it: an invitation
+ * accepted since counts once they are brought back, which reads them all again.
+ */
+export function summariesCover(
+  states: SignedStates,
+  orgId: string,
+  { members }: VerifiedMembers,
+  current: ReadonlyMap<string, KeptGrants>,
+  fromHistory: ReadonlyMap<string, GrantSummary>,
+): boolean {
+  for (const member of members) {
+    const grants = current.get(member.id);
+    const history = fromHistory.get(member.id);
+    if (grants === undefined || history === undefined) continue;
+    if (!summaryCovers(grants.summary, history, member.status === 'ACTIVE')) {
+      states.mismatch(MEMBERSHIP_GRANTS.subject, { orgId, id: member.id });
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The members and their summaries as a decision reads them: in step, behind, or unbuilt. */
+interface MembersWithGrants {
+  readonly outcome: 'read';
+  readonly verified: VerifiedMembers;
+  readonly current: ReadonlyMap<string, KeptGrants>;
+  /** Whether any member's summary is unbuilt or behind its membership: the history decides, and the job builds it. */
+  readonly due: boolean;
+}
+
+/** The memberships and their summaries, read for a decision (`share`); or tampered with (the alarm raised). */
+async function membersWithGrants(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<MembersWithGrants | Tampered> {
+  const made = await membershipsMade(tx, states, orgId);
+  if (made.outcome === 'tampered') return made;
+  await gathered(tx, states, orgId, made.ids);
+  const memberships = await checksOf(tx, states, orgId, MEMBERSHIPS, made.ids);
+  const verified = membersFrom(states, orgId, made, (id) => checkOf(memberships, id));
+  if (verified.outcome === 'tampered') return verified;
+  const summaries = await checksOf(tx, states, orgId, MEMBERSHIP_GRANTS, made.ids);
+  const kept = new Map<string, KeptGrants>();
+  let unbuilt = false;
+  for (const { id } of verified.members) {
+    const grants = grantsFrom(checkOf(summaries, id));
+    if (grants.outcome === 'tampered') return grants;
+    if (grants.outcome === 'unbuilt') unbuilt = true;
+    else kept.set(id, grants);
+  }
+  const inStep = summariesInStep(states, orgId, verified, kept);
+  if (inStep === undefined) return { outcome: 'tampered', sign: 'holding' };
+  return { outcome: 'read', verified, current: inStep.current, due: unbuilt || inStep.behind.length > 0 };
+}
+
+/**
+ * Whether any of the organisation's summaries is unbuilt or behind its
+ * membership, read for a decision (`share`) in the caller's transaction, which
+ * must be withSignedStates' for it: the job's look before it builds, so an
+ * organisation in step costs a few trips and takes no lock for a change.
+ */
+export async function grantSummariesDue(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<boolean | Tampered> {
+  const read = await membersWithGrants(tx, states, orgId);
+  return read.outcome === 'tampered' ? read : read.due;
+}
+
 /**
  * The two-person rule's facts for the organisation, in the caller's
- * transaction, which must be withSignedStates' for it: its members read for a
- * decision (`share`), and its history of memberships and invitations.
+ * transaction, which must be withSignedStates' for it: its memberships and
+ * their grant summaries read for a decision (`share`).
  */
 export async function twoPersonFactsOf(
   tx: MembershipsTransaction,
   states: SignedStates,
   orgId: string,
 ): Promise<TwoPersonFactsCheck> {
-  const members = await membersOf(tx, states, orgId);
-  if (members.outcome === 'tampered') return members;
-  const history = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
-  if (history.outcome === 'tampered') return history;
-  // Every membership the log says was made is a member, deactivated or not (none is ever deleted): one missing
-  // from the list would make the organisation look smaller than it is and open the one-person path (H10's
-  // review), so it is a tamper sign. A row deleted is found by its signed state first; a directory entry gone,
-  // the row and its seal intact, only here (the list is read through the directory).
-  const listed = new Set(members.members.map(({ id }) => id.toLowerCase()));
-  const vanished = history.events.find(
-    ({ event }) =>
-      event.subject.type === 'membership' &&
-      event.action === 'membership.created' &&
-      !listed.has(event.subject.id.toLowerCase()),
-  );
-  if (vanished !== undefined) {
-    states.mismatch('membership', { orgId, id: vanished.event.subject.id });
-    return { outcome: 'tampered', sign: 'deleted' };
+  const read = await membersWithGrants(tx, states, orgId);
+  if (read.outcome === 'tampered') return read;
+  const { verified, current } = read;
+  if (!read.due) {
+    const held = new Map([...current].map(([id, { summary }]) => [id, summary]));
+    return { outcome: 'read', ...factsFromSummaries(verified.members, held) };
   }
-  return { outcome: 'read', ...twoPersonFacts(members.members, history.events) };
+  // A summary not built yet (a membership added before 0085), or left behind by an image from before OR1: the
+  // history, as before the summaries, at most MOST_HISTORY_EVENTS (past it TooManyEventsToRead: nothing decided).
+  const events = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
+  if (events.outcome === 'tampered') return events;
+  const history = grantHistory();
+  gatherGrants(history, events.events);
+  const fromHistory = historyFacts(verified.members, history);
+  if (!summariesCover(states, orgId, verified, current, fromHistory.summaries)) {
+    return { outcome: 'tampered', sign: 'holding' };
+  }
+  return { outcome: 'read', ...fromHistory.facts };
 }

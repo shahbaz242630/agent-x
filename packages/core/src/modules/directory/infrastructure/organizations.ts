@@ -53,3 +53,36 @@ export async function listedOrganizations(
     if (rows.length < page) return listed;
   }
 }
+
+/**
+ * Every organisation the directory lists, as `listedOrganizations` gives them, but shard by shard (0082, PL-65 PR4): by
+ * its chain's shard in the anchors' store, then by ID, in pages along the index on the two (0083). The anchor check
+ * walks the anchors' store a shard at a time, so those past its cap, which go in the list's order, go shard by shard too.
+ */
+export async function listedByShard(
+  db: Kysely<DirectoryTables>,
+  page = LIST_PAGE,
+  answeredWithinMs?: number,
+): Promise<string[]> {
+  const listed: string[] = [];
+  let after: { readonly shard: number; readonly orgId: string } | undefined;
+  for (;;) {
+    const from = after;
+    const rows = await readAlone(
+      db,
+      (tx) => {
+        const all = tx.selectFrom('directory.orgs').select(['anchor_shard', 'org_id']);
+        const rest =
+          from === undefined
+            ? all
+            : all.where((eb) => eb(eb.refTuple('anchor_shard', 'org_id'), '>', eb.tuple(from.shard, from.orgId)));
+        return rest.orderBy('anchor_shard').orderBy('org_id').limit(page).execute();
+      },
+      answeredWithinMs,
+    );
+    for (const row of rows) listed.push(row.org_id);
+    const last = rows.at(-1);
+    if (last === undefined || rows.length < page) return listed;
+    after = { shard: last.anchor_shard, orgId: last.org_id };
+  }
+}

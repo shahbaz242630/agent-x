@@ -25,6 +25,7 @@
   "identity.factor_resets",
   "identity.invitations",
   "identity.login_flows",
+  "identity.membership_grants",
   "identity.memberships",
   "identity.registered_contacts",
   "identity.session_emails",

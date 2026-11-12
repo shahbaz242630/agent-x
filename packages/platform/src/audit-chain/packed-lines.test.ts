@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Anchor, Progress } from './anchor.ts';
 import { packedLines, type Taken } from './packed-lines.ts';
+import { shardOf } from './shards.ts';
 
 const AT = new Date('2026-11-02T09:00:00.000Z');
 
@@ -237,5 +238,38 @@ describe('the records a table holds (PL-65 review)', () => {
       expect(table.stampOf(chainOf(index))).toBe(index + 1);
       if (places) expect((back as Progress).began).toEqual(new Date(AT.getTime() - index));
     }
+  });
+});
+
+describe('each line keeps its chain’s shard (PL-65 PR2)', () => {
+  const anchorOf = (chain: string, seq: bigint, hashBytes = 32): Anchor => ({
+    chain,
+    seq,
+    hash: Buffer.alloc(hashBytes, 1),
+    macKeyVersion: 1,
+    at: AT,
+    keyVersion: 1,
+    signature: Buffer.alloc(64, 2),
+  });
+
+  it('in a record and in a line kept whole alike, through a line set again, for a file taken a shard at a time', () => {
+    const table = packedLines<Anchor>(false);
+    const [fits, whole] = [chainOf(1), chainOf(2)];
+    table.set(anchorOf(fits, 1n), 1);
+    table.set(anchorOf(whole, 1n, 31), 2);
+    table.set(anchorOf(fits, 2n), 3);
+    table.set(anchorOf(whole, 2n), 4);
+    expect(table.shardOf(fits)).toBe(shardOf(fits));
+    expect(table.shardOf(whole)).toBe(shardOf(whole));
+    expect(table.shardOf(chainOf(3))).toBeUndefined();
+
+    const shards: number[] = [];
+    const taken = table.take((_chain, _line, shard) => {
+      shards.push(shard);
+      return shard === shardOf(whole);
+    });
+    expect(shards).toEqual([shardOf(fits), shardOf(whole)]);
+    expect([...taken.stamps()]).toEqual([[whole, 4]]);
+    taken.release();
   });
 });

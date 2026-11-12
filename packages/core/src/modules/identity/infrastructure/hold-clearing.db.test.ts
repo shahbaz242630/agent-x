@@ -38,6 +38,7 @@ import {
   RECORDS_FILLING,
 } from './hold-clearing.ts';
 import { createHoldInvestigations, INVESTIGATE_OPERATION } from './hold-investigations.ts';
+import { MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
@@ -915,15 +916,11 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
 
       await historyChecked(investigationId);
       expect(await confirmPaged(1, investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+      // The memberships, and each one's grant summary (OR1), as many.
+      const filled = { level: 'warn', held: 2, during: 'hold_clearing', orgId: org, correlationId: CORRELATION };
       expect(filling(before)).toEqual([
-        expect.objectContaining({
-          level: 'warn',
-          records: MEMBERSHIPS.subject,
-          held: 2,
-          during: 'hold_clearing',
-          orgId: org,
-          correlationId: CORRELATION,
-        }),
+        expect.objectContaining({ ...filled, records: MEMBERSHIPS.subject }),
+        expect.objectContaining({ ...filled, records: MEMBERSHIP_GRANTS.subject }),
       ]);
     });
 

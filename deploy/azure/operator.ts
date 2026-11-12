@@ -12,6 +12,15 @@
 //   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
 //   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
 //   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
+//   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
+//
+// factor-reset-notice (OR2, playbook K) tells every member of an organisation,
+// and its registered contacts that count now, that our team is resetting a
+// person's second factor, as no admin can ask the product's own reset: recorded
+// on both chains, the notices sent by the API to the addresses Agent X holds. It
+// says which other organisations the directory lists the person in, each to be
+// told by a request of its own. Its --id is the record's: the same command with
+// it records and tells nothing twice.
 //
 // state-recovery-plan and state-restore (PL-29 follow-up, Carry-Forward S175;
 // playbook H) put an organisation's tampered authority rows (its members,
@@ -111,6 +120,9 @@ import {
   chainRecoveryRequest,
   chainRestoreRequest,
   DISCARD_FORK,
+  FACTOR_RESET_NOTICE,
+  factorResetNoticeOf,
+  factorResetNoticeRequest,
   stateRecoveryRequest,
   stateRestoreRequest,
   HEAD_HASH,
@@ -231,6 +243,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
+  node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -368,6 +381,40 @@ export function parseHandoff(argv: readonly string[]): HandoffArguments {
   const asked = handoffAskedOf({ reason, id: id ?? SOME_ID });
   if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
   return { command, reason: asked.reason, id };
+}
+
+/** The reset's notice the partner asked for (OR2, playbook K). */
+export interface FactorResetNoticeArguments {
+  readonly orgId: string;
+  readonly userId: string;
+  /** The incident's reference, never repeated in a problem. */
+  readonly reason: string;
+  /** The ID of an earlier try, if this is one. */
+  readonly id: string | undefined;
+}
+
+/**
+ * What was asked for, or a UsageError saying why it can't be done, by the
+ * operator's own rules (request.ts `factorResetNoticeOf`), so a request it
+ * would refuse is never written. The reference is never repeated in one.
+ */
+export function parseFactorResetNotice(argv: readonly string[]): FactorResetNoticeArguments {
+  const [command, orgFlag, orgId, userFlag, userId, reasonFlag, reason, ...rest] = argv;
+  const [idFlag, id, ...more] = rest;
+  const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
+  const shaped =
+    command === FACTOR_RESET_NOTICE && orgFlag === '--org' && userFlag === '--user' && reasonFlag === '--reason';
+  if (!shaped || !ided) {
+    throw new UsageError(
+      `say ${FACTOR_RESET_NOTICE} --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>], and nothing else`,
+    );
+  }
+  if (id !== undefined && !UUID_V7.test(id)) {
+    throw new UsageError('--id takes the ID an earlier run gave: a UUIDv7, in lower case');
+  }
+  const asked = factorResetNoticeOf({ orgId, userId, reason, id: id ?? SOME_ID });
+  if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
+  return { orgId: asked.orgId, userId: asked.userId, reason: asked.reason, id };
 }
 
 /** A request's job as Azure has it, checked: what a change sends back of it, and where it stands. */
@@ -846,6 +893,59 @@ export function handoffChange(request: HandoffArguments, steps: JobSteps): Promi
     tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. Nothing is recorded twice, and no organisation is told twice.`,
     mayStillHold: mayStillHold(id, noun),
     judge: (ended, lines) => handoffOutcome(steps, ended, lines, id, verb),
+  }));
+}
+
+/**
+ * What a reset's notice's run did (OR2), from the command's own lines about this
+ * request's record: 0 once recorded and its notices written, by this run or an
+ * earlier one of the same request, naming the other organisations the person is
+ * in; 1 otherwise, saying what to do next.
+ */
+function factorResetNoticeOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string): number {
+  const said = commandLines(lines);
+  const notified = said.find((line) => line.event === 'operator.factor_reset_notified' && line.noticeId === id);
+  const again = `Run the same command again with --id ${id}: it records and tells nothing twice.`;
+  if (notified !== undefined) {
+    steps.say(
+      notified.recordedBefore === true
+        ? `An earlier run of this request recorded it (${id}) and wrote its notices: nothing was recorded or sent again.`
+        : `Recorded (${id}): every member of the organisation, and its registered contacts that count now, are being emailed at the addresses Agent X holds. Wait 24 hours from now before removing anything.`,
+    );
+    const elsewhere = Array.isArray(notified.elsewhere) ? notified.elsewhere.map(String) : [];
+    if (elsewhere.length > 0) {
+      steps.say(
+        `The directory also lists the person in ${String(elsewhere.length)} other organisation(s): ${elsewhere.join(', ')}. Tell each with a request of its own, and wait for each one's contacts too.`,
+      );
+    }
+    return 0;
+  }
+  const refused = said.find((line) => line.event === 'operator.refused');
+  if (refusedFor(refused, NO_REQUEST_PROBLEM)) {
+    steps.say(noRequestFound(id));
+    return 1;
+  }
+  if (refusedAbout(refused, 'noticeId', id)) {
+    steps.say(`The operator's command refused it, and nothing was recorded: ${String(problemsSaid(refused))}.`);
+    return 1;
+  }
+  steps.say(
+    run.status === 'Succeeded'
+      ? `The run succeeded, but its lines don't show the notice ${id} recorded: they may not all have arrived, or another request ran in this one's place. ${again}`
+      : `The notice may not have been recorded: read the lines above. If they leave it unclear: ${again}`,
+  );
+  return 1;
+}
+
+/** Tells an organisation of a reset of a person's second factor under way, on the job (OR2): 0 once recorded. */
+export function factorResetNotice(request: FactorResetNoticeArguments, steps: JobSteps): Promise<number> {
+  const id = request.id ?? uuidV7Ids.next();
+  return runRequest(steps, () => ({
+    text: factorResetNoticeRequest({ orgId: request.orgId, userId: request.userId, reason: request.reason, id }),
+    intro: `The notice's record ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it records and tells nothing twice, and it takes the request off the job at its end.`,
+    tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. Nothing is recorded twice, and nobody is told twice.`,
+    mayStillHold: mayStillHold(id, 'notice'),
+    judge: (ended, lines) => factorResetNoticeOutcome(steps, ended, lines, id),
   }));
 }
 
@@ -1382,6 +1482,10 @@ export function main(
       if (argv[0] === 'handoff-pause' || argv[0] === 'handoff-resume') {
         const request = parseHandoff(argv);
         return (steps) => handoffChange(request, steps);
+      }
+      if (argv[0] === FACTOR_RESET_NOTICE) {
+        const request = parseFactorResetNotice(argv);
+        return (steps) => factorResetNotice(request, steps);
       }
       if (argv[0] === 'chain-recovery-plan') {
         const asked = parseRecoveryPlan(argv);

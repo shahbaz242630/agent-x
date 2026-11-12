@@ -23,6 +23,9 @@ import {
   chainRebaseRequest,
   type ChainRebaseWords,
   createOrganizationRequest,
+  FACTOR_RESET_NOTICE,
+  FACTOR_RESET_NOTICE_USAGE,
+  factorResetNoticeRequest,
   FIRST_ADMIN_USAGE,
   firstAdminRequest,
   handoffRequest,
@@ -728,6 +731,69 @@ describe('Phase 4 B1 a pause or resume of every hand-off, only ever from a file'
     expect(line('operator.refused')?.problems).toEqual([
       'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
       "the pause's ID must be a UUIDv7, in lower case",
+    ]);
+    expect(text).not.toContain(reason);
+  });
+});
+
+describe("OR2 our team's reset notice, only ever from a file (playbook K)", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-reset-notice-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const REASON = 'INC-2026/0099';
+  const ORG = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a01';
+  const USER = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
+  const asked = { orgId: ORG, userId: USER, reason: REASON, id: NEW_ID };
+
+  it('reads a well-formed one, then connects, never repeating the reference', async () => {
+    const { events, line, text } = await run(['--request', requestFile(factorResetNoticeRequest(asked))]);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: FACTOR_RESET_NOTICE });
+    expect(text).not.toContain(REASON);
+  });
+
+  it('refuses it typed', async () => {
+    const { events, line, text } = await run(JSON.parse(factorResetNoticeRequest(asked)) as string[]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `${FACTOR_RESET_NOTICE} runs only from a request file: ${FACTOR_RESET_NOTICE_USAGE}`,
+    ]);
+    expect(text).not.toContain(REASON);
+  });
+
+  it.each([
+    ['its person missing', [FACTOR_RESET_NOTICE, '--org', ORG, '--reason', REASON, '--id', NEW_ID]],
+    ['its ID missing', [FACTOR_RESET_NOTICE, '--org', ORG, '--user', USER, '--reason', REASON]],
+    ['a word more', [FACTOR_RESET_NOTICE, '--org', ORG, '--user', USER, '--reason', REASON, '--id', NEW_ID, 'x']],
+    ['a flag misnamed', [FACTOR_RESET_NOTICE, '--org', ORG, '--person', USER, '--reason', REASON, '--id', NEW_ID]],
+  ])('refuses %s, naming the shape', async (_what, words) => {
+    const { events, line, text } = await run(['--request', requestFile(JSON.stringify(words))]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${FACTOR_RESET_NOTICE_USAGE} as a JSON list, and nothing else`,
+    ]);
+    expect(text).not.toContain(REASON);
+  });
+
+  it('names each word that breaks its rule, never repeating the reference', async () => {
+    const reason = 'a note about the incident';
+    const { line, text } = await run([
+      '--request',
+      requestFile(
+        factorResetNoticeRequest({ orgId: 'org', userId: USER.toUpperCase(), reason, id: NEW_ID.toUpperCase() }),
+      ),
+    ]);
+
+    expect(line('operator.refused')?.problems).toEqual([
+      "the organisation's ID must be a UUIDv7, in lower case",
+      "the person's user ID must be a UUID, in lower case",
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+      "the notice's ID must be a UUIDv7, in lower case",
     ]);
     expect(text).not.toContain(reason);
   });

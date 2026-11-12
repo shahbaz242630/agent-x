@@ -31,6 +31,7 @@ import {
   INVITATION,
   INVITATIONS,
   MEMBERSHIP,
+  MEMBERSHIP_GRANTS,
   MEMBERSHIPS,
   REGISTERED_CONTACT,
   REGISTERED_CONTACTS,
@@ -105,12 +106,13 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), and a proposal to mark that failed (gate H10)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a membership's grant summary (OR1), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), and a proposal to mark that failed (gate H10)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then each one's grant summary, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed.
     const [
       organizations,
       invitations,
       memberships,
+      grantSummaries,
       contacts,
       resets,
       agentRows,
@@ -135,6 +137,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(organizations).toBe(ORGANIZATIONS);
     expect(invitations).toBe(INVITATIONS);
     expect(memberships).toBe(MEMBERSHIPS);
+    expect(grantSummaries).toBe(MEMBERSHIP_GRANTS);
     expect(contacts).toBe(REGISTERED_CONTACTS);
     expect(resets).toBe(FACTOR_RESETS);
     expect(agentRows).toBe(agents.AGENTS);
@@ -173,6 +176,11 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         subject: MEMBERSHIPS.subject,
         fields: MEMBERSHIPS.fields,
         status: MEMBERSHIP,
+      },
+      {
+        table: MEMBERSHIP_GRANTS.table,
+        subject: MEMBERSHIP_GRANTS.subject,
+        fields: MEMBERSHIP_GRANTS.fields,
       },
       {
         table: REGISTERED_CONTACTS.table,
@@ -326,42 +334,44 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[1]?.status).toBe(INVITATION);
     expect(AUTHORITY_TABLES[2]?.fields).toBe(MEMBERSHIPS.fields);
     expect(AUTHORITY_TABLES[2]?.status).toBe(MEMBERSHIP);
-    expect(AUTHORITY_TABLES[3]?.fields).toBe(REGISTERED_CONTACTS.fields);
-    expect(AUTHORITY_TABLES[3]?.status).toBe(REGISTERED_CONTACT);
-    expect(AUTHORITY_TABLES[4]?.fields).toBe(FACTOR_RESETS.fields);
-    expect(AUTHORITY_TABLES[4]?.status).toBe(FACTOR_RESET);
-    expect(AUTHORITY_TABLES[5]?.fields).toBe(agents.AGENTS.fields);
-    expect(AUTHORITY_TABLES[5]?.status).toBe(agents.AGENT);
-    expect(AUTHORITY_TABLES[6]?.fields).toBe(agents.AGENT_KEYS.fields);
-    expect(AUTHORITY_TABLES[6]?.status).toBe(agents.AGENT_KEY);
-    expect(AUTHORITY_TABLES[7]?.fields).toBe(mandates.MANDATES.fields);
-    expect(AUTHORITY_TABLES[7]?.status).toBe(mandates.MANDATE);
-    expect(AUTHORITY_TABLES[8]?.fields).toBe(mandates.MANDATE_VERSIONS.fields);
-    expect(AUTHORITY_TABLES[8]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[9]?.fields).toBe(mandates.POLICIES.fields);
+    expect(AUTHORITY_TABLES[3]?.fields).toBe(MEMBERSHIP_GRANTS.fields);
+    expect(AUTHORITY_TABLES[3]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[4]?.fields).toBe(REGISTERED_CONTACTS.fields);
+    expect(AUTHORITY_TABLES[4]?.status).toBe(REGISTERED_CONTACT);
+    expect(AUTHORITY_TABLES[5]?.fields).toBe(FACTOR_RESETS.fields);
+    expect(AUTHORITY_TABLES[5]?.status).toBe(FACTOR_RESET);
+    expect(AUTHORITY_TABLES[6]?.fields).toBe(agents.AGENTS.fields);
+    expect(AUTHORITY_TABLES[6]?.status).toBe(agents.AGENT);
+    expect(AUTHORITY_TABLES[7]?.fields).toBe(agents.AGENT_KEYS.fields);
+    expect(AUTHORITY_TABLES[7]?.status).toBe(agents.AGENT_KEY);
+    expect(AUTHORITY_TABLES[8]?.fields).toBe(mandates.MANDATES.fields);
+    expect(AUTHORITY_TABLES[8]?.status).toBe(mandates.MANDATE);
+    expect(AUTHORITY_TABLES[9]?.fields).toBe(mandates.MANDATE_VERSIONS.fields);
     expect(AUTHORITY_TABLES[9]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[10]?.fields).toBe(mandates.POLICY_VERSIONS.fields);
+    expect(AUTHORITY_TABLES[10]?.fields).toBe(mandates.POLICIES.fields);
     expect(AUTHORITY_TABLES[10]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[11]?.fields).toBe(fundingSources.SOURCES.fields);
-    expect(AUTHORITY_TABLES[11]?.status).toBe(fundingSources.FUNDING_SOURCE);
-    expect(AUTHORITY_TABLES[12]?.fields).toBe(suppliers.SUPPLIERS.fields);
-    expect(AUTHORITY_TABLES[12]?.status).toBe(suppliers.SUPPLIER);
-    expect(AUTHORITY_TABLES[13]?.fields).toBe(suppliers.BENEFICIARY_REGISTRATIONS.fields);
-    expect(AUTHORITY_TABLES[13]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
-    expect(AUTHORITY_TABLES[14]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
-    expect(AUTHORITY_TABLES[14]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[15]?.fields).toBe(suppliers.REMITTANCE_SETTINGS.fields);
+    expect(AUTHORITY_TABLES[11]?.fields).toBe(mandates.POLICY_VERSIONS.fields);
+    expect(AUTHORITY_TABLES[11]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[12]?.fields).toBe(fundingSources.SOURCES.fields);
+    expect(AUTHORITY_TABLES[12]?.status).toBe(fundingSources.FUNDING_SOURCE);
+    expect(AUTHORITY_TABLES[13]?.fields).toBe(suppliers.SUPPLIERS.fields);
+    expect(AUTHORITY_TABLES[13]?.status).toBe(suppliers.SUPPLIER);
+    expect(AUTHORITY_TABLES[14]?.fields).toBe(suppliers.BENEFICIARY_REGISTRATIONS.fields);
+    expect(AUTHORITY_TABLES[14]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
+    expect(AUTHORITY_TABLES[15]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
     expect(AUTHORITY_TABLES[15]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[16]?.fields).toBe(limitReservations.AGENT_ZONES.fields);
+    expect(AUTHORITY_TABLES[16]?.fields).toBe(suppliers.REMITTANCE_SETTINGS.fields);
     expect(AUTHORITY_TABLES[16]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[17]?.fields).toBe(spendRequests.SPEND_REQUESTS.fields);
-    expect(AUTHORITY_TABLES[17]?.status).toBe(spendRequests.SPEND_REQUEST);
-    expect(AUTHORITY_TABLES[18]?.fields).toBe(instructions.INSTRUCTIONS.fields);
-    expect(AUTHORITY_TABLES[18]?.status).toBeUndefined();
-    expect(AUTHORITY_TABLES[19]?.fields).toBe(transactions.TRANSACTIONS.fields);
-    expect(AUTHORITY_TABLES[19]?.status).toBe(transactions.TRANSACTION);
-    expect(AUTHORITY_TABLES[20]?.fields).toBe(transactions.FAILURE_PROPOSALS.fields);
-    expect(AUTHORITY_TABLES[20]?.status).toBe(transactions.FAILURE_PROPOSAL);
+    expect(AUTHORITY_TABLES[17]?.fields).toBe(limitReservations.AGENT_ZONES.fields);
+    expect(AUTHORITY_TABLES[17]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[18]?.fields).toBe(spendRequests.SPEND_REQUESTS.fields);
+    expect(AUTHORITY_TABLES[18]?.status).toBe(spendRequests.SPEND_REQUEST);
+    expect(AUTHORITY_TABLES[19]?.fields).toBe(instructions.INSTRUCTIONS.fields);
+    expect(AUTHORITY_TABLES[19]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[20]?.fields).toBe(transactions.TRANSACTIONS.fields);
+    expect(AUTHORITY_TABLES[20]?.status).toBe(transactions.TRANSACTION);
+    expect(AUTHORITY_TABLES[21]?.fields).toBe(transactions.FAILURE_PROPOSALS.fields);
+    expect(AUTHORITY_TABLES[21]?.status).toBe(transactions.FAILURE_PROPOSAL);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

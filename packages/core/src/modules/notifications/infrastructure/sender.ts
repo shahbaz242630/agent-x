@@ -62,16 +62,18 @@ import {
   type NoticeMessage,
   type PaidRemittance,
   type ResetLink,
+  type ResetPerson,
   type WaitingRequest,
 } from '../domain/messages.ts';
 import {
   type ClaimedNotice,
   isAboutAPerson,
-  isAboutASupplier,
   isToAdminsAndApprovers,
+  isToEveryMember,
   REMITTANCE_KIND,
   REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
+  SUPPORT_RESET_KIND,
 } from '../domain/notice.ts';
 import { LEASE_EXPIRED, type LeaseEnded, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
@@ -91,6 +93,15 @@ export interface Notifier {
 export interface AddressBook {
   /** Their verified address; undefined if they have none. Throws if it can't be asked. */
   addressOf(userId: string): Promise<string | undefined>;
+}
+
+/**
+ * Finds what Agent X keeps of a person, at send time (0049): the name and
+ * address our team's reset shows (0087), identity's, which the API wires.
+ * Undefined for a person it keeps nothing of. Throws if it can't be read.
+ */
+export interface People {
+  personOf(userId: string): Promise<ResetPerson | undefined>;
 }
 
 /** Finds a registered contact's address at send time, from its own row (B6-1b): identity's, which the API wires. */
@@ -202,6 +213,7 @@ export function createNoticeSender({
   resetLinks,
   waitingRequests,
   remittances,
+  people,
   audience,
   logger,
 }: {
@@ -213,6 +225,7 @@ export function createNoticeSender({
   readonly resetLinks: ResetLinks;
   readonly waitingRequests: WaitingRequests;
   readonly remittances: Remittances;
+  readonly people: People;
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
@@ -234,13 +247,13 @@ export function createNoticeSender({
    * admins but the member it is about, by their membership, or, for a notice
    * about a person (their sign-in, or a reset of their second factor), by
    * their user ID (B6-2a review): that person is told apart, as themselves,
-   * once. A notice about a supplier: the contacts that count now, or every
-   * active member (E2-2b). A notice about a mandate, the organisation's
+   * once. A notice about a supplier, or our team's reset of a person's second
+   * factor (0087): the contacts that count now, or every active member (E2-2b). A notice about a mandate, the organisation's
    * policy or freeze, or a spend request waiting: every admin and approver
    * (0036, 0038, 0045).
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
-    if (isAboutASupplier(notice.kind)) {
+    if (isToEveryMember(notice.kind)) {
       return notice.toContacts ? audience.countingContactsOf(notice.orgId) : audience.membersOf(notice.orgId);
     }
     if (isToAdminsAndApprovers(notice.kind)) return audience.adminsAndApproversOf(notice.orgId);
@@ -276,7 +289,19 @@ export function createNoticeSender({
    */
   const extrasOf = async (
     notice: ClaimedNotice,
-  ): Promise<{ readonly link?: ResetLink; readonly request?: WaitingRequest } | undefined> => {
+  ): Promise<
+    | { readonly link?: ResetLink; readonly request?: WaitingRequest; readonly person?: ResetPerson | undefined }
+    | undefined
+  > => {
+    if (notice.kind === SUPPORT_RESET_KIND) {
+      try {
+        // Never logged: the email alone shows the name and the masked address.
+        return { person: await people.personOf(notice.aboutId ?? '') };
+      } catch {
+        await failed(notice, 'person_unavailable', false);
+        return undefined;
+      }
+    }
     if (notice.kind === RESET_LINK_KIND) {
       let link: ResetLink | undefined;
       try {
@@ -328,7 +353,7 @@ export function createNoticeSender({
     }
     const extras = await extrasOf(notice);
     if (extras === undefined) return;
-    await sendAndRecord(notice, messageFor(notice, address, extras.link, extras.request));
+    await sendAndRecord(notice, messageFor(notice, address, extras.link, extras.request, undefined, extras.person));
   };
 
   /** Sends the notice's email and records how it went: sent, or the failure kept and what became of the notice. */

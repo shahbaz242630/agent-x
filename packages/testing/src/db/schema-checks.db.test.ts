@@ -1283,7 +1283,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         ...POLICY,
         globalTables: {
           ...POLICY.globalTables,
-          'directory.orgs': { reason: 'The list', columns: ['org_id'] },
+          'directory.orgs': { reason: 'The list', columns: ['org_id', 'anchor_shard'] },
           'migrations.applied': { ...LEDGER, appMay: ['SELECT', 'SELECT'] },
           'platform_controls.audit_head': {
             ...(POLICY.globalTables['platform_controls.audit_head'] ?? { reason: '', columns: [] }),

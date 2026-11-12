@@ -186,7 +186,7 @@ describe(`asking for a contact (B6-1a, Postgres ${server.version})`, () => {
 
     const { id, stepUpChallengeId, recorded } = await draft(who);
 
-    expect(recorded).toMatchObject({ version: 1, seq: 4n });
+    expect(recorded).toMatchObject({ version: 1, seq: 5n }); // One more since OR1: the first admin's signed grant summary.
     expect(await record(who.org, id)).toEqual({
       outcome: 'found',
       contact: { id, status: 'DRAFT', addedBy: who.admin, countsFrom: null, stepUpChallengeId },
@@ -209,7 +209,7 @@ describe(`asking for a contact (B6-1a, Postgres ${server.version})`, () => {
     // Encrypted: nothing of the address is in the row, in either case.
     expect(row.email_ciphertext.toString('latin1').toLowerCase()).not.toContain('finance');
     expect(row.email_ciphertext).toHaveLength(12 + 16 + 'finance.office@example.test'.length);
-    const [event] = await eventsFrom(who.org, 4n);
+    const [event] = await eventsFrom(who.org, 5n);
     expect(event).toMatchObject({
       actor_id: who.adminUser,
       action: 'registered_contact.drafted',
@@ -380,7 +380,7 @@ describe(`activating a contact (B6-1a, Postgres ${server.version})`, () => {
         stepUpChallengeId,
       },
     });
-    const events = await eventsFrom(who.org, 5n);
+    const events = await eventsFrom(who.org, 6n);
     expect(events).toMatchObject([
       { action: 'registered_contact.counts_from_set', subject_id: id, subject_version: 2, actor_id: who.adminUser },
       { action: 'registered_contact.activated', subject_id: id, subject_version: 3, actor_id: who.adminUser },

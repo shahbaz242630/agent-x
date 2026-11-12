@@ -94,6 +94,19 @@ export interface KeptPerson {
   readonly unreadable: boolean;
 }
 
+/**
+ * One person's kept name and address, by their Agent X ID in any case, or nothing when Agent X keeps no such person: what
+ * the notice sender names a person by (OR2, 0087).
+ */
+export const keptPersonReader =
+  (db: Handle, keys: KeyProvider) =>
+  async (
+    userId: string,
+  ): Promise<{ readonly name: string | undefined; readonly email: string | undefined } | undefined> => {
+    const kept = (await keptPeopleOf(db, keys, [userId])).get(userId.toLowerCase());
+    return kept === undefined ? undefined : { name: kept.name, email: kept.email };
+  };
+
 /** Each of these people Agent X knows, in one statement, their kept values opened. */
 export async function keptPeopleOf(
   db: Handle,

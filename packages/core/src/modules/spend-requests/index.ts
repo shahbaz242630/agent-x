@@ -62,6 +62,7 @@ export {
   rejectRequest,
   requestExpiryDue,
   requestsDueToExpire,
+  requestsDueToExpireRead,
   settleCarried,
   type SubjectsNamed,
   type Voided,
@@ -76,7 +77,6 @@ export {
   type ApprovalWaitHours,
   expiresAtOf,
   LONGEST_APPROVAL_WAIT,
-  SHORTEST_APPROVAL_WAIT_MS,
   waitedOut,
 } from './domain/approval-wait.ts';
 export {

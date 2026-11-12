@@ -11,8 +11,9 @@
 // ones' payments a few more (C3: `PaymentsOf`, the outcomes module's, after
 // the requests and before their reservations and claims, in the lock order).
 // A request waiting for approval whose unsealed `waits_until` (0073) reads
-// later than its sealed wait allows is a mismatch too: it would hide the
-// request from the expiry and keep its money held (one statement a page).
+// later than its sealed wait allows, or is missing (0086 filled them all), is
+// a mismatch too: it would hide the request from the expiry and keep its money
+// held (one statement a page).
 // A request whose holdings don't match raises the integrity alarm (`holding`),
 // and the organisation is put on hold once the page's transaction ends
 // (withSignedStates).
@@ -135,14 +136,14 @@ async function waitsUntilOf(tx: HoldingsTransaction, requestIds: readonly string
 }
 
 /**
- * Whether a request's `waits_until` is no later than its sealed wait lets it be: always for one with none read (not
- * waiting for approval, so not read; made before 0073), or with no decision read (the other comparisons judge that).
+ * Whether a request's `waits_until` is no later than its sealed wait lets it be: always for one not read (not waiting
+ * for approval), or with no decision read (the other comparisons judge that). A waiting request with none (0086 filled
+ * every one made before 0073) is hidden from the expiry, whose read is `waits_until`'s index alone (PM4): a mismatch.
  */
 const waitsAsSealed = (waitsUntil: Date | null | undefined, decided: ApprovalClock | undefined) =>
-  waitsUntil === null ||
   waitsUntil === undefined ||
   decided === undefined ||
-  waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS;
+  (waitsUntil !== null && waitsUntil.getTime() <= expiresAtOf(decided).getTime() + WAITS_UNTIL_SLACK_MS);
 
 /** Each reference's canonical form, as a request's `order_key` is made (`orderKeyOf`), in one statement. */
 async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[]): Promise<Map<string, string>> {

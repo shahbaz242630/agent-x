@@ -28,6 +28,9 @@ export {
   verifierVerdict,
 } from './domain/two-person.ts';
 export { MOST_HISTORY_EVENTS, type TwoPersonFactsCheck, twoPersonFactsOf } from './infrastructure/two-person-facts.ts';
+export { grantsBelieved, grantsToChange, MEMBERSHIP_GRANTS } from './infrastructure/membership-grants.ts';
+export { BUILDER, buildGrantSummaries, type GrantBuilding } from './infrastructure/grant-building.ts';
+export { grantSummariesDue } from './infrastructure/two-person-facts.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export {
   FACTOR_RESET,
@@ -141,6 +144,9 @@ export {
 } from './infrastructure/membership-changes.ts';
 export {
   addMembership,
+  changeMembershipRole,
+  deactivateMembership,
+  type MembershipChangeRead,
   lockMemberships,
   type MemberCheck,
   memberOf,
@@ -248,5 +254,5 @@ export {
   stepUpDetails,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
-export { type KeptPerson, keptPeopleOf } from './infrastructure/user-contacts.ts';
+export { type KeptPerson, keptPeopleOf, keptPersonReader } from './infrastructure/user-contacts.ts';
 export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';

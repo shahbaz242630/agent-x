@@ -25,8 +25,18 @@
 // SEC-DP-11 ("mark failed" refused without the wait, the bank's word, step-up
 // and evidence): the wait and the step-up are tagged here; the bank's
 // reference and the confirmed consequence missing, in payments.test.ts.
-import { withSignedStates } from '@agentx/core/modules/audit';
-import { createSessions, createStepUpChallenges, ESTABLISHED_DAYS, MEMBERSHIPS } from '@agentx/core/modules/identity';
+import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import {
+  changeMembershipRole,
+  createSessions,
+  createStepUpChallenges,
+  deactivateMembership,
+  ESTABLISHED_DAYS,
+  grantsBelieved,
+  grantsToChange,
+  memberOf,
+  MEMBERSHIPS,
+} from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
@@ -190,35 +200,29 @@ async function markable(fils = REJECTED_UNPROVEN) {
 /** How long a member must have been one to be a second person (ADR-012 §1), and a step past it. */
 const ESTABLISHED_MS = ESTABLISHED_DAYS * DAY_MS + 1;
 
+/** The member's membership and grant summary read for a change by `by`, as membership-changes.ts reads them. */
+const changeRead = async (tx: Parameters<typeof grantsToChange>[0], states: SignedStates, w: World, who: Member) => {
+  const key = { orgId: w.org, id: who.membershipId };
+  const read = await memberOf(tx, states, key, 'change');
+  if (read.outcome !== 'found') throw new Error('not found');
+  const grants = grantsBelieved(await grantsToChange(tx, states, key));
+  return { key, member: read.member, state: read.state, grants };
+};
+
 /** The member's role changed to admin by `by`, as membership-changes.ts records it: a role `by` granted. */
 const madeAdminBy = (w: World, who: Member, by: Member) =>
   withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const key = { orgId: w.org, id: who.membershipId };
-    const state = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
-    if (state.outcome !== 'verified') throw new Error('not verified');
-    await states.record(
-      tx,
-      MEMBERSHIPS,
-      key,
-      state,
-      { role: 'admin' },
-      {
-        actor: { type: 'user', id: by.userId },
-        action: 'membership.role_changed',
-        details: { roleFrom: 'approver', roleTo: 'admin' },
-      },
-    );
+    const read = await changeRead(tx, states, w, who);
+    const actor = { type: 'user' as const, id: by.userId };
+    await changeMembershipRole(tx, states, { ...read, actor, evidence: {}, roleTo: 'admin' });
   });
 
 /** The member removed by `by`, as membership-changes.ts records it. */
 const deactivatedBy = (w: World, who: Member, by: Member) =>
-  withSignedStates(app, w.org, quiet(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId: w.org, id: who.membershipId }, 'deactivate', {
-      actor: { type: 'user', id: by.userId },
-      action: 'membership.deactivated',
-      details: { role: 'admin' },
-    }),
-  );
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const read = await changeRead(tx, states, w, who);
+    await deactivateMembership(tx, states, { ...read, actor: { type: 'user', id: by.userId }, evidence: {} });
+  });
 
 const proposing = (who: Member, paymentId: string, evidenceRef = EVIDENCE) =>
   marks.propose(who, keyed(who, PROPOSE_OPERATION), paymentId, evidenceRef, CORRELATION);
