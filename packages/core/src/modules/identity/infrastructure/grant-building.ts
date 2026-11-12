@@ -5,9 +5,11 @@
 // (apps/api/src/grant-summaries.ts), and the rule reads the history for an
 // organisation with one unbuilt meanwhile (two-person-facts.ts).
 //
-// A summary left behind its membership by an image from before OR1 (a change
-// it made writes none) is brought up to date the same way: what the history
-// says, with nothing it held taken away. Never an alarm (two-person-facts.ts).
+// A summary left behind its membership is raised as the alarm first (OR1c:
+// since 0089 no image in service leaves one; two-person-facts.ts), then brought
+// up to date the same way: what the history says, with nothing it held taken
+// away. Why: only the app's keys can sign it, so without this a hold cleared
+// once someone has looked would be raised again by the very next read.
 //
 // In one transaction, withSignedStates' for the organisation: its memberships
 // read for a decision (`share`), so no change of one comes between the
@@ -26,6 +28,7 @@ import {
 import { addGrants, bringUpToDate, grantsToChange } from './membership-grants.ts';
 import { MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
 import {
+  behindRaised,
   type KeptGrants,
   membersFrom,
   membershipsMade,
@@ -64,7 +67,8 @@ async function grantsRead(
 
 /**
  * Builds and seals the summary of each of the organisation's memberships that
- * has none, and brings up to date each left behind its membership, in the
+ * has none, and brings up to date each left behind its membership, its alarm
+ * raised (the hold set as the transaction ends), in the
  * caller's transaction, which must be withSignedStates' for it. `page`: how
  * many events a read of the history takes.
  */
@@ -85,6 +89,7 @@ export async function buildGrantSummaries(
   const disagrees = { outcome: 'tampered', sign: 'holding' } as const;
   const inStep = summariesInStep(states, orgId, verified, read.kept);
   if (inStep === undefined) return disagrees;
+  behindRaised(states, orgId, inStep.behind);
   const due = [...read.unbuilt, ...inStep.behind];
   if (due.length === 0) return { outcome: 'built', built: 0 };
   const whole = await wholeHistory(tx, states, orgId, verified.members, page);

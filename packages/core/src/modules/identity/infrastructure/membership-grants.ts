@@ -13,10 +13,11 @@
 // it stands for. A membership added before 0085 has none (`unbuilt`) until
 // the API's job builds it from the history (grant-building.ts); its changes
 // meanwhile leave it unbuilt, as the history the job reads holds them. One
-// left behind its membership by an image from before OR1 is left behind by
-// later changes too, never moved on as if in step, until the job brings it up
-// to date from the history. An invitation a deactivated member accepts is
-// added only when they are brought back, which reads them all again.
+// not in step with its membership as a change finds it (behind: since 0089 no
+// image in service leaves one, OR1c) refuses the change, its alarm raised; the
+// job brings it up to date from the history. An invitation a deactivated
+// member accepts is added only when they are brought back, which reads them
+// all again.
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { Transaction } from 'kysely';
 
@@ -138,9 +139,10 @@ export async function addGrants(
  * Moves the summary on with its membership's change, in the caller's
  * transaction, which read it for the change (`grantsToChange`) and has just
  * recorded the membership from `fromVersion` to `membershipVersion`. One
- * unbuilt, or behind the membership as the change found it (an image from
- * before OR1 changed it), is left for the job, whose history holds this change:
- * moved on, it would claim a version whose grants it never saw.
+ * unbuilt is left for the job, whose history holds this change. One not at
+ * `fromVersion` (OR1c) throws, raised as a mismatch (the alarm, and the hold),
+ * so the change rolls back: moved on, it would claim a version whose grants it
+ * never saw.
  */
 export async function keepGrants(
   tx: MembershipsTransaction,
@@ -154,7 +156,11 @@ export async function keepGrants(
     actor,
   }: { change: GrantChange; fromVersion: number; membershipVersion: number; actor: AuditActor },
 ): Promise<void> {
-  if (read.outcome === 'unbuilt' || read.membershipVersion !== fromVersion) return;
+  if (read.outcome === 'unbuilt') return;
+  if (read.membershipVersion !== fromVersion) {
+    states.mismatch(MEMBERSHIP_GRANTS.subject, key);
+    throw new SignedStateFailed('tampered', "A membership's grant summary isn't in step with its membership");
+  }
   await states.record(
     tx,
     MEMBERSHIP_GRANTS,
@@ -170,9 +176,10 @@ export async function keepGrants(
 }
 
 /**
- * A summary left behind its membership brought up to date by the job, in the
- * caller's transaction, which read it for the change: what the history says,
- * with nothing it held taken away, at the membership's version.
+ * A summary left behind its membership brought up to date by the job, its
+ * alarm already raised, in the caller's transaction, which read it for the
+ * change: what the history says, with nothing it held taken away, at the
+ * membership's version.
  */
 export async function bringUpToDate(
   tx: MembershipsTransaction,

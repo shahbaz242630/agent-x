@@ -501,8 +501,8 @@ describe(`a grant summary changed past the app (FX-TAMPER, Postgres ${server.ver
   });
 });
 
-describe(`a summary left behind by an image from before OR1: the swap or a rollback (Postgres ${server.version})`, () => {
-  /** Bob's role changed as the code before OR1 changes it: the membership alone, no summary written. */
+describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Postgres ${server.version})`, () => {
+  /** Bob's role changed past his summary, as only the owner can since 0089 (an image from before OR1 could before it). */
   const changedByOldImage = (bob: { id: string }, alice: { userId: string }, roleFrom: Role, roleTo: Role) =>
     withSignedStates(oldImage, org, services(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: bob.id }, 'change');
@@ -521,52 +521,101 @@ describe(`a summary left behind by an image from before OR1: the swap or a rollb
       );
     });
 
-  it('raises no alarm: decides from the history until the job brings the summary up to date', async () => {
+  /** The alarm raised `times` times on the member's summary, as a mismatch. */
+  const raisedOn = (id: string, times: number) => {
+    const raised = lines('audit.integrity_failed');
+    expect(raised).toHaveLength(times);
+    for (const line of raised) {
+      expect(line).toMatchObject({ reason: 'holding', subjectType: 'membership_grant', objectId: id, orgId: org });
+    }
+  };
+
+  it('denies and holds, deciding nothing; the job raises it too and brings it up to date', async () => {
     const alice = await add('admin');
     const bob = await add('viewer');
     await changedByOldImage(bob, alice, 'viewer', 'approver');
     await changedByOldImage(bob, alice, 'approver', 'admin');
 
-    const read = await facts();
-
-    expect(read).toMatchObject({ outcome: 'read' });
-    if (read.outcome !== 'read') return;
-    expect([...(read.grantedBy.get(bob.id) ?? [])]).toEqual([alice.userId]);
-    expect(shape(read)).toEqual(shape(await historyFacts()));
-    expect(lines('audit.integrity_failed')).toEqual([]);
-    expect(await hold()).toMatchObject({ outcome: 'clear' });
+    await deniedAndHeld(bob.id, 'holding');
 
     expect(await build()).toEqual({ outcome: 'built', built: 1 });
+    raisedOn(bob.id, 2);
     expect(await summaryRows()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: bob.id, granted_by: alice.userId, membership_version: 3 }),
       ]),
     );
+    // In step again: decided as the history says, with no new alarm; the hold stands until someone clears it.
     const after = await facts();
     if (after.outcome !== 'read') throw new Error('not read');
-    expect(shape(after)).toEqual(shape(read));
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(shape(after)).toEqual(shape(await historyFacts()));
+    raisedOn(bob.id, 2);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
   });
 
-  it('leaves it behind through a later change by the new image, never moved on as if in step', async () => {
+  it('refuses a change by this image to a membership whose summary is behind, nothing moved', async () => {
     const alice = await add('admin');
     const dave = await add('admin');
     const bob = await add('viewer');
     await changedByOldImage(bob, alice, 'viewer', 'developer');
-    await changeRole(bob.id, 'approver', dave.userId);
 
+    await expect(changeRole(bob.id, 'approver', dave.userId)).rejects.toMatchObject({
+      name: 'SignedStateFailed',
+      reason: 'tampered',
+    });
+    raisedOn(bob.id, 1);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+    const read = await withSignedStates(app, org, services(), (tx, states) =>
+      memberOf(tx, states, { orgId: org, id: bob.id }, 'share'),
+    );
+    expect(read).toMatchObject({ outcome: 'found', member: { role: 'developer' }, state: { version: 2 } });
     expect(await summaryRows()).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: bob.id, granted_by: '', membership_version: 1 })]),
     );
-    const read = await facts();
-    if (read.outcome !== 'read') throw new Error('not read');
-    expect([...(read.grantedBy.get(bob.id) ?? [])].sort()).toEqual([alice.userId, dave.userId].sort());
-    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
 
-    expect(await build()).toEqual({ outcome: 'built', built: 1 });
-    const after = await facts();
-    if (after.outcome !== 'read') throw new Error('not read');
-    expect(shape(after)).toEqual(shape(read));
+  it('refuses to bring back a member whose summary is behind, nothing moved', async () => {
+    const alice = await add('admin');
+    const bob = await add('approver');
+    await deactivate(bob.id, alice.userId);
+    await changedByOldImage(bob, alice, 'approver', 'viewer');
+
+    const bringBack = withSignedStates(app, org, services(), (tx, states) =>
+      reactivateMembership(tx, states, {
+        orgId: org,
+        id: bob.id,
+        role: 'approver',
+        joinedAt: clock.now(),
+        actor: userActor(alice.userId),
+      }),
+    );
+    await expect(bringBack).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'tampered' });
+    raisedOn(bob.id, 1);
+    const read = await withSignedStates(app, org, services(), (tx, states) =>
+      memberOf(tx, states, { orgId: org, id: bob.id }, 'share'),
+    );
+    expect(read).toMatchObject({ outcome: 'found', member: { status: 'DEACTIVATED' }, state: { version: 3 } });
+    expect(await summaryRows()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: bob.id, membership_version: 2 })]),
+    );
+  });
+
+  it('refuses to keep a summary found ahead of the version the change started from', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+
+    await expect(
+      withSignedStates(app, org, services(), async (tx, states) => {
+        const read = await changeRead(tx, states, bob.id);
+        await keepGrants(tx, states, read.grants, read.key, {
+          change: { memberUserId: read.member.userId, granters: [alice.userId] },
+          fromVersion: 0,
+          membershipVersion: 1,
+          actor: userActor(alice.userId),
+        });
+      }),
+    ).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'tampered' });
+    raisedOn(bob.id, 1);
   });
 });
 
@@ -600,7 +649,7 @@ describe(`the rule past 10,000 events, and the summaries built for members from 
     expect([...(read.grantedBy.get(bob.id) ?? [])]).toEqual([alice.userId]);
     expect(lines('audit.integrity_failed')).toEqual([]);
 
-    // Bob's summary left behind by an image from before OR1: the history again, too long, so nothing decided.
+    // Bob's summary left behind its membership, past the app: the alarm, and the job brings it up to date.
     await withSignedStates(oldImage, org, services(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: bob.id }, 'change');
       if (state.outcome !== 'verified') throw new Error('not verified');
@@ -617,8 +666,9 @@ describe(`the rule past 10,000 events, and the summaries built for members from 
         },
       );
     });
-    await expect(facts()).rejects.toBeInstanceOf(TooManyEventsToRead);
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Strict (OR1c): the alarm, with no read of the history at all.
+    expect(await facts()).toEqual({ outcome: 'tampered', sign: 'holding' });
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'holding', objectId: bob.id })]);
     expect(await build()).toEqual({ outcome: 'built', built: 1 });
     expect(await facts()).toMatchObject({ outcome: 'read' });
   }, 240_000);
