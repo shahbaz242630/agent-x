@@ -1930,7 +1930,8 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   generationServer(steps, subscription, 'secrets', server);
   const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
-  const disabled = disabledLoginLists(existing);
+  // A run that writes the disabled list on purpose (a rotation by name, which always asks for both) may go on.
+  const disabled = disabledLoginLists(existing).filter((name) => !planIncludes(plan, name));
   if (disabled.length > 0) {
     throw new Error(
       `The vault holds ${disabled.join(' and ')} disabled. This run would write none over it, a new version, and the list in it would be lost, so nothing was deployed. Enable it again in the vault, or write both lists by name: secrets --rotate ${OUR_LOGIN_LISTS.join(' ')}.`,

@@ -1540,6 +1540,7 @@ describe('config: our own routine login changes, from the vault (SA2b)', () => {
     ['a sign', '-900000000000000002', 'entry 1 is not a login service user ID'],
     ['too long a number', '9'.repeat(31), 'entry 1 is not a login service user ID'],
     ['None in capitals', 'None', 'entry 1 is not a login service user ID'],
+    ['none with an ID after it', 'none,900000000000000001', 'entry 1 is not a login service user ID'],
     [
       'too many',
       Array.from({ length: 21 }, (_, at) => String(900000000000000100 + at)).join(','),
@@ -1549,6 +1550,11 @@ describe('config: our own routine login changes, from the vault (SA2b)', () => {
     const problems = problemsWith(mounted(value, SERVICE_USERS));
     expect(problems).toEqual([expect.stringMatching(new RegExp(`^AGENTX_IDP_OUR_ACTORS: ${problem}`))]);
     expect(problems.join(' ')).not.toMatch(/9000000000000000\d\d|agentx-resets/);
+  });
+
+  it('takes a list of exactly 20 IDs, the most it allows', () => {
+    const twenty = Array.from({ length: 20 }, (_, at) => String(900000000000000100 + at)).join(',');
+    expect(problemsWith(mounted(twenty, SERVICE_USERS))).toEqual([]);
   });
 
   it('refuses both forms at once, an empty file, and one that can’t be read, as it does a secret', () => {

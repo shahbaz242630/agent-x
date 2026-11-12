@@ -464,6 +464,8 @@ describe('loginIdProblems (SA2b)', () => {
     ['a space after a comma', '900000000000000001, 900000000000000002'],
     ['an empty entry', '900000000000000001,'],
     ['None in capitals', 'None'],
+    ['none with an ID after it', 'none,900000000000000001'],
+    ['a word beginning none', 'nonesense'],
   ])('refuses %s, never repeating the value', (_what, value) => {
     const problems = loginIdProblems(value);
     expect(problems).toContainEqual(expect.stringMatching(/is not a login service user ID/));
@@ -2086,6 +2088,24 @@ describe('deploy secrets', () => {
     });
     expect(done.az.deployment).toBeUndefined();
     expect(disabledLoginLists([{ name: 'api-oidc-client-secret', enabled: false }])).toEqual([]);
+  });
+
+  it('SA2b: lets a rotation by name write over a disabled list, as the refusal says it may', async () => {
+    const actors = '900000000000000001';
+    const serviceUsers = '900000000000000002';
+    const done = await run(['secrets', '--rotate', 'zitadel-our-actors'], {
+      answers: ['y'],
+      hidden: [actors, actors, serviceUsers, serviceUsers],
+      az: new RecordingAz({
+        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        after: everything,
+      }),
+    });
+    expect(done.status).toBe(0);
+    const values = done.az.deployment?.values ?? {};
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(actors);
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS).toBe(serviceUsers);
+    done.terminal.neverSaid([actors, serviceUsers]);
   });
 
   it('on a keys run, asks for nothing, writes only the keys and the master key, and checks every key is there', async () => {
