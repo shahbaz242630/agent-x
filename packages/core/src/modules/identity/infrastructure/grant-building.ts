@@ -5,9 +5,14 @@
 // (apps/api/src/grant-summaries.ts), and the rule reads the history for an
 // organisation with one unbuilt meanwhile (two-person-facts.ts).
 //
-// A summary left behind its membership by an image from before OR1 (a change
-// it made writes none) is brought up to date the same way: what the history
-// says, with nothing it held taken away. Never an alarm (two-person-facts.ts).
+// A summary left behind its membership is raised as the alarm first (OR1c:
+// since 0089 no image in service leaves one; two-person-facts.ts), then brought
+// up to date the same way: what the history says, with nothing it held taken
+// away. Why: only the app's keys can sign it, so without this a hold cleared
+// once someone has looked would be raised again by the very next read. Its
+// hold is kept waiting (directory.holds_waiting, one row naming the first
+// behind) in the same transaction as the repair, after it, so the hold is never
+// lost with the evidence.
 //
 // In one transaction, withSignedStates' for the organisation: its memberships
 // read for a decision (`share`), so no change of one comes between the
@@ -15,7 +20,13 @@
 // change, after its membership (ADR-006 §6, 2a). A summary in step must hold
 // at least what the history says, and none may be ahead of its membership, or
 // it is a mismatch: the alarm, and the hold.
-import { type AuditActor, checkOf, type SignedStates, type TamperSign } from '../../audit/index.ts';
+import {
+  type AuditActor,
+  checkOf,
+  keepHoldWaitingHere,
+  type SignedStates,
+  type TamperSign,
+} from '../../audit/index.ts';
 import {
   gatherGrants,
   grantHistory,
@@ -23,9 +34,10 @@ import {
   type GrantSummary,
   summaryFromHistory,
 } from '../domain/two-person.ts';
-import { addGrants, bringUpToDate, grantsToChange } from './membership-grants.ts';
+import { addGrants, bringUpToDate, grantsToChange, MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
 import {
+  behindRaised,
   type KeptGrants,
   membersFrom,
   membershipsMade,
@@ -64,7 +76,8 @@ async function grantsRead(
 
 /**
  * Builds and seals the summary of each of the organisation's memberships that
- * has none, and brings up to date each left behind its membership, in the
+ * has none, and brings up to date each left behind its membership, its alarm
+ * raised (the hold set as the transaction ends), in the
  * caller's transaction, which must be withSignedStates' for it. `page`: how
  * many events a read of the history takes.
  */
@@ -85,6 +98,7 @@ export async function buildGrantSummaries(
   const disagrees = { outcome: 'tampered', sign: 'holding' } as const;
   const inStep = summariesInStep(states, orgId, verified, read.kept);
   if (inStep === undefined) return disagrees;
+  behindRaised(states, orgId, inStep.behind);
   const due = [...read.unbuilt, ...inStep.behind];
   if (due.length === 0) return { outcome: 'built', built: 0 };
   const whole = await wholeHistory(tx, states, orgId, verified.members, page);
@@ -99,6 +113,19 @@ export async function buildGrantSummaries(
     const behind = read.kept.get(id);
     if (behind === undefined) await addGrants(tx, states, { orgId, id }, summary, version, change);
     else await bringUpToDate(tx, states, behind, { orgId, id }, { summary, membershipVersion: version, ...change });
+  }
+  const first = inStep.behind[0];
+  // Why: the repair above takes the evidence away once it commits, so its hold is kept waiting in this same transaction
+  // (with-signed-states.ts): if the hold then can't be recorded, the row outlives a restart and sets it. After the
+  // repair, so the chain head's lock is held already, as a hold's own transaction takes it before writing this row; one
+  // row, naming the first, the record this transaction's finding holds: one hold holds the organisation.
+  if (first !== undefined) {
+    const record = {
+      orgId: orgId.toLowerCase(),
+      subjectType: MEMBERSHIP_GRANTS.subject,
+      objectId: first.toLowerCase(),
+    };
+    await keepHoldWaitingHere(tx, record, 'holding');
   }
   return { outcome: 'built', built: due.length };
 }

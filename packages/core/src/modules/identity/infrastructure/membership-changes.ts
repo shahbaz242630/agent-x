@@ -43,7 +43,7 @@ import { type DirectoryTables, listedMember, listedMembership } from '../../dire
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
-import { grantsToChange } from './membership-grants.ts';
+import { grantsToChange, tamperThrown } from './membership-grants.ts';
 import {
   changeMembershipRole,
   deactivateMembership,
@@ -207,6 +207,9 @@ export function createMembershipChanges({
     } catch (error) {
       if (error instanceof ChangeRefused) {
         return { refused: { outcome: 'refused', status: error.status, code: error.code } as const, services };
+      }
+      if (tamperThrown(error)) {
+        return { refused: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } as const, services };
       }
       throw error;
     }
