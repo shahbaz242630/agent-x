@@ -4540,9 +4540,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'Microsoft.App/jobs/getAuthToken/action',
       'Microsoft.KeyVault/vaults/write',
       'Microsoft.KeyVault/vaults/accessPolicies/write',
+      'Microsoft.Storage/storageAccounts/write',
+      'Microsoft.Storage/storageAccounts/listKeys/action',
+      'Microsoft.Storage/storageAccounts/regenerateKey/action',
     ]) {
       expect(brokenRules(changed(RELEASE_ROLE, adding(action)))).toEqual(['release-identity', 'role-actions']);
     }
+    // Reading a secret from the RBAC vault is a data action, refused as one.
+    expect(
+      brokenRules(changed(RELEASE_ROLE, adding('Microsoft.KeyVault/vaults/secrets/getSecret/action', 'dataActions'))),
+    ).toContain('role-actions');
     // A store's role, held to its data actions by its own rule, is held here too.
     expect(
       brokenRules(

@@ -4133,8 +4133,10 @@ const jobWatch: Check = (snapshot, expected, add) => {
  * Security-Handoff §13), the environment itself, a grant or a role, an Azure
  * Policy rule, its assignment or an exemption from one, a secret's listing, a
  * token minted as an app or a job (`getAuthToken`), the vault or its access
- * policies, a federated trust (a new way to sign in as an identity), giving an
- * identity to a resource (`assign`), or a lock's removal. Without case, as Azure
+ * policies, a secret read (the vault is RBAC: `getSecret` is its data action), a
+ * storage account rewritten or its keys listed or remade (shared-key access back
+ * on opens every blob), a federated trust (a new way to sign in as an identity),
+ * giving an identity to a resource (`assign`), or a lock's removal. Without case, as Azure
  * reads an action.
  */
 const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
@@ -4157,6 +4159,12 @@ const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
     'Microsoft.App/jobs/getAuthToken/action',
     'Microsoft.KeyVault/vaults/write',
     'Microsoft.KeyVault/vaults/accessPolicies/write',
+    // The vault is RBAC, so reading a secret is this data action, not a listing (S188 review).
+    'Microsoft.KeyVault/vaults/secrets/getSecret/action',
+    // A storage account rewritten can switch shared-key access back on, and then its keys open every blob.
+    'Microsoft.Storage/storageAccounts/write',
+    'Microsoft.Storage/storageAccounts/listKeys/action',
+    'Microsoft.Storage/storageAccounts/regenerateKey/action',
   ].map((action) => action.toLowerCase()),
 );
 
