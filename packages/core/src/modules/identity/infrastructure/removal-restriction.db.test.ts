@@ -219,4 +219,8 @@ describe(`the restriction after a second factor is removed, read from the platfo
     // By the person's ID in any case.
     expect(await lastCountedRemoval(app, who.userId.toUpperCase())).toEqual(resetAt);
   });
+
+  it('finds nothing for an ID no one signs in as (SA2: no login to match by)', async () => {
+    expect(await lastCountedRemoval(app, '0199a0f0-0000-7000-8000-00000000dead')).toBeUndefined();
+  });
 });
