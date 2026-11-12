@@ -22,6 +22,7 @@ import {
   PARTNER_MODES,
   type LogLevel,
 } from './common.ts';
+import { readLoginIds } from './login-ids.ts';
 import { databaseHost, identifier, text, tlsMode, wholeNumber } from './primitives.ts';
 import { refusedProxyEntries } from './proxies.ts';
 
@@ -95,30 +96,16 @@ const proxyList = text.transform((raw, ctx) => {
   return [...new Set(entries)].sort();
 });
 
-/** The most login service user IDs one of SA2's lists may name: a handful are ours, so more is a pasting slip. */
-const MOST_LOGIN_IDS = 20;
-
 /**
- * Login service user IDs, as Zitadel makes them (digits), comma-separated, or `none` for no list (SA2b: the vault holds
- * `none` until the partner writes ours, so the secret is always there to mount). Read from the vault (config.ts
- * ourLoginIds): which accounts are ours is kept out of the public repository, and a problem never repeats a value.
+ * Login service user IDs, as Zitadel makes them (digits), comma-separated, or `none` for no list (login-ids.ts, which
+ * the deploy tool reads too). Read from the vault (config.ts ourLoginIds): which accounts are ours is kept out of the
+ * public repository, and a problem never repeats a value.
  */
 export const loginIdList = text.transform((raw, ctx): readonly string[] | undefined => {
-  if (raw === 'none') return undefined;
-  const entries = raw.split(',');
-  const bad = entries.flatMap((entry, index) => (/^\d{1,30}$/.test(entry) ? [] : [index + 1]));
-  if (bad.length > 0) {
-    ctx.addIssue({
-      code: 'custom',
-      message: `entry ${bad.join(', ')} is not a login service user ID. Write each as its digits, comma-separated with no spaces, or none`,
-    });
-    return z.NEVER;
-  }
-  if (entries.length > MOST_LOGIN_IDS) {
-    ctx.addIssue({ code: 'custom', message: `names ${String(entries.length)} IDs; at most ${String(MOST_LOGIN_IDS)}` });
-    return z.NEVER;
-  }
-  return [...new Set(entries)].sort();
+  const read = readLoginIds(raw);
+  if (read.ok) return read.ids;
+  ctx.addIssue({ code: 'custom', message: read.problem });
+  return z.NEVER;
 });
 
 /** A folder the platform mounts: an absolute path, so it can't depend on where the process was started. */

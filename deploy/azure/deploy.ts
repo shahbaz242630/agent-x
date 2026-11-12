@@ -61,7 +61,7 @@ import {
   SOURCE_REPOSITORY,
   verifyImage,
 } from '../image/verify.ts';
-import { loginIdList } from '../../packages/platform/src/config/settings.ts';
+import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
@@ -174,7 +174,7 @@ const OUR_LOGIN_LISTS: readonly string[] = Object.keys(VAULT_SECRETS).filter(
 );
 
 /** What the vault holds for a list of ours until the partner writes it: no list, so the feature stays off. */
-export const NO_LOGIN_IDS = 'none';
+export { NO_LOGIN_IDS };
 
 /**
  * The secrets every secrets run copies from an Azure service of the
@@ -598,8 +598,8 @@ export function issuedProblems(value: string): string[] {
  * so a run never writes what would stop the API's start. The message never repeats the value.
  */
 export function loginIdProblems(value: string): string[] {
-  const parsed = loginIdList.safeParse(value);
-  return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
+  const read = readLoginIds(value);
+  return read.ok ? [] : [read.problem];
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
