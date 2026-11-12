@@ -17,6 +17,7 @@ import {
   kqlStages,
   leastRestoreDays,
   paramsFileProblems,
+  policyLike,
   policyProblems,
   PREVIEW_API_EXCEPTIONS,
   type RuleId,
@@ -4655,8 +4656,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'alert-delivery',
       'release-writes-alert',
     ]);
-    // With no identity of CI's, no query can be right.
+    // With no identity of CI's, no query can be right: not even one naming no identity, which would match nothing.
     expect(brokenRules(without(named(/^id-agentx-stg-release$/)))).toContain('release-writes-alert');
+    const noIdentity = changed(
+      (resource) => RELEASE_WRITES(resource),
+      (alert) => (criterion(alert).query = query.replace(`=~ "${identity}"`, '=~ ""')),
+      without(named(/^id-agentx-stg-release$/)),
+    );
+    expect(brokenRules(noIdentity)).toContain('release-writes-alert');
   });
 
   describe("azure-policy (AZ2): Azure's own refusals on the resource group", () => {
@@ -4918,6 +4925,42 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
         'agentx-staging-apps-https: lets through what it is for (apps-https): its condition matches nothing it should',
       ]);
+    });
+
+    it('reads `like` as Azure does: one wildcard, text on both sides of it, without case on either side', () => {
+      expect(policyLike('aba', 'ab*ba')).toBe(false);
+      expect(policyLike('abba', 'ab*ba')).toBe(true);
+      expect(policyLike('abXba', 'ab*ba')).toBe(true);
+      expect(policyLike('ABXBA', 'ab*ba')).toBe(true);
+      expect(policyLike('abxba', 'AB*BA')).toBe(true);
+      expect(policyLike('ab', 'ab')).toBe(true);
+      expect(policyLike(undefined, 'ab*')).toBe(false);
+      // Our image named in capitals is still ours (Azure compares without case); another's in capitals is still refused.
+      const named = (image: string) =>
+        changed(APP('api'), (app) => {
+          containerOf(app).image = image;
+        });
+      const ours = String(containerOf(staging.predictedResources.find(APP('api')) as unknown as Mutable).image);
+      expect(
+        policyProblemsOf(named(ours.replace('ghcr.io/shahbaz242630/agent-x', 'GHCR.IO/SHAHBAZ242630/AGENT-X'))),
+      ).toEqual([]);
+      // Refused as shipped and as CI's partial update of it.
+      expect(policyProblemsOf(named(`DOCKER.IO/LIBRARY/BUSYBOX@sha256:${'0'.repeat(64)}`))).toEqual(
+        Array.from(
+          { length: 2 },
+          () =>
+            'agentx-staging-images: refuses ca-agentx-stg-api, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        ),
+      );
+    });
+
+    it('the images rule given twice, once at the group and once wider: refused', () => {
+      const wider = structuredClone(staging.predictedResources.find(ASSIGNMENT('images'))) as unknown as Mutable;
+      wider.id = String(wider.id).replace('/resourceGroups/rg-agentx-staging', '');
+      expect(brokenRules(withExtra(wider))).toEqual(['azure-policy']);
+      const renamed = structuredClone(staging.predictedResources.find(ASSIGNMENT('images'))) as unknown as Mutable;
+      renamed.id = String(renamed.id).replace(/agentx-staging-images$/, 'agentx-staging-images-again');
+      expect(brokenRules(withExtra(renamed))).toEqual(['azure-policy']);
     });
 
     it('a condition the checks cannot read is refused, not judged', () => {

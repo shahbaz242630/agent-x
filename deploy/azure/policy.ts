@@ -4278,7 +4278,7 @@ interface PolicyScope {
 class UnreadCondition extends Error {}
 
 /** Azure Policy's `like`: one `*` at most, without case. */
-function policyLike(value: unknown, pattern: unknown): boolean {
+export function policyLike(value: unknown, pattern: unknown): boolean {
   if (typeof value !== 'string' || typeof pattern !== 'string') return false;
   const [before, after, ...more] = pattern.toLowerCase().split('*');
   if (more.length > 0) throw new UnreadCondition(`like with more than one wildcard: ${pattern}`);
