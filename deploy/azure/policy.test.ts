@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS } from './app-keys.ts';
 import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
 import { DEAD_MAN_RULE } from './deploy.ts';
@@ -349,6 +350,7 @@ const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
+const LOGIN_SERVICE_ALERT = named(/^alert-agentx-.+-login-service$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
@@ -628,6 +630,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-denial-surge',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-handoff-queue',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-service',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-platform-full',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-store',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-check',
@@ -2733,6 +2736,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [AGENT_CANCEL_CAP_ALERT, 'agent-cancel-cap-alert'],
       [HOLDINGS_CHECK_ALERT, 'holdings-check-alert'],
       [HANDOFF_QUEUE_ALERT, 'handoff-queue-alert'],
+      [LOGIN_SERVICE_ALERT, 'login-service-alert'],
       [PLATFORM_FULL_ALERT, 'platform-full-alert'],
       [ANCHOR_STORE_ALERT, 'anchor-store-alert'],
       [INTEGRITY_RUNS_ALERT, 'integrity-runs-alert'],
@@ -3332,6 +3336,43 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'alert-delivery',
       'audit-integrity-alert',
     ]);
+  });
+
+  it("login-service-alert (SA2): no alert on a change made in the login service behind Agent X, or one that leaves a line out, can't fire, fires late or quietly", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const counted = (filter: string) => (alert: Mutable) =>
+      (criterion(alert).query = `ContainerAppConsoleLogs | ${filter} | summarize Events = count()`);
+    const listed = (events: readonly string[]) =>
+      `where tostring(parse_json(Log).event) in (${events.map((event) => JSON.stringify(event)).join(', ')})`;
+    expect(brokenRules(without(LOGIN_SERVICE_ALERT))).toEqual(['login-service-alert']);
+    // The rule's query names exactly the copier's list, every line of it.
+    expect(
+      String(at(staging.predictedResources.find(LOGIN_SERVICE_ALERT)?.properties, 'criteria', 'allOf', '0', 'query')),
+    ).toBe(`ContainerAppConsoleLogs | ${listed(LOGIN_SERVICE_ALERT_EVENTS)} | summarize Events = count()`);
+    for (const change of [
+      ...LOGIN_SERVICE_ALERT_EVENTS.map((left) =>
+        counted(listed(LOGIN_SERVICE_ALERT_EVENTS.filter((event) => event !== left))),
+      ),
+      counted(`${listed(LOGIN_SERVICE_ALERT_EVENTS)} | where tostring(parse_json(Log).level) == "error"`),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(LOGIN_SERVICE_ALERT, change))).toEqual(['login-service-alert']);
+    }
+    expect(brokenRules(changed(LOGIN_SERVICE_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'login-service-alert',
+    ]);
+    expect(brokenRules(changed(LOGIN_SERVICE_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'login-service-alert',
+    ]);
+    expect(String(at(staging.predictedResources.find(LOGIN_SERVICE_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section B\.$/,
+    );
   });
 
   it("token-refused-alert: no alert on a refused token, or one that counts something else, can't fire or fires too late", () => {

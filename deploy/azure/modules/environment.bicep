@@ -44,6 +44,7 @@ param agentCancelCapAlertName string
 param decisionsSuppressedAlertName string
 param dailyWordsAlertName string
 param handoffQueueAlertName string
+param loginServiceAlertName string
 param platformFullAlertName string
 param anchorStoppedAlertName string
 param jobsStoppedAlertName string
@@ -519,6 +520,56 @@ resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
       ]
     }
     autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// A change made in the login service behind Agent X (SA2): the API's copier of
+// its events (idp-copier.ts) logs someone acting as another person
+// (`idp.impersonated`, which the stack never turns on), rights given or changed
+// inside the login service (`idp.rights_changed`), an access token issued for a
+// login (`idp.token_issued`), and a full page of events at one moment it had
+// to move past (`idp_events.tied_page`). The error spike alert needs many of
+// one kind, and the daily email is a day late, so any one line tells someone
+// here, every window it is seen (LOGIN_SERVICE_ALERT_EVENTS, held by policy.ts).
+// Our own routine tokens and grants to our service users, by the logins the
+// API's AGENTX_IDP_OUR_* settings name, are info lines (`..._by_us`) it never
+// counts; until those settings are set, every token and grant fires it.
+resource loginServiceAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: loginServiceAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Login service: a change made behind Agent X'
+    description: 'SEV-1. The login service recorded someone acting as another person, admin rights given or changed inside it, or an access token issued for a login, or the copy of its events passed a moment it could not read whole (idp.impersonated, idp.rights_changed, idp.token_issued, idp_events.tied_page). Our own routine tokens and service-user grants are info lines that never fire it (once AGENTX_IDP_OUR_ACTORS and AGENTX_IDP_OUR_SERVICE_USERS are set), so treat this as a possible break-in. Runbook: Incident-Response-Playbook.md section B.'
+    severity: 1
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("idp.impersonated", "idp.rights_changed", "idp.token_issued", "idp_events.tied_page") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless: every window holding one notifies again.
+    autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]
     }
