@@ -219,6 +219,13 @@ describe('what a workload runs', () => {
     });
   });
 
+  it('reads no argument list, as Azure gives back an empty one, as none, and sends none back (S188)', () => {
+    const { args: _dropped, ...withoutArgs } = azureContainer('api');
+    const read = runningIn('api', [withoutArgs]);
+    expect(read.container.args).toEqual([]);
+    expect(released(read, read.image, read.release).args).toEqual([]);
+  });
+
   it("refuses anything that isn't the workload a release knows, saying why, so it is deployed by hand", () => {
     const container = azureContainer('api');
     const env = container.env as readonly Record<string, unknown>[];
@@ -250,6 +257,8 @@ describe('what a workload runs', () => {
     }
     refused(with_({ command: 'node main.ts' }), 'its command or arguments are not lists of words');
     refused(with_({ args: [1] }), 'its command or arguments are not lists of words');
+    refused(with_({ args: null }), 'its command or arguments are not lists of words');
+    refused(with_({ command: undefined }), 'its command or arguments are not lists of words');
     refused(with_({ resources: { cpu: '0.5', memory: '1Gi' } }), 'its size is not given');
     refused(with_({ resources: { cpu: 0.5 } }), 'its size is not given');
     refused(with_({ resources: undefined }), 'its size is not given');
