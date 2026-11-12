@@ -45,6 +45,7 @@ export type RuleId =
   | 'database-disk'
   | 'database-zone'
   | 'database-measures'
+  | 'database-stall-evidence'
   | 'load-run'
   | 'load-database'
   | 'connections'
@@ -202,6 +203,19 @@ const BURSTABLE_VALUES: ReadonlyMap<string, string> = new Map([
   ['pgms_wait_sampling.query_capture_mode', 'none'],
   ['track_io_timing', 'off'],
   ['max_connections', '50'],
+]);
+
+/**
+ * What a stall like the soak's 5 s commit pause leaves behind (MO5), every
+ * size alike: each checkpoint and each lock waited on for longer than a
+ * second in the server's log, and the server's own wait and transaction
+ * counts as Azure metrics, which go to no workspace.
+ */
+const STALL_EVIDENCE: ReadonlyMap<string, string> = new Map([
+  ['log_checkpoints', 'on'],
+  ['log_lock_waits', 'on'],
+  ['deadlock_timeout', '1000'],
+  ['metrics.collector_database_activity', 'on'],
 ]);
 
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
@@ -1584,7 +1598,7 @@ const serverSettings = (snapshot: Snapshot, server: PredictedResource): Readonly
       .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
   );
 
-/** Every server states its zone, and measures nothing on a Burstable size (4D2d P5). */
+/** Every server states its zone, measures nothing on a Burstable size (4D2d P5), and keeps what names a stall (MO5). */
 const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
     if (!['1', '2', '3'].includes(String(at(server.properties, 'availabilityZone')))) {
@@ -1598,6 +1612,16 @@ const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
     const differing = [...BURSTABLE_VALUES]
       .filter(([name, value]) => settings.get(name) !== value)
       .map(([name]) => name);
+    const unrecorded = [...STALL_EVIDENCE]
+      .filter(([name, value]) => settings.get(name) !== value)
+      .map(([name, value]) => `${name}=${value}`);
+    if (unrecorded.length > 0) {
+      add({
+        rule: 'database-stall-evidence',
+        resource: server.name,
+        message: `keeps what names a stall (MO5): its checkpoints and lock waits over a second logged, and its wait counts as metrics; differing or not stated: ${unrecorded.join(', ')}`,
+      });
+    }
     if (at(server, 'sku', 'tier') === 'Burstable' && differing.length > 0) {
       add({
         rule: 'database-measures',

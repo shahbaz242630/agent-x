@@ -609,6 +609,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/pgms_wait_sampling\.query_capture_mode$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/track_io_timing$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/max_connections$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_checkpoints$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_lock_waits$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/deadlock_timeout$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/metrics\.collector_database_activity$/),
       'Microsoft.Authorization/locks keep-live-database',
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
@@ -1579,6 +1583,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
       everyOn,
     );
     expect(brokenRules(loadSized)).toEqual([]);
+  });
+
+  it('database-stall-evidence: checkpoints or lock waits unlogged, lock waits logged only later, or the wait counts off, on any size (MO5)', () => {
+    const SETTING = (name: string) => (resource: PredictedResource) =>
+      type('Microsoft.DBforPostgreSQL/flexibleServers/configurations')(resource) && resource.name.endsWith(`/${name}`);
+    const wrong: readonly (readonly [string, string])[] = [
+      ['log_checkpoints', 'off'],
+      ['log_lock_waits', 'off'],
+      // Lock waits under 5 s go unlogged, so the soak's pause leaves no line.
+      ['deadlock_timeout', '5000'],
+      ['deadlock_timeout', '10s'],
+      ['metrics.collector_database_activity', 'off'],
+    ];
+    const loadSized = (from: Snapshot) =>
+      changed(SERVER, (server) => (server.sku = { name: 'Standard_D2ads_v5', tier: 'GeneralPurpose' }), from);
+    for (const [name, value] of wrong) {
+      const changedOne = changed(SETTING(name), (setting) => (inside(setting, 'properties').value = value));
+      expect({ name, value, broken: brokenRules(changedOne) }).toEqual({
+        name,
+        value,
+        broken: ['database-stall-evidence'],
+      });
+      // Not stated leaves whatever the server had.
+      const unstated = staging.predictedResources.filter((resource) => !SETTING(name)(resource));
+      expect(unstated).toHaveLength(staging.predictedResources.length - 1);
+      expect(brokenRules({ predictedResources: structuredClone(unstated), diagnostics: [] })).toEqual([
+        'database-stall-evidence',
+      ]);
+    }
+    // The load size too: it is where a stall is most likely, and its measurements don't stand in for these.
+    expect(
+      brokenRules(
+        loadSized(changed(SETTING('log_lock_waits'), (setting) => (inside(setting, 'properties').value = 'off'))),
+      ),
+    ).toContain('database-stall-evidence');
   });
 
   it('database-network: any door wider than 5432 from the apps and the subnet itself, or a Postgres subnet without its rules', () => {

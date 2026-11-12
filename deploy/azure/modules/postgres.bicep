@@ -147,6 +147,31 @@ var settings = [
     name: 'max_connections'
     value: measured ? '120' : '50'
   }
+  // MO5: what a stall like the soak's 5 s commit pause leaves behind, so it can be named. Each checkpoint writes two
+  // lines, its start and how long its writes and syncs took (Postgres 18's default, stated here because Azure may
+  // differ). A lock waited on for longer than deadlock_timeout writes who held it and the queue, and again when
+  // granted; 1 s is Postgres's default and also when it looks for a deadlock, so it isn't raised to quieten these.
+  // Both go to the login workspace with the rest of the server's log: a few MB a day; a lock storm writes about
+  // 3 KB a wait, so its 1 GB cap needs some 300,000 waits over a second in one day (Incident-Response-Playbook §J).
+  {
+    name: 'log_checkpoints'
+    value: 'on'
+  }
+  {
+    name: 'log_lock_waits'
+    value: 'on'
+  }
+  {
+    name: 'deadlock_timeout'
+    value: '1000'
+  }
+  // The server's own count of sessions by what they wait on (Lock, IO, LWLock), the oldest transaction and deadlocks,
+  // each minute, as Azure metrics kept 93 days: nothing goes to a workspace and nothing is billed. Beside the metrics
+  // always there (CPU and its credits, IOPS, disk queue depth, IOPS and bandwidth used), a stall reads as one of them.
+  {
+    name: 'metrics.collector_database_activity'
+    value: 'on'
+  }
 ]
 
 // One at a time: the server refuses a second change while one is in progress.
