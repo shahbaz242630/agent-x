@@ -24,8 +24,8 @@
 //   only ever public because a door below says so (G2e), never by accident
 // - the apps scale as the environment allows, within two limits: the API scales
 //   as its role (AGENTX_ROLE all, as here, holds the jobs: one copy; policy.ts),
-//   Zitadel holds something one replica's (its projections and its ten database
-//   connections), and staging keeps
+//   Zitadel runs two to four copies in production and one on staging, each
+//   copy's ten database connections counted (SA3a), and staging keeps
 //   no replica at all while nothing runs (ADR-002), unless the operator deploys
 //   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
@@ -155,7 +155,34 @@ param anchorEpoch int = 1
 @maxValue(10)
 param webCopies int = 3
 
+@description('The most Zitadel copies production runs (SA3a): two always, more as its traffic asks, each holding its own database connections, which policy.ts `connections` counts. Read in production alone: staging keeps one.')
+@minValue(2)
+@maxValue(4)
+param zitadelMostCopies int = 4
+
 var names = resourceNames(environment, nameSuffix)
+
+// Zitadel's copies and size (SA3a). None of its state is one copy's, read from
+// the pinned image itself: its memory cache is off and the caches it uses are
+// in Postgres, each projection takes a Postgres lock before it writes, and every
+// copy mounts the one master key. Production runs two always, so sign-in
+// outlives a copy, and up to `zitadelMostCopies`, at 1 vCPU and 2 GiB each.
+// Staging keeps one at the smallest pair the Consumption profile offers above
+// its minimum, as the jobs take, scaling to zero (`appMinReplicas`): its
+// server's 35 user connections hold no second pool.
+var zitadelScale = environment == 'production'
+  ? {
+      minReplicas: 2
+      maxReplicas: zitadelMostCopies
+      cpu: '1'
+      memory: '2Gi'
+    }
+  : {
+      minReplicas: appMinReplicas
+      maxReplicas: 1
+      cpu: '0.5'
+      memory: '1Gi'
+    }
 
 // Where the API runs as `web` copies beside one `jobs` app (4D2e D13): production,
 // and staging's load run. Out of one, staging keeps a single API at AGENTX_ROLE
@@ -1424,15 +1451,12 @@ var apps = concat([
     signsIn: false
     keepsDownloads: false
     keepsAnchors: false
-    // Its projections and its cache are one replica's; a second would also take
-    // ten more of the server's connections.
-    minReplicas: appMinReplicas
-    maxReplicas: 1
+    // Its copies and size by environment (`zitadelScale`, SA3a).
+    minReplicas: zitadelScale.minReplicas
+    maxReplicas: zitadelScale.maxReplicas
     stopSeconds: 30
-    // The smallest pair the Consumption profile offers above its minimum, as
-    // the jobs take.
-    cpu: '0.5'
-    memory: '1Gi'
+    cpu: zitadelScale.cpu
+    memory: zitadelScale.memory
     files: [
       {
         reads: 'zitadel-masterkey'

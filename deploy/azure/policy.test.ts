@@ -4790,15 +4790,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['apps']);
-    // The two that hold something one replica's, given a second.
-    for (const workload of ['api', 'zitadel']) {
-      expect({ workload, rules: brokenRules(changed(APP(workload), (app) => (scaleOf(app).maxReplicas = 2))) }).toEqual(
-        {
-          workload,
-          rules: ['apps'],
-        },
-      );
-    }
+    // The API holding the jobs, given a second copy; staging's Zitadel given a second, whose ten more
+    // connections its server has no room for either (SA3a).
+    expect(brokenRules(changed(APP('api'), (app) => (scaleOf(app).maxReplicas = 2)))).toEqual(['apps']);
+    expect(brokenRules(changed(APP('zitadel'), (app) => (scaleOf(app).maxReplicas = 2)))).toEqual([
+      'apps',
+      'connections',
+    ]);
     // An app that may run no replica at all, and one holding more than it may run.
     for (const scale of [{ maxReplicas: 0 }, { maxReplicas: 'one' }, { minReplicas: -1 }, { minReplicas: 2 }]) {
       expect({
@@ -6090,7 +6088,7 @@ describe('the load run (D2c, PL-38)', () => {
     expect(connectionProblems(staging)).toEqual([]);
     expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '11')))).toEqual([]);
     expect(connectionProblems(changed(api, setting('AGENTX_DB_POOL_MAX', '12')))).toEqual([
-      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 36: two of each API copy's pool, Zitadel's, one job and one to spare",
+      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 36: two of each API copy's pool, each Zitadel copy's, one job and one to spare",
     ]);
     // Zitadel's pool where it sets one, in place of its image's ten.
     expect(
@@ -6132,10 +6130,46 @@ describe('the load run (D2c, PL-38)', () => {
       Object.assign(scaleOf(app), { minReplicas: Number(count), maxReplicas: Number(count) });
     };
     const over = (holds: number) =>
-      `has 105 connections for users (max_connections 120 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, Zitadel's, one job and one to spare`;
+      `has 105 connections for users (max_connections 120 less Azure's 15), but the apps may hold ${String(holds)}: two of each API copy's pool, each Zitadel copy's, one job and one to spare`;
     expect(connectionProblems(loadChanged(api, copies('4')))).toEqual([over(120)]);
     expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '10')))).toEqual([]);
     expect(connectionProblems(loadChanged(APP('jobs'), setting('AGENTX_DB_JOBS_POOL_MAX', '11')))).toEqual([over(106)]);
+  });
+
+  it("apps and connections: Zitadel's copies, one on staging and up to four in production, each one's pool counted (SA3a)", () => {
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    const zitadelAt = (most: unknown, from: Snapshot = staging): Snapshot =>
+      changed(APP('zitadel'), (app) => Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: most }), from);
+    // The rule's messages alone: only Zitadel is changed, and the server's name carries the deployment's suffix.
+    const problemsOf = (snapshotted: Snapshot, rule: RuleId, expected: Expectations = STAGING): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter((problem) => problem.rule === rule)
+        .map(({ message }) => message);
+    expect(problemsOf(zitadelAt(2), 'apps')).toEqual([
+      "must run at most one replica (maxReplicas 1): staging's server has no room for a second copy's database connections; it says 2",
+    ]);
+    // Production's Zitadel: up to four copies pass; a fifth, or a count that isn't one, doesn't.
+    const productionApps = (most: unknown): string[] =>
+      problemsOf(zitadelAt(most, productionLike({ subject: true })), 'apps', production);
+    for (const most of [1, 2, 4]) expect({ most, problems: productionApps(most) }).toEqual({ most, problems: [] });
+    const atMostFour = (says: string): string =>
+      `must run at most 4 replicas (maxReplicas 4): Zitadel's copies stop at four (SA3a), each holding its own database connections; it says ${says}`;
+    expect(productionApps(5)).toEqual([atMostFour('5')]);
+    expect(productionApps('four')).toEqual([
+      atMostFour('four'),
+      'must be able to run a replica (maxReplicas at least 1); it says four',
+    ]);
+    // Its pool counts once for each copy it may run: 32 of staging's 35 with one copy, 42 with two.
+    expect(problemsOf(zitadelAt(1), 'connections')).toEqual([]);
+    expect(problemsOf(zitadelAt(2), 'connections')).toEqual([
+      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 42: two of each API copy's pool, each Zitadel copy's, one job and one to spare",
+    ]);
+    // A count of copies that can't be read is said, never summed as nothing.
+    for (const most of ['two', 1.5]) {
+      expect(problemsOf(zitadelAt(most), 'connections')).toEqual([
+        'ca-agentx-stg-zitadel must state maxReplicas as a whole number, so its connections can be counted',
+      ]);
+    }
   });
 
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {

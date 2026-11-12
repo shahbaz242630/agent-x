@@ -661,17 +661,39 @@ const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwa
  */
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
+/** The most replicas an app may run, and why. */
+interface MostReplicas {
+  readonly most: number;
+  readonly why: string;
+}
+
 /**
- * The apps whose replicas must stay at one, with why: Zitadel's projections and
- * cache are one replica's, and a second would take ten more of the server's 35
- * user connections (ADR-002 Amendment G1); the API's jobs apart from it (4D2e
- * D13) keep to one copy, as the lease alone doesn't make a second safe for the
- * copier. An app running the API is held by its role besides (`roleScaleProblems`).
+ * The apps whose replicas must stay at one, with why: the API's jobs apart from it (4D2e D13) keep to one copy, as the
+ * lease alone doesn't make a second safe for the copier. An app running the API is held by its role besides
+ * (`roleScaleProblems`), and Zitadel by its environment (`ZITADEL_COPIES`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
-  zitadel: "its projections are one replica's, and a second would take ten more database connections",
   jobs: "the API's jobs keep to one copy, which the lease alone doesn't make safe for the copier",
 };
+
+/**
+ * Zitadel's most copies, by environment (SA3a). None of its state is one copy's, read from the pinned image itself
+ * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
+ * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
+ * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
+ * up to four, each one's pool counted against its server (`connections`).
+ */
+const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
+  staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
+  production: { most: 4, why: "Zitadel's copies stop at four (SA3a), each holding its own database connections" },
+};
+
+/** The most replicas a workload may run in an environment, or nothing where only the defaults hold it. */
+function mostReplicasOf(workload: string, environment: Expectations['environment']): MostReplicas | undefined {
+  if (workload === 'zitadel') return ZITADEL_COPIES[environment];
+  const why = ONE_REPLICA[workload];
+  return why === undefined ? undefined : { most: 1, why };
+}
 
 /** What Azure keeps of a server's max_connections for itself: 35 of 50 left for everyone (postgres.bicep, S167). */
 const AZURE_RESERVED_CONNECTIONS = 15;
@@ -4216,12 +4238,13 @@ function ingressProblems(ingress: unknown, servesNothing: boolean, problem: (mes
   }
 }
 
-/** An app's scale: at most one replica when `only` says why, at least one it may run, and no more kept than that. */
-function scaleProblems(scale: unknown, only: string | undefined, problem: (message: string) => void): void {
+/** An app's scale: no more replicas than `limit` allows where it has one, at least one, and no more kept than that. */
+function scaleProblems(scale: unknown, limit: MostReplicas | undefined, problem: (message: string) => void): void {
   const most = at(scale, 'maxReplicas');
   const fewest = at(scale, 'minReplicas');
-  if (only !== undefined && most !== 1) {
-    problem(`must run at most one replica (maxReplicas 1): ${only}; it says ${String(most)}`);
+  if (limit !== undefined && !(typeof most === 'number' && most <= limit.most)) {
+    const replicas = limit.most === 1 ? 'one replica' : `${String(limit.most)} replicas`;
+    problem(`must run at most ${replicas} (maxReplicas ${String(limit.most)}): ${limit.why}; it says ${String(most)}`);
   }
   if (typeof most !== 'number' || most < 1) {
     problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);
@@ -4381,7 +4404,8 @@ function roleScaleProblems(
  * public door** — the doors are the route configs (G2e), so an app whose ingress
  * is external is one reachable from the internet that nothing decided to
  * publish. Plain http is refused even inside the environment. The apps that
- * hold something one replica's keep to one (`ONE_REPLICA`), the API scales as
+ * hold something one replica's keep to one (`ONE_REPLICA`), Zitadel to its
+ * environment's most (`ZITADEL_COPIES`), the API scales as
  * its role (`roleScaleProblems`), and every app can
  * run at least one. Together they are the three apps a deployment needs, so a
  * dropped one is caught here rather than at the first deployment.
@@ -4407,7 +4431,7 @@ const apps: Check = (snapshot, expected, add) => {
       problem,
     );
     const scale = at(app.properties, 'template', 'scale');
-    scaleProblems(scale, ONE_REPLICA[workload], problem);
+    scaleProblems(scale, mostReplicasOf(workload, expected.environment), problem);
     if (api !== undefined) {
       roleScaleProblems(api, scale, problem);
       heapProblems(containersOf(app)[0], problem);
@@ -4728,11 +4752,24 @@ function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, un
   return 2 * copies * pool;
 }
 
+/** Zitadel's connections: its pool once for each copy it may run (maxReplicas, SA3a), or why they can't be counted. */
+function zitadelConnections(app: PredictedResource): number | string {
+  const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
+  if (pool === undefined) {
+    return `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`;
+  }
+  const copies = at(app.properties, 'template', 'scale', 'maxReplicas');
+  if (!Number.isInteger(copies)) {
+    return `${app.name} must state maxReplicas as a whole number, so its connections can be counted`;
+  }
+  return pool * Number(copies);
+}
+
 /**
  * Every connection the apps may hold fits the server's (4D2e D12): two of each API copy's pool (a deploy runs the old
  * revision beside the new one), Zitadel's pool, one job and one to spare, within max_connections less what Azure keeps.
- * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's overlap isn't counted: it
- * runs one replica and isn't redeployed with each release.
+ * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's pool counts once for each
+ * copy it may run (SA3a); its overlap isn't counted, as it isn't redeployed with each release.
  */
 const connections: Check = (snapshot, _expected, add) => {
   const [server] = ofType(snapshot, TYPES.server);
@@ -4749,12 +4786,7 @@ const connections: Check = (snapshot, _expected, add) => {
   const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
     const settings = apiSettingsOf(app);
     if (settings !== undefined) return [apiConnections(app, settings)];
-    if (jobWorkloadOf(app.name) !== 'zitadel') return [];
-    const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
-    return [
-      pool ??
-        `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`,
-    ];
+    return jobWorkloadOf(app.name) === 'zitadel' ? [zitadelConnections(app)] : [];
   });
   for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
   const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
@@ -4764,7 +4796,7 @@ const connections: Check = (snapshot, _expected, add) => {
   const forUsers = stated - AZURE_RESERVED_CONNECTIONS;
   if (needed > forUsers) {
     problem(
-      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, Zitadel's, one job and one to spare`,
+      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, each Zitadel copy's, one job and one to spare`,
     );
   }
 };
