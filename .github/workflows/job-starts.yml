@@ -4,7 +4,9 @@
 # reads each job's runs of the last six hours and fails on any that ran other
 # containers than its job's own (deploy/azure/job-starts.ts). A failed scheduled
 # run emails the repository's owner (GitHub's own notifications), and what to
-# do is in the Incident-Response-Playbook, section T.
+# do is in the Incident-Response-Playbook, section T. It also holds the
+# migration job itself to main's apps.bicep (AZ2c): a job changed and then
+# started runs as the job now is, which no run's comparison can show.
 #
 # - it signs in by OIDC as the watch's own identity (modules/job-watch.bicep),
 #   whose one role reads the jobs and their runs and nothing else
@@ -42,9 +44,12 @@ jobs:
       contents: read # to check out the watch
       id-token: write # for the token Azure takes in place of a credential (OIDC)
     steps:
+      # The whole history: the migration job is held to main's apps.bicep only when nothing a person deploys changed
+      # since the build it runs (AZ2c), which the history says.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       # The runner image's own Node 24, as in the release job. It installs no packages.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

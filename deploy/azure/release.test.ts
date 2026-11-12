@@ -27,6 +27,7 @@ import {
   handDeployedList,
   main,
   migrateFirst,
+  NOT_AS_DEPLOYED,
   ORDER,
   PARAMS_PATHS,
   parseArguments,
@@ -387,11 +388,25 @@ const SAID: ReadonlyMap<string, readonly string[]> = new Map(
   }),
 );
 
+/** What the stand-in apps.bicep gives each workload (AZ2c): the container azureContainer makes, at any image and build. */
+const TEMPLATES: ReadonlyMap<Workload, unknown> = new Map(
+  ORDER.map((workload) => [workload, [azureContainer(WORKLOADS[workload].container)]] as const),
+);
+
+/** Stand-in templates, as a Folder's or migrateFirst's: each workload's container from apps.bicep, or Bicep's failure. */
+const templatesOf =
+  (given: ReadonlyMap<Workload, unknown> | Error = TEMPLATES): Folder['templates'] =>
+  () => {
+    if (given instanceof Error) throw given;
+    return given;
+  };
+
 /** This folder as a check finds it: at a commit, clean or not, with Bicep's answer or failure; each question kept. */
 function folderAt(
   head: string,
   answer: ReadonlyMap<string, readonly string[]> | Error = SAID,
   clean = true,
+  templates: ReadonlyMap<Workload, unknown> | Error = TEMPLATES,
 ): { folder: Folder; asked: string[][] } {
   const asked: string[][] = [];
   const folder: Folder = {
@@ -400,6 +415,7 @@ function folderAt(
       asked.push([...files]);
       return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
     },
+    templates: templatesOf(templates),
   };
   return { folder, asked };
 }
@@ -1064,6 +1080,7 @@ describe('check', () => {
         throw new Error("git couldn't say which commit this folder is at:\nfatal: not a git repository");
       },
       references: () => Promise.reject(new Error('never asked')),
+      templates: templatesOf(),
     };
     const cases: [Folder, string][] = [
       [folderAt(OLD).folder, `this folder is at ${OLD}, not ${NEW}`],
@@ -1195,6 +1212,12 @@ class Staging {
     suffix: '',
     env: builtAt(OLD),
   };
+  /** What the commit's apps.bicep gives each (AZ2c): the containers staging holds, at any image and build. */
+  templates: ReadonlyMap<Workload, unknown> | Error = new Map(
+    ORDER.map(
+      (workload) => [workload, [azureContainer(WORKLOADS[workload].container, { command: ['node'] })]] as const,
+    ),
+  );
   latest = 'ca-agentx-stg-api--0000007';
   ready = 'ca-agentx-stg-api--0000007';
   revisions = new Map<string, HeldRevision>([
@@ -1494,12 +1517,16 @@ class Staging {
     };
   }
 
-  steps(line: History, verified = true): ReleaseSteps & { readonly said: string[] } {
+  steps(
+    line: History,
+    verified = true,
+  ): ReleaseSteps & { readonly said: string[]; readonly templates: Folder['templates'] } {
     const said: string[] = [];
     return {
       az: this.az(),
       history: line,
-      folder: folderAt(NEW).folder,
+      folder: folderAt(NEW, SAID, true, this.templates).folder,
+      templates: templatesOf(this.templates),
       say: (text) => said.push(text),
       said,
       now: () => new Date(this.clock),
@@ -1522,6 +1549,14 @@ class Staging {
 }
 
 const RELEASE_NEW = { command: 'release', commit: NEW, digest: digest('2') } as const;
+
+/** The commit's templates made to give each workload what staging now holds, for a test of something else (AZ2c). */
+function deployedAsIs(azure: Staging): void {
+  azure.templates = new Map([
+    ['migrate', [azureContainer('migrate', { command: azure.job.command, env: builtAt(azure.job.release) })]],
+    ['api', [azureContainer('api', { command: azure.app.command, env: azure.app.env })]],
+  ]);
+}
 
 /** A release of NEW from OLD on a history where nothing a person deploys changed. */
 const ordinary = (): History => history([OLD, NEW], { [OLD]: ['apps/api/src/main.ts'] });
@@ -1743,6 +1778,7 @@ describe('release', () => {
     for (const [message, arrange] of cases) {
       const azure = new Staging();
       arrange(azure);
+      deployedAsIs(azure);
       const ended_ = await outcome(azure);
       expect(ended_.message).toBe(`${message}\nLeft: nothing was changed.`);
       expect(azure.writes).toEqual([]);
@@ -2049,9 +2085,10 @@ describe('release', () => {
     expect(await check(RELEASE_NEW, steps)).toBe(1);
     expect(steps.said).toContain(LOAD_RUN_UP);
     expect(methods(checking)).toEqual([]);
-    // The API at `all`, said outright, is staging's own shape: released as ever.
+    // The API at `all`, said outright by its template, is staging's own shape: released as ever.
     const all = new Staging();
     all.app = { ...all.app, env: [...all.app.env, { name: 'AGENTX_ROLE', value: 'all' }] };
+    deployedAsIs(all);
     expect((await outcome(all)).status).toBe(0);
   });
 });
@@ -2091,11 +2128,13 @@ describe('main', () => {
         (line) => said.push(line),
         () => fakeAz(staging(OLD), []),
         () => history([OLD, NEW]),
+        undefined,
+        () => folderAt(NEW).folder,
       ),
     ).toBe(0);
     expect(said.at(-1)).toMatch(/^ {2}api: image /);
     const azure = new Staging();
-    const { now, sleep, verify, probe } = azure.steps(ordinary());
+    const { now, sleep, verify, probe, folder } = azure.steps(ordinary());
     const releasedLines: string[] = [];
     expect(
       await main(
@@ -2104,6 +2143,7 @@ describe('main', () => {
         () => azure.az(),
         ordinary,
         () => ({ now, sleep, verify, probe }),
+        () => folder,
       ),
     ).toBe(0);
     expect(releasedLines.at(-1)).toMatch(/^Released /);
@@ -2193,5 +2233,170 @@ describe('migrateFirst: the migration run ahead of a hand deploy (deploy.ts apps
       `The API runs ${OLD}, which isn't in ${NEW}'s history, so whether it knows what this image's migrations add can't be checked (decision 49): the migration wasn't run, and nothing was changed.`,
     );
     expect(outside.writes).toEqual([]);
+  });
+});
+
+describe('AZ2c: each workload held to what the commit gives it, beyond its image and build', () => {
+  /** Staging's API settings with one changed: its value, or the setting itself. */
+  const apiEnvWith = (change: (entry: { name: string; value?: string }) => unknown): readonly unknown[] =>
+    builtAt(OLD).map((entry) => change(entry as { name: string; value?: string }));
+
+  it("stops a release red, writing nothing, when migrate's command was changed outside a deploy", async () => {
+    const azure = new Staging();
+    azure.job.command = ['node', '-e', 'fetch(process.env.X)'];
+    const { status, said, printed } = await outcome(azure);
+    expect(status).toBe(1);
+    expect(azure.writes).toEqual([]);
+    expect(said.slice(-2)).toEqual([
+      `A release of ${NEW} stops here, red: ${NOT_AS_DEPLOYED}`,
+      '  migrate: its command is not the template’s',
+    ]);
+    // What it ran is never printed: only names.
+    expect(printed).not.toContain('fetch');
+    expect(NOT_AS_DEPLOYED).toContain('deploy it by hand with apps after checking who changed it');
+    expect(NOT_AS_DEPLOYED).toContain('Incident-Response-Playbook section B');
+  });
+
+  it("stops on any of the API's settings changed, added, dropped or turned into a secret, naming the setting alone", async () => {
+    const cases: [readonly unknown[], string][] = [
+      [
+        apiEnvWith((entry) =>
+          entry.name === 'AGENTX_PUBLIC_ORIGIN' ? { ...entry, value: 'https://evil.example' } : entry,
+        ),
+        'api: its setting AGENTX_PUBLIC_ORIGIN holds another value than the template gives',
+      ],
+      [
+        [...builtAt(OLD), { name: 'NODE_OPTIONS', value: '--require /tmp/x.js' }],
+        "api: it has a setting the template doesn't: NODE_OPTIONS",
+      ],
+      [
+        builtAt(OLD).filter((entry) => (entry as { name: string }).name !== 'AGENTX_ENV'),
+        "api: it lacks the template's setting AGENTX_ENV",
+      ],
+      [
+        apiEnvWith((entry) => (entry.name === 'AGENTX_ENV' ? { name: 'AGENTX_ENV', secretRef: 'a-secret' } : entry)),
+        'api: its setting AGENTX_ENV reads a secret where the template gives a value',
+      ],
+      [
+        apiEnvWith((entry) =>
+          entry.name === 'AGENTX_FROM_VAULT' ? { name: 'AGENTX_FROM_VAULT', secretRef: 'other' } : entry,
+        ),
+        "api: its setting AGENTX_FROM_VAULT doesn't read the secret the template names",
+      ],
+    ];
+    for (const [env, reason] of cases) {
+      const azure = new Staging();
+      azure.app.env = env;
+      const { status, said, printed } = await outcome(azure);
+      expect(status).toBe(1);
+      expect(azure.writes).toEqual([]);
+      expect(said.at(-1)).toBe(`  ${reason}`);
+      expect(printed).not.toContain('evil');
+      expect(printed).not.toContain('/tmp/x.js');
+    }
+  });
+
+  it('lets a release through when only the image and build differ, Azure dropping empty arguments', async () => {
+    const azure = new Staging();
+    // The template's AGENTX_RELEASE names another commit and image: both are the release's to write.
+    azure.templates = new Map(
+      ORDER.map((workload) => [
+        workload,
+        [azureContainer(WORKLOADS[workload].container, { command: ['node'], env: builtAt(LATER), image: 'x' })],
+      ]),
+    );
+    expect((await outcome(azure)).status).toBe(0);
+    const { args: _none, ...withoutArgs } = azureContainer('api', { env: builtAt(OLD) });
+    const { status } = await checked({ ...staging(OLD), api: [withoutArgs] }, history([OLD, NEW]));
+    expect(status).toBe(0);
+  });
+
+  it('says the same in a check, red, changing nothing', async () => {
+    const { status, said, calls } = await checked(
+      { ...staging(OLD), migrate: [azureContainer('migrate', { env: builtAt(OLD), args: ['--other'] })] },
+      history([OLD, NEW]),
+    );
+    expect(status).toBe(1);
+    expect(said.slice(-2)).toEqual([
+      `A release of ${NEW} stops here, red: ${NOT_AS_DEPLOYED}`,
+      '  migrate: its arguments are not the template’s',
+    ]);
+    expect(calls.every((call) => call[0] === 'account' || call[2] === 'get')).toBe(true);
+  });
+
+  it("stops before any write when the commit's templates can't be read, keeping the subscription out", async () => {
+    const elsewhere = new Staging();
+    const stepsAt = (head: string, clean: boolean): ReturnType<Staging['steps']> => ({
+      ...elsewhere.steps(ordinary()),
+      folder: folderAt(head, SAID, clean).folder,
+    });
+    for (const [steps, start] of [
+      [stepsAt(OLD, true), `This folder is at ${OLD}, not ${NEW}, so`],
+      [stepsAt(NEW, false), `This folder is at ${NEW} with changes, not ${NEW}, so`],
+    ] as const) {
+      const failed = await release(RELEASE_NEW, steps).then(
+        () => '',
+        (error: unknown) => (error instanceof Error ? error.message : ''),
+      );
+      expect(failed.startsWith(start)).toBe(true);
+      expect(failed).toContain('nothing was changed. Run this again from a clean checkout of the commit');
+    }
+    const broken = new Staging();
+    broken.templates = new Error(`bicep snapshot failed: /subscriptions/${SUBSCRIPTION}/x`);
+    const { status, message } = await outcome(broken);
+    expect(status).toBeUndefined();
+    expect(message).toBe(
+      `What ${NEW}'s apps.bicep gives the API and the migration job couldn't be read (bicep snapshot failed: /subscriptions/the subscription/x), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`,
+    );
+    for (const azure of [elsewhere, broken]) expect(azure.writes).toEqual([]);
+  });
+
+  it('reads no template when there is nothing to release, or a hand deploy is needed anyway', async () => {
+    const unread = new Error('never read');
+    const current = await checked(
+      staging(NEW, NEW_IMAGE),
+      history([NEW]),
+      undefined,
+      folderAt(NEW, SAID, true, unread).folder,
+    );
+    expect(current.status).toBe(0);
+    const byHand = await checked(
+      staging(OLD),
+      history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] }),
+      undefined,
+      folderAt(NEW, SAID, true, unread).folder,
+    );
+    expect(byHand.status).toBe(1);
+    expect(byHand.said).toContain(`A release of ${NEW} stops here, red: this needs a hand deploy.`);
+  });
+
+  it("sends migrate's container as the commit gives it ahead of a hand deploy, saying what differed (--migrate-first)", async () => {
+    const azure = new Staging();
+    azure.job.command = ['node', '-e', 'x'];
+    const steps = azure.steps(ordinary());
+    expect(await migrateFirst(steps, SUBSCRIPTION, NEW, digest('2'))).toBe('job-agentx-stg-migrate-new0x');
+    expect(azure.writes[0]?.body).toEqual({
+      properties: { template: { containers: [released(running('migrate', { command: ['node'] }), NEW_IMAGE, NEW)] } },
+    });
+    expect(steps.said).toContain(
+      `migrate isn't as ${NEW}'s apps.bicep has it, beyond its image and build (its command is not the template’s): it runs as apps.bicep says. If apps.bicep didn't change it since ${OLD}, someone changed it outside a deploy: treat it as a suspected breach (Incident-Response-Playbook section B).`,
+    );
+    // A value only Azure or the shell gives can't be sent from the template: nothing is.
+    const unsendable = new Staging();
+    unsendable.templates = new Map([
+      [
+        'migrate',
+        [
+          azureContainer('migrate', {
+            command: ['node'],
+            env: [{ name: 'X', value: "[reference('r', 'v').hostName]" }],
+          }),
+        ],
+      ],
+    ]);
+    await expect(migrateFirst(unsendable.steps(ordinary()), SUBSCRIPTION, NEW, digest('2'))).rejects.toThrow(
+      "the setting X is given only at deploy time, so it can't be sent from the template alone\nLeft: nothing was changed.",
+    );
+    expect(unsendable.writes).toEqual([]);
   });
 });

@@ -21,6 +21,11 @@
 // difference stays a finding. So an override that changes only those, followed
 // by a release, would pass as one: an older image of ours, and a release label.
 // A start doesn't move the job's change time.
+// **Its sharper half (AZ2c):** a job whose own template was changed (its command,
+// say), then started, runs as the job is, so no run differs. The migration job,
+// the one CI's release identity may write and start, is held besides to what
+// main's apps.bicep gives it beyond its image and build (migrateHeld); the other
+// jobs only a person writes.
 // Azure keeps a job's last 100 runs: a full list still inside the window, or a
 // flood of runs, is a finding of its own. Nothing here stops a start: it only
 // makes one seen.
@@ -29,7 +34,10 @@
 // workflow's log is public. Each finding names the run, and the partner reads
 // the rest with `az containerapp job execution show`.
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text, UsageError } from './deploy.ts';
+import { differences as templateDifferences, expectedOf } from './drift.ts';
+import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { jobName, JOBS_API, runCli } from './jobs.ts';
+import { handDeployed, realTemplates, runningIn, type Templates } from './release.ts';
 
 /** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
 export const DEFAULT_HOURS = 6;
@@ -68,6 +76,8 @@ export interface DeployedJob {
   /** When the job last changed, in ms, or undefined when Azure didn't say. */
   readonly changedAt: number | undefined;
   readonly template: Template;
+  /** Its template's containers as Azure gave them, mounts and size too: what the migration job is held to apps.bicep by (AZ2c). */
+  readonly containers?: unknown;
 }
 
 export interface Run {
@@ -337,14 +347,15 @@ export function deployedJobs(az: Az, subscription: string): DeployedJob[] {
       const job = item as {
         name?: unknown;
         systemData?: { lastModifiedAt?: unknown };
-        properties?: { template?: unknown };
+        properties?: { template?: { containers?: unknown } };
       };
       const name = text(job.name);
       const template = templateOf(job.properties?.template);
       if (!/^[a-z0-9-]+$/.test(name) || template === undefined) {
         throw new Error(`Azure listed a job "${name}" whose containers can't be read, so no run of it can be checked.`);
       }
-      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template };
+      const containers = job.properties?.template?.containers;
+      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template, containers };
     },
   );
 }
@@ -412,10 +423,89 @@ export function parseArguments(argv: readonly string[]): number {
   return hours;
 }
 
+/** What holding the migration job to main's apps.bicep reads (AZ2c): this checkout of main, its history and its templates. */
+export interface HeldSteps {
+  readonly checkout: () => Checkout;
+  readonly history: History;
+  readonly templates: Templates;
+}
+
+const realHeld = (): HeldSteps => ({
+  checkout: () => realCheckout(),
+  history: realHistory(),
+  templates: realTemplates,
+});
+
+/** What holding the migration job to apps.bicep found: lines said as they are, and findings. */
+interface Held {
+  readonly said: readonly string[];
+  readonly found: readonly string[];
+}
+
+const MIGRATE_JOB = jobName('migrate');
+
+/** Words on one line, so nothing in them can start a workflow command of its own in the log. */
+const oneLine = (words: string): string => words.replace(/[\r\n]+/g, ' ');
+
+/** A finding on the migration job as it is deployed, with what it means and what to do. */
+const heldFinding = (problem: string, lines: readonly string[]): Held => ({
+  said: [],
+  found: [
+    `FOUND: ${MIGRATE_JOB} isn't as main's apps.bicep has it, beyond its image and build: ${problem}`,
+    ...lines.map((line) => `  - ${line}`),
+    "  What it means: someone who may write the job (CI's release identity, or a person) changed it outside a deploy, and any start of it, ours included, runs that change with its secrets and its identity. A run compared with the job as it is now can't show it.",
+    '  What to do: treat it as a suspected breach (Incident-Response-Playbook section B; section T says how) until shown otherwise. Find who changed it in the activity log, then deploy it by hand with apps after checking who changed it, before anyone starts it.',
+  ],
+});
+
+/**
+ * AZ2c: the migration job's own container held to what main's apps.bicep gives it, beyond its image and build. Its
+ * runs are compared with the job, so a job whose command was changed and then started looks as deployed; this is
+ * what shows that change. Compared only when main's templates are the ones the job's build was deployed from: it runs
+ * main's newest commit, or an older one with nothing a person deploys changed since (else the hand deploy that change
+ * waits for is said, as a warning). A build that isn't in main's history is a finding: every image a deploy may send
+ * was built on main. The API isn't read: the watch's role reads the jobs alone.
+ */
+function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: HeldSteps): Held {
+  const job = jobs.find((each) => each.name === MIGRATE_JOB);
+  // No migration job (a new environment's first deploys): nothing a release could start.
+  if (job === undefined) return { said: [], found: [] };
+  try {
+    const running = runningIn('migrate', job.containers);
+    const here = steps.checkout();
+    if (!here.clean) {
+      return { said: [`::warning::${MIGRATE_JOB} wasn't held to apps.bicep: this checkout has changes.`], found: [] };
+    }
+    if (!steps.history.isAncestor(running.release, here.head)) {
+      return heldFinding(`it names its build ${running.release}, which isn't in main's history`, []);
+    }
+    const pending = steps.history.changedFiles(running.release, here.head).filter((file) => handDeployed(file));
+    if (pending.length > 0) {
+      return {
+        said: [
+          `::warning::${MIGRATE_JOB} wasn't held to apps.bicep: it runs ${running.release}, and main changed what a person deploys since (${oneLine(pending.join(', '))}). Nothing to do if a hand deploy is coming; the first watch after it holds the job again.`,
+        ],
+        found: [],
+      };
+    }
+    const expected = expectedOf(steps.templates(subscription).get('migrate'));
+    const said = templateDifferences(expected, running.container, new Map());
+    if (said.length > 0) return heldFinding('what differs is below, by name, never by value', said);
+    return { said: [`${MIGRATE_JOB} is as main's apps.bicep has it, beyond its image and build.`], found: [] };
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    return heldFinding(
+      `it can't be compared (${oneLine(error.message.replaceAll(subscription, 'the subscription'))})`,
+      [],
+    );
+  }
+}
+
 export interface WatchSteps {
   readonly az: Az;
   readonly say: (line: string) => void;
   readonly now: () => Date;
+  readonly held: HeldSteps;
 }
 
 /** Reads every job's recent runs and says each that ran other containers: 1 when any did, else 0. */
@@ -453,6 +543,9 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
       }
     }
   }
+  const held = migrateHeld(jobs, subscription, steps.held);
+  for (const line of held.said) steps.say(line);
+  found.push(...held.found);
   if (found.length === 0) {
     steps.say(`No run started since ${when(since)} ran other containers than its job's own.`);
     return Promise.resolve(0);
@@ -466,12 +559,13 @@ export function main(
   say: (line: string) => void = console.log,
   az: () => Az = realAz,
   now: () => Date = () => new Date(),
+  held: () => HeldSteps = realHeld,
 ): Promise<number> {
   return runCli(
     USAGE,
     say,
     () => parseArguments(argv),
-    (hours) => watch(hours, { az: az(), say, now }),
+    (hours) => watch(hours, { az: az(), say, now, held: held() }),
   );
 }
 

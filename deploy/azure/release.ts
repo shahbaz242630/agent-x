@@ -40,7 +40,10 @@
 //   the API's also sends an empty revision suffix, so one set by hand is
 //   cleared, never sent again and refused as taken (AZ7).
 //   Each container is Azure's own, with the image and AGENTX_RELEASE changed
-//   and nothing else; a field this tool doesn't know is refused, not guessed at
+//   and nothing else; a field this tool doesn't know is refused, not guessed at.
+//   The rest of each must first be what the commit's apps.bicep gives it (AZ2c,
+//   drift.ts): a command or setting changed outside a deploy stops the release
+//   red, before it could carry the change forward
 // - only images, commits, file names and Azure's own names are printed: the
 //   settings name the domain, and the subscription is Azure's, both kept out
 //   of CI's public logs. An error Azure gives is shown by its HTTP reason and
@@ -75,6 +78,15 @@ import {
   RESOURCE_GROUP,
   UsageError,
 } from './deploy.ts';
+import {
+  type Bound,
+  deployable,
+  differences,
+  expectedOf,
+  type LiveContainer,
+  type Setting,
+  templatesIn,
+} from './drift.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
@@ -132,7 +144,7 @@ export const TEST_FILE = '.test.ts';
  * without case, since the partner's Windows checkout puts `Deploy/Azure/x`
  * where `deploy/azure/x` goes; the exception with it, so `.TS` still counts.
  */
-const handDeployed = (file: string): HandDeployed | undefined =>
+export const handDeployed = (file: string): HandDeployed | undefined =>
   file.endsWith(TEST_FILE)
     ? undefined
     : HAND_DEPLOYED.find(
@@ -226,6 +238,22 @@ export type Workload = keyof typeof WORKLOADS;
 /** The order a release updates them in: the migration first, and the API only once its run has succeeded (G4-3b). */
 export const ORDER: readonly Workload[] = ['migrate', 'api'];
 
+/**
+ * What a folder's apps.bicep gives each release workload's containers (their
+ * template's `containers`, as the snapshot has them), in the subscription.
+ */
+export type Templates = (subscription: string) => ReadonlyMap<Workload, unknown>;
+
+/** The real ones: the pinned Bicep's snapshot of this folder's apps deployment (drift.ts). */
+export const realTemplates: Templates = (subscription) => {
+  const named = ORDER.map((workload) => {
+    const [kind, name] = WORKLOADS[workload].path.split('/');
+    return { type: `Microsoft.App/${String(kind)}`, name: String(name) };
+  });
+  const containers = templatesIn(subscription, named);
+  return new Map(ORDER.map((workload, index) => [workload, containers[index]] as const));
+};
+
 /** The setting that names the build on every log line. */
 const RELEASE_SETTING = 'AGENTX_RELEASE';
 
@@ -282,19 +310,10 @@ export function parseArguments(argv: readonly string[]): Request {
   return { command, commit, digest };
 }
 
-/** One setting: a value, or a reference to one of the workload's secrets (never a value in hand). */
-type Setting =
-  { readonly name: string; readonly value: string } | { readonly name: string; readonly secretRef: string };
-
 /** One container as a release sends it back: Azure's own fields, the ones this tool knows. */
-export interface Container {
+export interface Container extends LiveContainer {
   readonly name: string;
   readonly image: string;
-  readonly command: readonly string[];
-  readonly args: readonly string[];
-  readonly env: readonly Setting[];
-  readonly resources: { readonly cpu: number; readonly memory: string };
-  readonly volumeMounts: readonly { readonly volumeName: string; readonly mountPath: string }[];
 }
 
 /** What a workload runs: its one container, and the image and build in it. */
@@ -399,6 +418,11 @@ export type Decision =
    * it goes round this gate and the old image would raise a false tamper alarm as the migration runs.
    */
   | { readonly kind: 'coming-first'; readonly reasons: readonly string[] }
+  /**
+   * The API or the migration job isn't as the commit's apps.bicep has it beyond its image and build (AZ2c): changed
+   * outside a deploy, which a release would carry forward, as it copies the rest of each container.
+   */
+  | { readonly kind: 'not-as-deployed'; readonly reasons: readonly string[] }
   | {
       readonly kind: 'release';
       readonly updates: ReadonlyMap<Workload, Container>;
@@ -613,13 +637,21 @@ export function changes(before: Container, after: Container): string[] {
   return said;
 }
 
-/** What a check reads from this folder: the commit it is at, and what Bicep says each deployment reads. */
+/**
+ * What a check reads from this folder: the commit it is at, what Bicep says each deployment reads, and what its
+ * apps.bicep gives the two workloads.
+ */
 export interface Folder {
   readonly checkout: () => Checkout;
   readonly references: (paramsFiles: readonly string[]) => Promise<ReadonlyMap<string, readonly string[]>>;
+  readonly templates: Templates;
 }
 
-const realFolder = (): Folder => ({ checkout: () => realCheckout(), references: (files) => fileReferences(files) });
+const realFolder = (): Folder => ({
+  checkout: () => realCheckout(),
+  references: (files) => fileReferences(files),
+  templates: realTemplates,
+});
 
 export interface CheckSteps {
   readonly az: Az;
@@ -661,6 +693,52 @@ async function readersAt(commit: string, steps: CheckSteps): Promise<Readers | u
   }
 }
 
+/** What to do when the templates can't be read: nothing was changed, and the release is run again from the commit. */
+const UNCHECKED_NEXT =
+  'so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).';
+
+/**
+ * AZ2c: the release decided, each workload held to what this commit's apps.bicep gives it beyond its image and build,
+ * before anything is written; the decision unchanged when both are as deployed. The folder must be a clean checkout of
+ * the commit (CI's is), since its templates are what is compared. A release only ever reaches here with no file apps
+ * reads changed since what staging runs (decide), so these templates are also the ones staging was deployed from.
+ * Nothing read is printed but names: the subscription is masked out of Bicep's own words.
+ */
+function heldToTemplates(
+  decision: Decision,
+  commit: string,
+  subscription: string,
+  running: ReadonlyMap<Workload, Running>,
+  steps: CheckSteps,
+): Decision {
+  if (decision.kind !== 'release') return decision;
+  const here = steps.folder.checkout();
+  if (here.head !== commit || !here.clean) {
+    throw new Error(
+      `This folder is at ${here.head}${here.clean ? '' : ' with changes'}, not ${commit}, so what the commit's apps.bicep gives the API and the migration job can't be read, ${UNCHECKED_NEXT}`,
+    );
+  }
+  const bound: Bound = new Map();
+  let reasons: string[];
+  try {
+    const templates = steps.folder.templates(subscription);
+    reasons = ORDER.flatMap((workload) => {
+      const container = running.get(workload)?.container;
+      if (container === undefined) throw new Error(`nothing was read for ${workload}`);
+      const said = differences(expectedOf(templates.get(workload)), container, bound);
+      return said.map((line) => `${workload}: ${line}`);
+    });
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const why = error.message.replaceAll(subscription, 'the subscription');
+    throw new Error(
+      `What ${commit}'s apps.bicep gives the API and the migration job couldn't be read (${why}), ${UNCHECKED_NEXT}`,
+      { cause: error },
+    );
+  }
+  return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
+}
+
 async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   const subscription = signedIn(steps.az, steps.say);
   const image = `${IMAGE_REPOSITORY}@${request.digest}`;
@@ -671,8 +749,15 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   if (api !== undefined && settingValue(api.container, 'AGENTX_ROLE') === 'web') {
     return { subscription, image, reads, running, decision: { kind: 'load-run' } };
   }
+  const held = (decided: Decision): Plan => ({
+    subscription,
+    image,
+    reads,
+    running,
+    decision: heldToTemplates(decided, request.commit, subscription, running, steps),
+  });
   const first = decide(running, request.commit, image, steps.history);
-  if (first.kind !== 'by-hand') return { subscription, image, reads, running, decision: first };
+  if (first.kind !== 'by-hand') return held(first);
   const readers = await readersAt(request.commit, steps);
   const records = recordsIn(reads.get('migrate')?.tags ?? {}, steps.say);
   steps.say(
@@ -680,8 +765,7 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
       ? 'The migration job holds no hand deploy records.'
       : `The migration job records: ${[...records].map(([deployment, sent]) => deployment + ' sent ' + sent).join('; ')}.`,
   );
-  const decision = decide(running, request.commit, image, steps.history, readers, records);
-  return { subscription, image, reads, running, decision };
+  return held(decide(running, request.commit, image, steps.history, readers, records));
 }
 
 /** What the records show deployed by hand, said before a release goes ahead. */
@@ -708,6 +792,13 @@ export const COMING_FIRST =
   "the image staging runs wasn't told what this release's migration adds. Release a commit carrying it in coming.json first, then this one; never a hand deploy, which goes round this check and raises the false tamper alarm it prevents (decision 49).";
 
 /**
+ * What a release says when a workload isn't as its commit's apps.bicep has it (AZ2c): what happened, what broke, what
+ * next. A write with CI's sign-in leaves no request body in the activity log, so this is where such a change shows.
+ */
+export const NOT_AS_DEPLOYED =
+  "the API or the migration job isn't as this commit's apps.bicep has it, beyond its image and build (what differs is below, by name, never by value). Someone changed it outside a deploy: with CI's sign-in, or by hand. What broke: nothing was released or changed, since a release copies each container and would carry that change forward, and run it. What next: find who changed it in the resource group's activity log and treat it as a suspected breach until shown otherwise (Incident-Response-Playbook section B); then deploy it by hand with apps after checking who changed it, which puts back what apps.bicep says.";
+
+/**
  * A decision that leaves nothing to update, said: the status to end with, or
  * nothing when there are updates to make.
  */
@@ -731,6 +822,11 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
   }
   if (decision.kind === 'by-hand') {
     say(`A release of ${commit} stops here, red: this needs a hand deploy.`);
+    for (const reason of decision.reasons) say(`  ${reason}`);
+    return 1;
+  }
+  if (decision.kind === 'not-as-deployed') {
+    say(`A release of ${commit} stops here, red: ${NOT_AS_DEPLOYED}`);
     for (const reason of decision.reasons) say(`  ${reason}`);
     return 1;
   }
@@ -1133,14 +1229,41 @@ function alreadyServed(steps: ReleaseSteps, subscription: string, api: Read, ima
   return 0;
 }
 
-/** What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door. */
-export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'>;
+/**
+ * What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door, and
+ * what the hand deploy's checkout of the commit gives migrate (AZ2c).
+ */
+export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'> & { readonly templates: Templates };
+
+/**
+ * The migration job's container as the hand deploy's commit gives it (AZ2c), with this image and build: never a copy
+ * of the live one, which a write outside a deploy may have changed (its command, say), so a hand deploy never runs such
+ * a change. Said when the live one differs beyond its image and build, by name alone: the hand deploy is the fix the
+ * release asks for, and the difference is a suspected breach to look into.
+ */
+function templateMigrate(
+  steps: MigrateFirstSteps,
+  subscription: string,
+  live: Running,
+  image: string,
+  commit: string,
+): Container {
+  const containers = steps.templates(subscription).get('migrate');
+  const after = deployable(WORKLOADS.migrate.container, containers, image, commit);
+  const said = differences(expectedOf(containers), live.container, new Map());
+  if (said.length > 0) {
+    steps.say(
+      `migrate isn't as ${commit}'s apps.bicep has it, beyond its image and build (${said.join('; ')}): it runs as apps.bicep says. If apps.bicep didn't change it since ${live.release}, someone changed it outside a deploy: treat it as a suspected breach (Incident-Response-Playbook section B).`,
+    );
+  }
+  return after;
+}
 
 /**
  * `deploy.ts apps --migrate-first` (AZ6): a release's first half alone, for a hand deploy whose image brings
  * migrations the database lacks (S174: deployed together, the API started on the new image before them, refused at
- * start and raised a false tamper alarm). The migration job is updated to the image and run to success, exactly as a
- * release does, and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
+ * start and raised a false tamper alarm). The migration job is updated to the image and run to success, as a release
+ * does, but with its container as the commit's apps.bicep gives it (AZ2c), and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
  * since it checks the database while the migration runs. The run's name once it has succeeded; otherwise an error
  * saying what it left, and the deployment isn't sent. The image was checked by the caller (verify.ts).
  */
@@ -1173,7 +1296,9 @@ export async function migrateFirst(
     return timeLimit(job);
   });
   const left = `the API is unchanged, on ${apiRuns}`;
-  const after = released(job.running, image, commit);
+  const after = await leaving('nothing was changed.', () =>
+    templateMigrate(steps, subscription, job.running, image, commit),
+  );
   await leaving(`migrate may hold ${commit}, not run; ${left}.`, async () => {
     update(steps, subscription, 'migrate', job.running, after);
     await settledUpdate(steps, subscription, 'migrate', after);
