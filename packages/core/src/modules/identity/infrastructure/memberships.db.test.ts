@@ -23,13 +23,13 @@ import {
   membersFor,
   membershipFor,
   membershipOf,
-  MEMBERSHIPS,
   type MembershipsTransaction,
   membersOf,
   MOST_MEMBERS,
   reactivateMembership,
   TooManyMembers,
 } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -96,14 +96,7 @@ const add = (orgId: string, userId: string, role: Role = 'viewer', inside = orgI
 const check = (orgId: string, userId: string) =>
   withSignedStates(app, orgId, services(), (tx, states) => membershipOf(tx, states, orgId, userId));
 
-const deactivate = (orgId: string, id: string) =>
-  withSignedStates(app, orgId, services(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId, id }, 'deactivate', {
-      actor: OPERATOR,
-      action: 'membership.deactivate',
-      details: {},
-    }),
-  );
+const deactivate = (orgId: string, id: string) => deactivatedAsTheProduct(app, services(), { orgId, id }, OPERATOR);
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -239,9 +232,9 @@ describe('a person’s membership, read for a decision', () => {
     const user = await person();
     const { id } = await add(org, user, 'admin');
 
-    expect(await deactivate(org, id)).toMatchObject({ outcome: 'changed', from: 'ACTIVE', to: 'DEACTIVATED' });
+    await deactivate(org, id);
     expect(await check(org, user)).toEqual({ outcome: 'deactivated', id });
-    expect(await deactivate(org, id)).toEqual({ outcome: 'refused', from: 'DEACTIVATED' });
+    await expect(deactivate(org, id)).rejects.toThrow('did not move: refused');
     expect(alarms()).toEqual([]);
   });
 

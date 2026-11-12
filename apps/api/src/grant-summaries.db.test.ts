@@ -157,8 +157,10 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
     await job.run();
     expect(lines('grant_summaries.built')).toEqual([expect.objectContaining({ built: 1 })]);
 
-    // An image from before OR1 changes the membership, writing no summary: left behind.
-    await withSignedStates(app, org, quiet(), async (tx, states) => {
+    // An image from before OR1 changes the membership, writing no summary: left behind. Such an image ran only before
+    // 0089, which refuses that from the app's role (OR1b), so it is played on the owner's connection, which 0089 lets by.
+    const oldImage = createDatabase<Tables>({ ...database.connection('owner'), maxConnections: 1 }, testLogger());
+    await withSignedStates(oldImage, org, quiet(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: before }, 'change');
       if (state.outcome !== 'verified') throw new Error('not verified');
       await states.record(
@@ -174,6 +176,7 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
         },
       );
     });
+    await oldImage.destroy();
     await job.run();
 
     // The job's logger is the one it was made with: its second run's line after the first.

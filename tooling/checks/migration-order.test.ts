@@ -87,7 +87,9 @@ describe("the repository's migrations", () => {
       () => NOTHING,
       new Map(),
     );
-    expect([...new Set(refused.map((line) => line.slice(0, 4)))]).toEqual([...GRANDFATHERED.keys()]);
+    // Those up to 0081, released before the rule; a later one changing something was carried as coming (the next test).
+    const beforeTheRule = refused.map((line) => line.slice(0, 4)).filter((number) => number <= '0081');
+    expect([...new Set(beforeTheRule)]).toEqual([...GRANDFATHERED.keys()]);
   });
 
   it('each change after those was carried as coming by the code before it', () => {
@@ -405,6 +407,17 @@ describe("a migration granting the operator's role a right (OR2b)", () => {
     );
   const coming = ['SELECT on column identity.contacts.id', 'SELECT on column identity.contacts.status'];
   const OUTRIGHT = ': no coming entry can describe that, so the image before it would raise the tamper alarm';
+
+  it('reads a body naming a grant only in a comment or a string as no grant, and one granting after them as one (0089)', () => {
+    const fn = (body: string) => `CREATE FUNCTION app.helper() RETURNS trigger LANGUAGE plpgsql AS $$ ${body} $$;`;
+    const quiet =
+      "BEGIN -- a grant summary\n /* revoke */ RAISE EXCEPTION 'without its grant summary' USING errcode = 'check_violation'; RETURN NULL; END";
+    expect(refusedFor(fn(quiet))).toEqual([]);
+    const granting = String.raw`BEGIN RAISE NOTICE E'it''s a \' grant'; GRANT SELECT ON app.things TO agentx_app; END`;
+    expect(refusedFor(fn(granting))).toEqual([
+      `0002_later.sql writes app.helper with a body that changes triggers or routines, runs built SQL, or grants${OUTRIGHT}`,
+    ]);
+  });
 
   it('on a table already built, is refused for each right the code before it did not carry', () => {
     expect(refusedFor(COLUMNS, ['SELECT on column identity.contacts.id'])).toEqual([

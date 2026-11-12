@@ -44,6 +44,7 @@ import {
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -271,13 +272,7 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
   it('brings back a person deactivated there, as the approver they were invited as, only once confirmed (B4-5c)', async () => {
     const who = await organization();
     const returning = await member(who.org, 'viewer');
-    await withSignedStates(app, who.org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: who.org, id: returning.membershipId }, OPERATOR);
     const { id } = await accepted(who, 'approver', returning.userId);
     expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
       outcome: 'deactivated',
@@ -667,13 +662,7 @@ describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, ()
     // Theirs is made before the confirming admin's, so its ID is the lower of the two.
     const returning = await member(who.org, 'viewer');
     const admin = await member(who.org, 'admin');
-    await withSignedStates(app, who.org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: who.org, id: returning.membershipId }, OPERATOR);
     const { id } = await accepted(who, 'approver', returning.userId);
     const challengeId = await asked(admin, id);
     await stepUp(admin, challengeId);

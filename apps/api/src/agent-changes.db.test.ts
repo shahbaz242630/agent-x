@@ -11,8 +11,6 @@ import {
   addMembership,
   createSessions,
   createStepUpChallenges,
-  memberOf,
-  MEMBERSHIPS,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
@@ -50,6 +48,7 @@ import {
   SUSPEND_OPERATION,
 } from './agent-changes.ts';
 import type { AgentMember, AgentTables } from './agent-writes.ts';
+import { deactivatedAsTheProduct, roleChangedAsTheProduct } from './membership-changes.helper.test.ts';
 
 type Tables = AgentTables & OrganizationsTables;
 
@@ -479,32 +478,11 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
   };
 
   const deactivate = (org: string, who: Member) =>
-    withSignedStates(app, org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: who.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    deactivatedAsTheProduct(app, quiet(), { orgId: org, id: who.membershipId }, OPERATOR);
 
   /** The member's role changed to `role`, as an admin's role change records it. */
   const demote = (org: string, who: Member, role: Role) =>
-    withSignedStates(app, org, quiet(), async (tx, states) => {
-      const read = await memberOf(tx, states, { orgId: org, id: who.membershipId }, 'change');
-      if (read.outcome !== 'found') throw new Error('the membership was not found');
-      await states.record(
-        tx,
-        MEMBERSHIPS,
-        { orgId: org, id: who.membershipId },
-        read.state,
-        { role },
-        {
-          actor: OPERATOR,
-          action: 'membership.role_changed',
-          details: {},
-        },
-      );
-    });
+    roleChangedAsTheProduct(app, quiet(), { orgId: org, id: who.membershipId }, role, OPERATOR);
 
   it.each<Role>(['developer', 'admin'])(
     'hands it to a %s once the admin signed in again with a passkey: the owner alone changes, recorded with both',

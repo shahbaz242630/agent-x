@@ -45,6 +45,7 @@ import {
 } from './factor-resets.ts';
 import { IdpFactorsUnavailable, type SecondFactorRemover } from './idp-factors.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import { createRemovalRestriction, SECOND_FACTORS_REMOVED } from './removal-restriction.ts';
 import { activateContact, contactChange, contactToActivate, draftContact } from './registered-contacts.ts';
 import { createResetChanges } from './reset-changes.ts';
@@ -177,13 +178,7 @@ async function organization(): Promise<Org> {
 
 /** Deactivates the person's membership, as B4-5 does. */
 const deactivate = ({ org, person }: Org) =>
-  withSignedStates(app, org, quiet(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: person.membershipId }, 'deactivate', {
-      actor: OPERATOR,
-      action: 'membership.deactivated',
-      details: {},
-    }),
-  );
+  deactivatedAsTheProduct(app, quiet(), { orgId: org, id: person.membershipId }, OPERATOR);
 
 /** A reset of the person, asked and sent to the contact now, as B6-3b does: its ID. */
 async function sent({ org, admin, person, contact: contactId }: Org): Promise<string> {

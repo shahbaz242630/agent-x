@@ -243,6 +243,11 @@ const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
  */
 const BODY_DDL =
   /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)|\b(?:grant|revoke)\b/i;
+/**
+ * A body's comments and strings, read left to right, taken out before BODY_DDL reads it: words there run nothing
+ * (a string runs only through EXECUTE, refused on its own), so a message naming a "grant summary" is no grant (0089).
+ */
+const BODY_TEXT = /--[^\n]*|\/\*[\s\S]*?\*\/|(?<![A-Za-z0-9_$\u0080-￿])[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'/g;
 /** A table attached as a partition takes the parent's row triggers. */
 const ATTACH_PARTITION = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?\S+ attach partition ${NAME}`);
 
@@ -320,7 +325,7 @@ function written(fn: Named, words: string, bodies: readonly string[], before: Bu
   if (!fn.qualified) return unqualified('writes', fn);
   const body = bodyOf(words, bodies);
   if (body === undefined) return refused(`writes ${fn.name} with no dollar-quoted body`);
-  if (BODY_DDL.test(body))
+  if (BODY_DDL.test(body.replaceAll(BODY_TEXT, ' ')))
     return refused(`writes ${fn.name} with a body that changes triggers or routines, runs built SQL, or grants`);
   const hash = hashOf(body);
   own.bodies.set(fn.name, hash);

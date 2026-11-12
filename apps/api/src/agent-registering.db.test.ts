@@ -11,7 +11,6 @@ import {
   addMembership,
   createSessions,
   createStepUpChallenges,
-  MEMBERSHIPS,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
@@ -43,6 +42,7 @@ import {
   type RegistrationWrite,
 } from './agent-registering.ts';
 import type { AgentTables } from './agent-writes.ts';
+import { deactivatedAsTheProduct } from './membership-changes.helper.test.ts';
 
 type Tables = AgentTables & OrganizationsTables;
 
@@ -339,12 +339,11 @@ describe('what registering refuses, writing nothing', () => {
     const developer = await member(org, 'developer');
     const challengeId = askedFor(await ask(developer));
     await stepUp(developer, challengeId, APP_CODE);
-    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: developer.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
+    await deactivatedAsTheProduct(
+      app,
+      { keys, ids, logger: testLogger() },
+      { orgId: org, id: developer.membershipId },
+      OPERATOR,
     );
 
     expect(await confirm(developer, challengeId)).toMatchObject({ status: 403, code: 'FORBIDDEN' });

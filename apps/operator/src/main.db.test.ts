@@ -792,6 +792,19 @@ describe(`OR2 our team's reset notice, as the job runs it (Postgres ${server.ver
   });
 });
 
+describe(`OR2b an organisation's counting contacts, typed (Postgres ${server.version})`, () => {
+  it('checks the schema first, its own read of the contacts among it, then lists them', async () => {
+    const created = await run(['create-organization', '--name', 'Counting Co']);
+    const orgId = String(created.line('operator.organization_created')?.orgId);
+
+    const { code, events, line } = await run(['counting-contacts', '--org', orgId]);
+
+    expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.counting_contacts']);
+    expect(code).toBe(0);
+    expect(line('operator.counting_contacts')).toMatchObject({ orgId, count: 0 });
+  });
+});
+
 describe("S78 the restore drill's check, run as the job runs it", () => {
   const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-restore-'));
   afterAll(() => {

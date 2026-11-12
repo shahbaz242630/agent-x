@@ -1,24 +1,5 @@
 {
-  "triggers": [
-    {
-      "table": "identity.memberships",
-      "name": "grants_in_step",
-      "definition": "CREATE CONSTRAINT TRIGGER grants_in_step AFTER UPDATE OF state_version ON identity.memberships DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((old.state_version IS DISTINCT FROM new.state_version)) EXECUTE FUNCTION identity.grants_in_step()",
-      "function": "identity.grants_in_step",
-      "body": "f7810e7a6ce09e59b2c9e82c00b096d69cab1f162964b27a127ef62d53f97052"
-    }
-  ],
+  "triggers": [],
   "bodies": [],
-  "operatorRights": [
-    "SELECT on column identity.registered_contacts.added_by",
-    "SELECT on column identity.registered_contacts.counts_from",
-    "SELECT on column identity.registered_contacts.email_ciphertext",
-    "SELECT on column identity.registered_contacts.email_key_version",
-    "SELECT on column identity.registered_contacts.id",
-    "SELECT on column identity.registered_contacts.org_id",
-    "SELECT on column identity.registered_contacts.state_event_id",
-    "SELECT on column identity.registered_contacts.state_version",
-    "SELECT on column identity.registered_contacts.status",
-    "SELECT on column identity.registered_contacts.step_up_challenge_id"
-  ]
+  "operatorRights": []
 }

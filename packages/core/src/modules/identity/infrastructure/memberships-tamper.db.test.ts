@@ -29,6 +29,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
 import { addMembership, membershipOf, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -81,14 +82,7 @@ const check = (user: string) =>
 
 const hold = () => withSignedStates(app, org, services(), (tx, states) => states.integrityHold(tx, org, 'none'));
 
-const deactivate = (id: string) =>
-  withSignedStates(app, org, services(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id }, 'deactivate', {
-      actor: OPERATOR,
-      action: 'membership.deactivate',
-      details: {},
-    }),
-  );
+const deactivate = (id: string) => deactivatedAsTheProduct(app, services(), { orgId: org, id }, OPERATOR);
 
 const guard = (): Promise<string[]> => liveSchemaProblems(app, { ...ROLES, authorityTables: AUTHORITY_TABLES });
 
