@@ -68,7 +68,7 @@ export const SHELL_MARKERS: Readonly<Record<string, { readonly marker: string; r
 };
 
 /** A name from Azure as it is printed: anything but letters, digits, `_`, `.` and `-` becomes `?` (no line break can reach the log). */
-const shown = (name: string): string => name.replace(/[^\w.-]/g, '?');
+export const shown = (name: string): string => name.replace(/[^\w.-]/g, '?');
 
 /** One token of an ARM expression. */
 type Token =
@@ -103,8 +103,9 @@ function tokens(expression: string): Token[] {
  * What a property Azure gives at deploy time reads as: `environment()`'s storage
  * suffix, Azure's own; a client ID, a GUID; the apps environment's domain, Azure's
  * under azurecontainerapps.io; a Communication Services host, its own name under
- * communication.azure.com; the e-mail domain's, a GUID under azurecomm.net; any
- * other a host. `resource` is the last part of the resource's ID, as Bicep wrote it.
+ * communication.azure.com; the e-mail domain's, a GUID under azurecomm.net; a
+ * vault's address, its own name under vault.azure.net. Any other is refused, never
+ * guessed. `resource` is the last part of the resource's ID, as Bicep wrote it.
  */
 function deployTime(name: string, resource: string | undefined, properties: readonly string[]): Part {
   const property = properties.join('.');
@@ -112,13 +113,32 @@ function deployTime(name: string, resource: string | undefined, properties: read
     if (property !== 'suffixes.storage') throw new Error(`environment().${property} is not one this tool reads`);
     return { text: 'core.windows.net' };
   }
+  const own = escaped(resource ?? '');
   const known: Readonly<Record<string, string>> = {
     clientId: GUID_PATTERN,
     defaultDomain: `${HOST}\\.azurecontainerapps\\.io`,
-    hostName: `${escaped(resource ?? '')}\\.[a-z0-9-]+\\.communication\\.azure\\.com`,
+    hostName: `${own}\\.[a-z0-9-]+\\.communication\\.azure\\.com`,
     mailFromSenderDomain: `${GUID_PATTERN}\\.azurecomm\\.net`,
+    vaultUri: `https://${own}\\.vault\\.azure\\.net/`,
   };
-  return { key: `${String(resource)}.${property}`, pattern: known[property] ?? HOST };
+  const pattern = known[property];
+  if (pattern === undefined || resource === undefined) {
+    throw new Error(`reference(...).${property} is not one this tool reads`);
+  }
+  return { key: `${resource}.${property}`, pattern };
+}
+
+/** `uri(base, relative)`: a vault's address and a path under it, joined as Azure joins them (the base ends in `/`). */
+function joinedUri(args: readonly Part[][]): Part[] {
+  const [base, relative] = args;
+  const last = base?.at(-1);
+  const tail = relative?.length === 1 ? relative[0] : undefined;
+  if (args.length !== 2 || last === undefined || !('key' in last) || !last.key.endsWith('.vaultUri')) {
+    throw new Error("uri()'s base is not a vault's address");
+  }
+  if (tail === undefined || !('text' in tail) || tail.text.startsWith('/'))
+    throw new Error("uri()'s path is not plain");
+  return [...(base ?? []), tail];
 }
 
 /** The parts an ARM expression Bicep leaves in a snapshot reads as: format, concat, string, and holes; an error for any other. */
@@ -176,6 +196,7 @@ function expressionParts(expression: string): Part[] {
 /** A function of strings applied: format's {n} places filled, concat's and string's joined. */
 function applied(name: string, args: readonly Part[][]): Part[] {
   if (name === 'concat' || (name === 'string' && args.length === 1)) return args.flat();
+  if (name === 'uri') return joinedUri(args);
   if (name !== 'format') throw new Error(`${name}() is not one this tool reads`);
   const [shape, ...fill] = args;
   const only = shape?.length === 1 ? shape[0] : undefined;
@@ -374,6 +395,184 @@ export function deployable(
   };
 }
 
+/** A workload as Azure gives it, or a snapshot predicts it: what runs it, and its properties. */
+export interface Workload {
+  readonly identity: unknown;
+  readonly properties: unknown;
+}
+
+const recordIn = (value: unknown, ...path: readonly string[]): Readonly<Record<string, unknown>> => {
+  let found: unknown = value;
+  for (const key of path) found = isRecord(found) ? found[key] : undefined;
+  return isRecord(found) ? found : {};
+};
+
+/** A workload's template's containers. */
+export const containersOf = (workload: unknown): unknown => recordIn(workload, 'properties', 'template').containers;
+
+/** Absent, as Azure writes it: null, an empty list or an empty object. */
+const absent = (value: unknown): boolean =>
+  value === undefined ||
+  value === null ||
+  (Array.isArray(value) && value.length === 0) ||
+  (isRecord(value) && Object.keys(value).length === 0);
+
+/** A value with every absent field left out and objects' keys in order, so Azure's nulls read as the snapshot's nothing. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .filter((key) => !absent(value[key]))
+      .sort()
+      .map((key) => [key, canonical(value[key])]),
+  );
+}
+
+const same = (one: unknown, other: unknown): boolean =>
+  JSON.stringify(canonical(absent(one) ? undefined : one)) ===
+  JSON.stringify(canonical(absent(other) ? undefined : other));
+
+/** The fields compared as they are, absent being absent, by where they sit. */
+const AS_THEY_ARE: Readonly<Record<'jobs' | 'containerApps', readonly (readonly string[])[]>> = {
+  jobs: [
+    ['configuration', 'triggerType'],
+    ['configuration', 'replicaTimeout'],
+    ['configuration', 'replicaRetryLimit'],
+    ['configuration', 'manualTriggerConfig'],
+    ['configuration', 'scheduleTriggerConfig'],
+    ['configuration', 'eventTriggerConfig'],
+  ],
+  containerApps: [
+    ['configuration', 'ingress', 'external'],
+    ['configuration', 'ingress', 'allowInsecure'],
+    ['configuration', 'ingress', 'targetPort'],
+    ['configuration', 'ingress', 'traffic'],
+    ['configuration', 'ingress', 'ipSecurityRestrictions'],
+    ['configuration', 'ingress', 'customDomains'],
+    ['configuration', 'ingress', 'additionalPortMappings'],
+    ['configuration', 'ingress', 'clientCertificateMode'],
+    ['configuration', 'ingress', 'corsPolicy'],
+    ['configuration', 'ingress', 'stickySessions'],
+    ['configuration', 'service'],
+    ['configuration', 'runtime'],
+    ['template', 'scale', 'maxReplicas'],
+    ['template', 'scale', 'rules'],
+    ['template', 'terminationGracePeriodSeconds'],
+    ['template', 'serviceBinds'],
+  ],
+};
+
+/** The fields both kinds compare as they are. */
+const BOTH: readonly (readonly string[])[] = [
+  ['configuration', 'registries'],
+  ['configuration', 'dapr'],
+  ['configuration', 'identitySettings'],
+  ['template', 'initContainers'],
+];
+
+const at = (value: unknown, path: readonly string[]): unknown =>
+  recordIn(value, ...path.slice(0, -1))[String(path.at(-1))];
+
+/** Lower case, for what Azure writes in either case (resource IDs, `Auto`). */
+const lower = (value: unknown): string => (typeof value === 'string' ? value.toLowerCase() : JSON.stringify(value));
+
+/** How the workload's secrets differ: each from the vault, by its identity, with no value in hand; by name alone. */
+function secretDifferences(expected: unknown, live: unknown, bound: Bound): string[] {
+  const listOf = (workload: unknown): readonly Readonly<Record<string, unknown>>[] => {
+    const secrets = recordIn(workload, 'properties', 'configuration').secrets;
+    return Array.isArray(secrets) ? secrets.map((secret) => recordIn(secret)) : [];
+  };
+  const want = new Map(listOf(expected).map((secret) => [String(secret.name), secret]));
+  const said: string[] = [];
+  const names = new Set<string>();
+  for (const secret of listOf(live)) {
+    const name = String(secret.name);
+    names.add(name);
+    const wanted = want.get(name);
+    const extra = Object.keys(secret).filter(
+      (key) => !['name', 'keyVaultUrl', 'identity'].includes(key) && !absent(secret[key]),
+    );
+    if (wanted === undefined) said.push(`it has a secret the template doesn't: ${shown(name)}`);
+    else if (extra.length > 0)
+      said.push(`its secret ${shown(name)} holds ${extra.map(shown).join(', ')}, not only a vault reference`);
+    else if (
+      typeof secret.keyVaultUrl !== 'string' ||
+      !matches(partsOf(String(wanted.keyVaultUrl)), secret.keyVaultUrl, bound)
+    ) {
+      said.push(`its secret ${shown(name)} is read from another vault entry than the template’s`);
+    } else if (lower(secret.identity) !== lower(wanted.identity)) {
+      said.push(`its secret ${shown(name)} is read as another identity than the template’s`);
+    }
+  }
+  for (const name of want.keys()) if (!names.has(name)) said.push(`it lacks the template's secret ${shown(name)}`);
+  return said;
+}
+
+/** A workload's volumes, each with its secrets in path order, so only what they hold counts. */
+function volumesOf(workload: unknown): unknown {
+  const volumes = recordIn(workload, 'properties', 'template').volumes;
+  if (!Array.isArray(volumes)) return volumes;
+  return (volumes as unknown[]).map((volume) => {
+    const { secrets, ...rest } = recordIn(volume);
+    const sorted = Array.isArray(secrets)
+      ? (secrets as unknown[]).map((secret) => JSON.stringify(canonical(secret))).toSorted()
+      : secrets;
+    return { ...rest, secrets: sorted };
+  });
+}
+
+/** The identities a workload runs as, by their resource IDs in lower case (Azure lowers `resourceGroups`). */
+const identitiesOf = (workload: unknown): string =>
+  JSON.stringify([
+    lower(recordIn(workload, 'identity').type),
+    ...Object.keys(recordIn(workload, 'identity', 'userAssignedIdentities'))
+      .map(lower)
+      .sort(),
+  ]);
+
+/**
+ * Every way a workload differs from its template beyond its containers (AZ2c):
+ * no init container; the same volumes, secrets (each a vault reference as its
+ * identity, never a value), identities, registries, environment and plan; a
+ * job's trigger, time limit and runs; an app's door, scale and grace. In words
+ * with no value. An app's least replicas may be 0 or 1 (`apps --keep-running`).
+ */
+export function workloadDifferences(
+  kind: 'jobs' | 'containerApps',
+  expected: unknown,
+  live: unknown,
+  bound: Bound,
+): string[] {
+  const said: string[] = [];
+  for (const path of [...BOTH, ...AS_THEY_ARE[kind]]) {
+    if (!same(at(expected, ['properties', ...path]), at(live, ['properties', ...path]))) {
+      said.push(`its ${path.join('.')} is not the template’s`);
+    }
+  }
+  for (const path of [
+    ['environmentId'],
+    ['workloadProfileName'],
+    ['configuration', 'ingress', 'transport'],
+    ['configuration', 'activeRevisionsMode'],
+  ]) {
+    const want = at(expected, ['properties', ...path]);
+    const found = at(live, ['properties', ...path]);
+    // An app's revisions mode Azure gives as Single when the template sends none.
+    const wanted = want ?? (path.at(-1) === 'activeRevisionsMode' && kind === 'containerApps' ? 'Single' : undefined);
+    if (lower(wanted ?? null) !== lower(found ?? null)) said.push(`its ${path.join('.')} is not the template’s`);
+  }
+  if (
+    kind === 'containerApps' &&
+    ![0, 1].includes(Number(at(live, ['properties', 'template', 'scale', 'minReplicas'])))
+  ) {
+    said.push('its template.scale.minReplicas is neither 0 nor 1');
+  }
+  if (identitiesOf(expected) !== identitiesOf(live)) said.push('it runs as other identities than the template’s');
+  if (!same(volumesOf(expected), volumesOf(live))) said.push('its volumes are not the template’s');
+  return [...said, ...secretDifferences(expected, live, bound)];
+}
+
 /** A resource the apps deployment makes, by its type and name. */
 interface Named {
   readonly type: string;
@@ -381,29 +580,30 @@ interface Named {
 }
 
 /**
- * What this folder's apps.bicep gives each named resource's containers (its
- * template's `containers`), from the pinned Bicep's snapshot of the apps
+ * What a deploy/azure folder's apps.bicep gives each named workload (its
+ * identity and properties), from the pinned Bicep's snapshot of the apps
  * deployment in the subscription, as a plain `apps` (no load run) sends it, the
  * shell's values as their markers. An error when Bicep can't, or a resource
- * isn't made exactly once.
+ * isn't made exactly once. `source` is this checkout's folder unless given.
  */
-export function templatesIn(subscription: string, wanted: readonly Named[]): unknown[] {
+export function templatesIn(subscription: string, wanted: readonly Named[], source?: string): Workload[] {
   const values = Object.fromEntries(Object.entries(SHELL_MARKERS).map(([variable, { marker }]) => [variable, marker]));
-  const made = inCopy((dir) =>
-    deploymentSnapshot(
-      dir,
-      DEPLOYMENTS.apps,
-      RESOURCE_GROUP,
-      { ...values, AGENTX_AZURE_LOAD_RUN: 'false' },
-      subscription,
-    ),
+  const made = inCopy(
+    (dir) =>
+      deploymentSnapshot(
+        dir,
+        DEPLOYMENTS.apps,
+        RESOURCE_GROUP,
+        { ...values, AGENTX_AZURE_LOAD_RUN: 'false' },
+        subscription,
+      ),
+    source,
   ).predictedResources;
   return wanted.map(({ type, name }) => {
     const found = made.filter((resource) => resource.type === type && resource.name === name);
     const [one] = found;
     if (one === undefined || found.length > 1)
       throw new Error(`apps.bicep makes ${String(found.length)} of ${name}, not one`);
-    const properties = isRecord(one.properties) ? one.properties : {};
-    return (isRecord(properties.template) ? properties.template : {}).containers;
+    return { identity: one.identity, properties: one.properties };
   });
 }

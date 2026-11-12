@@ -113,36 +113,32 @@ class FakeAz implements Az {
 
 const MIGRATE_JOB = 'job-agentx-stg-migrate';
 
-/** The migration job's containers in a world, as its jobs list gives them; none when it has no migration job. */
+/** The migration job in a world, as its jobs list gives it; none when it has no migration job. */
 const migrateIn = (world: World): unknown =>
-  (world.jobs as readonly ReturnType<typeof JOB>[]).find((job) => job.name === MIGRATE_JOB)?.properties.template
-    .containers;
+  (world.jobs as readonly ReturnType<typeof JOB>[]).find((job) => job.name === MIGRATE_JOB);
 
 /**
- * Main's checkout, history and apps.bicep, as the watch reads them (AZ2c): by default at the build the jobs run,
- * with apps.bicep giving the migration job exactly what the world's job holds.
+ * Main's head and history, and the apps.bicep of a commit, as the watch reads them (AZ2c): by default apps.bicep
+ * gives the migration job exactly what the world's job holds; a template given as containers is the job with those.
+ * Each commit whose apps.bicep was read is kept in `asked`.
  */
 function heldFor(
   world: World,
-  given: {
-    readonly head?: string;
-    readonly clean?: boolean;
-    readonly inHistory?: boolean;
-    readonly changed?: readonly string[];
-    readonly template?: unknown;
-  } = {},
+  given: { readonly inHistory?: boolean; readonly template?: readonly unknown[] | Error } = {},
+  asked: string[] = [],
 ): HeldSteps {
   return {
-    checkout: () => ({ head: given.head ?? BUILD, clean: given.clean ?? true }),
+    head: () => 'd'.repeat(40),
     history: {
       isAncestor: () => given.inHistory ?? true,
-      changedFiles: () => given.changed ?? [],
+      changedFiles: () => [],
       fileAt: () => undefined,
       filesIn: () => [],
     },
-    templates: () => {
+    templatesAt: (_subscription, commit) => {
+      asked.push(commit);
       if (given.template instanceof Error) throw given.template;
-      return new Map([['migrate', given.template ?? migrateIn(world)]]);
+      return new Map([['migrate', given.template === undefined ? migrateIn(world) : JOB(MIGRATE_JOB, given.template)]]);
     },
   };
 }
@@ -174,14 +170,14 @@ const oneRun = (containers: readonly unknown[], startTime = LATELY, initContaine
   runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, startTime, containers, initContainers)] },
 });
 
-describe('AZ2c: the migration job itself held to main’s apps.bicep', () => {
+describe('AZ2c: the migration job itself held to its build’s apps.bicep', () => {
   const MIGRATE = { ...OPERATOR, name: 'migrate', command: ['node', 'apps/migrate/src/main.ts'], args: [] };
   /** The migration job as deployed, and a run of it as deployed: whatever the job runs, the run matches. */
   const world = (container: Readonly<Record<string, unknown>>): World => ({
     jobs: [JOB(MIGRATE_JOB, [container])],
     runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [container])] },
   });
-  const FINDING_START = `FOUND: ${MIGRATE_JOB} isn't as main's apps.bicep has it, beyond its image and build: `;
+  const FINDING_START = `FOUND: ${MIGRATE_JOB} isn't as the apps.bicep of the build it names has it, beyond its image and build: `;
 
   it('finds a job whose command was changed and then started: the run matches the job, the job not main', async () => {
     const changed = { ...MIGRATE, command: ['node', '-e', 'fetch(process.env.X)'] };
@@ -205,31 +201,48 @@ describe('AZ2c: the migration job itself held to main’s apps.bicep', () => {
     expect(elsewhere.lines.join('\n')).not.toContain('evil');
   });
 
-  it('holds an older build to main when nothing a person deploys changed since, and passes one only its image and build moved', async () => {
+  it('reads the apps.bicep of the build the job names, and passes a job that differs only by its image', async () => {
+    const asked: string[] = [];
     const older = { ...MIGRATE, image: `ghcr.io/shahbaz242630/agent-x@sha256:${'b'.repeat(64)}`, args: ['x'] };
-    const later = 'd'.repeat(40);
-    const held = heldFor(world(older), { head: later, changed: ['apps/api/src/main.ts'], template: [MIGRATE] });
+    const held = heldFor(world(older), { template: [MIGRATE] }, asked);
     expect((await run(world(older), [], held)).lines).toContain('  - its arguments are not the template’s');
+    expect(asked).toEqual([BUILD]);
     const asDeployed = { ...MIGRATE, image: older.image };
-    const passes = await run(world(asDeployed), [], heldFor(world(asDeployed), { head: later, template: [MIGRATE] }));
+    const passes = await run(world(asDeployed), [], heldFor(world(asDeployed), { template: [MIGRATE] }));
     expect(passes.status).toBe(0);
-    expect(passes.lines).toContain(`${MIGRATE_JOB} is as main's apps.bicep has it, beyond its image and build.`);
+    expect(passes.lines).toContain(`${MIGRATE_JOB} is as ${BUILD}'s apps.bicep has it, beyond its image and build.`);
   });
 
-  it('only warns while a hand deploy is due, or the checkout has changes; a build off main is a finding', async () => {
-    const changed = { ...MIGRATE, command: ['sh'] };
-    const due = await run(
-      world(changed),
-      [],
-      heldFor(world(changed), { head: 'd'.repeat(40), changed: ['deploy/azure/apps.bicep'], template: [MIGRATE] }),
-    );
-    expect(due.status).toBe(0);
-    expect(due.lines).toContain(
-      `::warning::${MIGRATE_JOB} wasn't held to apps.bicep: it runs ${BUILD}, and main changed what a person deploys since (deploy/azure/apps.bicep). Nothing to do if a hand deploy is coming; the first watch after it holds the job again.`,
-    );
-    const dirty = await run(world(changed), [], heldFor(world(changed), { clean: false, template: [MIGRATE] }));
-    expect(dirty.status).toBe(0);
-    expect(dirty.lines).toContain(`::warning::${MIGRATE_JOB} wasn't held to apps.bicep: this checkout has changes.`);
+  it('finds the rest of the job changed: an init container, a secret given a value, a volume remapped, another identity', async () => {
+    const changes: [(job: ReturnType<typeof JOB>) => void, string][] = [
+      [
+        (job) => Object.assign(job.properties.template, { initContainers: [{ name: 'x', image: 'evil' }] }),
+        'its template.initContainers is not the template’s',
+      ],
+      [
+        (job) => Object.assign(job.properties, { configuration: { secrets: [{ name: 's', value: 'evil' }] } }),
+        "it has a secret the template doesn't: s",
+      ],
+      [
+        (job) => Object.assign(job.properties.template, { volumes: [{ name: 'secrets', storageType: 'EmptyDir' }] }),
+        'its volumes are not the template’s',
+      ],
+      [
+        (job) => Object.assign(job, { identity: { type: 'SystemAssigned' } }),
+        'it runs as other identities than the template’s',
+      ],
+    ];
+    for (const [change, said] of changes) {
+      const job = JOB(MIGRATE_JOB, [MIGRATE]);
+      change(job);
+      const done = await run({ jobs: [job], runs: {} }, [], heldFor({ jobs: [], runs: {} }, { template: [MIGRATE] }));
+      expect(done.status, said).toBe(1);
+      expect(done.lines).toContain(`  - ${said}`);
+      expect(done.lines.join('\n')).not.toContain('evil');
+    }
+  });
+
+  it('is a finding when the job names a build off main', async () => {
     const offMain = await run(world(MIGRATE), [], heldFor(world(MIGRATE), { inHistory: false }));
     expect(offMain.status).toBe(1);
     expect(offMain.lines).toContain(`${FINDING_START}it names its build ${BUILD}, which isn't in main's history`);
@@ -289,7 +302,7 @@ describe('SEC-OPS-14 the job-start watch', () => {
       'Reading the runs of 2 jobs started since 2026-11-10 08:00 UTC (the last 6 h).',
       `${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`,
       'job-agentx-stg-migrate-x1 (started 2026-11-10 12:16 UTC): ran the job as it is deployed.',
-      "job-agentx-stg-migrate is as main's apps.bicep has it, beyond its image and build.",
+      `job-agentx-stg-migrate is as ${BUILD}'s apps.bicep has it, beyond its image and build.`,
       "No run started since 2026-11-10 08:00 UTC ran other containers than its job's own.",
     ]);
     // Reads only: every call a GET or the account.

@@ -23,9 +23,10 @@
 // A start doesn't move the job's change time.
 // **Its sharper half (AZ2c):** a job whose own template was changed (its command,
 // say), then started, runs as the job is, so no run differs. The migration job,
-// the one CI's release identity may write and start, is held besides to what
-// main's apps.bicep gives it beyond its image and build (migrateHeld); the other
-// jobs only a person writes.
+// the one CI's release identity may write and start, is held besides, whole, to
+// what the apps.bicep of the build it names gives it beyond its image and build
+// (migrateHeld, read in a temporary worktree at that commit); the other jobs
+// only a person writes.
 // Azure keeps a job's last 100 runs: a full list still inside the window, or a
 // flood of runs, is a finding of its own. Nothing here stops a start: it only
 // makes one seen.
@@ -34,10 +35,16 @@
 // workflow's log is public. Each finding names the run, and the partner reads
 // the rest with `az containerapp job execution show`.
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text, UsageError } from './deploy.ts';
-import { differences as templateDifferences, expectedOf } from './drift.ts';
-import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
+import {
+  containersOf,
+  differences as templateDifferences,
+  expectedOf,
+  type Workload,
+  workloadDifferences,
+} from './drift.ts';
+import { atCommit, type History, realCheckout, realHistory } from './git.ts';
 import { jobName, JOBS_API, runCli } from './jobs.ts';
-import { handDeployed, realTemplates, runningIn, type Templates } from './release.ts';
+import { runningIn, templatesFrom } from './release.ts';
 
 /** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
 export const DEFAULT_HOURS = 6;
@@ -76,8 +83,8 @@ export interface DeployedJob {
   /** When the job last changed, in ms, or undefined when Azure didn't say. */
   readonly changedAt: number | undefined;
   readonly template: Template;
-  /** Its template's containers as Azure gave them, mounts and size too: what the migration job is held to apps.bicep by (AZ2c). */
-  readonly containers?: unknown;
+  /** The job as Azure gave it, its identity and properties: what the migration job is held to apps.bicep by (AZ2c). */
+  readonly workload?: Workload;
 }
 
 export interface Run {
@@ -347,15 +354,16 @@ export function deployedJobs(az: Az, subscription: string): DeployedJob[] {
       const job = item as {
         name?: unknown;
         systemData?: { lastModifiedAt?: unknown };
-        properties?: { template?: { containers?: unknown } };
+        identity?: unknown;
+        properties?: { template?: unknown };
       };
       const name = text(job.name);
       const template = templateOf(job.properties?.template);
       if (!/^[a-z0-9-]+$/.test(name) || template === undefined) {
         throw new Error(`Azure listed a job "${name}" whose containers can't be read, so no run of it can be checked.`);
       }
-      const containers = job.properties?.template?.containers;
-      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template, containers };
+      const workload = { identity: job.identity, properties: job.properties };
+      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template, workload };
     },
   );
 }
@@ -423,17 +431,20 @@ export function parseArguments(argv: readonly string[]): number {
   return hours;
 }
 
-/** What holding the migration job to main's apps.bicep reads (AZ2c): this checkout of main, its history and its templates. */
+/**
+ * What holding the migration job to apps.bicep reads (AZ2c): the commit main is at, its history, and what the
+ * apps.bicep of any commit in it gives the release's workloads.
+ */
 export interface HeldSteps {
-  readonly checkout: () => Checkout;
+  readonly head: () => string;
   readonly history: History;
-  readonly templates: Templates;
+  readonly templatesAt: (subscription: string, commit: string) => ReadonlyMap<string, unknown>;
 }
 
 const realHeld = (): HeldSteps => ({
-  checkout: () => realCheckout(),
+  head: () => realCheckout().head,
   history: realHistory(),
-  templates: realTemplates,
+  templatesAt: (subscription, commit) => atCommit(commit, 'deploy/azure', (dir) => templatesFrom(subscription, dir)),
 });
 
 /** What holding the migration job to apps.bicep found: lines said as they are, and findings. */
@@ -451,7 +462,7 @@ const oneLine = (words: string): string => words.replace(/[\r\n]+/g, ' ');
 const heldFinding = (problem: string, lines: readonly string[]): Held => ({
   said: [],
   found: [
-    `FOUND: ${MIGRATE_JOB} isn't as main's apps.bicep has it, beyond its image and build: ${problem}`,
+    `FOUND: ${MIGRATE_JOB} isn't as the apps.bicep of the build it names has it, beyond its image and build: ${problem}`,
     ...lines.map((line) => `  - ${line}`),
     "  What it means: someone who may write the job (CI's release identity, or a person) changed it outside a deploy, and any start of it, ours included, runs that change with its secrets and its identity. A run compared with the job as it is now can't show it.",
     '  What to do: treat it as a suspected breach (Incident-Response-Playbook section B; section T says how) until shown otherwise. Find who changed it in the activity log, then deploy it by hand with apps after checking who changed it, before anyone starts it.',
@@ -459,39 +470,32 @@ const heldFinding = (problem: string, lines: readonly string[]): Held => ({
 });
 
 /**
- * AZ2c: the migration job's own container held to what main's apps.bicep gives it, beyond its image and build. Its
- * runs are compared with the job, so a job whose command was changed and then started looks as deployed; this is
- * what shows that change. Compared only when main's templates are the ones the job's build was deployed from: it runs
- * main's newest commit, or an older one with nothing a person deploys changed since (else the hand deploy that change
- * waits for is said, as a warning). A build that isn't in main's history is a finding: every image a deploy may send
- * was built on main. The API isn't read: the watch's role reads the jobs alone.
+ * AZ2c: the migration job itself (its container, and the rest of it: secrets, volumes, identity, trigger) held to what
+ * the apps.bicep of the build it names gives it, beyond its image and build, read from that commit in a temporary
+ * worktree. Its runs are compared with the job, so a job whose command was changed and then started looks as
+ * deployed; this is what shows that change. A build that isn't in main's history is a finding: every image a deploy
+ * may send was built on main. The API isn't read: the watch's role reads the jobs alone.
  */
 function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: HeldSteps): Held {
   const job = jobs.find((each) => each.name === MIGRATE_JOB);
   // No migration job (a new environment's first deploys): nothing a release could start.
   if (job === undefined) return { said: [], found: [] };
   try {
-    const running = runningIn('migrate', job.containers);
-    const here = steps.checkout();
-    if (!here.clean) {
-      return { said: [`::warning::${MIGRATE_JOB} wasn't held to apps.bicep: this checkout has changes.`], found: [] };
-    }
-    if (!steps.history.isAncestor(running.release, here.head)) {
+    const running = runningIn('migrate', containersOf(job.workload));
+    if (!steps.history.isAncestor(running.release, steps.head())) {
       return heldFinding(`it names its build ${running.release}, which isn't in main's history`, []);
     }
-    const pending = steps.history.changedFiles(running.release, here.head).filter((file) => handDeployed(file));
-    if (pending.length > 0) {
-      return {
-        said: [
-          `::warning::${MIGRATE_JOB} wasn't held to apps.bicep: it runs ${running.release}, and main changed what a person deploys since (${oneLine(pending.join(', '))}). Nothing to do if a hand deploy is coming; the first watch after it holds the job again.`,
-        ],
-        found: [],
-      };
-    }
-    const expected = expectedOf(steps.templates(subscription).get('migrate'));
-    const said = templateDifferences(expected, running.container, new Map());
+    const template = steps.templatesAt(subscription, running.release).get('migrate');
+    const bound = new Map<string, string>();
+    const said = [
+      ...templateDifferences(expectedOf(containersOf(template)), running.container, bound),
+      ...workloadDifferences('jobs', template, job.workload, bound),
+    ];
     if (said.length > 0) return heldFinding('what differs is below, by name, never by value', said);
-    return { said: [`${MIGRATE_JOB} is as main's apps.bicep has it, beyond its image and build.`], found: [] };
+    return {
+      said: [`${MIGRATE_JOB} is as ${running.release}'s apps.bicep has it, beyond its image and build.`],
+      found: [],
+    };
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     return heldFinding(

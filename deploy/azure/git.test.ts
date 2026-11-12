@@ -2,13 +2,13 @@
 // made here. This machine's git settings (signing, hooks) are kept out of it:
 // they are for our own repository, not a fixture.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { realCheckout, realHistory } from './git.ts';
+import { atCommit, realCheckout, realHistory } from './git.ts';
 import { decide, HAND_DEPLOYED, runningIn, type Workload, WORKLOADS } from './release.ts';
 
 const MISSING = 'd'.repeat(40);
@@ -182,5 +182,33 @@ describe('the checkout', () => {
     const nowhere = path.join(dir, 'nowhere');
     expect(() => realCheckout(nowhere)).toThrow("git couldn't be run:");
     expect(() => realHistory(nowhere).isAncestor(made.first, made.bicep)).toThrow("git couldn't be run:");
+  });
+});
+
+describe('a folder as it is at a commit (AZ2c: the watch reads a build’s own apps.bicep)', () => {
+  it('holds that commit’s files alone, in a worktree removed after, whatever the reader does', () => {
+    expect(atCommit(made.bicep, 'deploy/azure', (at) => readdirSync(at).sort(), repository)).toEqual([
+      'apps.bicep',
+      'release.ts',
+    ]);
+    expect(atCommit(made.tool, 'deploy/azure', (at) => readdirSync(at), repository)).toEqual(['release.ts']);
+    expect(() =>
+      atCommit(
+        made.bicep,
+        'deploy/azure',
+        () => {
+          throw new Error('the reader failed');
+        },
+        repository,
+      ),
+    ).toThrow('the reader failed');
+    expect(() => atCommit(MISSING, 'deploy/azure', () => 'read', repository)).toThrow(
+      `git couldn't make a worktree at ${MISSING}`,
+    );
+    expect(() => atCommit(made.first, 'deploy/azure', () => 'read', repository)).toThrow(
+      `git couldn't check out deploy/azure at ${made.first}`,
+    );
+    // Every worktree made is gone: only the repository's own is left.
+    expect(git('worktree', 'list', '--porcelain').match(/^worktree /gm)).toHaveLength(1);
   });
 });

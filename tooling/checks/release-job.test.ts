@@ -118,8 +118,16 @@ describe('the release job', () => {
       'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
       'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
     });
-    // No secret anywhere in the job: a client secret or certificate would be a credential to leak.
-    expect(JSON.stringify(release)).not.toMatch(/secrets\./);
+    // No credential among the job's secrets: a client secret or certificate would be one to leak. Its only secrets
+    // are the three pins (AZ2c), each a hash of a value the release reads anyway, on the release step alone.
+    const named = [...JSON.stringify(release).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
+    expect(named.toSorted()).toEqual([
+      'AGENTX_APP_HOST_SHA256',
+      'AGENTX_AUTH_HOST_SHA256',
+      'AGENTX_OIDC_CLIENT_ID_SHA256',
+    ]);
+    const pinning = steps.filter((step) => JSON.stringify(step).includes('secrets.'));
+    expect(pinning.map((step) => step.name)).toEqual(['Release this commit to staging']);
   });
 
   it('releases the commit it runs for, with the digest the image job published, and signs out whatever happens', () => {
@@ -127,7 +135,13 @@ describe('the release job', () => {
     expect(releasing).toEqual([
       {
         name: 'Release this commit to staging',
-        env: { COMMIT: '${{ github.sha }}', DIGEST: '${{ needs.image-publish.outputs.digest }}' },
+        env: {
+          COMMIT: '${{ github.sha }}',
+          DIGEST: '${{ needs.image-publish.outputs.digest }}',
+          AGENTX_AUTH_HOST_SHA256: '${{ secrets.AGENTX_AUTH_HOST_SHA256 }}',
+          AGENTX_APP_HOST_SHA256: '${{ secrets.AGENTX_APP_HOST_SHA256 }}',
+          AGENTX_OIDC_CLIENT_ID_SHA256: '${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}',
+        },
         run: 'node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"',
       },
     ]);
@@ -192,7 +206,7 @@ describe('the job-start watch', () => {
     const masking = at((step) => step.run?.includes('::add-mask::') === true);
     const bicep = at((step) => step.run === 'node tooling/bicep/install.ts');
     const signingIn = at((step) => AZURE_LOGIN.test(step.uses ?? ''));
-    expect(watchSteps[0]?.with).toEqual({ 'persist-credentials': false });
+    expect(watchSteps[0]?.with).toEqual({ 'persist-credentials': false, 'fetch-depth': 0 });
     expect(watchSteps[masking]?.env).toEqual({
       CLIENT: '${{ secrets.AZURE_WATCH_CLIENT_ID }}',
       TENANT: '${{ secrets.AZURE_WATCH_TENANT_ID }}',

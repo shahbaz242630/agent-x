@@ -4,6 +4,9 @@
 // in this repository unless told otherwise. Anything git can't answer is an
 // error, never taken as an answer.
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** Reading the repository's history, which the release job must check out whole. */
@@ -84,4 +87,26 @@ export function realCheckout(repository = REPOSITORY): Checkout {
   const status = git(repository, ['status', '--porcelain', '-z']);
   if (status.status !== 0) throw new Error(`git couldn't say whether this folder has changes:\n${status.stderr}`);
   return { head: head.stdout.trim(), clean: status.stdout === '' };
+}
+
+/**
+ * `use` given a folder holding `folder` exactly as it is at `commit` (AZ2c: the
+ * watch reads the apps.bicep a job's build was deployed from): a temporary
+ * worktree with nothing else checked out, removed after, whatever `use` does.
+ * An error when git can't, never a folder of another commit.
+ */
+export function atCommit<T>(commit: string, folder: string, use: (dir: string) => T, repository = REPOSITORY): T {
+  const made = mkdtempSync(path.join(tmpdir(), 'agentx-at-'));
+  const tree = path.join(made, 'tree');
+  try {
+    const added = git(repository, ['worktree', 'add', '--no-checkout', '--detach', tree, commit]);
+    if (added.status !== 0) throw new Error(`git couldn't make a worktree at ${commit}:\n${added.stderr}`);
+    const out = git(tree, ['checkout', commit, '--', folder]);
+    if (out.status !== 0) throw new Error(`git couldn't check out ${folder} at ${commit}:\n${out.stderr}`);
+    return use(path.join(tree, folder));
+  } finally {
+    // Its folder removed, git forgets the worktree on the prune.
+    rmSync(made, { recursive: true, force: true });
+    git(repository, ['worktree', 'prune']);
+  }
 }

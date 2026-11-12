@@ -686,10 +686,16 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # The three pins (AZ2c): optional `staging` environment secrets, each the SHA-256 of a value only the partner's
+      # shell gives apps (the auth host, the app host, the API's client ID). Secrets, never variables: a variable in a
+      # step's env is printed in the public log. Unset, the release says so and holds each to its shape alone.
       - name: Release this commit to staging
         env:
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
+          AGENTX_AUTH_HOST_SHA256: ${{ secrets.AGENTX_AUTH_HOST_SHA256 }}
+          AGENTX_APP_HOST_SHA256: ${{ secrets.AGENTX_APP_HOST_SHA256 }}
+          AGENTX_OIDC_CLIENT_ID_SHA256: ${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}
         run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

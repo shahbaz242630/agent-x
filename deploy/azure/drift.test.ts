@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   type Bound,
+  containersOf,
   deployable,
   differences,
   expectedOf,
@@ -13,6 +14,8 @@ import {
   partsOf,
   SHELL_MARKERS,
   templatesIn,
+  type Workload,
+  workloadDifferences,
 } from './drift.ts';
 
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000e';
@@ -55,9 +58,15 @@ describe("reading the snapshot's values", () => {
     expect(reads(store, 'https://stagentx.blob.evil.example/audit-anchors')).toBe(false);
     expect(reads("[concat('a', string(1), 'b')]", 'a1b')).toBe(true);
     expect(reads("[format('{0}''s', 'it')]", "it's")).toBe(true);
-    // Any other deploy-time property is a host.
-    expect(reads(`[reference('${ID('X/y', 'z')}', 'v').fqdn]`, 'z.example.net')).toBe(true);
-    expect(reads(`[reference('${ID('X/y', 'z')}', 'v').fqdn]`, 'z example')).toBe(false);
+    // A vault entry: the vault's own address, and the path under it.
+    const entry = `[uri(reference('${ID('Microsoft.KeyVault/vaults', 'kv-agentx-stg-ab12')}', '2025-05-01').vaultUri, 'secrets/db-owner-password')]`;
+    expect(reads(entry, 'https://kv-agentx-stg-ab12.vault.azure.net/secrets/db-owner-password')).toBe(true);
+    expect(reads(entry, 'https://evil.vault.azure.net/secrets/db-owner-password')).toBe(false);
+    expect(reads(entry, 'https://kv-agentx-stg-ab12.vault.azure.net/secrets/other')).toBe(false);
+    // Any other deploy-time property is refused (M1): never "any host".
+    expect(() => partsOf(`[reference('${ID('X/y', 'z')}', 'v').fqdn]`)).toThrow(
+      'reference(...).fqdn is not one this tool reads',
+    );
   });
 
   it('holds one resource to one value in every setting, and in one value', () => {
@@ -94,6 +103,11 @@ describe("reading the snapshot's values", () => {
       '[@]',
       '[(]',
       "[reference('r', 'v').]",
+      "[reference(concat('a', 'b'), 'v').clientId]",
+      "[uri('https://x/', 'secrets/a')]",
+      "[uri(reference('r', 'v').clientId, 'secrets/a')]",
+      "[uri(reference('r', 'v').vaultUri, '/secrets/a')]",
+      "[uri(reference('r', 'v').vaultUri)]",
     ]) {
       expect(() => partsOf(expression), expression).toThrow();
     }
@@ -238,11 +252,13 @@ describe('the container a template sends (migrate ahead of a hand deploy)', () =
 
 describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
   it('gives the API and the migration job one container each, which their live shape passes, and a changed one does not', () => {
-    const [migrate, api] = templatesIn(SUBSCRIPTION, [
-      { type: 'Microsoft.App/jobs', name: 'job-agentx-stg-migrate' },
-      { type: 'Microsoft.App/containerApps', name: 'ca-agentx-stg-api' },
-    ]);
-    const expectedApi = expectedOf(api);
+    const [migrateWorkload = { identity: null, properties: null }, apiWorkload = { identity: null, properties: null }] =
+      templatesIn(SUBSCRIPTION, [
+        { type: 'Microsoft.App/jobs', name: 'job-agentx-stg-migrate' },
+        { type: 'Microsoft.App/containerApps', name: 'ca-agentx-stg-api' },
+      ]);
+    const migrate = containersOf(migrateWorkload);
+    const expectedApi = expectedOf(containersOf(apiWorkload));
     // What Azure and the shell would fill in: each hole a value of its shape, the same everywhere.
     const fill: Readonly<Record<string, string>> = {
       'cae-agentx-staging.defaultDomain': 'ashy-1.uaenorth.azurecontainerapps.io',
@@ -258,6 +274,8 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
           if ('text' in part) return part.text;
           if (part.key.endsWith('.hostName'))
             return `${part.key.slice(0, -'.hostName'.length)}.uae.communication.azure.com`;
+          if (part.key.endsWith('.vaultUri'))
+            return `https://${part.key.slice(0, -'.vaultUri'.length)}.vault.azure.net/`;
           const value = fill[part.key];
           if (value === undefined) throw new Error(`no stand-in for ${part.key}`);
           return value;
@@ -289,6 +307,34 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
     );
     expect(differences(expectedApi, { ...live, env: issuer }, new Map())).toEqual([
       'its setting AGENTX_EMAIL_ENDPOINT holds another value than the template gives',
+    ]);
+    // Each workload as Azure would give it: its vault entries resolved, its identity's ID in lower case, its nulls.
+    const asAzure = (workload: Workload, app = false): Workload => {
+      const copy = structuredClone(workload) as {
+        identity: { userAssignedIdentities: Record<string, unknown> };
+        properties: { configuration: { secrets: { keyVaultUrl: string }[]; registries?: unknown } };
+      };
+      copy.identity.userAssignedIdentities = Object.fromEntries(
+        Object.entries(copy.identity.userAssignedIdentities).map(([id, value]) => [id.toLowerCase(), value]),
+      );
+      for (const secret of copy.properties.configuration.secrets)
+        secret.keyVaultUrl = filled(partsOf(secret.keyVaultUrl));
+      copy.properties.configuration.registries = null;
+      // Azure gives an app's revisions mode though the template sends none.
+      if (app) {
+        Object.assign(copy.properties.configuration, { activeRevisionsMode: 'Single' });
+      }
+      return copy;
+    };
+    expect(workloadDifferences('jobs', migrateWorkload, asAzure(migrateWorkload), bound)).toEqual([]);
+    expect(workloadDifferences('containerApps', apiWorkload, asAzure(apiWorkload, true), bound)).toEqual([]);
+    const literal = asAzure(apiWorkload, true) as {
+      properties: { configuration: { secrets: Record<string, unknown>[] } };
+    };
+    const [first] = literal.properties.configuration.secrets;
+    if (first !== undefined) first.value = 'x';
+    expect(workloadDifferences('containerApps', apiWorkload, literal, new Map())).toEqual([
+      `its secret ${String(first?.name)} holds value, not only a vault reference`,
     ]);
   });
 

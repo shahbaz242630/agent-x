@@ -57,6 +57,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
+import { fingerprintOf } from '../../tooling/git-hooks/private-names.ts';
 import {
   COMING_FILE,
   MIGRATION_NAME,
@@ -80,12 +81,15 @@ import {
 } from './deploy.ts';
 import {
   type Bound,
+  containersOf,
   deployable,
   differences,
   expectedOf,
   type LiveContainer,
   type Setting,
+  shown,
   templatesIn,
+  workloadDifferences,
 } from './drift.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
@@ -144,7 +148,7 @@ export const TEST_FILE = '.test.ts';
  * without case, since the partner's Windows checkout puts `Deploy/Azure/x`
  * where `deploy/azure/x` goes; the exception with it, so `.TS` still counts.
  */
-export const handDeployed = (file: string): HandDeployed | undefined =>
+const handDeployed = (file: string): HandDeployed | undefined =>
   file.endsWith(TEST_FILE)
     ? undefined
     : HAND_DEPLOYED.find(
@@ -239,20 +243,23 @@ export type Workload = keyof typeof WORKLOADS;
 export const ORDER: readonly Workload[] = ['migrate', 'api'];
 
 /**
- * What a folder's apps.bicep gives each release workload's containers (their
- * template's `containers`, as the snapshot has them), in the subscription.
+ * What a folder's apps.bicep gives each release workload (its identity and
+ * properties, as the snapshot has them), in the subscription.
  */
 export type Templates = (subscription: string) => ReadonlyMap<Workload, unknown>;
 
-/** The real ones: the pinned Bicep's snapshot of this folder's apps deployment (drift.ts). */
-export const realTemplates: Templates = (subscription) => {
+/** The pinned Bicep's snapshot of a deploy/azure folder's apps deployment (drift.ts): this checkout's unless given. */
+export function templatesFrom(subscription: string, source?: string): ReadonlyMap<Workload, unknown> {
   const named = ORDER.map((workload) => {
     const [kind, name] = WORKLOADS[workload].path.split('/');
     return { type: `Microsoft.App/${String(kind)}`, name: String(name) };
   });
-  const containers = templatesIn(subscription, named);
-  return new Map(ORDER.map((workload, index) => [workload, containers[index]] as const));
-};
+  const workloads = templatesIn(subscription, named, source);
+  return new Map(ORDER.map((workload, index) => [workload, workloads[index]] as const));
+}
+
+/** The real ones: this checkout's. */
+export const realTemplates: Templates = (subscription) => templatesFrom(subscription);
 
 /** The setting that names the build on every log line. */
 const RELEASE_SETTING = 'AGENTX_RELEASE';
@@ -347,7 +354,8 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
   const found = record(containers[0]);
   const unknown = Object.keys(found).filter((field) => !CONTAINER_FIELDS.has(field));
-  if (unknown.length > 0) return refuse(`its container has ${unknown.join(', ')}, which this tool doesn't copy`);
+  if (unknown.length > 0)
+    return refuse(`its container has ${unknown.map(shown).join(', ')}, which this tool doesn't copy`);
   const { name, image, command, env, resources, volumeMounts } = found;
   // Azure leaves an empty argument list out of what it gives back (staging's API from 12 Nov 2026, after #626's
   // release): no arguments, as `[]`, which the release then sends back. Any other missing or odd list is refused.
@@ -358,15 +366,16 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   const size = record(resources);
   if (typeof size.cpu !== 'number' || typeof size.memory !== 'string') return refuse('its size is not given');
   const sized = Object.keys(size).filter((field) => !SIZE_FIELDS.has(field));
-  if (sized.length > 0) return refuse(`its size has ${sized.join(', ')}, which this tool doesn't copy`);
+  if (sized.length > 0) return refuse(`its size has ${sized.map(shown).join(', ')}, which this tool doesn't copy`);
   if (!Array.isArray(env)) return refuse('its settings are not a list');
   const settings = env.map((entry): Setting => {
     const { name: setting, value, secretRef, ...other } = record(entry);
     if (typeof setting !== 'string') return refuse('a setting has no name');
-    if (Object.keys(other).length > 0) return refuse(`the setting ${setting} has more than a name and its value`);
+    if (Object.keys(other).length > 0)
+      return refuse(`the setting ${shown(setting)} has more than a name and its value`);
     if (typeof value === 'string' && secretRef === undefined) return { name: setting, value };
     if (typeof secretRef === 'string' && value === undefined) return { name: setting, secretRef };
-    return refuse(`the setting ${setting} has neither a value nor a secret reference alone`);
+    return refuse(`the setting ${shown(setting)} has neither a value nor a secret reference alone`);
   });
   // A reference to the vault has no value, which reads as "undefined": no commit.
   const releases = env.map(record).filter((entry) => entry.name === RELEASE_SETTING);
@@ -601,6 +610,8 @@ function signedIn(az: Az, say: (line: string) => void): string {
 /** A workload as Azure has it: its properties, and what it runs. */
 export interface Read {
   readonly properties: Readonly<Record<string, unknown>>;
+  /** The identities it runs as, as Azure gives them. */
+  readonly identity: unknown;
   /** Its tags: the migration job's hold the hand deploys' records (T1b). */
   readonly tags: Readonly<Record<string, unknown>>;
   readonly running: Running;
@@ -610,7 +621,12 @@ export interface Read {
 export function readWorkload(az: Az, subscription: string, workload: Workload): Read {
   const found = get(az, workloadUrl(subscription, workload), workload);
   const properties = record(found.properties);
-  return { properties, tags: record(found.tags), running: runningIn(workload, record(properties.template).containers) };
+  return {
+    properties,
+    identity: found.identity,
+    tags: record(found.tags),
+    running: runningIn(workload, record(properties.template).containers),
+  };
 }
 
 /** The value a container's setting holds in the open, or nothing (none, or a secret reference). */
@@ -658,6 +674,10 @@ export interface CheckSteps {
   readonly history: History;
   readonly folder: Folder;
   readonly say: (line: string) => void;
+  /** verify.ts's answer for an image, by digest, at a commit. */
+  readonly verify: (image: string, commit: string) => Outcome;
+  /** The pins set for the release (PINS), from its environment: none set is an empty record. */
+  readonly pins: Readonly<Record<string, string | undefined>>;
 }
 
 /** What a release of the commit would do, read from Azure and the history, with what each runs said. */
@@ -708,7 +728,7 @@ function heldToTemplates(
   decision: Decision,
   commit: string,
   subscription: string,
-  running: ReadonlyMap<Workload, Running>,
+  reads: ReadonlyMap<Workload, Read>,
   steps: CheckSteps,
 ): Decision {
   if (decision.kind !== 'release') return decision;
@@ -723,10 +743,9 @@ function heldToTemplates(
   try {
     const templates = steps.folder.templates(subscription);
     reasons = ORDER.flatMap((workload) => {
-      const container = running.get(workload)?.container;
-      if (container === undefined) throw new Error(`nothing was read for ${workload}`);
-      const said = differences(expectedOf(templates.get(workload)), container, bound);
-      return said.map((line) => `${workload}: ${line}`);
+      const read = reads.get(workload);
+      if (read === undefined) throw new Error(`nothing was read for ${workload}`);
+      return workloadAgainst(workload, templates.get(workload), read, bound).map((line) => `${workload}: ${line}`);
     });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
@@ -736,7 +755,80 @@ function heldToTemplates(
       { cause: error },
     );
   }
+  reasons.push(...unsignedBuilds(reads, steps.verify), ...unpinned(bound, steps.pins, steps.say));
   return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
+}
+
+/** The kind of workload, as Resource Manager names it. */
+const kindOf = (workload: Workload): 'jobs' | 'containerApps' =>
+  WORKLOADS[workload].path.startsWith('jobs/') ? 'jobs' : 'containerApps';
+
+/** Every way a workload read from Azure differs from its template (drift.ts): its container, then the rest of it. */
+function workloadAgainst(workload: Workload, template: unknown, read: Read, bound: Bound): string[] {
+  return [
+    ...differences(expectedOf(containersOf(template)), read.running.container, bound),
+    ...workloadDifferences(kindOf(workload), template, { identity: read.identity, properties: read.properties }, bound),
+  ];
+}
+
+/**
+ * AZ2c H2: each workload's build, as its AGENTX_RELEASE names it, must be the commit its image's signature names:
+ * CI signs each image for the one commit it was built from (verify.ts), and every deploy stamps that commit. A build
+ * that isn't, an older commit's name on today's image say, would hide a change from the history the gate reads. Each
+ * image and build is checked once.
+ */
+function unsignedBuilds(reads: ReadonlyMap<Workload, Read>, verify: CheckSteps['verify']): string[] {
+  const checked = new Map<string, Outcome>();
+  return ORDER.flatMap((workload) => {
+    const running = reads.get(workload)?.running;
+    if (running === undefined) return [];
+    const key = `${running.image} ${running.release}`;
+    const outcome = checked.get(key) ?? verify(running.image, running.release);
+    checked.set(key, outcome);
+    if (outcome.verified) return [];
+    return [
+      `${workload}: its image isn't CI's signed build of ${running.release}, the commit its ${RELEASE_SETTING} names (${outcome.reason}): a suspected breach`,
+    ];
+  });
+}
+
+/**
+ * AZ2c H3: the staging secrets that pin what only the partner's shell gives `apps`, each the SHA-256 of the value in
+ * lower case (as the domain guard keeps the domain, tooling/git-hooks/private-names.ts), by the marker it is matched
+ * by (drift.ts SHELL_MARKERS). The values never reach CI or this repository; their hashes only confirm them.
+ */
+const PINS = [
+  { variable: 'AGENTX_AUTH_HOST_SHA256', shell: 'AGENTX_AZURE_AUTH_HOST', what: 'auth host' },
+  { variable: 'AGENTX_APP_HOST_SHA256', shell: 'AGENTX_AZURE_APP_HOST', what: 'app host' },
+  { variable: 'AGENTX_OIDC_CLIENT_ID_SHA256', shell: 'AGENTX_AZURE_API_OIDC_CLIENT_ID', what: "API's client ID" },
+] as const;
+
+/**
+ * Each pinned value the live settings carry, held to its pin exactly: a reason for each that isn't. A pin not set is
+ * said in one line, not red: the value is then held to its shape alone. Neither the value nor its hash is printed.
+ */
+function unpinned(
+  bound: ReadonlyMap<string, string>,
+  pins: Readonly<Record<string, string | undefined>>,
+  say: (line: string) => void,
+): string[] {
+  const unset = PINS.filter(({ variable }) => (pins[variable]?.trim() ?? '') === '');
+  if (unset.length > 0) {
+    say(
+      `Not pinned (${unset.map(({ variable }) => variable).join(', ')} unset): the ${unset.map(({ what }) => what).join(', ')} held to shape alone. Nothing is wrong; set each as a staging secret to hold it exactly.`,
+    );
+  }
+  return PINS.flatMap(({ variable, shell, what }) => {
+    const pin = pins[variable]?.trim().toLowerCase() ?? '';
+    if (pin === '') return [];
+    if (!/^[0-9a-f]{64}$/.test(pin))
+      return [`${variable} isn't a SHA-256 (64 hex), so the ${what} can't be checked: set it again`];
+    const live = bound.get(`shell ${shell}`);
+    if (live === undefined) return [`no setting carries the ${what}, which ${variable} pins`];
+    return fingerprintOf(live.toLowerCase()) === pin
+      ? []
+      : [`api: the ${what} its settings carry isn't the one ${variable} pins`];
+  });
 }
 
 async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
@@ -754,7 +846,7 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
     image,
     reads,
     running,
-    decision: heldToTemplates(decided, request.commit, subscription, running, steps),
+    decision: heldToTemplates(decided, request.commit, subscription, reads, steps),
   });
   const first = decide(running, request.commit, image, steps.history);
   if (first.kind !== 'by-hand') return held(first);
@@ -1244,12 +1336,32 @@ export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'> & { rea
 function templateMigrate(
   steps: MigrateFirstSteps,
   subscription: string,
-  live: Running,
+  job: Read,
   image: string,
   commit: string,
 ): Container {
-  const containers = steps.templates(subscription).get('migrate');
-  const after = deployable(WORKLOADS.migrate.container, containers, image, commit);
+  const live = job.running;
+  const template = steps.templates(subscription).get('migrate');
+  const containers = containersOf(template);
+  const beyond = workloadDifferences(
+    'jobs',
+    template,
+    { identity: job.identity, properties: job.properties },
+    new Map(),
+  );
+  let after: Container | undefined;
+  try {
+    after = deployable(WORKLOADS.migrate.container, containers, image, commit);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    beyond.push(error.message);
+  }
+  // M3: --migrate-first sends the containers alone; anything else the commit's migrate needs only apps can send.
+  if (beyond.length > 0 || after === undefined) {
+    throw new Error(
+      `migrate isn't as ${commit}'s apps.bicep has it beyond its containers (${beyond.join('; ')}), and --migrate-first sends its containers alone. If this commit adds a secret, mount or deploy-time setting to migrate: run apps --api-stopped first (Incident-Response-Playbook section L). If it doesn't, someone changed the job outside a deploy: treat it as a suspected breach (section B).`,
+    );
+  }
   const said = differences(expectedOf(containers), live.container, new Map());
   if (said.length > 0) {
     steps.say(
@@ -1296,9 +1408,7 @@ export async function migrateFirst(
     return timeLimit(job);
   });
   const left = `the API is unchanged, on ${apiRuns}`;
-  const after = await leaving('nothing was changed.', () =>
-    templateMigrate(steps, subscription, job.running, image, commit),
-  );
+  const after = await leaving('nothing was changed.', () => templateMigrate(steps, subscription, job, image, commit));
   await leaving(`migrate may hold ${commit}, not run; ${left}.`, async () => {
     update(steps, subscription, 'migrate', job.running, after);
     await settledUpdate(steps, subscription, 'migrate', after);
@@ -1423,14 +1533,16 @@ export function main(
   history: () => History = realHistory,
   extras: () => Extras = realExtras,
   folder: () => Folder = realFolder,
+  pins: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<number> {
   return runCli(
     USAGE,
     say,
     () => parseArguments(argv),
     (request) => {
-      const steps = { az: az(), history: history(), folder: folder(), say };
-      return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...extras() });
+      const more = extras();
+      const steps = { az: az(), history: history(), folder: folder(), say, verify: more.verify, pins };
+      return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...more });
     },
   );
 }
