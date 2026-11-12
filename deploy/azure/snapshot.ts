@@ -99,6 +99,8 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_API_OIDC_CLIENT_SECRET: standIn(24),
     AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN: standIn(24),
     AGENTX_AZURE_ZITADEL_RESET_TOKEN: standIn(24),
+    AGENTX_AZURE_ZITADEL_OUR_ACTORS: standIn(24),
+    AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS: standIn(24),
     AGENTX_AZURE_APP_KEYS: newAppKeys(),
   };
 }

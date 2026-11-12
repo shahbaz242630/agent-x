@@ -82,7 +82,8 @@
 // that is exactly one of our own routine changes (idp-event.ts
 // isOurRoutineChange: one of our actors, to one of our service users, only
 // their roles) is an info line, `idp.token_issued_by_us` or
-// `idp.rights_changed_by_us`, which no alert counts. A run
+// `idp.rights_changed_by_us`, which no alert counts and which, as every line
+// here, names no account (SA2b). A run
 // never throws: a feed that can't be read, or a record that can't be written,
 // is logged and the run ends; the next picks up where this one got to.
 import { holdTransactionLock, withTenant } from '@agentx/platform/db';
@@ -337,8 +338,9 @@ export function createIdpEventCopier({
     }
     if (event.eventClass !== 'rights_changed' && event.eventClass !== 'token_issued') return;
     if (isOurRoutineChange(event, ours)) {
-      const target = event.member?.userId ?? event.aggregateId;
-      const mine = { eventType: event.type, editor: event.editorUserId, target };
+      // SA2b: no editor or target, as no other line has: they would name our own accounts, which the deployment keeps
+      // in the vault so nobody learns which to aim at. The platform record keeps the event's key, to look up there.
+      const mine = { eventType: event.type, organisations };
       if (event.eventClass === 'rights_changed') logger.info('idp.rights_changed_by_us', mine);
       else logger.info('idp.token_issued_by_us', mine);
     } else if (event.eventClass === 'rights_changed') {

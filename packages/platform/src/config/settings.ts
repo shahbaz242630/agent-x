@@ -95,15 +95,27 @@ const proxyList = text.transform((raw, ctx) => {
   return [...new Set(entries)].sort();
 });
 
-/** Login service user IDs, as Zitadel makes them (digits), comma-separated: names, never secrets. */
-const loginIdList = text.transform((raw, ctx) => {
+/** The most login service user IDs one of SA2's lists may name: a handful are ours, so more is a pasting slip. */
+const MOST_LOGIN_IDS = 20;
+
+/**
+ * Login service user IDs, as Zitadel makes them (digits), comma-separated, or `none` for no list (SA2b: the vault holds
+ * `none` until the partner writes ours, so the secret is always there to mount). Read from the vault (config.ts
+ * ourLoginIds): which accounts are ours is kept out of the public repository, and a problem never repeats a value.
+ */
+export const loginIdList = text.transform((raw, ctx): readonly string[] | undefined => {
+  if (raw === 'none') return undefined;
   const entries = raw.split(',');
   const bad = entries.flatMap((entry, index) => (/^\d{1,30}$/.test(entry) ? [] : [index + 1]));
   if (bad.length > 0) {
     ctx.addIssue({
       code: 'custom',
-      message: `entry ${bad.join(', ')} is not a login service user ID. Write each as its digits, comma-separated with no spaces`,
+      message: `entry ${bad.join(', ')} is not a login service user ID. Write each as its digits, comma-separated with no spaces, or none`,
     });
+    return z.NEVER;
+  }
+  if (entries.length > MOST_LOGIN_IDS) {
+    ctx.addIssue({ code: 'custom', message: `names ${String(entries.length)} IDs; at most ${String(MOST_LOGIN_IDS)}` });
     return z.NEVER;
   }
   return [...new Set(entries)].sort();
@@ -293,9 +305,13 @@ const SETTINGS = {
   AGENTX_FACTOR_RESET_TOKEN_FILE: { schema: text },
   // SA2: our own routine changes in the login service, told by an info line, not the alert: the logins that make them
   // (the break-glass admin, our set-up's service user), and our API's service users they are made for (agentx-directory,
-  // agentx-resets). Both or neither; unset, every token issued and every grant alerts. IDs, not secrets.
-  AGENTX_IDP_OUR_ACTORS: { schema: loginIdList.optional() },
-  AGENTX_IDP_OUR_SERVICE_USERS: { schema: loginIdList.optional() },
+  // agentx-resets). Both or neither; unset (or `none`), every token issued and every grant alerts. SA2b: kept like a
+  // secret, since the list tells an attacker which accounts to aim at: deployed only from the vault, as the `_FILE`
+  // form (deploy/azure/policy.ts refuses the direct one), and read by ourLoginIds (config.ts).
+  AGENTX_IDP_OUR_ACTORS: { schema: text },
+  AGENTX_IDP_OUR_ACTORS_FILE: { schema: text },
+  AGENTX_IDP_OUR_SERVICE_USERS: { schema: text },
+  AGENTX_IDP_OUR_SERVICE_USERS_FILE: { schema: text },
   // ADR-003 §7: a console session ends after this long unused, and this long
   // after it opened however much it is used.
   AGENTX_SESSION_IDLE_MINUTES: {
@@ -493,7 +509,9 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_FACTOR_RESET_TOKEN',
       'AGENTX_FACTOR_RESET_TOKEN_FILE',
       'AGENTX_IDP_OUR_ACTORS',
+      'AGENTX_IDP_OUR_ACTORS_FILE',
       'AGENTX_IDP_OUR_SERVICE_USERS',
+      'AGENTX_IDP_OUR_SERVICE_USERS_FILE',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',

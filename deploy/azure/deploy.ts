@@ -61,6 +61,7 @@ import {
   SOURCE_REPOSITORY,
   verifyImage,
 } from '../image/verify.ts';
+import { loginIdList } from '../../packages/platform/src/config/settings.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
@@ -136,9 +137,15 @@ export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost
  * - issued: given by a service we are a client of, pasted by a person, and
  *   written only by name (`--rotate`): it exists only once that service does,
  *   so a first `--all` can't have it (B2-6)
+ * - ids: login service user IDs a person pastes (SA2b), written only by name
+ *   like an issued one; any run writes `none` (off) for one the vault lacks, so
+ *   the apps always have it to mount and the feature stays off until then
  */
 export const VAULT_SECRETS: Readonly<
-  Record<string, { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' }>
+  Record<
+    string,
+    { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' | 'ids' }
+  >
 > = {
   'db-admin-password': { variable: 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', source: 'person' },
   'db-owner-password': { variable: 'AGENTX_AZURE_DB_OWNER_PASSWORD', source: 'machine' },
@@ -155,7 +162,19 @@ export const VAULT_SECRETS: Readonly<
   'zitadel-directory-token': { variable: 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN', source: 'issued' },
   // B6-3c: the token Zitadel gave the API's service user with Org User Manager, for removing second factors.
   'zitadel-reset-token': { variable: 'AGENTX_AZURE_ZITADEL_RESET_TOKEN', source: 'issued' },
+  // SA2b: who makes our own routine changes in the login service, and our API's service users they are made for
+  // (AGENTX_IDP_OUR_*). Kept in the vault, never the public repository: the list tells an attacker which to aim at.
+  'zitadel-our-actors': { variable: 'AGENTX_AZURE_ZITADEL_OUR_ACTORS', source: 'ids' },
+  'zitadel-our-service-users': { variable: 'AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS', source: 'ids' },
 };
+
+/** SA2b: the two lists go together, both or neither (config.ts), so a run that writes one writes both. */
+const OUR_LOGIN_LISTS: readonly string[] = Object.keys(VAULT_SECRETS).filter(
+  (name) => VAULT_SECRETS[name]?.source === 'ids',
+);
+
+/** What the vault holds for a list of ours until the partner writes it: no list, so the feature stays off. */
+export const NO_LOGIN_IDS = 'none';
 
 /**
  * The secrets every secrets run copies from an Azure service of the
@@ -200,6 +219,10 @@ const PERSON_LABELS: Readonly<Record<string, string>> = {
   'api-oidc-client-secret': "the API's client secret, as Zitadel showed it",
   'zitadel-directory-token': "the API's directory token, as Zitadel showed it for its read-only service user",
   'zitadel-reset-token': "the API's reset token, as Zitadel showed it for its Org User Manager service user",
+  'zitadel-our-actors':
+    'the Zitadel user IDs that make our own routine changes (the break-glass admin, the set-up service user), comma-separated, or none',
+  'zitadel-our-service-users':
+    "the Zitadel user IDs of the API's own service users (directory, resets), comma-separated, or none",
 };
 
 /** Every secret (`all`), the ones named (`rotate`), or only the app's keys the vault lacks (`keys`). */
@@ -410,6 +433,8 @@ function parseSecretPlan(options: readonly string[]): SecretPlan {
   const pair = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source === 'pair');
   const rotated = new Set(names);
   if (pair.some((name) => rotated.has(name))) for (const name of pair) rotated.add(name);
+  // So are our two login lists (SA2b): one alone, beside the other's `none`, would stop the API's start.
+  if (OUR_LOGIN_LISTS.some((name) => rotated.has(name))) for (const name of OUR_LOGIN_LISTS) rotated.add(name);
   return { kind: 'rotate', names: rotated };
 }
 
@@ -431,14 +456,22 @@ function refuseUnrotatable(name: string): void {
   }
 }
 
-/** Whether a run writes the secret: `--all` writes all but an issued one, which only its name writes. */
-const planIncludes = (plan: SecretPlan, name: string): boolean =>
-  (plan.kind === 'all' && VAULT_SECRETS[name]?.source !== 'issued') || (plan.kind === 'rotate' && plan.names.has(name));
+/** Who pastes a secret: a person, theirs or one a service issued, or our login IDs. */
+const pasted = (source: (typeof VAULT_SECRETS)[string]['source']): boolean =>
+  source === 'person' || source === 'issued' || source === 'ids';
 
-/** The secrets a person pastes (theirs, and the issued ones) that a run must ask for. */
+/** Whether a run writes the secret: `--all` writes all but an issued one or our IDs, which only their names write. */
+const planIncludes = (plan: SecretPlan, name: string): boolean => {
+  const source = VAULT_SECRETS[name]?.source;
+  return (
+    (plan.kind === 'all' && source !== 'issued' && source !== 'ids') || (plan.kind === 'rotate' && plan.names.has(name))
+  );
+};
+
+/** The secrets a person pastes (theirs, the issued ones and our IDs) that a run must ask for. */
 export const peopleAskedFor = (plan: SecretPlan): string[] =>
   Object.entries(VAULT_SECRETS)
-    .filter(([name, secret]) => (secret.source === 'person' || secret.source === 'issued') && planIncludes(plan, name))
+    .filter(([name, secret]) => pasted(secret.source) && planIncludes(plan, name))
     .map(([name]) => name);
 
 export interface Makers {
@@ -451,12 +484,14 @@ export interface Makers {
  * and an empty one for each it leaves as the vault has it (the parameters file
  * refuses a missing one, so a misspelt name can't pass for a rotation). The
  * master key and the app's keys always go, fresh; Azure keeps only the first
- * of each.
+ * of each. A list of our login IDs the vault doesn't hold (`held`: its enabled
+ * secrets) goes as `none`, so the apps always have it to mount (SA2b).
  */
 export function secretValues(
   plan: SecretPlan,
   people: Readonly<Record<string, string>>,
   makers: Makers = { random: randomBytes, keyPair: newKeyPair },
+  held: readonly string[] = [],
 ): Record<string, string> {
   const pair = Object.entries(VAULT_SECRETS).some(
     ([name, secret]) => secret.source === 'pair' && planIncludes(plan, name),
@@ -465,7 +500,11 @@ export function secretValues(
     : undefined;
   const values: Record<string, string> = {};
   for (const [name, secret] of Object.entries(VAULT_SECRETS)) {
-    values[secret.variable] = secretValue(name, secret.source, planIncludes(plan, name), people, pair, makers.random);
+    const written = planIncludes(plan, name);
+    values[secret.variable] =
+      secret.source === 'ids' && !written && !held.includes(name)
+        ? NO_LOGIN_IDS
+        : secretValue(name, secret.source, written, people, pair, makers.random);
   }
   values[APP_KEYS_VARIABLE] = newAppKeys(makers.random);
   return values;
@@ -482,7 +521,8 @@ function secretValue(
 ): string {
   switch (source) {
     case 'person':
-    case 'issued': {
+    case 'issued':
+    case 'ids': {
       const given = people[name];
       if (written && given === undefined) throw new Error(`${name} was to be written but nobody gave it`);
       return written ? (given ?? '') : '';
@@ -501,8 +541,11 @@ function secretValue(
 export function describePlan(plan: SecretPlan): string[] {
   const secrets = Object.entries(VAULT_SECRETS).map(([name, secret]) => {
     if (secret.source === 'once') return `  ${name}: written only if the vault has none yet`;
+    if (secret.source === 'ids' && !planIncludes(plan, name)) {
+      return `  ${name}: kept as the vault has it, or written as ${NO_LOGIN_IDS} (off) if it has none yet`;
+    }
     if (!planIncludes(plan, name)) return `  ${name}: kept as the vault has it`;
-    return secret.source === 'person' || secret.source === 'issued'
+    return pasted(secret.source)
       ? `  ${name}: written, from what you paste`
       : `  ${name}: written, made fresh by this run`;
   });
@@ -546,6 +589,15 @@ export function issuedProblems(value: string): string[] {
   if (value.trim() !== value) problems.push('it starts or ends with a space, which a paste may have added');
   else if (!/^[!-~]*$/.test(value)) problems.push('it holds a space or a character that is not plain visible ASCII');
   return problems;
+}
+
+/**
+ * Why a list of our login IDs won't do (SA2b), or nothing: as the API's config reads it (settings.ts loginIdList),
+ * so a run never writes what would stop the API's start. The message never repeats the value.
+ */
+export function loginIdProblems(value: string): string[] {
+  const parsed = loginIdList.safeParse(value);
+  return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -1814,15 +1866,16 @@ function vaultIn(steps: Steps, subscription: string): string {
 }
 
 /**
- * The issued secrets the vault doesn't hold yet (B2-6), and the copied ones
+ * The issued secrets and our login ID lists the vault doesn't hold yet (B2-6, SA2b), and the copied ones
  * (B5-3). An app reads each by its URL, so a deployment without one leaves
  * that app unable to start; each issued one is issued by a service already
- * running, then written by name, and any secrets run copies the rest.
+ * running, then written by name, and any secrets run copies the rest and
+ * writes `none` for a list of our login IDs it lacks (SA2b).
  */
 export function issuedMissing(held: readonly string[]): string[] {
   return [
     ...Object.entries(VAULT_SECRETS)
-      .filter(([name, secret]) => secret.source === 'issued' && !held.includes(name))
+      .filter(([name, secret]) => (secret.source === 'issued' || secret.source === 'ids') && !held.includes(name))
       .map(([name]) => name),
     ...COPIED_SECRETS.filter((name) => !held.includes(name)),
   ];
@@ -1832,6 +1885,13 @@ export function issuedMissing(held: readonly string[]): string[] {
 export function secretsRunFor(missing: readonly string[]): string {
   const issued = missing.filter((name) => VAULT_SECRETS[name]?.source === 'issued');
   return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
+}
+
+/** What a pasted secret is held to, by who makes it: a person's password, a service's issue, or our login IDs. */
+function problemsOf(name: string): (value: string) => string[] {
+  const source = VAULT_SECRETS[name]?.source;
+  if (source === 'ids') return loginIdProblems;
+  return source === 'issued' ? issuedProblems : passwordProblems;
 }
 
 /** An --all run on a vault that holds secrets goes on only once the operator types that it rotates everything. */
@@ -1856,15 +1916,14 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   for (const line of describePlan(plan)) steps.terminal.say(line);
   const people: Record<string, string> = {};
   for (const name of peopleAskedFor(plan)) {
-    const issued = VAULT_SECRETS[name]?.source === 'issued';
-    people[name] = await askPassword(
-      steps.terminal,
-      PERSON_LABELS[name] ?? name,
-      3,
-      issued ? issuedProblems : passwordProblems,
-    );
+    people[name] = await askPassword(steps.terminal, PERSON_LABELS[name] ?? name, 3, problemsOf(name));
   }
-  const values = secretValues(plan, people, steps.makers);
+  const values = secretValues(
+    plan,
+    people,
+    steps.makers,
+    existing.filter((listed) => listed.enabled).map((listed) => listed.name),
+  );
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'secrets', values)) === undefined) return 1;
   const now = secretsInVault(steps, subscription, vault);
@@ -2504,7 +2563,7 @@ async function deployApps(
   );
   if (missing.length > 0) {
     throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
   const release = commit ?? (await images.latestCommit());

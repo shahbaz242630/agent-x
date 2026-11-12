@@ -1173,6 +1173,20 @@ var apiFiles = concat(
           setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
         }
       ],
+  // SA2b: who makes our own routine changes in the login service, and for whom
+  // (AGENTX_IDP_OUR_*), from the vault alone, never a value here: the list tells
+  // an attacker which accounts to aim at. The vault holds `none` for each until the
+  // partner writes ours (deploy.ts), which leaves the feature off.
+  [
+    {
+      reads: 'zitadel-our-actors'
+      setting: 'AGENTX_IDP_OUR_ACTORS_FILE'
+    }
+    {
+      reads: 'zitadel-our-service-users'
+      setting: 'AGENTX_IDP_OUR_SERVICE_USERS_FILE'
+    }
+  ],
   // B5-3: the email service's key, copied in by the secrets deployment,
   // and Zitadel's read-only token for the admins' addresses. The four
   // email settings are all or none, so neither in the load run.
