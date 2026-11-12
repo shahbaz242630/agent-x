@@ -592,6 +592,26 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(sent.every(({ subject }) => subject.includes("a supplier's bank details"))).toBe(true);
   });
 
+  it("OR2 sends our team's reset notice to every active member, whatever their role, and to the contacts that count now", async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const person = '0199a0f0-0000-7000-8000-00000000c0a2';
+    const support: Notice = { ...aboutASupplier(false), kind: 'factor_reset_by_support', aboutId: person };
+    await app.transaction().execute((tx) => outbox.add(tx, [support, { ...support, toContacts: true }]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual([
+      'admin@example.test',
+      'finance.office@example.test',
+      'viewer@example.test',
+    ]);
+    expect(sent.every(({ text }) => text.includes(`Person: ${person}`))).toBe(true);
+    expect(sent.every(({ subject }) => subject === "Agent X: our team is resetting a person's second factor")).toBe(
+      true,
+    );
+  });
+
   it('B3a sends a notice about a mandate to every active admin and approver', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     const accepted: Notice = {

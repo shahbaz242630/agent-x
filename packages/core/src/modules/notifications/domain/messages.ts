@@ -28,6 +28,7 @@ import {
   type NoticeKind,
   REMITTANCE_KIND,
   RESET_LINK_KIND,
+  SUPPORT_RESET_KIND,
 } from './notice.ts';
 
 /** An email as the notifier sends it. */
@@ -234,6 +235,15 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     firstLine: () =>
       `The ${SECOND_FACTOR} of a person in one of your Agent X organisations was removed, as a reset a registered contact confirmed asked. They sign in with their password, and set up a new one.`,
     check: SIGN_IN_CHECK,
+  },
+  // About a person (0087, OR2; playbook K): Agent X's own team resetting their second factor, as no admin can ask it, to
+  // every member and the contacts that count now. The team waits 24 hours, and anyone's word stops it.
+  factor_reset_by_support: {
+    subject: () => "Agent X: our team is resetting a person's second factor",
+    firstLine: () =>
+      `Agent X's own team was asked to reset the ${SECOND_FACTOR} of a person in one of your Agent X organisations, who says they lost theirs. The organisation has no other admin who could ask for it in Agent X, so our team does it, and waits at least 24 hours from this email before anything is removed.`,
+    check:
+      "If you didn't expect this, or think the request isn't real, tell us within 24 hours, by the contact details in your organisation's onboarding records (never by replying to anyone who contacts you about it), and the reset stops. Registered contacts: our team will ask you to confirm it, by writing to this address and calling the organisation's number in those records. Nobody from Agent X will ask you for a password or a code.",
   },
   // About a supplier (0033), sent by E2-2 and E3-2.
   supplier_reactivated: {
@@ -576,6 +586,7 @@ function whyTold(notice: ClaimedNotice): string {
     return "You're told because this is your own login.";
   }
   if (notice.kind === 'agent_handed_to_you') return "You're told because you're the agent's new owner.";
+  if (notice.kind === SUPPORT_RESET_KIND) return "You're told because you're a member of this organisation.";
   if (isToAdminsAndApprovers(notice.kind))
     return "You're told because you're an admin or approver of this organisation.";
   return "You're told because you're an admin of this organisation.";

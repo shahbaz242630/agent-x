@@ -67,8 +67,8 @@ import {
 import {
   type ClaimedNotice,
   isAboutAPerson,
-  isAboutASupplier,
   isToAdminsAndApprovers,
+  isToEveryMember,
   REMITTANCE_KIND,
   REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
@@ -234,13 +234,13 @@ export function createNoticeSender({
    * admins but the member it is about, by their membership, or, for a notice
    * about a person (their sign-in, or a reset of their second factor), by
    * their user ID (B6-2a review): that person is told apart, as themselves,
-   * once. A notice about a supplier: the contacts that count now, or every
-   * active member (E2-2b). A notice about a mandate, the organisation's
+   * once. A notice about a supplier, or our team's reset of a person's second
+   * factor (0087): the contacts that count now, or every active member (E2-2b). A notice about a mandate, the organisation's
    * policy or freeze, or a spend request waiting: every admin and approver
    * (0036, 0038, 0045).
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
-    if (isAboutASupplier(notice.kind)) {
+    if (isToEveryMember(notice.kind)) {
       return notice.toContacts ? audience.countingContactsOf(notice.orgId) : audience.membersOf(notice.orgId);
     }
     if (isToAdminsAndApprovers(notice.kind)) return audience.adminsAndApproversOf(notice.orgId);
