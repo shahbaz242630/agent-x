@@ -24,6 +24,21 @@ param roleName string
 @description('The GitHub subject CI signs in with (names.bicep releaseSubject).')
 param subject string
 
+@description('The main workspace, which keeps the activity log of the subscription (main.bicep `activity-log-to-workspace`).')
+param workspaceId string
+
+@description('Who the alert on the other writes of CI tells.')
+param actionGroupId string
+
+@description('The name of that alert.')
+param alertName string
+
+@description('The API app, which CI writes on a release.')
+param apiName string
+
+@description('The migration job, which CI writes and starts on a release.')
+param migrateName string
+
 // Usable only by resources in this region, like every identity here (it is
 // given to none: it only signs in from GitHub).
 resource release 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
@@ -86,6 +101,61 @@ resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
         notDataActions: []
       }
     ]
+  }
+}
+
+// Anything CI's identity does in Azure but a release's three writes (AZ2): any
+// other write, delete or action, and any of the three on another resource, even
+// one Azure refused (a refusal is in the activity log too, under the same
+// caller). A release writes the API, writes the migration job and starts it,
+// nothing else (release.ts); its role allows little more (rule
+// `release-identity`), so a line here is CI's sign-in used by something else,
+// or a change to the release that needs this list changed with it.
+// - who did it is read from the sign-in's own claim naming the identity
+//   (`xms_mirid`, its resource id, in every line of CI's in staging's activity
+//   log, S188), compared without case: known when this is deployed, where the
+//   identity's principal ID is known only after
+// - the activity log reaches the workspace minutes late, so each run reads the
+//   hour before and fires on any line in it: one write tells someone up to four
+//   times, and one up to 45 minutes late still does
+var apiId = resourceId('Microsoft.App/containerApps', apiName)
+var migrateId = resourceId('Microsoft.App/jobs', migrateName)
+
+resource otherWrites 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: alertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'CI: its Azure sign-in did something besides a release'
+    description: 'SEV-1. The Azure identity of CI wrote, deleted or ran something besides the three steps of a release (write the API, write the migration job, start it), or tried to and Azure refused. Either its sign-in is being used by something else, or a change to the release needs this alert changed with it: treat it as a possible break-in until shown otherwise. Runbook: Incident-Response-Playbook.md section B.'
+    severity: 1
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT1H'
+    // The table appears with the activity log's first line, which may come after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'AzureActivity | where tostring(parse_json(Claims).xms_mirid) =~ "${release.id}" | where not((OperationNameValue =~ "Microsoft.App/containerApps/write" and _ResourceId =~ "${apiId}") or (OperationNameValue in~ ("Microsoft.App/jobs/write", "Microsoft.App/jobs/start/action") and _ResourceId =~ "${migrateId}")) | summarize Writes = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Writes'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless: every window holding one notifies again.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
   }
 }
 

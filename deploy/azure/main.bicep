@@ -409,7 +409,15 @@ module release 'modules/release.bicep' = {
     identityName: names.release
     roleName: names.releaseRole
     subject: releaseSubject(environment)
+    workspaceId: ids.workspace
+    actionGroupId: ids.actionGroup
+    // Named here, not in names.bicep, so only foundation reads it (AZ2).
+    alertName: 'alert-agentx-${short}-release-writes'
+    apiName: appName(environment, 'api')
+    migrateName: jobName(environment, 'migrate')
   }
+  // The workspace and the action group must exist first.
+  dependsOn: [monitoring]
 }
 
 // The job-start watch's identity, its trust in GitHub and its read-only role (S175).
@@ -421,6 +429,16 @@ module jobWatch 'modules/job-watch.bicep' = {
     identityName: names.jobWatch
     roleName: names.jobWatchRole
     subject: jobWatchSubject()
+  }
+}
+
+// Azure's own refusals on the resource group (AZ2): an app open to the internet or
+// over plain http, an image not ours by digest, a job that starts itself, more
+// replicas than we run, or a type we don't deploy, whoever sends it.
+module guardrails 'modules/guardrails.bicep' = {
+  params: {
+    environment: environment
+    groupName: group.name
   }
 }
 

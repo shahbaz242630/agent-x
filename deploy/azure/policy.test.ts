@@ -11,6 +11,7 @@ import {
   at,
   bicepGuid,
   describeProblem,
+  ALLOWED_TYPES,
   DNS_ALLOWED,
   type Expectations,
   kqlStages,
@@ -216,6 +217,20 @@ function splitTheApi(from: Snapshot): Snapshot {
   return { ...from, predictedResources: kept as unknown as PredictedResource[] };
 }
 
+/** Azure's own refusals (AZ2) named for production, and CI's writes alert naming production's CI identity. */
+function guardrailsForProduction(resource: Mutable): void {
+  resource.name = String(resource.name).replace(/^agentx-staging-/, 'agentx-production-');
+  resource.id = String(resource.id).replace(/\/agentx-staging-/, '/agentx-production-');
+  if (resource.type === 'Microsoft.Authorization/policyAssignments') {
+    const given = resource.properties as Mutable;
+    given.policyDefinitionId = String(given.policyDefinitionId).replace(/\/agentx-staging-/, '/agentx-production-');
+  }
+  if (resource.type === 'Microsoft.Insights/scheduledQueryRules') {
+    const watched = criterion(resource);
+    watched.query = String(watched.query).replace('/id-agentx-stg-release"', '/id-agentx-prd-release"');
+  }
+}
+
 /**
  * Staging's resources as production's would name them: their tags and CI's
  * identity (where it is and whom its role is given to), and (unless a test
@@ -238,6 +253,7 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
         grant.principalId = String(grant.principalId).replace(`/id-agentx-stg-${who}`, `/id-agentx-prd-${who}`);
       }
     }
+    guardrailsForProduction(resource);
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
     if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
       inside(resource, 'sku').name = 'Standard_ZRS';
@@ -269,6 +285,8 @@ const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
 const inside = (value: unknown, ...keys: readonly string[]): Mutable => at(value, ...keys) as Mutable;
 const nth = (value: unknown, index: number): Mutable => (value as readonly Mutable[]).at(index) ?? {};
 const first = (value: unknown): Mutable => nth(value, 0);
+/** A list in a resource, or none. */
+const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 
 /** A staging resource's id. A lookup that finds nothing fails, so no case passes on a scope or principal that isn't there. */
 function idOf(pick: (resource: PredictedResource) => boolean): string {
@@ -723,6 +741,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
+      // The alert on CI doing anything but a release (AZ2).
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-release-writes',
       // The job-start watch (S175): its identity, its trust, its read-only role and that role on the group.
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-job-watch',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-job-watch/github',
@@ -731,6 +751,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
+      ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
+        ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
+          (guardrail) => `Microsoft.Authorization/${kind} agentx-staging-${guardrail}`,
+        ),
       ),
     ]);
   });
@@ -1595,7 +1621,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       (role: Mutable) =>
         (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
-      (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
       (role: Mutable) => (permissionsOf(role).dataActions = []),
       (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
       (role: Mutable) =>
@@ -1603,6 +1628,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(only(changed(WRITER_ROLE, change))).toEqual(['evidence-store']);
     }
+    // A wildcard is also `role-actions`' to refuse, for every role of ours.
+    expect(only(changed(WRITER_ROLE, (role) => (permissionsOf(role).dataActions = ['*'])))).toEqual([
+      'evidence-store',
+      'role-actions',
+    ]);
     // Without the role, its one grant names a role that isn't there.
     expect(only(without(WRITER_ROLE))).toEqual(['evidence-store']);
     // The grant: on the container alone, to the operator alone, once.
@@ -1761,13 +1791,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
         (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
         (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/read`]),
         (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/add/action`]),
-        (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
         (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
         (role: Mutable) =>
           (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
       ]) {
         expect(brokenRules(changed(ROLE, change))).toEqual(['evidence-store']);
       }
+      // A wildcard is also `role-actions`' to refuse, for every role of ours.
+      expect(brokenRules(changed(ROLE, (role) => (permissionsOf(role).dataActions = ['*'])))).toEqual([
+        'evidence-store',
+        'role-actions',
+      ]);
       expect(brokenRules(without(ROLE))).toEqual(['evidence-store']);
     });
 
@@ -2253,7 +2287,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       (role: Mutable) =>
         (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
-      (role: Mutable) => (permissionsOf(role).dataActions = ['*']),
       (role: Mutable) => (permissionsOf(role).dataActions = []),
       (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
       (role: Mutable) =>
@@ -2261,6 +2294,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(only(changed(ROLE, change))).toEqual(['activity-downloads']);
     }
+    // A wildcard is also `role-actions`' to refuse, for every role of ours.
+    expect(only(changed(ROLE, (role) => (permissionsOf(role).dataActions = ['*'])))).toEqual([
+      'activity-downloads',
+      'role-actions',
+    ]);
     expect(only(without(ROLE))).toEqual(['activity-downloads']);
     expect(staging.predictedResources.find(ROLE)?.name).toBe(bicepGuid(group, 'activity-downloads'));
 
@@ -4273,7 +4311,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const apiGrant = widened.predictedResources.find(API_GRANT) as unknown as Mutable;
     properties(apiGrant).roleDefinitionId = roleId.replace(role, other);
     expect(accessProblems(widened)).toEqual([given('ca-agentx-stg-api', 0)]);
-    expect(brokenRules(widened)).toEqual(['release-identity', 'release-access', 'secret-access']);
+    expect(brokenRules(widened)).toEqual(['release-identity', 'release-access', 'role-actions', 'secret-access']);
     // CI's identity's namesake in another resource group isn't CI's identity.
     const namesake = release.replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/elsewhere/');
     const toNamesake = withExtra({
@@ -4452,6 +4490,458 @@ describe('SEC-OPS-09 each rule can fail', () => {
       grantProperties(found).principalId = principal('id-agentx-stg-job-watch');
     });
     expect(brokenRules(reads)).toEqual(['secret-access']);
+  });
+
+  it('role-actions (AZ2): a custom role allowing a wildcard, a door, the environment, a grant, a policy rule or a secret listing', () => {
+    const RELEASE_ROLE = (resource: PredictedResource): boolean =>
+      resource.type === 'Microsoft.Authorization/roleDefinitions' &&
+      at(resource.properties, 'description') ===
+        'CI after a merge: update our image in the API and the migration job, and run the migration. Nothing else.';
+    const EVIDENCE_ROLE = (resource: PredictedResource): boolean =>
+      resource.type === 'Microsoft.Authorization/roleDefinitions' &&
+      list(at(resource.properties, 'permissions', '0', 'dataActions')).length === 1;
+    // Read back from staging (S188): CI's role has neither a door's write nor any wildcard.
+    const actions = list(at(staging.predictedResources.find(RELEASE_ROLE)?.properties, 'permissions', '0', 'actions'));
+    expect(actions.some((action) => String(action).includes('*') || /httpRouteConfigs/i.test(String(action)))).toBe(
+      false,
+    );
+    const adding =
+      (action: string, key = 'actions') =>
+      (role: Mutable) =>
+        (first(inside(role, 'properties').permissions)[key] = [
+          ...list(first(inside(role, 'properties').permissions)[key]),
+          action,
+        ]);
+    for (const action of [
+      'Microsoft.App/jobs/*/action',
+      '*',
+      'Microsoft.App/managedEnvironments/httpRouteConfigs/write',
+      'MICROSOFT.APP/MANAGEDENVIRONMENTS/HTTPROUTECONFIGS/WRITE',
+      'Microsoft.App/managedEnvironments/write',
+      'Microsoft.App/containerApps/listSecrets/action',
+      'Microsoft.App/jobs/listSecrets/action',
+      'Microsoft.Authorization/roleAssignments/write',
+      'Microsoft.Authorization/policyAssignments/write',
+      'Microsoft.Authorization/policyAssignments/delete',
+      'Microsoft.Authorization/policyExemptions/write',
+    ]) {
+      expect(brokenRules(changed(RELEASE_ROLE, adding(action)))).toEqual(['release-identity', 'role-actions']);
+    }
+    // A store's role, held to its data actions by its own rule, is held here too.
+    expect(
+      brokenRules(
+        changed(
+          EVIDENCE_ROLE,
+          adding('Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*', 'dataActions'),
+        ),
+      ),
+    ).toContain('role-actions');
+  });
+
+  it('release-writes-alert (AZ2): no alert on CI doing anything but a release, or one that lets a write through, fires late or quietly', () => {
+    const RELEASE_WRITES = named(/^alert-agentx-.+-release-writes$/);
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = String(
+      at(staging.predictedResources.find(RELEASE_WRITES)?.properties, 'criteria', 'allOf', '0', 'query'),
+    );
+    const identity = idOf(named(/^id-agentx-stg-release$/));
+    const api = idOf(APP('api'));
+    const migrate = idOf(JOB('migrate'));
+    expect(query).toBe(
+      `AzureActivity | where tostring(parse_json(Claims).xms_mirid) =~ "${identity}" | where not((OperationNameValue =~ "Microsoft.App/containerApps/write" and _ResourceId =~ "${api}") or (OperationNameValue in~ ("Microsoft.App/jobs/write", "Microsoft.App/jobs/start/action") and _ResourceId =~ "${migrate}")) | summarize Writes = count()`,
+    );
+    expect(brokenRules(without(RELEASE_WRITES))).toEqual(['release-writes-alert']);
+    // Without case, as KQL's =~ compares, it is the same query.
+    expect(
+      brokenRules(
+        changed(RELEASE_WRITES, (alert) => (criterion(alert).query = query.replace(identity, identity.toUpperCase()))),
+      ),
+    ).toEqual([]);
+    const asked = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    for (const change of [
+      asked(query.replace(identity, idOf(named(/^id-agentx-stg-job-watch$/)))),
+      asked(query.replace('xms_mirid', 'appid')),
+      asked(query.replace(`"${api}"`, `"${idOf(APP('zitadel'))}"`)),
+      asked(query.replace(`"${migrate}"`, `"${idOf(JOB('db-setup'))}"`)),
+      asked(
+        query.replace(
+          ', "Microsoft.App/jobs/start/action"',
+          ', "Microsoft.App/jobs/start/action", "Microsoft.App/jobs/stop/action"',
+        ),
+      ),
+      asked(query.replace('Microsoft.App/containerApps/write', 'Microsoft.App/containerApps/*')),
+      asked(query.replace('where not(', 'where (')),
+      asked(query.replace(' | summarize', ' | where ActivityStatusValue == "Success" | summarize')),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).windowSize = 'PT30M'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT30M'),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 3),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 3),
+      (alert: Mutable) => (properties(alert).scopes = [idOf(LOGIN_WORKSPACE)]),
+    ]) {
+      expect(brokenRules(changed(RELEASE_WRITES, change))).toEqual(['release-writes-alert']);
+    }
+    expect(brokenRules(changed(RELEASE_WRITES, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'release-writes-alert',
+    ]);
+    expect(brokenRules(changed(RELEASE_WRITES, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'release-writes-alert',
+    ]);
+    // With no identity of CI's, no query can be right.
+    expect(brokenRules(without(named(/^id-agentx-stg-release$/)))).toContain('release-writes-alert');
+  });
+
+  describe("azure-policy (AZ2): Azure's own refusals on the resource group", () => {
+    const DEFINITION = (guardrail: string) => (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Authorization/policyDefinitions' && resource.name === `agentx-staging-${guardrail}`;
+    const ASSIGNMENT = (guardrail: string) => (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Authorization/policyAssignments' && resource.name === `agentx-staging-${guardrail}`;
+    const GUARDRAIL_NAMES = ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'];
+    const policyProblemsOf = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'azure-policy')
+        .map(({ resource, message }) => `${resource}: ${message}`);
+    const ruleOf = (definition: Mutable): Mutable => inside(definition, 'properties', 'policyRule');
+    /** Each leaf of a rule's condition, a count's `where` walked into, for changing one in place. */
+    const leaves = (condition: unknown): Mutable[] => {
+      if (Array.isArray(condition)) return condition.flatMap(leaves);
+      if (typeof condition !== 'object' || condition === null) return [];
+      const object = condition as Mutable;
+      return 'field' in object && !('where' in object) ? [object] : Object.values(object).flatMap(leaves);
+    };
+
+    it('gives each of the six rules once on the group, enforced, as Deny, Indexed, with the words a refusal gets back', () => {
+      const group = idOf(type('Microsoft.Resources/resourceGroups'));
+      for (const guardrail of GUARDRAIL_NAMES) {
+        const definition = staging.predictedResources.find(DEFINITION(guardrail));
+        const assignment = staging.predictedResources.find(ASSIGNMENT(guardrail));
+        expect(at(definition?.properties, 'mode')).toBe('Indexed');
+        expect(at(definition?.properties, 'policyRule', 'then', 'effect')).toBe('deny');
+        expect(assignment?.id).toBe(
+          `${group}/providers/Microsoft.Authorization/policyAssignments/agentx-staging-${guardrail}`,
+        );
+        expect(at(assignment?.properties, 'policyDefinitionId')).toBe(definition?.id);
+        expect(String(at(assignment?.properties, 'nonComplianceMessages', '0', 'message'))).toMatch(
+          /^Refused: .+ Nothing changed; .+\.$/,
+        );
+      }
+      // The aliases Azure lists for Microsoft.App, the ingress two as its built-in rules use them (S188).
+      expect(JSON.stringify(staging.predictedResources.find(DEFINITION('apps-internal'))?.properties)).toContain(
+        '"field":"Microsoft.App/containerApps/configuration.ingress.external","equals":true',
+      );
+      expect(JSON.stringify(staging.predictedResources.find(DEFINITION('apps-https'))?.properties)).toContain(
+        '"field":"Microsoft.App/containerApps/configuration.ingress.allowInsecure","equals":true',
+      );
+    });
+
+    it('a rule or its assignment missing, doubled, another kind, not enforced, scoped wider or narrower, or one nobody reads', () => {
+      for (const guardrail of GUARDRAIL_NAMES) {
+        expect(brokenRules(without(DEFINITION(guardrail)))).toEqual(['azure-policy']);
+        expect(brokenRules(without(ASSIGNMENT(guardrail)))).toEqual(['azure-policy']);
+        const twice = structuredClone(staging.predictedResources.find(ASSIGNMENT(guardrail))) as unknown as Mutable;
+        expect(brokenRules(withExtra(twice))).toEqual(['azure-policy']);
+      }
+      const definitionProperties = (definition: Mutable): Mutable => inside(definition, 'properties');
+      const assignmentProperties = definitionProperties;
+      for (const change of [
+        (definition: Mutable) => (definitionProperties(definition).mode = 'All'),
+        (definition: Mutable) => (inside(ruleOf(definition), 'then').effect = 'audit'),
+        (definition: Mutable) => (inside(ruleOf(definition), 'then').effect = 'disabled'),
+        (definition: Mutable) => (definitionProperties(definition).policyType = 'BuiltIn'),
+        (definition: Mutable) => (definitionProperties(definition).parameters = { effect: { type: 'String' } }),
+        (definition: Mutable) =>
+          (definition.id = String(definition.id).replace(
+            '/providers/',
+            '/resourceGroups/rg-agentx-staging/providers/',
+          )),
+      ]) {
+        expect(brokenRules(changed(DEFINITION('images'), change))).toEqual(['azure-policy']);
+      }
+      for (const change of [
+        (assignment: Mutable) => (assignmentProperties(assignment).enforcementMode = 'DoNotEnforce'),
+        (assignment: Mutable) => (assignmentProperties(assignment).notScopes = [idOf(APP('api'))]),
+        (assignment: Mutable) => (assignmentProperties(assignment).nonComplianceMessages = []),
+        (assignment: Mutable) => (assignmentProperties(assignment).nonComplianceMessages = [{ message: '' }]),
+        (assignment: Mutable) =>
+          (assignment.id = String(assignment.id).replace('/resourceGroups/rg-agentx-staging', '')),
+        (assignment: Mutable) => (assignmentProperties(assignment).policyDefinitionId = idOf(DEFINITION('apps-https'))),
+      ]) {
+        expect(brokenRules(changed(ASSIGNMENT('images'), change))).toEqual(['azure-policy']);
+      }
+      const stranger = structuredClone(staging.predictedResources.find(DEFINITION('images'))) as unknown as Mutable;
+      stranger.name = 'agentx-staging-something-else';
+      expect(policyProblemsOf(withExtra(stranger))).toEqual([
+        'agentx-staging-something-else: is no rule of modules/guardrails.bicep: one no check reads',
+      ]);
+    });
+
+    it('each rule refuses its bad examples: a rule whose field or value is wrong refuses nothing, and is caught', () => {
+      const lets = (guardrail: string): string =>
+        `agentx-staging-${guardrail}: lets through what it is for (${guardrail}): its condition matches nothing it should`;
+      const firstLeaf =
+        (field: RegExp) =>
+        (definition: Mutable): Mutable =>
+          leaves(ruleOf(definition).if).find((leaf) => field.test(String(leaf.field))) ?? {};
+      const cases: readonly (readonly [string, (definition: Mutable) => void])[] = [
+        [
+          'apps-internal',
+          (definition) =>
+            (firstLeaf(/ingress\.external$/)(definition).field =
+              'Microsoft.App/containerApps/configuration.ingress.externall'),
+        ],
+        ['apps-internal', (definition) => (firstLeaf(/ingress\.external$/)(definition).equals = 'yes')],
+        [
+          'apps-https',
+          (definition) =>
+            (firstLeaf(/allowInsecure$/)(definition).field =
+              'Microsoft.App/containerApps/configuration.ingress.transport'),
+        ],
+        // Each place's digest condition, one at a time: Zitadel's image by tag alone gets through.
+        ...[0, 1, 2, 3].map(
+          (place) =>
+            [
+              'images',
+              (definition: Mutable) => {
+                const leaf = leaves(ruleOf(definition).if).filter((each) => 'notContains' in each)[place];
+                if (leaf !== undefined) leaf.notContains = ':';
+              },
+            ] as const,
+        ),
+        // Each place's list of images, one at a time: another image by digest gets through.
+        ...[0, 1, 2, 3].map(
+          (place) =>
+            [
+              'images',
+              (definition: Mutable) => {
+                const leaf = leaves(ruleOf(definition).if).filter(
+                  (each) => each.notLike === 'ghcr.io/shahbaz242630/agent-x@sha256:*',
+                )[place];
+                if (leaf !== undefined) leaf.notLike = '*';
+              },
+            ] as const,
+        ),
+        [
+          'images',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => 'notLike' in each && String(each.notLike).startsWith('ghcr.io/shahbaz242630/agent-x@'),
+            ))
+              leaf.notLike = 'ghcr.io/shahbaz242630/agent-x*';
+          },
+        ],
+        [
+          'images',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) =>
+              String(each.field).includes('initContainers'),
+            ))
+              leaf.field = String(leaf.field).replace('.image', '.images');
+          },
+        ],
+        [
+          'jobs-by-hand',
+          (definition) =>
+            (firstLeaf(/triggerType$/)(definition).field = 'Microsoft.App/jobs/configuration.triggerTypo'),
+        ],
+        [
+          'jobs-by-hand',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => String(each.field).endsWith('.parallelism') && 'notIn' in each,
+            ))
+              leaf.notIn = [0, 1, 2];
+          },
+        ],
+        [
+          'jobs-by-hand',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => String(each.field).endsWith('.replicaCompletionCount') && 'notIn' in each,
+            ))
+              leaf.notIn = [0, 1, 2];
+          },
+        ],
+        [
+          'app-replicas',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) => list(each.notIn).length === 5))
+              leaf.notIn = [0, 1, 2, 3, 4, 5];
+          },
+        ],
+        [
+          'app-replicas',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) => each.field === 'name'))
+              leaf.like = '*-job';
+          },
+        ],
+        [
+          'app-replicas',
+          (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => String(each.field).endsWith('maxReplicas') && list(each.notIn).length === 2,
+            ))
+              leaf.notIn = [0, 1, 2];
+          },
+        ],
+      ];
+      for (const [guardrail, change] of cases) {
+        expect(policyProblemsOf(changed(DEFINITION(guardrail), change))).toEqual([lets(guardrail)]);
+      }
+    });
+
+    it('no rule refuses what we ship, a release sends, the load image, or four API replicas', () => {
+      const refuses = (guardrail: string, what: string): string =>
+        `agentx-staging-${guardrail}: refuses ${what}, which this deployment ships or a release sends: Azure would refuse our own deploy`;
+      // The jobs' trigger read on a missing field: CI's PATCH of the containers alone would be refused.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('jobs-by-hand'), (definition) => {
+            const guard = leaves(ruleOf(definition).if).find(
+              (leaf) => String(leaf.field).endsWith('triggerType') && 'exists' in leaf,
+            );
+            if (guard !== undefined) guard.exists = false;
+          }),
+        ),
+      ).toContain(refuses('jobs-by-hand', 'job-agentx-stg-migrate'));
+      // Zitadel's login pages' image left out of those allowed.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('images'), (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => each.notLike === 'ghcr.io/zitadel/zitadel-login:*',
+            ))
+              leaf.notLike = 'ghcr.io/zitadel/zitadel-logins:*';
+          }),
+        ),
+      ).toEqual([refuses('images', 'ca-agentx-stg-login')]);
+      // The load test's image left out: refused only in a load run, which the checks also make.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('images'), (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter(
+              (each) => each.notLike === 'ghcr.io/shahbaz242630/agent-x-load@sha256:*',
+            ))
+              leaf.notLike = 'ghcr.io/shahbaz242630/agent-x-lode@sha256:*';
+          }),
+        ),
+      ).toEqual([refuses('images', 'ca-agentx-stg-api'), refuses('images', 'job-agentx-stg-migrate')]);
+      // The cap below four: production's Zitadel and staging's load run need room.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('app-replicas'), (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) => list(each.notIn).length === 5))
+              leaf.notIn = [0, 1, 2, 3];
+          }),
+        ),
+      ).toEqual([refuses('app-replicas', 'ca-agentx-stg-api')]);
+      // Turned around, refusing an app that keeps to https: every app (the API twice, at four replicas too), and
+      // the bad example let through.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('apps-https'), (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => String(each.field).endsWith('allowInsecure'));
+            if (leaf !== undefined) leaf.equals = false;
+          }),
+        ),
+      ).toEqual([
+        ...['ca-agentx-stg-api', 'ca-agentx-stg-zitadel', 'ca-agentx-stg-login', 'ca-agentx-stg-api'].map((app) =>
+          refuses('apps-https', app),
+        ),
+        'agentx-staging-apps-https: lets through what it is for (apps-https): its condition matches nothing it should',
+      ]);
+    });
+
+    it('a condition the checks cannot read is refused, not judged', () => {
+      const unread = (guardrail: string, what: string): string =>
+        `agentx-staging-${guardrail}: holds a condition these checks can't read (${what}), so none can say it's right`;
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('images'), (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => 'notLike' in each);
+            if (leaf !== undefined) leaf.notLike = 'ghcr.io/*/agent-x@*';
+          }),
+        ),
+      ).toEqual([unread('images', 'like with more than one wildcard: ghcr.io/*/agent-x@*')]);
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('apps-internal'), (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => String(each.field).endsWith('external'));
+            if (leaf !== undefined) {
+              delete leaf.equals;
+              leaf.match = 'true';
+            }
+          }),
+        ),
+      ).toEqual([unread('apps-internal', "an operator these checks don't read: match")]);
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('apps-internal'), (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => String(each.field).endsWith('external'));
+            if (leaf !== undefined) leaf.field = 'Microsoft.App/containerApps/template.containers[*].image';
+          }),
+        ),
+      ).toEqual([
+        unread(
+          'apps-internal',
+          'an array field outside a count: Microsoft.App/containerApps/template.containers[*].image',
+        ),
+      ]);
+    });
+
+    it('allows exactly the types the deployment creates and its records', () => {
+      const typesOf = (definition: Mutable): Mutable => inside(ruleOf(definition), 'if', 'not');
+      const allowed = list(
+        at(staging.predictedResources.find(DEFINITION('allowed-types'))?.properties, 'policyRule', 'if', 'not', 'in'),
+      );
+      // The list is staging's own types (a load run's and Stage G's are among them) and the deployments' records.
+      const made = [...staging.predictedResources.map((resource) => resource.type), 'Microsoft.Resources/deployments'];
+      expect(new Set(allowed)).toEqual(new Set(made));
+      expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
+      expect(ALLOWED_TYPES).toHaveLength(new Set(made).size);
+      const exactly: unknown = expect.stringMatching(
+        /^agentx-staging-allowed-types: must allow exactly Microsoft\.App\//,
+      );
+      const fewer = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.filter((each) => each !== 'Microsoft.Network/virtualNetworks');
+      });
+      expect(policyProblemsOf(fewer)).toEqual([
+        'agentx-staging-allowed-types: refuses vnet-agentx-staging, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        exactly,
+      ]);
+      const more = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = [...allowed, 'Microsoft.Compute/virtualMachines'];
+      });
+      expect(policyProblemsOf(more)).toEqual([
+        'agentx-staging-allowed-types: lets through what it is for (allowed-types): its condition matches nothing it should',
+        exactly,
+      ]);
+      // Another name in place of one: the same count, still refused.
+      const swapped = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.map((each) =>
+          each === 'Microsoft.Insights/workbooks' ? 'Microsoft.Compute/virtualMachines' : each,
+        );
+      });
+      expect(policyProblemsOf(swapped)).toContainEqual(exactly);
+      // Case is Azure's to ignore.
+      const cased = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.map((each) => String(each).toUpperCase());
+      });
+      expect(policyProblemsOf(cased)).toEqual([]);
+      // A new type in the deployment needs the list to name it, or Azure refuses our own deploy.
+      const added = withExtra({
+        ...structuredClone(staging.predictedResources.find(VAULT)),
+        type: 'Microsoft.Cache/redis',
+        name: 'redis',
+      });
+      expect(policyProblemsOf(added)).toEqual([
+        'agentx-staging-allowed-types: refuses redis, which this deployment ships or a release sends: Azure would refuse our own deploy',
+      ]);
+    });
   });
 
   it('SEC-OPS-11 vault-secrets: a secret written on every run or on another condition, missing, doubled, unread, or elsewhere', () => {
@@ -4703,17 +5193,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['jobs']);
-    for (const start of [
-      { triggerType: 'Schedule' },
-      { scheduleTriggerConfig: { cronExpression: '0 3 * * *' } },
-      { eventTriggerConfig: { scale: {} } },
-      { replicaRetryLimit: 1 },
-      { replicaTimeout: 0 },
-      { replicaTimeout: 4000 },
-      { replicaTimeout: 'soon' },
-      { manualTriggerConfig: { parallelism: 2, replicaCompletionCount: 1 } },
-      { manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 2 } },
-    ]) {
+    // Azure itself refuses a job that starts itself or runs two replicas a run (AZ2, `azure-policy`).
+    const refused = ['azure-policy', 'jobs'];
+    for (const [start, rules] of [
+      [{ triggerType: 'Schedule' }, refused],
+      [{ scheduleTriggerConfig: { cronExpression: '0 3 * * *' } }, ['jobs']],
+      [{ eventTriggerConfig: { scale: {} } }, ['jobs']],
+      [{ replicaRetryLimit: 1 }, ['jobs']],
+      [{ replicaTimeout: 0 }, ['jobs']],
+      [{ replicaTimeout: 4000 }, ['jobs']],
+      [{ replicaTimeout: 'soon' }, ['jobs']],
+      [{ manualTriggerConfig: { parallelism: 2, replicaCompletionCount: 1 } }, refused],
+      [{ manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 2 } }, refused],
+    ] as const) {
       expect({
         start,
         rules: brokenRules(
@@ -4721,7 +5213,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
             Object.assign(configurationOf(job), start);
           }),
         ),
-      }).toEqual({ start, rules: ['jobs'] });
+      }).toEqual({ start, rules });
     }
     // Two containers, or work hidden in an init container that runs before it.
     expect(
@@ -4745,7 +5237,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           containerOf(job).image = 'ghcr.io/shahbaz242630/agent-x:v1';
         }),
       ),
-    ).toEqual(['jobs']);
+    ).toEqual(refused);
     // A job the deployment needs, left out. CI's role would then be given on
     // a migration job this deployment doesn't make, and the owner-login alert
     // would pair logins with its starts.
@@ -4754,7 +5246,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         workload,
         // The operator or the chain repair gone, the anchors' epoch is set by fewer than all three (anchor-epoch).
         rules: {
-          migrate: ['owner-login-alert', 'release-access', 'jobs'],
+          migrate: ['owner-login-alert', 'release-access', 'release-writes-alert', 'jobs'],
           operator: ['anchor-epoch', 'jobs'],
           'chain-restore': ['anchor-epoch', 'jobs'],
         }[workload] ?? ['jobs'],
@@ -4780,8 +5272,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ).toEqual(['apps']);
     // A public door nothing decided to publish: the doors are the route
     // configs (G2e), so an external ingress here is one nobody asked for.
-    expect(brokenRules(changed(APP('api'), (app) => (ingressOf(app).external = true)))).toEqual(['apps']);
-    expect(brokenRules(changed(APP('zitadel'), (app) => (ingressOf(app).allowInsecure = true)))).toEqual(['apps']);
+    // Azure itself refuses both too (AZ2, `azure-policy`).
+    expect(brokenRules(changed(APP('api'), (app) => (ingressOf(app).external = true)))).toEqual([
+      'azure-policy',
+      'apps',
+    ]);
+    expect(brokenRules(changed(APP('zitadel'), (app) => (ingressOf(app).allowInsecure = true)))).toEqual([
+      'azure-policy',
+      'apps',
+    ]);
     // An ingress left out entirely is one Azure decides, not us.
     expect(
       brokenRules(
@@ -4800,11 +5299,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
       );
     }
     // An app that may run no replica at all, and one holding more than it may run.
-    for (const scale of [{ maxReplicas: 0 }, { maxReplicas: 'one' }, { minReplicas: -1 }, { minReplicas: 2 }]) {
+    // A count that is no number of replicas Azure itself refuses too (AZ2, `azure-policy`).
+    for (const [scale, rules] of [
+      [{ maxReplicas: 0 }, ['apps']],
+      [{ maxReplicas: 'one' }, ['azure-policy', 'apps']],
+      [{ minReplicas: -1 }, ['apps']],
+      [{ minReplicas: 2 }, ['apps']],
+    ] as const) {
       expect({
         scale,
         rules: brokenRules(changed(APP('login'), (app) => Object.assign(scaleOf(app), scale))),
-      }).toEqual({ scale, rules: ['apps'] });
+      }).toEqual({ scale, rules });
     }
     // Two containers, or work hidden in an init container that runs before it.
     expect(
@@ -4823,6 +5328,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ).toEqual(['apps']);
     // A tag in place of the digest: the same name, another image tomorrow.
     expect(brokenRules(changed(APP('api'), (app) => (containerOf(app).image = 'ghcr.io/x/agent-x:v1')))).toEqual([
+      'azure-policy',
       'apps',
     ]);
     // An app the deployment needs, left out. Zitadel's own secrets are then
@@ -4832,7 +5338,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
         workload,
         rules:
-          workload === 'api' ? ['anchor-epoch', 'release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
+          workload === 'api'
+            ? ['anchor-epoch', 'release-access', 'release-writes-alert', 'apps', 'public-doors']
+            : ['apps', 'public-doors'],
       });
     }
   });

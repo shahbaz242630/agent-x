@@ -874,6 +874,9 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/dns-policy.bicep': ['foundation'],
       'deploy/azure/modules/environment.bicep': ['foundation'],
       'deploy/azure/modules/evidence.bicep': ['foundation', 'apps'],
+      // Azure's own refusals (AZ2).
+      'deploy/azure/modules/guardrail-assignments.bicep': ['foundation'],
+      'deploy/azure/modules/guardrails.bicep': ['foundation'],
       'deploy/azure/modules/job-watch.bicep': ['foundation'],
       'deploy/azure/modules/keyvault.bicep': ['foundation'],
       'deploy/azure/modules/metrics.bicep': ['foundation'],
