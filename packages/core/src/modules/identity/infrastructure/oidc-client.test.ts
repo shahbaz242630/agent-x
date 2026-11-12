@@ -150,17 +150,26 @@ async function signIn(returned: Partial<{ code: string; state: string }> = {}, f
   return client.finish({ ...flow, ...flowChange }, { code: CODE, state: flow.state, ...returned });
 }
 
-/** Expects the sign-in to fail with this failure, its message naming no code or token. */
+/**
+ * Expects the sign-in to fail with this failure, its message naming no code or
+ * token. AZ9: the end-to-end log scan never holds the access token the API
+ * takes to the userinfo endpoint (it is opaque, and only the API sees it), so
+ * this is where it is proven out of every failure the route logs: not in the
+ * message or the stack, and no cause carried that could hold it.
+ */
 async function expectFailure(attempt: Promise<unknown>, failure: SignInFailure, message?: RegExp): Promise<void> {
   const error: unknown = await attempt.then(
     () => undefined,
     (thrown: unknown) => thrown,
   );
   expect(error).toBeInstanceOf(SignInFailed);
-  expect((error as SignInFailed).failure).toBe(failure);
-  if (message !== undefined) expect((error as SignInFailed).message).toMatch(message);
-  expect((error as SignInFailed).message).not.toContain(CODE);
-  expect((error as SignInFailed).message).not.toContain('eyJ');
+  const failed = error as SignInFailed;
+  expect(failed.failure).toBe(failure);
+  if (message !== undefined) expect(failed.message).toMatch(message);
+  expect(failed.message).not.toContain(CODE);
+  expect(failed.message).not.toContain('eyJ');
+  expect(failed.cause).toBeUndefined();
+  expect(`${failed.message} ${String(failed.stack)}`).not.toContain(ACCESS);
 }
 
 describe('starting a sign-in', () => {

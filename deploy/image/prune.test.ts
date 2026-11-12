@@ -22,6 +22,8 @@ import {
   Stopped,
   USAGE,
   type Version,
+  type Verify,
+  verifyKept,
   VERSIONS_API,
   versionsIn,
 } from './prune.ts';
@@ -676,6 +678,57 @@ describe('prune', () => {
   });
 });
 
+/** A stand-in for verify.ts: every image verifies but those of the commits named, and each check is recorded. */
+function verifying(...refusedCommits: string[]): { readonly verify: Verify; readonly checked: string[] } {
+  const checked: string[] = [];
+  const verify: Verify = (image, imageCommit) => {
+    checked.push(`${image} ${imageCommit}`);
+    return refusedCommits.includes(imageCommit)
+      ? { verified: false, reason: 'SBOM_MISSING', detail: 'none of the attestations matched the predicate type' }
+      : { verified: true };
+  };
+  return { verify, checked };
+}
+
+const checkedImage = (n: number): string => `${IMAGE_REPOSITORY}@${at(n).image.digest} ${commit(n)}`;
+
+describe('verifyKept (AZ9)', () => {
+  it("checks every kept image up to this run's with the deploy's own check, each by its digest and commit", async () => {
+    const { verify, checked } = verifying();
+    const lines: string[] = [];
+    await verifyKept(own(6), held(VERSIONS).source, HISTORY, verify, (line) => lines.push(line));
+    // 7 and 8 are kept too, but newer: their own runs check them once their SBOMs are attached.
+    expect(checked).toEqual([checkedImage(6), checkedImage(5), checkedImage(4)]);
+    expect(lines).toEqual([
+      `  ${commit(6)}  verified`,
+      `  ${commit(5)}  verified`,
+      `  ${commit(4)}  verified`,
+      "Every kept image up to this run's (3) still verifies.",
+    ]);
+  });
+
+  it('checks every one, then refuses naming each that no longer verifies', async () => {
+    const { verify, checked } = verifying(commit(5), commit(7));
+    const lines: string[] = [];
+    const checking = verifyKept(own(8), held(VERSIONS).source, HISTORY, verify, (line) => lines.push(line));
+    await expect(checking).rejects.toThrow(
+      `kept images no longer verify, so none of them can be rolled back to: ${commit(7)}, ${commit(5)}.`,
+    );
+    expect(checked).toHaveLength(5);
+    expect(lines).toContain(
+      `  ${commit(5)}  refused (SBOM_MISSING): none of the attestations matched the predicate type`,
+    );
+  });
+
+  it("refuses, checking nothing, when this run's image isn't in the package", async () => {
+    const { verify, checked } = verifying();
+    await expect(
+      verifyKept({ commit: commit(8), digest: digest(999) }, held(VERSIONS).source, HISTORY, verify, () => undefined),
+    ).rejects.toThrow("isn't in the package");
+    expect(checked).toEqual([]);
+  });
+});
+
 describe('main', () => {
   const ENV = { GITHUB_TOKEN: JOB_WORD, GITHUB_ACTOR: ACTOR };
 
@@ -780,7 +833,36 @@ describe('main', () => {
     }
   });
 
-  it('knows two commands, each with a commit and its digest', async () => {
+  it('verify-kept only reads the package, and is refused when a kept image no longer verifies', async () => {
+    const reading = async (verify: Verify) => {
+      const http = serving(VERSIONS, BUNDLES);
+      const lines: string[] = [];
+      const code = await main(
+        ['verify-kept', commit(8), at(8).image.digest],
+        ENV,
+        http.http,
+        HISTORY,
+        (line) => lines.push(line),
+        () => Promise.resolve(),
+        verify,
+      );
+      expect(http.calls.every(({ method }) => method === 'GET')).toBe(true);
+      return { code, lines };
+    };
+    const passing = await reading(verifying().verify);
+    expect(passing.code).toBe(EXIT.DONE);
+    expect(passing.lines.at(-1)).toBe("Every kept image up to this run's (5) still verifies.");
+
+    const failing = await reading(verifying(commit(4)).verify);
+    expect(failing.code).toBe(EXIT.REFUSED);
+    expect(
+      failing.lines
+        .at(-1)
+        ?.startsWith(`Refused: kept images no longer verify, so none of them can be rolled back to: ${commit(4)}. `),
+    ).toBe(true);
+  });
+
+  it('knows three commands, each with a commit and its digest', async () => {
     for (const argv of [
       [],
       ['plan'],
