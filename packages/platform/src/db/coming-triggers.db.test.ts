@@ -585,14 +585,18 @@ begin
   if current_user = 'agentx_owner' then
     return null;
   end if;
-  select g.membership_version into kept from identity.membership_grants g
-    where g.org_id = new.org_id and g.id = new.id;
-  if kept is null or kept <> old.state_version then
-    return null;
-  end if;
+  -- The row was just changed and no role but the owner deletes one, so a membership not seen here is hidden by the
+  -- tenant wall: the organisation's setting changed before the commit. Refused, as nothing here can be judged.
   select m.state_version into now_at from identity.memberships m
     where m.org_id = new.org_id and m.id = new.id;
-  if now_at is null or now_at = kept then
+  if now_at is null then
+    raise exception 'a membership changed out of sight of its own organisation'
+      using errcode = 'check_violation', constraint = 'grants_in_step';
+  end if;
+  select g.membership_version into kept from identity.membership_grants g
+    where g.org_id = new.org_id and g.id = new.id;
+  -- None built yet, or one an older image left behind before this change (OR1c's): let through.
+  if kept is null or kept < old.state_version or kept = now_at then
     return null;
   end if;
   raise exception 'a membership changed without its grant summary kept in step'
