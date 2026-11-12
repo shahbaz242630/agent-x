@@ -2,13 +2,14 @@
 // identity's grant-building.ts): the API's job, on a timer of its own. For
 // each organisation the directory lists, every run, it first looks, as a
 // decision reads (`share`, a few trips, no lock for a change), whether any
-// summary is unbuilt or left behind its membership by an image from before
-// OR1; only then does one transaction build or bring each up to date from the
-// history, read a page at a time, so no length of history stops it. Until
-// then the two-person rule reads that organisation's history as before
-// (two-person-facts.ts). Every run looks again, as a summary can be left
-// behind at any time an older image serves (a swap, a rollback): nothing is
-// remembered from one run to the next. Tampering found raises the alarm and
+// summary is unbuilt or left behind its membership; only then does one
+// transaction build or bring each up to date from the history, read a page at
+// a time, so no length of history stops it. Until one is built the two-person
+// rule reads that organisation's history as before (two-person-facts.ts). One
+// behind is the alarm since OR1c (0089 lets no image in service leave one): the
+// build raises it and holds the organisation, then brings it up to date, so the
+// hold can be cleared once someone has looked. Every run looks again: nothing
+// is remembered from one run to the next. Tampering found raises the alarm and
 // holds the organisation, as any read does.
 //
 // A run never throws: each failure is logged, naming the organisation, and
@@ -54,7 +55,8 @@ export function createGrantSummaryBuilding({
       const due = await withSignedStates(database, orgId, services, (tx, states) =>
         grantSummariesDue(tx, states, orgId),
       );
-      // In step, or tampered with (its alarm raised and the organisation held): nothing to build this run.
+      // In step, or tampered with (its alarm raised and the organisation held): nothing to build this run. One
+      // behind is raised by the build, which reads it for the change.
       if (due !== true) return;
       const done = await withSignedStates(database, orgId, services, (tx, states) =>
         buildGrantSummaries(tx, states, orgId, page),

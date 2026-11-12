@@ -146,8 +146,8 @@ export async function reactivateMembership(
     details: { role },
   });
   if (moved.outcome !== 'changed') throw new Error(`a membership read as deactivated did not move: ${moved.outcome}`);
-  // Unbuilt (added before 0085): left for the job, whose history holds this return.
-  if (grants.outcome === 'unbuilt' || grants.membershipVersion !== current.version) return;
+  // Unbuilt (added before 0085): left for the job, whose history holds this return. One not in step, keepGrants refuses.
+  if (grants.outcome === 'unbuilt') return;
   // Who brought them back, and who asked for, opened or confirmed any invitation they accepted, the one confirmed now too.
   const granters = [...(await invitationGrantersOf(tx, states, orgId, userId)), ...byPerson(actor)];
   await keepGrants(tx, states, grants, key, {
