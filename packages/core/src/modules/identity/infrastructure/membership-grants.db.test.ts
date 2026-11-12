@@ -44,7 +44,9 @@ import {
   membersOf,
   MEMBERSHIPS,
   type MembershipsTransaction,
+  MOST_MEMBERS,
   reactivateMembership,
+  TooManyMembers,
 } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
 import { twoPersonFactsOf } from './two-person-facts.ts';
@@ -372,6 +374,38 @@ describe(`a membership's grant summary, kept with each change (OR1, Postgres ${s
     });
 
     await expect(add('viewer', userActor(userId), userId)).rejects.toBeInstanceOf(TooManyEventsToRead);
+  });
+
+  it('counts no one for an invitation the operator’s command asked for: only a person grants a role', async () => {
+    const userId = await person();
+    await withSignedStates(app, org, services(), async (tx) => {
+      const subject = { type: 'invitation', id: ids.next(), version: 1 };
+      await trail.record(tx, org, { actor: OPERATOR, action: 'invitation.drafted', subject, details: {} });
+      await trail.record(tx, org, {
+        actor: userActor(userId),
+        action: 'invitation.acceptance_recorded',
+        subject: { ...subject, version: 2 },
+        details: {},
+      });
+    });
+    const admin = await add('admin', userActor(userId), userId);
+
+    expect(await summaryRows()).toEqual([expect.objectContaining({ id: admin.id, granted_by: '' })]);
+  });
+
+  it('refuses an organisation whose log made more memberships than a list holds, rather than decide on part', async () => {
+    await withSignedStates(app, org, services(), async (tx) => {
+      for (let n = 0; n <= MOST_MEMBERS; n += 1) {
+        await trail.record(tx, org, {
+          actor: OPERATOR,
+          action: 'membership.created',
+          subject: { type: 'membership', id: ids.next(), version: 1 },
+          details: {},
+        });
+      }
+    });
+
+    await expect(facts()).rejects.toBeInstanceOf(TooManyMembers);
   });
 
   it('reads nine or more members past one gather, in two statements a table, as well', async () => {
