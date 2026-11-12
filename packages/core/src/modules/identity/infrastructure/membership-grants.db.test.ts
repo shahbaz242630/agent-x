@@ -50,6 +50,7 @@ import {
   TooManyMembers,
 } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
+import { leftBehind } from '../membership-changes.helper.test.ts';
 import { twoPersonFactsOf } from './two-person-facts.ts';
 import { userForSubject } from './users.ts';
 
@@ -590,10 +591,13 @@ describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Post
     expect(read).toMatchObject({ outcome: 'found', member: { status: 'ACTIVE' }, state: { version: 2 } });
   });
 
-  it('keeps the hold waiting in the repair’s own transaction, so it outlives the evidence; the hold set takes it', async () => {
+  it('keeps one hold waiting in the repair’s own transaction, naming the first behind; the hold set takes it', async () => {
     const alice = await add('admin');
     const bob = await add('viewer');
+    const carol = await add('viewer');
     await changedByOldImage(bob, alice, 'viewer', 'approver');
+    await changedByOldImage(carol, alice, 'viewer', 'approver');
+    const [first] = [bob.id, carol.id].sort();
 
     const inRepair = await withSignedStates(app, org, services(), async (tx, states) => {
       const built = await buildGrantSummaries(tx, states, org);
@@ -603,11 +607,11 @@ describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Post
     });
 
     expect(inRepair).toEqual({
-      built: { outcome: 'built', built: 1 },
-      waiting: [{ subject_type: 'membership_grant', object_id: bob.id, reason: 'holding' }],
+      built: { outcome: 'built', built: 2 },
+      waiting: [{ subject_type: 'membership_grant', object_id: first, reason: 'holding' }],
     });
-    raisedOn(bob.id, 1);
-    // Committed with the repair; the hold then recorded, which takes its row with it.
+    expect(lines('audit.integrity_failed')).toHaveLength(2);
+    // Committed with the repair; the hold then recorded, naming the same first record, which takes its row with it.
     expect(await hold()).toMatchObject({ outcome: 'held' });
     expect(await database.as('backup').query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual(
       [],
@@ -840,6 +844,46 @@ describe(`concurrent membership changes, in a forced lock order (ADR-006 §6, Po
     if (read.outcome !== 'read') return;
     expect([...(read.grantedBy.get(bob.id) ?? [])]).toEqual([alice.userId]);
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a hold set while the job repairs a summary behind waits on the chain head the repair holds, never on its row', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    await leftBehind(oldImage, services(), { orgId: org, id: bob.id }, 'approver', userActor(alice.userId));
+    /** A finding on the record in a transaction of its own: its hold is set as that transaction ends. */
+    const found = (subjectType: string, id: string) =>
+      withSignedStates(app, org, services(), (_tx, states) => {
+        states.mismatch(subjectType, { orgId: org, id });
+        return Promise.resolve();
+      });
+    // Held on another record already, so each later hold keeps Bob's row waiting (the head's lock, then the row).
+    await found(MEMBERSHIPS.subject, alice.id);
+    // The repair done and its row written, holding the head's lock and the row, until let go.
+    const repairing = await paused((pause) =>
+      withSignedStates(app, org, services(), async (tx, states) => {
+        const built = await buildGrantSummaries(tx, states, org);
+        pause.reached();
+        await pause.until;
+        return built;
+      }),
+    );
+    const holding = within(20_000, found(MEMBERSHIP_GRANTS.subject, bob.id), 'the other hold');
+    const [waiter] = await waitUntilQueued(database.as('admin'), 1);
+    const [waiting] = await database
+      .as('admin')
+      .query<{ query: string }>('select query from pg_catalog.pg_stat_activity where pid = $1', [waiter]);
+    // Queued on the hold's lock of the chain head, which the repair took before its row: never on the row itself.
+    expect(waiting?.query).toContain('from "audit"."heads"');
+    repairing.go();
+
+    expect(await within(20_000, repairing.done, 'the repair')).toEqual({ outcome: 'built', built: 1 });
+    await holding;
+    expect(lines('audit.integrity_failed').filter((line) => line.check === 'hold')).toEqual([]);
+    expect(
+      await database
+        .as('backup')
+        .query('select subject_type, object_id from directory.holds_waiting where org_id = $1', [org]),
+    ).toEqual([{ subject_type: 'membership_grant', object_id: bob.id }]);
   });
 
   it('builds a summary only once a change of its membership in flight ends, from a history that holds it', async () => {

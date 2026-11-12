@@ -10,8 +10,9 @@
 // up to date the same way: what the history says, with nothing it held taken
 // away. Why: only the app's keys can sign it, so without this a hold cleared
 // once someone has looked would be raised again by the very next read. Its
-// hold is kept waiting (directory.holds_waiting) in the same transaction as
-// the repair, so the hold is never lost with the evidence.
+// hold is kept waiting (directory.holds_waiting, one row naming the first
+// behind) in the same transaction as the repair, after it, so the hold is never
+// lost with the evidence.
 //
 // In one transaction, withSignedStates' for the organisation: its memberships
 // read for a decision (`share`), so no change of one comes between the
@@ -98,12 +99,6 @@ export async function buildGrantSummaries(
   const inStep = summariesInStep(states, orgId, verified, read.kept);
   if (inStep === undefined) return disagrees;
   behindRaised(states, orgId, inStep.behind);
-  // Why: the repair below commits the evidence away, so each alarm's hold is also kept waiting in this same
-  // transaction (with-signed-states.ts): if the hold then can't be recorded, the row outlives a restart and sets it.
-  for (const id of inStep.behind) {
-    const record = { orgId: orgId.toLowerCase(), subjectType: MEMBERSHIP_GRANTS.subject, objectId: id.toLowerCase() };
-    await keepHoldWaitingHere(tx, record, 'holding');
-  }
   const due = [...read.unbuilt, ...inStep.behind];
   if (due.length === 0) return { outcome: 'built', built: 0 };
   const whole = await wholeHistory(tx, states, orgId, verified.members, page);
@@ -118,6 +113,19 @@ export async function buildGrantSummaries(
     const behind = read.kept.get(id);
     if (behind === undefined) await addGrants(tx, states, { orgId, id }, summary, version, change);
     else await bringUpToDate(tx, states, behind, { orgId, id }, { summary, membershipVersion: version, ...change });
+  }
+  const first = inStep.behind[0];
+  // Why: the repair above takes the evidence away once it commits, so its hold is kept waiting in this same transaction
+  // (with-signed-states.ts): if the hold then can't be recorded, the row outlives a restart and sets it. After the
+  // repair, so the chain head's lock is held already, as a hold's own transaction takes it before writing this row; one
+  // row, naming the first, the record this transaction's finding holds: one hold holds the organisation.
+  if (first !== undefined) {
+    const record = {
+      orgId: orgId.toLowerCase(),
+      subjectType: MEMBERSHIP_GRANTS.subject,
+      objectId: first.toLowerCase(),
+    };
+    await keepHoldWaitingHere(tx, record, 'holding');
   }
   return { outcome: 'built', built: due.length };
 }
