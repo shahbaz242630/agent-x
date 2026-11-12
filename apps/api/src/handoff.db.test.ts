@@ -49,8 +49,10 @@ import {
   transactionOf,
 } from '@agentx/core/modules/transactions';
 import {
+  type Anchor,
   type AnchorLog,
   type AnchorStore,
+  type Chain,
   createAnchorLog,
   createMemoryAnchorStore,
   signAnchor,
@@ -2531,6 +2533,101 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
 
     expect(await handedOnce(w, request.id, anchors)).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
     expect(anchorAlarms()).toEqual([]);
+  });
+
+  /**
+   * The anchors as a log that lets shards go holds them (PL-65 PR3): a shard let go says nothing until pinned, which
+   * reads it again; a pinned one is never let go. Each pin, release and read of an anchor noted, with the pins then held.
+   */
+  const shardOver = (anchors: AnchorStore, { away = false, readable = true } = {}) => {
+    const events: string[] = [];
+    const state = { pins: 0, gone: away };
+    return {
+      events,
+      state,
+      anchoring: {
+        anchors: {
+          latest: (chain: Chain) => {
+            events.push(`latest ${String(state.pins)}`);
+            return state.gone ? undefined : anchors.latest(chain);
+          },
+          keep: (anchor: Anchor) => {
+            if (!state.gone) anchors.keep(anchor);
+          },
+        },
+        anchorFirst: noAnchorMade,
+        pin: (): Promise<(() => void) | undefined> => {
+          if (!readable) return Promise.resolve(undefined);
+          state.pins += 1;
+          state.gone = false;
+          events.push(`pin ${String(state.pins)}`);
+          return Promise.resolve(() => {
+            state.pins -= 1;
+            events.push(`release ${String(state.pins)}`);
+          });
+        },
+      } satisfies Anchoring,
+    };
+  };
+
+  it('(PL-65 PR3) the shard pinned from the lane’s first anchor through Tx A, never let go between; all released after', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const shard = shardOver(await anchoredNow(w));
+    const handed = await handedOnce(w, request.id, shard.anchoring);
+    expect(handed).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    // Pinned at the page, Tx A's own pin taken before the page's goes, every anchor read with a pin held.
+    expect(shard.events.slice(0, 3)).toEqual(['pin 1', 'latest 1', 'pin 2']);
+    expect(shard.events.filter((event) => event.startsWith('latest'))).not.toContain('latest 0');
+    const firstPin = shard.events.indexOf('pin 1');
+    const lastRead = shard.events.findLastIndex((event) => event.startsWith('latest'));
+    expect(shard.events.slice(firstPin, lastRead).filter((event) => event === 'release 0')).toEqual([]);
+    expect(shard.state.pins).toBe(0);
+  });
+
+  it('(PL-65 PR3) a run stopped once the page is read, before Tx A: the page’s pin goes with the run', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const shard = shardOver(await anchoredNow(w));
+    const stopping = new AbortController();
+    // Stopped as the page's first anchor is read: its item is never taken.
+    const anchoring = {
+      ...shard.anchoring,
+      anchors: {
+        ...shard.anchoring.anchors,
+        latest: (chain: Chain) => {
+          stopping.abort();
+          return shard.anchoring.anchors.latest(chain);
+        },
+      },
+    } satisfies Anchoring;
+    await handoffOf(w, w.rail, undefined, anchoring).run(stopping.signal);
+    expect(await statusOf(w, request.id)).toBe('APPROVED');
+    expect(shard.events).toEqual(['pin 1', 'latest 1', 'release 0']);
+    expect(shard.state.pins).toBe(0);
+  });
+
+  it('(PL-65 PR3) a shard let go before the run: read again by its pin before Tx A, compared and handed off', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const shard = shardOver(await anchoredNow(w), { away: true });
+    expect(await handedOnce(w, request.id, shard.anchoring)).toMatchObject({ submitted: 1, status: 'HANDED_OFF' });
+    expect(lines('handoff.waiting')).toEqual([]);
+    expect(shard.state.pins).toBe(0);
+  });
+
+  it('(PL-65 PR3) a shard let go that can’t be read again: the payment waits, anchor_pending, no call, no hold', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    const shard = shardOver(await anchoredNow(w), { away: true, readable: false });
+    expect(await handedOnce(w, request.id, shard.anchoring)).toMatchObject({
+      submitted: 0,
+      status: 'APPROVED',
+      hold: { outcome: 'clear' },
+    });
+    expect(lines('handoff.waiting')).toEqual([
+      expect.objectContaining({ requestId: request.id, why: 'anchor_pending' }),
+    ]);
   });
 
   it('compares the anchor only under the head’s lock: asked before integrityHold took it, it throws', async () => {

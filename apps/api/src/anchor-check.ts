@@ -435,8 +435,12 @@ export function createAnchorCheck({
       .map(({ orgId }) => orgId);
   const turns = createTurns(lanes, durable === undefined ? shuffled : oldestFirst, pastCapStart);
 
-  /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
-  const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
+  /**
+   * Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read, and, for a
+   * chain, its shard is held whole (PL-65 PR3: one let go says nothing of the chain, so nothing is compared with it).
+   */
+  const storeUnread = (chain?: Chain): boolean =>
+    durable !== undefined && (durable.state() !== 'read' || (chain !== undefined && !durable.holds(chain)));
 
   /** A chain's integrity alarm on its own line, its reason kept for its hold. */
   const alarmed = (chain: Chain, log: Logger, reason: string, seq?: bigint): Outcome => {
@@ -464,12 +468,16 @@ export function createAnchorCheck({
     if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
     if (last?.seq === report.seq) {
       // Said again in the store now and then, so its time tells a restart this chain has had its turn (anchor-turns.ts).
-      if (durable !== undefined && !storeUnread() && clock.now().getTime() - last.at.getTime() >= reachWithinMs / 2) {
+      if (
+        durable !== undefined &&
+        !storeUnread(chain) &&
+        clock.now().getTime() - last.at.getTime() >= reachWithinMs / 2
+      ) {
         anchors.keep(signAnchor(keys, chain, report, clock.now(), durable.epoch));
       }
       return 'unchanged';
     }
-    if (storeUnread()) return 'unanchored';
+    if (storeUnread(chain)) return 'unanchored';
     const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
     log.info('audit.anchored', {
@@ -589,49 +597,65 @@ export function createAnchorCheck({
   };
 
   const checkOne = async (
-    { chain, verify }: CheckedChain,
+    checked: CheckedChain,
     signal: AbortSignal | undefined,
     alone = false,
     ran: (ms: number) => void = () => undefined,
   ): Promise<Outcome> => {
+    const { chain } = checked;
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
-    const key = keyOf(chain);
+    let release: (() => void) | undefined;
     try {
-      const last = anchors.latest(chain);
-      let report: ChainReport;
-      let cutOff = false;
-      const began = performance.now();
-      try {
-        if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
-        inFlight.add(key);
-        checkBegan.set(key, clock.now().getTime());
-        const checking = Promise.resolve().then(() => verify(last));
-        // Handled here too, so a check that ends after its deadline never goes unhandled.
-        void checking.then(
-          (ending) => {
-            ended(key);
-            if (cutOff) landedLate(chain, log, ending, last, alone);
-          },
-          (error: unknown) => {
-            ended(key);
-            if (cutOff) failedLate(chain, log, error);
-          },
-        );
-        report = await withinDeadline(checking, deadlineMs, signal);
-      } catch (error) {
-        cutOff = true;
-        if (error instanceof Stopped) return 'unchecked';
-        if (error instanceof PastDeadline) ran(performance.now() - began);
-        return failedOutcome(chain, log, error, alone);
-      }
-      ran(performance.now() - began);
-      return compared(chain, log, report, last, alone);
+      // Its shard held while it is compared, read again first if it was let go (PL-65 PR3): one that can't be waits.
+      release = durable === undefined ? () => undefined : await durable.pin(chain);
+      if (release === undefined) return 'unanchored';
+      return await checkHeld(checked, signal, { alone, ran, log });
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
       log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
       return 'unchecked';
+    } finally {
+      release?.();
     }
+  };
+
+  /** One chain's check, its shard held: apart from `checkOne`, which holds it and catches what escapes, to keep each short. */
+  const checkHeld = async (
+    { chain, verify }: CheckedChain,
+    signal: AbortSignal | undefined,
+    { alone, ran, log }: { alone: boolean; ran: (ms: number) => void; log: Logger },
+  ): Promise<Outcome> => {
+    const key = keyOf(chain);
+    const last = anchors.latest(chain);
+    let report: ChainReport;
+    let cutOff = false;
+    const began = performance.now();
+    try {
+      if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
+      inFlight.add(key);
+      checkBegan.set(key, clock.now().getTime());
+      const checking = Promise.resolve().then(() => verify(last));
+      // Handled here too, so a check that ends after its deadline never goes unhandled.
+      void checking.then(
+        (ending) => {
+          ended(key);
+          if (cutOff) landedLate(chain, log, ending, last, alone);
+        },
+        (error: unknown) => {
+          ended(key);
+          if (cutOff) failedLate(chain, log, error);
+        },
+      );
+      report = await withinDeadline(checking, deadlineMs, signal);
+    } catch (error) {
+      cutOff = true;
+      if (error instanceof Stopped) return 'unchecked';
+      if (error instanceof PastDeadline) ran(performance.now() - began);
+      return failedOutcome(chain, log, error, alone);
+    }
+    ran(performance.now() - began);
+    return compared(chain, log, report, last, alone);
   };
 
   /**
@@ -1117,6 +1141,8 @@ export function createAnchorCheck({
             if (signal.aborted) throw new Stopped('the run has ended');
             return tracked(ROTATION, 'the last read of the rotation has not finished', work, signal);
           },
+          // Its shards pinned for each step, where the log lets them go (PL-65 PR3).
+          ...(durable === undefined ? {} : { shards: durable }),
           failed: (orgId, check, { reason, seq }) => rotationFailed(from, orgId, check, reason, seq),
           missed: async (orgId, check, error) => {
             // A database that refuses the read is the alarm, as for any check; anything else a warning, and next run.
