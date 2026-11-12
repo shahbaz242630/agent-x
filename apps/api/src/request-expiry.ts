@@ -7,8 +7,8 @@
 //
 // For each organisation its marks list (4D2e D8: those whose soonest wait is
 // due, `requestExpiryDue`), the candidates are found by their rows
-// (`requestsDueToExpire`, 0074's index: `waits_until` passed, or, made before
-// it, waiting the shortest wait), a page at a time, each page after the last, so requests
+// (`requestsDueToExpire`: `waits_until` passed, one range of 0074's index,
+// soonest first, stopping at the page's size: PM4, 0086), a page at a time, each page after the last, so requests
 // refused on every run (tampered with) can't fill a page and keep the rest
 // waiting; each page kept to those whose sealed wait has run out, read in the
 // page's one transaction (`duePage`), so one not yet due takes no lock and no
@@ -127,8 +127,9 @@ export function createRequestExpiry({
  * `after`, at most `left`: its rows due by now (requestsDueToExpire), read
  * `left` at a time, each kept once the wait its decision sealed has run out
  * (their decisions read in one statement a page), until `left` are kept or
- * the rows run out. Their order is the rows', so the job's next page, after
- * the last kept, reads again only rows not yet due. One whose decision can't
+ * the rows run out. Their order is the rows' (soonest `waits_until` first),
+ * so the job's next page, after the last kept, reads again only rows not yet
+ * due. One whose decision can't
  * be read is kept: expireRequest judges it and fails loudly. A page whose
  * decisions can't be read at all (one past belief, say) keeps every row, so
  * each is judged alone and the rest still expire (S119 review: one bad

@@ -253,7 +253,7 @@ describe('a request waiting for approval: its wait on its row, and its mark', ()
 });
 
 describe("the request expiry's due read", () => {
-  it('the soonest of those waiting; one with no wait on its row by its age and the shortest wait; none for any other', async () => {
+  it('the soonest of those waiting; none for any other', async () => {
     const { w, acting } = await ready();
     const dueOf = () =>
       withTenant(app, w.org, async (tx) => (await requestExpiryDue(tx, w.org).execute())[0]?.due ?? null);
@@ -261,13 +261,12 @@ describe("the request expiry's due read", () => {
     await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
     expect(await dueOf()).toBeNull();
 
-    const newer = await ask(acting, w);
-    expect(await dueOf()).toEqual((await waitOf(newer.id)).waits_until);
+    const longer = await ask(acting, w);
+    expect(await dueOf()).toEqual((await waitOf(longer.id)).waits_until);
 
-    // One made before 0073: its age and 24 hours, sooner than the other's 72, so the due of the two.
-    const older = await ask(acting, w);
-    await waitsUntilMoved(older.id, 'null');
-    expect(await dueOf()).toEqual(new Date((await waitOf(older.id)).created_at.getTime() + 24 * HOUR));
+    await waitChosen(w, 24);
+    const shorter = await ask(acting, w);
+    expect(await dueOf()).toEqual((await waitOf(shorter.id)).waits_until);
   });
 });
 
@@ -296,37 +295,6 @@ describe('the request expiry follows its marks', () => {
     await job.run();
     expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
     expect(await markOf(w.org, 'request_expiry')).toBeUndefined();
-  });
-
-  it('one made before 0073, with no wait on its row, is due by its age and the shortest wait, judged by its seal', async () => {
-    const { w, acting } = await ready();
-    const waiting = await ask(acting, w);
-    await waitsUntilMoved(waiting.id, 'null');
-    const { created_at: created, decided_at: decided } = await waitOf(waiting.id);
-    const job = requestExpiry();
-
-    moveTo(new Date(created.getTime() + 24 * HOUR + MINUTE));
-    await job.run();
-    // A candidate by its row, its sealed 72 hours not yet out: left, and visited each run until they are.
-    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
-    expect((await markOf(w.org, 'request_expiry'))?.due_at).toEqual(clock.now());
-
-    moveTo(new Date(decided.getTime() + 72 * HOUR + MINUTE));
-    await job.run();
-    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
-    expect(await markOf(w.org, 'request_expiry')).toBeUndefined();
-  });
-
-  it('one made before 0073 sealing 24 hours is expired 24 hours on: its age is read against the shortest wait', async () => {
-    const { w, acting } = await ready();
-    await waitChosen(w, 24);
-    const waiting = await ask(acting, w);
-    await waitsUntilMoved(waiting.id, 'null');
-    clock.advanceBy(24 * HOUR + MINUTE);
-
-    await requestExpiry().run();
-
-    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
   });
 
   it('its soonest wait bounds the mark: one of 24 hours after one of 72 brings it forward, and is expired first', async () => {
@@ -374,7 +342,7 @@ describe("the request's wait on its row, held to its seal by the holdings check"
     ['as written', null, 0],
     ['moved sooner', "waits_until - interval '1 day'", 0],
     ['moved later within the minute its clock may step back', "waits_until + interval '30 seconds'", 0],
-    ['taken away, as one made before 0073', 'null', 0],
+    ['taken away: 0086 filled every waiting one, and the expiry reads none without it', 'null', 1],
     [
       'moved later past that minute: it would hide the request from the expiry',
       "waits_until + interval '2 minutes'",
@@ -601,30 +569,6 @@ describe('the hourly look holds both to their rows', () => {
       ['request_expiry', false],
       ['mandate_expiry', false],
     ]);
-  });
-});
-
-describe('the hourly look leaves a mark a visit settled for work still due', () => {
-  it('a request made before 0073 waiting 72 hours: due by its age a day on, visited, then looked at: no miss said', async () => {
-    const { w, acting } = await ready();
-    const waiting = await ask(acting, w);
-    await waitsUntilMoved(waiting.id, 'null');
-    clock.advanceBy(24 * HOUR + MINUTE);
-    await requestExpiry().run();
-    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
-    const settled = await markOf(w.org, 'request_expiry');
-    expect(settled?.due_at).toEqual(clock.now());
-
-    clock.advanceBy(HOUR);
-    await createOrgWorkRediscovery({
-      list: () => Promise.resolve([w.org]),
-      database: app,
-      logger: testLogger(capture),
-      clock,
-    }).run();
-
-    expect(lines('org_work.unmarked')).toEqual([]);
-    expect(await markOf(w.org, 'request_expiry')).toEqual(settled);
   });
 });
 
