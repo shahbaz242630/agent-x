@@ -2671,4 +2671,11 @@ export async function main(
   }
 }
 
-if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
+// Not a top-level await (S187): apps loads migration-state.ts and release.ts when it needs them, and both import this
+// file; a dynamic import waits for this module to finish loading, which a top-level await holds until main ends, so
+// Node found the wait unsettled and exited before anything was sent. Started this way, the module is loaded at once.
+if (import.meta.main) {
+  void main(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
+}

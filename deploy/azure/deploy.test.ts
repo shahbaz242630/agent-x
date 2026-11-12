@@ -114,6 +114,16 @@ const pasted = (...values: readonly string[]): Record<string, string> =>
 /** A PEM block's first line, assembled so no scanner reads the test as holding a key. */
 const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...label].join(' ') + '-----\n';
 
+describe('the entry (S187)', () => {
+  it('starts main without a top-level await, so apps can load migration-state.ts and release.ts, which import it', () => {
+    // A top-level await held this module loading until main ended, and main's own dynamic import of a module importing
+    // this one waited for it: Node exited "unsettled" before apps sent anything (the partner's first apps after #614).
+    const source = readFileSync(path.join(AZURE_DIR, 'deploy.ts'), 'utf8');
+    expect(source).not.toMatch(/^if \(import\.meta\.main\).*\bawait\b/m);
+    expect(source).toMatch(/^ {2}void main\(process\.argv\.slice\(2\)\)\.then\(/m);
+  });
+});
+
 describe('parseArguments', () => {
   it('reads the ways the tool is run', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false, alwaysOn: false });
