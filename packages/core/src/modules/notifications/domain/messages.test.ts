@@ -4,18 +4,28 @@
 // which confirms that reset only, and says so.
 import { describe, expect, it } from 'vitest';
 
-import { amountText, messageFor, type PaidRemittance, type ResetLink, type WaitingRequest } from './messages.ts';
+import {
+  amountText,
+  maskedEmail,
+  messageFor,
+  type PaidRemittance,
+  type ResetLink,
+  type WaitingRequest,
+} from './messages.ts';
 import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
   isAboutAPayment,
+  isAboutAPerson,
   isAboutASpendRequest,
   isToAdminsAndApprovers,
+  isToEveryMember,
   MANDATE_NOTICE_KINDS,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
   type SignInNoticeKind,
   SUPPLIER_NOTICE_KINDS,
+  SUPPORT_RESET_KIND,
 } from './notice.ts';
 
 const NOTICE: ClaimedNotice = {
@@ -621,5 +631,76 @@ describe('a notice’s email (B5-1b)', () => {
     // Nothing of the recipient but where it goes, and nothing of the member but their membership's ID.
     expect(text).not.toContain('admin@example.test');
     expect(text).not.toContain(NOTICE.recipientUserId);
+  });
+});
+
+describe("our team's reset of a person's second factor (0087, OR2; playbook K)", () => {
+  const PERSON = '0199a0f0-0000-7000-8000-00000000c0a1';
+  const support: ClaimedNotice = {
+    ...NOTICE,
+    kind: SUPPORT_RESET_KIND,
+    membershipId: null,
+    role: null,
+    aboutId: PERSON,
+  };
+
+  const SARA = { name: 'Sara Ahmed', email: 'sara.ahmed@company.ae' };
+
+  it('tells a member it is under way, what stops it within 24 hours, and how, naming the person so they can tell who', () => {
+    const { subject, text } = messageFor(support, 'member@example.test', undefined, undefined, undefined, SARA);
+
+    expect(subject).toBe("Agent X: our team is resetting a person's second factor");
+    expect(text).toContain("Agent X's own team was asked to reset the second factor");
+    expect(text).toContain('waits at least 24 hours from this email before anything is removed');
+    expect(text).toContain("by the contact details in your organisation's onboarding records");
+    expect(text).toContain('Nobody from Agent X will ask you for a password or a code.');
+    expect(text).toContain('Person: Sara Ahmed (s***@company.ae)');
+    expect(text).not.toContain('sara.ahmed@');
+    expect(text).not.toContain(PERSON);
+    expect(text).toContain("You're told because you're a member of this organisation.");
+    expect(text).not.toContain('member@example.test');
+  });
+
+  it('shows the masked address alone with no name kept, the name alone with no address, and the ID with neither', () => {
+    const personLine = (person?: { name: string | undefined; email: string | undefined }) =>
+      messageFor(support, 'm@example.test', undefined, undefined, undefined, person)
+        .text.split(String.fromCharCode(10))
+        .find((line) => line.startsWith('Person: '));
+
+    expect(personLine({ name: undefined, email: SARA.email })).toBe('Person: s***@company.ae');
+    expect(personLine({ name: SARA.name, email: undefined })).toBe('Person: Sara Ahmed');
+    expect(personLine({ name: undefined, email: undefined })).toBe(`Person: ${PERSON}`);
+    expect(personLine()).toBe(`Person: ${PERSON}`);
+  });
+
+  it.each([
+    ['sara.ahmed@company.ae', 's***@company.ae'],
+    ['a@company.ae', 'a***@company.ae'],
+    ['sara+payroll@company.ae', 's***@company.ae'],
+    ['odd@name@company.ae', 'o***@company.ae'],
+    ['no-at-sign', '***'],
+    ['@company.ae', '***'],
+  ])('masks %s as %s: the first character, ***, then the whole domain', (email, masked) => {
+    expect(maskedEmail(email)).toBe(masked);
+  });
+
+  it('names a person on our team’s reset alone: any other notice given one is a bug', () => {
+    expect(() => messageFor(NOTICE, 'a@example.test', undefined, undefined, undefined, SARA)).toThrow(RangeError);
+  });
+
+  it('tells the person it is their own login, and a contact why it is told', () => {
+    expect(messageFor({ ...support, recipientUserId: PERSON }, 'p@example.test').text).toContain(
+      "You're told because this is your own login.",
+    );
+    expect(
+      messageFor({ ...support, recipientUserId: null, recipientContactId: CONTACT }, 'c@example.test').text,
+    ).toContain("You're told because this address is one of the organisation's registered contacts.");
+  });
+
+  it('goes to every member and the counting contacts, as a notice about a supplier does, and is about a person', () => {
+    expect(isToEveryMember(SUPPORT_RESET_KIND)).toBe(true);
+    expect(isAboutAPerson(SUPPORT_RESET_KIND)).toBe(true);
+    expect(SUPPLIER_NOTICE_KINDS.every(isToEveryMember)).toBe(true);
+    expect(isToEveryMember('factor_reset_asked')).toBe(false);
   });
 });

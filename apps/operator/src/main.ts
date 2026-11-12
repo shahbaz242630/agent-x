@@ -22,7 +22,10 @@
 // a file, read-only on both sides, checked against the anchors' store, the
 // plan and its rows to the evidence store alone. Or move a chain's anchor on
 // after a sanctioned change to it (4D2e E11, chain-rebase.ts): only from a
-// file, read-only on the database, one signed line to the anchors' store.
+// file, read-only on the database, one signed line to the anchors' store. Or
+// tell an organisation's members and counting contacts that our team is
+// resetting a person's second factor (OR2, playbook K, factor-reset-notice.ts):
+// only from a file, its reference never logged.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -95,6 +98,7 @@ import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
+import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
@@ -104,6 +108,9 @@ import {
   CHAIN_REBASE_USAGE,
   CHAIN_RECOVERY_USAGE,
   DISCARD_FORK,
+  FACTOR_RESET_NOTICE,
+  FACTOR_RESET_NOTICE_USAGE,
+  factorResetNoticeOf,
   FIRST_ADMIN_USAGE,
   type HandoffCommand,
   handoffAskedOf,
@@ -123,7 +130,12 @@ import { checkRestoredCopy } from './restore-check.ts';
 import { planChainRecovery, planDigest, planFile } from './chain-recovery.ts';
 
 /** Every table the commands reach. */
-type CommandTables = FirstAdminTables & AuditExportTables & ActivityExportTables & HandoffPauseTables & RebaseTables;
+type CommandTables = FirstAdminTables &
+  AuditExportTables &
+  ActivityExportTables &
+  HandoffPauseTables &
+  RebaseTables &
+  FactorResetNoticeTables;
 
 const SERVICE = 'operator';
 
@@ -212,6 +224,16 @@ type Request =
       readonly id: string;
     }
   | HandoffRequest
+  | {
+      readonly command: typeof FACTOR_RESET_NOTICE;
+      readonly orgId: string;
+      /** The person whose second factor our team resets. */
+      readonly userId: string;
+      /** The incident's reference, sealed on both chains; never logged, nor repeated in a problem. */
+      readonly reason: string;
+      /** Its record's ID on the organisation's chain. */
+      readonly id: string;
+    }
   | { readonly command: typeof RESTORE_CHECK }
   | {
       readonly command: typeof CHAIN_RECOVERY;
@@ -321,6 +343,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['activity-export', (words, fromFile) => caseExportAsked('activity-export', ACTIVITY_EXPORT_USAGE, words, fromFile)],
   ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
+  [FACTOR_RESET_NOTICE, factorResetNoticeAsked],
   [RESTORE_CHECK, restoreCheckAsked],
   [CHAIN_RECOVERY, chainRecoveryAsked],
   [CHAIN_REBASE, chainRebaseAsked],
@@ -498,6 +521,22 @@ function handoffAsked(command: HandoffCommand, words: readonly string[], fromFil
   return 'problems' in asked ? asked : { command, ...asked };
 }
 
+/** A reset's notice a request file asks for (OR2, playbook K), or the problems; never typed. */
+function factorResetNoticeAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+  const [, orgFlag, orgId, userFlag, userId, reasonFlag, reason, idFlag, id, ...more] = words;
+  if (!fromFile) return problem(`${FACTOR_RESET_NOTICE} runs only from a request file: ${FACTOR_RESET_NOTICE_USAGE}`);
+  const shaped =
+    orgFlag === '--org' &&
+    userFlag === '--user' &&
+    reasonFlag === '--reason' &&
+    idFlag === '--id' &&
+    id !== undefined &&
+    more.length === 0;
+  if (!shaped) return problem(`the request file holds ${FACTOR_RESET_NOTICE_USAGE} as a JSON list, and nothing else`);
+  const asked = factorResetNoticeOf({ orgId, userId, reason, id });
+  return 'problems' in asked ? asked : { command: FACTOR_RESET_NOTICE, ...asked };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -578,6 +617,7 @@ async function run(
   if (request.command === 'handoff-pause' || request.command === 'handoff-resume') {
     return handoff(config, keys, request, database, logger);
   }
+  if (request.command === FACTOR_RESET_NOTICE) return factorResetNotice(config, keys, request, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -691,6 +731,27 @@ async function handoff(
         release: config.release,
         run: config.run,
       },
+    );
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** Tells an organisation our team is resetting a person's second factor (OR2, playbook K): the exit code. */
+async function factorResetNotice(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: typeof FACTOR_RESET_NOTICE }>,
+  database: Database<FactorResetNoticeTables>,
+  logger: Logger,
+): Promise<number> {
+  try {
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
+    const { orgId, userId, reason, id } = request;
+    return await noticeFactorReset(
+      database,
+      { keys, ids: uuidV7Ids, logger },
+      { orgId, userId, reason, noticeId: id, release: config.release, run: config.run },
     );
   } finally {
     await database.destroy();

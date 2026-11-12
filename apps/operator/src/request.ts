@@ -291,3 +291,53 @@ export function handoffAskedOf({
 /** The request to pause or resume every hand-off, as its file holds it. */
 export const handoffRequest = (command: HandoffCommand, reason: string, id: string): string =>
   JSON.stringify([command, '--reason', reason, '--id', id]);
+
+/** The command word that tells an organisation our team is resetting a person's second factor (OR2; playbook K). */
+export const FACTOR_RESET_NOTICE = 'factor-reset-notice';
+
+/** What a request file holds to tell an organisation of a reset under way: only ever a file. */
+export const FACTOR_RESET_NOTICE_USAGE = `${FACTOR_RESET_NOTICE} --org <organisation ID> --user <the person's user ID> --reason <incident reference> --id <new ID>`;
+
+/** A reset's notice asked for: the organisation, the person, the incident's reference and the record's ID. */
+export interface FactorResetNoticeAsked {
+  readonly orgId: string;
+  readonly userId: string;
+  /** The incident's reference (a case reference's shape): sealed on both chains, never logged. */
+  readonly reason: string;
+  /** Its record's ID on the organisation's chain, made where the request was written. */
+  readonly id: string;
+}
+
+/** A user's ID as the product keeps it (identity.users): a UUID, in lower case. */
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The reset's notice these words ask for, or the problems, by the rules both
+ * sides hold it to: the operator's command reading its file (main.ts), and
+ * deploy/azure/operator.ts before it writes one. The reference is repeated in
+ * no problem.
+ */
+export function factorResetNoticeOf({
+  orgId,
+  userId,
+  reason,
+  id,
+}: {
+  readonly orgId: string | undefined;
+  readonly userId: string | undefined;
+  readonly reason: string | undefined;
+  readonly id: string;
+}): FactorResetNoticeAsked | { readonly problems: readonly string[] } {
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...(USER_ID.test(String(userId)) ? [] : ["the person's user ID must be a UUID, in lower case"]),
+    ...(reason !== undefined && CASE_REFERENCE.test(reason) ? [] : [CASE_REFERENCE_PROBLEM]),
+    ...(UUID_V7.test(id) ? [] : ["the notice's ID must be a UUIDv7, in lower case"]),
+  ];
+  if (problems.length > 0 || orgId === undefined || userId === undefined || reason === undefined) return { problems };
+  return { orgId, userId, reason, id };
+}
+
+/** The request to tell an organisation of a reset under way, as its file holds it. */
+export const factorResetNoticeRequest = ({ orgId, userId, reason, id }: FactorResetNoticeAsked): string =>
+  JSON.stringify([FACTOR_RESET_NOTICE, '--org', orgId, '--user', userId, '--reason', reason, '--id', id]);

@@ -14,6 +14,11 @@
 // outside the organisation, carries the payment's own facts, read at send
 // time: who paid, the invoice number, the bank reference and the amount
 // (partner decisions 8 and 34a). Nothing else, and no ID of ours.
+//
+// And one more (0087, OR2; partner S186): our team's reset of a person's
+// second factor names the person by the name Agent X keeps and their address
+// masked (s***@company.ae), read at send time, so every member can tell who
+// it is; never logged, and never on the audit chains, which keep the ID.
 import {
   type ClaimedNotice,
   isAboutAMandate,
@@ -28,6 +33,7 @@ import {
   type NoticeKind,
   REMITTANCE_KIND,
   RESET_LINK_KIND,
+  SUPPORT_RESET_KIND,
 } from './notice.ts';
 
 /** An email as the notifier sends it. */
@@ -67,6 +73,37 @@ export interface WaitingRequest {
   readonly consoleUrl: string;
   /** When it expires, unless a person decides first: its decision's time and its wait (E6, partner S119). */
   readonly expiresAt: Date;
+}
+
+/**
+ * The person our team's reset is about (0087, OR2; partner S186), as the
+ * sender reads it at send time from what Agent X keeps of them (0049): so
+ * every member can tell who it is. Either may be missing; the email shows the
+ * name and the address masked (maskedEmail), never the address whole.
+ */
+export interface ResetPerson {
+  readonly name: string | undefined;
+  readonly email: string | undefined;
+}
+
+/**
+ * An address as a reset's email shows it: the first character of the part
+ * before the @, then ***, then the whole domain (s***@company.ae). A
+ * plus-address's tag goes with the rest; an address with no @ is all masked.
+ */
+export function maskedEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at <= 0) return '***';
+  return `${email.slice(0, 1)}***${email.slice(at)}`;
+}
+
+/** The person line of our team's reset: their name and masked address, either alone, or their ID when Agent X keeps neither. */
+function personLine(id: string, person: ResetPerson | undefined): string {
+  const masked = person?.email === undefined ? undefined : maskedEmail(person.email);
+  const name = person?.name;
+  if (name !== undefined && masked !== undefined) return `Person: ${name} (${masked})`;
+  if (name !== undefined || masked !== undefined) return `Person: ${String(name ?? masked)}`;
+  return `Person: ${id}`;
 }
 
 /**
@@ -234,6 +271,15 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     firstLine: () =>
       `The ${SECOND_FACTOR} of a person in one of your Agent X organisations was removed, as a reset a registered contact confirmed asked. They sign in with their password, and set up a new one.`,
     check: SIGN_IN_CHECK,
+  },
+  // About a person (0087, OR2; playbook K): Agent X's own team resetting their second factor, as no admin can ask it, to
+  // every member and the contacts that count now. The team waits 24 hours, and anyone's word stops it.
+  factor_reset_by_support: {
+    subject: () => "Agent X: our team is resetting a person's second factor",
+    firstLine: () =>
+      `Agent X's own team was asked to reset the ${SECOND_FACTOR} of a person in one of your Agent X organisations, who says they lost theirs. The organisation has no other admin who could ask for it in Agent X, so our team does it, and waits at least 24 hours from this email before anything is removed.`,
+    check:
+      "If you didn't expect this, or think the request isn't real, tell us within 24 hours, by the contact details in your organisation's onboarding records (never by replying to anyone who contacts you about it), and the reset stops. Registered contacts: our team will ask you to confirm it, by writing to this address and calling the organisation's number in those records. Nobody from Agent X will ask you for a password or a code.",
   },
   // About a supplier (0033), sent by E2-2 and E3-2.
   supplier_reactivated: {
@@ -576,6 +622,7 @@ function whyTold(notice: ClaimedNotice): string {
     return "You're told because this is your own login.";
   }
   if (notice.kind === 'agent_handed_to_you') return "You're told because you're the agent's new owner.";
+  if (notice.kind === SUPPORT_RESET_KIND) return "You're told because you're a member of this organisation.";
   if (isToAdminsAndApprovers(notice.kind))
     return "You're told because you're an admin or approver of this organisation.";
   return "You're told because you're an admin of this organisation.";
@@ -592,7 +639,11 @@ export function messageFor(
   link?: ResetLink,
   request?: WaitingRequest,
   paid?: PaidRemittance,
+  person?: ResetPerson,
 ): NoticeMessage {
+  if (person !== undefined && notice.kind !== SUPPORT_RESET_KIND) {
+    throw new RangeError("only our team's reset names its person");
+  }
   const remittance = notice.kind === REMITTANCE_KIND;
   if (remittance !== (paid !== undefined)) {
     throw new RangeError('a remittance, and only it, is sent with the payment it tells of');
@@ -624,7 +675,7 @@ export function messageFor(
       wording.check,
       '',
       `Organisation: ${notice.orgId}`,
-      aboutLine(notice),
+      notice.kind === SUPPORT_RESET_KIND ? personLine(notice.aboutId ?? '', person) : aboutLine(notice),
       '',
       `${why} This email can't approve or change anything.`,
     ].join(NEWLINE),

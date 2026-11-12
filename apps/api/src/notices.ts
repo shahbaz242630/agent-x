@@ -15,6 +15,7 @@ import {
   type NoticeSender,
   type NotificationsTables,
   type Outbox,
+  type People,
   type Remittances,
   type ResetLinks,
   type WaitingRequests,
@@ -82,6 +83,7 @@ export function noticeSenderFrom({
   resetLink,
   waitingRequests,
   remittances,
+  personOf,
   fetch,
   logger,
 }: {
@@ -101,6 +103,8 @@ export function noticeSenderFrom({
   readonly waitingRequests: WaitingRequests;
   /** A paid supplier's email, read as it is sent (Phase 4 C2b). */
   readonly remittances: Remittances;
+  /** What Agent X keeps of a person, their name and address (identity's keptPeopleOf, 0049): our team's reset shows them (0087). */
+  readonly personOf: People['personOf'];
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): NoticeSender | undefined {
@@ -125,6 +129,7 @@ export function noticeSenderFrom({
     resetLinks: { linkFor: resetLink },
     waitingRequests,
     remittances,
+    people: { personOf },
     audience: audienceFrom(listMembers, listContacts, listCountingContacts),
     logger,
   });

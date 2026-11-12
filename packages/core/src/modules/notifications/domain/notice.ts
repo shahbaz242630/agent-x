@@ -40,6 +40,16 @@ const RESET_NOTICE_KINDS = [
   'factor_reset_completed',
 ] as const;
 
+/**
+ * The kind that tells every member of an organisation, and its registered
+ * contacts that count now, that Agent X's own team is resetting a person's
+ * second factor (0087, OR2; playbook K): the organisation's only admin lost
+ * theirs, or the person is in more than one organisation, so no admin can ask
+ * the product's own reset. `aboutId` the person's user ID. Any of them may stop
+ * it within the 24 hours the team waits.
+ */
+export const SUPPORT_RESET_KIND = 'factor_reset_by_support';
+
 /** The kinds about a supplier, `aboutId` its ID (0033): sent by E2-2 and E3-2; its remittance email changed by Phase 4 C2a (0061). */
 export const SUPPLIER_NOTICE_KINDS = [
   'supplier_reactivated',
@@ -156,6 +166,7 @@ export const NOTICE_KINDS = [
   MARKED_FAILED_KIND,
   ...PAYMENT_ALERT_KINDS,
   ...MARK_PROPOSAL_KINDS,
+  SUPPORT_RESET_KIND,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -167,7 +178,17 @@ export const isNoticeRole = (value: unknown): value is NoticeRole => NOTICE_ROLE
 
 /** Whether a kind is about a person, `aboutId` their user ID: their sign-in (B6-2a), or a reset of their second factor (B6-3b). */
 export const isAboutAPerson = (kind: NoticeKind): boolean =>
-  SIGN_IN_NOTICE_KINDS.some((each) => each === kind) || RESET_NOTICE_KINDS.some((each) => each === kind);
+  SIGN_IN_NOTICE_KINDS.some((each) => each === kind) ||
+  RESET_NOTICE_KINDS.some((each) => each === kind) ||
+  kind === SUPPORT_RESET_KIND;
+
+/**
+ * Whether a kind is told to every active member, whatever their role, and,
+ * written to the contacts, to those that count now: one about a supplier
+ * (E2-2b, ADR-012 §1), or our team's reset of a person's second factor (0087).
+ */
+export const isToEveryMember = (kind: NoticeKind): boolean =>
+  SUPPLIER_NOTICE_KINDS.some((each) => each === kind) || kind === SUPPORT_RESET_KIND;
 
 /** Whether a kind is about a supplier, `aboutId` its ID (0033). */
 export const isAboutASupplier = (kind: NoticeKind): boolean => SUPPLIER_NOTICE_KINDS.some((each) => each === kind);

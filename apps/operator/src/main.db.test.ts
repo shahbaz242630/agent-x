@@ -46,6 +46,7 @@ import {
   auditExportRequest,
   chainRebaseRequest,
   chainRecoveryRequest,
+  factorResetNoticeRequest,
   firstAdminRequest,
   handoffRequest,
   restoreCheckRequest,
@@ -765,6 +766,28 @@ describe(`Phase 4 B1 the operator resumes every hand-off, as the job runs it (Po
       .as('owner')
       .query<{ details: string }>('select details from platform_controls.audit_events where id = $1', [id]);
     expect(JSON.parse(String(event?.details))).toEqual({ reason: REASON, release: 'r-operator', run: null });
+    expect(text).not.toContain(REASON);
+  });
+});
+
+describe(`OR2 our team's reset notice, as the job runs it (Postgres ${server.version})`, () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-reset-notice-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const REASON = 'INC-2026/0099';
+
+  it('checks the schema first, then refuses an organisation it cannot find, recording nothing, never logging the reference', async () => {
+    const id = uuidV7Ids.next();
+    const asked = path.join(folder, `notice-${id}`);
+    const request = { orgId: uuidV7Ids.next(), userId: '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f', reason: REASON, id };
+    writeFileSync(asked, factorResetNoticeRequest(request));
+
+    const { code, events, line, text } = await run(['--request', asked]);
+
+    expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.refused']);
+    expect(code).toBe(1);
+    expect(line('operator.refused')).toMatchObject({ noticeId: id, problems: ['no organisation has this ID'] });
     expect(text).not.toContain(REASON);
   });
 });

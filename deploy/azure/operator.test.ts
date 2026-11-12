@@ -13,6 +13,7 @@ import {
   activityExportRequest,
   auditExportRequest,
   createOrganizationRequest,
+  factorResetNoticeRequest,
   handoffRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
@@ -32,6 +33,7 @@ import {
   chainRebase,
   chainRestore,
   createOrganization,
+  factorResetNotice,
   handoffChange,
   type HandoffArguments,
   inviteFirstAdmin,
@@ -41,6 +43,7 @@ import {
   parseArguments,
   parseAuditExport,
   parseFirstAdmin,
+  parseFactorResetNotice,
   parseHandoff,
   parseRebase,
   parseRecoveryPlan,
@@ -246,7 +249,11 @@ type Ending =
   | 'state-restore-write'
   | 'state-restore-unverified'
   | 'state-restore-unknown'
-  | 'state-restore-done-before';
+  | 'state-restore-done-before'
+  | 'notified'
+  | 'notified-before'
+  | 'notice-refused'
+  | 'notified-other';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
@@ -604,6 +611,26 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     TERMINATED,
   ],
   'state-restore-done-before': (id) => [said({ event: 'operator.done_before', restoreId: id }), TERMINATED],
+  notified: (id) => [
+    said({ event: 'operator.factor_reset_notified', noticeId: id, recordedBefore: false, elsewhere: [OTHER_ID] }),
+    TERMINATED,
+  ],
+  'notified-before': (id) => [
+    said({ event: 'operator.factor_reset_notified', noticeId: id, recordedBefore: true, elsewhere: [] }),
+    TERMINATED,
+  ],
+  'notice-refused': (id) => [
+    said({
+      event: 'operator.refused',
+      noticeId: id,
+      problems: ['the directory lists no such person in this organisation'],
+    }),
+    TERMINATED,
+  ],
+  'notified-other': () => [
+    said({ event: 'operator.factor_reset_notified', noticeId: OTHER_ID, recordedBefore: false, elsewhere: [] }),
+    TERMINATED,
+  ],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -638,6 +665,9 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'restored-other',
   'state-planned',
   'states-restored',
+  'notified',
+  'notified-before',
+  'notified-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -897,6 +927,7 @@ class FakeAzure implements Az {
         'chain-restore': 8,
         'state-restore': 8,
         'chain-rebase': 12,
+        'factor-reset-notice': 8,
       }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
@@ -2117,6 +2148,134 @@ describe('a pause or resume of every hand-off to the bank (Phase 4 B1, SEC-OPS-0
       ),
     ).resolves.toBe(2);
     expect(lines).toEqual([`say handoff-pause --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`]);
+  });
+});
+
+describe("OR2 our team's reset notice, on the operator's job (playbook K)", () => {
+  /** A reference no test line repeats in a problem. */
+  const REASON = 'INC-2026/0099';
+  const ORG = '0199a1b2-c3d4-7e5f-8a6b-0000000000b1';
+  const USER = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
+  const asked = ['factor-reset-notice', '--org', ORG, '--user', USER, '--reason', REASON];
+  const shape =
+    'say factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>], and nothing else';
+
+  async function noticeRun(script: Script = {}, id?: string) {
+    const az = new FakeAzure({ ending: 'notified', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await factorResetNotice(
+      { orgId: ORG, userId: USER, reason: REASON, id },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status, az, said: lines, id: String(words[8]) };
+  }
+
+  it('reads the organisation, the person, the reference, and an earlier ID when one is given', () => {
+    expect(parseFactorResetNotice(asked)).toEqual({ orgId: ORG, userId: USER, reason: REASON, id: undefined });
+    expect(parseFactorResetNotice([...asked, '--id', EARLIER_ID])).toMatchObject({ id: EARLIER_ID });
+  });
+
+  it("refuses what the operator's command would, before writing anything, never repeating the reference", () => {
+    const refused = (argv: readonly string[]): string => {
+      try {
+        parseFactorResetNotice(argv);
+      } catch (error) {
+        expect(error).toBeInstanceOf(UsageError);
+        return (error as Error).message;
+      }
+      return 'read';
+    };
+    for (const argv of [
+      asked.slice(0, 5),
+      asked.with(3, '--person'),
+      [...asked, '--id'],
+      [...asked, '--id', EARLIER_ID, 'x'],
+    ]) {
+      expect(refused(argv)).toBe(shape);
+    }
+    expect(refused([...asked, '--id', 'not-an-id'])).toBe(
+      '--id takes the ID an earlier run gave: a UUIDv7, in lower case',
+    );
+    const badReason = 'a note with spaces';
+    const said = refused(asked.with(6, badReason).with(4, USER.toUpperCase()));
+    expect(said).toBe(
+      "the person's user ID must be a UUID, in lower case; the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit",
+    );
+    expect(said).not.toContain(badReason);
+  });
+
+  it("writes the operator's request, runs it, puts [] back, says who is told and names the other organisations", async () => {
+    const done = await noticeRun();
+
+    expect(done.status).toBe(0);
+    expect(done.id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(
+      factorResetNoticeRequest({ orgId: ORG, userId: USER, reason: REASON, id: done.id }),
+    );
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.slice(-2)).toEqual([
+      `Recorded (${done.id}): every member of the organisation, and its registered contacts that count now, are being emailed at the addresses Agent X holds. Wait 24 hours from now before removing anything.`,
+      `The directory also lists the person in 1 other organisation(s): ${OTHER_ID}. Tell each with a request of its own, and wait for each one's contacts too.`,
+    ]);
+  });
+
+  it('says a retry recorded and sent nothing again', async () => {
+    const done = await noticeRun({ ending: 'notified-before' }, EARLIER_ID);
+
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(
+      `An earlier run of this request recorded it (${EARLIER_ID}) and wrote its notices: nothing was recorded or sent again.`,
+    );
+  });
+
+  it('says a refusal and a run that found no request, each recording nothing', async () => {
+    const refused = await noticeRun({ ending: 'notice-refused', states: ['Failed'] });
+    expect(refused.status).toBe(1);
+    expect(refused.said.at(-1)).toBe(
+      "The operator's command refused it, and nothing was recorded: the directory lists no such person in this organisation.",
+    );
+    const empty = await noticeRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${empty.id}.`,
+    );
+  });
+
+  it('never takes a line about another notice for this one, nor a run whose lines say nothing', async () => {
+    for (const ending of ['notified-other', 'silent'] as const) {
+      const done = await noticeRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        `The run succeeded, but its lines don't show the notice ${done.id} recorded: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${done.id}: it records and tells nothing twice.`,
+      );
+    }
+    const stopped = await noticeRun({ ending: 'failed', states: ['Failed'] });
+    expect(stopped.status).toBe(1);
+    expect(stopped.said.at(-1)).toBe(
+      `The notice may not have been recorded: read the lines above. If they leave it unclear: Run the same command again with --id ${stopped.id}: it records and tells nothing twice.`,
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['factor-reset-notice', '--org', ORG],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`${shape}${String.fromCharCode(10)}${USAGE}`]);
   });
 });
 

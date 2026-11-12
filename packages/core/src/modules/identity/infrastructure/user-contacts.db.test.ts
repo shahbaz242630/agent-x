@@ -9,7 +9,7 @@ import { createKeyProvider } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import type { IdentityTables } from './tables.ts';
-import { keepUserContact, keptPeopleOf } from './user-contacts.ts';
+import { keepUserContact, keptPeopleOf, keptPersonReader } from './user-contacts.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -186,5 +186,10 @@ describe('identity.user_contacts', () => {
       name: 'Lina',
       email: 'lina@example.test',
     });
+
+    // One person, as the notice sender reads them (OR2): by an ID in any case, or nothing for one Agent X doesn't know.
+    const personOf = keptPersonReader(app, keys);
+    expect(await personOf(nobody.toUpperCase())).toEqual({ name: 'Lina', email: 'lina@example.test' });
+    expect(await personOf('0199a0f0-0000-7000-8000-00000000dead')).toBeUndefined();
   });
 });
