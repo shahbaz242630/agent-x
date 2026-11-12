@@ -242,6 +242,36 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
     }
   });
 
+  it('is a finding when the job runs a build older than one its runs ran: rolled back', async () => {
+    const LATER_BUILD = 'e'.repeat(40);
+    const ranLater = {
+      ...MIGRATE,
+      env: MIGRATE.env.map((entry) => (entry.name === 'AGENTX_RELEASE' ? { ...entry, value: LATER_BUILD } : entry)),
+    };
+    const rolled: World = {
+      jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
+    };
+    const done = await run(rolled, [], heldFor(rolled));
+    expect(done.status).toBe(1);
+    expect(done.lines).toContain(
+      `${FINDING_START}it names its build ${BUILD}, older than ${LATER_BUILD}, which a run of it ran: rolled back`,
+    );
+    // A run of an older build, or of its own, is no roll-back.
+    const older: World = {
+      jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
+    };
+    const notLater = await run(older, [], {
+      ...heldFor(older),
+      history: {
+        ...heldFor(older).history,
+        isAncestor: (one, other) => other === 'd'.repeat(40) || (one === LATER_BUILD && other === BUILD),
+      },
+    });
+    expect(notLater.status).toBe(0);
+  });
+
   it('is a finding when the job names a build off main', async () => {
     const offMain = await run(world(MIGRATE), [], heldFor(world(MIGRATE), { inHistory: false }));
     expect(offMain.status).toBe(1);

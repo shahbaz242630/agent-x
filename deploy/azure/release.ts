@@ -91,7 +91,7 @@ import {
   templatesIn,
   workloadDifferences,
 } from './drift.ts';
-import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
+import { atCommit, type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
@@ -246,7 +246,7 @@ export const ORDER: readonly Workload[] = ['migrate', 'api'];
  * What a folder's apps.bicep gives each release workload (its identity and
  * properties, as the snapshot has them), in the subscription.
  */
-export type Templates = (subscription: string) => ReadonlyMap<Workload, unknown>;
+export type Templates = (subscription: string, commit: string) => ReadonlyMap<Workload, unknown>;
 
 /** The pinned Bicep's snapshot of a deploy/azure folder's apps deployment (drift.ts): this checkout's unless given. */
 export function templatesFrom(subscription: string, source?: string): ReadonlyMap<Workload, unknown> {
@@ -258,8 +258,15 @@ export function templatesFrom(subscription: string, source?: string): ReadonlyMa
   return new Map(ORDER.map((workload, index) => [workload, workloads[index]] as const));
 }
 
-/** The real ones: this checkout's. */
-export const realTemplates: Templates = (subscription) => templatesFrom(subscription);
+/**
+ * The real ones, of a commit's apps.bicep: this checkout's when it is a clean checkout of the commit, else the
+ * commit's own, read in a temporary worktree (git.ts atCommit).
+ */
+export const realTemplates: Templates = (subscription, commit) => {
+  const here = realCheckout();
+  if (here.clean && here.head === commit) return templatesFrom(subscription);
+  return atCommit(commit, 'deploy/azure', (dir) => templatesFrom(subscription, dir));
+};
 
 /** The setting that names the build on every log line. */
 const RELEASE_SETTING = 'AGENTX_RELEASE';
@@ -717,12 +724,15 @@ async function readersAt(commit: string, steps: CheckSteps): Promise<Readers | u
 const UNCHECKED_NEXT =
   'so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).';
 
+/** The decisions held to what was deployed (AZ2c): a release about to write, and a re-run that has nothing to do. */
+const HELD: ReadonlySet<Decision['kind']> = new Set(['release', 'current', 'past']);
+
 /**
- * AZ2c: the release decided, each workload held to what this commit's apps.bicep gives it beyond its image and build,
- * before anything is written; the decision unchanged when both are as deployed. The folder must be a clean checkout of
- * the commit (CI's is), since its templates are what is compared. A release only ever reaches here with no file apps
- * reads changed since what staging runs (decide), so these templates are also the ones staging was deployed from.
- * Nothing read is printed but names: the subscription is masked out of Bicep's own words.
+ * AZ2c: before anything is written, and on a re-run with nothing to do (read-only), each workload held to what the
+ * apps.bicep of the build it runs gives it beyond its image and build, its build to its image's signature and to what
+ * was deployed before it (rolledBack), and the shell's values to their pins; the decision unchanged when all hold.
+ * The folder must be a clean checkout of the commit (CI's is). Nothing read is printed but names: the subscription is
+ * masked out of Bicep's own words.
  */
 function heldToTemplates(
   decision: Decision,
@@ -731,32 +741,113 @@ function heldToTemplates(
   reads: ReadonlyMap<Workload, Read>,
   steps: CheckSteps,
 ): Decision {
-  if (decision.kind !== 'release') return decision;
+  if (!HELD.has(decision.kind)) return decision;
   const here = steps.folder.checkout();
   if (here.head !== commit || !here.clean) {
     throw new Error(
-      `This folder is at ${here.head}${here.clean ? '' : ' with changes'}, not ${commit}, so what the commit's apps.bicep gives the API and the migration job can't be read, ${UNCHECKED_NEXT}`,
+      `This folder is at ${here.head}${here.clean ? '' : ' with changes'}, not ${commit}, so what apps.bicep gives the API and the migration job can't be read, ${UNCHECKED_NEXT}`,
     );
   }
   const bound: Bound = new Map();
   let reasons: string[];
   try {
-    const templates = steps.folder.templates(subscription);
+    // Each build's own templates, read once each: a release's builds are staging's (decide holds them to this
+    // commit's for what apps reads); a re-run's may be later than this commit.
+    const byBuild = new Map<string, ReadonlyMap<Workload, unknown>>();
     reasons = ORDER.flatMap((workload) => {
       const read = reads.get(workload);
       if (read === undefined) throw new Error(`nothing was read for ${workload}`);
+      const build = read.running.release;
+      const templates = byBuild.get(build) ?? steps.folder.templates(subscription, build);
+      byBuild.set(build, templates);
       return workloadAgainst(workload, templates.get(workload), read, bound).map((line) => `${workload}: ${line}`);
     });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     const why = error.message.replaceAll(subscription, 'the subscription');
     throw new Error(
-      `What ${commit}'s apps.bicep gives the API and the migration job couldn't be read (${why}), ${UNCHECKED_NEXT}`,
-      { cause: error },
+      `What apps.bicep gives the API and the migration job couldn't be read (${why}), ${UNCHECKED_NEXT}`,
+      {
+        cause: error,
+      },
     );
   }
-  reasons.push(...unsignedBuilds(reads, steps.verify), ...unpinned(bound, steps.pins, steps.say));
+  reasons.push(
+    ...unsignedBuilds(reads, steps.verify),
+    ...rolledBack(reads, recordedBuilds(steps.az, subscription), steps.history),
+    ...unpinned(bound, steps.pins, steps.say),
+  );
   return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
+}
+
+/** The builds deploys have left on record: each of the API's revisions', and each of migrate's runs'. */
+interface OnRecord {
+  readonly api: readonly string[];
+  readonly migrate: readonly string[];
+}
+
+/** Every item of a list Azure gives, page by page; only a link back to Resource Manager is followed. */
+function listedAll(az: Az, url: string, what: string): unknown[] {
+  const items: unknown[] = [];
+  for (let next: string | undefined = url; next !== undefined;) {
+    const page = get(az, next, what);
+    if (!Array.isArray(page.value)) throw new Error(`Azure's list of ${what} wasn't a list.`);
+    items.push(...(page.value as unknown[]));
+    next = typeof page.nextLink === 'string' && page.nextLink.startsWith(ARM) ? page.nextLink : undefined;
+  }
+  return items;
+}
+
+/** The build a revision or run names in its one container's AGENTX_RELEASE, if it names a commit. */
+function buildIn(item: unknown): string[] {
+  const containers = record(record(record(item).properties).template).containers;
+  const env = Array.isArray(containers) ? record(containers[0]).env : undefined;
+  const found = (Array.isArray(env) ? env : []).map(record).find((setting) => setting.name === RELEASE_SETTING);
+  return typeof found?.value === 'string' && COMMIT.test(found.value) ? [found.value] : [];
+}
+
+/**
+ * What deploys have left on record (AZ2c): the builds of the API's revisions (Azure keeps each, a deploy can't take
+ * one back) and of migrate's runs (its last 100; a flood of them is the watch's finding). Read, never written.
+ */
+function recordedBuilds(az: Az, subscription: string): OnRecord {
+  const revisions = workloadUrl(subscription, 'api').replace('?api-version=', '/revisions?api-version=');
+  return {
+    api: [...new Set(listedAll(az, revisions, "the API's revisions").flatMap(buildIn))],
+    migrate: [...new Set(listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").flatMap(buildIn))],
+  };
+}
+
+/**
+ * AZ2c: a workload rolled back, even to an older commit's own signed image, is a suspected breach. A release moves
+ * both forward together, migrate first, so: neither may run a commit older than one deploys have left on record
+ * (the API against its own revisions, since migrate alone may be ahead after --migrate-first or a stopped release;
+ * migrate against both), and migrate may never be behind the API. A record not in this history counts for nothing.
+ */
+function rolledBack(reads: ReadonlyMap<Workload, Read>, recorded: OnRecord, history: History): string[] {
+  const api = reads.get('api')?.running.release ?? '';
+  const migrate = reads.get('migrate')?.running.release ?? '';
+  const later = (build: string, among: readonly string[]): string | undefined =>
+    [...new Set(among)].find((each) => each !== build && history.isAncestor(build, each));
+  const said: string[] = [];
+  const apiLater = later(api, recorded.api);
+  if (apiLater !== undefined) {
+    said.push(
+      `api: it runs ${api}, older than ${apiLater}, which one of its revisions ran: rolled back, a suspected breach`,
+    );
+  }
+  const migrateLater = later(migrate, [...recorded.migrate, ...recorded.api]);
+  if (migrateLater !== undefined) {
+    said.push(
+      `migrate: it runs ${migrate}, older than ${migrateLater}, which a run of it or an API revision ran: rolled back, a suspected breach`,
+    );
+  }
+  if (migrate !== api && history.isAncestor(migrate, api)) {
+    said.push(
+      `migrate: it runs ${migrate}, behind the API's ${api}, which no deploy leaves (migrate is always moved first): a suspected breach`,
+    );
+  }
+  return said;
 }
 
 /** The kind of workload, as Resource Manager names it. */
@@ -1341,7 +1432,7 @@ function templateMigrate(
   commit: string,
 ): Container {
   const live = job.running;
-  const template = steps.templates(subscription).get('migrate');
+  const template = steps.templates(subscription, commit).get('migrate');
   const containers = containersOf(template);
   const beyond = workloadDifferences(
     'jobs',

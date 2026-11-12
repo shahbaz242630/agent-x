@@ -1006,6 +1006,8 @@ function fakeAz(
     run: (args) => {
       calls.push([...args]);
       if (args[0] === 'account') return answer(account);
+      // What deploys left on record (AZ2c): no revision or run of another build.
+      if (args.some((arg) => arg.includes('/revisions?') || arg.includes('/executions?'))) return answer({ value: [] });
       const workload = ORDER.find((each) => args.includes(workloadUrl(SUBSCRIPTION, each)));
       if (args[0] === 'rest' && workload !== undefined) {
         return answer({
@@ -1081,18 +1083,22 @@ describe('check', () => {
       `  migrate: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}, and nothing else`,
       `  api: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}, and nothing else`,
     ]);
-    // Reads only: the account, then each workload by GET, at the version apps.bicep deploys it with.
+    // Reads only: the account, then each workload by GET, at the version apps.bicep deploys it with, then what
+    // deploys left on record (AZ2c): the API's revisions and migrate's runs.
+    const at = (resource: string): string[] => [
+      'rest',
+      '--method',
+      'get',
+      '--url',
+      `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/${resource}?api-version=${JOBS_API}`,
+      '--output',
+      'json',
+    ];
     expect(calls).toEqual([
       ['account', 'show', '--output', 'json'],
-      ...ORDER.map((workload) => [
-        'rest',
-        '--method',
-        'get',
-        '--url',
-        `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/${WORKLOADS[workload].path}?api-version=${JOBS_API}`,
-        '--output',
-        'json',
-      ]),
+      ...ORDER.map((workload) => at(WORKLOADS[workload].path)),
+      at(`${WORKLOADS.api.path}/revisions`),
+      at(`${WORKLOADS.migrate.path}/executions`),
     ]);
   });
 
@@ -1330,7 +1336,7 @@ class Staging {
       },
     ],
   ]);
-  runs: { name: string; status: string; image: string; polls: number }[] = [
+  runs: { name: string; status: string; image: string; polls: number; release?: string }[] = [
     { name: 'job-agentx-stg-migrate-aocy0fb', status: 'Succeeded', image: OLD_IMAGE, polls: 0 },
   ];
 
@@ -1557,7 +1563,18 @@ class Staging {
       const listed = this.runs.filter(
         (run) => run.polls >= 0 && (this.lists > this.listLag || !run.name.includes('new')),
       );
-      return json({ value: listed.map(({ name, status }) => ({ name, properties: { status } })) });
+      // Each run's template names its build (AZ2c: what deploys left on record); the first run's is OLD.
+      return json({
+        value: listed.map(({ name, status, image, release }) => ({
+          name,
+          properties: {
+            status,
+            template: {
+              containers: [{ name: 'migrate', image, env: [{ name: 'AGENTX_RELEASE', value: release ?? OLD }] }],
+            },
+          },
+        })),
+      });
     }
     if (method === 'post' && url === `${jobBase}/start${query}`) return this.startMigrate();
     const run = this.runs.find((each) => url === `${jobBase}/executions/${each.name}${query}`);
@@ -1583,6 +1600,7 @@ class Staging {
         name,
         status: 'Running',
         image: this.runImage ?? this.job.image,
+        release: this.job.release,
         polls: this.runPolls,
       });
     }
@@ -1616,6 +1634,17 @@ class Staging {
         }
         const migrate = this.migrateCall(method, url, jobBase, query);
         if (migrate !== undefined) return migrate;
+        // The API's revisions, each with its build (AZ2c: what deploys left on record).
+        if (method === 'get' && url === `${appBase}/revisions${query}`) {
+          return json({
+            value: [...this.revisions].map(([name, held]) => ({
+              name,
+              properties: {
+                template: { containers: [{ name: 'api', env: [{ name: 'AGENTX_RELEASE', value: held.release }] }] },
+              },
+            })),
+          });
+        }
         const revision = /\/revisions\/([^?]+)\?/.exec(url)?.[1];
         if (method === 'get' && url.startsWith(`${appBase}/revisions/`) && revision !== undefined) {
           const found = this.revision(revision);
@@ -2463,20 +2492,122 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     const { status, message } = await outcome(broken);
     expect(status).toBeUndefined();
     expect(message).toBe(
-      `What ${NEW}'s apps.bicep gives the API and the migration job couldn't be read (bicep snapshot failed: /subscriptions/the subscription/x), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`,
+      `What apps.bicep gives the API and the migration job couldn't be read (bicep snapshot failed: /subscriptions/the subscription/x), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`,
     );
     for (const azure of [elsewhere, broken]) expect(azure.writes).toEqual([]);
   });
 
-  it('reads no template when there is nothing to release, or a hand deploy is needed anyway', async () => {
-    const unread = new Error('never read');
-    const current = await checked(
-      staging(NEW, NEW_IMAGE),
-      history([NEW]),
-      undefined,
-      folderAt(NEW, SAID, true, unread).folder,
+  it('holds a re-run with nothing to do too, read-only: a changed workload is red, not "nothing to do" (item 2)', async () => {
+    const changed = (release: string, image: string): Readonly<Record<Workload, unknown>> => ({
+      ...staging(release, image),
+      migrate: [azureContainer('migrate', { image, env: builtAt(release), args: ['--other'] })],
+    });
+    for (const [containers, line, build] of [
+      [staging(NEW, NEW_IMAGE), history([NEW]), NEW],
+      [staging(LATER), history([NEW, LATER]), LATER],
+    ] as const) {
+      const asked: string[] = [];
+      const folder: Folder = {
+        ...folderAt(NEW).folder,
+        templates: (_subscription, build) => {
+          asked.push(build);
+          return TEMPLATES;
+        },
+      };
+      expect((await checked(containers, line, undefined, folder)).status).toBe(0);
+      // The templates of the build each workload runs, read once for both.
+      expect(asked).toEqual([build]);
+    }
+    for (const [containers, line] of [
+      [changed(NEW, NEW_IMAGE), history([NEW])],
+      [changed(LATER, OLD_IMAGE), history([NEW, LATER])],
+    ] as const) {
+      const { status, said, calls } = await checked(containers, line);
+      expect(status).toBe(1);
+      expect(said.slice(-2)).toEqual([
+        `A release of ${NEW} stops here, red: ${NOT_AS_DEPLOYED}`,
+        '  migrate: its arguments are not the template’s',
+      ]);
+      expect(calls.every((call) => call[0] === 'account' || call[2] === 'get')).toBe(true);
+    }
+    // A re-run's release red the same way, writing nothing.
+    const azure = new Staging();
+    Object.assign(azure.job, { release: NEW, image: NEW_IMAGE, command: ['sh'] });
+    Object.assign(azure.app, { release: NEW, image: NEW_IMAGE, env: builtAt(NEW) });
+    expect((await outcome(azure)).status).toBe(1);
+    expect(azure.writes).toEqual([]);
+  });
+
+  it('stops on a roll-back, even to an older commit’s own signed image, and on migrate behind the API (review item 1)', async () => {
+    const MID = commit('c');
+    const line = (): History => history([OLD, MID, NEW], { [OLD]: [], [MID]: [] });
+    const said = async (
+      arrange: (azure: Staging) => void,
+    ): Promise<{ status: number | undefined; said: string[]; writes: unknown[] }> => {
+      const azure = new Staging();
+      arrange(azure);
+      const done = await outcome(azure, line());
+      return { status: done.status, said: done.said, writes: azure.writes };
+    };
+    const revisionAt = (release: string) => ({
+      image: OLD_IMAGE,
+      release,
+      provisioningState: 'Provisioned',
+      active: false,
+      trafficWeight: 0,
+      healthState: 'None',
+    });
+    for (const [arrange, reason] of [
+      [
+        (azure: Staging) => azure.revisions.set('ca-agentx-stg-api--0000006', revisionAt(MID)),
+        `  api: it runs ${OLD}, older than ${MID}, which one of its revisions ran: rolled back, a suspected breach`,
+      ],
+      [
+        (azure: Staging) =>
+          azure.runs.push({
+            name: 'job-agentx-stg-migrate-mid1',
+            status: 'Succeeded',
+            image: OLD_IMAGE,
+            polls: 0,
+            release: MID,
+          }),
+        `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back, a suspected breach`,
+      ],
+      [
+        (azure: Staging) => {
+          Object.assign(azure.app, { release: MID, env: builtAt(MID) });
+          azure.revisions.set('ca-agentx-stg-api--0000007', revisionAt(MID));
+        },
+        `  migrate: it runs ${OLD}, behind the API's ${MID}, which no deploy leaves (migrate is always moved first): a suspected breach`,
+      ],
+    ] as const) {
+      const done = await said(arrange);
+      expect(done.status, reason).toBe(1);
+      expect(done.writes).toEqual([]);
+      expect(done.said).toContain(reason);
+      expect(done.said).toContain(`A release of ${NEW} stops here, red: ${NOT_AS_DEPLOYED}`);
+    }
+    // Migrate is held to the API's revisions as well as its own runs.
+    const byRevision = await said((azure) => azure.revisions.set('ca-agentx-stg-api--0000006', revisionAt(MID)));
+    expect(byRevision.said).toContain(
+      `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back, a suspected breach`,
     );
-    expect(current.status).toBe(0);
+    // Migrate ahead of the API, as --migrate-first or a stopped release leaves it: released as ever.
+    const ahead = await said((azure) => {
+      Object.assign(azure.job, { release: MID });
+      azure.runs.push({
+        name: 'job-agentx-stg-migrate-mid1',
+        status: 'Succeeded',
+        image: OLD_IMAGE,
+        polls: 0,
+        release: MID,
+      });
+    });
+    expect(ahead.status).toBe(0);
+  });
+
+  it('reads no template when a hand deploy is needed anyway', async () => {
+    const unread = new Error('never read');
     const byHand = await checked(
       staging(OLD),
       history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] }),

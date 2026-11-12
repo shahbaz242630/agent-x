@@ -25,8 +25,11 @@
 // say), then started, runs as the job is, so no run differs. The migration job,
 // the one CI's release identity may write and start, is held besides, whole, to
 // what the apps.bicep of the build it names gives it beyond its image and build
-// (migrateHeld, read in a temporary worktree at that commit); the other jobs
-// only a person writes.
+// (migrateHeld, read in a temporary worktree at that commit), and its build may
+// not be older than one its runs ran (a roll-back); the other jobs only a person
+// writes. **A known gap:** the API's revisions, the other record of what was
+// released, are beyond the watch's role (it reads jobs alone), so a roll-back of
+// the API is the release's to find (release.ts rolledBack), at its next run.
 // Azure keeps a job's last 100 runs: a full list still inside the window, or a
 // flood of runs, is a finding of its own. Nothing here stops a start: it only
 // makes one seen.
@@ -42,9 +45,9 @@ import {
   type Workload,
   workloadDifferences,
 } from './drift.ts';
-import { atCommit, type History, realCheckout, realHistory } from './git.ts';
+import { type History, realCheckout, realHistory } from './git.ts';
 import { jobName, JOBS_API, runCli } from './jobs.ts';
-import { runningIn, templatesFrom } from './release.ts';
+import { realTemplates, runningIn } from './release.ts';
 
 /** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
 export const DEFAULT_HOURS = 6;
@@ -444,7 +447,7 @@ export interface HeldSteps {
 const realHeld = (): HeldSteps => ({
   head: () => realCheckout().head,
   history: realHistory(),
-  templatesAt: (subscription, commit) => atCommit(commit, 'deploy/azure', (dir) => templatesFrom(subscription, dir)),
+  templatesAt: realTemplates,
 });
 
 /** What holding the migration job to apps.bicep found: lines said as they are, and findings. */
@@ -474,9 +477,11 @@ const heldFinding = (problem: string, lines: readonly string[]): Held => ({
  * the apps.bicep of the build it names gives it, beyond its image and build, read from that commit in a temporary
  * worktree. Its runs are compared with the job, so a job whose command was changed and then started looks as
  * deployed; this is what shows that change. A build that isn't in main's history is a finding: every image a deploy
- * may send was built on main. The API isn't read: the watch's role reads the jobs alone.
+ * may send was built on main, and so is a build older than one its runs ran (rolled back, even to an older commit's
+ * own signed image). The API isn't read: the watch's role reads the jobs alone, so its revisions, the release's other
+ * record, are the release's to hold.
  */
-function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: HeldSteps): Held {
+function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: HeldSteps, runs: readonly Run[]): Held {
   const job = jobs.find((each) => each.name === MIGRATE_JOB);
   // No migration job (a new environment's first deploys): nothing a release could start.
   if (job === undefined) return { said: [], found: [] };
@@ -484,6 +489,17 @@ function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: 
     const running = runningIn('migrate', containersOf(job.workload));
     if (!steps.history.isAncestor(running.release, steps.head())) {
       return heldFinding(`it names its build ${running.release}, which isn't in main's history`, []);
+    }
+    const ran = new Set(runs.flatMap((run) => run.template?.containers.flatMap((container) => container.env) ?? []));
+    const later = [...ran]
+      .filter((setting) => setting.name === 'AGENTX_RELEASE' && typeof setting.value === 'string')
+      .map((setting) => String(setting.value))
+      .find((build) => build !== running.release && steps.history.isAncestor(running.release, build));
+    if (later !== undefined) {
+      return heldFinding(
+        `it names its build ${running.release}, older than ${later}, which a run of it ran: rolled back`,
+        [],
+      );
     }
     const template = steps.templatesAt(subscription, running.release).get('migrate');
     const bound = new Map<string, string>();
@@ -521,8 +537,10 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
     `Reading the runs of ${String(jobs.length)} jobs started since ${when(since)} (the last ${String(hours)} h).`,
   );
   const found: string[] = [];
+  let migrateRuns: readonly Run[] = [];
   for (const job of jobs) {
     const listed = listedRuns(steps.az, subscription, job.name);
+    if (job.name === MIGRATE_JOB) migrateRuns = listed;
     const problems = historyProblems(listed, since, hours);
     if (problems.length > 0) found.push(...historyLines(job, problems));
     for (const run of listed.filter((each) => inWindow(each, since))) {
@@ -547,7 +565,7 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
       }
     }
   }
-  const held = migrateHeld(jobs, subscription, steps.held);
+  const held = migrateHeld(jobs, subscription, steps.held, migrateRuns);
   for (const line of held.said) steps.say(line);
   found.push(...held.found);
   if (found.length === 0) {
