@@ -292,6 +292,15 @@ export function handoffAskedOf({
 export const handoffRequest = (command: HandoffCommand, reason: string, id: string): string =>
   JSON.stringify([command, '--reason', reason, '--id', id]);
 
+/** The command word that lists an organisation's registered contacts that count now (OR2b; playbook K): read-only. */
+export const COUNTING_CONTACTS = 'counting-contacts';
+
+/** What lists them: typed, or as a request file's JSON list. */
+export const COUNTING_CONTACTS_USAGE = `${COUNTING_CONTACTS} --org <organisation ID>`;
+
+/** The request to list an organisation's counting contacts, as its file holds it. */
+export const countingContactsRequest = (orgId: string): string => JSON.stringify([COUNTING_CONTACTS, '--org', orgId]);
+
 /** The command word that tells an organisation our team is resetting a person's second factor (OR2; playbook K). */
 export const FACTOR_RESET_NOTICE = 'factor-reset-notice';
 

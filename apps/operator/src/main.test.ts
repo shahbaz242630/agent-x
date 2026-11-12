@@ -13,7 +13,7 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { COUNTING_CONTACTS_USAGE, HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   activityExportRequest,
@@ -22,6 +22,8 @@ import {
   CHAIN_REBASE_USAGE,
   chainRebaseRequest,
   type ChainRebaseWords,
+  COUNTING_CONTACTS_USAGE,
+  countingContactsRequest,
   createOrganizationRequest,
   FACTOR_RESET_NOTICE,
   FACTOR_RESET_NOTICE_USAGE,
@@ -809,7 +811,7 @@ describe("OR2b an organisation's counting contacts, typed or from a file (playbo
 
   it.each([
     ['typed', ['counting-contacts', '--org', ORG]],
-    ['from a file', ['--request', requestFile(JSON.stringify(['counting-contacts', '--org', ORG]))]],
+    ['from a file, as the launcher writes it', ['--request', requestFile(countingContactsRequest(ORG))]],
   ])('reads it %s, then connects', async (_how, argv) => {
     const { events, line } = await run(argv);
 

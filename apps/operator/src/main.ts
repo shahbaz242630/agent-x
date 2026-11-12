@@ -100,7 +100,7 @@ import { type ActivityExportTables, exportActivityLog } from './activity-export.
 import { rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
-import { COUNTING_CONTACTS, type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
+import { type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
@@ -112,6 +112,8 @@ import {
   auditExportOf,
   CHAIN_REBASE_USAGE,
   CHAIN_RECOVERY_USAGE,
+  COUNTING_CONTACTS,
+  COUNTING_CONTACTS_USAGE,
   DISCARD_FORK,
   FACTOR_RESET_NOTICE,
   FACTOR_RESET_NOTICE_USAGE,
@@ -544,9 +546,6 @@ function factorResetNoticeAsked(words: readonly string[], fromFile: boolean): Re
   const asked = factorResetNoticeOf({ orgId, userId, reason, id });
   return 'problems' in asked ? asked : { command: FACTOR_RESET_NOTICE, ...asked };
 }
-
-/** What lists an organisation's counting contacts (OR2b): typed, or as a request file's JSON list. */
-export const COUNTING_CONTACTS_USAGE = `${COUNTING_CONTACTS} --org <organisation ID>`;
 
 /** A listing of an organisation's counting contacts (OR2b, playbook K): typed or from a file, the organisation alone. */
 function countingContactsAsked(words: readonly string[]): Request | Problems {

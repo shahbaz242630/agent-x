@@ -30,12 +30,10 @@ import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import type { Database } from '@agentx/platform/db';
 
 import type { OperatorTables } from './create-organization.ts';
+import { COUNTING_CONTACTS } from './request.ts';
 
 /** Every table the listing reads: the organisation's row, its chain, and its contacts. */
 export type CountingContactsTables = OperatorTables & IdentityTables & AuditTables;
-
-/** The command's word. */
-export const COUNTING_CONTACTS = 'counting-contacts';
 
 /** Why no list is given. */
 class ListRefused extends Error {
