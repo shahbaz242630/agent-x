@@ -1628,7 +1628,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (role: Mutable) =>
         (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
       (role: Mutable) => (permissionsOf(role).dataActions = []),
-      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/read']),
       (role: Mutable) =>
         (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
     ]) {
@@ -1797,7 +1797,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
         (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/read`]),
         (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/add/action`]),
-        (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+        (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/read']),
         (role: Mutable) =>
           (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
       ]) {
@@ -2000,7 +2000,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/add/action`),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
           (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
-          (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+          (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/read']),
         ]) {
           expect(brokenRules(changed(READER, change))).toEqual(['evidence-store']);
         }
@@ -2294,7 +2294,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (role: Mutable) =>
         (permissionsOf(role).dataActions = ['Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read']),
       (role: Mutable) => (permissionsOf(role).dataActions = []),
-      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/listKeys/action']),
+      (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/read']),
       (role: Mutable) =>
         (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
     ]) {
