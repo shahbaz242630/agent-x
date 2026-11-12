@@ -233,7 +233,10 @@ var lateLinesRead = 'P2D'
 var privilegedRoles = '${adminLogin}|agentx_backup|${ownerRole}'
 
 // ADR-012 §2: a login by the server admin or the backup role raises an alert.
-// The set-up job's own login (G2) is one of them, and expected.
+// The set-up job's own login (G2) is one of them, and expected. Counted by when
+// a line arrived over the last 20 minutes of a 15-minute rhythm, reading two
+// days back: a late line is still seen, and one may notify twice, never not at
+// all (MO2; by when it happened, a line arriving after its window was missed).
 resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: 'alert-${name}-privileged-login'
   location: location
@@ -247,12 +250,13 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [loginWorkspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    overrideQueryTimeRange: lateLinesRead
     // The table appears with the server's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
+          query: 'PGSQLServerLogs | where ingestion_time() > ago(20m) | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Logins'
           operator: 'GreaterThan'

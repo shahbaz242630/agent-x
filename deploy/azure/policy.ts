@@ -288,6 +288,13 @@ const LATE_LINES_READ = 'P2D';
 const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: LATE_LINES_READ } as const;
 
 /**
+ * The login alerts that count lines rather than pair them take those that
+ * arrived over the last 20 minutes, run every 15: a run late by up to five
+ * leaves no gap, and a line arriving late is counted when it arrives (MO2).
+ */
+const ARRIVED_LATELY = 'where ingestion_time() > ago(20m)';
+
+/**
  * The refused-login alert's query (MO2) for the server's admin: one FATAL line
  * for each login refused as a privileged role, a wrong password or a connection
  * the server's rules refuse, counted by when it arrived over the last 20
@@ -299,7 +306,7 @@ const refusedLoginQuery = (admin: string): string => {
   const host = `host ${quote}[^${quote}]*${quote}, user`;
   const refused = `(password authentication failed for user|no pg_hba[.]conf entry for ${host}|pg_hba[.]conf rejects connection for ${host})`;
   const roles = `${quote}(${admin}|${BACKUP_ROLE}|${OWNER_ROLE})${quote}`;
-  return `PGSQLServerLogs | where ingestion_time() > ago(20m) | where Message matches regex @"${LINE_START}FATAL:  ${refused} ${roles}" | summarize Refused = count()`;
+  return `PGSQLServerLogs | ${ARRIVED_LATELY} | where Message matches regex @"${LINE_START}FATAL:  ${refused} ${roles}" | summarize Refused = count()`;
 };
 
 /**
@@ -1691,14 +1698,20 @@ const database: Check = (snapshot, expected, add) => {
       snapshot,
       'stateless SEV-1',
       (criterion, alert) =>
-        queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+        at(alert.properties, 'overrideQueryTimeRange') === LATE_LINES_READ &&
+        queryIs(
+          at(criterion, 'query'),
+          'PGSQLServerLogs',
+          [ARRIVED_LATELY, `where Message matches regex ${pattern}`],
+          'count()',
+        ) &&
         watchesEveryWindow(alert, criterion),
       loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute by when each line arrived, over the two days before, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }

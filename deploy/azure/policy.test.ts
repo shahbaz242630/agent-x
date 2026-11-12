@@ -1185,7 +1185,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').severity = 2)))).toEqual(
       expect.arrayContaining(['database-logins']),
     );
-    for (const change of LATE_OR_BLIND) {
+    for (const change of [
+      ...LATE_OR_BLIND,
+      // Counted by when it happened, so a line arriving after its window is missed, or over too short a stretch (MO2).
+      edited('where ingestion_time() > ago(20m)', 'where TimeGenerated > ago(20m)'),
+      edited('where ingestion_time() > ago(20m) | ', ''),
+      edited('ago(20m)', 'ago(15m)'),
+      edited('ago(20m)', 'ago(10m)'),
+      // Reading too little back for a late line to be in view when it arrives.
+      (alert: Mutable) => (inside(alert, 'properties').overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => delete inside(alert, 'properties').overrideQueryTimeRange,
+    ]) {
       expect(brokenRules(changed(LOGIN_ALERT, change))).toEqual(['database-logins']);
     }
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').autoMitigate = true)))).toEqual([
