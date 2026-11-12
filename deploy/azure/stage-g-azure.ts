@@ -7,7 +7,8 @@
 // The CLI is started without a shell (deploy.ts realAz), so Git Bash's path
 // conversion, which playbook L's restore needs MSYS_NO_PATHCONV against, never
 // touches the subnet's and the private zone's IDs here.
-import { ARM, azJson, isOwnServer, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
+import { ARM, azJson, RESOURCE_GROUP, servedServerOf, signedIn, text } from './deploy.ts';
+import { baseServerOf } from './server-generation.ts';
 import {
   type Api,
   API_APP,
@@ -108,9 +109,9 @@ export interface StageGAzure {
   deleteContainer(account: string, container: string): boolean;
 }
 
-/** The evidence store beside staging's server: both carry the same suffix (names.bicep). */
+/** The evidence store beside staging's server: both carry the same suffix (names.bicep), the server's `-r<n>` aside (AZ25). */
 export const evidenceAccountOf = (stagingServer: string): string =>
-  `stagentxstg${stagingServer.replace(/^psql-agentx-stg-/, '')}`;
+  `stagentxstg${baseServerOf(stagingServer).replace(/^psql-agentx-stg-/, '')}`;
 
 const where = (subscription: string): string[] => ['--subscription', subscription, '--resource-group', RESOURCE_GROUP];
 
@@ -401,13 +402,12 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
   };
 }
 
-/** Staging's own server among the group's, with its network, or an error saying why there isn't exactly one. */
-export function stagingServerOf(listed: unknown): StagingServer {
-  const own = (Array.isArray(listed) ? listed.map(record) : []).filter(({ name }) => isOwnServer(text(name)));
-  const [found] = own;
-  if (own.length !== 1 || found === undefined) {
-    throw new Error(`${RESOURCE_GROUP} holds ${String(own.length)} database servers of its own, not one.`);
-  }
+/**
+ * Staging's own server at the configured generation among the group's (AZ25: a previous generation may sit beside
+ * it), with its network, or an error saying why there isn't exactly one.
+ */
+export function stagingServerOf(listed: unknown, generation?: number): StagingServer {
+  const found = servedServerOf(Array.isArray(listed) ? listed.map(record) : [], generation);
   const network = record(found.network);
   const staging = {
     id: text(found.id),

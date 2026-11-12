@@ -265,7 +265,6 @@ export const PLAIN_WORDS = {
     broke: 'After a start, payments wait for every organisation. Nobody is held.',
     next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
-
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',

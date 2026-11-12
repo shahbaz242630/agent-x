@@ -980,8 +980,13 @@ describe('the anchor check over shards let go (PL-65 PR3)', () => {
     { length: 40 },
     (_, index) => `0199a0f0-0000-7000-8000-${String(100 + index).padStart(12, '0')}`,
   );
-  const folderOf = (orgId: string): string =>
-    `e1/shards/${createHash('sha256').update(`organisation:${orgId}`).digest().readUInt8(0).toString(16).padStart(2, '0')}/`;
+  const folderOf = (orgId: string): string => {
+    const shard = createHash('sha256')
+      .update('organisation:' + orgId)
+      .digest()
+      .readUInt8(0);
+    return `e1/shards/${shard.toString(16).padStart(2, '0')}/`;
+  };
 
   /** A store moved on to its shards by a process of its own, the migration done: every organisation anchored at 3. */
   async function shardedStore() {
@@ -1022,7 +1027,7 @@ describe('the anchor check over shards let go (PL-65 PR3)', () => {
     const given = Object.fromEntries(ORGS.map((orgId) => [orgId, chains.given[orgId]?.length ?? 0]));
     await after.check.run();
     expect(after.lines('audit.anchor_shards_evicted').length).toBeGreaterThan(0);
-    for (const orgId of ORGS) expect(chains.given[orgId]?.slice(given[orgId])).toEqual([3n]);
+    for (const orgId of ORGS) expect(chains.given[orgId]?.slice(given[orgId] ?? 0)).toEqual([3n]);
     expect(after.lines('audit.integrity_failed')).toEqual([]);
     expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(11_000);
   });

@@ -38,6 +38,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 import type { SupplierTables } from './supplier-work.ts';
@@ -176,7 +177,7 @@ async function sent(api: FastifyInstance, orgId: string, url: string, body: unkn
       'idempotency-key': key ?? `scan-${String(keysUsed)}`,
       'content-type': 'application/json',
     },
-    payload: JSON.stringify(body),
+    payload: JSON.stringify(worded(url, body)),
   };
   const response: LightMyRequestResponse = await api.inject(request);
   answers.push(response.body);

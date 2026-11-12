@@ -863,6 +863,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/apps.bicep': ['apps'],
       'deploy/azure/bicepconfig.json': all,
       'deploy/azure/certificates.bicep': ['certificates'],
+      // The database server's generation (AZ25), through names.bicep: a change asks for every hand deploy.
+      'deploy/azure/database-generation.json': all,
       'deploy/azure/dns-allowed.json': ['foundation'],
       'deploy/azure/github-ranges.json': ['foundation'],
       'deploy/azure/main.bicep': ['foundation'],

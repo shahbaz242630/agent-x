@@ -28,7 +28,7 @@ import {
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { CHAIN_START, type Chain, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
@@ -309,7 +309,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
           anchors: anchorStore,
           anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal),
           // Tx A's shard held from the lane's first anchor through Tx A, where the log lets shards go (PL-65 PR3).
-          ...(anchorLog === undefined ? {} : { pin: (chain: Chain) => anchorLog.pin(chain) }),
+          ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
         },
       }),
     );

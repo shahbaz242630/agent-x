@@ -41,6 +41,7 @@
   "stepUp.notNow": "Don't make it",
   "stepUp.done": "Done: {change}",
   "stepUp.refused": "Agent X didn't make this change: {change}. Its confirmation was refused or ran out. Ask for it again if you still want it.",
+  "stepUp.wordsChanged": "Agent X didn't make this change: {change}. The words you confirmed it with have changed since you read them. Ask for it again to read them as they are now.",
   "stepUp.failed": "Agent X couldn't be reached, so the change isn't made yet. Try confirming again.",
   "stepUp.lost": "A change you signed in again for can't be found in this window, so it wasn't made. Ask for it again if you still want it.",
   "stepUp.close": "Close",

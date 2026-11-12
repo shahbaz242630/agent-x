@@ -25,6 +25,8 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { liveSession } from './live-session.helper.test.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { PAYEE_STATEMENT_VERSION } from './suspensions.ts';
+import { worded } from './statement-words.helper.test.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { SupplierDetailsChanges } from './supplier-details.ts';
@@ -376,7 +378,7 @@ const post = (path: string, payload: unknown = {}, key = 'k-1'): InjectOptions =
     'idempotency-key': key,
     'content-type': 'application/json',
   },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(`/v1/suppliers${path}`, payload)),
 });
 
 const get = (path: string): InjectOptions => ({
@@ -919,7 +921,7 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
 
       const response = await app.inject({
         ...post(`/${SUPPLIER_ID}/payee-registrations/pass-through`),
-        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}","pendingRequests":"${escaped('cancel')}"}`,
+        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}","pendingRequests":"${escaped('cancel')}","${escaped('statementVersion')}":${String(PAYEE_STATEMENT_VERSION)}}`,
       });
 
       expect(response.statusCode).toBe(201);

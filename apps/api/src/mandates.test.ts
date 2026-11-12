@@ -18,6 +18,7 @@ import { ABOVE_THE_CAP, type MandateView } from './mandate-reads.ts';
 import type { MandateDraft, MandateRegistry, MandateWrite } from './mandate-registry.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
+import { worded } from './statement-words.helper.test.ts';
 
 const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
@@ -206,7 +207,7 @@ const post = (url: string, payload: unknown): InjectOptions => ({
   method: 'POST',
   url,
   headers: { ...headers, 'idempotency-key': 'k-1', 'content-type': 'application/json' },
-  payload: JSON.stringify(payload),
+  payload: JSON.stringify(worded(url, payload)),
 });
 
 const TERMS = {

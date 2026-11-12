@@ -686,6 +686,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "STATEMENT_CHANGED",
+                    "description": "The words this change is confirmed with aren't the ones Agent X confirms it with now (they changed, or none were named), so this request changed nothing. Read them again (GET /v1/statements) and confirm with the version shown. A retry sent after a release changed the words is refused this way even if its first try went through: check what was done before trying again."
+                  },
+                  {
+                    "type": "string",
                     "const": "STEP_UP_FAILED",
                     "description": "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver."
                   },
@@ -8447,11 +8452,17 @@
                     "enum": [
                       true
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "pendingRequests",
-                  "confirmed"
+                  "confirmed",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -8648,12 +8659,18 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "reason",
                   "pendingRequests",
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -11073,6 +11090,11 @@
                     "enum": [
                       true
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -11476,12 +11498,18 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "evidenceRef",
                   "confirmed",
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -11677,11 +11705,17 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "confirmed",
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -12573,10 +12607,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -13229,11 +13269,17 @@
                       "overlap",
                       "end_now"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "stepUpChallengeId",
-                  "oldKey"
+                  "oldKey",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -13696,10 +13742,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "consentExpiry"
+                  "consentExpiry",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -14286,10 +14338,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -14385,10 +14443,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "consentExpiry"
+                  "consentExpiry",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -15148,10 +15212,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -15631,6 +15701,11 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -15638,7 +15713,8 @@
                   "phone",
                   "source",
                   "pendingRequests",
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -15836,11 +15912,17 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "stepUpChallengeId",
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -15935,10 +16017,16 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -16040,12 +16128,18 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "name",
                   "iban",
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -16993,6 +17087,11 @@
                       "refuse",
                       "approval"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -17009,7 +17108,8 @@
                   "splitCheck",
                   "consentLimits",
                   "endsAt",
-                  "overLimit"
+                  "overLimit",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -17362,6 +17462,11 @@
                       "refuse",
                       "approval"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -17375,7 +17480,8 @@
                   "splitCheck",
                   "consentLimits",
                   "endsAt",
-                  "overLimit"
+                  "overLimit",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -17578,6 +17684,11 @@
                       "cancel",
                       "carry"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
@@ -17779,11 +17890,17 @@
                       "cancel",
                       "pause"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "stepUpChallengeId",
-                  "pendingRequests"
+                  "pendingRequests",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -18361,11 +18478,17 @@
                       "refuse",
                       "approval"
                     ]
+                  },
+                  "statementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "stepUpChallengeId",
-                  "overLimit"
+                  "overLimit",
+                  "statementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -19340,13 +19463,30 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "monthlyCapStatementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "approvalWaitStatementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "waitingStatementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [
                   "currency",
                   "monthlyCapChoice",
                   "approvalWaitHours",
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "monthlyCapStatementVersion",
+                  "approvalWaitStatementVersion"
                 ],
                 "additionalProperties": false
               }
@@ -19924,6 +20064,11 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "waitingStatementVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
                   }
                 },
                 "required": [

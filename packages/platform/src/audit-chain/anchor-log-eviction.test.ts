@@ -65,7 +65,10 @@ const shardFile = (name: string, anchors: readonly Anchor[], signing: KeyProvide
 /** One organisation in each of `count` shards, none the platform's: so each shard holds one chain. */
 const oneAShard = (count: number): Chain[] => {
   const found = new Map<number, Chain>();
-  for (let index = 1; found.size < count; index += 1) {
+  // Organisations in turn, until enough shards have one.
+  let index = 0;
+  while (found.size < count) {
+    index += 1;
     const chain = organisation(index);
     const shard = shardOfChain(chain);
     if (shard !== shardOfChain(PLATFORM) && !found.has(shard)) found.set(shard, chain);
@@ -229,7 +232,10 @@ describe('SEC-ANC-05 shards in and out of memory (PL-65 PR3)', () => {
       // Twenty chains in one shard, past a budget the others fit in.
       const crowd: Chain[] = [];
       const shard = shardOfChain(CHAINS[0] ?? PLATFORM);
-      for (let index = 1; crowd.length < 60; index += 1) {
+      // Organisations in turn, until sixty fall in that shard.
+      let index = 0;
+      while (crowd.length < 60) {
+        index += 1;
         const chain = organisation(index);
         if (shardOfChain(chain) === shard) crowd.push(chain);
       }

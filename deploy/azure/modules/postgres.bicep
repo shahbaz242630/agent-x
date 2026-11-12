@@ -161,6 +161,19 @@ resource setting 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-
   }
 ]
 
+// Deleting a server deletes every restore point with it (S184: a restore's first steps nearly did): Azure itself
+// refuses a delete while this lock stands, whoever asks and however. Changes still go through. A server of an older
+// generation (AZ25) keeps its lock too, so letting it go after the partner's sign-off is a deliberate removal by an
+// Owner first. Stage G's copies and the drill are restored by the CLI, not here, so they carry none and stay deletable.
+resource keepServer 'Microsoft.Authorization/locks@2020-05-01' = {
+  scope: server
+  name: 'keep-live-database'
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'The live database and its restore points. Never delete before a replacement runs and is checked (Incident playbook L).'
+  }
+}
+
 // Kept under its old name, so a deploy moves the one setting to the login workspace rather than adding a second
 // beside it that would go on filling the main one.
 resource serverLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {

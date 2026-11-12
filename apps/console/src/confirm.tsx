@@ -8,6 +8,8 @@
 // can't be loaded are said, and nothing can be confirmed without them.
 // A change the API states no words for (a reject: one outcome, no signed
 // statement) is confirmed with the console's own words instead (6B1).
+// Confirming hands back the version of the API's words shown (CO3), which
+// the change sends back: the API refuses words it no longer confirms with.
 // It is modal for the keyboard too (WAI-ARIA's dialog pattern): focus starts
 // on Cancel, Tab and Shift+Tab go round its own controls only, focus that
 // leaves it some other way is brought back (to the pop-up itself while every
@@ -72,8 +74,11 @@ export type ConfirmProps = WordsFrom & {
   /** What the change is, for this one thing (its supplier, amount…), above the consequence. */
   readonly children?: ReactNode;
   readonly confirmLabel: string;
-  /** Called with the choice confirmed (`confirm` for a change with none). */
-  readonly onConfirm: (choice: string) => void;
+  /**
+   * Called with the choice confirmed (`confirm` for a change with none) and
+   * the version of the API's words shown, to send back; none for the console's own.
+   */
+  readonly onConfirm: (choice: string, statementVersion?: number) => void;
   readonly onCancel: () => void;
   /** While the change is being sent: nothing can be pressed twice. */
   readonly busy?: boolean;
@@ -118,8 +123,12 @@ export function Confirm({
   const fetching = served && words.isFetching;
   const unloaded = served && !words.isFetching && (words.isError || words.data === undefined);
   let choices: readonly Words[] = [];
+  let version: number | undefined;
   if (text !== undefined) choices = [{ choice: 'confirm', text }];
-  else if (!words.isFetching && !words.isError) choices = words.data?.words ?? [];
+  else if (!words.isFetching && !words.isError) {
+    choices = words.data?.words ?? [];
+    version = words.data?.version;
+  }
   const single = choices.length === 1 ? choices[0] : undefined;
   const picked = single?.choice ?? chosen;
   return (
@@ -173,7 +182,7 @@ export function Confirm({
             className="primary"
             disabled={busy || !ready || picked === null}
             onClick={() => {
-              if (picked !== null) onConfirm(picked);
+              if (picked !== null) onConfirm(picked, version);
             }}
           >
             {confirmLabel}
