@@ -535,6 +535,9 @@ resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 // to move past (`idp_events.tied_page`). The error spike alert needs many of
 // one kind, and the daily email is a day late, so any one line tells someone
 // here, every window it is seen (LOGIN_SERVICE_ALERT_EVENTS, held by policy.ts).
+// Our own routine tokens and grants to our service users, by the logins the
+// API's AGENTX_IDP_OUR_* settings name, are info lines (`..._by_us`) it never
+// counts; until those settings are set, every token and grant fires it.
 resource loginServiceAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: loginServiceAlertName
   location: location
@@ -542,7 +545,7 @@ resource loginServiceAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
   kind: 'LogAlert'
   properties: {
     displayName: 'Login service: a change made behind Agent X'
-    description: 'SEV-1. The login service recorded someone acting as another person, admin rights given or changed inside it, or an access token issued for a login, or the copy of its events passed a moment it could not read whole (idp.impersonated, idp.rights_changed, idp.token_issued, idp_events.tied_page). Rights or a token from a planned set-up or key rotation are expected; anything else may be a break-in. Runbook: Incident-Response-Playbook.md section B.'
+    description: 'SEV-1. The login service recorded someone acting as another person, admin rights given or changed inside it, or an access token issued for a login, or the copy of its events passed a moment it could not read whole (idp.impersonated, idp.rights_changed, idp.token_issued, idp_events.tied_page). Our own routine tokens and service-user grants are info lines that never fire it (once AGENTX_IDP_OUR_ACTORS and AGENTX_IDP_OUR_SERVICE_USERS are set), so treat this as a possible break-in. Runbook: Incident-Response-Playbook.md section B.'
     severity: 1
     enabled: true
     scopes: [workspaceId]
