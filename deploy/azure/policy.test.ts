@@ -24,6 +24,7 @@ import {
   DECISION_HEADROOM,
   gateBusy,
   LOAD_RUN,
+  ZITADEL_COPIES,
 } from './policy.ts';
 import {
   type BicepRun,
@@ -6221,13 +6222,95 @@ describe('the load run (D2c, PL-38)', () => {
     expect(problemsOf(zitadelAt(1, staging, 1), 'connections')).toEqual([]);
   });
 
+  it('apps.bicep compiled for production: Zitadel at two to four copies of 1 vCPU and 2Gi, passing the apps and jobs rules (SA3a)', () => {
+    // No production parameters are committed yet: staging's two, the foundation's and the apps', named production,
+    // with the snapshot's stand-ins for what the shell gives. Production's own values (its backups, evidence store,
+    // alerts, secrets and certificates) are other rules', so only the apps and jobs rules are read here.
+    const production = inCopy((dir) => {
+      for (const part of ['', '.apps']) {
+        const text = readFileSync(path.join(dir, `staging${part}.bicepparam`), 'utf8');
+        expect(text).toContain("param environment = 'staging'");
+        writeFileSync(
+          path.join(dir, `production${part}.bicepparam`),
+          text.replace("param environment = 'staging'", "param environment = 'production'"),
+        );
+      }
+      return environmentSnapshot(dir, 'production').together;
+    });
+    const zitadel = production.predictedResources.find(APP('zitadel'));
+    expect(zitadel?.name).toBe('ca-agentx-prd-zitadel');
+    expect(at(zitadel?.properties, 'template', 'scale')).toEqual({ minReplicas: 2, maxReplicas: 4 });
+    expect(at(containerOf(zitadel as unknown as Mutable), 'resources')).toEqual({ cpu: 1, memory: '2Gi' });
+    const problems = policyProblems(production, { region: 'uaenorth', environment: 'production' });
+    expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs')).toEqual([]);
+    // Its count at production's defaults (Azure.md): web 60, jobs 20, Zitadel 10 x (4 + 2), and two more.
+    expect(problems.filter(({ rule }) => rule === 'connections').map(({ message }) => message)).toEqual([
+      "has 35 connections for users (max_connections 50 less Azure's 15), but the apps may hold 142: two of each API copy's pool, each Zitadel copy's, one job and one to spare",
+    ]);
+    // The parameter's bounds are the policy's: no more copies than it allows, no fewer than it keeps running.
+    const copies = at(bicepFile('apps.bicep').template, 'parameters', 'zitadelMostCopies');
+    expect(at(copies, 'maxValue')).toBe(ZITADEL_COPIES.production.most);
+    expect(at(copies, 'minValue')).toBe(ZITADEL_COPIES.production.fewest);
+    expect(at(copies, 'defaultValue')).toBe(ZITADEL_COPIES.production.most);
+  });
+
+  it("apps and jobs: a container at a size Azure's Consumption profile doesn't offer", () => {
+    const sized = (pick: (resource: PredictedResource) => boolean, cpu: unknown, memory: unknown): Snapshot =>
+      changed(pick, (resource) => {
+        containerOf(resource).resources = { cpu, memory };
+      });
+    const sizeProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ message }) => message.includes('Consumption profile offers'))
+        .map(({ rule, resource, message }) => `${rule} ${resource}: ${message}`);
+    // Staging's own apps and jobs, in a load run or out of one, are every one at an offered size.
+    expect(sizeProblems(staging)).toEqual([]);
+    expect(sizeProblems(load.together)).toEqual([]);
+    // The smallest, the largest, and each a quarter vCPU apart with 2Gi a vCPU, in GiB or MiB.
+    for (const [cpu, memory] of [
+      [0.25, '0.5Gi'],
+      [1, '2Gi'],
+      [1, '2048Mi'],
+      [1.75, '3.5Gi'],
+      [4, '8Gi'],
+    ] as const) {
+      expect({ cpu, memory, problems: sizeProblems(sized(APP('zitadel'), cpu, memory)) }).toEqual({
+        cpu,
+        memory,
+        problems: [],
+      });
+    }
+    const offSize = (rule: string, resource: string, cpu: string, memory: string): string =>
+      `${rule} ${resource}: must run at a size the Consumption profile offers (0.25 to 4 vCPU in quarters, with 2Gi for each vCPU); it says ${cpu} vCPU and ${memory}`;
+    for (const [cpu, memory] of [
+      [0.5, '2Gi'],
+      [1, '1Gi'],
+      [0.3, '0.6Gi'],
+      [0, '0Gi'],
+      [4.25, '8.5Gi'],
+      ['1', '2Gi'],
+      [1, undefined],
+    ] as const) {
+      expect(sizeProblems(sized(APP('zitadel'), cpu, memory))).toEqual([
+        offSize('apps', 'ca-agentx-stg-zitadel', String(cpu), String(memory)),
+      ]);
+    }
+    // A job's size too.
+    expect(sizeProblems(sized(JOB('migrate'), 0.5, '2Gi'))).toEqual([
+      offSize('jobs', 'job-agentx-stg-migrate', '0.5', '2Gi'),
+    ]);
+  });
+
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {
     const api = APP('api');
     for (const change of [
-      (app: Mutable) => (inside(containerOf(app), 'resources').cpu = 0.5),
-      // With its heap brought down too: a heap of 3072 MiB in 1 GiB is the `apps` rule's (4D2e D12).
+      // Each at a size Azure offers, its memory twice its vCPUs (the `apps` rule's otherwise): larger than measured,
       (app: Mutable) => {
-        inside(containerOf(app), 'resources').memory = '1Gi';
+        containerOf(app).resources = { cpu: 2.5, memory: '5Gi' };
+      },
+      // and smaller, with its heap brought down too: a heap of 3072 MiB in 1 GiB is the `apps` rule's (4D2e D12).
+      (app: Mutable) => {
+        containerOf(app).resources = { cpu: 0.5, memory: '1Gi' };
         containerOf(app).command = ['node', '--max-old-space-size=768', 'apps/api/src/main.ts'];
       },
       (app: Mutable) => {
@@ -6245,7 +6328,14 @@ describe('the load run (D2c, PL-38)', () => {
         changed(api, (app) => settingsOf(app).push({ name: 'AGENTX_RATE_LIMIT_PER_MINUTE', value: '50000' })),
       ),
     ).toEqual(['load-run']);
-    expect(brokenRules(changed(api, (app) => (inside(containerOf(app), 'resources').cpu = 2)))).toEqual(['load-run']);
+    expect(
+      brokenRules(
+        changed(api, (app) => {
+          containerOf(app).resources = { cpu: 2, memory: '4Gi' };
+          containerOf(app).command = ['node', '--max-old-space-size=3072', 'apps/api/src/main.ts'];
+        }),
+      ),
+    ).toEqual(['load-run']);
   });
 
   it('load-run: the API not split as three web copies, or its jobs app off its size, connections, cap or email, in a load run or out of one (4D2e D13)', () => {

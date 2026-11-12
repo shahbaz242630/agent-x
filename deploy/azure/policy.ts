@@ -686,7 +686,7 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * sharing one would also need the same 10 ms tick and sequence to make the same ID, and capping at four copies keeps
  * the odds small (SA3d tracks proving it).
  */
-const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
+export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
   production: {
     most: 4,
@@ -4183,6 +4183,35 @@ function containerProblems(workload: PredictedResource, problem: (message: strin
     if (!PINNED_IMAGE.test(image)) {
       problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
     }
+    sizeProblems(container, problem);
+  }
+}
+
+/** A Consumption size's step: a quarter vCPU, with half a GiB of memory (512 MiB) for each. */
+const CONSUMPTION_STEP = { cpu: 0.25, mebibytes: 512 } as const;
+
+/** The Consumption profile's largest size, in steps: 4 vCPU and 8Gi. */
+const CONSUMPTION_MOST_STEPS = 16;
+
+/**
+ * A container's size is one the Consumption profile offers (Microsoft Learn, "Containers in Azure Container Apps",
+ * vCPU and memory allocation requirements, checked 13 Nov 2026): 0.25 vCPU with 0.5Gi, then each quarter vCPU more with
+ * 0.5Gi more, up to 4 vCPU with 8Gi, memory always twice the vCPUs in GiB. Any other pair passes a what-if and fails
+ * the deployment.
+ */
+function sizeProblems(container: unknown, problem: (message: string) => void): void {
+  const cpu = at(container, 'resources', 'cpu');
+  const memory = at(container, 'resources', 'memory');
+  const steps = typeof cpu === 'number' ? cpu / CONSUMPTION_STEP.cpu : Number.NaN;
+  const offered =
+    Number.isInteger(steps) &&
+    steps >= 1 &&
+    steps <= CONSUMPTION_MOST_STEPS &&
+    mebibytesOf(memory) === steps * CONSUMPTION_STEP.mebibytes;
+  if (!offered) {
+    problem(
+      `must run at a size the Consumption profile offers (0.25 to 4 vCPU in quarters, with 2Gi for each vCPU); it says ${String(cpu)} vCPU and ${String(memory)}`,
+    );
   }
 }
 
