@@ -66,6 +66,7 @@ import {
   refusals,
 } from '../../tooling/migration-order.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
+import { type Anchor, anchorSaid, belowAnchor, forwardPast, lastRelease } from './anchor.ts';
 import {
   ARM,
   type Az,
@@ -698,6 +699,8 @@ export interface CheckSteps {
   readonly pins: Readonly<Record<string, string | undefined>>;
   /** The clock, which says how recent the oldest record is (recordedBuilds). */
   readonly now: () => Date;
+  /** The last release GitHub recorded for staging (anchor.ts): read in CI, not outside it. */
+  readonly anchor: () => Promise<Anchor>;
 }
 
 /** What a release of the commit would do, read from Azure and the history, with what each runs said. */
@@ -748,13 +751,13 @@ const HELD: ReadonlySet<Decision['kind']> = new Set(['release', 'current', 'past
  * The folder must be a clean checkout of the commit (CI's is). Nothing read is printed but names: the subscription is
  * masked out of Bicep's own words.
  */
-function heldToTemplates(
+async function heldToTemplates(
   decision: Decision,
   commit: string,
   subscription: string,
   reads: ReadonlyMap<Workload, Read>,
   steps: CheckSteps,
-): Decision {
+): Promise<Decision> {
   if (!HELD.has(decision.kind)) return decision;
   const here = steps.folder.checkout();
   if (here.head !== commit || !here.clean) {
@@ -767,10 +770,13 @@ function heldToTemplates(
   const byBuild = new Map<string, ReadonlyMap<Workload, unknown>>();
   const reasons = ORDER.flatMap((workload) => heldWorkload(workload, reads, subscription, steps, { bound, byBuild }));
   const recorded = recordedBuilds(steps.az, subscription, steps.now());
+  const anchor = await steps.anchor();
+  const unanchored = anchorSaid(anchor);
+  if (unanchored !== undefined) steps.say(unanchored);
   reasons.push(
     ...unsignedBuilds(reads, steps.verify),
     ...recorded.problems,
-    ...rolledBack(reads, recorded, steps.history),
+    ...rolledBack(reads, recorded, steps.history, anchor),
     ...unpinned(bound, steps.pins, steps.say),
   );
   return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
@@ -839,23 +845,31 @@ export function listedAll(az: Az, url: string, what: string): unknown[] {
   return items;
 }
 
-/** One revision or run on record: the build its one container's AGENTX_RELEASE names (any text, or none), and when it was made. */
+/** One revision or run on record: the build its workload's container's AGENTX_RELEASE names (any text, or none), and when it was made. */
 interface Kept {
   readonly build: string | undefined;
   readonly startedAt: number | undefined;
 }
 
-/** A revision or run as kept: its build, and its creation (a revision) or start (a run). */
-function keptOf(item: unknown): Kept {
-  const properties = record(record(item).properties);
-  const containers = record(properties.template).containers;
-  const env = Array.isArray(containers) ? record(containers[0]).env : undefined;
-  const found = (Array.isArray(env) ? env : []).map(record).find((setting) => setting.name === RELEASE_SETTING);
-  return {
-    build: typeof found?.value === 'string' ? found.value : undefined,
-    startedAt: azureTime(properties.createdTime ?? properties.startTime),
+/**
+ * A revision or run as kept: the build of the container named as the workload's (apps.bicep), never whichever comes
+ * first, and its creation (a revision) or start (a run). None of that name names no build: a record no deploy left.
+ */
+const keptOf =
+  (workload: Workload) =>
+  (item: unknown): Kept => {
+    const properties = record(record(item).properties);
+    const containers = record(properties.template).containers;
+    const own = (Array.isArray(containers) ? (containers as unknown[]) : [])
+      .map(record)
+      .find((container) => container.name === WORKLOADS[workload].container);
+    const env = own?.env;
+    const found = (Array.isArray(env) ? env : []).map(record).find((setting) => setting.name === RELEASE_SETTING);
+    return {
+      build: typeof found?.value === 'string' ? found.value : undefined,
+      startedAt: azureTime(properties.createdTime ?? properties.startTime),
+    };
   };
-}
 
 /** How far back the record's own history is held to be whole: the job-start watch's window. */
 const RECORD_HOURS = 6;
@@ -869,8 +883,8 @@ const RECORD_HOURS = 6;
 function recordedBuilds(az: Az, subscription: string, now: Date): OnRecord {
   const since = now.getTime() - RECORD_HOURS * 3_600_000;
   const revisionsUrl = workloadUrl(subscription, 'api').replace('?api-version=', '/revisions?api-version=');
-  const revisions = listedAll(az, revisionsUrl, "the API's revisions").map(keptOf);
-  const runs = listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").map(keptOf);
+  const revisions = listedAll(az, revisionsUrl, "the API's revisions").map(keptOf('api'));
+  const runs = listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").map(keptOf('migrate'));
   const builds = (kept: readonly Kept[]): string[] => [...new Set(kept.map((each) => String(each.build)))];
   return {
     api: builds(revisions),
@@ -886,10 +900,6 @@ function recordedBuilds(az: Az, subscription: string, now: Date): OnRecord {
   };
 }
 
-/** What to do after a roll-back: forward only, past the newest build on record. */
-const forwardPast = (newest: string): string =>
-  `If a person rolled it back on purpose, deploy by hand a commit at least as new as ${newest}; otherwise a suspected breach`;
-
 /**
  * AZ2c: a workload rolled back, even to an older commit's own signed image, is a suspected breach. A release moves
  * both forward together, migrate first, so: neither may run a commit older than one deploys have left on record
@@ -897,29 +907,54 @@ const forwardPast = (newest: string): string =>
  * migrate against both), and migrate may never be behind the API. A record naming a build that isn't a commit in this
  * history is one no deploy left: a suspected breach too.
  */
-function rolledBack(reads: ReadonlyMap<Workload, Read>, recorded: OnRecord, history: History): string[] {
+function rolledBack(
+  reads: ReadonlyMap<Workload, Read>,
+  recorded: OnRecord,
+  history: History,
+  anchor: Anchor,
+): string[] {
   const api = reads.get('api')?.running.release ?? '';
   const migrate = reads.get('migrate')?.running.release ?? '';
-  const known = (build: string): boolean => COMMIT.test(build) && history.isAncestor(build, build);
+  // One read of main's line places every build (git.ts mainline): newer is nearer the tip.
+  const line = history.mainline();
+  const place = (build: string): number | undefined => line.get(build);
   const said: string[] = [];
   for (const [workload, builds, kind] of [
     ['api', recorded.api, 'revision'],
     ['migrate', recorded.migrate, 'run'],
   ] as const) {
-    const strange = builds.filter((build) => !known(build));
+    const strange = builds.filter((build) => place(build) === undefined);
     if (strange.length > 0) {
       said.push(
-        `${workload}: a ${kind} of it names a build that isn't in main's history (${strange.map(shown).join(', ')}): no deploy leaves one, a suspected breach`,
+        `${workload}: a ${kind} of it names a build that isn't in main's history (${strange.map(shown).join(', ')}): no deploy leaves one, a suspected breach (or this clone lacks main's newest commits: it reads origin/main, which git fetch origin main brings up to date)`,
       );
     }
   }
   /** The newest of the builds on record later than `build`, or nothing when none is. */
   const newestAfter = (build: string, among: readonly string[]): string | undefined => {
-    const later = [...new Set(among)].filter(
-      (each) => each !== build && known(each) && history.isAncestor(build, each),
-    );
-    return later.find((each) => later.every((other) => other === each || !history.isAncestor(each, other)));
+    let newest: string | undefined;
+    let best = place(build);
+    if (best === undefined) return undefined;
+    for (const each of new Set(among)) {
+      const at = place(each);
+      if (at !== undefined && at < best) {
+        best = at;
+        newest = each;
+      }
+    }
+    return newest;
   };
+  for (const [workload, build] of [
+    ['api', api],
+    ['migrate', migrate],
+  ] as const) {
+    if (place(build) === undefined) {
+      said.push(
+        `${workload}: it runs ${shown(build)}, which isn't on main's line here, so how new it is can't be told: a suspected breach, unless this clone lacks main's newest commits (git fetch origin main; CI checks out with fetch-depth 0)`,
+      );
+    }
+  }
+  said.push(...belowAnchor(anchor, { api, migrate }, place));
   const apiLater = newestAfter(api, recorded.api);
   if (apiLater !== undefined) {
     said.push(
@@ -932,7 +967,7 @@ function rolledBack(reads: ReadonlyMap<Workload, Read>, recorded: OnRecord, hist
       `migrate: it runs ${migrate}, older than ${migrateLater}, which a run of it or an API revision ran: rolled back. ${forwardPast(migrateLater)}`,
     );
   }
-  if (migrate !== api && history.isAncestor(migrate, api)) {
+  if ((place(migrate) ?? -1) > (place(api) ?? Number.POSITIVE_INFINITY)) {
     said.push(
       `migrate: it runs ${migrate}, behind the API's ${api}, which a release never leaves (it moves migrate first). If a hand apps run failed part way (it updates both at once), run apps again; otherwise a suspected breach`,
     );
@@ -1022,12 +1057,12 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   if (api !== undefined && settingValue(api.container, 'AGENTX_ROLE') === 'web') {
     return { subscription, image, reads, running, decision: { kind: 'load-run' } };
   }
-  const held = (decided: Decision): Plan => ({
+  const held = async (decided: Decision): Promise<Plan> => ({
     subscription,
     image,
     reads,
     running,
-    decision: heldToTemplates(decided, request.commit, subscription, reads, steps),
+    decision: await heldToTemplates(decided, request.commit, subscription, reads, steps),
   });
   const first = decide(running, request.commit, image, steps.history);
   if (first.kind !== 'by-hand') return held(first);
@@ -1714,7 +1749,7 @@ export function main(
   history: () => History = realHistory,
   extras: () => Extras = realExtras,
   folder: () => Folder = realFolder,
-  pins: Readonly<Record<string, string | undefined>> = process.env,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<number> {
   return runCli(
     USAGE,
@@ -1722,7 +1757,16 @@ export function main(
     () => parseArguments(argv),
     (request) => {
       const more = extras();
-      const steps = { az: az(), history: history(), folder: folder(), say, verify: more.verify, pins, now: more.now };
+      const steps = {
+        az: az(),
+        history: history(),
+        folder: folder(),
+        say,
+        verify: more.verify,
+        pins: env,
+        now: more.now,
+        anchor: () => lastRelease(env),
+      };
       return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...more });
     },
   );

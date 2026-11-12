@@ -644,6 +644,7 @@ jobs:
     permissions:
       contents: read # to check out the release tool and read the history
       id-token: write # for the token Azure takes in place of a credential (OIDC)
+      deployments: read # GitHub's record of the last release to staging, which an Azure sign-in can't touch (AZ2c)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -696,6 +697,8 @@ jobs:
           AGENTX_AUTH_HOST_SHA256: ${{ secrets.AGENTX_AUTH_HOST_SHA256 }}
           AGENTX_APP_HOST_SHA256: ${{ secrets.AGENTX_APP_HOST_SHA256 }}
           AGENTX_OIDC_CLIENT_ID_SHA256: ${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}
+          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above).
+          GITHUB_TOKEN: ${{ github.token }}
         run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

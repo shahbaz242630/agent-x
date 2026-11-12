@@ -77,6 +77,7 @@ function historyOf(files: Readonly<Record<string, readonly string[]>>): History 
       if (held === undefined) throw new Error(`git couldn't list ${folder} at ${commit}`);
       return held;
     },
+    mainline: () => new Map(),
   };
 }
 

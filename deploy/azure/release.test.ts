@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
 import type { Outcome } from '../image/verify.ts';
+import { type Anchor, type GitHubGet, lastRelease } from './anchor.ts';
 import { type Az, type AzResult, type Deployment, DEPLOYMENTS, RECORDED, RECORDS_JOB, recordTag } from './deploy.ts';
 import { type History, realHistory } from './git.ts';
 import { jobName, JOBS_API } from './jobs.ts';
@@ -469,6 +470,8 @@ function history(
       Object.keys(files[commit] ?? {})
         .filter((file) => file.startsWith(`${folder}/`))
         .map((file) => file.slice(folder.length + 1)),
+    // Main's line is the line given, its last commit the tip.
+    mainline: () => new Map(line.toReversed().map((commit, place) => [commit, place] as const)),
   };
 }
 
@@ -1058,6 +1061,11 @@ function fakeAz(
 /** The stand-in image check: every image is CI's signed build of the commit asked about. */
 const signedAsNamed = (): Outcome => ({ verified: true });
 
+/** The stand-in GitHub record: not read, as outside GitHub Actions; and the one line said for it. */
+const UNREAD: Anchor = { kind: 'unread' };
+const NOT_ANCHORED =
+  "GitHub's record of the last release wasn't read (not a GitHub Actions run): roll-backs are held to Azure's own record alone.";
+
 /** The one line a release says while no pin is set (AZ2c H3). */
 const NOT_PINNED =
   "Not pinned (AGENTX_AUTH_HOST_SHA256, AGENTX_APP_HOST_SHA256, AGENTX_OIDC_CLIENT_ID_SHA256 unset): the auth host, app host, API's client ID held to shape alone. Nothing is wrong; set each as a staging secret to hold it exactly.";
@@ -1089,6 +1097,7 @@ async function checked(
         verify: signedAsNamed,
         pins: {},
         now: () => new Date('2026-09-18T12:00:00Z'),
+        anchor: () => Promise.resolve(UNREAD),
       },
     );
     return { status, said, calls, error: undefined };
@@ -1113,6 +1122,7 @@ describe('check', () => {
       'Signed in to the subscription "Azure subscription 1".',
       `migrate runs ${OLD} (${OLD_IMAGE}).`,
       `api runs ${OLD} (${OLD_IMAGE}).`,
+      NOT_ANCHORED,
       NOT_PINNED,
       `A release of ${NEW} would update, in order:`,
       `  migrate: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}, and nothing else`,
@@ -1178,6 +1188,7 @@ describe('check', () => {
     expect(status).toBe(0);
     expect(said.slice(3)).toEqual([
       `The migration job records: foundation sent ${NEW}.`,
+      NOT_ANCHORED,
       NOT_PINNED,
       'Deployed by hand already, as the migration job records:',
       `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deployed by hand, foundation from ${NEW}`,
@@ -1356,6 +1367,8 @@ class Staging {
   /** The pins the release is given (AZ2c H3), and what the image check answers. */
   pins: Readonly<Record<string, string | undefined>> = {};
   signed: (image: string, commit: string) => Outcome = signedAsNamed;
+  /** The last release GitHub recorded (AZ2c), as the release reads it: by default not read, as outside CI. */
+  anchor: () => Promise<Anchor> = () => Promise.resolve(UNREAD);
   /** More revisions and runs on record than the release's own (AZ2c), as Azure lists them. */
   recordExtra: { revisions: unknown[]; runs: unknown[] } = { revisions: [], runs: [] };
   latest = 'ca-agentx-stg-api--0000007';
@@ -1723,6 +1736,7 @@ class Staging {
           : { verified: false, reason: 'SIGNATURE_REFUSED', detail: 'not signed by CI on main' };
       },
       pins: this.pins,
+      anchor: () => this.anchor(),
       probe: (url) => {
         expect(url).toBe(`https://${HOST}/health`);
         const status = this.probes.length > 1 ? this.probes.shift() : this.probes[0];
@@ -1736,6 +1750,13 @@ class Staging {
 const RELEASE_NEW = { command: 'release', commit: NEW, digest: digest('2') } as const;
 
 /** The commit's templates made to give each workload what staging now holds, for a test of something else (AZ2c). */
+/** The stand-in API's serving revision, 0000007. */
+function revisionOf(azure: Staging): HeldRevision {
+  const serving = azure.revisions.get('ca-agentx-stg-api--0000007');
+  if (serving === undefined) throw new Error('the stand-in staging has no revision 0000007');
+  return serving;
+}
+
 function deployedAsIs(azure: Staging): void {
   azure.templates = new Map(ORDER.map((workload) => [workload, azure.shape(workload)] as const));
 }
@@ -1791,6 +1812,7 @@ describe('release', () => {
       'Signed in to the subscription "Azure subscription 1".',
       `migrate runs ${OLD} (${OLD_IMAGE}).`,
       `api runs ${OLD} (${OLD_IMAGE}).`,
+      NOT_ANCHORED,
       NOT_PINNED,
       `Updating migrate: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}.`,
       `migrate holds ${NEW}.`,
@@ -1853,10 +1875,19 @@ describe('release', () => {
   });
 
   it('has nothing to do when both hold the commit and the API serves it; red when it holds it but does not', async () => {
-    // OLD before NEW; LATER a commit of main too, but on no line from NEW (a revision only ever names a main commit).
+    // OLD before NEW; LATER a commit of main too, older than both (a revision only ever names a main commit).
     const servedLine = (): History => {
       const line = ordinary();
-      return { ...line, isAncestor: (one, other) => (one === LATER && other === LATER) || line.isAncestor(one, other) };
+      return {
+        ...line,
+        isAncestor: (one, other) => (one === LATER && other === LATER) || line.isAncestor(one, other),
+        mainline: () =>
+          new Map([
+            [NEW, 0],
+            [OLD, 1],
+            [LATER, 2],
+          ]),
+      };
     };
     const holding = (): Staging => {
       const azure = new Staging();
@@ -2669,7 +2700,11 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
       properties: {
         [field]: time,
         status: 'Succeeded',
-        template: { containers: [{ name: 'c', env: [{ name: 'AGENTX_RELEASE', value: OLD }] }] },
+        template: {
+          containers: [
+            { name: field === 'createdTime' ? 'api' : 'migrate', env: [{ name: 'AGENTX_RELEASE', value: OLD }] },
+          ],
+        },
       },
     });
     const many = (field: 'createdTime' | 'startTime', time: string): unknown[] =>
@@ -2745,22 +2780,22 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     if (serving === undefined) throw new Error('the stand-in staging has no revision 0000007');
     azure.revisions.set('ca-agentx-stg-api--0000007', { ...serving, release: first });
     azure.runs = azure.runs.map((run) => ({ ...run, release: first }));
-    const named = (build: string) => ({
+    const named = (build: string, name = 'api') => ({
       name: 'x',
-      properties: { template: { containers: [{ name: 'c', env: [{ name: 'AGENTX_RELEASE', value: build }] }] } },
+      properties: { template: { containers: [{ name, env: [{ name: 'AGENTX_RELEASE', value: build }] }] } },
     });
     const unknown = 'f'.repeat(40);
-    azure.recordExtra = { revisions: [named(unknown), named('x\n::error::y')], runs: [named(unknown)] };
+    azure.recordExtra = { revisions: [named(unknown), named('x\n::error::y')], runs: [named(unknown, 'migrate')] };
     const steps = {
       ...azure.steps(realHistory(repository)),
       folder: folderAt(second, SAID, true, azure.templates).folder,
     };
     expect(await check({ command: 'check', commit: second, digest: digest('2') }, steps)).toBe(1);
     expect(steps.said).toContain(
-      `  api: a revision of it names a build that isn't in main's history (${unknown}, x???error??y): no deploy leaves one, a suspected breach`,
+      `  api: a revision of it names a build that isn't in main's history (${unknown}, x???error??y): no deploy leaves one, a suspected breach (or this clone lacks main's newest commits: it reads origin/main, which git fetch origin main brings up to date)`,
     );
     expect(steps.said).toContain(
-      `  migrate: a run of it names a build that isn't in main's history (${unknown}): no deploy leaves one, a suspected breach`,
+      `  migrate: a run of it names a build that isn't in main's history (${unknown}): no deploy leaves one, a suspected breach (or this clone lacks main's newest commits: it reads origin/main, which git fetch origin main brings up to date)`,
     );
     // Without them, the same staging is as deployed.
     azure.recordExtra = { revisions: [], runs: [] };
@@ -2769,6 +2804,28 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
       folder: folderAt(second, SAID, true, azure.templates).folder,
     };
     expect(await check({ command: 'check', commit: second, digest: digest('2') }, clean)).toBe(0);
+    // A revision's build is its api container's, never whichever container comes first (round 4, item 3).
+    azure.recordExtra = {
+      revisions: [
+        {
+          name: 'x',
+          properties: {
+            template: {
+              containers: [
+                { name: 'sidecar', env: [{ name: 'AGENTX_RELEASE', value: unknown }] },
+                { name: 'api', env: [{ name: 'AGENTX_RELEASE', value: first }] },
+              ],
+            },
+          },
+        },
+      ],
+      runs: [],
+    };
+    const sidecar = {
+      ...azure.steps(realHistory(repository)),
+      folder: folderAt(second, SAID, true, azure.templates).folder,
+    };
+    expect(await check({ command: 'check', commit: second, digest: digest('2') }, sidecar)).toBe(0);
   });
 
   it('reads a list page by page, and refuses a next page anywhere but Resource Manager (item 6)', () => {
@@ -2788,6 +2845,79 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     );
     expect(() => listedAll(az, 'https://management.azure.com/odd', 'things')).toThrow(
       "Azure's list of things wasn't a list.",
+    );
+  });
+
+  it('holds both workloads to the last release GitHub recorded, which a purge of Azure’s own record can’t reach (round 4)', async () => {
+    const MID = commit('c');
+    const line = (): History => history([OLD, MID, NEW], { [OLD]: [], [MID]: [] });
+    const anchored = async (
+      anchor: () => Promise<Anchor>,
+      arrange: (azure: Staging) => void = () => undefined,
+    ): Promise<{ status: number | undefined; said: string[]; message: string; writes: unknown[] }> => {
+      const azure = new Staging();
+      azure.anchor = anchor;
+      arrange(azure);
+      const done = await outcome(azure, line());
+      return { status: done.status, said: done.said, message: done.message, writes: azure.writes };
+    };
+    // Staging older than GitHub's record: rolled back, whatever Azure still lists (here nothing newer at all).
+    const older = await anchored(() => Promise.resolve({ kind: 'release', commit: MID }));
+    expect(older.status).toBe(1);
+    expect(older.writes).toEqual([]);
+    for (const workload of ['api', 'migrate']) {
+      expect(older.said).toContain(
+        `  ${workload}: it runs ${OLD}, older than the last release GitHub recorded (${MID}): rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${MID}; otherwise a suspected breach`,
+      );
+    }
+    // As new as it, or newer (a hand apps of a later commit): released as ever, and nothing said of it.
+    const same = await anchored(() => Promise.resolve({ kind: 'release', commit: OLD }));
+    expect(same.status).toBe(0);
+    expect(same.said).not.toContain(NOT_ANCHORED);
+    const newer = await anchored(
+      () => Promise.resolve({ kind: 'release', commit: OLD }),
+      (azure) => {
+        Object.assign(azure.job, { release: MID });
+        Object.assign(azure.app, { release: MID, env: builtAt(MID) });
+        azure.revisions.set('ca-agentx-stg-api--0000007', { ...revisionOf(azure), release: MID });
+      },
+    );
+    expect(newer.status).toBe(0);
+    // A record that isn't on main's line here holds nothing: red, saying how to fix the clone.
+    const elsewhere = await anchored(() => Promise.resolve({ kind: 'release', commit: 'f'.repeat(40) }));
+    expect(elsewhere.status).toBe(1);
+    expect(elsewhere.said).toContain(
+      `  the last release GitHub recorded (${'f'.repeat(40)}) isn't on main's line here, so nothing can be held to it: check out main's whole history (fetch-depth 0) and run this again`,
+    );
+    // A workload whose build isn't on main's line here can't be placed: red, naming the fetch.
+    const lineless = new Staging();
+    const unplaced = await outcome(lineless, {
+      ...line(),
+      mainline: () =>
+        new Map([
+          [NEW, 0],
+          [MID, 1],
+        ]),
+    });
+    expect(unplaced.status).toBe(1);
+    expect(unplaced.said).toContain(
+      `  api: it runs ${OLD}, which isn't on main's line here, so how new it is can't be told: a suspected breach, unless this clone lacks main's newest commits (git fetch origin main; CI checks out with fetch-depth 0)`,
+    );
+    // None recorded yet: said in one line, as when it isn't read.
+    const none = await anchored(() => Promise.resolve({ kind: 'none' }));
+    expect(none.status).toBe(0);
+    expect(none.said).toContain(
+      "GitHub has recorded no release to staging yet: roll-backs are held to Azure's own record alone.",
+    );
+    // In CI, a record GitHub won't give is red, writing nothing: fail closed.
+    const failing: GitHubGet = () => Promise.resolve({ status: 403, body: undefined });
+    const unreadable = await anchored(() =>
+      lastRelease({ GITHUB_ACTIONS: 'true', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' }, failing),
+    );
+    expect(unreadable.status).toBeUndefined();
+    expect(unreadable.writes).toEqual([]);
+    expect(unreadable.message).toContain(
+      "GitHub's record of the last release to staging couldn't be read (HTTP 403), so a roll-back past it can't be ruled out (AZ2c), and nothing was changed.",
     );
   });
 

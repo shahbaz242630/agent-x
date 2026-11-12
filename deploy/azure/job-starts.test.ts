@@ -9,6 +9,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
+import { type Anchor, type GitHubGet, lastRelease } from './anchor.ts';
 import { realHistory } from './git.ts';
 import {
   azureTime,
@@ -130,17 +131,17 @@ const migrateIn = (world: World): unknown =>
  */
 function heldFor(
   world: World,
-  given: { readonly inHistory?: boolean; readonly template?: readonly unknown[] | Error } = {},
+  given: {
+    /** Main's line, newest first: by default the build the jobs run alone. */
+    readonly line?: readonly string[];
+    readonly template?: readonly unknown[] | Error;
+    readonly anchor?: () => Promise<Anchor>;
+  } = {},
   asked: string[] = [],
 ): HeldSteps {
   return {
-    head: () => 'd'.repeat(40),
-    history: {
-      isAncestor: () => given.inHistory ?? true,
-      changedFiles: () => [],
-      fileAt: () => undefined,
-      filesIn: () => [],
-    },
+    history: { mainline: () => new Map((given.line ?? [BUILD]).map((commit, place) => [commit, place] as const)) },
+    anchor: given.anchor ?? (() => Promise.resolve({ kind: 'unread' })),
     templatesAt: (_subscription, commit) => {
       asked.push(commit);
       if (given.template instanceof Error) throw given.template;
@@ -258,7 +259,7 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
       jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
       runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
     };
-    const done = await run(rolled, [], heldFor(rolled));
+    const done = await run(rolled, [], heldFor(rolled, { line: [LATER_BUILD, BUILD] }));
     expect(done.status).toBe(1);
     expect(done.lines).toContain(
       `${FINDING_START}it names its build ${BUILD}, older than ${LATER_BUILD}, which a run of it ran: rolled back (if a person did it on purpose, deploy by hand a commit at least as new as ${LATER_BUILD})`,
@@ -268,15 +269,39 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
       jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
       runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
     };
-    const notLater = await run(older, [], {
-      ...heldFor(older),
-      history: {
-        ...heldFor(older).history,
-        isAncestor: (one, other) =>
-          one === other || other === 'd'.repeat(40) || (one === LATER_BUILD && other === BUILD),
-      },
-    });
+    const notLater = await run(older, [], heldFor(older, { line: [BUILD, LATER_BUILD] }));
     expect(notLater.status).toBe(0);
+  });
+
+  it('holds the job to the last release GitHub recorded, failing closed when it can’t be read (round 4)', async () => {
+    const LATER_BUILD = 'e'.repeat(40);
+    const deployed = world(MIGRATE);
+    const anchoredAt = (anchor: () => Promise<Anchor>) =>
+      run(deployed, [], heldFor(deployed, { line: [LATER_BUILD, BUILD], anchor }));
+    const older = await anchoredAt(() => Promise.resolve({ kind: 'release', commit: LATER_BUILD }));
+    expect(older.status).toBe(1);
+    expect(older.lines).toContain(
+      `${FINDING_START}migrate: it runs ${BUILD}, older than the last release GitHub recorded (${LATER_BUILD}): rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${LATER_BUILD}; otherwise a suspected breach`,
+    );
+    const same = await anchoredAt(() => Promise.resolve({ kind: 'release', commit: BUILD }));
+    expect(same.status).toBe(0);
+    const unread = await anchoredAt(() => Promise.resolve({ kind: 'unread' }));
+    expect(unread.status).toBe(0);
+    expect(unread.lines).toContain(
+      "GitHub's record of the last release wasn't read (not a GitHub Actions run): roll-backs are held to Azure's own record alone.",
+    );
+    const failing: GitHubGet = () => Promise.reject(new Error('offline'));
+    const closed = await anchoredAt(() =>
+      lastRelease({ GITHUB_ACTIONS: 'true', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' }, failing),
+    );
+    expect(closed.status).toBe(1);
+    expect(
+      closed.lines.some((line) =>
+        line.startsWith(
+          `${FINDING_START}it can't be compared (GitHub's record of the last release to staging couldn't be read (nothing answered)`,
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('finds a run naming a build that isn’t in main’s history, with the real history, never crashing (round 3, item 1)', async () => {
@@ -305,7 +330,6 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
     });
     const held = (world: World): HeldSteps => ({
       ...heldFor(world, { template: [builtAt(built)] }),
-      head: () => built,
       history: realHistory(repository),
     });
     for (const odd of ['f'.repeat(40), 'x\n::error::y']) {
@@ -327,7 +351,7 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
   });
 
   it('is a finding when the job names a build off main', async () => {
-    const offMain = await run(world(MIGRATE), [], heldFor(world(MIGRATE), { inHistory: false }));
+    const offMain = await run(world(MIGRATE), [], heldFor(world(MIGRATE), { line: [] }));
     expect(offMain.status).toBe(1);
     expect(offMain.lines).toContain(`${FINDING_START}it names its build ${BUILD}, which isn't in main's history`);
   });
@@ -386,6 +410,7 @@ describe('SEC-OPS-14 the job-start watch', () => {
       'Reading the runs of 2 jobs started since 2026-11-10 08:00 UTC (the last 6 h).',
       `${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`,
       'job-agentx-stg-migrate-x1 (started 2026-11-10 12:16 UTC): ran the job as it is deployed.',
+      "GitHub's record of the last release wasn't read (not a GitHub Actions run): roll-backs are held to Azure's own record alone.",
       `job-agentx-stg-migrate is as ${BUILD}'s apps.bicep has it, beyond its image and build.`,
       "No run started since 2026-11-10 08:00 UTC ran other containers than its job's own.",
     ]);

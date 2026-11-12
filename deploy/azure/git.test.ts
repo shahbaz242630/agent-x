@@ -189,6 +189,30 @@ describe('the checkout', () => {
   });
 });
 
+describe('main’s line, read once (AZ2c: the release places hundreds of builds on it)', () => {
+  it('places each commit by how far it is from the tip, newest 0, and refuses a shallow clone', () => {
+    const line = realHistory(repository).mainline();
+    expect(line.get(made.unusual)).toBe(0);
+    expect(line.get(made.first)).toBe(line.size - 1);
+    expect((line.get(made.tool) ?? 0) > (line.get(made.bicep) ?? 0)).toBe(true);
+    expect(line.get(MISSING)).toBeUndefined();
+    // From origin/main's tip where there is one, not HEAD.
+    git('update-ref', 'refs/remotes/origin/main', made.bicep);
+    try {
+      const fromMain = realHistory(repository).mainline();
+      expect(fromMain.get(made.bicep)).toBe(0);
+      expect(fromMain.has(made.unusual)).toBe(false);
+    } finally {
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+    }
+    const shallow = path.join(dir, 'shallow');
+    git('clone', '--quiet', '--depth', '1', `file://${repository.replaceAll('\\', '/')}`, shallow);
+    expect(() => realHistory(shallow).mainline()).toThrow(
+      "this clone is shallow, so main's history can't be read whole: check it out with its whole history (fetch-depth 0)",
+    );
+  });
+});
+
 describe('a folder as it is at a commit (AZ2c: the watch reads a build’s own apps.bicep)', () => {
   it('holds that commit’s files alone, in a worktree removed after, whatever the reader does', () => {
     expect(atCommit(made.bicep, 'deploy/azure', (at) => readdirSync(at).sort(), repository)).toEqual([

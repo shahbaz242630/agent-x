@@ -43,6 +43,7 @@ jobs:
     permissions:
       contents: read # to check out the watch
       id-token: write # for the token Azure takes in place of a credential (OIDC)
+      deployments: read # GitHub's record of the last release to staging, which an Azure sign-in can't touch (AZ2c)
     steps:
       # The whole history: the migration job is held to the apps.bicep of the build it names, read at that commit
       # (AZ2c), which must be in main's history.
@@ -83,6 +84,9 @@ jobs:
           subscription-id: ${{ secrets.AZURE_WATCH_SUBSCRIPTION_ID }}
 
       - name: Check every job run of the last six hours
+        env:
+          # The job's own token, to read the last release GitHub recorded (deployments: read alone, AZ2c).
+          GITHUB_TOKEN: ${{ github.token }}
         run: node deploy/azure/job-starts.ts
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

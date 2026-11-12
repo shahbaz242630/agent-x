@@ -533,7 +533,9 @@ const identitiesOf = (workload: unknown): string =>
 
 /**
  * How many inactive revisions Azure keeps when an app sets none: "By default, you have access to 100 inactive
- * revisions" (learn.microsoft.com/azure/container-apps/revisions). apps.bicep sets none, so staging keeps 100.
+ * revisions" (learn.microsoft.com/azure/container-apps/revisions). apps.bicep sets none. Staging in fact lists more
+ * (201 on 13 Nov 2026: Azure purges late), so the release's test of a list at that cap (release.ts recordedBuilds) is
+ * in practice its test of a flood; GitHub's record of the last release (anchor.ts) is what a purge can't reach.
  */
 const DEFAULT_INACTIVE_REVISIONS = 100;
 
