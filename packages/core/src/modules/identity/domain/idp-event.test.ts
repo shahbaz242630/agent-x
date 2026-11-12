@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classOfIdpEvent,
   endsSessions,
+  isOurRoutineChange,
   isToldToThePerson,
   MOST_WATCHED_TYPES,
   PASSKEY_ADDED_EVENTS,
@@ -78,5 +79,53 @@ describe('the login service’s events we copy (B6-2b)', () => {
       'sign_in_email_changed',
       'sign_in_restored',
     ]);
+  });
+});
+
+describe('our own routine changes in the login service (SA2)', () => {
+  const ADMIN = '312000000000000001';
+  const DIRECTORY = '312000000000000050';
+  const ours = { actors: new Set([ADMIN]), serviceUsers: new Set([DIRECTORY]) };
+  const token = (aggregateId: string, editorUserId: string | null = ADMIN) => ({
+    type: 'user.token.added',
+    eventClass: 'token_issued' as const,
+    aggregateType: 'user',
+    aggregateId,
+    editorUserId,
+  });
+  const grant = (member: { userId: string; roles: string[] } | undefined, type = 'instance.member.added') => ({
+    type,
+    eventClass: 'rights_changed' as const,
+    aggregateType: 'instance',
+    aggregateId: '312000000000000007',
+    editorUserId: ADMIN,
+    ...(member && { member }),
+  });
+
+  it('is ours only when one of our actors makes exactly a change we make', () => {
+    expect(isOurRoutineChange(token(DIRECTORY), ours)).toBe(true);
+    expect(isOurRoutineChange(grant({ userId: DIRECTORY, roles: ['IAM_OWNER_VIEWER'] }), ours)).toBe(true);
+    expect(
+      isOurRoutineChange(grant({ userId: DIRECTORY, roles: ['ORG_USER_MANAGER'] }, 'org.member.changed'), ours),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['a token for anyone else', token('312000000000000099')],
+    ['a token by another login', token(DIRECTORY, '312000000000000099')],
+    ['a token by no one named', token(DIRECTORY, null)],
+    ['a grant to anyone else', grant({ userId: '312000000000000099', roles: ['IAM_OWNER_VIEWER'] })],
+    ['an owner’s role to our service user', grant({ userId: DIRECTORY, roles: ['IAM_OWNER'] })],
+    ['one of their roles and an owner’s', grant({ userId: DIRECTORY, roles: ['IAM_OWNER_VIEWER', 'ORG_OWNER'] })],
+    ['a grant of no role', grant({ userId: DIRECTORY, roles: [] })],
+    ['a membership removed', grant({ userId: DIRECTORY, roles: [] }, 'instance.member.removed')],
+    ['a grant whose payload wasn’t read', grant(undefined)],
+    ['impersonation', { ...token(DIRECTORY), type: 'user.impersonated', eventClass: 'impersonated' as const }],
+  ])('is not ours, and alerts: %s', (_what, event) => {
+    expect(isOurRoutineChange(event, ours)).toBe(false);
+  });
+
+  it('is never ours when the deployment names no one', () => {
+    expect(isOurRoutineChange(token(DIRECTORY), { actors: new Set(), serviceUsers: new Set() })).toBe(false);
   });
 });

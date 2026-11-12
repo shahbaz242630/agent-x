@@ -65,7 +65,8 @@ import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
 const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
-import { type Checkout, realCheckout } from './git.ts';
+import { type Checkout, realCheckout, realHistory } from './git.ts';
+import type { MigrationState } from './migration-state.ts';
 import { describeProblem, LOAD_SERVER_CONNECTIONS, policyProblems } from './policy.ts';
 import { deploymentSnapshot, environmentSnapshot, inCopy } from './snapshot.ts';
 import { throwawayHost, throwawayServerProblem } from '../../tooling/load/throwaway.ts';
@@ -224,6 +225,8 @@ export type Request =
       readonly loadDatabase?: string;
       /** A real restore's switch (AZ25, playbook L): the API stopped before the deployment and confirmed stopped after it. */
       readonly apiStopped?: boolean;
+      /** The migration job runs the new image to success before the deployment is sent (AZ6), as CI's release does. */
+      readonly migrateFirst?: boolean;
     } & ServerFlags)
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
@@ -270,7 +273,7 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts secrets --all [--back-to-generation <n>]
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...] [--back-to-generation <n>]
   node deploy/azure/deploy.ts secrets --keys [--back-to-generation <n>]
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]] [--api-stopped] [--back-to-generation <n>]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running] [--load-run [--load-database <throwaway copy>]] [--api-stopped] [--migrate-first] [--back-to-generation <n>]
   (--first-server and --back-to-generation only where deploy.ts asks for them: playbook L, AZ25)
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
@@ -282,13 +285,23 @@ function parseApps(options: readonly string[]): Request {
   for (let at = 0; at < options.length; at += 1) {
     at += appsOption(asked, options[at], options[at + 1] ?? '');
   }
-  const { commit, keepRunning, loadRun, loadDatabase, apiStopped } = asked;
+  const { commit, keepRunning, loadRun, loadDatabase, apiStopped, migrateFirst } = asked;
   if (loadDatabase !== undefined && !loadRun) {
     throw new UsageError("--load-database is Stage G's load run alone: give --load-run with it");
   }
   if (apiStopped === true && (keepRunning || loadRun)) {
     throw new UsageError(
       "--api-stopped is a real restore's switch alone (playbook L): it keeps the API stopped, so never with --keep-running or --load-run",
+    );
+  }
+  if (loadRun && migrateFirst === true) {
+    throw new UsageError(
+      "--migrate-first is never with --load-run: it migrates staging's own server, not Stage G's copy, and a load run's API doesn't serve CI's release; run apps --migrate-first alone first, then the load run",
+    );
+  }
+  if (apiStopped === true && migrateFirst === true) {
+    throw new UsageError(
+      "--migrate-first is never with --api-stopped: a restore's API stays stopped, and playbook L runs migrate on the new server once the deployment has moved the jobs to it",
     );
   }
   return {
@@ -298,6 +311,7 @@ function parseApps(options: readonly string[]): Request {
     loadRun,
     ...(loadDatabase === undefined ? {} : { loadDatabase }),
     ...(apiStopped === true ? { apiStopped } : {}),
+    ...(migrateFirst === true ? { migrateFirst } : {}),
   };
 }
 
@@ -308,6 +322,7 @@ interface AppsAsked {
   loadRun: boolean;
   loadDatabase?: string;
   apiStopped?: boolean;
+  migrateFirst?: boolean;
 }
 
 /** One of apps's options taken into `asked`, each at most once: how many words past it were its value. */
@@ -324,6 +339,10 @@ function appsOption(asked: AppsAsked, option: string | undefined, value: string)
     asked.apiStopped = true;
     return 0;
   }
+  if (option === '--migrate-first' && asked.migrateFirst !== true) {
+    asked.migrateFirst = true;
+    return 0;
+  }
   if (option === '--commit' && asked.commit === undefined && COMMIT.test(value)) {
     asked.commit = value;
     return 1;
@@ -333,7 +352,7 @@ function appsOption(asked: AppsAsked, option: string | undefined, value: string)
     return 1;
   }
   throw new UsageError(
-    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped and --back-to-generation <n>, each at most once',
+    'apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped, --migrate-first and --back-to-generation <n>, each at most once',
   );
 }
 
@@ -950,6 +969,16 @@ export interface Steps {
   readonly checkout?: () => Checkout;
   /** The database server's generation the foundation names: database-generation.json's unless given (AZ25). */
   readonly generation?: number;
+  /** What the database holds of the image's migrations, and the migration run ahead of a deployment (AZ6). */
+  readonly migrations?: Migrations;
+}
+
+/** The database's migrations as apps reads and runs them (AZ6): migration-state.ts and release.ts in a real run. */
+export interface Migrations {
+  /** What the database on the host holds of the migrations the commit's image brings, read from migrate's runs. */
+  state(subscription: string, host: string, commit: string): Promise<MigrationState>;
+  /** The migration job updated to the image and run to success, or an error saying what that left. */
+  runFirst(subscription: string, commit: string, digest: string): Promise<void>;
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
@@ -1149,10 +1178,10 @@ async function deployFoundation(
   confirmBicep(steps);
   if (!steps.rangesCurrent()) {
     throw new Error(
-      "GitHub's published addresses have changed, and an image pull would fail. Run node deploy/azure/github-ranges.ts, take the change, and redeploy from a merged commit.",
+      "GitHub's published addresses have changed: it publishes one the file doesn't allow yet, or couldn't be read, and an image pull could fail. Run node deploy/azure/github-ranges.ts --write (or take the waiting data/github-ranges-* branch), merge the change, and redeploy from the merged commit.",
     );
   }
-  const disk = generationServer(steps, subscription, 'foundation', server);
+  const { disk } = generationServer(steps, subscription, 'foundation', server);
   const email = await steps.terminal.ask('Address the alerts go to: ');
   if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
   steps.terminal.say(
@@ -1247,7 +1276,7 @@ function generationServer(
   subscription: string,
   part: 'foundation' | 'secrets' | 'apps',
   said: ServerSaid = {},
-): number {
+): { readonly disk: number; readonly server: string | undefined } {
   const vaults = readOrNothing(() =>
     azJson(steps.az, [
       'keyvault',
@@ -1284,7 +1313,8 @@ function generationServer(
   if (verdict.kind === 'refused') throw new Error(verdict.why);
   steps.terminal.say(verdict.said);
   const size = listed?.find(({ name }) => text(name) === verdict.server)?.storage?.storageSizeGb;
-  return typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
+  const disk = typeof size === 'number' && Number.isSafeInteger(size) && size > LEAST_DISK_GB ? size : LEAST_DISK_GB;
+  return { disk, server: verdict.server };
 }
 
 /** One of the two rules on the jobs having stopped (main.bicep's name), which foundation sets together. */
@@ -2276,6 +2306,174 @@ async function removeLeftJobsApp(
 const REMOVAL_READ_MS = 10_000;
 const REMOVAL_READS = 60;
 
+/**
+ * How often, and how many times, the API is read for its revision of the new image being the ready one (AZ7): ten
+ * minutes in all, since pulling the image into a new replica can take minutes on its own.
+ */
+const REVISION_READ_MS = 15_000;
+const REVISION_READS = 40;
+
+/** One of the API's revisions as Azure names it, held to that shape before it goes into a URL (release.ts's rule). */
+const API_REVISION = /^ca-agentx-stg-api--[a-z0-9]+$/;
+
+/** How Azure has the API's newest revision: its name, whether it is the ready one, and what it runs and how. */
+interface NewestRevision {
+  readonly name: string;
+  readonly ready: boolean;
+  readonly image: string;
+  readonly provisioning: string;
+  readonly running: string;
+  readonly active: boolean;
+}
+
+/** A read through Resource Manager as JSON properties, or undefined when Azure didn't answer it with any. */
+function armProperties(steps: Steps, url: string): Readonly<Record<string, unknown>> | undefined {
+  const read = steps.az.run(['rest', '--method', 'get', '--url', url]);
+  if (read.status !== 0) return undefined;
+  try {
+    const properties = (JSON.parse(read.stdout) as { properties?: unknown } | null)?.properties;
+    return typeof properties === 'object' && properties !== null ? (properties as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The API's newest revision, or undefined while Azure names none (or none of the API's shape) or can't be read. */
+function newestRevision(steps: Steps, subscription: string): NewestRevision | undefined {
+  const app = armProperties(steps, apiUrl(subscription));
+  const name = text(app?.latestRevisionName);
+  if (!API_REVISION.test(name)) return undefined;
+  const revision = armProperties(steps, apiUrl(subscription, `/revisions/${name}`));
+  if (revision === undefined) return undefined;
+  const containers = (revision.template as { containers?: unknown } | undefined)?.containers;
+  const api = (Array.isArray(containers) ? (containers as { name?: unknown; image?: unknown }[]) : []).find(
+    (container) => container.name === 'api',
+  );
+  return {
+    name,
+    ready: name === text(app?.latestReadyRevisionName),
+    image: text(api?.image),
+    provisioning: text(revision.provisioningState),
+    running: text(revision.runningState),
+    active: revision.active === true,
+  };
+}
+
+/** The running states Azure gives a revision whose replicas couldn't start (the portal shows the second, S174). */
+const FAILED_TO_START: ReadonlySet<string> = new Set(['Failed', 'ActivationFailed']);
+
+/** A revision's state in words, for the operator: Azure's own words for each part. */
+const revisionState = (found: NewestRevision): string =>
+  `${found.name}: ${found.provisioning || 'no provisioning state'}, ${found.running || 'no running state'}, ${found.active ? 'active' : 'not active'}, ${found.ready ? 'the ready one' : 'not the ready one'}`;
+
+/**
+ * Once the deployment has succeeded, waits until the API's newest revision runs the new image and is the ready one
+ * (AZ7): Azure calls a deployment done before the revision has started, so without this a revision that never starts
+ * (S174: the image ahead of its migration) went unseen until CI's release refused. True once it is; false, having said
+ * what happened and what to do, when it failed or wasn't ready within the wait.
+ */
+async function apiServes(steps: Steps, subscription: string, image: string): Promise<boolean> {
+  steps.terminal.say(
+    `Waiting for ${API_APP}'s revision of the new image to be the ready one (up to ${String((REVISION_READS * REVISION_READ_MS) / 60_000)} minutes: a new replica pulls the image first)...`,
+  );
+  let last = 'Azure named no revision of the new image';
+  for (let read = 0; read < REVISION_READS; read += 1) {
+    const found = newestRevision(steps, subscription);
+    if (found?.image === image) {
+      if (found.ready && found.active && found.provisioning === 'Provisioned') {
+        steps.terminal.say(`${API_APP}'s revision ${found.name} runs the new image and is the ready one.`);
+        return true;
+      }
+      // A revision that failed to start never recovers (S174): waiting longer only hides it.
+      if (found.provisioning === 'Failed' || FAILED_TO_START.has(found.running)) {
+        steps.terminal.say(
+          `Deployed, but ${API_APP}'s revision of the new image failed to start (${revisionState(found)}), so the API doesn't serve this release. A failed revision never recovers. Read why in the Azure portal (Container Apps, ${API_APP}, Revisions and replicas, its log). If the database lacked a migration (the API refuses to start ahead of one), run the migration with this image (node deploy/azure/jobs.ts run migrate), then apps --keep-running, which makes a fresh revision, then apps.`,
+        );
+        return false;
+      }
+      last = revisionState(found);
+    }
+    await (steps.sleep ?? sleepFor)(REVISION_READ_MS);
+  }
+  steps.terminal.say(
+    `Deployed, but ${API_APP}'s revision of the new image wasn't the ready one ${String((REVISION_READS * REVISION_READ_MS) / 60_000)} minutes later (${last}), so the API may not serve this release yet: the revision before it serves until it is, if there is one. Look at it in the Azure portal (Container Apps, ${API_APP}, Revisions and replicas, its log); once it reads ready, nothing more is needed, and if it failed, fix the cause and run apps again.`,
+  );
+  return false;
+}
+
+/** The host staging's database server answers at (names.bicep `databaseHost`). */
+const hostOf = (server: string): string => `${server}.postgres.database.azure.com`;
+
+/** The way the migrations are read and run, which every apps run needs. */
+function migrationsOf(steps: Steps): Migrations {
+  if (steps.migrations === undefined) throw new Error("No way to read the database's migrations was given.");
+  return steps.migrations;
+}
+
+/**
+ * Before anything is asked (AZ6): whether the database holds every migration the image brings. Deployed ahead of
+ * them, the API refuses to start on the new image and raises a false tamper alarm (S174), so apps is refused unless
+ * `--migrate-first` runs the migration with the image first; true when it is to run. A first deploy has no job or
+ * server to read yet (its jobs run after it), and `--api-stopped`'s API stays stopped through a restore, whose
+ * playbook runs migrate on the new server before starting it.
+ */
+async function migrationsFirst(
+  steps: Steps,
+  subscription: string,
+  server: string | undefined,
+  release: string,
+  flags: { readonly apiStopped: boolean; readonly asked: boolean },
+): Promise<boolean> {
+  const say = (line: string): void => {
+    steps.terminal.say(line);
+  };
+  if (flags.apiStopped) {
+    say(
+      "The database's migrations aren't checked here: with --api-stopped the API stays stopped, and playbook L runs migrate on the new server before starting it.",
+    );
+    return false;
+  }
+  const state =
+    server === undefined ? undefined : await migrationsOf(steps).state(subscription, hostOf(server), release);
+  if (state === undefined || state.kind === 'no-job') {
+    say('No migration job yet, so this is a first deploy: run migrate after it, with the other jobs.');
+    return false;
+  }
+  if (state.kind === 'holds') {
+    say(
+      `The database on ${String(server)} holds every migration this image brings (migrate's run ${state.run} ran ${state.ran}).${flags.asked ? ' --migrate-first: nothing to run first.' : ''}`,
+    );
+    return false;
+  }
+  const why =
+    state.kind === 'behind'
+      ? `The database on ${String(server)} lacks ${String(state.missing.length)} migration${state.missing.length === 1 ? '' : 's'} this image brings (${state.missing.join(', ')}): migrate's newest successful run there, ${state.run}, ran ${state.ran}.`
+      : `Whether the database on ${String(server)} holds every migration this image brings can't be told: ${state.why}.`;
+  if (flags.asked) {
+    say(`${why} --migrate-first: the migration job runs this image first, before the deployment is sent.`);
+    return true;
+  }
+  throw new Error(
+    `${why} Deployed now, the API would start on this image ahead of its database, refuse to start, and raise a false tamper alarm (S174). Run the migration with this image first: run apps again with --migrate-first added (and the same options), which puts this image on the migration job, runs it, and sends the deployment only once it has succeeded, as CI's release does. Nothing was deployed.`,
+  );
+}
+
+/** `--migrate-first` (AZ6), once everything is asked and checked: the migration job runs the image to success. */
+async function runMigrationFirst(steps: Steps, subscription: string, release: string, digest: string): Promise<void> {
+  // The partner's rule (Rule Book §1.9): a change to the database is confirmed before it is made, not after.
+  steps.terminal.say(
+    `--migrate-first: the migration job will run commit ${release}'s migrations on the database now, before the deployment's own what-if. A migration can't be undone; the API keeps its build until the deployment.`,
+  );
+  if (!yes(await steps.terminal.ask('Run the migration now? [y/N] '))) throw new Cancelled();
+  steps.terminal.say(
+    "Running the migration with this image first (a release's first half: migrate updated to it, run, and waited for)...",
+  );
+  await migrationsOf(steps).runFirst(subscription, release, digest);
+  steps.terminal.say(
+    "The migration has run. If the what-if is now declined, the database holds this image's migrations while the API stays on its build: run apps again soon.",
+  );
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2285,13 +2483,14 @@ async function deployApps(
     loadDatabase,
     server,
     apiStopped,
+    migrateFirst,
   }: Omit<Extract<Request, { command: 'apps' }>, 'command'>,
 ): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
-  generationServer(steps, subscription, 'apps', server);
+  const served = generationServer(steps, subscription, 'apps', server).server;
   if (loadRun) {
     confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
@@ -2321,6 +2520,10 @@ async function deployApps(
     throw new Error(`The image was refused (${outcome.reason}), so nothing was deployed:\n${outcome.detail}`);
   }
   steps.terminal.say('Verified.');
+  const runFirst = await migrationsFirst(steps, subscription, served, release, {
+    apiStopped: apiStopped === true,
+    asked: migrateFirst === true,
+  });
   const loadDigest = loadRun ? await verifiedLoadImage(steps, images, release) : '';
   steps.terminal.say(
     keepRunning
@@ -2348,8 +2551,26 @@ async function deployApps(
     [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
   };
   checkPolicy(steps, values);
+  if (runFirst) await runMigrationFirst(steps, subscription, release, digest);
   if (!(await sendApps(steps, subscription, values, apiStopped === true))) return 1;
+  return afterApps(steps, subscription, { image, keepRunning, loadRun, apiStopped: apiStopped === true });
+}
+
+/** What follows a deployment that went: what Azure left, the API's new revision waited for, then what comes next. */
+async function afterApps(
+  steps: Steps,
+  subscription: string,
+  sent: {
+    readonly image: string;
+    readonly keepRunning: boolean;
+    readonly loadRun: boolean;
+    readonly apiStopped: boolean;
+  },
+): Promise<number> {
+  const { image, keepRunning, loadRun, apiStopped } = sent;
   const appsLeft = sayWhatIsDeployed(steps, subscription, loadRun);
+  // A stopped API (--api-stopped) starts no revision until playbook L starts it; a load run's jobs app stays until it serves.
+  if (!apiStopped && !(await apiServes(steps, subscription, image))) return 1;
   await removeLeftJobsApp(steps, subscription, appsLeft, loadRun);
   steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
@@ -2381,7 +2602,24 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
   }
 }
 
-/** Whether GitHub's ranges match the pinned file, by running the refresher's own check. */
+/**
+ * The real reading and running of the migrations (AZ6). Both modules import this one, so each is loaded only when
+ * used, once this one is whole: a static import would run their top level before this file's constants exist.
+ */
+function realMigrations(az: Az, say: (line: string) => void): Migrations {
+  const history = realHistory();
+  return {
+    state: async (subscription, host, commit) =>
+      (await import('./migration-state.ts')).migrationState(az, history, subscription, host, commit),
+    runFirst: async (subscription, commit, digest) => {
+      const { migrateFirst } = await import('./release.ts');
+      const steps = { az, history, say, now: () => new Date(), sleep: (ms: number) => sleepFor(ms) };
+      await migrateFirst(steps, subscription, commit, digest);
+    },
+  };
+}
+
+/** Whether nothing GitHub publishes now could break a pull, by the refresher's own check (a removed range alone passes). */
 function rangesCurrent(): boolean {
   const done = spawnSync(process.execPath, [path.join(AZURE_DIR, 'github-ranges.ts')], {
     stdio: 'inherit',
@@ -2410,9 +2648,14 @@ export async function main(
     return 1;
   }
   try {
+    const terminal = realTerminal();
+    const az = realAz();
     return await deploy(request, {
-      terminal: realTerminal(),
-      az: realAz(),
+      terminal,
+      az,
+      migrations: realMigrations(az, (line) => {
+        terminal.say(line);
+      }),
       policy: (values) => policyCheck(values),
       alerts: (part, subscription, values) => plannedAlerts(part, subscription, values),
       rangesCurrent,

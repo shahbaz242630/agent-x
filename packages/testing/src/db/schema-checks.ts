@@ -43,8 +43,7 @@
 // problems in the same order, whatever its locale.
 import type pg from 'pg';
 
-import { catalogueRows as rows, openCatalogue } from './catalogue.ts';
-import type { TestDatabase } from './test-database.ts';
+import { type CatalogueTarget, catalogueRows as rows, openCatalogue } from './catalogue.ts';
 
 /** A table with no org_id and no row-level security, allowed by name (ADR-005 §6). */
 interface GlobalTable {
@@ -524,7 +523,7 @@ interface RoleNames {
  * Every way the database breaks the CI-06 rules, or none. Connects as the
  * migration role and reads the system catalogues; it changes nothing.
  */
-export async function schemaProblems(database: TestDatabase, policy: SchemaPolicy): Promise<string[]> {
+export async function schemaProblems(database: CatalogueTarget, policy: SchemaPolicy): Promise<string[]> {
   const roles: RoleNames = {
     app: database.server.roles.app.user,
     backup: database.server.roles.backup.user,

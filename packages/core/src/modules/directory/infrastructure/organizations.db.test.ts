@@ -1,10 +1,18 @@
-// The directory's list of organisations (0007), as the app role.
-import { createTestDatabase, type TestDatabase, testLogger, within } from '@agentx/testing';
+// The directory's list of organisations (0007), as the app role, and each one's shard in the anchors' store (0082).
+import { createHash, randomUUID } from 'node:crypto';
+
+import { ANCHOR_SHARD_VECTORS, createTestDatabase, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { listedOrganizations, registerOrganization } from './organizations.ts';
+import { listedByShard, listedOrganizations, registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
+
+// The anchors' shard as the design defines it (first byte of the SHA-256 of the chain's name), worked out here rather
+// than imported: the directory module may not import the audit chain (module boundaries), and shards.ts's shardOf is
+// held to the same golden vectors (ANCHOR_SHARD_VECTORS) in its own test.
+const shardOf = (chain: string): number => createHash('sha256').update(chain, 'utf8').digest().readUInt8(0);
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -15,6 +23,8 @@ const newId = (): string => {
   number += 1;
   return `0199a0f0-0000-7000-8000-${(0x6000 + number).toString(16).padStart(12, '0')}`;
 };
+
+const ORGANISATION = 'organisation:';
 
 const listed = (id: string) => app.selectFrom('directory.orgs').select('org_id').where('org_id', '=', id).execute();
 
@@ -80,6 +90,88 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
       await holder.query('rollback');
       await holder.end();
     }
+  });
+
+  describe("each organisation's shard in the anchors' store (0082, PL-65 PR4)", () => {
+    const shardIn = async (id: string): Promise<number | undefined> =>
+      (await app.selectFrom('directory.orgs').select('anchor_shard').where('org_id', '=', id).executeTakeFirst())
+        ?.anchor_shard;
+
+    it.each(ANCHOR_SHARD_VECTORS.filter(([chain]) => chain.startsWith(ORGANISATION)))(
+      'golden: %s is in shard %i here too, as shardOf gives it',
+      async (chain, shard) => {
+        const id = chain.slice(ORGANISATION.length);
+        await withTenant(app, id, (tx) => registerOrganization(tx, id));
+        expect(await shardIn(id)).toBe(shard);
+        expect(shardOf(chain)).toBe(shard);
+      },
+    );
+
+    it('is the same as shardOf for any ID, given in any case', async () => {
+      const ids = Array.from({ length: 300 }, () => randomUUID());
+      for (const id of ids) await withTenant(app, id, (tx) => registerOrganization(tx, id.toUpperCase()));
+      const rows = await app
+        .selectFrom('directory.orgs')
+        .select(['org_id', 'anchor_shard'])
+        .where('org_id', 'in', ids)
+        .execute();
+      expect(rows).toHaveLength(ids.length);
+      for (const row of rows) expect(row.anchor_shard).toBe(shardOf(`${ORGANISATION}${row.org_id}`));
+    });
+
+    it('is written by nothing: the app can neither give it nor change it', async () => {
+      const id = newId();
+      await withTenant(app, id, (tx) => registerOrganization(tx, id));
+      const wrong = ((await shardIn(id)) ?? 0) ^ 1;
+      await expect(
+        withTenant(app, newId(), (tx) =>
+          sql`insert into directory.orgs (org_id, anchor_shard) values (${newId()}::uuid, ${wrong})`.execute(tx),
+        ),
+      ).rejects.toMatchObject({ code: '428C9' });
+      await expect(
+        sql`update directory.orgs set anchor_shard = ${wrong} where org_id = ${id}::uuid`.execute(app),
+      ).rejects.toMatchObject({ code: '428C9' });
+      // Nor its ID, which the column follows: the app has no right to change an entry at all.
+      await expect(
+        sql`update directory.orgs set org_id = ${newId()}::uuid where org_id = ${id}::uuid`.execute(app),
+      ).rejects.toMatchObject({ code: '42501' });
+    });
+
+    it('lists every organisation shard by shard, then by ID, in pages at any edge', async () => {
+      for (let count = 0; count < 12; count += 1) {
+        const id = newId();
+        await withTenant(app, id, (tx) => registerOrganization(tx, id));
+      }
+      const all = await listedByShard(app);
+      expect([...all].sort()).toEqual(await listedOrganizations(app));
+      const keys = all.map((id) => [shardOf(`${ORGANISATION}${id}`), id] as const);
+      expect(keys).toEqual(
+        keys.toSorted(([one, oneId], [other, otherId]) => one - other || oneId.localeCompare(otherId)),
+      );
+      expect(await listedByShard(app, 1)).toEqual(all);
+      expect(await listedByShard(app, 5)).toEqual(all);
+      expect(await listedByShard(app, all.length)).toEqual(all);
+    });
+
+    it('reads its pages along the index, never sorting the table', async () => {
+      const owner = await database.connect('admin');
+      try {
+        // With sequential scans priced out, a plan that can't use the index still shows a sort.
+        await owner.query('begin');
+        await owner.query('set local enable_seqscan = off');
+        const rows = await owner.query<{ 'QUERY PLAN': string }>(
+          `explain select anchor_shard, org_id from directory.orgs
+           where (anchor_shard, org_id) > (3, '0199a0f0-0000-7000-8000-000000000001'::uuid)
+           order by anchor_shard, org_id limit 50`,
+        );
+        const plan = rows.map((row) => row['QUERY PLAN']).join('\n');
+        expect(plan).toMatch(/orgs_by_anchor_shard/);
+        expect(plan).not.toMatch(/Sort/);
+      } finally {
+        await owner.query('rollback');
+        await owner.end();
+      }
+    });
   });
 
   it('refuses one listed already', async () => {

@@ -53,7 +53,9 @@ import { type Clock, DAY_MS } from '@agentx/core/shared-kernel';
 import {
   type Anchor,
   type AnchorStore,
+  type Chain,
   CHAIN_START,
+  type LastKnown,
   type ChainProblem,
   type ChainReport,
   type ChainStep,
@@ -67,6 +69,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { Stopped } from './background.ts';
 
 /** The rotation's reads of one organisation's chain, each in a transaction of its own under its wall. */
@@ -229,6 +232,20 @@ export interface RotationOptions {
   readonly failed: (orgId: string, check: RotationCheck, problem: ChainProblem) => Promise<void>;
   /** A read that didn't come back, the run not stopped: the alarm where the database refused it, a warning otherwise. */
   readonly missed: (orgId: string, check: RotationCheck, error: unknown) => Promise<void>;
+  /**
+   * The anchors' log where it lets shards go (PL-65 PR3): a chain's shard is pinned for each step that reads its anchor
+   * or keeps its lines, so it is never read as never anchored, nor its lines refused. None, where all are held.
+   */
+  readonly shards?: {
+    holds(chain: Chain): boolean;
+    pin(chain: Chain): Promise<(() => void) | undefined>;
+    /** What is last known of a chain, held or let go, with no read: what the share, the order and lateness go by. */
+    lastKnown(chain: Chain): LastKnown | undefined;
+    /** Near the budget, what waits written, before a shard is read back (PR4: each step leaves a line waiting). */
+    roomToReadBack(): Promise<void>;
+    /** The walk has gone past the chain's shard: it goes first when room is needed (PR4). */
+    walkedPast(chain: Chain): void;
+  };
 }
 
 export interface Rotation {
@@ -272,6 +289,8 @@ const FAILED = Symbol('failed');
 
 const chainOf = (orgId: string) => ({ kind: 'organisation', orgId }) as const;
 
+const itself = (orgId: string): string => orgId;
+
 export function createRotation({
   checks,
   anchors,
@@ -286,6 +305,7 @@ export function createRotation({
   bounded,
   failed,
   missed,
+  shards,
 }: RotationOptions): Rotation {
   const started = clock.now().getTime();
   const slots = new Map<string, number>();
@@ -306,6 +326,41 @@ export function createRotation({
   let lastPassAt: number | undefined;
   // A share cut short by time, still owed: read on top of the next run's.
   let carried = 0n;
+
+  /**
+   * What is known of a chain, never reading a shard back for it (PR3): held, as held now; let go (`held` false), as the
+   * log last knew it. Its anchored place, when its last pass began, and since when it has gone unpassed.
+   */
+  const knownOf = (orgId: string) => {
+    const chain = chainOf(orgId);
+    if (shards?.holds(chain) === false) {
+      const known = shards.lastKnown(chain);
+      return { held: false, seq: known?.seq, passedAt: known?.passedAt, passAt: known?.passedAt ?? known?.placeAt };
+    }
+    const passedAt = passes.lastPass(chain)?.at.getTime();
+    const passAt = passedAt ?? passes.lastProgress(chain)?.at.getTime();
+    return { held: true, seq: anchors.latest(chain)?.seq, passedAt, passAt };
+  };
+
+  // The organisation whose shard the rotation last pinned, so the log hears when its walk leaves that shard (PR4).
+  let walkedFrom: string | undefined;
+
+  /** `work` with the chain's shard pinned, read again first if it was let go; MISSED if it can't be (said by the log). */
+  const pinned = async <T>(orgId: string, work: () => Promise<T>): Promise<T | typeof MISSED> => {
+    if (shards === undefined) return work();
+    if (walkedFrom !== undefined && shardOfOrganisation(walkedFrom) !== shardOfOrganisation(orgId)) {
+      shards.walkedPast(chainOf(walkedFrom));
+    }
+    walkedFrom = orgId;
+    if (!shards.holds(chainOf(orgId))) await shards.roomToReadBack();
+    const release = await shards.pin(chainOf(orgId));
+    if (release === undefined) return MISSED;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  };
 
   const slotFor = (orgId: string): number => {
     let slot = slots.get(orgId);
@@ -379,29 +434,56 @@ export function createRotation({
     return true;
   };
 
-  /** The days waiting, oldest first, until the run ends. One whose read fails goes to the back, where it was, and the rest go on. */
+  /**
+   * The days waiting, oldest first, until the run ends. Where shards are let go (PR3), a shard at a time (anchor-walk.ts),
+   * so each is read back once a run however many of its days are due: the shards by the longest-waiting day in each, so
+   * one late in number never waits behind others run after run. A day missed keeps when it was due, and ages to the
+   * front. One whose read fails goes to the back, where it was, and the rest go on.
+   */
   const takeDays = async (listed: ReadonlySet<string>, signal: AbortSignal): Promise<void> => {
-    for (const day of [...days.values()]) {
+    const queue = [...days.values()];
+    const ordered =
+      shards === undefined
+        ? queue
+        : shardWalk(
+            queue,
+            (day) => day.orgId,
+            (day) => day.dueAt,
+          );
+    for (const day of ordered) {
       if (signal.aborted) return;
-      // Gone from the list (its own alarm), or never anchored, so its first check reads it whole.
-      const target = day.target ?? anchors.latest(chainOf(day.orgId));
-      if (!listed.has(day.orgId) || target === undefined) {
+      // Gone from the list (its own alarm).
+      if (!listed.has(day.orgId)) {
         days.delete(day.orgId);
         continue;
       }
-      day.target = target;
-      const ended = await oneDay(day, target, signal);
+      const ended = await pinned(day.orgId, async () => {
+        // Never anchored, so its first check reads it whole: nothing for the day.
+        const target = day.target ?? anchors.latest(chainOf(day.orgId));
+        if (target === undefined) return true;
+        day.target = target;
+        return oneDay(day, target, signal);
+      });
       days.delete(day.orgId);
-      if (!ended) days.set(day.orgId, day);
+      // Not ended, or its shard not read again: kept, at the back.
+      if (ended !== true) days.set(day.orgId, day);
     }
   };
 
-  /** The listed, the chains passed longest ago first, those never passed before all. */
-  const oldestFirst = (listed: readonly string[]): readonly string[] =>
-    listed
-      .map((orgId) => ({ orgId, at: passes.lastPass(chainOf(orgId))?.at.getTime() ?? 0 }))
+  /**
+   * The listed, the chains passed longest ago first, those never passed before all. A chain whose shard is let go by its
+   * last pass known: one passed lately doesn't jump the queue to be read back. Where shards are let go (PR4), a shard at
+   * a time (anchor-walk.ts): the shards by the chain in each passed longest ago, so a round reads each shard back once;
+   * after a restart the round begins again with the shards waiting longest, as the store's signed passes say.
+   */
+  const oldestFirst = (listed: readonly string[]): readonly string[] => {
+    const passedAt = (orgId: string): number => knownOf(orgId).passedAt ?? 0;
+    if (shards !== undefined) return shardWalk(listed, itself, passedAt);
+    return listed
+      .map((orgId) => ({ orgId, at: passedAt(orgId) }))
       .sort((one, other) => one.at - other.at)
       .map(({ orgId }) => orgId);
+  };
 
   /**
    * The next chain to pass: one whose read didn't come back first, then one under way, then by the round's order; a new
@@ -421,7 +503,9 @@ export function createRotation({
         continue;
       }
       next += 1;
-      if (listedNow.has(orgId) && !run.tried.has(orgId) && anchors.latest(chainOf(orgId)) !== undefined) return orgId;
+      // A chain whose shard is let go may well be anchored: its step pins it and reads it again.
+      const anchored = shards?.holds(chainOf(orgId)) === false || anchors.latest(chainOf(orgId)) !== undefined;
+      if (listedNow.has(orgId) && !run.tried.has(orgId) && anchored) return orgId;
     }
   };
 
@@ -501,20 +585,40 @@ export function createRotation({
   };
 
   /** The places the passes under way reached this run, signed into the store so a restart goes on from them. */
-  const keepPlaces = (moved: ReadonlySet<string>): void => {
+  const keepPlaces = async (moved: ReadonlySet<string>): Promise<void> => {
     for (const orgId of moved) {
       const place = underWay.get(orgId);
-      if (place !== undefined) passes.keepProgress(placeLine(orgId, place.cursor, place.began, place.owed));
+      if (place === undefined) continue;
+      // Its shard held as the place is kept: one that can't be read again keeps its place in memory, for the next run.
+      await pinned(orgId, () => {
+        passes.keepProgress(placeLine(orgId, place.cursor, place.began, place.owed));
+        return Promise.resolve();
+      });
     }
   };
 
   /** Every listed chain anchored and never owed a pass yet: owed one from now, in the store, so no restart moves it. */
-  const markOwed = (listed: readonly string[]): void => {
+  const markOwed = async (listed: readonly string[], signal: AbortSignal): Promise<void> => {
     const now = clock.now().getTime();
-    for (const orgId of listed) {
+    const owed = (orgId: string): void => {
       const chain = chainOf(orgId);
-      if (anchors.latest(chain) === undefined || passes.lastPass(chain) !== undefined) continue;
+      if (anchors.latest(chain) === undefined || passes.lastPass(chain) !== undefined) return;
       if (passes.lastProgress(chain) === undefined) passes.keepProgress(placeLine(orgId, CHAIN_START, now, now));
+    };
+    // Those whose shard is let go, anchored and with no pass or place known: read back for it, each shard once.
+    const away: string[] = [];
+    for (const orgId of listed) {
+      const known = knownOf(orgId);
+      if (known.held) owed(orgId);
+      else if (known.seq !== undefined && known.passAt === undefined) away.push(orgId);
+    }
+    const byShard = shardWalk(away, itself, () => 0);
+    for (const orgId of byShard) {
+      if (signal.aborted) return;
+      await pinned(orgId, () => {
+        owed(orgId);
+        return Promise.resolve();
+      });
     }
   };
 
@@ -535,8 +639,15 @@ export function createRotation({
       while (left > 0n && !signal.aborted) {
         const orgId = nextChain(listed, listedNow, run);
         if (orgId === undefined) break;
-        const from = await passFrom(orgId, signal);
-        const took = typeof from === 'object' ? await passStep(orgId, from, left, signal) : (from ?? MISSED);
+        // Its shard pinned from reading where the pass goes from to keeping the pass: a shard that can't be read is MISSED.
+        const stepped = await pinned(orgId, async () => {
+          const from = await passFrom(orgId, signal);
+          return {
+            from,
+            took: typeof from === 'object' ? await passStep(orgId, from, left, signal) : (from ?? MISSED),
+          };
+        });
+        const { from, took } = stepped === MISSED ? { from: undefined, took: MISSED } : stepped;
         if (typeof took === 'bigint') {
           moved.add(orgId);
           left -= took;
@@ -548,7 +659,7 @@ export function createRotation({
         if (took === MISSED && from !== undefined && !underWay.has(orgId)) retryFirst.add(orgId);
       }
     } finally {
-      keepPlaces(moved);
+      await keepPlaces(moved);
     }
     return left;
   };
@@ -560,7 +671,8 @@ export function createRotation({
     signal: AbortSignal,
     stopping: AbortSignal | undefined,
   ) => {
-    const total = listed.reduce((sum, orgId) => sum + (anchors.latest(chainOf(orgId))?.seq ?? 0n), 0n);
+    // A chain whose shard is let go counts at its last known place, nothing read back: the share doesn't shrink as shards go.
+    const total = listed.reduce((sum, orgId) => sum + (knownOf(orgId).seq ?? 0n), 0n);
     const at = clock.now().getTime();
     // A round's worth at most, carried part and all: past that a whole round is being asked for in one run anyway.
     const budget = smallest(passBudget(total, at - (lastPassAt ?? at)) + carried, total);
@@ -609,10 +721,10 @@ export function createRotation({
       });
     }
     const latePasses = listed.filter((orgId) => {
-      const chain = chainOf(orgId);
-      if (anchors.latest(chain) === undefined) return false;
+      // Never anchored: its first check reads it whole. One whose shard is let go is never taken for that: as last known.
+      const { held, seq, passAt: last } = knownOf(orgId);
+      if (held && seq === undefined) return false;
       // From the last pass's start, or since one was first owed; a restart never moves it, but where the environment sleeps.
-      const last = (passes.lastPass(chain)?.at ?? passes.lastProgress(chain)?.at)?.getTime();
       const since = sleeps ? Math.max(last ?? 0, started) : (last ?? started);
       return now - since >= PASS_LATE_MS;
     });
@@ -639,7 +751,7 @@ export function createRotation({
         await takeDays(listedNow, signal);
         const daysMs = Math.round(performance.now() - began);
         const { budget, slicesMs } = await takePass(listed, listedNow, signal, stopping);
-        markOwed(listed);
+        await markOwed(listed, signal);
         sayLate(listed);
         logger.info('audit.anchor_rotation_done', {
           due,

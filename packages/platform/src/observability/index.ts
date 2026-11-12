@@ -12,6 +12,7 @@ export {
   type WorkContext,
   workUnderWay,
 } from './logger.ts';
+export { LOGIN_SERVICE_ALERT_EVENTS } from './login-service-alert.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
 export type { ProblemEvent } from './plain-words.ts';
 export { hidesField } from './redact.ts';

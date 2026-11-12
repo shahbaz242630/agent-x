@@ -3,15 +3,20 @@
 // each event recorded on each chain of the person's organisations and on the
 // platform chain, told to the person and their admins, never twice; where a
 // run starts; and what it logs (SEC-OPS-02).
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { LOGIN_SERVICE_ALERT_EVENTS } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
+  type TestClient,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -21,13 +26,14 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
-import { classOfIdpEvent } from '../domain/idp-event.ts';
-import { createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
+import { classOfIdpEvent, type OurLoginChanges } from '../domain/idp-event.ts';
+import { COPY_LOCK, createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
 import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
 import { createRemovalRestriction } from './removal-restriction.ts';
 import { createSessions } from './sessions.ts';
+import { changeHashOf, createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -122,7 +128,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
   return { feed, asked };
 }
 
-const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
+const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurLoginChanges) =>
   createIdpEventCopier({
     database: app,
     feed,
@@ -132,6 +138,7 @@ const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
     factors,
+    ours,
     logger: testLogger(capture),
   });
 
@@ -382,6 +389,77 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     expect(lines('idp.token_issued')).toEqual([expect.objectContaining({ level: 'warn' })]);
     expect(await orgRecords(org)).toHaveLength(2);
     expect(await noticesOf(org)).toEqual([]);
+  });
+
+  it('SA2: writes each line the login service alert counts, by the event its query names, and no other warning or error', async () => {
+    const who = await person();
+    await organization(who.userId);
+    const at = new Date(clock.now().getTime() - 10 * 60_000);
+    const tied = Array.from({ length: 100 }, () =>
+      event('user.human.password.changed', who.subject, { createdAt: at }),
+    );
+    const others = [
+      event('user.impersonated', who.subject, { createdAt: new Date(at.getTime() + 1000) }),
+      event('instance.member.added', '312000000000000001', {
+        aggregateType: 'instance',
+        editorUserId: null,
+        createdAt: new Date(at.getTime() + 2000),
+      }),
+      event('user.token.added', who.subject, { createdAt: new Date(at.getTime() + 3000) }),
+    ];
+    const { feed } = feedOf(() => [...tied, ...others]);
+
+    await copierWith(feed).run();
+
+    // The alert's query (environment.bicep, held to the list by policy.ts) matches on `event` alone, whatever the level.
+    const problems = capture.lines().filter((line) => line.level === 'warn' || line.level === 'error');
+    expect(problems.map((line) => line.event).sort()).toEqual([...LOGIN_SERVICE_ALERT_EVENTS].sort());
+  });
+
+  it('SA2: tells our own routine token and grant by an info line no alert counts, and anything else our actor does as before', async () => {
+    const ADMIN = '312000000000009999';
+    const service = zitadelId();
+    const who = await person();
+    const later = (seconds: number) => new Date(clock.now().getTime() - 10 * 60_000 + seconds * 1000);
+    const grant = (userId: string, roles: string[], seconds: number) =>
+      event('instance.member.added', '312000000000000001', {
+        aggregateType: 'instance',
+        member: { userId, roles },
+        createdAt: later(seconds),
+      });
+    const events = [
+      // Ours: our admin, a token or a viewer's role for our service user.
+      event('user.token.added', service, { createdAt: later(1) }),
+      grant(service, ['IAM_OWNER_VIEWER'], 2),
+      // The same admin, any other change: a token for a person, an owner's role for our service user.
+      event('user.token.added', who.subject, { createdAt: later(3) }),
+      grant(service, ['IAM_OWNER'], 4),
+      // Another login, our kind of change; and impersonation by our admin.
+      event('user.token.added', service, { editorUserId: '312000000000000123', createdAt: later(5) }),
+      event('user.impersonated', service, { createdAt: later(6) }),
+    ];
+    const ours = { actors: new Set([ADMIN]), serviceUsers: new Set([service]) };
+
+    await copierWith(feedOf(() => events).feed, undefined, ours).run();
+
+    const told = capture
+      .lines()
+      .filter((line) => String(line.event).startsWith('idp.'))
+      .map((line) => [line.level, line.event, line.eventType]);
+    expect(told).toEqual([
+      ['info', 'idp.token_issued_by_us', 'user.token.added'],
+      ['info', 'idp.rights_changed_by_us', 'instance.member.added'],
+      ['warn', 'idp.token_issued', 'user.token.added'],
+      ['warn', 'idp.rights_changed', 'instance.member.added'],
+      ['warn', 'idp.token_issued', 'user.token.added'],
+      ['error', 'idp.impersonated', 'user.impersonated'],
+    ]);
+    expect(lines('idp.rights_changed_by_us')).toEqual([
+      expect.objectContaining({ editor: ADMIN, target: service, eventType: 'instance.member.added' }),
+    ]);
+    // Our own are lines the alert's list leaves out.
+    expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.token_issued_by_us');
+    expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.rights_changed_by_us');
   });
 
   it('reads a full page, then the next, until one is not full', async () => {
@@ -802,5 +880,154 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     ).run();
 
     expect(await sessionsOf(who.userId)).toBe(1);
+  });
+
+  it('SA2: restricts a person for 7 days from a factor removed by someone else before they first signed in, by their login', async () => {
+    const subject = zitadelId();
+    const removed = event('user.human.mfa.otp.removed', subject);
+    const byThemselves = event('user.human.mfa.u2f.token.removed', subject, {
+      editorUserId: subject,
+      createdAt: new Date(removed.createdAt.getTime() + 1000),
+    });
+
+    await copierWith(feedOf(() => [removed, byThemselves]).feed).run();
+
+    expect(await platformCopies(`user:${subject}:${removed.sequence}`)).toEqual([
+      expect.objectContaining({ org: 'none', person: null, subject, by: 'other' }),
+    ]);
+    // Signed in for the first time since: the removal limits them; their own removal after it changes nothing.
+    const userId = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock });
+    expect(await restrictedUntil(userId)).toEqual(new Date(removed.createdAt.getTime() + WEEK_MS));
+    // Another login's removal limits no one else.
+    const other = await person();
+    expect(await restrictedUntil(other.userId)).toBeUndefined();
+  });
+
+  describe('the order its locks are taken in, forced (the S68 windows)', () => {
+    /** A person in an organisation, signed in, with a step-up challenge open on the session. */
+    async function signedInWithChallenge() {
+      const who = await person();
+      const org = await organization(who.userId, 'admin');
+      const { sessionId } = await signIn(who.userId);
+      await createStepUpChallenges({ ids, clock }).open(app, {
+        sessionId,
+        action: 'members.invite',
+        changeHash: changeHashOf(['invite', who.subject]),
+      });
+      return { ...who, org };
+    }
+
+    /** Opens a transaction as the owner of everything, its lock waits cut short, so a wait fails rather than hangs. */
+    async function holder(): Promise<TestClient> {
+      const client = await database.connect('admin');
+      await client.query('begin');
+      await client.query("set local lock_timeout = '3s'");
+      return client;
+    }
+
+    /** Takes, without waiting long, every lock the copier takes after the one held: none may be the copier's yet. */
+    async function takeLaterLocks(client: TestClient, org: string, userId: string, challenges: boolean) {
+      if (challenges) {
+        await client.query(
+          `select c.id from identity.step_up_challenges c join identity.sessions s on s.id = c.session_id
+           where s.user_id = $1 for update`,
+          [userId],
+        );
+      }
+      await client.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
+      await client.query('select seq from platform_controls.audit_head for no key update');
+    }
+
+    it('takes the person’s sessions before their challenges, the chains’ heads or anything else of theirs', async () => {
+      const who = await signedInWithChallenge();
+      const locked = event('user.locked', who.subject);
+      const client = await holder();
+      try {
+        await client.query('select id from identity.sessions where user_id = $1 for update', [who.userId]);
+        const run = within(20_000, copierWith(feedOf(() => [locked]).feed).run(), 'the copy');
+        await waitUntilQueued(database.as('admin'), 1);
+        // Queued at the sessions: it holds none of the later locks, so taking them waits for nothing.
+        await takeLaterLocks(client, who.org, who.userId, true);
+        await client.query('commit');
+        expect(await run).toBe('ran');
+      } finally {
+        await client.end();
+      }
+      expect(lines('idp_events.run_failed')).toEqual([]);
+      expect(await sessionsOf(who.userId)).toBe(0);
+      expect(await orgRecords(who.org)).toHaveLength(1);
+    });
+
+    it('holds the sessions while it waits for their challenges, and takes the chains’ heads only after', async () => {
+      const who = await signedInWithChallenge();
+      const locked = event('user.locked', who.subject);
+      const client = await holder();
+      try {
+        await client.query(
+          `select c.id from identity.step_up_challenges c join identity.sessions s on s.id = c.session_id
+           where s.user_id = $1 for update`,
+          [who.userId],
+        );
+        const run = within(20_000, copierWith(feedOf(() => [locked]).feed).run(), 'the copy');
+        await waitUntilQueued(database.as('admin'), 1);
+        // The sessions are the copier's already: a lock on them is refused at once.
+        await expect(
+          database
+            .as('admin')
+            .query('select id from identity.sessions where user_id = $1 for update nowait', [who.userId]),
+        ).rejects.toThrow(/could not obtain lock/);
+        await takeLaterLocks(client, who.org, who.userId, false);
+        await client.query('commit');
+        expect(await run).toBe('ran');
+      } finally {
+        await client.end();
+      }
+      expect(lines('idp_events.run_failed')).toEqual([]);
+      expect(await sessionsOf(who.userId)).toBe(0);
+    });
+
+    /** Two copiers of the event, both reading it as not copied, then queued at its lock, held here until both are. */
+    async function twoCopiersOf(changed: IdpEvent): Promise<string> {
+      const key = `${changed.aggregateType}:${changed.aggregateId}:${changed.sequence}`;
+      const client = await holder();
+      try {
+        await holdNamedLock(client, lockName(COPY_LOCK, key));
+        const runs = within(
+          20_000,
+          Promise.all([copierWith(feedOf(() => [changed]).feed).run(), copierWith(feedOf(() => [changed]).feed).run()]),
+          'the two copies',
+        );
+        await waitUntilQueued(database.as('admin'), 2);
+        await client.query('commit');
+        expect(await runs).toEqual(['ran', 'ran']);
+      } finally {
+        await client.end();
+      }
+      return key;
+    }
+
+    it('copies an event once, ending sessions once, when two copiers reach it at once (a second copy, or a stale holder)', async () => {
+      const who = await person();
+      const first = await organization(who.userId);
+      const second = await organization(who.userId);
+      await signIn(who.userId);
+      const key = await twoCopiersOf(event('user.human.mfa.otp.removed', who.subject));
+      const copies = await platformCopies(key);
+      expect(copies.map((copy) => copy.org).sort()).toEqual([first, second].sort());
+      expect(copies.filter((copy) => 'signInsEnded' in copy)).toEqual([expect.objectContaining({ signInsEnded: 1 })]);
+      for (const org of [first, second]) {
+        expect(await orgRecords(org)).toHaveLength(1);
+        expect(await noticesOf(org)).toHaveLength(2);
+      }
+      // Each organisation copied by whichever copier took the event's lock first: two records between them.
+      expect(lines('idp_events.copied').reduce((sum, line) => sum + Number(line.records), 0)).toBe(2);
+    });
+
+    it('copies an event about no one in an organisation once too, with two copiers at it', async () => {
+      const key = await twoCopiersOf(event('user.locked', zitadelId()));
+
+      expect(await platformCopies(key)).toEqual([expect.objectContaining({ org: 'none', person: null })]);
+      expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ records: 1 })]);
+    });
   });
 });

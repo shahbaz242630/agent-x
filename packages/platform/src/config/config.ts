@@ -118,6 +118,11 @@ export interface Config {
       }
     | undefined;
   /**
+   * SA2: who makes our own routine changes in the login service, and the service users they are for, by Zitadel
+   * user ID; undefined when neither is set, and every token issued and every grant then alerts.
+   */
+  readonly idpOurChanges: { readonly actors: readonly string[]; readonly serviceUsers: readonly string[] } | undefined;
+  /**
    * B5-3: the admins' notices by email. Undefined when none is set, and no
    * notice is sent then: they wait in the outbox.
    */
@@ -409,6 +414,8 @@ function readSettings(env: Env, location: LocationChecks) {
     emailAccessKey: optionalSecretSetting(env, 'AGENTX_EMAIL_ACCESS_KEY'),
     directoryToken: optionalSecretSetting(env, 'AGENTX_DIRECTORY_TOKEN'),
     factorResetToken: optionalSecretSetting(env, 'AGENTX_FACTOR_RESET_TOKEN'),
+    idpOurActors: setting(env, 'AGENTX_IDP_OUR_ACTORS'),
+    idpOurServiceUsers: setting(env, 'AGENTX_IDP_OUR_SERVICE_USERS'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
@@ -606,6 +613,13 @@ function serviceRuleProblems(checks: Settings): string[] {
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
+    ...(checks.idpOurActors.ok &&
+    checks.idpOurServiceUsers.ok &&
+    (checks.idpOurActors.value === undefined) !== (checks.idpOurServiceUsers.value === undefined)
+      ? [
+          'AGENTX_IDP_OUR_ACTORS and AGENTX_IDP_OUR_SERVICE_USERS: set both, or neither (every change alerts without them)',
+        ]
+      : []),
   ];
 }
 
@@ -699,6 +713,13 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
     ),
     factorResets:
       checks.factorResetToken.value === undefined ? undefined : Object.freeze({ token: checks.factorResetToken.value }),
+    idpOurChanges:
+      checks.idpOurActors.value === undefined || checks.idpOurServiceUsers.value === undefined
+        ? undefined
+        : Object.freeze({
+            actors: Object.freeze(checks.idpOurActors.value),
+            serviceUsers: Object.freeze(checks.idpOurServiceUsers.value),
+          }),
     sessions: Object.freeze({
       idleSeconds: checks.sessionIdle.value * 60,
       absoluteSeconds: checks.sessionAbsolute.value * 3600,

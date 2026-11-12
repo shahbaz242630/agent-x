@@ -68,6 +68,15 @@
 // to read one chain's. So the true limit is memory: more anchors than the heap holds take
 // more hardware, and a store file past it says so (`audit.anchor_store_beyond_memory`).
 //
+// Past that, the log lets shards go (PL-65 PR3), and a round walks the store a shard at a time (PR4, anchor-walk.ts): its
+// organisations by shard, the shards by the oldest anchor in each, so each shard let go is read back once a round and the
+// log's least-recently-used rule lets one go only once the walk is past it. The run's probe asks only of chains whose shard
+// is held; each shard let go is probed as the walk reaches it, pinned meanwhile. Before reading one back a turn has what
+// waits written (`roomToReadBack`): signing idle chains again leaves a line waiting in every shard behind it, and none of
+// those may go until written. The walk's place is the turns' within a process; after a restart its order begins again
+// with the shards waiting longest, by the anchors' signed times in the store. No cursor is written anywhere, so nothing
+// short of the `audit-anchor` key moves it, and it only orders work: every verdict is the comparison's, as ever.
+//
 // What that means for tamper: a chain wound back is seen at its turn, and with the probe
 // a turn is a few microseconds for a chain that hasn't moved, so a round is a run until
 // the moved chains alone outlast it. Tx A compares a payment with the last anchor alone
@@ -127,6 +136,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { createRotation, type RotatedChecks, type RotationCheck } from './anchor-rotation.ts';
 import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
+import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
@@ -422,21 +432,33 @@ export function createAnchorCheck({
   const isStale = (key: string): boolean =>
     clock.now().getTime() - since(key) >= staleAfterMs &&
     ((!spreading && !pastCapNow.has(key)) || key === 'platform' || (misses.get(key) ?? 0) >= MISSES_TO_SAY);
+  /**
+   * When the chain's anchor was last signed, as the store says, held or let go (PL-65 PR4): what is last known of it, never
+   * read back for it. Nothing for one never anchored, or with no store.
+   */
+  const anchoredAt = (orgId: string): number | undefined =>
+    durable?.lastKnown({ kind: 'organisation', orgId })?.anchoredAt;
   /** When a chain is last known to have been checked: after a restart, as its anchor says. */
-  const lastKnown = (orgId: string): number =>
-    lastChecked.get(orgId) ??
-    (durable === undefined ? undefined : anchors.latest({ kind: 'organisation', orgId })?.at.getTime()) ??
-    since(orgId);
-  /** By the store where there is one: never anchored first, then the oldest anchor. Its reads are this process's memory. */
-  const oldestFirst = (orgIds: readonly string[]): readonly string[] =>
-    orgIds
-      .map((orgId) => ({ orgId, at: anchors.latest({ kind: 'organisation', orgId })?.at.getTime() ?? 0 }))
-      .sort((one, other) => one.at - other.at)
-      .map(({ orgId }) => orgId);
-  const turns = createTurns(lanes, durable === undefined ? shuffled : oldestFirst, pastCapStart);
+  const lastKnown = (orgId: string): number => lastChecked.get(orgId) ?? anchoredAt(orgId) ?? since(orgId);
+  /**
+   * By the store where there is one, a shard at a time (anchor-walk.ts, PL-65 PR4): the shards by the oldest anchor in
+   * each, never anchored oldest of all, and in each the oldest first. So a round reads each shard the log has let go back
+   * once, and after a restart begins with the shards waiting longest. Its reads are this process's memory.
+   */
+  const walkOrder = (orgIds: readonly string[]): readonly string[] =>
+    shardWalk(
+      orgIds,
+      (orgId) => orgId,
+      (orgId) => anchoredAt(orgId) ?? 0,
+    );
+  const turns = createTurns(lanes, durable === undefined ? shuffled : walkOrder, pastCapStart);
 
-  /** Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read. */
-  const storeUnread = (): boolean => durable !== undefined && durable.state() !== 'read';
+  /**
+   * Whether a chain's first anchor must wait: it could hide a chain wound back until the store has been read, and, for a
+   * chain, its shard is held whole (PL-65 PR3: one let go says nothing of the chain, so nothing is compared with it).
+   */
+  const storeUnread = (chain?: Chain): boolean =>
+    durable !== undefined && (durable.state() !== 'read' || (chain !== undefined && !durable.holds(chain)));
 
   /** A chain's integrity alarm on its own line, its reason kept for its hold. */
   const alarmed = (chain: Chain, log: Logger, reason: string, seq?: bigint): Outcome => {
@@ -464,12 +486,16 @@ export function createAnchorCheck({
     if (last !== undefined && !stillHolds(report, last)) return alarmed(chain, log, 'anchor', last.seq);
     if (last?.seq === report.seq) {
       // Said again in the store now and then, so its time tells a restart this chain has had its turn (anchor-turns.ts).
-      if (durable !== undefined && !storeUnread() && clock.now().getTime() - last.at.getTime() >= reachWithinMs / 2) {
+      if (
+        durable !== undefined &&
+        !storeUnread(chain) &&
+        clock.now().getTime() - last.at.getTime() >= reachWithinMs / 2
+      ) {
         anchors.keep(signAnchor(keys, chain, report, clock.now(), durable.epoch));
       }
       return 'unchanged';
     }
-    if (storeUnread()) return 'unanchored';
+    if (storeUnread(chain)) return 'unanchored';
     const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
     log.info('audit.anchored', {
@@ -588,50 +614,73 @@ export function createAnchorCheck({
     }
   };
 
+  /**
+   * The chain's shard pinned. A turn about to read it back makes room first (PR4: the walk leaves lines waiting behind
+   * it); a hand-off's anchor never waits on a write.
+   */
+  const pinFor = (log: AnchorLog, chain: Chain, alone: boolean): Promise<(() => void) | undefined> =>
+    alone || log.holds(chain) ? log.pin(chain) : log.roomToReadBack().then(() => log.pin(chain));
+
   const checkOne = async (
-    { chain, verify }: CheckedChain,
+    checked: CheckedChain,
     signal: AbortSignal | undefined,
     alone = false,
     ran: (ms: number) => void = () => undefined,
   ): Promise<Outcome> => {
+    const { chain } = checked;
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
     const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
-    const key = keyOf(chain);
+    let release: (() => void) | undefined;
     try {
-      const last = anchors.latest(chain);
-      let report: ChainReport;
-      let cutOff = false;
-      const began = performance.now();
-      try {
-        if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
-        inFlight.add(key);
-        checkBegan.set(key, clock.now().getTime());
-        const checking = Promise.resolve().then(() => verify(last));
-        // Handled here too, so a check that ends after its deadline never goes unhandled.
-        void checking.then(
-          (ending) => {
-            ended(key);
-            if (cutOff) landedLate(chain, log, ending, last, alone);
-          },
-          (error: unknown) => {
-            ended(key);
-            if (cutOff) failedLate(chain, log, error);
-          },
-        );
-        report = await withinDeadline(checking, deadlineMs, signal);
-      } catch (error) {
-        cutOff = true;
-        if (error instanceof Stopped) return 'unchecked';
-        if (error instanceof PastDeadline) ran(performance.now() - began);
-        return failedOutcome(chain, log, error, alone);
-      }
-      ran(performance.now() - began);
-      return compared(chain, log, report, last, alone);
+      // Its shard held while it is compared, read again first if it was let go (PL-65 PR3): one that can't be waits.
+      release = durable === undefined ? () => undefined : await pinFor(durable, chain, alone);
+      if (release === undefined) return 'unanchored';
+      return await checkHeld(checked, signal, { alone, ran, log });
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
       log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
       return 'unchecked';
+    } finally {
+      release?.();
     }
+  };
+
+  /** One chain's check, its shard held: apart from `checkOne`, which holds it and catches what escapes, to keep each short. */
+  const checkHeld = async (
+    { chain, verify }: CheckedChain,
+    signal: AbortSignal | undefined,
+    { alone, ran, log }: { alone: boolean; ran: (ms: number) => void; log: Logger },
+  ): Promise<Outcome> => {
+    const key = keyOf(chain);
+    const last = anchors.latest(chain);
+    let report: ChainReport;
+    let cutOff = false;
+    const began = performance.now();
+    try {
+      if (inFlight.has(key)) throw new UnderWay('the last check of this chain has not finished');
+      inFlight.add(key);
+      checkBegan.set(key, clock.now().getTime());
+      const checking = Promise.resolve().then(() => verify(last));
+      // Handled here too, so a check that ends after its deadline never goes unhandled.
+      void checking.then(
+        (ending) => {
+          ended(key);
+          if (cutOff) landedLate(chain, log, ending, last, alone);
+        },
+        (error: unknown) => {
+          ended(key);
+          if (cutOff) failedLate(chain, log, error);
+        },
+      );
+      report = await withinDeadline(checking, deadlineMs, signal);
+    } catch (error) {
+      cutOff = true;
+      if (error instanceof Stopped) return 'unchecked';
+      if (error instanceof PastDeadline) ran(performance.now() - began);
+      return failedOutcome(chain, log, error, alone);
+    }
+    ran(performance.now() - began);
+    return compared(chain, log, report, last, alone);
   };
 
   /**
@@ -720,9 +769,13 @@ export function createAnchorCheck({
   };
 
   // What this run's probe found, by organisation: those it didn't answer for are read in their turns.
-  let probed: ReadonlyMap<string, Probed> = new Map();
+  const probed = new Map<string, Probed>();
   // Those the last run's time left unprobed, probed first next run.
   let unprobed: ReadonlySet<string> = new Set();
+  // Those whose shard the log had let go at the run's probe (PL-65 PR3), by shard, and each shard's probe under way or
+  // done this run: probed as the walk reaches the shard, never read back for the run's probe alone (PR4).
+  let awayShards: ReadonlyMap<number, readonly string[]> = new Map();
+  const shardProbes = new Map<number, Promise<void>>();
 
   /** The probe's misses, in one line: their turns read them as before, so a warning, never the alarm. */
   const sayProbeMissed = (count: number, error: unknown): void => {
@@ -740,16 +793,13 @@ export function createAnchorCheck({
     orgIds: readonly string[],
     cap: AbortSignal,
     stop: AbortSignal | undefined,
-  ): Promise<ReadonlyMap<string, Probed>> => {
+  ): Promise<void> => {
     const probe = from.probe?.bind(from);
-    if (probe === undefined) return new Map();
+    if (probe === undefined) return;
     // Those the last run's time left unprobed first, so a tail never starves.
     const order = [...orgIds.filter((orgId) => unprobed.has(orgId)), ...orgIds.filter((orgId) => !unprobed.has(orgId))];
-    const asked = order.flatMap((orgId) => {
-      const anchor = anchors.latest({ kind: 'organisation', orgId });
-      return anchor === undefined ? [] : [{ orgId, from: anchor }];
-    });
-    if (asked.length === 0) return new Map();
+    const asked = withAnchors(order);
+    if (asked.length === 0) return;
     // Within the lanes' share, as a turn and the rotation: checks from the last run may still hold some of it.
     while (inFlight.size >= lanes && !cap.aborted) await roomOrEnd(cap);
     if (cap.aborted) {
@@ -758,7 +808,7 @@ export function createAnchorCheck({
         asked.map(({ orgId }) => orgId),
         asked.length,
       );
-      return new Map();
+      return;
     }
     const pages = Math.max(1, Math.min(probePages, lanes - inFlight.size));
     let answers: ReadonlyMap<string, ProbeAnswer>;
@@ -767,21 +817,116 @@ export function createAnchorCheck({
       answers = await tracked(PROBE, 'the last probe has not finished', () => probe(asked, cap, pages), stop, pages);
     } catch (error) {
       if (!(error instanceof Stopped)) sayProbeMissed(asked.length, error);
-      return new Map();
+      return;
     }
     sayUnprobed(
       asked.filter(({ orgId }) => !answers.has(orgId)).map(({ orgId }) => orgId),
       asked.length,
     );
-    const found = new Map<string, Probed>();
+    takeAnswers(asked, answers);
+  };
+
+  /**
+   * Those of them with an anchor held, each with it: what a probe asks of. Read from the log without counting their
+   * shards as used (PR4), so the probe's list order doesn't decide which shard goes first.
+   */
+  const withAnchors = (orgIds: readonly string[]) =>
+    orgIds.flatMap((orgId) => {
+      const chain = { kind: 'organisation', orgId } as const;
+      const anchor = durable !== undefined && anchors === durable ? durable.heldAnchor(chain) : anchors.latest(chain);
+      return anchor === undefined ? [] : [{ orgId, from: anchor }];
+    });
+
+  /** A probe's answers kept for the turns: unmoved or failing as found, read anyway; its misses said in one line. */
+  const takeAnswers = (
+    asked: readonly { readonly orgId: string; readonly from: CheckedPoint }[],
+    answers: ReadonlyMap<string, ProbeAnswer>,
+  ): void => {
     const missed: unknown[] = [];
     for (const { orgId, from: anchor } of asked) {
       const answer = answers.get(orgId);
-      if (answer?.kind === 'same' || answer?.kind === 'failed') found.set(orgId, { anchor, answer });
+      if (answer?.kind === 'same' || answer?.kind === 'failed') probed.set(orgId, { anchor, answer });
       else if (answer?.kind === 'missed') missed.push(answer.error);
     }
     if (missed.length > 0) sayProbeMissed(missed.length, missed[0]);
-    return found;
+  };
+
+  /**
+   * Those listed whose shard the log had let go as the run's probe read the anchors (PR3), by shard: the probe asked
+   * nothing of them, and nothing is read back for it, so each shard's are probed as the walk reaches it (PR4).
+   */
+  const awayByShard = (from: OrganisationChains, orgIds: readonly string[]): ReadonlyMap<number, string[]> => {
+    const away = new Map<number, string[]>();
+    if (durable === undefined || from.probe === undefined) return away;
+    for (const orgId of orgIds) {
+      if (probed.has(orgId) || durable.holds({ kind: 'organisation', orgId })) continue;
+      const shard = shardOfOrganisation(orgId);
+      const those = away.get(shard);
+      if (those === undefined) away.set(shard, [orgId]);
+      else those.push(orgId);
+    }
+    return away;
+  };
+
+  /**
+   * One shard's chains, let go at the run's probe, probed as the walk first reaches it (PR4): its shard read back and
+   * pinned meanwhile, one page on a connection of the lanes', as a turn's. Those it doesn't answer for are read in their
+   * turns, as any the run's probe missed. Never throws.
+   */
+  const probeAway = async (
+    probe: NonNullable<OrganisationChains['probe']>,
+    shard: number,
+    away: readonly string[],
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const [first] = away;
+    if (durable === undefined || first === undefined || signal.aborted) return;
+    // A shard that can't be read back: each turn finds the same, and its organisations wait (anchor-log.ts said why).
+    await durable.roomToReadBack();
+    const release = await durable.pin({ kind: 'organisation', orgId: first });
+    if (release === undefined) return;
+    try {
+      const asked = withAnchors(away);
+      if (asked.length === 0) return;
+      const answers = await tracked(
+        `${PROBE}|${String(shard)}`,
+        'the last probe of this shard has not finished',
+        () => probe(asked, signal, 1),
+        signal,
+      );
+      takeAnswers(asked, answers);
+    } catch (error) {
+      if (!(error instanceof Stopped)) sayProbeMissed(away.length, error);
+    } finally {
+      release();
+    }
+  };
+
+  // The organisation whose turn the walk last took, so the log hears when the walk leaves its shard.
+  let walkedFrom: string | undefined;
+  /** The walk takes this organisation's turn: if that leaves the last one's shard, the log lets that shard go first. */
+  const walkTo = (orgId: string): void => {
+    if (durable === undefined) return;
+    const from = walkedFrom;
+    walkedFrom = orgId;
+    if (from !== undefined && shardOfOrganisation(from) !== shardOfOrganisation(orgId)) {
+      durable.walkedPast({ kind: 'organisation', orgId: from });
+    }
+  };
+
+  /** Where the organisation's shard was let go at the run's probe: that shard's probe, begun by the first of it to come. */
+  const probedAway = (from: OrganisationChains, orgId: string, signal: AbortSignal): Promise<void> | undefined => {
+    const probe = from.probe?.bind(from);
+    if (awayShards.size === 0 || probe === undefined) return undefined;
+    const shard = shardOfOrganisation(orgId);
+    const away = awayShards.get(shard);
+    if (away === undefined) return undefined;
+    let probing = shardProbes.get(shard);
+    if (probing === undefined) {
+      probing = probeAway(probe, shard, away, signal);
+      shardProbes.set(shard, probing);
+    }
+    return probing;
   };
 
   /** What the probe found, each as a check completed in its turn would count, for a run with no time left for turns. */
@@ -840,6 +985,10 @@ export function createAnchorCheck({
     signal: AbortSignal,
   ): Promise<Outcome> => {
     let ranMs: number | undefined;
+    walkTo(orgId);
+    // Awaited only where there is one, so a run with every shard held takes its turns as before, tick for tick.
+    const away = listed.has(orgId) ? probedAway(from, orgId, signal) : undefined;
+    if (away !== undefined) await away;
     const outcome = listed.has(orgId)
       ? await checkOne(
           {
@@ -952,9 +1101,10 @@ export function createAnchorCheck({
     const listed = inUse ?? [...firstSeen.keys()];
     turns.begin(listed, fresh, gone, pastCap);
     if (turns.pastCapStarts()) pastCapSince = clock.now().getTime();
-    probed = await probeAll(from, [...listed, ...pastCap], cap, stop);
+    await probeAll(from, [...listed, ...pastCap], cap, stop);
     // The run's time gone during the probe: no turn follows, so what it found counts now, alarms and holds as ever.
     if (cap.aborted) return landProbed(from);
+    awayShards = awayByShard(from, [...listed, ...pastCap]);
     return takeTurns(from, new Set([...listed, ...pastCap]), cap);
   };
 
@@ -1117,6 +1267,8 @@ export function createAnchorCheck({
             if (signal.aborted) throw new Stopped('the run has ended');
             return tracked(ROTATION, 'the last read of the rotation has not finished', work, signal);
           },
+          // Its shards pinned for each step, where the log lets them go (PL-65 PR3).
+          ...(durable === undefined ? {} : { shards: durable }),
           failed: (orgId, check, { reason, seq }) => rotationFailed(from, orgId, check, reason, seq),
           missed: async (orgId, check, error) => {
             // A database that refuses the read is the alarm, as for any check; anything else a warning, and next run.
@@ -1189,7 +1341,9 @@ export function createAnchorCheck({
       if (signal?.aborted === true) end();
       signal?.addEventListener('abort', end, { once: true });
       completed = 0;
-      probed = new Map();
+      probed.clear();
+      awayShards = new Map();
+      shardProbes.clear();
       missedThisRun = [];
       staleThisRun = [];
       unlistedThisRun = 0;

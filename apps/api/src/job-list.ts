@@ -14,7 +14,7 @@ import {
   HOLDS_WAITING_EVERY_MS,
   pollHoldsWaiting,
 } from '@agentx/core/modules/audit';
-import { listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
+import { listedByShard, listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
@@ -250,7 +250,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       },
     ],
     organizations: {
-      list: () => listedOrganizations(database, undefined, JOB_ANSWER_WITHIN_MS),
+      // Shard by shard (PL-65 PR4), so those past the cap, taken in the list's order, walk the anchors' shards too.
+      list: () => listedByShard(database, undefined, JOB_ANSWER_WITHIN_MS),
       // Only those recorded since the last read, up to where the platform chain's check has reached (4D2e E8).
       recorded: recordedSince({
         since: (afterSeq, upTo) => platform.createdOrganizationsSince(database, afterSeq, upTo, JOB_ANSWER_WITHIN_MS),
@@ -305,7 +306,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
-        anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
+        anchoring: {
+          anchors: anchorStore,
+          anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal),
+          // Tx A's shard held from the lane's first anchor through Tx A, where the log lets shards go (PL-65 PR3).
+          ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
+        },
       }),
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,

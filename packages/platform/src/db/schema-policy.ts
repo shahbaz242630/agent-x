@@ -166,7 +166,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'directory.orgs': {
       reason:
         "The directory's list of organisations (ADR-005 §6): IDs only, read by work that runs across organisations (the anchor check, the retention sweeps) before it works inside each one's withTenant",
-      columns: ['org_id'],
+      // Its chain's shard in the anchors' store beside it (0082, PL-65 PR4): worked out by Postgres, written by nothing.
+      columns: ['org_id', 'anchor_shard'],
       // Added with its organisation and read; an entry changed or deleted
       // would be an organisation no anchor check or sweep reaches.
       appMay: ['SELECT', 'INSERT'],

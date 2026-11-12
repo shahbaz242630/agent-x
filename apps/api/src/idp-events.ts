@@ -50,7 +50,7 @@ export function idpEventCopierFrom({
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): IdpEventCopier | undefined {
-  const { email, signIn, factorResets } = config;
+  const { email, signIn, factorResets, idpOurChanges } = config;
   if (email === undefined || signIn === undefined) return undefined;
   return createIdpEventCopier({
     database,
@@ -74,6 +74,11 @@ export function idpEventCopierFrom({
             token: factorResets.token,
             fetch,
           }),
+    // SA2: our own routine tokens and grants, an info line rather than the alert; none named, every one alerts.
+    ours:
+      idpOurChanges === undefined
+        ? undefined
+        : { actors: new Set(idpOurChanges.actors), serviceUsers: new Set(idpOurChanges.serviceUsers) },
     logger,
   });
 }

@@ -5,10 +5,12 @@
 // factor removed, a password reset, a login locked, someone given rights in
 // the login service itself) is on the record and told.
 //
-// One copy at a time, by the jobs' lease (4D2e D). Unlike the other jobs, which
-// judge again under their row locks, this one is not safe with a stale holder: a
-// process frozen while leading and running on as it wakes could copy twice, until
-// its lease's timer ends the run. Its records say so if it does; nothing is lost.
+// One copy at a time, by the jobs' lease (4D2e D). A stale holder (a process
+// frozen while leading, running on as it wakes) or a second copy is safe too
+// (SA2): each record's transaction first takes a lock named for the event, that
+// only copiers take, and judges again under it whether the event was copied for
+// that organisation, and whether for any (so a change that ends sessions ends
+// them once). A second copier of the same event waits, then finds it copied.
 //
 // For each event, once for each organisation the person belongs to, in one
 // transaction, withTenant's for that organisation:
@@ -26,7 +28,9 @@
 // organisation `none`, naming the person when there is one (B6-2b review: a
 // deliberate rule, not a gap). There is no organisation to tell, and none to
 // tell later: B6-3's cooling-off after a reset reads the platform chain by
-// person, so a factor removed before someone joins still limits them.
+// person, so a factor removed before someone joins still limits them; and by
+// the login (`subject`, recorded with every event about one, SA2), so one
+// removed before they first sign in does too.
 //
 // Where it got to is the latest time the platform chain holds for a copied
 // event: each run reads from a millisecond before it to a minute before now
@@ -50,7 +54,10 @@
 // - A change that ends sessions (idp-event.ts `endsSessions`: a second factor
 //   added or removed, the password or the login's email changed, the login
 //   blocked) ends every Agent X session of the person, in the first copy's
-//   transaction, before anything else is locked (ADR-006 §6 level 0b).
+//   transaction, before anything else is locked (ADR-006 §6 level 0b) but the
+//   event's own lock, which nothing else takes: the sessions, then their
+//   challenges, then the organisation's chain, the outbox and the platform
+//   chain's head last (forced in idp-copier.db.test.ts).
 // - A security key or passkey added counts toward B6-3d's restriction, 7
 //   days without an admin's or approver's powers (`counts: 'yes'` on the
 //   platform chain's record), unless it is the person's first second factor
@@ -69,13 +76,19 @@
 //   the removal is what shows the swap.
 //
 // Impersonation (which the stack never turns on) is logged as an error;
-// rights given in the login service, and tokens issued, as warnings. A run
+// rights given in the login service, and tokens issued, as warnings. Each of
+// these, and a tied page, is told at once by an alert of its own
+// (LOGIN_SERVICE_ALERT_EVENTS, SA2), whatever its level; but a token or a grant
+// that is exactly one of our own routine changes (idp-event.ts
+// isOurRoutineChange: one of our actors, to one of our service users, only
+// their roles) is an info line, `idp.token_issued_by_us` or
+// `idp.rights_changed_by_us`, which no alert counts. A run
 // never throws: a feed that can't be read, or a record that can't be written,
 // is logged and the run ends; the next picks up where this one got to.
-import { withTenant } from '@agentx/platform/db';
+import { holdTransactionLock, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { Kysely } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, createAuditTrail } from '../../audit/index.ts';
@@ -90,6 +103,8 @@ import {
 } from '../../platform-controls/index.ts';
 import {
   endsSessions,
+  isOurRoutineChange,
+  type OurLoginChanges,
   isToldToThePerson,
   PASSKEY_ADDED_EVENTS,
   SECOND_FACTOR_REMOVED_EVENTS,
@@ -127,6 +142,12 @@ const PAGE = 100;
 /** Who records: the API's own job. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
+/** No actor's change is ours: what a deployment that names none gets. */
+const NONE_OURS: OurLoginChanges = { actors: new Set(), serviceUsers: new Set() };
+
+/** The lock each record's transaction takes first, named for the event: only copiers take it (SA2). */
+export const COPY_LOCK = 'idp-event-copy';
+
 type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables & PlatformControlsTables;
 
 export interface IdpEventCopier {
@@ -150,6 +171,7 @@ export function createIdpEventCopier({
   issuer,
   outbox,
   factors,
+  ours = NONE_OURS,
   logger,
 }: {
   readonly database: Kysely<Tables>;
@@ -162,6 +184,8 @@ export function createIdpEventCopier({
   readonly outbox: Outbox;
   /** Which second factors a person holds, keys apart from others (the reset token's reader); undefined: every key added counts. */
   readonly factors?: SecondFactorsHeld | undefined;
+  /** Who makes our own routine changes in the login service (SA2); undefined: none is ours, every one alerts. */
+  readonly ours?: OurLoginChanges | undefined;
   readonly logger: Logger;
 }): IdpEventCopier {
   const trail = createAuditTrail({ keys, ids });
@@ -221,18 +245,20 @@ export function createIdpEventCopier({
 
   /**
    * Records the event for one organisation, or for none, in one transaction;
-   * false if it was already. `first` carries the decisions made on the
-   * event's first copy: whether to end the person's sessions here, and
-   * whether a key added counts.
+   * false if it was already. The event's lock first, then judged again under
+   * it: copied for this organisation already, nothing; copied for none yet,
+   * this is the first copy, which ends the person's sessions when the change
+   * does. `counts` is decided once, before the first copy.
    */
   const copyOnce = async (
     event: IdpEvent,
     person: string | undefined,
     orgId: string | null,
-    first: { readonly endSessions: boolean; readonly counts: boolean },
+    counts: boolean,
   ): Promise<boolean> => {
     const key = keyOf(event);
     const org = orgId ?? 'none';
+    // Read first outside, so a run reading the same time again opens no transaction for what it copied.
     if (await platformEventWith(database, IDP_EVENT_COPIED, { event: key, org })) return false;
     const details = {
       event: key,
@@ -241,23 +267,35 @@ export function createIdpEventCopier({
       at: event.createdAt.toISOString(),
       by: byWhom(event),
       person: person ?? null,
-      ...(first.counts && { counts: 'yes' }),
+      ...(event.aggregateType === 'user' && { subject: event.aggregateId }),
+      ...(counts && { counts: 'yes' }),
     };
     const platformEvent = (signInsEnded: number | undefined) => ({
       actor: ACTOR,
       action: IDP_EVENT_COPIED,
       details: signInsEnded === undefined ? details : { ...details, signInsEnded },
     });
-    const ending = first.endSessions && person !== undefined ? person : undefined;
+    /** The event's lock, then whether to copy it and whose sessions to end: undefined to copy nothing. */
+    const judged = async (tx: Transaction<Tables>): Promise<{ ending: string | undefined } | undefined> => {
+      await holdTransactionLock(tx, COPY_LOCK, key);
+      if (await platformEventWith(tx, IDP_EVENT_COPIED, { event: key, org })) return undefined;
+      const ends = person !== undefined && endsSessions(event.eventClass);
+      const first = ends && !(await platformEventWith(tx, IDP_EVENT_COPIED, { event: key }));
+      return { ending: first ? person : undefined };
+    };
     if (orgId === null || person === undefined) {
-      await database.transaction().execute(async (tx) => {
-        const ended = ending === undefined ? undefined : await endSessions(tx, ending);
+      return database.transaction().execute(async (tx) => {
+        const copying = await judged(tx);
+        if (copying === undefined) return false;
+        const ended = copying.ending === undefined ? undefined : await endSessions(tx, copying.ending);
         await platform.record(tx, platformEvent(ended));
+        return true;
       });
-      return true;
     }
-    await withTenant(database, orgId, async (tx) => {
-      const ended = ending === undefined ? undefined : await endSessions(tx, ending);
+    return withTenant(database, orgId, async (tx) => {
+      const copying = await judged(tx);
+      if (copying === undefined) return false;
+      const ended = copying.ending === undefined ? undefined : await endSessions(tx, copying.ending);
       await trail.record(tx, orgId, {
         actor: ACTOR,
         action: SIGN_IN_CHANGED,
@@ -268,8 +306,8 @@ export function createIdpEventCopier({
         await outbox.add(tx, toldOfReset(orgId, event.eventClass, person, false));
       }
       await platform.record(tx, platformEvent(ended));
+      return true;
     });
-    return true;
   };
 
   /** Copies one event to every organisation its person belongs to; how many records it wrote. */
@@ -284,16 +322,30 @@ export function createIdpEventCopier({
     const counts = !copiedBefore && person !== undefined ? await counted(event, person) : false;
     let written = 0;
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
-      const first = { endSessions: !copiedBefore && written === 0 && endsSessions(event.eventClass), counts };
-      if (await copyOnce(event, person, orgId, first)) written += 1;
+      if (await copyOnce(event, person, orgId, counts)) written += 1;
     }
-    if (written > 0) {
-      const facts = { eventType: event.type, by: byWhom(event), organisations: orgs.length };
-      if (event.eventClass === 'impersonated') logger.error('idp.impersonated', facts);
-      else if (event.eventClass === 'rights_changed') logger.warn('idp.rights_changed', facts);
-      else if (event.eventClass === 'token_issued') logger.warn('idp.token_issued', facts);
-    }
+    if (written > 0) told(event, orgs.length);
     return written;
+  };
+
+  /** The line a copied event's class asks for: an alarm, a warning the alert counts, or our own routine change. */
+  const told = (event: IdpEvent, organisations: number): void => {
+    const facts = { eventType: event.type, by: byWhom(event), organisations };
+    if (event.eventClass === 'impersonated') {
+      logger.error('idp.impersonated', facts);
+      return;
+    }
+    if (event.eventClass !== 'rights_changed' && event.eventClass !== 'token_issued') return;
+    if (isOurRoutineChange(event, ours)) {
+      const target = event.member?.userId ?? event.aggregateId;
+      const mine = { eventType: event.type, editor: event.editorUserId, target };
+      if (event.eventClass === 'rights_changed') logger.info('idp.rights_changed_by_us', mine);
+      else logger.info('idp.token_issued_by_us', mine);
+    } else if (event.eventClass === 'rights_changed') {
+      logger.warn('idp.rights_changed', facts);
+    } else {
+      logger.warn('idp.token_issued', facts);
+    }
   };
 
   /** Reads and copies pages until none is left, MOST_PAGES are read, or the signal is aborted. */

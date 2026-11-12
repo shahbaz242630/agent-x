@@ -345,8 +345,13 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
 
   it('gives nothing for details planted without an orgId text, which the chain check names', async () => {
     await record(created(ORGS[0] ?? ''));
-    // The owner can drop the table's check that details are a JSON object, as here.
-    await tamper('alter table platform_controls.audit_events drop constraint audit_events_details_check');
+    // The owner can drop the table's check that details are a JSON object, as here, and 0084's indexes on facts of
+    // the details, which read every row's details as JSON and would refuse the `not json` row below.
+    await tamper(
+      'alter table platform_controls.audit_events drop constraint audit_events_details_check',
+      `drop index platform_controls.audit_events_by_event, platform_controls.audit_events_by_person,
+         platform_controls.audit_events_by_subject, platform_controls.audit_events_by_at`,
+    );
     try {
       // Copies of the operator's event, so added as the owner (0080 refuses any other role).
       await tamperAsOwner(
@@ -369,6 +374,10 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
       await tamper(
         'truncate platform_controls.audit_events, platform_controls.audit_head',
         "alter table platform_controls.audit_events add constraint audit_events_details_check check (pg_catalog.jsonb_typeof(details::jsonb) = 'object')",
+        "create index audit_events_by_event on platform_controls.audit_events (action, (details::jsonb ->> 'event'))",
+        "create index audit_events_by_person on platform_controls.audit_events (action, (details::jsonb ->> 'person'))",
+        "create index audit_events_by_subject on platform_controls.audit_events (action, (details::jsonb ->> 'subject'))",
+        `create index audit_events_by_at on platform_controls.audit_events (action, ((details::jsonb ->> 'at') collate "C"))`,
       );
     }
   });

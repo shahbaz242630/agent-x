@@ -33,9 +33,8 @@
 // compares the tenant policy with a reference policy).
 import type pg from 'pg';
 
-import { catalogueRows as rows, openCatalogue } from './catalogue.ts';
+import { type CatalogueTarget, catalogueRows as rows, openCatalogue } from './catalogue.ts';
 import { TABLE_NAME } from './names.ts';
-import type { TestDatabase } from './test-database.ts';
 
 /** The type an authority field is read as: @agentx/platform/db's SignedFieldType. */
 export type AuthorityFieldType = 'text' | 'uuid' | 'integer' | 'timestamptz';
@@ -412,7 +411,10 @@ interface Facts {
  * as the migration role and reads the system catalogues; the reference objects
  * it builds are rolled back, so it leaves the database as it was.
  */
-export async function authorityProblems(database: TestDatabase, tables: readonly AuthorityTable[]): Promise<string[]> {
+export async function authorityProblems(
+  database: CatalogueTarget,
+  tables: readonly AuthorityTable[],
+): Promise<string[]> {
   const listed = listProblems(tables);
   // A registry that names a table twice, or a machine written wrong, would
   // make the facts below ambiguous, so nothing is read until it is sound.
