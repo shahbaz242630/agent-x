@@ -573,3 +573,58 @@ describe('0072 once its image is in: each part held at once', () => {
     expect(await clean()).toEqual({ atOnce: [], releaseShaped: [] });
   });
 });
+
+describe("OR1b's trigger as coming.json lists it, before its migration (0089) has run", () => {
+  // The function and trigger exactly as 0089 will make them: the body between the dollar quotes is what is hashed.
+  const MAKE_IN_STEP = `CREATE FUNCTION identity.grants_in_step() RETURNS trigger LANGUAGE plpgsql
+  SET search_path = pg_catalog AS $$
+declare
+  kept integer;
+  now_at integer;
+begin
+  if current_user = 'agentx_owner' then
+    return null;
+  end if;
+  -- The row was just changed and no role but the owner deletes one, so a membership not seen here is hidden by the
+  -- tenant wall: the organisation's setting changed before the commit. Refused, as nothing here can be judged.
+  select m.state_version into now_at from identity.memberships m
+    where m.org_id = new.org_id and m.id = new.id;
+  if now_at is null then
+    raise exception 'a membership changed out of sight of its own organisation'
+      using errcode = 'check_violation', constraint = 'grants_in_step';
+  end if;
+  select g.membership_version into kept from identity.membership_grants g
+    where g.org_id = new.org_id and g.id = new.id;
+  -- None built yet, or one an older image left behind before this change (OR1c's): let through.
+  if kept is null or kept < old.state_version or kept = now_at then
+    return null;
+  end if;
+  raise exception 'a membership changed without its grant summary kept in step'
+    using errcode = 'check_violation', constraint = 'grants_in_step';
+end
+$$;
+
+CREATE CONSTRAINT TRIGGER grants_in_step AFTER UPDATE OF state_version ON identity.memberships
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (old.state_version IS DISTINCT FROM new.state_version)
+  EXECUTE FUNCTION identity.grants_in_step();`;
+
+  afterEach(async () => {
+    await owner.query('drop function if exists identity.grants_in_step() cascade');
+  });
+
+  it('is this image’s own coming entry, exact: the trigger release-shaped, its function known, nothing at once', async () => {
+    await owner.query(MAKE_IN_STEP);
+    expect(await liveSchemaDrift(app, ROLES)).toEqual({
+      atOnce: [],
+      releaseShaped: ['identity.memberships carries "grants_in_step", a coming trigger'],
+    });
+  });
+
+  it('to an image without the entry, is the alarm at once: why it lands a release first', async () => {
+    await owner.query(MAKE_IN_STEP);
+    expect((await liveSchemaDrift(app, { ...ROLES, comingTriggers: [] })).atOnce).toEqual([
+      'identity.memberships carries the trigger "grants_in_step"',
+    ]);
+  });
+});
