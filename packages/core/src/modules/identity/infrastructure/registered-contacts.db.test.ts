@@ -5,6 +5,7 @@ import {
   FixedClock,
   LogCapture,
   SequentialIds,
+  tamperAsOwner,
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
@@ -12,7 +13,7 @@ import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, withSignedStates } from '../../audit/index.ts';
+import { type AuditTables, createAuditTrail, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { contactCountsFrom } from '../domain/registered-contact.ts';
@@ -29,6 +30,7 @@ import {
   contactsOf,
   contactToActivate,
   contactToRemove,
+  countingContactsAsRead,
   draftContact,
   MOST_CONTACT_RECORDS,
   REGISTERED_CONTACTS,
@@ -43,6 +45,8 @@ type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTabl
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
+/** The operator's command's own role (PL-57, OR2b). */
+let operator: Database<Tables>;
 
 /** Stand-in keys, one per purpose. */
 const keys = createKeyProvider(
@@ -166,12 +170,20 @@ const eventsFrom = (org: string, seq: bigint) =>
       .execute(),
   );
 
+/** The contacts that count at `now`, as the operator's command reads them: its own role, withTenant's, no lock. */
+const countingAsOperator = (org: string, now: Date) =>
+  withTenant(operator, org, (tx) =>
+    countingContactsAsRead(tx, { trail: createAuditTrail({ keys, ids }), keys }, org, now),
+  );
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+  operator = createDatabase<Tables>({ ...database.connection('operator'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {
+  await operator.destroy();
   await app.destroy();
   await database.drop();
 });
@@ -597,5 +609,95 @@ describe(`the organisation's contacts (B6-1a, Postgres ${server.version})`, () =
 
     await draft(who);
     await expect(list(who.org)).rejects.toBeInstanceOf(TooManyContacts);
+    await expect(countingAsOperator(who.org, clock.now())).rejects.toBeInstanceOf(TooManyContacts);
+  });
+});
+
+describe(`the counting contacts as the operator's role reads them (OR2b, 0088, Postgres ${server.version})`, () => {
+  /** The organisation's contacts: a draft, one counting first, one a moment later, one removed. */
+  async function contacts() {
+    const who = await organization();
+    await draft(who, { email: 'draft@example.test' });
+    const first = await draft(who, { email: 'First@Example.test' });
+    const later = await draft(who, { email: 'later@example.test' });
+    const removed = await draft(who, { email: 'gone@example.test' });
+    await activate(who, first.id);
+    await activate(who, removed.id);
+    await remove(who, removed.id);
+    const countsFrom = contactCountsFrom(clock.now());
+    clock.advanceBy(1);
+    await activate(who, later.id);
+    return { who, first, later, countsFrom };
+  }
+
+  it('lists those that count at its now, each with its address and start, read unlocked with its own rights alone', async () => {
+    const { who, first, later, countsFrom } = await contacts();
+    const laterFrom = new Date(countsFrom.getTime() + 1);
+
+    expect(await countingAsOperator(who.org, new Date(countsFrom.getTime() - 1))).toEqual({
+      outcome: 'listed',
+      contacts: [],
+    });
+    expect(await countingAsOperator(who.org, laterFrom)).toEqual({
+      outcome: 'listed',
+      contacts: [
+        { id: first.id, countsFrom, email: 'first@example.test' },
+        { id: later.id, countsFrom: laterFrom, email: 'later@example.test' },
+      ].toSorted((a, b) => (a.id < b.id ? -1 : 1)),
+    });
+    expect(await countingAsOperator((await organization()).org, laterFrom)).toEqual({
+      outcome: 'listed',
+      contacts: [],
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('may not lock a contact, nor read when it was made: 0088 grants no more than the list reads', async () => {
+    const { who } = await contacts();
+    await expect(
+      withTenant(operator, who.org, (tx) =>
+        tx.selectFrom('identity.registered_contacts').select('id').forShare().execute(),
+      ),
+    ).rejects.toThrow('permission denied');
+    await expect(
+      withTenant(operator, who.org, (tx) =>
+        tx.selectFrom('identity.registered_contacts').select('created_at').execute(),
+      ),
+    ).rejects.toThrow('permission denied');
+  });
+
+  it.each([
+    [
+      'its start moved earlier',
+      "update identity.registered_contacts set counts_from = counts_from - interval '1 day' where id = $1",
+    ],
+    ['deleted, to keep it from being written to', 'delete from identity.registered_contacts where id = $1'],
+  ])('gives no list once a contact was changed past the app: %s', async (_what, tamper) => {
+    const { who, first, countsFrom } = await contacts();
+    const owner = await tamperAsOwner(database, REGISTERED_CONTACTS, who.org);
+    try {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text, from the list above.
+      await owner.query(tamper, [first.id]);
+    } finally {
+      await owner.end();
+    }
+    expect(await countingAsOperator(who.org, countsFrom)).toEqual({ outcome: 'unverified' });
+  });
+
+  it('gives no list once a contact was planted with no event', async () => {
+    const { who, countsFrom } = await contacts();
+    const owner = await tamperAsOwner(database, REGISTERED_CONTACTS, who.org);
+    try {
+      // ACTIVE and counting from the start, past the status guard as only the owner can.
+      await owner.withoutStatusGuard(() =>
+        owner.query(
+          "insert into identity.registered_contacts (org_id, id, status, added_by, counts_from, step_up_challenge_id, created_at, email_ciphertext, email_key_version) values ($1, $2, 'ACTIVE', $3, now() - interval '30 days', $4, now() - interval '40 days', $5, 1)",
+          [who.org, ids.next(), who.admin, ids.next(), Buffer.alloc(40)],
+        ),
+      );
+    } finally {
+      await owner.end();
+    }
+    expect(await countingAsOperator(who.org, countsFrom)).toEqual({ outcome: 'unverified' });
   });
 });

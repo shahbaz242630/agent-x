@@ -13,7 +13,7 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { COUNTING_CONTACTS_USAGE, HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   activityExportRequest,
@@ -796,6 +796,42 @@ describe("OR2 our team's reset notice, only ever from a file (playbook K)", () =
       "the notice's ID must be a UUIDv7, in lower case",
     ]);
     expect(text).not.toContain(reason);
+  });
+});
+
+describe("OR2b an organisation's counting contacts, typed or from a file (playbook K)", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-counting-contacts-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const ORG = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a01';
+
+  it.each([
+    ['typed', ['counting-contacts', '--org', ORG]],
+    ['from a file', ['--request', requestFile(JSON.stringify(['counting-contacts', '--org', ORG]))]],
+  ])('reads it %s, then connects', async (_how, argv) => {
+    const { events, line } = await run(argv);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: 'counting-contacts' });
+  });
+
+  it.each([
+    ['no organisation', ['counting-contacts']],
+    ['a flag misnamed', ['counting-contacts', '--organisation', ORG]],
+    ['a word more', ['counting-contacts', '--org', ORG, 'x']],
+  ])('refuses %s, naming the shape', async (_what, argv) => {
+    const { events, line } = await run(argv);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([`the command is ${COUNTING_CONTACTS_USAGE}, and nothing else`]);
+  });
+
+  it('refuses an organisation ID that is not a UUIDv7 in lower case', async () => {
+    const { line } = await run(['counting-contacts', '--org', ORG.toUpperCase()]);
+
+    expect(line('operator.refused')?.problems).toEqual(["the organisation's ID must be a UUIDv7, in lower case"]);
   });
 });
 

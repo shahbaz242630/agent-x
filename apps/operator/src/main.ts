@@ -25,7 +25,11 @@
 // file, read-only on the database, one signed line to the anchors' store. Or
 // tell an organisation's members and counting contacts that our team is
 // resetting a person's second factor (OR2, playbook K, factor-reset-notice.ts):
-// only from a file, its reference never logged.
+// only from a file, its reference never logged. Or list an organisation's
+// registered contacts that count now, each address masked (OR2b, playbook K,
+// counting-contacts.ts): typed or from a file, read-only:
+//
+//   node apps/operator/src/main.ts counting-contacts --org <organisation ID>
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -96,6 +100,7 @@ import { type ActivityExportTables, exportActivityLog } from './activity-export.
 import { rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
+import { COUNTING_CONTACTS, type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
 import { createOrganizationAsOperator } from './create-organization.ts';
 import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
@@ -135,7 +140,8 @@ type CommandTables = FirstAdminTables &
   ActivityExportTables &
   HandoffPauseTables &
   RebaseTables &
-  FactorResetNoticeTables;
+  FactorResetNoticeTables &
+  CountingContactsTables;
 
 const SERVICE = 'operator';
 
@@ -234,6 +240,7 @@ type Request =
       /** Its record's ID on the organisation's chain. */
       readonly id: string;
     }
+  | { readonly command: typeof COUNTING_CONTACTS; readonly orgId: string }
   | { readonly command: typeof RESTORE_CHECK }
   | {
       readonly command: typeof CHAIN_RECOVERY;
@@ -344,6 +351,7 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [FACTOR_RESET_NOTICE, factorResetNoticeAsked],
+  [COUNTING_CONTACTS, countingContactsAsked],
   [RESTORE_CHECK, restoreCheckAsked],
   [CHAIN_RECOVERY, chainRecoveryAsked],
   [CHAIN_REBASE, chainRebaseAsked],
@@ -537,6 +545,19 @@ function factorResetNoticeAsked(words: readonly string[], fromFile: boolean): Re
   return 'problems' in asked ? asked : { command: FACTOR_RESET_NOTICE, ...asked };
 }
 
+/** What lists an organisation's counting contacts (OR2b): typed, or as a request file's JSON list. */
+export const COUNTING_CONTACTS_USAGE = `${COUNTING_CONTACTS} --org <organisation ID>`;
+
+/** A listing of an organisation's counting contacts (OR2b, playbook K): typed or from a file, the organisation alone. */
+function countingContactsAsked(words: readonly string[]): Request | Problems {
+  const [, orgFlag, orgId, ...more] = words;
+  if (orgFlag !== '--org' || orgId === undefined || more.length > 0) {
+    return problem(`the command is ${COUNTING_CONTACTS_USAGE}, and nothing else`);
+  }
+  if (!UUID_V7.test(orgId)) return problem("the organisation's ID must be a UUIDv7, in lower case");
+  return { command: COUNTING_CONTACTS, orgId };
+}
+
 /**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
@@ -618,6 +639,7 @@ async function run(
     return handoff(config, keys, request, database, logger);
   }
   if (request.command === FACTOR_RESET_NOTICE) return factorResetNotice(config, keys, request, database, logger);
+  if (request.command === COUNTING_CONTACTS) return countingContacts(keys, request.orgId, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -753,6 +775,21 @@ async function factorResetNotice(
       { keys, ids: uuidV7Ids, logger },
       { orgId, userId, reason, noticeId: id, release: config.release, run: config.run },
     );
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** Lists an organisation's registered contacts that count now, each address masked (OR2b, playbook K): the exit code. */
+async function countingContacts(
+  keys: KeyProvider,
+  orgId: string,
+  database: Database<CountingContactsTables>,
+  logger: Logger,
+): Promise<number> {
+  try {
+    if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
+    return await listCountingContacts(database, { keys, ids: uuidV7Ids, logger }, orgId, systemClock.now());
   } finally {
     await database.destroy();
   }

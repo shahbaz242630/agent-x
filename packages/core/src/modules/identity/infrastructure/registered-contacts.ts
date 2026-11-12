@@ -42,9 +42,14 @@ import {
   type AuditActor,
   type AuditDetails,
   type AuditTables,
+  type AuditTrail,
   type RecordedState,
   type SignedStates,
   type SignedStatesServices,
+  // eslint-disable-next-line no-restricted-imports -- OR2b: only the two repair steps that read and judge, writing nothing, for the operator's unlocked read of its contacts (countingContactsAsRead)
+  stateObjectIds,
+  // eslint-disable-next-line no-restricted-imports -- as above: reads and judges, never writes or switches a guard
+  statesAsRead,
   type TamperSign,
   type VerifiedState,
   withSignedStates,
@@ -500,6 +505,49 @@ export function countingContactsFor(
 ): Promise<readonly string[]> {
   const now = clock.now();
   return contactIdsFor(db, services, orgId, (contact) => countsNow(contact, now));
+}
+
+/** A contact that counts, as our team's runbook lists it (OR2b, playbook K): when it started to count, and its address. */
+export interface CountingContact {
+  readonly id: string;
+  readonly countsFrom: Date;
+  readonly email: string;
+}
+
+/**
+ * The organisation's contacts that count at `now` (countsNow), in order of ID, each with its address, for our team's
+ * runbook (OR2b, playbook K), in the caller's transaction, withTenant's for the organisation. Read with no lock: the
+ * operator's role may read the table, never lock a row of it (a lock needs a right to change one). Every contact the
+ * table or the log knows of is judged as verifiedState judges it, raising no alarm and holding nothing (statesAsRead):
+ * any one not believed, or with more events since its newest signed one than a read takes, gives `unverified` and no
+ * list, so a contact planted, deleted or changed past the app can't make the list wrong. More than
+ * MOST_CONTACT_RECORDS throws TooManyContacts; an address that won't open throws ContactUnreadable.
+ */
+export async function countingContactsAsRead(
+  tx: ContactsTransaction,
+  { trail, keys }: { readonly trail: AuditTrail; readonly keys: KeyProvider },
+  orgId: string,
+  now: Date,
+): Promise<
+  { readonly outcome: 'listed'; readonly contacts: readonly CountingContact[] } | { readonly outcome: 'unverified' }
+> {
+  const { ids, next } = await stateObjectIds(tx, trail, REGISTERED_CONTACTS, orgId, null, MOST_CONTACT_RECORDS);
+  if (next !== null) throw new TooManyContacts();
+  const read = await statesAsRead(tx, trail, keys, REGISTERED_CONTACTS, orgId, ids);
+  const records: ContactRecord[] = [];
+  for (const id of ids) {
+    const check = read.get(id)?.check;
+    if (check?.outcome !== 'verified') return { outcome: 'unverified' };
+    records.push(recordOf(id, check.fields));
+  }
+  const contacts: CountingContact[] = [];
+  for (const record of records) {
+    const { id, countsFrom } = record;
+    // countsNow holds a contact with no start to not counting; the check says so to the type as well.
+    if (countsFrom === null || !countsNow(record, now)) continue;
+    contacts.push({ id, countsFrom, email: await contactEmail(tx, keys, orgId, id) });
+  }
+  return { outcome: 'listed', contacts };
 }
 
 /**

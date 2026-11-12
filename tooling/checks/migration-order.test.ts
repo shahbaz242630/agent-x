@@ -87,7 +87,9 @@ describe("the repository's migrations", () => {
       () => NOTHING,
       new Map(),
     );
-    expect([...new Set(refused.map((line) => line.slice(0, 4)))]).toEqual([...GRANDFATHERED.keys()]);
+    // Those up to 0081, released before the rule; a later one changing something was carried as coming (the next test).
+    const beforeTheRule = refused.map((line) => line.slice(0, 4)).filter((number) => number <= '0081');
+    expect([...new Set(beforeTheRule)]).toEqual([...GRANDFATHERED.keys()]);
   });
 
   it('each change after those was carried as coming by the code before it', () => {

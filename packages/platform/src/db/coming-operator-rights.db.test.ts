@@ -19,9 +19,9 @@ let app: Kysely<unknown>;
 let owner: TestSession;
 
 const ROLES = { appRole: 'agentx_app', ownerRole: 'agentx_owner' } as const;
-const CONTACTS = 'identity.registered_contacts';
-const ID = `SELECT on column ${CONTACTS}.id`;
-const STATUS = `SELECT on column ${CONTACTS}.status`;
+const MEMBERSHIPS = 'identity.memberships';
+const ID = `SELECT on column ${MEMBERSHIPS}.id`;
+const STATUS = `SELECT on column ${MEMBERSHIPS}.status`;
 const may = (right: string) => `agentx_operator may ${right}`;
 
 /** The GRANT that gives a right as the guard prints it: on a table, or on one column of it (`a.b.c`). */
@@ -54,12 +54,12 @@ afterAll(async () => {
   await database.drop();
 });
 
-const GRANT_ID = 'grant select (id) on identity.registered_contacts to agentx_operator';
+const GRANT_ID = 'grant select (id) on identity.memberships to agentx_operator';
 
 describe("a right a coming migration grants the operator's role on a table already built", () => {
   afterEach(async () => {
-    await owner.query('revoke all on identity.registered_contacts from agentx_operator');
-    await owner.query('revoke all (id, status) on identity.registered_contacts from agentx_operator');
+    await owner.query('revoke all on identity.memberships from agentx_operator');
+    await owner.query('revoke all (id, status) on identity.memberships from agentx_operator');
   });
 
   it('known as coming and not yet granted says nothing: the image before the migration ran', async () => {
@@ -82,14 +82,14 @@ describe("a right a coming migration grants the operator's role on a table alrea
   });
 
   it('softens no other right: another column, or the whole table, is the alarm at once', async () => {
-    await owner.query('grant select (id, status) on identity.registered_contacts to agentx_operator');
+    await owner.query('grant select (id, status) on identity.memberships to agentx_operator');
     expect(await drift()).toEqual({ atOnce: [may(STATUS)], releaseShaped: [may(ID)] });
-    await owner.query('grant select on identity.registered_contacts to agentx_operator');
-    expect((await drift()).atOnce).toEqual([may(STATUS), may(`SELECT on ${CONTACTS}`)]);
+    await owner.query('grant select on identity.memberships to agentx_operator');
+    expect((await drift()).atOnce).toEqual([may(STATUS), may(`SELECT on ${MEMBERSHIPS}`)]);
   });
 
   it('handed on (WITH GRANT OPTION), is the alarm at once, both the right and the handing on', async () => {
-    await owner.query('grant select (id) on identity.registered_contacts to agentx_operator with grant option');
+    await owner.query('grant select (id) on identity.memberships to agentx_operator with grant option');
     expect(await drift()).toEqual({ atOnce: [may(ID), `agentx_operator may grant ${ID}`], releaseShaped: [] });
   });
 
