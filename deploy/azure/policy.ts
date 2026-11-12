@@ -472,6 +472,10 @@ const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
+  // AZ3: Stage G's mark (as the owner) and checks (as the app and the backup role), on its throwaway copy alone.
+  'stage-g reads db-owner-password',
+  'stage-g reads db-app-password',
+  'stage-g reads db-backup-password',
   // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
@@ -629,13 +633,14 @@ export const LOAD_RUN = {
 
 /**
  * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
- * runs as and what it reads. The mark and the checks as the set-up job's identity, which reads those logins already,
- * so no grant is added; the step as PL-38's jobs. Each reads a part of its identity's own (a test holds it to GRANTS).
+ * runs as and what it reads. The mark and the checks as Stage G's own identity (AZ3), which reads the owner's, the
+ * app's and the backup role's logins alone, never the server admin's; the step as PL-38's jobs. Each reads a part of
+ * its identity's own (a test holds it to GRANTS).
  */
 const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
-  'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
+  'load-mark': { runsAs: 'stage-g', reads: new Set(['db-owner-password']) },
   'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
-  'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
+  'load-check': { runsAs: 'stage-g', reads: new Set(['db-app-password', 'db-backup-password']) },
 };
 
 const isStageGJob = (workload: string): boolean => Object.hasOwn(STAGE_G_JOBS, workload);
@@ -4142,14 +4147,23 @@ const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
   ].map((action) => action.toLowerCase()),
 );
 
+/** Starting a job's run, as Azure names the action, without case. */
+const JOB_START = 'microsoft.app/jobs/start/action';
+
 /**
  * Every custom role the deployment defines (AZ2): no wildcard in any action or
  * data action (`Microsoft.App/jobs/*\/action` would add a secret's listing and
  * every action Azure adds later, Microsoft's jobs page), and none of
- * FORBIDDEN_ACTIONS. CI's and the watch's are held to their exact lists besides
- * (`release-identity`, `job-watch`): this holds every role, a new one included.
+ * FORBIDDEN_ACTIONS. And only CI's role may start a job (AZ3): a start is the
+ * job's secrets and identity (Microsoft's jobs page), and CI's is given on the
+ * migration job alone (`release-access`), so no identity of ours but CI's can
+ * start migrate, and none can start chain-restore or the operator's job; a
+ * person starts those, as the subscription's owner. CI's and the watch's roles
+ * are held to their exact lists besides (`release-identity`, `job-watch`): this
+ * holds every role, a new one included.
  */
 const roleActions: Check = (snapshot, _expected, add) => {
+  const ci = releaseRoleName(groupOf(snapshot));
   for (const role of ofType(snapshot, TYPES.roleDefinition)) {
     const permissions = list(at(role.properties, 'permissions'));
     const allowed = permissions.flatMap((entry) => [...list(at(entry, 'actions')), ...list(at(entry, 'dataActions'))]);
@@ -4159,6 +4173,13 @@ const roleActions: Check = (snapshot, _expected, add) => {
           rule: 'role-actions',
           resource: role.name,
           message: `allows ${action}: no role of ours allows a wildcard, a door's write, the environment's, a grant, a policy rule or its exemption, or a secret's listing`,
+        });
+      }
+      if (action.toLowerCase() === JOB_START && role.name !== ci) {
+        add({
+          rule: 'role-actions',
+          resource: role.name,
+          message: `allows ${action}: only CI's role starts a job, and only the migration (release-access); a start uses the job's secrets`,
         });
       }
     }

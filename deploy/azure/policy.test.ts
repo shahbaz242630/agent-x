@@ -637,6 +637,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel-setup',
         'operator',
         'chain-restore',
+        // Stage G's mark and checks (AZ3), unused out of a Stage G run.
+        'stage-g',
       ].map((workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-what-broke',
@@ -796,11 +798,15 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'migrate reads db-owner-password',
         // 4D2e E10: the chain repair writes as the owner, the one job besides the migration.
         'chain-restore reads db-owner-password',
+        // AZ3: Stage G's mark as the owner, and its checks as the app and the backup role, on its copy alone.
+        'stage-g reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
         // The API's jobs apart from it read what the API reads (4D2e D13).
         'jobs reads db-app-password',
+        'stage-g reads db-app-password',
         'db-setup reads db-backup-password',
+        'stage-g reads db-backup-password',
         'db-setup reads db-operator-password',
         'operator reads db-operator-password',
         'db-setup reads db-zitadel-password',
@@ -4298,7 +4304,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         `the deployment [release-access] ${given('ca-agentx-stg-api', 0).replace('the deployment: ', '')}`,
       ]),
     );
-    expect(brokenRules(asOwner)).toEqual(['release-identity', 'release-access', 'secret-access']);
+    expect(brokenRules(asOwner)).toEqual(['release-identity', 'release-access', 'role-actions', 'secret-access']);
     // A second custom role, wider, given to CI on the API in place of CI's own.
     const wider = structuredClone(staging.predictedResources.find(RELEASE_ROLE));
     const other = bicepGuid(group, 'wider');
@@ -4536,6 +4542,47 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       ),
     ).toContain('role-actions');
+  });
+
+  it("role-actions (AZ3): a role but CI's allowed to start a job, whose start is the job's secrets", () => {
+    const WATCH_ROLE = (resource: PredictedResource): boolean =>
+      ROLE_DEFINITIONS(resource) && String(at(resource.properties, 'roleName')).startsWith('Agent X job watch ');
+    const starting = (action: string) => (role: Mutable) => {
+      const permissions = first(inside(role, 'properties').permissions);
+      permissions.actions = [...list(permissions.actions), action];
+    };
+    // CI's role starts the migration, as every release does.
+    expect(
+      list(at(staging.predictedResources.find(RELEASE_ROLE)?.properties, 'permissions', '0', 'actions')),
+    ).toContain('Microsoft.App/jobs/start/action');
+    for (const action of ['Microsoft.App/jobs/start/action', 'MICROSOFT.APP/JOBS/START/ACTION']) {
+      expect(brokenRules(changed(WATCH_ROLE, starting(action)))).toEqual(['job-watch', 'role-actions']);
+    }
+    // A stop or a read of a run is no start.
+    expect(brokenRules(changed(WATCH_ROLE, starting('Microsoft.App/jobs/stop/action')))).toEqual(['job-watch']);
+  });
+
+  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, reading the owner's, the app's and the backup role's logins alone", () => {
+    const grants = staging.predictedResources
+      .filter((resource) => ASSIGNMENTS(resource))
+      .map((resource) => String(at(resource.properties, 'description')))
+      .filter((description) => description.startsWith('stage-g reads '));
+    expect(grants).toEqual([
+      'stage-g reads db-owner-password (deploy/azure/secrets.bicep)',
+      'stage-g reads db-app-password (deploy/azure/secrets.bicep)',
+      'stage-g reads db-backup-password (deploy/azure/secrets.bicep)',
+    ]);
+    // The server admin's login, the operator's or Zitadel's, given to it: refused.
+    for (const secret of ['db-admin-password', 'db-operator-password', 'db-zitadel-password']) {
+      const extra = structuredClone(
+        staging.predictedResources.find(READS('stage-g', 'db-owner-password')),
+      ) as unknown as Mutable;
+      const reader = structuredClone(staging.predictedResources.find(READS('db-setup', secret))) as unknown as Mutable;
+      extra.id = String(reader.id).replace(/[^/]+$/, 'stage-g-extra');
+      expect(brokenRules(withExtra(extra))).toEqual(['secret-access']);
+    }
+    // One of its three left out: refused, as each is needed.
+    expect(brokenRules(without(READS('stage-g', 'db-backup-password')))).toEqual(['secret-access']);
   });
 
   it('release-writes-alert (AZ2): no alert on CI doing anything but a release, or one that lets a write through, fires late or quietly', () => {
@@ -6897,9 +6944,9 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     const identity = (job: string) =>
       Object.keys(at(found(copy.together, JOB(job)), 'identity', 'userAssignedIdentities') as Mutable)[0];
     expect(STAGE_G.map(identity)).toEqual([
-      expect.stringMatching(/id-agentx-stg-db-setup/),
+      expect.stringMatching(/id-agentx-stg-stage-g$/),
       expect.stringMatching(/id-agentx-stg-api/),
-      expect.stringMatching(/id-agentx-stg-db-setup/),
+      expect.stringMatching(/id-agentx-stg-stage-g$/),
     ]);
     const reads = (job: string) => declaredSecrets(found(copy.together, JOB(job))).map(({ name }) => name);
     expect(reads('load-mark')).toEqual(['db-owner-password']);
@@ -7072,7 +7119,7 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
         ),
       ),
     ).toContain(
-      'workload-secrets job-agentx-stg-load-check: must run as its own identity alone, the one named for db-setup',
+      'workload-secrets job-agentx-stg-load-check: must run as its own identity alone, the one named for stage-g',
     );
   });
 
