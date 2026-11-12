@@ -5329,6 +5329,34 @@ describe('SEC-OPS-09 each rule can fail', () => {
         `ca-agentx-stg-api [workload-secrets] sets ${name} in the deployment, where anyone reading it sees it; mount it from the vault as ${name}_FILE`,
       ]);
     }
+    const setsOurs = (resource: string): string =>
+      `${resource} [workload-secrets] sets AGENTX_IDP_OUR_ACTORS in the deployment, where anyone reading it sees it; mount it from the vault as AGENTX_IDP_OUR_ACTORS_FILE`;
+    // The API's jobs app, where the API is split (4D2e D13), and any job.
+    const split = splitTheApi(structuredClone(staging));
+    const onJobsApp = changed(
+      APP('jobs'),
+      (app) => {
+        setSetting(app, 'AGENTX_IDP_OUR_ACTORS', '900000000000000001');
+      },
+      split,
+    );
+    // Only what workload-secrets says: the split alone leaves other rules to weigh (the anchors' role), not this one.
+    const secretsSaid = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'workload-secrets')
+        .map(describeProblem);
+    expect(secretsSaid(split)).toEqual([]);
+    expect(secretsSaid(onJobsApp)).toEqual([setsOurs('ca-agentx-stg-jobs')]);
+    const onJob = changed(JOB('migrate'), (job) => {
+      setSetting(job, 'AGENTX_IDP_OUR_ACTORS', '900000000000000001');
+    });
+    expect(policyProblems(onJob, STAGING).map(describeProblem)).toEqual([setsOurs('job-agentx-stg-migrate')]);
+    // From a secret in the environment rather than a value: refused all the same, the file form alone.
+    const fromSecret = changed(APP('api'), (app) => {
+      settingsOf(app).push({ name: 'AGENTX_IDP_OUR_ACTORS', secretRef: 'zitadel-our-actors' });
+    });
+    expect(brokenRules(fromSecret)).toEqual(['workload-secrets']);
+    expect(policyProblems(fromSecret, STAGING).map(describeProblem)).toContain(setsOurs('ca-agentx-stg-api'));
   });
 
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {

@@ -48,8 +48,10 @@ import {
   COPIED_SECRETS,
   secretsRunFor,
   issuedProblems,
+  disabledLoginLists,
   loginIdProblems,
   NO_LOGIN_IDS,
+  ourListsProblem,
   passwordProblems,
   peopleAskedFor,
   type PlannedAlert,
@@ -295,12 +297,29 @@ describe('the secrets a run writes', () => {
     expect(peopleAskedFor(ids)).toEqual([...OUR_LISTS]);
     const values = secretValues(
       ids,
-      { 'zitadel-our-actors': '900000000000000001', 'zitadel-our-service-users': NO_LOGIN_IDS },
+      { 'zitadel-our-actors': '900000000000000001', 'zitadel-our-service-users': '900000000000000002' },
       quickMakers(),
     );
     expect(values[variableOf('zitadel-our-actors')]).toBe('900000000000000001');
-    expect(values[variableOf('zitadel-our-service-users')]).toBe(NO_LOGIN_IDS);
+    expect(values[variableOf('zitadel-our-service-users')]).toBe('900000000000000002');
+    // Both none turns the feature off again.
+    const off = secretValues(ids, { 'zitadel-our-actors': NO_LOGIN_IDS, 'zitadel-our-service-users': NO_LOGIN_IDS });
+    expect(off[variableOf('zitadel-our-actors')]).toBe(NO_LOGIN_IDS);
     expect(describePlan(ids)).toContain('  zitadel-our-actors: written, from what you paste');
+  });
+
+  it('SA2b: refuses one list beside the other’s none, which would stop the API’s start, never naming a value', () => {
+    for (const people of [
+      { 'zitadel-our-actors': '900000000000000001', 'zitadel-our-service-users': NO_LOGIN_IDS },
+      { 'zitadel-our-actors': NO_LOGIN_IDS, 'zitadel-our-service-users': '900000000000000002' },
+    ]) {
+      expect(ourListsProblem(people)).toBe(
+        "zitadel-our-actors and zitadel-our-service-users go together: give both as lists of IDs, or both as none. One alone would stop the API's start, so nothing was deployed.",
+      );
+      expect(() => secretValues(rotating(...OUR_LISTS), people, quickMakers())).toThrow(/go together/);
+    }
+    // Neither pasted (another run): nothing to weigh.
+    expect(ourListsProblem({})).toBeUndefined();
   });
 
   it('asks people only for their own secrets, and only when the run writes them', () => {
@@ -2035,6 +2054,38 @@ describe('deploy secrets', () => {
     expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(actors);
     expect(values.AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS).toBe(serviceUsers);
     done.terminal.neverSaid([actors, serviceUsers, 'agentx-admin']);
+  });
+
+  it('SA2b: refuses a rotation that pastes one list and none for the other, sending nothing', async () => {
+    const actors = '900000000000000001';
+    const done = await run(['secrets', '--rotate', 'zitadel-our-actors'], {
+      answers: ['y'],
+      hidden: [actors, actors, NO_LOGIN_IDS, NO_LOGIN_IDS],
+      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+    });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(/go together: .*nothing was deployed\.$/) as unknown,
+    });
+    expect(String(done.error)).not.toContain(actors);
+    expect(done.az.deployment).toBeUndefined();
+    done.terminal.neverSaid([actors]);
+  });
+
+  it('SA2b: refuses any run while one of our lists is disabled, so none is never written over it', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({
+        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        after: everything,
+      }),
+    });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The vault holds zitadel-our-service-users disabled\. .*Enable it again in the vault, or write both lists by name: secrets --rotate zitadel-our-actors zitadel-our-service-users\.$/,
+      ) as unknown,
+    });
+    expect(done.az.deployment).toBeUndefined();
+    expect(disabledLoginLists([{ name: 'api-oidc-client-secret', enabled: false }])).toEqual([]);
   });
 
   it('on a keys run, asks for nothing, writes only the keys and the master key, and checks every key is there', async () => {

@@ -493,6 +493,8 @@ export function secretValues(
   makers: Makers = { random: randomBytes, keyPair: newKeyPair },
   held: readonly string[] = [],
 ): Record<string, string> {
+  const mixed = ourListsProblem(people);
+  if (mixed !== undefined) throw new Error(mixed);
   const pair = Object.entries(VAULT_SECRETS).some(
     ([name, secret]) => secret.source === 'pair' && planIncludes(plan, name),
   )
@@ -1887,6 +1889,23 @@ export function secretsRunFor(missing: readonly string[]): string {
   return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
 }
 
+/** Our login lists the vault holds but disabled (SA2b): a run never writes none over one silently. */
+export const disabledLoginLists = (listed: readonly { readonly name: string; readonly enabled: boolean }[]): string[] =>
+  listed.filter((secret) => !secret.enabled && OUR_LOGIN_LISTS.includes(secret.name)).map((secret) => secret.name);
+
+/**
+ * Why our two pasted lists won't go together, or nothing (SA2b): both lists or both none, as the API's config
+ * requires, or it would refuse to start. Each is checked alone as it is pasted; this checks the pair. Never a value.
+ */
+export function ourListsProblem(people: Readonly<Record<string, string>>): string | undefined {
+  const pastes = OUR_LOGIN_LISTS.map((name) => people[name]);
+  if (pastes.some((paste) => paste === undefined)) return undefined;
+  const off = pastes.filter((paste) => paste === NO_LOGIN_IDS).length;
+  return off === 0 || off === pastes.length
+    ? undefined
+    : `${OUR_LOGIN_LISTS.join(' and ')} go together: give both as lists of IDs, or both as ${NO_LOGIN_IDS}. One alone would stop the API's start, so nothing was deployed.`;
+}
+
 /** What a pasted secret is held to, by who makes it: a person's password, a service's issue, or our login IDs. */
 function problemsOf(name: string): (value: string) => string[] {
   const source = VAULT_SECRETS[name]?.source;
@@ -1911,6 +1930,12 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   generationServer(steps, subscription, 'secrets', server);
   const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
+  const disabled = disabledLoginLists(existing);
+  if (disabled.length > 0) {
+    throw new Error(
+      `The vault holds ${disabled.join(' and ')} disabled. This run would write none over it, a new version, and the list in it would be lost, so nothing was deployed. Enable it again in the vault, or write both lists by name: secrets --rotate ${OUR_LOGIN_LISTS.join(' ')}.`,
+    );
+  }
   if (plan.kind === 'all' && existing.length > 0) await confirmRotateEverything(steps, existing.length);
   steps.terminal.say('This run:');
   for (const line of describePlan(plan)) steps.terminal.say(line);
@@ -1918,11 +1943,12 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   for (const name of peopleAskedFor(plan)) {
     people[name] = await askPassword(steps.terminal, PERSON_LABELS[name] ?? name, 3, problemsOf(name));
   }
+  // None of our lists is disabled here (above): one the vault holds is kept as it is.
   const values = secretValues(
     plan,
     people,
     steps.makers,
-    existing.filter((listed) => listed.enabled).map((listed) => listed.name),
+    existing.map((listed) => listed.name),
   );
   checkPolicy(steps, values);
   if ((await sendWithWhatIf(steps, subscription, 'secrets', values)) === undefined) return 1;
