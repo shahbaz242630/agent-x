@@ -114,7 +114,7 @@ describe("the repository's migrations", () => {
   it("can find the code before a migration on main: 0081's came after a commit without it", () => {
     const before = commitBefore('0081_month_total_index_only.sql');
     expect(git('cat-file', '-e', `${before}:${MIGRATIONS_FOLDER}/0081_month_total_index_only.sql`).status).not.toBe(0);
-    expect(comingAt(before)).toEqual(NOTHING);
+    expect(comingAt(before)).toEqual({ ...NOTHING, operatorRights: [] });
   });
 });
 
@@ -373,6 +373,125 @@ describe('a migration doing what no coming entry describes', () => {
   });
 });
 
+describe("a migration granting the operator's role a right (OR2b)", () => {
+  const COLUMNS = 'GRANT SELECT (id, "status") ON identity.contacts TO agentx_operator;';
+  const BUILT_CONTACTS = { name: '0001_built.sql', sql: 'CREATE TABLE identity.contacts (id uuid, status text);' };
+  const refusedFor = (sql: string, operatorRights: readonly string[] = []) =>
+    refusals(
+      [BUILT_CONTACTS, { name: '0002_later.sql', sql }],
+      ['0002_later.sql'],
+      () => ({ ...NOTHING, operatorRights }),
+      new Map(),
+    );
+  const coming = ['SELECT on column identity.contacts.id', 'SELECT on column identity.contacts.status'];
+  const OUTRIGHT = ': no coming entry can describe that, so the image before it would raise the tamper alarm';
+
+  it('on a table already built, is refused for each right the code before it did not carry', () => {
+    expect(refusedFor(COLUMNS, ['SELECT on column identity.contacts.id'])).toEqual([
+      "0002_later.sql grants the operator's role SELECT on column identity.contacts.status, which the code before it didn't carry in coming.json's operatorRights",
+    ]);
+  });
+
+  it('is accepted when every right was coming, exactly as the guard prints it', () => {
+    expect(refusedFor(COLUMNS, coming)).toEqual([]);
+    expect(refusedFor(COLUMNS, ['SELECT on identity.contacts'])).toHaveLength(2);
+  });
+
+  it('reads a whole table, several tables and several roles, the operator among them', () => {
+    const sql = `CREATE TABLE identity.others (id uuid);
+      GRANT SELECT, INSERT ON TABLE identity.contacts, identity.others TO agentx_app, "agentx_operator", agentx_backup;`;
+    expect(readMigrations([BUILT_CONTACTS, { name: '0002_later.sql', sql }]).changes.get('0002_later.sql')).toEqual([
+      { kind: 'operator', right: 'SELECT on identity.contacts' },
+      { kind: 'operator', right: 'INSERT on identity.contacts' },
+    ]);
+  });
+
+  it('on a table the same migration builds, is nothing to tell: the guard reads it as that table’s', () => {
+    expect(
+      refusedFor('CREATE TABLE identity.fresh (id uuid); GRANT SELECT (id) ON identity.fresh TO agentx_operator;'),
+    ).toEqual([]);
+  });
+
+  it('to other roles alone, or naming the role only in a string or a comment, is nothing to tell', () => {
+    expect(refusedFor('GRANT SELECT ON identity.contacts TO agentx_app, agentx_backup;')).toEqual([]);
+    expect(refusedFor("COMMENT ON TABLE identity.contacts IS 'read by agentx_operator'; -- agentx_operator")).toEqual(
+      [],
+    );
+  });
+
+  it.each([
+    [
+      'taking a right away',
+      'REVOKE SELECT ON identity.contacts FROM agentx_operator;',
+      "takes a right from the operator's role",
+    ],
+    [
+      'letting it hand the right on',
+      'GRANT SELECT ON identity.contacts TO agentx_operator WITH GRANT OPTION;',
+      "lets the operator's role hand a right on",
+    ],
+    [
+      'a right on a schema',
+      'GRANT USAGE ON SCHEMA identity TO agentx_operator;',
+      "grants the operator's role a right on something other than a table",
+    ],
+    [
+      'every table in a schema',
+      'GRANT SELECT ON ALL TABLES IN SCHEMA identity TO agentx_operator;',
+      "grants the operator's role a right on something other than a table",
+    ],
+    [
+      'every privilege',
+      'GRANT ALL PRIVILEGES ON identity.contacts TO agentx_operator;',
+      "grants the operator's role a right this check can't print",
+    ],
+    [
+      'a column whose name needs quotes',
+      'GRANT SELECT ("Status") ON identity.contacts TO agentx_operator;',
+      "grants the operator's role a right this check can't print",
+    ],
+    [
+      'a table without its schema',
+      'GRANT SELECT ON contacts TO agentx_operator;',
+      "grants the operator's role a right on a table not named plainly with its schema",
+    ],
+    [
+      'a role granted to it',
+      'GRANT agentx_app TO agentx_operator;',
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'its default privileges',
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA identity GRANT SELECT ON TABLES TO agentx_operator;',
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'a grant naming it as the grantor alone',
+      'GRANT SELECT ON identity.contacts TO agentx_app GRANTED BY agentx_operator;',
+      "names the operator's role outside a grant this check can read",
+    ],
+    [
+      'a DO block granting it a right',
+      'DO $$ BEGIN GRANT SELECT ON identity.contacts TO agentx_operator; END $$;',
+      "runs a DO block naming the operator's role",
+    ],
+    [
+      'a DO block with a quoted body granting it a right',
+      "DO 'BEGIN GRANT SELECT ON identity.contacts TO AGENTX_OPERATOR; END';",
+      "runs a DO block naming the operator's role",
+    ],
+  ])('is refused outright: %s', (_what, sql, what) => {
+    expect(refusedFor(sql, coming)).toEqual([`0002_later.sql ${what}${OUTRIGHT}`]);
+  });
+
+  it('names a coming right already granted as left behind, and passes one still to come', () => {
+    const reading = readMigrations([BUILT_CONTACTS, { name: '0002_later.sql', sql: COLUMNS }]);
+    expect(
+      leftBehind({ ...NOTHING, operatorRights: [...coming, 'SELECT on column identity.contacts.other'] }, reading),
+    ).toEqual(coming.map((right) => `coming operator right ${right} is already granted: take it out of coming.json`));
+  });
+});
+
 describe('refusals', () => {
   it('never refuses a grandfathered migration, and looks nothing up for one that changes nothing', () => {
     const asked: string[] = [];
@@ -440,8 +559,34 @@ describe('parseComing', () => {
     expect(parseComing(JSON.stringify({ triggers: [trigger], bodies: [{ function: 'f.f', body: HASH_A }] }))).toEqual({
       triggers: [{ table: 't.t', name: 'n', function: 'f.f', body: HASH_A }],
       bodies: [{ function: 'f.f', body: HASH_A }],
+      operatorRights: [],
     });
-    expect(parseComing(undefined)).toEqual(NOTHING);
+    expect(parseComing(undefined)).toEqual({ ...NOTHING, operatorRights: [] });
+  });
+
+  it('reads the operator rights coming, each as the guard prints one', () => {
+    const operatorRights = ['SELECT on column a.b.c', 'INSERT on a.b'];
+    expect(parseComing(JSON.stringify({ triggers: [], bodies: [], operatorRights }))).toEqual({
+      ...NOTHING,
+      operatorRights,
+    });
+  });
+
+  it.each([
+    ['not a list', 'SELECT on a.b'],
+    ['a right with no schema', ['SELECT on b']],
+    ['a column with no table', ['SELECT on column a.b']],
+    ['a table named as a column', ['SELECT on a.b.c']],
+    ['a privilege a column cannot hold', ['DELETE on column a.b.c']],
+    ['a privilege in lower case', ['select on a.b']],
+    ['a name needing quotes', ['SELECT on a.B']],
+    ['a schema right', ['USAGE on schema a']],
+    ['more after it', ['SELECT on a.b and more']],
+    ['not text', [1]],
+  ])('refuses operator rights that are %s', (_what, operatorRights) => {
+    expect(() => parseComing(JSON.stringify({ triggers: [], bodies: [], operatorRights }))).toThrow(
+      "coming.json's operatorRights",
+    );
   });
 
   it.each([
