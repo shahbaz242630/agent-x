@@ -1664,8 +1664,12 @@ const subnetRules = (snapshot: Snapshot, subnet: unknown, direction: string): re
   const apart = ofType(snapshot, TYPES.rule).filter((rule) => rule.id.startsWith(`${String(rulesId)}/securityRules/`));
   return [...inside, ...apart]
     .map((rule) => at(rule, 'properties'))
-    .filter((rule) => at(rule, 'direction') === direction);
+    .filter((rule) => sameWord(at(rule, 'direction'), direction));
 };
+
+/** Azure reads a rule's direction and access without case (`outbound` is `Outbound`), so these checks do too (AZ8e). */
+const sameWord = (value: unknown, word: string): boolean =>
+  typeof value === 'string' && value.toLowerCase() === word.toLowerCase();
 
 const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =>
   subnetRules(snapshot, subnet, 'Inbound');
@@ -1674,7 +1678,7 @@ const outboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] 
   subnetRules(snapshot, subnet, 'Outbound');
 
 const allowing = (inbound: readonly unknown[]): readonly unknown[] =>
-  inbound.filter((rule) => at(rule, 'access') === 'Allow');
+  inbound.filter((rule) => sameWord(at(rule, 'access'), 'Allow'));
 
 /**
  * The backstop of a direction: a rule that denies everything from `source`,
@@ -1689,7 +1693,7 @@ const deniesRest = (rules: readonly unknown[], source: string): boolean => {
   const lastAllow = Math.max(...allowing(rules).map((rule) => Number(at(rule, 'priority'))));
   return rules.some(
     (rule) =>
-      at(rule, 'access') === 'Deny' &&
+      sameWord(at(rule, 'access'), 'Deny') &&
       at(rule, 'protocol') === '*' &&
       at(rule, 'sourceAddressPrefix') === source &&
       at(rule, 'destinationAddressPrefix') === '*' &&

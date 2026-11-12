@@ -3232,6 +3232,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra(separateRule(DATABASE_RULES, 'Outbound', '10.40.9.0/24', 'Internet', '443')))).toEqual(
       ['database-egress'],
     );
+    // Azure reads direction and access without case (AZ8e): written in lower case, every door and backstop still
+    // counts, so the groups pass as they are, and a door nothing needs is still caught.
+    const lowerCase = (group: Mutable): void => {
+      for (const rule of rules(group)) {
+        const properties = inside(rule, 'properties');
+        properties.direction = String(properties.direction).toLowerCase();
+        properties.access = String(properties.access).toLowerCase();
+      }
+    };
+    expect(brokenRules(changed(DATABASE_RULES, lowerCase))).toEqual([]);
+    expect(brokenRules(changed(APPS_RULES, lowerCase))).toEqual([]);
+    const quietDoor = separateRule(DATABASE_RULES, 'Outbound', '10.40.9.0/24', 'Internet', '443');
+    const quietProperties = inside(quietDoor, 'properties');
+    quietProperties.direction = 'outbound';
+    quietProperties.access = 'allow';
+    expect(brokenRules(withExtra(quietDoor))).toEqual(['database-egress']);
     // Each problem is said apart, naming the subnet: a door missing and one nothing needs.
     const problems = policyProblems(
       changed(DATABASE_RULES, (group) => (out(group, 'storage').destinationAddressPrefix = 'Storage')),
