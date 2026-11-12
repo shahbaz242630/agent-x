@@ -661,10 +661,11 @@ const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwa
  */
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
-/** The most replicas an app may run, and why. */
+/** The most replicas an app may run, and why; and the fewest it must keep running, where it has a floor. */
 interface MostReplicas {
   readonly most: number;
   readonly why: string;
+  readonly fewest?: number;
 }
 
 /**
@@ -681,11 +682,16 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
  * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
- * up to four, each one's pool counted against its server (`connections`).
+ * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
+ * hangs on one copy there.
  */
 const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
-  production: { most: 4, why: "Zitadel's copies stop at four (SA3a), each holding its own database connections" },
+  production: {
+    most: 4,
+    why: "Zitadel's copies stop at four (SA3a), each holding its own database connections",
+    fewest: 2,
+  },
 };
 
 /** The most replicas a workload may run in an environment, or nothing where only the defaults hold it. */
@@ -4245,6 +4251,12 @@ function scaleProblems(scale: unknown, limit: MostReplicas | undefined, problem:
   if (limit !== undefined && !(typeof most === 'number' && most <= limit.most)) {
     const replicas = limit.most === 1 ? 'one replica' : `${String(limit.most)} replicas`;
     problem(`must run at most ${replicas} (maxReplicas ${String(limit.most)}): ${limit.why}; it says ${String(most)}`);
+  }
+  const floor = limit?.fewest;
+  if (floor !== undefined && !(typeof fewest === 'number' && fewest >= floor)) {
+    problem(
+      `must keep at least ${String(floor)} replicas running (minReplicas ${String(floor)}): sign-in must not hang on one copy in production; it says ${String(fewest)}`,
+    );
   }
   if (typeof most !== 'number' || most < 1) {
     problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);

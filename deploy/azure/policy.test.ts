@@ -229,6 +229,11 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
     ),
   );
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
+    // Production keeps two Zitadel copies running (SA3a); five connections each keeps staging's server's sum.
+    if (APP('zitadel')(resource as unknown as PredictedResource)) {
+      Object.assign(scaleOf(resource), { minReplicas: 2, maxReplicas: 2 });
+      setSetting(resource, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '5');
+    }
     // CI's identity and the job-start watch's (S175), both named by the environment.
     for (const who of ['release', 'job-watch']) {
       resource.id = String(resource.id).replace(`/id-agentx-stg-${who}`, `/id-agentx-prd-${who}`);
@@ -4992,14 +4997,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(appsProblems(withIngress({}))).toEqual([noIngress]);
     expect(appsProblems(withIngress(null))).toEqual([]);
     // Production's API at `all`, as staging's is out of a load run.
-    expect(appsProblems(productionLike({ subject: true }), STAGING)).toEqual([]);
+    // (Its API alone: production's two Zitadel copies are production's, SA3a.)
+    // splitTheApi changes what it is given, so a copy of staging's, never staging's itself.
+    expect(appsProblems(splitTheApi(structuredClone(staging)), STAGING)).toEqual([]);
     const unsplit = {
       ...staging,
       predictedResources: staging.predictedResources.map((resource) =>
         resource.tags === undefined ? resource : { ...resource, tags: { ...resource.tags, environment: 'production' } },
       ),
     };
+    // Staging's shape as production's: its one Zitadel copy, asleep, is short of production's two too (SA3a).
     expect(appsProblems(unsplit)).toEqual([
+      'ca-agentx-stg-zitadel: must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy in production; it says 0',
       'the deployment: must run the API split in production, web copies beside the jobs app (4D2e D13), whose identity alone keeps the anchors there',
     ]);
   });
@@ -6138,8 +6147,8 @@ describe('the load run (D2c, PL-38)', () => {
 
   it("apps and connections: Zitadel's copies, one on staging and up to four in production, each one's pool counted (SA3a)", () => {
     const production = { region: 'uaenorth', environment: 'production' } as const;
-    const zitadelAt = (most: unknown, from: Snapshot = staging): Snapshot =>
-      changed(APP('zitadel'), (app) => Object.assign(scaleOf(app), { minReplicas: 1, maxReplicas: most }), from);
+    const zitadelAt = (most: unknown, from: Snapshot = staging, fewest: unknown = 1): Snapshot =>
+      changed(APP('zitadel'), (app) => Object.assign(scaleOf(app), { minReplicas: fewest, maxReplicas: most }), from);
     // The rule's messages alone: only Zitadel is changed, and the server's name carries the deployment's suffix.
     const problemsOf = (snapshotted: Snapshot, rule: RuleId, expected: Expectations = STAGING): string[] =>
       policyProblems(snapshotted, expected)
@@ -6149,9 +6158,21 @@ describe('the load run (D2c, PL-38)', () => {
       "must run at most one replica (maxReplicas 1): staging's server has no room for a second copy's database connections; it says 2",
     ]);
     // Production's Zitadel: up to four copies pass; a fifth, or a count that isn't one, doesn't.
-    const productionApps = (most: unknown): string[] =>
-      problemsOf(zitadelAt(most, productionLike({ subject: true })), 'apps', production);
-    for (const most of [1, 2, 4]) expect({ most, problems: productionApps(most) }).toEqual({ most, problems: [] });
+    const productionApps = (most: unknown, fewest: unknown = 2): string[] =>
+      problemsOf(zitadelAt(most, productionLike({ subject: true }), fewest), 'apps', production);
+    for (const most of [2, 4]) expect({ most, problems: productionApps(most) }).toEqual({ most, problems: [] });
+    expect(productionApps(4, 3)).toEqual([]);
+    // Production keeps two running, so sign-in never hangs on one copy; staging's may still sleep at none.
+    const atLeastTwo = (says: string): string =>
+      `must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy in production; it says ${says}`;
+    expect(productionApps(4, 1)).toEqual([atLeastTwo('1')]);
+    expect(productionApps(4, 0)).toEqual([atLeastTwo('0')]);
+    expect(productionApps(4, 'two')).toEqual([
+      atLeastTwo('two'),
+      'must keep no more replicas than it may run (minReplicas two, maxReplicas 4)',
+    ]);
+    expect(problemsOf(zitadelAt(1, staging, 0), 'apps')).toEqual([]);
+    expect(problemsOf(zitadelAt(1, staging, 1), 'apps')).toEqual([]);
     const atMostFour = (says: string): string =>
       `must run at most 4 replicas (maxReplicas 4): Zitadel's copies stop at four (SA3a), each holding its own database connections; it says ${says}`;
     expect(productionApps(5)).toEqual([atMostFour('5')]);
