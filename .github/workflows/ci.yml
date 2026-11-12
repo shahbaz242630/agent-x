@@ -737,3 +737,42 @@ jobs:
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
         run: node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"
+
+  # AZ9: every kept image up to this run's still verifies after the prune, with
+  # the deploy's own check (deploy/image/verify.ts) and the pinned cosign, so a
+  # prune that lost a signature or an SBOM is seen at once, not at a rollback.
+  # A job of its own: the prune job holds `packages: write` and runs nothing
+  # but the prune; this one only reads (image-prune.test.ts).
+  image-kept-verify:
+    name: Image (main) - kept images still verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish, image-prune]
+    runs-on: ubuntu-latest
+    # Two cosign checks an image, for at most six images.
+    timeout-minutes: 20
+    permissions:
+      contents: read # to check out the tools and read the history
+      packages: read # to list the package's versions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in image-publish. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      # The pinned cosign the release uses, checked against its SHA-256 as it arrives.
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
+      - name: Check every kept image up to this run's
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"
