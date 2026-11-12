@@ -135,7 +135,7 @@ import {
 } from '@agentx/core/modules/outcomes';
 import type { Notice, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { AnchorStore } from '@agentx/platform/audit-chain';
+import type { AnchorStore, Chain } from '@agentx/platform/audit-chain';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -388,6 +388,11 @@ export function createHandoff({
   readonly anchoring?: {
     readonly anchors: AnchorStore;
     readonly anchorFirst: (orgId: string, signal?: AbortSignal) => Promise<void>;
+    /**
+     * Holds the chain's shard of the anchors (PL-65 PR3), read again first if it was let go: from the lane's first anchor
+     * to Tx A, so Tx A never finds it let go. None where every shard is always held.
+     */
+    readonly pin?: (chain: Chain) => Promise<(() => void) | undefined>;
   };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
@@ -795,6 +800,11 @@ export function createHandoff({
   /** One request handed off if it may go, its outcome logged: whether its organisation's turn goes on. */
   const handOff = async (orgId: string, id: string, log: Logger): Promise<LaneStep> => {
     beatNow();
+    // Its shard pinned through Tx A, read again if it was let go, before the page's pin goes: held all the way. One that
+    // can't be read leaves Tx A to wait (`anchor_pending`).
+    const pin = anchoring?.pin;
+    const release = pin === undefined ? undefined : await pin({ kind: 'organisation', orgId });
+    unprepared(orgId);
     let done: Cleared;
     try {
       // Its bank slot already taken (its lane's turn), so a committed Tx A never queues before its call.
@@ -803,6 +813,8 @@ export function createHandoff({
       // Tx A's outcome unclear (a commit lost with the connection) or a bug: the partner is never called.
       log.error('handoff.failed', { requestId: id, err: error });
       return 'next';
+    } finally {
+      release?.();
     }
     if (done.outcome === 'denied') log.info('handoff.denied', { requestId: id, causes: done.causes });
     // Before the bank's answer, which a later Tx A seeing a freeze can overtake.
@@ -868,9 +880,24 @@ export function createHandoff({
     }
   };
 
-  /** A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. */
+  // Each lane's organisation's shard pinned as its page is read, until its next Tx A has pinned it too (PL-65 PR3).
+  const prepared = new Map<string, Promise<(() => void) | undefined>>();
+
+  /** The pin a lane's page took let go: its Tx A holds its own, or the run is over. */
+  const unprepared = (orgId: string): void => {
+    const pinning = prepared.get(orgId);
+    prepared.delete(orgId);
+    void pinning?.then((release) => release?.());
+  };
+
+  /**
+   * A process just started (staging wakes from zero, a deploy) holds no anchor yet: the chain is anchored first. Its shard
+   * pinned at once, counted before any wait, and held until its Tx A.
+   */
   const anchorFirstIn = (orgId: string): Promise<void> | undefined => {
-    const held = anchoring?.anchors.latest({ kind: 'organisation', orgId });
+    const chain = { kind: 'organisation', orgId } as const;
+    if (anchoring?.pin !== undefined && !prepared.has(orgId)) prepared.set(orgId, anchoring.pin(chain));
+    const held = anchoring?.anchors.latest(chain);
     if (anchoring === undefined || held !== undefined) return undefined;
     return anchorGate.run(orgId, async () => {
       // A long queue of these may outlast the run: none begun past its budget or a stop.
@@ -910,6 +937,8 @@ export function createHandoff({
     endedAsAWhole.clear();
     budgetEnds = clock.now().getTime() + runBudgetMs;
     const outcomes = await finishedWithinStop(lanes.run(orgs, runSpent), signal, stopWaitMs);
+    // Pages read and never handed off (the run cut, the lane closed): their pins go with the run.
+    for (const orgId of [...prepared.keys()]) unprepared(orgId);
     if (outcomes === undefined) {
       gaveUpWaiting = true;
       return;

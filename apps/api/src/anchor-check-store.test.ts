@@ -1,6 +1,7 @@
 // The anchor check with its anchors in the write-once store (4D2e E, PL-58): the
 // forced cases, a restart being a new log and a new check over the same store.
 // The real chains, with the real Tx A, are in handoff.db.test.ts.
+import { createHash } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 
 import {
@@ -91,10 +92,11 @@ function process(
   chains: readonly CheckedChain[] = [],
   holding = keys,
   epoch = 1,
+  { at = AT, ...shards }: { at?: Date; cutOver?: boolean; evicts?: boolean; mostFileBytes?: number } = {},
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
-  const clock = new FixedClock(AT);
+  const clock = new FixedClock(at);
   const log = createAnchorLog({
     store: fake.store,
     keys: holding,
@@ -102,6 +104,7 @@ function process(
     now: () => clock.now(),
     epoch,
     alertAfterMs: STALE_MS,
+    ...shards,
   });
   const check = createAnchorCheck({
     chains,
@@ -969,5 +972,104 @@ describe('a rebase moves the check on (4D2e E11)', () => {
     expect(api.log.latest(CHAIN)?.seq).toBe(9n);
     expect(api.log.latest({ kind: 'organisation', orgId: OTHER_ORG })?.seq).toBe(4n);
     expect(chains.given[ORG]?.at(-1)).toBe(9n);
+  });
+});
+
+describe('the anchor check over shards let go (PL-65 PR3)', () => {
+  const ORGS = Array.from(
+    { length: 40 },
+    (_, index) => `0199a0f0-0000-7000-8000-${String(100 + index).padStart(12, '0')}`,
+  );
+  const folderOf = (orgId: string): string => {
+    const shard = createHash('sha256')
+      .update('organisation:' + orgId)
+      .digest()
+      .readUInt8(0);
+    return `e1/shards/${shard.toString(16).padStart(2, '0')}/`;
+  };
+
+  /** A store moved on to its shards by a process of its own, the migration done: every organisation anchored at 3. */
+  async function shardedStore() {
+    const fake = createFakeWriteOnceStore();
+    const chains = chainsHolding(Object.fromEntries(ORGS.map((orgId) => [orgId, ok(3n)])));
+    const writer = process(fake, chains.organizations, [], keys, 1, { cutOver: true });
+    await writer.check.run();
+    // A read begun an hour past the marker, every shard's snapshot standing: the migration is done.
+    writer.clock.advanceBy(61 * 60_000);
+    await writer.check.run();
+    expect(fake.files.has('e1/shards/done-shards-v1')).toBe(true);
+    writer.clock.advanceBy(60_000);
+    return { fake, chains, at: writer.clock.now() };
+  }
+
+  /** A process that lets shards go, at a budget holding a few of the forty organisations' shards. */
+  const tight = (fake: FakeWriteOnceStore, chains: OrganisationChains, at: Date) =>
+    process(fake, chains, [], keys, 1, { at, evicts: true, mostFileBytes: 11_000 });
+
+  it('a chain wound back in a shard let go: its shard read again and compared, the alarm, never anchored afresh', async () => {
+    const { fake, chains, at } = await shardedStore();
+    const after = tight(fake, chains.organizations, at);
+    await after.log.read();
+    const victim = ORGS.find((orgId) => !after.log.holds({ kind: 'organisation', orgId })) ?? ORG;
+    chains.held[victim] = ok(2n);
+    await after.check.anchorOrganisation(victim);
+    expect(chains.given[victim]?.at(-1)).toBe(3n);
+    expect(after.lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: victim, check: 'anchor', reason: 'anchor' }),
+    ]);
+    expect(after.lines('audit.anchored')).toEqual([]);
+    expect(after.lines('audit.anchor_shard_loaded').length).toBeGreaterThan(0);
+  });
+
+  it('a whole run over shards let go: each read again to be compared, every chain against its anchor', async () => {
+    const { fake, chains, at } = await shardedStore();
+    const after = tight(fake, chains.organizations, at);
+    const given = Object.fromEntries(ORGS.map((orgId) => [orgId, chains.given[orgId]?.length ?? 0]));
+    await after.check.run();
+    expect(after.lines('audit.anchor_shards_evicted').length).toBeGreaterThan(0);
+    for (const orgId of ORGS) expect(chains.given[orgId]?.slice(given[orgId] ?? 0)).toEqual([3n]);
+    expect(after.lines('audit.integrity_failed')).toEqual([]);
+    expect(after.log.memoryHeld().bytes).toBeLessThanOrEqual(11_000);
+  });
+
+  it('a shard that can’t be read again: nothing compared, nothing anchored, and Tx A still waits', async () => {
+    const { fake, chains, at } = await shardedStore();
+    const after = tight(fake, chains.organizations, at);
+    await after.log.read();
+    const victim = ORGS.find((orgId) => !after.log.holds({ kind: 'organisation', orgId })) ?? ORG;
+    const before = chains.given[victim]?.length;
+    fake.instead.list = (start, most, next) =>
+      start === folderOf(victim) ? failing() : fake.real.list(start, most, next);
+    await after.check.anchorOrganisation(victim);
+    expect(chains.given[victim]?.length).toBe(before);
+    expect(after.log.latest({ kind: 'organisation', orgId: victim })).toBeUndefined();
+    expect(after.lines('audit.anchored')).toEqual([]);
+    expect(after.lines('audit.anchor_shard_unreadable')).toEqual([
+      expect.objectContaining({ level: 'error', reason: 'store' }),
+    ]);
+  });
+
+  it('a chain whose shard the log says it no longer holds as it is compared: nothing kept, never anchored', async () => {
+    const { fake, chains, at } = await shardedStore();
+    const after = tight(fake, chains.organizations, at);
+    await after.log.read();
+    const victim = ORGS.find((orgId) => after.log.holds({ kind: 'organisation', orgId })) ?? ORG;
+    chains.held[victim] = ok(4n);
+    const capture = new LogCapture();
+    // Pinned, and yet not held: the check keeps nothing it could not compare, whatever the log does.
+    const check = createAnchorCheck({
+      chains: [],
+      organizations: chains.organizations,
+      keys,
+      clock: new FixedClock(at),
+      logger: testLogger(capture),
+      staleAfterMs: STALE_MS,
+      deadlineMs: DEADLINE_MS,
+      durable: { ...after.log, holds: () => false, pin: () => Promise.resolve(() => undefined) },
+    });
+    await check.anchorOrganisation(victim);
+    expect(chains.given[victim]?.at(-1)).toBe(3n);
+    expect(capture.lines().filter((line) => line.event === 'audit.anchored')).toEqual([]);
+    expect(after.log.latest({ kind: 'organisation', orgId: victim })?.seq).toBe(3n);
   });
 });

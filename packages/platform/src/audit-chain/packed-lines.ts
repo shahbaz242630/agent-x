@@ -63,6 +63,8 @@ export interface PackedLines<T extends Anchor> {
   readonly size: number;
   /** How many records are in use: one a line that fits, and those a file taken may still read, until released. */
   readonly records: number;
+  /** What its record buffers take, in bytes: allocated, not estimated. They are reused, never given back, so this is its peak. */
+  readonly allocatedBytes: number;
   has(chain: string): boolean;
   get(chain: string): T | undefined;
   stampOf(chain: string): number | undefined;
@@ -201,6 +203,9 @@ export function packedLines<T extends Anchor>(places: boolean): PackedLines<T> {
     },
     get records() {
       return used - free.length;
+    },
+    get allocatedBytes() {
+      return chunks.length * RECORDS_A_CHUNK * size;
     },
     has: (chain: string) => index.has(chain),
     get(chain: string) {
