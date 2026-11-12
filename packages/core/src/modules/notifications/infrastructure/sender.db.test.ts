@@ -24,6 +24,7 @@ import {
   type ContactAddresses,
   createNoticeSender,
   type Notifier,
+  type People,
   type RemittanceRead,
   type Remittances,
   type ResetLinks,
@@ -272,6 +273,11 @@ const REMITTANCE: Notice = {
   aboutId: PAYMENT,
 };
 
+/** What Agent X keeps of the person our team's reset is about (0049): a name and an address, or what the test gives. */
+const people = (
+  personOf: People['personOf'] = () => Promise.resolve({ name: 'Sara Ahmed', email: 'sara.ahmed@company.ae' }),
+): People => ({ personOf });
+
 function sender(
   service: Notifier,
   addresses: AddressBook = addressBook(),
@@ -280,6 +286,7 @@ function sender(
   links: ResetLinks = resetLinks(),
   requests: WaitingRequests = waitingRequests(),
   paid: Remittances = remittances(),
+  kept: People = people(),
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
@@ -294,6 +301,7 @@ function sender(
       resetLinks: links,
       waitingRequests: requests,
       remittances: paid,
+      people: kept,
       audience: admins,
       logger,
     }),
@@ -598,18 +606,56 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     const support: Notice = { ...aboutASupplier(false), kind: 'factor_reset_by_support', aboutId: person };
     await app.transaction().execute((tx) => outbox.add(tx, [support, { ...support, toContacts: true }]));
     const { sent, service } = notifier();
+    const { run, capture } = sender(service);
 
-    await sender(service).run.run();
+    await run.run();
 
     expect(sent.map(({ to }) => to).sort()).toEqual([
       'admin@example.test',
       'finance.office@example.test',
       'viewer@example.test',
     ]);
-    expect(sent.every(({ text }) => text.includes(`Person: ${person}`))).toBe(true);
+    // Who it is, so every member can tell: the kept name and the address masked, never whole, and never logged.
+    expect(sent.every(({ text }) => text.includes('Person: Sara Ahmed (s***@company.ae)'))).toBe(true);
+    expect(sent.some(({ text }) => text.includes('sara.ahmed@') || text.includes(person))).toBe(false);
+    expect(JSON.stringify(capture.lines())).not.toMatch(/Sara|sara\.ahmed|s\*\*\*@/);
     expect(sent.every(({ subject }) => subject === "Agent X: our team is resetting a person's second factor")).toBe(
       true,
     );
+  });
+
+  it("OR2 tries our team's reset notice again when what Agent X keeps of the person can't be read", async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const support: Notice = {
+      orgId: ORG,
+      recipientUserId: ADMIN,
+      kind: 'factor_reset_by_support',
+      membershipId: null,
+      role: null,
+      aboutId: '0199a0f0-0000-7000-8000-00000000c0a3',
+    };
+    await app.transaction().execute((tx) => outbox.add(tx, [support]));
+    const { sent, service } = notifier();
+    const unreadable = people(() => Promise.reject(new Error('a field key away')));
+    const { run, capture } = sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests(),
+      remittances(),
+      unreadable,
+    );
+
+    await run.run();
+
+    expect(sent).toEqual([]);
+    expect(capture.lines().find(({ event }) => event === 'notification.failed')).toMatchObject({
+      kind: 'factor_reset_by_support',
+      failure: 'person_unavailable',
+      outcome: 'retry',
+    });
   });
 
   it('B3a sends a notice about a mandate to every active admin and approver', async () => {
@@ -1141,6 +1187,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       resetLinks: resetLinks(),
       waitingRequests: waitingRequests(),
       remittances: remittances(),
+      people: people(),
       audience: audience(),
       logger: testLogger(),
     });
@@ -1154,6 +1201,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       resetLinks: resetLinks(),
       waitingRequests: waitingRequests(),
       remittances: remittances(),
+      people: people(),
       audience: audience(),
       logger: testLogger(capture),
     });

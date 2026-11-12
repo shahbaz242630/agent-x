@@ -8,6 +8,7 @@ export {
   type NoticeMessage,
   type PaidRemittance,
   type ResetLink,
+  type ResetPerson,
   type WaitingRequest,
 } from './domain/messages.ts';
 export { type AcsSettings, createAcsNotifier, EMAIL_API_VERSION } from './infrastructure/acs-notifier.ts';
@@ -41,6 +42,7 @@ export {
   type Notifier,
   type NoticeSender,
   NOTICES_A_RUN,
+  type People,
   type RemittanceRead,
   type Remittances,
   type ResetLinks,

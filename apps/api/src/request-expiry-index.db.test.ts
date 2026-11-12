@@ -319,6 +319,23 @@ describe("the job's read: one range of 0074's index, every row read a due one, n
     ]);
   });
 
+  it('pages past two due at the very same moment by their IDs: each read once, neither skipped', async () => {
+    const { w, due, at } = await seeded();
+    const [first, second] = due;
+    await admin().query(
+      'update spend_requests.requests set waits_until = (select waits_until from spend_requests.requests where id = $1) where id = $2',
+      [first?.id, second?.id],
+    );
+    const tied = [first?.id ?? '', second?.id ?? ''].sort();
+
+    const one = await planned(w, at, 1);
+    const two = await planned(w, at, 1, one.rows.at(-1));
+    const three = await planned(w, at, 1, two.rows.at(-1));
+
+    expect([...one.rows, ...two.rows]).toEqual(tied);
+    expect(three.rows).toEqual([due[2]?.id]);
+  });
+
   it('a page after a request that is not there ends the pages', async () => {
     const { w, at } = await seeded();
     const { rows } = await planned(w, at, 2, '0190f000-0000-7000-8000-000000000000');
