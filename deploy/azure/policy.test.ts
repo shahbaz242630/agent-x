@@ -1188,10 +1188,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const change of [
       ...LATE_OR_BLIND,
       // Counted by when it happened, so a line arriving after its window is missed, or over too short a stretch (MO2).
-      edited('where ingestion_time() > ago(20m)', 'where TimeGenerated > ago(20m)'),
-      edited('where ingestion_time() > ago(20m) | ', ''),
-      edited('ago(20m)', 'ago(15m)'),
-      edited('ago(20m)', 'ago(10m)'),
+      edited('where ingestion_time() > ago(30m)', 'where TimeGenerated > ago(30m)'),
+      edited('where ingestion_time() > ago(30m) | ', ''),
+      // A window no longer than the runs' rhythm: a run starting late leaves a sliver unseen.
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(20m)'),
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(15m)'),
       // Reading too little back for a late line to be in view when it arrives.
       (alert: Mutable) => (inside(alert, 'properties').overrideQueryTimeRange = 'PT1H'),
       (alert: Mutable) => delete inside(alert, 'properties').overrideQueryTimeRange,
@@ -1354,9 +1355,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       edited('|no pg_hba[.]conf entry for host', '|no pg_hba[.]conf entry for user'),
       edited('|pg_hba[.]conf rejects connection for host \\x22[^\\x22]*\\x22, user)', ')'),
       // Counted by when it happened, so a line arriving late falls between runs, or over too short a stretch.
-      edited('where ingestion_time() > ago(20m)', 'where TimeGenerated > ago(20m)'),
-      edited('ago(20m)', 'ago(15m)'),
-      edited('ago(20m)', 'ago(10m)'),
+      edited('where ingestion_time() > ago(30m)', 'where TimeGenerated > ago(30m)'),
+      // A window no longer than the runs' rhythm: a run starting late leaves a sliver unseen.
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(20m)'),
+      edited('ingestion_time() > ago(30m)', 'ingestion_time() > ago(15m)'),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
@@ -1426,6 +1428,21 @@ describe('SEC-OPS-09 each rule can fail', () => {
 
     it('holds on staging, and each watch missing is refused', () => {
       expect(staging.predictedResources.filter(ACTIVITY_ALERTS)).toHaveLength(2);
+      // Alert processing rules, which can mute every alert, and a deleted log setting, which empties the login
+      // alerts' table while they run healthy; never the writes every foundation deploy makes to those settings.
+      const operations = anyOf(
+        structuredClone(staging.predictedResources.find(RULES_CHANGED)) as unknown as Mutable,
+      ).map((one) => one.equals);
+      expect(operations).toHaveLength(11);
+      expect(operations).toEqual(
+        expect.arrayContaining([
+          'Microsoft.AlertsManagement/actionRules/write',
+          'Microsoft.AlertsManagement/actionRules/delete',
+          'Microsoft.Insights/diagnosticSettings/delete',
+        ]),
+      );
+      expect(operations).not.toContain('Microsoft.Insights/diagnosticSettings/write');
+      expect(operations).not.toContain('Microsoft.DBforPostgreSQL/flexibleServers/configurations/write');
       expect(brokenRules(without(ACTIVITY_ALERTS))).toEqual(['alert-rules-watch']);
       expect(brokenRules(without(RULES_CHANGED))).toEqual(['alert-rules-watch']);
       expect(brokenRules(without(RULES_UNHEALTHY))).toEqual(['alert-rules-watch']);
@@ -1477,10 +1494,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
             (alert: Mutable) =>
               (inside(alert, 'properties', 'actions').actionGroups = [{ actionGroupId: '/subscriptions/x/elsewhere' }]),
           ] as const,
+          // A group of nobody's beside ours: every group it names must be this deployment's (mutation 8b).
+          [
+            pick,
+            (alert: Mutable) =>
+              (inside(alert, 'properties', 'actions').actionGroups as Mutable[]).push({
+                actionGroupId: '/subscriptions/x/elsewhere',
+              }),
+          ] as const,
         ]),
-        // A kind of change left unwatched: each of the eight, written or deleted.
+        // A kind of change left unwatched: each of the eleven, written or deleted (alert processing rules among them),
+        // or a diagnostic setting deleted.
         ...Array.from(
-          { length: 8 },
+          { length: 11 },
           (_unused, index) => [RULES_CHANGED, (alert: Mutable) => anyOf(alert).splice(index, 1)] as const,
         ),
         [

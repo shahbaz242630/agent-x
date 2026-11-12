@@ -229,12 +229,16 @@ var loginLineStart = '${lineStart}LOG:  '
 // late is still in view when it arrives (MO2). Reading costs nothing more; a rule's price follows how often it runs.
 var lateLinesRead = 'P2D'
 
+// The login alerts that count lines take those that arrived over the last 30 minutes, run every 15: a run starting up
+// to 15 minutes late leaves no gap, and a line may notify twice, never not at all (MO2).
+var arrivedLately = 'where ingestion_time() > ago(30m)'
+
 // The roles whose refused logins raise the alert below: the two above and the owner.
 var privilegedRoles = '${adminLogin}|agentx_backup|${ownerRole}'
 
 // ADR-012 §2: a login by the server admin or the backup role raises an alert.
 // The set-up job's own login (G2) is one of them, and expected. Counted by when
-// a line arrived over the last 20 minutes of a 15-minute rhythm, reading two
+// a line arrived over the last 30 minutes of a 15-minute rhythm, reading two
 // days back: a late line is still seen, and one may notify twice, never not at
 // all (MO2; by when it happened, a line arriving after its window was missed).
 resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
@@ -256,7 +260,7 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where ingestion_time() > ago(20m) | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
+          query: 'PGSQLServerLogs | ${arrivedLately} | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Logins'
           operator: 'GreaterThan'
@@ -281,7 +285,7 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // MO2: a privileged login that was refused, which the two alerts on logins that got in never see. Postgres writes one
 // FATAL line for each, whatever log_connections says: a wrong password (also what it says for a role that doesn't
 // exist), or a connection its rules refuse (no TLS, an address not allowed). Quotes in the pattern are RE2's \x22, as
-// Kusto's verbatim strings can't hold one. Judged by when a line arrives, over the last 20 minutes of a 15-minute
+// Kusto's verbatim strings can't hold one. Judged by when a line arrives, over the last 30 minutes of a 15-minute
 // rhythm: a late line is still seen, and one may notify twice, never not at all.
 var quote = '\\x22'
 var refusedLines = '${lineStart}FATAL:  (password authentication failed for user|no pg_hba[.]conf entry for host ${quote}[^${quote}]*${quote}, user|pg_hba[.]conf rejects connection for host ${quote}[^${quote}]*${quote}, user) ${quote}(${privilegedRoles})${quote}'
@@ -305,7 +309,7 @@ resource refusedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where ingestion_time() > ago(20m) | where Message matches regex @"${refusedLines}" | summarize Refused = count()'
+          query: 'PGSQLServerLogs | ${arrivedLately} | where Message matches regex @"${refusedLines}" | summarize Refused = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Refused'
           operator: 'GreaterThan'

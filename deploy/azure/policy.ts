@@ -289,16 +289,17 @@ const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: LATE_LINES_READ } as const;
 
 /**
  * The login alerts that count lines rather than pair them take those that
- * arrived over the last 20 minutes, run every 15: a run late by up to five
- * leaves no gap, and a line arriving late is counted when it arrives (MO2).
+ * arrived over the last 30 minutes, run every 15: a run late by up to 15
+ * leaves no gap, a line may notify twice, and a line arriving late is counted
+ * when it arrives (MO2).
  */
-const ARRIVED_LATELY = 'where ingestion_time() > ago(20m)';
+const ARRIVED_LATELY = 'where ingestion_time() > ago(30m)';
 
 /**
  * The refused-login alert's query (MO2) for the server's admin: one FATAL line
  * for each login refused as a privileged role, a wrong password or a connection
- * the server's rules refuse, counted by when it arrived over the last 20
- * minutes, so a run late by up to five never leaves a gap. Quotes are RE2's
+ * the server's rules refuse, counted by when it arrived (ARRIVED_LATELY), so a
+ * late line is still seen. Quotes are RE2's
  * `\x22`: Kusto's verbatim strings can't hold one.
  */
 const refusedLoginQuery = (admin: string): string => {
@@ -3722,6 +3723,9 @@ const refusedLoginAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** An alert processing rule: one that removes action groups mutes every alert in its scope (MO2). */
+const PROCESSING_RULE = 'Microsoft.AlertsManagement/actionRules';
+
 /** One leaf of an activity log alert's condition: the event's field holds this value (Azure compares without case). */
 const leaf = (field: string, equals: string): Readonly<Record<string, string>> => ({ field, equals });
 
@@ -3734,16 +3738,19 @@ const leaf = (field: string, equals: string): Readonly<Record<string, string>> =
  */
 const RULE_WATCHES: readonly { readonly what: string; readonly condition: unknown }[] = [
   {
-    what: 'a change to any alert rule or action group',
+    what: 'a change to any alert rule, action group or alert processing rule, or a diagnostic setting deleted',
     condition: {
       allOf: [
         leaf('category', 'Administrative'),
         leaf('status', 'Succeeded'),
         {
-          anyOf: [TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup].flatMap((type) => [
-            leaf('operationName', `${type}/write`),
-            leaf('operationName', `${type}/delete`),
-          ]),
+          anyOf: [
+            ...[TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup, PROCESSING_RULE].flatMap(
+              (type) => [leaf('operationName', `${type}/write`), leaf('operationName', `${type}/delete`)],
+            ),
+            // Deploys never delete one; they rewrite every one, so its writes would be noise.
+            leaf('operationName', `${TYPES.diagnostics}/delete`),
+          ],
         },
       ],
     },

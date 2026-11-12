@@ -192,11 +192,15 @@ resource capReached 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = [
 // someone with rights could switch off, rewrite or delete, after which it tells nobody; and a rule whose query stops
 // running (a table or column renamed) tells nobody either. Activity log alerts watch both: they read Azure's own
 // record of changes and health, cost nothing, and need no workspace, so neither workspace's cap blinds them. Each
-// notifies once an event, as a stateless SEV-1 does. Global, as Azure offers them; the email names the rule and who.
+// notifies once an event, as a stateless SEV-1 does. Global, as Azure offers them; the email names the rule, the
+// caller and the caller's address, which ADR-013 Amendment MO2 allows beside rule 3's counts-only.
 var group = resourceGroup().id
 
-// Each change that succeeded to an alert rule of any kind, or to the action group they notify, by anyone: CI never
-// writes them (its role can't), so outside a foundation deploy, which rewrites every one, each is unexplained.
+// Each change that succeeded to an alert rule of any kind, to the action group they notify, or to an alert processing
+// rule (one that removes action groups mutes every alert, these two included), by anyone: CI never writes them (its
+// role can't), so outside a foundation deploy, which rewrites every rule, each is unexplained. And a diagnostic
+// setting deleted: the login alerts would go on running, healthy, over a table nothing reaches. Deploys never delete
+// one; writes to them and to the server's settings are left out, as every foundation deploy rewrites those.
 var watchedChanges = [
   'Microsoft.Insights/scheduledQueryRules/write'
   'Microsoft.Insights/scheduledQueryRules/delete'
@@ -206,6 +210,9 @@ var watchedChanges = [
   'Microsoft.Insights/activityLogAlerts/delete'
   'Microsoft.Insights/actionGroups/write'
   'Microsoft.Insights/actionGroups/delete'
+  'Microsoft.AlertsManagement/actionRules/write'
+  'Microsoft.AlertsManagement/actionRules/delete'
+  'Microsoft.Insights/diagnosticSettings/delete'
 ]
 
 resource rulesChanged 'Microsoft.Insights/activityLogAlerts@2026-01-01' = {
@@ -213,7 +220,7 @@ resource rulesChanged 'Microsoft.Insights/activityLogAlerts@2026-01-01' = {
   location: 'Global'
   tags: tags
   properties: {
-    description: 'SEV-1. An alert rule or the action group in this resource group was changed, switched off or deleted. A foundation deploy rewrites every rule, one email each; at any other time someone may be silencing the alarms before acting. The email names the rule and who did it. Runbook: Incident-Response-Playbook.md section I.'
+    description: 'SEV-1. An alert rule, the action group or an alert processing rule in this resource group was changed, switched off or deleted, or a log setting of a resource was deleted. A foundation deploy rewrites every rule, one email each; at any other time someone may be silencing the alarms before acting. The email names the rule and who did it. Runbook: Incident-Response-Playbook.md section I.'
     enabled: true
     scopes: [group]
     condition: {
