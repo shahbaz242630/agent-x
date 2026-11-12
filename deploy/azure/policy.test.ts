@@ -1439,16 +1439,21 @@ describe('SEC-OPS-09 each rule can fail', () => {
     for (const change of [
       (network: Mutable) => delete inside(subnet(network, 'apps'), 'properties').delegations,
       (network: Mutable) => delete inside(subnet(network, 'database'), 'properties').serviceEndpoints,
-      (network: Mutable) => {
-        const second = structuredClone(subnet(network, 'database'));
-        second.name = 'database2';
-        inside(second, 'properties').addressPrefix = '10.40.2.0/24';
-        delete inside(second, 'properties').networkSecurityGroup;
-        (at(network, 'properties', 'subnets') as Mutable[]).push(second);
-      },
     ]) {
       expect(brokenRules(changed(NETWORK, change))).toEqual(['database-network']);
     }
+    // A second Postgres subnet without rules: nothing keeps the network out, nor the server in (AZ8).
+    expect(
+      brokenRules(
+        changed(NETWORK, (network) => {
+          const second = structuredClone(subnet(network, 'database'));
+          second.name = 'database2';
+          inside(second, 'properties').addressPrefix = '10.40.2.0/24';
+          delete inside(second, 'properties').networkSecurityGroup;
+          (at(network, 'properties', 'subnets') as Mutable[]).push(second);
+        }),
+      ),
+    ).toEqual(['database-network', 'database-egress']);
     expect(
       brokenRules(changed(NETWORK, (network) => delete inside(subnet(network, 'database'), 'properties').delegations)),
     ).toEqual(expect.arrayContaining(['database-network', 'database-private']));
@@ -3180,6 +3185,62 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // The order Azure is given a list of addresses in is its business, not ours.
     expect(brokenRules(changed(APPS_RULES, (group) => prefixes(group, 'github-registry').reverse()))).toEqual([]);
+  });
+
+  it("database-egress (AZ8): the server let out anywhere but its own subnet, DNS and its region's Storage", () => {
+    const out = (group: Mutable, name: string): Mutable => ruleNamed(group, `allow-out-${name}`);
+    const deny = (group: Mutable): Mutable => ruleNamed(group, 'deny-out-rest');
+    for (const change of [
+      // A door widened, or pointed elsewhere, is a door nothing needs and the one it replaced gone.
+      (group: Mutable) => (out(group, 'within-subnet').destinationPortRange = '*'),
+      (group: Mutable) => (out(group, 'within-subnet').protocol = '*'),
+      (group: Mutable) => (out(group, 'within-subnet').destinationAddressPrefix = 'VirtualNetwork'),
+      (group: Mutable) => (out(group, 'azure-dns').destinationPortRange = '*'),
+      (group: Mutable) => (out(group, 'azure-dns').destinationAddressPrefix = 'Internet'),
+      // Every region's accounts, another country's, or any port.
+      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage'),
+      (group: Mutable) => (out(group, 'storage').destinationAddressPrefix = 'Storage.westeurope'),
+      (group: Mutable) => (out(group, 'storage').destinationPortRange = '*'),
+      (group: Mutable) => (out(group, 'storage').protocol = '*'),
+      // Each door simply missing.
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-within-subnet');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-azure-dns');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-storage');
+      },
+      // A door open to traffic from somewhere other than the subnet.
+      (group: Mutable) => (out(group, 'storage').sourceAddressPrefix = '*'),
+      (group: Mutable) => (out(group, 'azure-dns').sourceAddressPrefix = '10.40.9.0/24'),
+      // The backstop weakened: any of its parts, or moved above a door it must follow.
+      (group: Mutable) => (deny(group).access = 'Allow'),
+      (group: Mutable) => (deny(group).protocol = 'Tcp'),
+      (group: Mutable) => (deny(group).sourceAddressPrefix = '10.40.9.0/24'),
+      (group: Mutable) => (deny(group).destinationAddressPrefix = 'Internet'),
+      (group: Mutable) => (deny(group).destinationPortRange = '443'),
+      (group: Mutable) => (deny(group).priority = 205),
+      (group: Mutable) => {
+        dropRule(group, 'deny-out-rest');
+      },
+    ]) {
+      expect(brokenRules(changed(DATABASE_RULES, change))).toEqual(['database-egress']);
+    }
+    // A door added as a resource of its own under the group counts with the group's.
+    expect(brokenRules(withExtra(separateRule(DATABASE_RULES, 'Outbound', '10.40.9.0/24', 'Internet', '443')))).toEqual(
+      ['database-egress'],
+    );
+    // Each problem is said apart, naming the subnet: a door missing and one nothing needs.
+    const problems = policyProblems(
+      changed(DATABASE_RULES, (group) => (out(group, 'storage').destinationAddressPrefix = 'Storage')),
+      STAGING,
+    ).filter((problem) => problem.rule === 'database-egress');
+    expect(problems.map((problem) => problem.message)).toEqual([
+      'its database subnet must let out Tcp to Storage.uaenorth on 443, for the write-ahead log and backups, in this region alone',
+      'its database subnet lets out Tcp to Storage on 443, which nothing it runs needs',
+    ]);
   });
 
   it('SEC-DATA-09 apps-logs: console or system logs kept out of the workspace, or the HTTP log sent anywhere', () => {
