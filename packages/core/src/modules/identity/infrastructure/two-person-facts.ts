@@ -228,16 +228,21 @@ export function summariesCover(
   return true;
 }
 
-/**
- * The two-person rule's facts for the organisation, in the caller's
- * transaction, which must be withSignedStates' for it: its memberships and
- * their grant summaries read for a decision (`share`).
- */
-export async function twoPersonFactsOf(
+/** The members and their summaries as a decision reads them: in step, behind, or unbuilt. */
+interface MembersWithGrants {
+  readonly outcome: 'read';
+  readonly verified: VerifiedMembers;
+  readonly current: ReadonlyMap<string, KeptGrants>;
+  /** Whether any member's summary is unbuilt or behind its membership: the history decides, and the job builds it. */
+  readonly due: boolean;
+}
+
+/** The memberships and their summaries, read for a decision (`share`); or tampered with (the alarm raised). */
+async function membersWithGrants(
   tx: MembershipsTransaction,
   states: SignedStates,
   orgId: string,
-): Promise<TwoPersonFactsCheck> {
+): Promise<MembersWithGrants | Tampered> {
   const made = await membershipsMade(tx, states, orgId);
   if (made.outcome === 'tampered') return made;
   await gathered(tx, states, orgId, made.ids);
@@ -253,21 +258,52 @@ export async function twoPersonFactsOf(
     if (grants.outcome === 'unbuilt') unbuilt = true;
     else kept.set(id, grants);
   }
-  const disagrees = { outcome: 'tampered', sign: 'holding' } as const;
   const inStep = summariesInStep(states, orgId, verified, kept);
-  if (inStep === undefined) return disagrees;
-  if (!unbuilt && inStep.behind.length === 0) {
-    const held = new Map([...inStep.current].map(([id, { summary }]) => [id, summary]));
+  if (inStep === undefined) return { outcome: 'tampered', sign: 'holding' };
+  return { outcome: 'read', verified, current: inStep.current, due: unbuilt || inStep.behind.length > 0 };
+}
+
+/**
+ * Whether any of the organisation's summaries is unbuilt or behind its
+ * membership, read for a decision (`share`) in the caller's transaction, which
+ * must be withSignedStates' for it: the job's look before it builds, so an
+ * organisation in step costs a few trips and takes no lock for a change.
+ */
+export async function grantSummariesDue(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<boolean | Tampered> {
+  const read = await membersWithGrants(tx, states, orgId);
+  return read.outcome === 'tampered' ? read : read.due;
+}
+
+/**
+ * The two-person rule's facts for the organisation, in the caller's
+ * transaction, which must be withSignedStates' for it: its memberships and
+ * their grant summaries read for a decision (`share`).
+ */
+export async function twoPersonFactsOf(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<TwoPersonFactsCheck> {
+  const read = await membersWithGrants(tx, states, orgId);
+  if (read.outcome === 'tampered') return read;
+  const { verified, current } = read;
+  if (!read.due) {
+    const held = new Map([...current].map(([id, { summary }]) => [id, summary]));
     return { outcome: 'read', ...factsFromSummaries(verified.members, held) };
   }
   // A summary not built yet (a membership added before 0085), or left behind by an image from before OR1: the
-  // history, as before the summaries.
-  const read = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
-  if (read.outcome === 'tampered') return read;
+  // history, as before the summaries, at most MOST_HISTORY_EVENTS (past it TooManyEventsToRead: nothing decided).
+  const events = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
+  if (events.outcome === 'tampered') return events;
   const history = grantHistory();
-  gatherGrants(history, read.events);
+  gatherGrants(history, events.events);
   const fromHistory = historyFacts(verified.members, history);
-  if (!summariesCover(states, orgId, verified, inStep.current, fromHistory.summaries)) return disagrees;
-  const { facts } = fromHistory;
-  return { outcome: 'read', ...facts };
+  if (!summariesCover(states, orgId, verified, current, fromHistory.summaries)) {
+    return { outcome: 'tampered', sign: 'holding' };
+  }
+  return { outcome: 'read', ...fromHistory.facts };
 }

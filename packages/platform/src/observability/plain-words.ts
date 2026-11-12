@@ -558,7 +558,7 @@ export const PLAIN_WORDS = {
     happened:
       "The signed record of who gave each member their role could not be built for one organisation's older members.",
     broke:
-      'Nothing is refused for it: that organisation still reads its full membership history to decide who may approve, as before.',
+      'That organisation decides who may approve from its full membership history, as before; if that history is too long to read, those approvals are refused until the record is built.',
     next: 'It is tried again at the next run, about an hour later. If it keeps failing, check the database and the error.',
   },
   'grant_summaries.run_failed': {

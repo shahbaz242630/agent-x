@@ -30,6 +30,7 @@ export {
 export { MOST_HISTORY_EVENTS, type TwoPersonFactsCheck, twoPersonFactsOf } from './infrastructure/two-person-facts.ts';
 export { grantsBelieved, grantsToChange, MEMBERSHIP_GRANTS } from './infrastructure/membership-grants.ts';
 export { BUILDER, buildGrantSummaries, type GrantBuilding } from './infrastructure/grant-building.ts';
+export { grantSummariesDue } from './infrastructure/two-person-facts.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export {
   FACTOR_RESET,

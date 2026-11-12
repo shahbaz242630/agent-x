@@ -133,11 +133,62 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
     // Its failure logged, naming it, and the run went on to the next.
     expect(lines('grant_summaries.build_failed')).toEqual([expect.objectContaining({ level: 'error', orgId: gone })]);
 
-    // Both found whole: not visited again by this process; the failed one is.
-    capture = new LogCapture();
+    // Both in step now: looked at again, nothing built. (The job's logger is the capture it was made with.)
+    const seen = capture.lines().length;
     listed = [one.org, two.org];
     await job.run();
-    expect(capture.lines().filter(({ event }) => String(event).startsWith('grant_summaries.'))).toEqual([]);
+    expect(
+      capture
+        .lines()
+        .slice(seen)
+        .filter(({ event }) => String(event).startsWith('grant_summaries.')),
+    ).toEqual([]);
+  });
+
+  it('brings up to date, on its next run, a summary left behind after the organisation was found whole', async () => {
+    const { org, before } = await organisation();
+    const job = createGrantSummaryBuilding({
+      list: () => Promise.resolve([org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    });
+    await job.run();
+    expect(lines('grant_summaries.built')).toEqual([expect.objectContaining({ built: 1 })]);
+
+    // An image from before OR1 changes the membership, writing no summary: left behind.
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: before }, 'change');
+      if (state.outcome !== 'verified') throw new Error('not verified');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        { orgId: org, id: before },
+        state,
+        { role: 'approver' },
+        {
+          actor: OPERATOR,
+          action: 'membership.role_changed',
+          details: { roleFrom: 'admin', roleTo: 'approver' },
+        },
+      );
+    });
+    await job.run();
+
+    // The job's logger is the one it was made with: its second run's line after the first.
+    expect(lines('grant_summaries.built')).toEqual([
+      expect.objectContaining({ orgId: org, built: 1 }),
+      expect.objectContaining({ orgId: org, built: 1 }),
+    ]);
+    const rows = await database
+      .as('backup')
+      .query<{ membership_version: number }>(
+        'select membership_version from identity.membership_grants where org_id = $1 and id = $2',
+        [org, before],
+      );
+    expect(rows).toEqual([{ membership_version: 2 }]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('says so when the organisations can’t be listed, and stops when told to', async () => {

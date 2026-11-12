@@ -164,7 +164,7 @@ export interface MembershipChangeRead {
   readonly member: Pick<MemberRecord, 'userId' | 'role'>;
   /** The summary, read for the change after the membership (grantsToChange), not tampered with. */
   readonly grants: Exclude<GrantsCheck, { readonly outcome: 'tampered' }>;
-  readonly actor: { readonly type: 'user'; readonly id: string };
+  readonly actor: AuditActor;
   /** What the event says besides the move: the step-up's evidence, the sessions ended. */
   readonly evidence: AuditDetails;
 }
@@ -207,7 +207,7 @@ export async function changeMembershipRole(
   await keepGrants(tx, states, grants, key, {
     change: {
       memberUserId: member.userId,
-      granters: [actor.id],
+      granters: byPerson(actor),
       verifierChangedAt: changesVerifier({ action: 'membership.role_changed', details })
         ? recorded.recordedAt
         : undefined,

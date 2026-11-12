@@ -19,7 +19,12 @@
 // (cleanup.load.test.ts) proves it before Azure runs it.
 import { AGENT_KEYS } from '../../packages/core/src/modules/agents/index.ts';
 import { withSignedStates } from '../../packages/core/src/modules/audit/index.ts';
-import { MEMBERSHIPS } from '../../packages/core/src/modules/identity/index.ts';
+import {
+  deactivateMembership,
+  grantsBelieved,
+  grantsToChange,
+  memberOf,
+} from '../../packages/core/src/modules/identity/index.ts';
 import { ORGANIZATIONS } from '../../packages/core/src/modules/organizations/index.ts';
 import { PENDING_STATUSES, voidPendingOf } from '../../packages/core/src/modules/spend-requests/index.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
@@ -106,14 +111,12 @@ async function cleanUpOrg(database: Database<MandateWorldTables>, keyring: KeyPr
   });
   await withSignedStates(database, orgId, quiet, async (tx, states) => {
     for (const id of await idsIn(tx, 'identity.memberships', 'ACTIVE')) {
-      moved(
-        await states.changeStatus(tx, MEMBERSHIPS, { orgId, id }, 'deactivate', {
-          actor: LOAD_TEST,
-          action: 'membership.deactivated',
-          details: {},
-        }),
-        `Membership ${id}`,
-      );
+      // As the product deactivates one: its grant summary moved on with it (OR1), so none is left behind.
+      const key = { orgId, id };
+      const read = await memberOf(tx, states, key, 'change');
+      if (read.outcome !== 'found') throw new Error(`Membership ${id} was not found whole: ${read.outcome}`);
+      const grants = grantsBelieved(await grantsToChange(tx, states, key));
+      await deactivateMembership(tx, states, { key, member: read.member, grants, actor: LOAD_TEST, evidence: {} });
     }
   });
 }

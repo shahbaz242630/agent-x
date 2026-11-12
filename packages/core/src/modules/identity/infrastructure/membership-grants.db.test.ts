@@ -557,6 +557,28 @@ describe(`the rule past 10,000 events, and the summaries built for members from 
     if (read.outcome !== 'read') return;
     expect([...(read.grantedBy.get(bob.id) ?? [])]).toEqual([alice.userId]);
     expect(lines('audit.integrity_failed')).toEqual([]);
+
+    // Bob's summary left behind by an image from before OR1: the history again, too long, so nothing decided.
+    await withSignedStates(app, org, services(), async (tx, states) => {
+      const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: bob.id }, 'change');
+      if (state.outcome !== 'verified') throw new Error('not verified');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        { orgId: org, id: bob.id },
+        state,
+        { role: 'admin' },
+        {
+          actor: userActor(alice.userId),
+          action: 'membership.role_changed',
+          details: { roleFrom: 'approver', roleTo: 'admin' },
+        },
+      );
+    });
+    await expect(facts()).rejects.toBeInstanceOf(TooManyEventsToRead);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(await build()).toEqual({ outcome: 'built', built: 1 });
+    expect(await facts()).toMatchObject({ outcome: 'read' });
   }, 240_000);
 
   it('builds each unbuilt summary from the history, a page at a time, as the history would decide', async () => {
