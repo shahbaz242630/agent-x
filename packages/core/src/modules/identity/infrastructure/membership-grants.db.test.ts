@@ -20,6 +20,7 @@ import {
 } from '@agentx/testing';
 import { createDatabase, type Database, liveSchemaProblems } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
@@ -899,6 +900,51 @@ describe(`OR1b: the database holds each membership change to its summary (0089, 
     });
 
     await expect(changing).rejects.toMatchObject({ constraint: 'grants_in_step' });
+    expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
+  });
+
+  it('refuses, as the app role in raw SQL, a version moved alone whose organisation setting is cleared before the commit (S187 review)', async () => {
+    // The product's own transactions refuse this before the commit (withTenant's TenantContextError); the database
+    // holds it too, for a raw-SQL actor on the app's role, where the wall hides both rows from the trigger.
+    await add('admin');
+    const bob = await add('viewer');
+    const changing = app.transaction().execute(async (tx) => {
+      await sql`select pg_catalog.set_config('app.org_id', ${org}, true)`.execute(tx);
+      await sql`update identity.memberships set state_version = state_version + 1 where org_id = ${org} and id = ${bob.id}`.execute(
+        tx,
+      );
+      await sql`select pg_catalog.set_config('app.org_id', '', true)`.execute(tx);
+    });
+
+    await expect(changing).rejects.toMatchObject({ code: '23514', constraint: 'grants_in_step' });
+    expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
+  });
+
+  it('refuses a summary put ahead of its membership in the same change (S187 review)', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    const changing = withSignedStates(app, org, services(), async (tx, states) => {
+      const read = await changeRead(tx, states, bob.id);
+      const moved = await states.record(
+        tx,
+        MEMBERSHIPS,
+        read.key,
+        read.state,
+        { role: 'developer' },
+        { actor: userActor(alice.userId), action: 'membership.role_changed', details: {} },
+      );
+      await keepGrants(tx, states, read.grants, read.key, {
+        change: { memberUserId: read.member.userId, granters: [alice.userId] },
+        fromVersion: read.state.version,
+        membershipVersion: moved.version,
+        actor: userActor(alice.userId),
+      });
+      await sql`update identity.membership_grants set membership_version = 99 where org_id = ${org} and id = ${bob.id}`.execute(
+        tx,
+      );
+    });
+
+    await expect(changing).rejects.toMatchObject({ code: '23514', constraint: 'grants_in_step' });
     expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
   });
 
