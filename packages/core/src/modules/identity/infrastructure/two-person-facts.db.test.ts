@@ -20,7 +20,8 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
 import { verifierVerdict } from '../domain/two-person.ts';
-import { addMembership, MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
+import { grantsBelieved, grantsToChange } from './membership-grants.ts';
+import { addMembership, changeMembershipRole, memberOf, type MembershipsTransaction } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
 import { twoPersonFactsOf } from './two-person-facts.ts';
 import { userForSubject } from './users.ts';
@@ -67,8 +68,8 @@ const person = (): Promise<string> => {
 };
 
 /** A member added with `role`, recorded as `by` adding them: `self` for one who joined by accepting. */
-const add = async (role: Role, by: { type: 'user' | 'system'; id: string } | 'self' = OPERATOR) => {
-  const userId = await person();
+const add = async (role: Role, by: { type: 'user' | 'system'; id: string } | 'self' = OPERATOR, existing?: string) => {
+  const userId = existing ?? (await person());
   const id = ids.next();
   const actor = by === 'self' ? userActor(userId) : by;
   await withSignedStates(app, org, services(), (tx: MembershipsTransaction, states) =>
@@ -90,19 +91,14 @@ const invited = (inviter: string, invitee: string) =>
     });
   });
 
-/** The member's role changed by `by`, as membership-changes.ts records it. */
-const changeRole = (id: string, roleFrom: Role, roleTo: Role, by: string) =>
+/** The member's role changed by `by`, as membership-changes.ts records it, its grant summary with it. */
+const changeRole = (id: string, roleTo: Role, by: string) =>
   withSignedStates(app, org, services(), async (tx, states) => {
-    const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id }, 'change');
-    if (state.outcome !== 'verified') throw new Error('not verified');
-    await states.record(
-      tx,
-      MEMBERSHIPS,
-      { orgId: org, id },
-      state,
-      { role: roleTo },
-      { actor: userActor(by), action: 'membership.role_changed', details: { roleFrom, roleTo } },
-    );
+    const key = { orgId: org, id };
+    const read = await memberOf(tx, states, key, 'change');
+    if (read.outcome !== 'found') throw new Error('not found');
+    const grants = grantsBelieved(await grantsToChange(tx, states, key));
+    await changeMembershipRole(tx, states, { key, ...read, grants, actor: userActor(by), evidence: {}, roleTo });
   });
 
 const facts = () => withSignedStates(app, org, services(), (tx, states) => twoPersonFactsOf(tx, states, org));
@@ -131,10 +127,12 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
     const alice = await add('admin');
     const bob = await add('viewer', userActor(alice.userId));
     const dave = await add('admin');
-    const carol = await add('approver', 'self');
-    await invited(dave.userId, carol.userId);
-    await changeRole(bob.id, 'viewer', 'approver', alice.userId);
-    await changeRole(dave.id, 'admin', 'developer', alice.userId);
+    // Carol joins by accepting Dave's invitation: who asked for it is read as her membership is added.
+    const carolId = await person();
+    await invited(dave.userId, carolId);
+    const carol = await add('approver', 'self', carolId);
+    await changeRole(bob.id, 'approver', alice.userId);
+    await changeRole(dave.id, 'developer', alice.userId);
 
     const read = await facts();
 
@@ -172,16 +170,16 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
     });
   });
 
-  it('raises the alarm on an invitation’s event edited past the app, and decides nothing', async () => {
+  it('raises the alarm on an invitation’s event edited past the app, read as the invited person joins', async () => {
     const alice = await add('admin');
-    const bob = await add('admin');
-    await invited(alice.userId, bob.userId);
+    const bobId = await person();
+    await invited(alice.userId, bobId);
     await attacker.query(`update audit.events set actor_id = $2 where org_id = $1 and action = 'invitation.drafted'`, [
       org,
-      bob.userId,
+      bobId,
     ]);
 
-    expect(await facts()).toEqual({ outcome: 'tampered', sign: 'log' });
+    await expect(add('admin', 'self', bobId)).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'tampered' });
     expect(alarms()).toEqual([
       expect.objectContaining({ reason: 'log', subjectType: 'organisation', objectId: org, orgId: org }),
     ]);
@@ -190,7 +188,7 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
   it('raises the alarm on a member the log made but the list no longer holds: never one admin fewer (H10)', async () => {
     const alice = await add('admin');
     await add('admin');
-    // Its row deleted past the app: its signed state finds it, before the history is read.
+    // Its row deleted past the app (its grant summary with it): its signed state finds it, before the history is read.
     await attacker.query('delete from identity.memberships where org_id = $1 and id = $2', [org, alice.id]);
 
     expect(await facts()).toEqual({ outcome: 'tampered', sign: 'deleted' });

@@ -2,13 +2,14 @@ import type { Generated } from 'kysely';
 
 import type { TamperSign } from '../../audit/index.ts';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql, 0049_user_contacts.sql, 0085_membership_grants.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
   'identity.login_flows': LoginFlowsTable;
   'identity.step_up_challenges': StepUpChallengesTable;
   'identity.memberships': MembershipsTable;
+  'identity.membership_grants': MembershipGrantsTable;
   'identity.invitations': InvitationsTable;
   'identity.session_emails': SessionEmailsTable;
   'identity.user_contacts': UserContactsTable;
@@ -81,6 +82,19 @@ interface MembershipsTable {
   role: string;
   status: string;
   joined_at: Date;
+  /** These two are written by the signed state's steps alone (the audit module's record). */
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
+}
+
+/** A membership's grant summary (0085, OR1): its row's ID is its membership's. */
+interface MembershipGrantsTable {
+  org_id: string;
+  id: string;
+  /** Lower-case user IDs, sorted, comma-joined; empty for none. */
+  granted_by: string;
+  verifier_changed_at: Date | null;
+  membership_version: number;
   /** These two are written by the signed state's steps alone (the audit module's record). */
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;

@@ -22,8 +22,10 @@
 // collusion through a planted account is the residual R-10 names, with the
 // 14 days and the notices to everyone between it and a payment.
 //
-// Pure: the history it rests on is read from the organisation's log
-// (infrastructure/two-person-facts.ts). A member in the 7 days without powers
+// Pure: what it rests on is each membership's signed grant summary, kept in
+// step with every membership change, or, for a membership added before the
+// summaries (0085, OR1) until its summary is built, the organisation's log
+// (infrastructure/two-person-facts.ts, membership-grants.ts). A member in the 7 days without powers
 // after a second factor removed (removal-restriction.ts) still counts as
 // eligible here, so the organisation waits for them rather than going solo;
 // whether the verifier themselves may act then is the route's access check.
@@ -79,7 +81,7 @@ const MEMBERSHIP_GRANTS: ReadonlySet<string> = new Set([
 ]);
 
 /** An invitation's events that grant or confirm the role it carries: asked for, opened, confirmed. */
-const INVITATION_GRANTS: ReadonlySet<string> = new Set([
+export const INVITATION_GRANTS: ReadonlySet<string> = new Set([
   'invitation.drafted',
   'invitation.opened',
   'invitation.confirmed',
@@ -93,60 +95,165 @@ const addTo = (map: Map<string, Set<string>>, key: string, value: string): void 
 };
 
 /** Whether the event changes a verifier: an admin or approver deactivated, or their role changed to any other. */
-const changesVerifier = ({ action, details }: RuleEvent['event']): boolean =>
+export const changesVerifier = ({ action, details }: Pick<RuleEvent['event'], 'action' | 'details'>): boolean =>
   (action === 'membership.deactivated' && mayVerify(String(details.role))) ||
   (action === 'membership.role_changed' && mayVerify(String(details.roleFrom)));
 
-/** The log's events, gathered: who granted each membership and invitation, who accepted which, the latest change to a verifier. */
-interface History {
+/** The later of two times, either undefined for none. */
+const later = (a: Date | undefined, b: Date | undefined): Date | undefined =>
+  a === undefined || (b !== undefined && b > a) ? b : a;
+
+/**
+ * A membership's grant summary (OR1; 0085): who granted or confirmed its role,
+ * ever, and when it last stopped being a verifier's. Kept signed with each
+ * membership change, so the rule reads one a member rather than the whole log.
+ */
+export interface GrantSummary {
+  /** The people (user IDs, lower case) who granted or confirmed its role; never the member themselves. */
+  readonly grantedBy: ReadonlySet<string>;
+  /** When it, an admin's or approver's, was last deactivated or had its role changed; undefined for never. */
+  readonly verifierChangedAt: Date | undefined;
+}
+
+/** The log's events, gathered: who granted each membership and invitation, who accepted which, each membership's latest change as a verifier. */
+export interface GrantHistory {
   readonly byMembership: Map<string, Set<string>>;
   readonly byInvitation: Map<string, Set<string>>;
   /** By person: the invitations they accepted. */
   readonly acceptedBy: Map<string, Set<string>>;
-  lastVerifierChange: Date | undefined;
+  /** By membership: when it, a verifier's, was last deactivated or had its role changed. */
+  readonly verifierChanges: Map<string, Date>;
 }
 
-/** Adds one event to the history. */
-function gather(history: History, { recordedAt, event }: RuleEvent): void {
+/** A history with nothing gathered yet. */
+export const grantHistory = (): GrantHistory => ({
+  byMembership: new Map(),
+  byInvitation: new Map(),
+  acceptedBy: new Map(),
+  verifierChanges: new Map(),
+});
+
+/** Adds one event about a membership to the history: who granted its role, and its latest change as a verifier. */
+function gatherMembership(history: GrantHistory, { recordedAt, event }: RuleEvent): void {
+  const subject = event.subject.id.toLowerCase();
+  if (event.actor.type === 'user' && MEMBERSHIP_GRANTS.has(event.action)) {
+    addTo(history.byMembership, subject, event.actor.id.toLowerCase());
+  }
+  if (changesVerifier(event)) {
+    history.verifierChanges.set(subject, later(history.verifierChanges.get(subject), recordedAt) ?? recordedAt);
+  }
+}
+
+/** Adds one event about an invitation to the history: who accepted it, or who granted the role it carries. */
+function gatherInvitation(history: GrantHistory, { event }: RuleEvent): void {
   const subject = event.subject.id.toLowerCase();
   const actor = event.actor.id.toLowerCase();
-  const byPerson = event.actor.type === 'user';
-  if (event.subject.type === 'membership') {
-    if (byPerson && MEMBERSHIP_GRANTS.has(event.action)) addTo(history.byMembership, subject, actor);
-    const latest = history.lastVerifierChange;
-    if (changesVerifier(event) && (latest === undefined || recordedAt > latest))
-      history.lastVerifierChange = recordedAt;
-  } else if (event.subject.type === 'invitation') {
-    if (event.action === 'invitation.acceptance_recorded') addTo(history.acceptedBy, actor, subject);
-    else if (byPerson && INVITATION_GRANTS.has(event.action)) addTo(history.byInvitation, subject, actor);
+  if (event.action === 'invitation.acceptance_recorded') addTo(history.acceptedBy, actor, subject);
+  else if (event.actor.type === 'user' && INVITATION_GRANTS.has(event.action))
+    addTo(history.byInvitation, subject, actor);
+}
+
+/** Adds events about memberships and invitations (HISTORY_SUBJECTS) to the history, in any order: a page at a time. */
+export function gatherGrants(history: GrantHistory, events: readonly RuleEvent[]): void {
+  for (const read of events) {
+    if (read.event.subject.type === 'membership') gatherMembership(history, read);
+    else if (read.event.subject.type === 'invitation') gatherInvitation(history, read);
   }
 }
 
 /**
- * The rule's facts from the members and the log's events about memberships
- * and invitations (HISTORY_SUBJECTS), in any order. A person never counts as
+ * The member's grant summary as the history holds it. A person never counts as
  * granting their own role: accepting an invitation is theirs.
  */
-export function twoPersonFacts(members: readonly RuleMember[], events: readonly RuleEvent[]): TwoPersonFacts {
-  const history: History = {
-    byMembership: new Map(),
-    byInvitation: new Map(),
-    acceptedBy: new Map(),
-    lastVerifierChange: undefined,
-  };
-  for (const event of events) gather(history, event);
-  const { byMembership, byInvitation, acceptedBy, lastVerifierChange } = history;
+export function summaryFromHistory(history: GrantHistory, member: Pick<RuleMember, 'id' | 'userId'>): GrantSummary {
+  const person = member.userId.toLowerCase();
+  const granted = new Set(history.byMembership.get(member.id.toLowerCase()));
+  for (const invitation of history.acceptedBy.get(person) ?? []) {
+    for (const granter of history.byInvitation.get(invitation) ?? []) granted.add(granter);
+  }
+  granted.delete(person);
+  return { grantedBy: granted, verifierChangedAt: history.verifierChanges.get(member.id.toLowerCase()) };
+}
+
+/**
+ * The rule's facts from every member and each one's grant summary, by
+ * membership ID in lower case; the latest change to a verifier is the latest
+ * of any member's. Throws for a member with none: a member left out of the
+ * latest change would make the one-person path look open, so the facts are
+ * read from the history until every summary is built.
+ */
+export function factsFromSummaries(
+  members: readonly RuleMember[],
+  summaries: ReadonlyMap<string, GrantSummary>,
+): TwoPersonFacts {
   const grantedBy = new Map<string, ReadonlySet<string>>();
+  let lastVerifierChange: Date | undefined;
   for (const member of members) {
-    const person = member.userId.toLowerCase();
-    const granted = new Set(byMembership.get(member.id.toLowerCase()));
-    for (const invitation of acceptedBy.get(person) ?? []) {
-      for (const granter of byInvitation.get(invitation) ?? []) granted.add(granter);
-    }
-    granted.delete(person);
-    grantedBy.set(member.id.toLowerCase(), granted);
+    const summary = summaries.get(member.id.toLowerCase());
+    if (summary === undefined) throw new Error(`The two-person rule's facts hold no summary for ${member.id}`);
+    grantedBy.set(member.id.toLowerCase(), summary.grantedBy);
+    lastVerifierChange = later(lastVerifierChange, summary.verifierChangedAt);
   }
   return { members, grantedBy, lastVerifierChange };
+}
+
+/**
+ * The rule's facts from the members and the log's events about memberships
+ * and invitations (HISTORY_SUBJECTS), in any order. The latest change to a
+ * verifier is the latest the log holds about any membership.
+ */
+export function twoPersonFacts(members: readonly RuleMember[], events: readonly RuleEvent[]): TwoPersonFacts {
+  const history = grantHistory();
+  gatherGrants(history, events);
+  return historyFacts(members, history).facts;
+}
+
+/** The rule's facts from a gathered history, with each member's summary as it holds it, by membership ID in lower case. */
+export function historyFacts(
+  members: readonly RuleMember[],
+  history: GrantHistory,
+): { readonly facts: TwoPersonFacts; readonly summaries: ReadonlyMap<string, GrantSummary> } {
+  const summaries = new Map(members.map((member) => [member.id.toLowerCase(), summaryFromHistory(history, member)]));
+  let lastVerifierChange: Date | undefined;
+  for (const at of history.verifierChanges.values()) lastVerifierChange = later(lastVerifierChange, at);
+  return { facts: { ...factsFromSummaries(members, summaries), lastVerifierChange }, summaries };
+}
+
+/** A membership change as its grant summary takes it (grantsAfter). */
+export interface GrantChange {
+  /** The member's own user ID: never among those who granted their role. */
+  readonly memberUserId: string;
+  /** Who granted or confirmed the role by this change (user IDs); none for a change that grants nothing. */
+  readonly granters: Iterable<string>;
+  /** The change's event's time, when it is a verifier's deactivation or role change (changesVerifier). */
+  readonly verifierChangedAt?: Date | undefined;
+}
+
+/** The summary after a change of its membership: nothing taken away, so it never looks cleaner than its history. */
+export function grantsAfter(
+  summary: GrantSummary,
+  { memberUserId, granters, verifierChangedAt }: GrantChange,
+): GrantSummary {
+  const grantedBy = new Set(summary.grantedBy);
+  for (const granter of granters) grantedBy.add(granter.toLowerCase());
+  grantedBy.delete(memberUserId.toLowerCase());
+  return { grantedBy, verifierChangedAt: later(summary.verifierChangedAt, verifierChangedAt) };
+}
+
+/** A summary of a membership no one has granted anything yet. */
+export const NO_GRANTS: GrantSummary = { grantedBy: new Set(), verifierChangedAt: undefined };
+
+/**
+ * Whether a kept summary holds at least what its history says, for the rule's
+ * purposes: every granter of an active member's role (for one deactivated, an
+ * invitation accepted since only counts once they are brought back, which
+ * reads them all again), and no earlier a verifier change. More is only more
+ * caution; less would open a path the history shuts.
+ */
+export function summaryCovers(kept: GrantSummary, history: GrantSummary, active: boolean): boolean {
+  if (active && [...history.grantedBy].some((granter) => !kept.grantedBy.has(granter))) return false;
+  if (history.verifierChangedAt === undefined) return true;
+  return kept.verifierChangedAt !== undefined && kept.verifierChangedAt >= history.verifierChangedAt;
 }
 
 /** Why a member may not verify details another entered. */

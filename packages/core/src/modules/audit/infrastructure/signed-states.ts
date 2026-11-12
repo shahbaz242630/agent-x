@@ -324,6 +324,8 @@ export interface RecordedState {
   readonly version: number;
   readonly eventId: string;
   readonly seq: bigint;
+  /** When its event was recorded, as the chain seals it (a verifier's change, OR1). */
+  readonly recordedAt: Date;
 }
 
 /** A status change with its signed event: as a status change, or refused on the row's verified state. */
@@ -1417,7 +1419,12 @@ export function createSignedStates({
     if (from === 'new' && key.id.toLowerCase() === key.orgId.toLowerCase() && recorded.seq === 1n) {
       created.set(tx, (created.get(tx) ?? new Set<string>()).add(key.orgId.toLowerCase()));
     }
-    return Object.freeze({ version: row.version, eventId: recorded.id, seq: recorded.seq });
+    return Object.freeze({
+      version: row.version,
+      eventId: recorded.id,
+      seq: recorded.seq,
+      recordedAt: recorded.recordedAt,
+    });
   };
 
   /**
@@ -1468,7 +1475,7 @@ export function createSignedStates({
       subject,
       details: { ...change.details, ...stateSealDetails(seal) },
     });
-    return Object.freeze({ version, eventId: recorded.id, seq: recorded.seq });
+    return Object.freeze({ version, eventId: recorded.id, seq: recorded.seq, recordedAt: recorded.recordedAt });
   };
 
   const integrityHold = async (tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> => {
