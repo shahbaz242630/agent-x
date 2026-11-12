@@ -78,7 +78,7 @@ export interface Coming {
 }
 
 /** The operator's command's own role (schema-guard.ts OPERATOR_ROLE): the role a coming right is granted to. */
-export const OPERATOR_ROLE = 'agentx_operator';
+const OPERATOR_ROLE = 'agentx_operator';
 
 /** Where the list is kept, from the repository's root. */
 export const COMING_FILE = 'packages/platform/src/db/coming.json';
