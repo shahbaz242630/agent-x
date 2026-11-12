@@ -34,6 +34,7 @@ import {
   ROLE_CONFIRM_OPERATION,
   ROLE_OPERATION,
 } from './membership-changes.ts';
+import { MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
@@ -665,6 +666,25 @@ describe(`changing a membership tampered with (B4-5a, Postgres ${server.version}
     const viewer = await member(who.org, 'viewer');
     const challengeId = await steppedUp(who.admin, viewer.membershipId, DEACTIVATE);
     await asOwner(who.org, viewer.membershipId, 'role', 'admin');
+
+    expect(await confirm(who.admin, viewer.membershipId, DEACTIVATE, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+    expect(await sessionsOf(viewer.userId)).toBe(1);
+  });
+
+  it('refuses a member whose grant summary was tampered with, as INTEGRITY_FAILED, ending no session (OR1)', async () => {
+    const who = await organization();
+    const viewer = await member(who.org, 'viewer');
+    const challengeId = await steppedUp(who.admin, viewer.membershipId, DEACTIVATE);
+    const owner = await tamperAsOwner(database, MEMBERSHIP_GRANTS, who.org);
+    try {
+      await owner.setColumn(viewer.membershipId, 'granted_by', who.admin.userId);
+    } finally {
+      await owner.end();
+    }
 
     expect(await confirm(who.admin, viewer.membershipId, DEACTIVATE, challengeId)).toEqual({
       outcome: 'refused',

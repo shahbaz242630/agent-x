@@ -7,11 +7,20 @@ import { describe, expect, it } from 'vitest';
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import type { Role } from './membership.ts';
 import {
+  changesVerifier,
   ESTABLISHED_DAYS,
+  factsFromSummaries,
+  gatherGrants,
+  grantHistory,
+  grantsAfter,
+  historyFacts,
   mayVerify,
+  NO_GRANTS,
   type RuleEvent,
   type RuleMember,
   SOLO_PATH_LOCK_DAYS,
+  summaryCovers,
+  summaryFromHistory,
   type TwoPersonFacts,
   twoPersonFacts,
   verifierVerdict,
@@ -302,5 +311,88 @@ describe('who granted a member’s role, from the log (twoPersonFacts)', () => {
     expect([...f.grantedBy.keys()]).toEqual([alice.id, bob.id]);
     expect([...(f.grantedBy.get(alice.id) ?? [])]).toEqual([carol.userId]);
     expect([...(f.grantedBy.get(bob.id) ?? [])]).toEqual([]);
+  });
+});
+
+describe('a membership’s grant summary (OR1): kept from the history, moved on by each change', () => {
+  const alice = member('a', 'admin');
+  const bob = member('b', 'approver');
+  const membershipOf = (who: RuleMember) => ({ type: 'membership', id: who.id });
+
+  it('gathers a page at a time to the same summaries and facts as the whole history at once', () => {
+    const invitation = { type: 'invitation', id: 'i-5' };
+    const events = [
+      event('membership.created', membershipOf(bob), alice.userId),
+      event('invitation.drafted', invitation, 'u-c'),
+      event('invitation.acceptance_recorded', invitation, bob.userId),
+      event('membership.deactivated', membershipOf(alice), bob.userId, { role: 'admin' }, daysAgo(3)),
+      event('membership.role_changed', membershipOf(alice), bob.userId, { roleFrom: 'approver' }, daysAgo(2)),
+    ];
+    const history = grantHistory();
+    gatherGrants(history, events.slice(0, 2));
+    gatherGrants(history, events.slice(2));
+
+    expect(historyFacts([alice, bob], history).facts).toEqual(facts([alice, bob], events));
+    expect(summaryFromHistory(history, bob)).toEqual({
+      grantedBy: new Set(['u-a', 'u-c']),
+      verifierChangedAt: undefined,
+    });
+    // The later of Alice's two changes as a verifier.
+    expect(summaryFromHistory(history, alice).verifierChangedAt).toEqual(daysAgo(2));
+  });
+
+  it('decides from summaries alone as from the history, the latest verifier change of any member', () => {
+    const summaries = new Map([
+      [alice.id, { grantedBy: new Set<string>(), verifierChangedAt: daysAgo(5) }],
+      [bob.id, { grantedBy: new Set([alice.userId]), verifierChangedAt: daysAgo(1) }],
+    ]);
+    const f = factsFromSummaries([alice, bob], summaries);
+
+    expect(f.lastVerifierChange).toEqual(daysAgo(1));
+    // Bob's role is Alice's grant, and no one else is eligible: the one-person path, shut by Bob's change a day ago.
+    expect(verdict(f, 'a', 'b')).toEqual({
+      outcome: 'refused',
+      reason: 'SOLO_PATH_LOCKED',
+      until: new Date(daysAgo(1).getTime() + SOLO_PATH_LOCK_DAYS * DAY_MS),
+    });
+  });
+
+  it('decides nothing for a member with no summary: their change could shut the one-person path', () => {
+    expect(() => factsFromSummaries([alice, bob], new Map([[alice.id, NO_GRANTS]]))).toThrow(/no summary/);
+  });
+
+  it('adds who granted a change, never the member, and keeps the later verifier change', () => {
+    const before = { grantedBy: new Set(['u-x']), verifierChangedAt: daysAgo(4) };
+
+    expect(
+      grantsAfter(before, { memberUserId: 'U-B', granters: ['U-A', 'u-b'], verifierChangedAt: daysAgo(6) }),
+    ).toEqual({ grantedBy: new Set(['u-x', 'u-a']), verifierChangedAt: daysAgo(4) });
+    expect(grantsAfter(NO_GRANTS, { memberUserId: 'u-b', granters: [], verifierChangedAt: daysAgo(1) })).toEqual({
+      grantedBy: new Set(),
+      verifierChangedAt: daysAgo(1),
+    });
+  });
+
+  it('counts a verifier deactivated or moved to any role as a change, and no one else', () => {
+    expect(changesVerifier({ action: 'membership.deactivated', details: { role: 'approver' } })).toBe(true);
+    expect(changesVerifier({ action: 'membership.deactivated', details: { role: 'viewer' } })).toBe(false);
+    expect(changesVerifier({ action: 'membership.role_changed', details: { roleFrom: 'admin' } })).toBe(true);
+    expect(changesVerifier({ action: 'membership.role_changed', details: { roleFrom: 'developer' } })).toBe(false);
+  });
+
+  it('holds a kept summary to at least what the history says: granters for an active member, and the verifier change', () => {
+    const history = { grantedBy: new Set(['u-a']), verifierChangedAt: daysAgo(2) };
+    const kept = (grantedBy: string[], verifierChangedAt?: Date) => ({
+      grantedBy: new Set(grantedBy),
+      verifierChangedAt,
+    });
+
+    expect(summaryCovers(kept(['u-a', 'u-z'], daysAgo(1)), history, true)).toBe(true);
+    expect(summaryCovers(kept([], daysAgo(2)), history, true)).toBe(false);
+    // Deactivated: an invitation accepted since counts once they come back, which reads them all again.
+    expect(summaryCovers(kept([], daysAgo(2)), history, false)).toBe(true);
+    expect(summaryCovers(kept(['u-a'], daysAgo(3)), history, true)).toBe(false);
+    expect(summaryCovers(kept(['u-a']), history, true)).toBe(false);
+    expect(summaryCovers(kept(['u-a']), { ...history, verifierChangedAt: undefined }, true)).toBe(true);
   });
 });

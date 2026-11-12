@@ -8,7 +8,9 @@
 //
 // A membership is added in one transaction, withSignedStates' for its
 // organisation: its directory entry first (the row points at it), then its
-// row, then its first signed state. The insert is the one query on this table
+// row, then its first signed state, then its grant summary's (OR1,
+// membership-grants.ts), which every change of it moves on in the same
+// transaction. The insert is the one query on this table
 // outside the audit module's steps, as for an organisation's row
 // (organizations.ts says why a plain insert is safe, and must stay plain).
 //
@@ -17,10 +19,11 @@
 // state), and then verified: the signed state must name the same person, so
 // an entry pointed at someone else's membership finds nothing.
 import type { SignedStateTable } from '@agentx/platform/db';
-import { type Kysely, type Transaction } from 'kysely';
+import type { Kysely } from 'kysely';
 
 import {
   type AuditActor,
+  type AuditDetails,
   type AuditTables,
   type RecordedState,
   type SignedStates,
@@ -31,6 +34,17 @@ import {
 } from '../../audit/index.ts';
 import { type DirectoryTables, listedMembers, listedMembership, registerMember } from '../../directory/index.ts';
 import { isRole, MEMBERSHIP, type Role } from '../domain/membership.ts';
+import { changesVerifier } from '../domain/two-person.ts';
+import {
+  byPerson,
+  type GrantsCheck,
+  grantsBelieved,
+  grantsForNewMembership,
+  grantsToChange,
+  invitationGrantersOf,
+  keepGrants,
+  type MembershipsTransaction,
+} from './membership-grants.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** A membership's row, as the signed state reads, records and moves it. */
@@ -46,8 +60,7 @@ export const MEMBERSHIPS = {
   rules: MEMBERSHIP,
 } as const satisfies SignedStateTable & { readonly rules: typeof MEMBERSHIP };
 
-/** A transaction on the tables a membership is added and read in, opened by withSignedStates for its organisation. */
-export type MembershipsTransaction = Transaction<IdentityTables & DirectoryTables & AuditTables>;
+export type { MembershipsTransaction } from './membership-grants.ts';
 
 export interface NewMembership {
   readonly orgId: string;
@@ -78,11 +91,14 @@ export async function addMembership(
     .insertInto(MEMBERSHIPS.table)
     .values({ org_id: orgId, id, ...fields })
     .execute();
-  return states.record(tx, MEMBERSHIPS, { orgId, id }, 'new', fields, {
+  const recorded = await states.record(tx, MEMBERSHIPS, { orgId, id }, 'new', fields, {
     actor,
     action: 'membership.created',
     details: { role },
   });
+  // Its grant summary from the start (OR1): who added it, and who asked for, opened or confirmed what the person accepted.
+  await grantsForNewMembership(tx, states, { orgId, id, userId, actor, membershipVersion: recorded.version });
+  return recorded;
 }
 
 /** A deactivated membership brought back: which, with what role, from when, and by whom. */
@@ -109,9 +125,12 @@ export async function reactivateMembership(
 ): Promise<void> {
   const key = { orgId, id };
   const current = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
-  if (current.outcome !== 'verified' || current.fields.get('status') !== 'DEACTIVATED') {
+  const userId = current.outcome === 'verified' ? current.fields.get('user_id') : undefined;
+  if (current.outcome !== 'verified' || current.fields.get('status') !== 'DEACTIVATED' || typeof userId !== 'string') {
     throw new Error(`a membership read as deactivated is not: ${current.outcome}`);
   }
+  // Its grant summary next, for the change, after the membership (ADR-006 §6, 2a).
+  const grants = grantsBelieved(await grantsToChange(tx, states, key));
   await states.record(
     tx,
     MEMBERSHIPS,
@@ -121,10 +140,113 @@ export async function reactivateMembership(
     { actor, action: 'membership.renewed', details: { roleFrom: current.fields.get('role') ?? null, roleTo: role } },
   );
   // Verified deactivated and locked just above, in this transaction: it moves.
-  await states.changeStatus(tx, MEMBERSHIPS, key, 'reactivate', {
+  const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'reactivate', {
     actor,
     action: 'membership.reactivated',
     details: { role },
+  });
+  if (moved.outcome !== 'changed') throw new Error(`a membership read as deactivated did not move: ${moved.outcome}`);
+  // Unbuilt (added before 0085): left for the job, whose history holds this return.
+  if (grants.outcome === 'unbuilt' || grants.membershipVersion !== current.version) return;
+  // Who brought them back, and who asked for, opened or confirmed any invitation they accepted, the one confirmed now too.
+  const granters = [...(await invitationGrantersOf(tx, states, orgId, userId)), ...byPerson(actor)];
+  await keepGrants(tx, states, grants, key, {
+    change: { memberUserId: userId, granters },
+    fromVersion: current.version,
+    membershipVersion: moved.version,
+    actor,
+  });
+}
+
+/** A member's change by a person, read for it in the caller's transaction: their membership, then its grant summary. */
+export interface MembershipChangeRead {
+  readonly key: { readonly orgId: string; readonly id: string };
+  readonly member: Pick<MemberRecord, 'userId' | 'role'>;
+  /** The summary, read for the change after the membership (grantsToChange), not tampered with. */
+  readonly grants: Exclude<GrantsCheck, { readonly outcome: 'tampered' }>;
+  readonly actor: AuditActor;
+  /** What the event says besides the move: the step-up's evidence, the sessions ended. */
+  readonly evidence: AuditDetails;
+}
+
+/**
+ * The member's role changed (`membership.role_changed`), in the caller's
+ * transaction, which read the membership (`state`) and its summary for the
+ * change: the summary moved on with it, naming who changed it, and when a
+ * verifier's role changed, which shuts the one-person path (ADR-012 §1).
+ */
+export async function changeMembershipRole(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  {
+    key,
+    member,
+    grants,
+    actor,
+    evidence,
+    state,
+    roleTo,
+  }: MembershipChangeRead & {
+    readonly state: VerifiedState;
+    readonly roleTo: Role;
+  },
+): Promise<void> {
+  const details = { roleFrom: member.role, roleTo };
+  const recorded = await states.record(
+    tx,
+    MEMBERSHIPS,
+    key,
+    state,
+    { role: roleTo },
+    {
+      actor,
+      action: 'membership.role_changed',
+      details: { ...details, ...evidence },
+    },
+  );
+  await keepGrants(tx, states, grants, key, {
+    change: {
+      memberUserId: member.userId,
+      granters: byPerson(actor),
+      verifierChangedAt: changesVerifier({ action: 'membership.role_changed', details })
+        ? recorded.recordedAt
+        : undefined,
+    },
+    fromVersion: state.version,
+    membershipVersion: recorded.version,
+    actor,
+  });
+}
+
+/**
+ * The member deactivated (`membership.deactivated`), in the caller's
+ * transaction, which read the membership and its summary for the change: the
+ * summary moved on with it, granting no one, and noting when a verifier went.
+ * Throws for one that didn't move: the caller read it as active just now.
+ */
+export async function deactivateMembership(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  { key, member, grants, actor, evidence }: MembershipChangeRead,
+): Promise<void> {
+  const details = { role: member.role };
+  const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
+    actor,
+    action: 'membership.deactivated',
+    details: { ...details, ...evidence },
+  });
+  if (moved.outcome !== 'changed') throw new Error(`a membership read as active did not move: ${moved.outcome}`);
+  await keepGrants(tx, states, grants, key, {
+    change: {
+      memberUserId: member.userId,
+      granters: [],
+      verifierChangedAt: changesVerifier({ action: 'membership.deactivated', details })
+        ? moved.state.recordedAt
+        : undefined,
+    },
+    fromVersion: moved.version - 1,
+    membershipVersion: moved.version,
+    actor,
   });
 }
 
@@ -278,6 +400,11 @@ export async function memberOf(
 ): Promise<MemberCheck> {
   const state = await states.verifiedState(tx, MEMBERSHIPS, key, lock);
   if (state.outcome !== 'verified') return state;
+  return { outcome: 'found', member: memberFrom(key.id, state), state };
+}
+
+/** The member a verified membership's state holds. */
+export function memberFrom(id: string, state: VerifiedState): MemberRecord {
   const userId = state.fields.get('user_id');
   const role = state.fields.get('role');
   const status = state.fields.get('status');
@@ -288,13 +415,9 @@ export async function memberOf(
     (status !== 'ACTIVE' && status !== 'DEACTIVATED') ||
     typeof joinedAt !== 'string'
   ) {
-    throw new Error(`A verified membership holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified membership holds a field that isn't one of its own: ${id}`);
   }
-  return {
-    outcome: 'found',
-    member: { id: key.id.toLowerCase(), userId, role, status, joinedAt: new Date(joinedAt) },
-    state,
-  };
+  return { id: id.toLowerCase(), userId, role, status, joinedAt: new Date(joinedAt) };
 }
 
 /**

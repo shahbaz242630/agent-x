@@ -163,7 +163,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
 
     const { id, stepUpChallengeId, recorded } = await draft(who, { role: 'approver' });
 
-    expect(recorded).toMatchObject({ version: 1, seq: 4n });
+    expect(recorded).toMatchObject({ version: 1, seq: 5n }); // One more since OR1: the first admin's signed grant summary.
     expect(await record(who.org, id)).toEqual({
       outcome: 'found',
       invitation: {
@@ -181,7 +181,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
       event: await tx
         .selectFrom('audit.events')
         .select(['actor_type', 'actor_id', 'action', 'subject_type', 'subject_id', 'subject_version', 'details'])
-        .where('seq', '=', 4n)
+        .where('seq', '=', 5n)
         .executeTakeFirstOrThrow(),
     }));
     expect(row).toMatchObject({

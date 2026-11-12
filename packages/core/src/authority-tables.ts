@@ -15,7 +15,13 @@ import type { SignedStateTable } from '@agentx/platform/db';
 
 import { AGENT_KEYS, AGENTS } from './modules/agents/index.ts';
 import { SOURCES } from './modules/funding-sources/index.ts';
-import { FACTOR_RESETS, INVITATIONS, MEMBERSHIPS, REGISTERED_CONTACTS } from './modules/identity/index.ts';
+import {
+  FACTOR_RESETS,
+  INVITATIONS,
+  MEMBERSHIP_GRANTS,
+  MEMBERSHIPS,
+  REGISTERED_CONTACTS,
+} from './modules/identity/index.ts';
 import { INSTRUCTIONS } from './modules/instructions/index.ts';
 import { AGENT_ZONES } from './modules/limit-reservations/index.ts';
 import { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './modules/mandates/index.ts';
@@ -65,7 +71,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
 /**
  * In the global lock order (ADR-006 §6): the organisation (2), then its
  * invitations and memberships (2a, an invitation before a membership, as
- * accepting and confirming take them), then its registered contacts (2b,
+ * accepting and confirming take them, and each membership's grant summary
+ * after its membership: OR1, 0085), then its registered contacts (2b,
  * B6-1a: an admin's membership is read before the contacts it changes), then
  * its factor resets (2c, B6-3a: a reset is confirmed by a contact read
  * first), then its agents (3) and their keys (3a, C1-1), then its mandates
@@ -86,6 +93,7 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   ORGANIZATIONS,
   INVITATIONS,
   MEMBERSHIPS,
+  MEMBERSHIP_GRANTS,
   REGISTERED_CONTACTS,
   FACTOR_RESETS,
   AGENTS,
