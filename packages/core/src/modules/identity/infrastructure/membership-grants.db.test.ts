@@ -59,6 +59,11 @@ const ROLES = { appRole: 'agentx_app', ownerRole: 'agentx_owner' } as const;
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
+/**
+ * Where an image from before OR1 writes a membership past its summary: an image that old ran only before 0089, whose
+ * trigger refuses that from the app's role (OR1b), so it is played here on the owner's connection, which 0089 lets by.
+ */
+let oldImage: Database<Tables>;
 let owner: OwnerTamper;
 
 const keys = createKeyProvider(
@@ -243,9 +248,11 @@ async function deniedAndHeld(id: string, sign: string): Promise<void> {
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  oldImage = createDatabase<Tables>({ ...database.connection('owner'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {
+  await oldImage.destroy();
   await app.destroy();
   await database.drop();
 });
@@ -496,7 +503,7 @@ describe(`a grant summary changed past the app (FX-TAMPER, Postgres ${server.ver
 describe(`a summary left behind by an image from before OR1: the swap or a rollback (Postgres ${server.version})`, () => {
   /** Bob's role changed as the code before OR1 changes it: the membership alone, no summary written. */
   const changedByOldImage = (bob: { id: string }, alice: { userId: string }, roleFrom: Role, roleTo: Role) =>
-    withSignedStates(app, org, services(), async (tx, states) => {
+    withSignedStates(oldImage, org, services(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: bob.id }, 'change');
       if (state.outcome !== 'verified') throw new Error('not verified');
       await states.record(
@@ -593,7 +600,7 @@ describe(`the rule past 10,000 events, and the summaries built for members from 
     expect(lines('audit.integrity_failed')).toEqual([]);
 
     // Bob's summary left behind by an image from before OR1: the history again, too long, so nothing decided.
-    await withSignedStates(app, org, services(), async (tx, states) => {
+    await withSignedStates(oldImage, org, services(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: bob.id }, 'change');
       if (state.outcome !== 'verified') throw new Error('not verified');
       await states.record(
@@ -755,5 +762,170 @@ describe(`concurrent membership changes, in a forced lock order (ADR-006 §6, Po
     if (read.outcome !== 'read') throw new Error('not read');
     expect([...(read.grantedBy.get(bob.id) ?? [])]).toEqual([alice.userId]);
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('commits a change queued behind a change refused for its summary, at the version the first never made', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    // A change past the summary holds Bob's membership, recorded, until let go; then its commit is refused.
+    const refused = await paused((pause) => roleAlone(bob.id, 'developer', alice.userId, pause));
+    const queued = within(20_000, changeRole(bob.id, 'approver', alice.userId), 'the queued change');
+    await waitUntilQueued(database.as('admin'), 1);
+    refused.go();
+    await expect(refused.done).rejects.toMatchObject({ constraint: 'grants_in_step' });
+    await queued;
+
+    expect(await versions(bob.id)).toEqual({ membership: 2, summary: 2 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('commits two changes of one membership one after the other, each moving its summary on in step', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    const first = await paused((pause) => changeRole(bob.id, 'developer', alice.userId, { pause }));
+    const second = within(20_000, changeRole(bob.id, 'approver', alice.userId), 'the second change');
+    await waitUntilQueued(database.as('admin'), 1);
+    first.go();
+    await first.done;
+    await second;
+
+    expect(await versions(bob.id)).toEqual({ membership: 3, summary: 3 });
+  });
+});
+
+/** The membership's signed version and the one its summary was kept at. */
+const versions = async (id: string) => {
+  // The owner's session inside the organisation (tamperAsOwner's): the tables' walls bind it too.
+  const [row] = await owner.query<{ membership: number; summary: number | null }>(
+    'select m.state_version as membership, g.membership_version as summary from identity.memberships m left join identity.membership_grants g on g.org_id = m.org_id and g.id = m.id where m.org_id = $1 and m.id = $2',
+    [org, id],
+  );
+  return row;
+};
+
+/**
+ * The member's role changed by the app's role and its summary left as it was: what no code of the product does since
+ * OR1, and what 0089 refuses at the commit. With `pause`, held open once recorded until let go.
+ */
+const roleAlone = (
+  id: string,
+  roleTo: Role,
+  by: string,
+  pause?: { readonly reached: () => void; readonly until: Promise<void> },
+) =>
+  withSignedStates(app, org, services(), async (tx, states) => {
+    const read = await changeRead(tx, states, id);
+    await states.record(
+      tx,
+      MEMBERSHIPS,
+      read.key,
+      read.state,
+      { role: roleTo },
+      { actor: userActor(by), action: 'membership.role_changed', details: { roleFrom: read.member.role, roleTo } },
+    );
+    pause?.reached();
+    await pause?.until;
+  });
+
+describe(`OR1b: the database holds each membership change to its summary (0089, Postgres ${server.version})`, () => {
+  it('lets every change the product makes commit, each summary in step with its membership', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
+    await changeRole(bob.id, 'approver', alice.userId);
+    expect(await versions(bob.id)).toEqual({ membership: 2, summary: 2 });
+    await deactivate(bob.id, alice.userId);
+    expect(await versions(bob.id)).toEqual({ membership: 3, summary: 3 });
+    await withSignedStates(app, org, services(), (tx, states) =>
+      reactivateMembership(tx, states, {
+        orgId: org,
+        id: bob.id,
+        role: 'viewer',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    // The return records the role and start, then the move: two versions, the summary kept at the last.
+    expect(await versions(bob.id)).toEqual({ membership: 5, summary: 5 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('refuses at the commit a change of the membership alone, the summary in step before it: nothing is kept', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+
+    await expect(roleAlone(bob.id, 'admin', alice.userId)).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'grants_in_step',
+    });
+
+    expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
+    const read = await withSignedStates(app, org, services(), (tx, states) =>
+      memberOf(tx, states, { orgId: org, id: bob.id }, 'share'),
+    );
+    expect(read).toMatchObject({ outcome: 'found', member: { role: 'viewer' } });
+  });
+
+  it('refuses a summary moved on to a version its membership passed in the same change', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    const changing = withSignedStates(app, org, services(), async (tx, states) => {
+      const read = await changeRead(tx, states, bob.id);
+      const first = await states.record(
+        tx,
+        MEMBERSHIPS,
+        read.key,
+        read.state,
+        { role: 'developer' },
+        { actor: userActor(alice.userId), action: 'membership.role_changed', details: {} },
+      );
+      await keepGrants(tx, states, read.grants, read.key, {
+        change: { memberUserId: read.member.userId, granters: [alice.userId] },
+        fromVersion: read.state.version,
+        membershipVersion: first.version,
+        actor: userActor(alice.userId),
+      });
+      // The membership moved once more, its summary left at the version before.
+      const again = await states.verifiedState(tx, MEMBERSHIPS, read.key, 'change');
+      if (again.outcome !== 'verified') throw new Error('not verified');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        read.key,
+        again,
+        { role: 'approver' },
+        { actor: userActor(alice.userId), action: 'membership.role_changed', details: {} },
+      );
+    });
+
+    await expect(changing).rejects.toMatchObject({ constraint: 'grants_in_step' });
+    expect(await versions(bob.id)).toEqual({ membership: 1, summary: 1 });
+  });
+
+  it('lets a membership with no summary yet change alone: built later by the job, OR1c’s to judge', async () => {
+    const alice = await add('admin');
+    const bob = await addBefore('viewer');
+    await roleAlone(bob.id, 'approver', alice.userId);
+    expect(await versions(bob.id)).toEqual({ membership: 2, summary: null });
+  });
+
+  it('lets a membership whose summary an image from before OR1 left behind change alone: OR1c’s to judge', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    await withSignedStates(oldImage, org, services(), async (tx, states) => {
+      const read = await changeRead(tx, states, bob.id);
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        read.key,
+        read.state,
+        { role: 'developer' },
+        { actor: userActor(alice.userId), action: 'membership.role_changed', details: {} },
+      );
+    });
+    // The owner's change (as a state repair writes) committed alone; then the app's, the summary behind before it.
+    expect(await versions(bob.id)).toEqual({ membership: 2, summary: 1 });
+    await roleAlone(bob.id, 'approver', alice.userId);
+    expect(await versions(bob.id)).toEqual({ membership: 3, summary: 1 });
   });
 });

@@ -5,13 +5,7 @@
 // supplier-changes.db.test.ts.
 import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import {
-  addMembership,
-  type IdentityTables,
-  MEMBERSHIPS,
-  type Role,
-  userForSubject,
-} from '@agentx/core/modules/identity';
+import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -48,6 +42,7 @@ import {
   type SupplierRegistry,
 } from './supplier-registry.ts';
 import type { SupplierMember } from './supplier-work.ts';
+import { deactivatedAsTheProduct } from './membership-changes.helper.test.ts';
 
 type Tables = IdentityTables &
   SuppliersTables &
@@ -216,13 +211,7 @@ describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {
   it('refuses an admin whose membership is deactivated: FORBIDDEN, adding nothing', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
-    await withSignedStates(app, org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, quiet(), { orgId: org, id: admin.membershipId }, OPERATOR);
 
     expect(await add(admin)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
     expect(await suppliersIn(org)).toBe(0);

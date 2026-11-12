@@ -28,6 +28,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMyOrganizations } from './my-organizations.ts';
+import { deactivatedAsTheProduct } from './membership-changes.helper.test.ts';
 
 type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables;
 
@@ -81,14 +82,7 @@ const freeze = (orgId: string) =>
     }),
   );
 
-const deactivate = (orgId: string, id: string) =>
-  withSignedStates(app, orgId, services(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId, id }, 'deactivate', {
-      actor: OPERATOR,
-      action: 'membership.deactivate',
-      details: {},
-    }),
-  );
+const deactivate = (orgId: string, id: string) => deactivatedAsTheProduct(app, services(), { orgId, id }, OPERATOR);
 
 const listed = () => createMyOrganizations({ database: app, keys, ids, logger: testLogger(capture) });
 

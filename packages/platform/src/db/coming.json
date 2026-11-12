@@ -1,13 +1,5 @@
 {
-  "triggers": [
-    {
-      "table": "identity.memberships",
-      "name": "grants_in_step",
-      "definition": "CREATE CONSTRAINT TRIGGER grants_in_step AFTER UPDATE OF state_version ON identity.memberships DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((old.state_version IS DISTINCT FROM new.state_version)) EXECUTE FUNCTION identity.grants_in_step()",
-      "function": "identity.grants_in_step",
-      "body": "f7810e7a6ce09e59b2c9e82c00b096d69cab1f162964b27a127ef62d53f97052"
-    }
-  ],
+  "triggers": [],
   "bodies": [],
   "operatorRights": []
 }

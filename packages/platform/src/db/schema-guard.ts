@@ -388,8 +388,25 @@ function operatorEventsTrigger(table: string): WrittenTrigger {
 /** The operator's rule's triggers (0080), one on each chain's events. */
 export const OPERATOR_EVENT_TRIGGERS: readonly WrittenTrigger[] = OPERATOR_EVENT_TABLES.map(operatorEventsTrigger);
 
-/** Every trigger a migration added to a table already built, as written: the marks' and the operator's rule's. */
-export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [...MARK_TRIGGERS, ...OPERATOR_EVENT_TRIGGERS];
+/**
+ * A membership's grant summary kept in step with it (OR1b, 0089): a commit refused where a membership's signed version
+ * moved past a summary that was in step with it. 0089 writes it, after 0088's image knew it as coming.
+ */
+export const GRANTS_IN_STEP_TRIGGER: WrittenTrigger = {
+  table: 'identity.memberships',
+  name: 'grants_in_step',
+  definition:
+    'CREATE CONSTRAINT TRIGGER grants_in_step AFTER UPDATE OF state_version ON identity.memberships DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((old.state_version IS DISTINCT FROM new.state_version)) EXECUTE FUNCTION identity.grants_in_step()',
+  function: 'identity.grants_in_step',
+  body: '05994cd38a7348ff1c386d4cc875b5076bd21d56c8fadf5fe29f365135dc7bd2',
+};
+
+/** Every trigger a migration added to a table already built, as written: the marks', the operator's rule's, OR1b's. */
+export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [
+  ...MARK_TRIGGERS,
+  ...OPERATOR_EVENT_TRIGGERS,
+  GRANTS_IN_STEP_TRIGGER,
+];
 
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
