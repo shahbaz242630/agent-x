@@ -229,10 +229,11 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
     ),
   );
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
-    // Production keeps two Zitadel copies running (SA3a); five connections each keeps staging's server's sum.
+    // Production keeps two Zitadel copies running (SA3a). Counted with a revision swap's two more, two connections
+    // each keep the sum within staging's server: 8 for Zitadel, 32 of 35 in all.
     if (APP('zitadel')(resource as unknown as PredictedResource)) {
       Object.assign(scaleOf(resource), { minReplicas: 2, maxReplicas: 2 });
-      setSetting(resource, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '5');
+      setSetting(resource, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '2');
     }
     // CI's identity and the job-start watch's (S175), both named by the environment.
     for (const who of ['release', 'job-watch']) {
@@ -5008,7 +5009,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     };
     // Staging's shape as production's: its one Zitadel copy, asleep, is short of production's two too (SA3a).
     expect(appsProblems(unsplit)).toEqual([
-      'ca-agentx-stg-zitadel: must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy in production; it says 0',
+      'ca-agentx-stg-zitadel: must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy; it says 0',
       'the deployment: must run the API split in production, web copies beside the jobs app (4D2e D13), whose identity alone keeps the anchors there',
     ]);
   });
@@ -6164,7 +6165,7 @@ describe('the load run (D2c, PL-38)', () => {
     expect(productionApps(4, 3)).toEqual([]);
     // Production keeps two running, so sign-in never hangs on one copy; staging's may still sleep at none.
     const atLeastTwo = (says: string): string =>
-      `must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy in production; it says ${says}`;
+      `must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy; it says ${says}`;
     expect(productionApps(4, 1)).toEqual([atLeastTwo('1')]);
     expect(productionApps(4, 0)).toEqual([atLeastTwo('0')]);
     expect(productionApps(4, 'two')).toEqual([
@@ -6191,6 +6192,33 @@ describe('the load run (D2c, PL-38)', () => {
         'ca-agentx-stg-zitadel must state maxReplicas as a whole number, so its connections can be counted',
       ]);
     }
+    // Production counts a revision swap too: the new revision's two copies beside the old one's four, 10 × 6 = 60.
+    // With the split API's 10 and 12 and two more, 84: a server of 99 fits it exactly, one of 98 is one short.
+    const atServer = (limit: string, from: Snapshot): Snapshot =>
+      changed(
+        (resource) =>
+          resource.type === 'Microsoft.DBforPostgreSQL/flexibleServers/configurations' &&
+          resource.name.endsWith('/max_connections'),
+        (setting) => (inside(setting, 'properties').value = limit),
+        from,
+      );
+    const productionZitadel = (fewest: unknown): Snapshot =>
+      changed(
+        APP('zitadel'),
+        (app) => {
+          setSetting(app, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '10');
+        },
+        zitadelAt(4, productionLike({ subject: true }), fewest),
+      );
+    expect(problemsOf(atServer('99', productionZitadel(2)), 'connections', production)).toEqual([]);
+    expect(problemsOf(atServer('98', productionZitadel(2)), 'connections', production)).toEqual([
+      "has 83 connections for users (max_connections 98 less Azure's 15), but the apps may hold 84: two of each API copy's pool, each Zitadel copy's, one job and one to spare",
+    ]);
+    expect(problemsOf(atServer('99', productionZitadel('two')), 'connections', production)).toEqual([
+      'ca-agentx-stg-zitadel must state minReplicas as a whole number, so its connections can be counted',
+    ]);
+    // Staging's one copy counts alone, its overlap not (32 of 35): counted as production's, it would be 42.
+    expect(problemsOf(zitadelAt(1, staging, 1), 'connections')).toEqual([]);
   });
 
   it('load-run: the API out of its load size, limits or email in a load run, or in either out of one', () => {

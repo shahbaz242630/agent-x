@@ -661,12 +661,11 @@ const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwa
  */
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
-/** The most replicas an app may run, and why; and the fewest it must keep running, where it has a floor. */
-interface MostReplicas {
-  readonly most: number;
-  readonly why: string;
-  readonly fewest?: number;
-}
+/** The most replicas an app may run, and why; and, where it has a floor, the fewest it must keep running, and why. */
+type MostReplicas = { readonly most: number; readonly why: string } & (
+  | { readonly fewest?: undefined; readonly fewestWhy?: undefined }
+  | { readonly fewest: number; readonly fewestWhy: string }
+);
 
 /**
  * The apps whose replicas must stay at one, with why: the API's jobs apart from it (4D2e D13) keep to one copy, as the
@@ -683,7 +682,9 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
  * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
  * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
- * hangs on one copy there.
+ * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes; two copies
+ * sharing one would also need the same 10 ms tick and sequence to make the same ID, and capping at four copies keeps
+ * the odds small (SA3d tracks proving it).
  */
 const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
@@ -691,6 +692,7 @@ const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>
     most: 4,
     why: "Zitadel's copies stop at four (SA3a), each holding its own database connections",
     fewest: 2,
+    fewestWhy: 'sign-in must not hang on one copy',
   },
 };
 
@@ -4252,10 +4254,9 @@ function scaleProblems(scale: unknown, limit: MostReplicas | undefined, problem:
     const replicas = limit.most === 1 ? 'one replica' : `${String(limit.most)} replicas`;
     problem(`must run at most ${replicas} (maxReplicas ${String(limit.most)}): ${limit.why}; it says ${String(most)}`);
   }
-  const floor = limit?.fewest;
-  if (floor !== undefined && !(typeof fewest === 'number' && fewest >= floor)) {
+  if (limit?.fewest !== undefined && !(typeof fewest === 'number' && fewest >= limit.fewest)) {
     problem(
-      `must keep at least ${String(floor)} replicas running (minReplicas ${String(floor)}): sign-in must not hang on one copy in production; it says ${String(fewest)}`,
+      `must keep at least ${String(limit.fewest)} replicas running (minReplicas ${String(limit.fewest)}): ${limit.fewestWhy}; it says ${String(fewest)}`,
     );
   }
   if (typeof most !== 'number' || most < 1) {
@@ -4764,26 +4765,36 @@ function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, un
   return 2 * copies * pool;
 }
 
-/** Zitadel's connections: its pool once for each copy it may run (maxReplicas, SA3a), or why they can't be counted. */
-function zitadelConnections(app: PredictedResource): number | string {
+/**
+ * Zitadel's connections (SA3a), or why they can't be counted: its pool once for each copy it may run. In production,
+ * also each copy a change to its template starts beside them: Azure starts the new revision at minReplicas while the
+ * old still runs up to maxReplicas, so pool × (maxReplicas + minReplicas). Staging's one copy's overlap stays
+ * uncounted: Zitadel isn't redeployed with each release, and staging's server has no room for it.
+ */
+function zitadelConnections(app: PredictedResource, environment: Expectations['environment']): number | string {
   const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
   if (pool === undefined) {
     return `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`;
   }
-  const copies = at(app.properties, 'template', 'scale', 'maxReplicas');
-  if (!Number.isInteger(copies)) {
-    return `${app.name} must state maxReplicas as a whole number, so its connections can be counted`;
+  const scale = at(app.properties, 'template', 'scale');
+  let copies = 0;
+  for (const name of environment === 'production' ? ['maxReplicas', 'minReplicas'] : ['maxReplicas']) {
+    const count = at(scale, name);
+    if (!Number.isInteger(count)) {
+      return `${app.name} must state ${name} as a whole number, so its connections can be counted`;
+    }
+    copies += Number(count);
   }
-  return pool * Number(copies);
+  return pool * copies;
 }
 
 /**
  * Every connection the apps may hold fits the server's (4D2e D12): two of each API copy's pool (a deploy runs the old
  * revision beside the new one), Zitadel's pool, one job and one to spare, within max_connections less what Azure keeps.
  * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's pool counts once for each
- * copy it may run (SA3a); its overlap isn't counted, as it isn't redeployed with each release.
+ * copy it may run, and in production for each a revision swap starts beside them too (`zitadelConnections`, SA3a).
  */
-const connections: Check = (snapshot, _expected, add) => {
+const connections: Check = (snapshot, expected, add) => {
   const [server] = ofType(snapshot, TYPES.server);
   if (server === undefined) return;
   const problem = (message: string): void => {
@@ -4798,7 +4809,7 @@ const connections: Check = (snapshot, _expected, add) => {
   const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
     const settings = apiSettingsOf(app);
     if (settings !== undefined) return [apiConnections(app, settings)];
-    return jobWorkloadOf(app.name) === 'zitadel' ? [zitadelConnections(app)] : [];
+    return jobWorkloadOf(app.name) === 'zitadel' ? [zitadelConnections(app, expected.environment)] : [];
   });
   for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
   const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
