@@ -25,8 +25,9 @@ export function anchorLogOf(
     readonly alertAfterMs: number;
   },
 ): AnchorLog | undefined {
-  // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it.
-  const shared = { ...services, epoch, now: () => clock.now(), cutOver: true };
+  // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it. They
+  // let shards go past what they can hold (PR3), asking for one's anchors only with it pinned or held.
+  const shared = { ...services, epoch, now: () => clock.now(), cutOver: true, evicts: true };
   if (container !== null) {
     const fetch = createOutboundFetch(azureBlobOrigins(container));
     return createAnchorLog({ ...shared, store: azureWriteOnceStore({ settings: container, fetch }) });

@@ -74,3 +74,40 @@ describe('the image prune job', () => {
     });
   });
 });
+
+describe('AZ9: the check that kept images still verify after the prune', () => {
+  const kept = jobs['image-kept-verify'];
+  if (kept === undefined) throw new Error(`${SIGNING_WORKFLOW} has no image-kept-verify job`);
+  const keptSteps = kept.steps ?? [];
+
+  it('runs on a push to main, after the prune, and can only read', () => {
+    expect(kept.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect([kept.needs ?? []].flat().sort()).toEqual(['image-prune', 'image-publish']);
+    expect(kept.permissions).toEqual({ contents: 'read', packages: 'read' });
+    expect(kept.environment).toBeUndefined();
+  });
+
+  it('checks with the pinned cosign and the prune tool alone, logging in nowhere', () => {
+    expect(keptSteps.map((step) => step.uses?.replace(/@.*/, '') ?? 'run')).toEqual([
+      'actions/checkout',
+      'actions/setup-node',
+      'run',
+      'run',
+    ]);
+    expect(keptSteps[0]?.with).toEqual({ 'persist-credentials': false, 'fetch-depth': 0 });
+    expect(keptSteps[2]?.run).toBe('node tooling/cosign/install.ts');
+    expect(keptSteps[3]).toEqual({
+      name: "Check every kept image up to this run's",
+      env: {
+        GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+        COMMIT: '${{ github.sha }}',
+        DIGEST: '${{ needs.image-publish.outputs.digest }}',
+      },
+      run: 'node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"',
+    });
+  });
+
+  it('holds nothing back: no job waits on it', () => {
+    expect(Object.values(jobs).filter((other) => [other.needs ?? []].flat().includes('image-kept-verify'))).toEqual([]);
+  });
+});

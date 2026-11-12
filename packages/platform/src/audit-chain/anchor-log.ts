@@ -62,8 +62,19 @@
 // made since it last read an old file of theirs, by when every older version has seen the marker and stopped anchoring;
 // from then on the old files are read no more, unless a shard's own snapshots are all spoiled back to its first file,
 // when they stand under it again. A version from before the marker reads none of the store once it is there (PR0). A
-// line in another shard's file is skipped, and the alarm (`misplaced`). All shards are held, as the old store was: taking
-// them in and out of memory is PR3.
+// line in another shard's file is skipped, and the alarm (`misplaced`).
+//
+// Shards in and out of memory (PL-65 PR3): a log set to (`evicts`, the API's) lets shards go once what it holds passes
+// what it can, the least recently used first, down to `EVICT_TO` of it, and only in the sharded layout, where a shard's
+// own files hold all of it. Never one with lines waiting to be written or in a file unsent or being made, one pinned
+// (`pin`: the anchor check while it compares a chain, so the hand-off's first anchor), the platform chain's, or one
+// that stood on the old files. A shard let go is held whole or not at all: its chains say nothing
+// (`latest` and the rest give nothing, so Tx A waits, `anchor_pending`), nothing of it is kept (`keep` and the rest are
+// refused, said), its lines in any file read are passed over, and no file of it is written, so no snapshot of it can
+// ever stand for less than the whole. `pin` reads it again as a first read does, every signature checked again, from
+// its folder's own list, its rebases first; one with no sound snapshot of its own stands on the old files, as at a
+// first read, and is never let go again. One that can't be read whole or held stays let go: its organisations wait,
+// said, and no other's do. Its organisations still count as seen.
 //
 // So the API identity's token alone (add and read) can raise alarms, and can make payments
 // wait after a restart: by more than a day's spoiled snapshots named newer than the last
@@ -241,6 +252,34 @@ const LISTS_A_WRITE = 8;
 /** How many shards' folders a read walks again, the hourly walk spread over the runs: all 256 within the hour. */
 const WALKS_A_READ = 32;
 
+/**
+ * How far below what it can hold a log lets shards go to, once past it (PR3): far enough that the next few lines read
+ * don't let another go, near enough that little is read again.
+ */
+const EVICT_TO = 0.8;
+
+/**
+ * What an organisation seen in the store, whose shard is let go, is counted at: its chain's name, and what is last known
+ * of it (its place, when its last pass began, when its place was owed), in a map.
+ */
+const SEEN_NAME_BYTES = 160;
+
+/** What is last known of a chain: its anchored place, when its last pass began, and when its place reached was owed. */
+export interface LastKnown {
+  readonly seq?: bigint | undefined;
+  readonly passedAt?: number | undefined;
+  readonly placeAt?: number | undefined;
+}
+
+/**
+ * How many shards read again in an hour say the shards held are too few for the chains in use: more than every shard
+ * read once over. Past it, what is read each hour is the whole store again, at about a dozen calls a shard.
+ */
+const CHURN_RELOADS = SHARDS;
+
+/** The platform chain's shard: never let go, as more than the anchor check reads its anchor (job-list.ts). */
+const PLATFORM_SHARD = shardOf('platform');
+
 /** How many rebase files a list asks: there are a handful in an epoch. */
 const REBASES_A_PAGE = 100;
 
@@ -299,6 +338,35 @@ export interface AnchorLog extends AnchorStore, PassRecord {
   writeFailed(error: unknown): void;
   /** When the newest file this process has read or written was named: where another process last left off. */
   lastFileAt(): Date | undefined;
+  /**
+   * Whether the chain's shard is held whole (PL-65 PR3): until it is, nothing of the chain is said or kept. Always, in a
+   * log that never lets a shard go; whether the store is read at all is `state`.
+   */
+  holds(chain: Chain): boolean;
+  /**
+   * Holds the chain's shard, read again first if it was let go (once the store has been read whole): never let go
+   * until the release given is called. Nothing, if it can't be read whole; the reason said.
+   */
+  pin(chain: Chain): Promise<(() => void) | undefined>;
+  /**
+   * What is last known of the chain, held or let go, with no read (PR3): what a caller sizing or ordering work by every
+   * chain goes by, never reading a shard back for it. Nothing for a chain never seen.
+   */
+  lastKnown(chain: Chain): LastKnown | undefined;
+  /**
+   * What is held, by this log's count against what it can hold; the records its tables really use, and the bytes their
+   * buffers take; and how many shards are held.
+   */
+  memoryHeld(): {
+    readonly bytes: number;
+    readonly mostBytes: number;
+    readonly records: number;
+    readonly allocated: number;
+    readonly shards: number;
+    /** Shards pinned now, and organisations known only as let go. */
+    readonly pinned: number;
+    readonly elsewhere: number;
+  };
 }
 
 /** A file made, not yet known to be in the store. Tried again under the same name, with the same bytes. */
@@ -582,6 +650,7 @@ export function createAnchorLog({
   alertAfterMs,
   mostFileBytes = heapsFileBytes(),
   cutOver = false,
+  evicts = false,
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -598,6 +667,11 @@ export function createAnchorLog({
    * API's jobs, which anchor. Whatever this says, a store moved on is read and written as the shards.
    */
   readonly cutOver?: boolean;
+  /**
+   * Whether shards are let go past what this process can hold (PL-65 PR3): the API's, whose callers ask `holds` and
+   * `pin`. The operator's tools read a chain's anchor after a read and would take nothing for none: theirs never are.
+   */
+  readonly evicts?: boolean;
 }): AnchorLog {
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   // Every table packed (packed-lines.ts, PL-65): each line a record, not an object. Where the same object stood in two
@@ -661,8 +735,55 @@ export function createAnchorLog({
     return marks !== undefined && marks.seeded > marks.old;
   };
   const fromRebase = new WeakSet<Anchor>();
+  // Shards in and out of memory (PR3). Which are held whole; when each was last used, by a count; how many pins each has;
+  // those that stood on the old files; those a file is being made of; the shard being read again, if
+  // any; each shard's read again under way; and the organisations seen in the store whose shard was let go.
+  const resident = Array.from({ length: SHARDS }, () => true);
+  const usedAt = new Float64Array(SHARDS);
+  const pins = new Uint32Array(SHARDS);
+  let uses = 0;
+  const bareShards = new Set<number>();
+  const making = new Set<number>();
+  let loading: number | undefined;
+  const loads = new Map<number, Promise<void>>();
+  const seenElsewhere = new Map<string, LastKnown>();
+  /** A line of an organisation whose shard is let go, as what is last known of it: the newest of each kind. */
+  const elsewhere = (chain: string, kind: LineKind, { seq, at }: { seq: bigint; at: Date }): void => {
+    if (!chain.startsWith(ORGANISATION)) return;
+    const was = seenElsewhere.get(chain) ?? {};
+    const ms = at.getTime();
+    const later = (known: number | undefined): number => Math.max(known ?? ms, ms);
+    if (kind === 'a') seenElsewhere.set(chain, { ...was, seq: was.seq === undefined || seq > was.seq ? seq : was.seq });
+    else if (kind === 'p') seenElsewhere.set(chain, { ...was, passedAt: later(was.passedAt) });
+    else seenElsewhere.set(chain, { ...was, placeAt: later(was.placeAt) });
+  };
+  /** Whether a shard is held whole. */
+  const isResident = (shard: number): boolean => resident[shard] === true;
+  /** A chain's shard: as a table holding it keeps it, else worked out. */
+  const shardOfChain = (chain: string): number =>
+    anchors.shardOf(chain) ?? sides.p.shardOf(chain) ?? sides.u.shardOf(chain) ?? shardOf(chain);
+  /** Whether a chain's shard is held whole, and so what is held of it says all the store does: used, if so. */
+  const visible = (chain: string): boolean => {
+    if (!evicts) return true;
+    const shard = shardOfChain(chain);
+    if (!isResident(shard)) return false;
+    uses += 1;
+    usedAt[shard] = uses;
+    return true;
+  };
+  /** Whether a line of this shard read now is taken in: held; while one is read again, that one alone. */
+  const takes = (shard: number): boolean => !evicts || (loading === undefined ? isResident(shard) : loading === shard);
+  /** Whether a line may be kept for this chain: its shard held whole. Anything else said, and nothing kept. */
+  const keepable = (chain: string, kind: LineKind): boolean => {
+    if (visible(chain)) return true;
+    const organisation = chain.startsWith(ORGANISATION);
+    const log = organisation ? logger.child({ orgId: chain.slice(ORGANISATION.length) }) : logger;
+    log.warn('audit.anchor_shard_not_held', { kind, shard: shardHex(shardOfChain(chain)) });
+    return false;
+  };
   /** A chain's anchor, a copy: one that is a rebase's is known to `keep` by it as such, as the one object was before. */
   const latest = (chain: string): Anchor | undefined => {
+    if (!visible(chain)) return undefined;
     const anchor = anchors.get(chain);
     if (anchor !== undefined && anchors.marked(chain)) fromRebase.add(anchor);
     return anchor;
@@ -697,7 +818,10 @@ export function createAnchorLog({
     takenLines * TAKEN_LINE_BYTES +
     (unsent?.stamps.length ?? 0) * UNSENT_LINE_BYTES +
     (written.size + awaited.size + refusedChanges.size + readSinceWalk.size + unlisted.size + lost.size) *
-      WRITTEN_NAME_BYTES;
+      WRITTEN_NAME_BYTES +
+    seenElsewhere.size * SEEN_NAME_BYTES;
+  /** What is held, by the budget's count, with `staging` lines a read has yet to merge. */
+  const heldBytes = (staging: number): number => (linesHeld() + staging) * KEPT_LINE_BYTES + besideLines();
   /** A line this process made, read back from its own text: `readsBack` held when the file was made, so it does. */
   const readBack = (kind: LineKind, text: string): Anchor | Progress => {
     const read = signedLineOf(kind, parsed(text) as Record<string, unknown>, epoch);
@@ -776,27 +900,70 @@ export function createAnchorLog({
       alarm('file', { ...where, problem: got, mostBytes: mostFileBytes });
       return { sound: false };
     }
+    return readJudged({ bytes: got, name, shard, kind, fileAt, where }, stage, touched);
+  };
+
+  /**
+   * A file fetched: its lines taken in as read, then judged. Apart from `opened`, which fetches it, so each stays short.
+   * A shard's file, or its lines, past what can be held lets that shard go where it may (`outgrown`).
+   */
+  const readJudged = async (
+    {
+      bytes,
+      name,
+      shard,
+      kind,
+      fileAt,
+      where,
+    }: { bytes: Buffer; name: string; shard: number | undefined; kind: Kind; fileAt: string; where: Where },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+  ): Promise<{ sound: boolean }> => {
     const belongs = shard === undefined ? undefined : (chain: string) => shardOf(chain) === shard;
     const take = lineTaken(stage, kind, fileAt);
     const moving = shard === undefined && layout === 'moving';
     let file: Awaited<ReturnType<typeof readFile>>;
     try {
-      file = await readFile(keys, { bytes: got, name, epoch, mostBytes: mostFileBytes, belongs }, (line, lineKind) => {
+      file = await readFile(keys, { bytes, name, epoch, mostBytes: mostFileBytes, belongs }, (line, lineKind) => {
         if (moving) touched.add(shardOf(line.chain));
         take(line, lineKind);
       });
     } catch (error) {
-      if (error instanceof BeyondMemory) throw error;
+      if (error instanceof BeyondMemory) return outgrown(error, shard, stage);
       alarm('file', { ...where, err: error });
       return { sound: false };
     }
-    return { sound: judgedFile(file, where) };
+    try {
+      return { sound: judgedFile(file, where) };
+    } catch (error) {
+      if (error instanceof BeyondMemory) return outgrown(error, shard, stage);
+      throw error;
+    }
+  };
+
+  /**
+   * A sound shard's file, or its lines, past what can be held: that shard let go if it may be (PR3), so it waits alone,
+   * and the read goes on; it is said when it is asked for again. Otherwise the read is past what can be held, as before.
+   */
+  const outgrown = (error: BeyondMemory, shard: number | undefined, stage: PackedLines<Anchor>): { sound: false } => {
+    if (shard === undefined || !evicts || layout !== 'sharded' || !evictable(shard, waitingShards())) throw error;
+    purged(new Set([shard]), stage);
+    logger.info('audit.anchor_shards_evicted', { shards: 1, outgrown: shardHex(shard), mostBytes: mostFileBytes });
+    return { sound: false };
   };
 
   /** What takes a file's lines in as each is read: dated before its chain's rebase, the chain as it was, passed over. */
   const lineTaken =
     (stage: PackedLines<Anchor>, kind: Kind, fileAt: string) =>
     (line: Anchor | Progress, lineKind: LineKind): void => {
+      // A shard let go is held whole or not at all: its lines are passed over, its read again takes them all (PR3).
+      const shard = shardOf(line.chain);
+      if (!takes(shard)) {
+        if (!isResident(shard)) elsewhere(line.chain, lineKind, line);
+        return;
+      }
+      // Read back whole: held again, so no longer counted as known elsewhere as well.
+      if (loading === shard) seenElsewhere.delete(line.chain);
       // Each line read a new one, as each was a new object: stamped as it comes in.
       if (lineKind === 'a') {
         if (!rebasedAfter(line.chain, line.at)) staged(stage, line, stamped(), kind, fileAt);
@@ -804,6 +971,13 @@ export function createAnchorLog({
         if (!rebasedAfter(line.chain, line.began)) placeLine(stage, line, stamped(), kind, fileAt);
       } else passLine(stage, line, stamped(), kind, fileAt);
     };
+
+  /** Where a file is, for its alarms: its kind, when it was named, and its shard if it has one. */
+  interface Where {
+    kind: Kind;
+    fileAt: string;
+    shard?: string;
+  }
 
   /** Whether a file read stands for what it should; anything wrong the alarm. Sound but past what can be held, thrown. */
   const judgedFile = (
@@ -856,8 +1030,88 @@ export function createAnchorLog({
 
   /** Whether what's held, what this read staged and what a file being made or unsent holds are past what this process can hold. */
   const pastMemory = (stage: PackedLines<Anchor>, kind: Kind, fileAt: string): void => {
-    if ((linesHeld() + stage.size) * KEPT_LINE_BYTES + besideLines() > mostFileBytes)
-      throw new BeyondMemory(kind, fileAt);
+    if (heldBytes(stage.size) <= mostFileBytes) return;
+    letGo(stage);
+    if (heldBytes(stage.size) > mostFileBytes) throw new BeyondMemory(kind, fileAt);
+  };
+
+  /** The shards with a line waiting to be written. */
+  const waitingShards = (): Set<number> => shardsIn(waitingTables, () => true, new Set<number>());
+
+  /** Whether a shard may be let go now: held, in the sharded layout, and none of what keeps one in (PR3). */
+  const evictable = (shard: number, waiting: ReadonlySet<number>): boolean =>
+    isResident(shard) &&
+    pins[shard] === 0 &&
+    shard !== PLATFORM_SHARD &&
+    !bareShards.has(shard) &&
+    !making.has(shard) &&
+    unsent?.shard !== shard &&
+    !waiting.has(shard);
+
+  /**
+   * Past what this process can hold, in the sharded layout of a log that evicts: shards let go, the least recently used
+   * first, until what is held is under `EVICT_TO` of it, or none is left that may go. `stage`, a read's lines yet to be
+   * merged, counts and goes with its shard.
+   */
+  const letGo = (stage: PackedLines<Anchor> | undefined): void => {
+    if (!evicts || layout !== 'sharded' || heldBytes(stage?.size ?? 0) <= mostFileBytes) return;
+    const waiting = waitingShards();
+    const tables = stage === undefined ? heldTables : [...heldTables, stage];
+    const counts = new Float64Array(SHARDS);
+    for (const table of tables) {
+      for (const chain of table.keys()) {
+        // Every chain a table holds has its shard: one without would be counted nowhere and purged with none.
+        const shard = table.shardOf(chain);
+        if (shard !== undefined) counts[shard] = (counts[shard] ?? 0) + 1;
+      }
+    }
+    const victims = new Set<number>();
+    let bytes = heldBytes(stage?.size ?? 0);
+    const byUse = Array.from({ length: SHARDS }, (_, shard) => shard)
+      .filter((shard) => (counts[shard] ?? 0) > 0 && evictable(shard, waiting))
+      .toSorted((one, other) => (usedAt[one] ?? 0) - (usedAt[other] ?? 0));
+    for (const shard of byUse) {
+      if (bytes <= mostFileBytes * EVICT_TO) break;
+      victims.add(shard);
+      bytes -= (counts[shard] ?? 0) * KEPT_LINE_BYTES;
+    }
+    if (victims.size === 0) return;
+    purged(victims, stage);
+    logger.info('audit.anchor_shards_evicted', {
+      shards: victims.size,
+      held: SHARDS - resident.filter((held) => !held).length,
+      bytes: heldBytes(stage?.size ?? 0),
+      mostBytes: mostFileBytes,
+    });
+  };
+
+  /**
+   * Shards let go: every line of theirs out of every table, and every name of theirs this process would pass over as
+   * read, so reading one again reads every file of it. Its organisations still count as seen.
+   */
+  const purged = (shards: ReadonlySet<number>, stage: PackedLines<Anchor> | undefined): void => {
+    for (const table of stage === undefined ? heldTables : [...heldTables, stage]) purgedFrom(table, shards);
+    for (const shard of shards) resident[shard] = false;
+    namesForgotten(shards);
+  };
+
+  /** One table's lines of these shards out, each as what is last known of its chain: a table at a time, kept short. */
+  const purgedFrom = (table: PackedLines<Anchor>, shards: ReadonlySet<number>): void => {
+    const kind: LineKind = table === sides.p ? 'p' : table === sides.u ? 'u' : 'a';
+    for (const chain of table.keys()) {
+      if (!shards.has(table.shardOf(chain) ?? -1)) continue;
+      const line = table.get(chain);
+      if (line !== undefined) elsewhere(chain, kind, line);
+      table.delete(chain);
+    }
+  };
+
+  /** Every name of these shards' files this process would pass over as read, forgotten: reading one again reads them. */
+  const namesForgotten = (shards: ReadonlySet<number>): void => {
+    const folders = [...shards].map((shard) => shardFolder(epoch, shard));
+    const ofThem = (name: string): boolean => folders.some((folderName) => name.startsWith(folderName));
+    for (const name of written) if (ofThem(name)) written.delete(name);
+    for (const name of readSinceWalk.keys()) if (ofThem(name)) readSinceWalk.delete(name);
   };
 
   /** A finished pass as it is read: the latest begun kept, at once, as it moves nothing a check compares with. */
@@ -884,18 +1138,24 @@ export function createAnchorLog({
    * The snapshots not read yet, newest first, back to the first with nothing wrong: `base`, the one deltas count from.
    * Thrown if none is left to stand for the whole, as with a failed call: what's in memory already does, once there is any.
    */
-  const newerSnapshots = async (foreign: { count: number }, stage: PackedLines<Anchor>, touched: Set<number>) => {
+  const newerSnapshots = async (
+    foreign: { count: number },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+    // The newest sound snapshot read: none, when one shard is read again whole (PR3).
+    from: string | undefined,
+  ) => {
     let spoiled = 0;
     for await (const name of filesOf('snapshots', SNAPSHOTS_A_PAGE, foreign)) {
       const countdown = countdownOf('snapshots', name);
-      if (snapshotFrom !== undefined && countdown >= snapshotFrom) break;
+      if (from !== undefined && countdown >= from) break;
       if (spoiled > MOST_SPOILED_SNAPSHOTS) throw new Error(tooManySpoiled(spoiled));
       const file = await opened({ kind: 'snapshots', countdown }, name, stage, touched);
       if (file.sound) return { base: countdown, sound: countdown };
       spoiled += 1;
     }
-    if (spoiled > 0 && snapshotFrom === undefined) throw new Error(tooManySpoiled(spoiled));
-    return { base: snapshotFrom, sound: undefined };
+    if (spoiled > 0 && from === undefined) throw new Error(tooManySpoiled(spoiled));
+    return { base: from, sound: undefined };
   };
 
   /**
@@ -906,17 +1166,16 @@ export function createAnchorLog({
     snapshot: string | undefined,
     foreign: { count: number },
     stage: PackedLines<Anchor>,
-    touched: Set<number>,
+    { touched, again }: { touched: Set<number>; again: boolean },
   ) => {
     let newest: string | undefined;
     let files = 0;
+    // Read again for one shard (PR3): back to the snapshot whatever was read before, this process's own deltas too.
+    const from = again ? undefined : deltasFrom;
     for await (const name of filesOf('deltas', DELTAS_A_PAGE, foreign)) {
-      const old =
-        deltasFrom === undefined
-          ? snapshot !== undefined && countdownOf('deltas', name) > snapshot
-          : name >= deltasFrom;
+      const old = from === undefined ? snapshot !== undefined && countdownOf('deltas', name) > snapshot : name >= from;
       if (old) break;
-      if (written.delete(name)) {
+      if (!again && written.delete(name)) {
         newest ??= name;
         continue;
       }
@@ -952,10 +1211,9 @@ export function createAnchorLog({
     rebases.set(rebase.chain, rebase);
     const held = anchors.get(rebase.chain);
     const moved = held === undefined || held.at < rebase.at;
-    if (moved) {
-      const { chain, seq, hash, macKeyVersion, at, keyVersion, signature } = rebase;
-      anchors.set({ chain, seq, hash, macKeyVersion, at, keyVersion, signature }, stamped(), true);
-    }
+    // A shard let go takes its rebases in first when it is read again (PR3).
+    if (moved && takes(shardOf(rebase.chain))) rebaseAnchored(rebase);
+    else if (moved) elsewhere(rebase.chain, 'a', rebase);
     const waiting = pending.get(rebase.chain);
     if (waiting !== undefined && waiting.at < rebase.at) pending.delete(rebase.chain);
     for (const places of [sides.u, pendingSides.u]) {
@@ -973,6 +1231,11 @@ export function createAnchorLog({
       reason: rebase.reason,
       at: rebase.at.toISOString(),
     });
+  };
+
+  /** A rebase's anchor as the chain's, marked as a rebase's: it isn't signed with this key. */
+  const rebaseAnchored = ({ chain, seq, hash, macKeyVersion, at, keyVersion, signature }: Rebase): void => {
+    anchors.set({ chain, seq, hash, macKeyVersion, at, keyVersion, signature }, stamped(), true);
   };
 
   /** One rebase file: taken in, or the alarm; one dated ahead of the clock is read again next time. */
@@ -1134,6 +1397,8 @@ export function createAnchorLog({
       const page = await store.list(start, SHARD_FILES_A_PAGE, after);
       foreign.count += page.foreign;
       for (const name of page.names) {
+        // Let go part way, or never held: read again whole, when asked for.
+        if (!takes(shard)) return walking.found();
         const reading = { shard, name, rest: name.slice(start.length), walking, stage, touched, foreign };
         if (await shardFileRead(reading)) return walking.found();
       }
@@ -1228,9 +1493,14 @@ export function createAnchorLog({
   };
 
   /** The old files not read yet: the snapshots back to a sound one, and every delta since. */
-  const readOld = async (foreign: { count: number }, stage: PackedLines<Anchor>, touched: Set<number>) => {
-    const snapshots = await newerSnapshots(foreign, stage, touched);
-    const deltas = await newerDeltas(snapshots.base, foreign, stage, touched);
+  const readOld = async (
+    foreign: { count: number },
+    stage: PackedLines<Anchor>,
+    touched: Set<number>,
+    again = false,
+  ) => {
+    const snapshots = await newerSnapshots(foreign, stage, touched, again ? undefined : snapshotFrom);
+    const deltas = await newerDeltas(snapshots.base, foreign, stage, { touched, again });
     return { snapshots, deltas };
   };
 
@@ -1258,6 +1528,8 @@ export function createAnchorLog({
   ): Promise<Changes> => {
     const seen: Changes = { newest: undefined, missing: new Map(), gotten: [], givenUp: [], snapshots: [] };
     for (const [name, at] of awaited) {
+      // Of a shard let go: looked for once it is held again, its own walk meanwhile reading whatever has landed.
+      if (!takes(shardOfName(name))) continue;
       if (now().getTime() - at > SNAPSHOT_EVERY_MS) seen.givenUp.push(name);
       else await namedFileRead(name, at, { stage, touched, seen });
     }
@@ -1354,6 +1626,8 @@ export function createAnchorLog({
   ): Promise<void> => {
     const [, hex = '', rest = ''] = LISTED_FILE.exec(name.slice(shardsFolder(epoch).length)) ?? [];
     const shard = Number.parseInt(hex, 16);
+    // Of a shard let go: its read again lists its folder, and finds the file there.
+    if (!takes(shard)) return;
     const kind: Kind = rest.endsWith('-s') ? 'snapshots' : 'deltas';
     const countdown = rest.slice(0, 13);
     const file = await opened({ kind, countdown, shard, named: true }, name, stage, touched);
@@ -1365,25 +1639,40 @@ export function createAnchorLog({
     if (file.sound && kind === 'snapshots') seen.snapshots.push([shard, countdown]);
   };
 
+  /** The shard of a shard file's whole name. */
+  const shardOfName = (name: string): number =>
+    Number.parseInt(name.slice(shardsFolder(epoch).length, shardsFolder(epoch).length + 2), 16);
+
   /** A read of the lists of changes, kept only once the whole read is. */
   const changesRead = ({ newest, missing, gotten, givenUp, snapshots }: Changes, floor: string): void => {
-    for (const name of gotten) readSinceWalk.set(name, 0);
+    // Not of a shard let go part way: its read again must read them.
+    for (const name of gotten) if (takes(shardOfName(name))) readSinceWalk.set(name, 0);
+    const from = changesMoved(newest, floor);
+    for (const name of refusedChanges)
+      if (name.slice(changesFolder(epoch).length, -37) > from) refusedChanges.delete(name);
+    for (const name of [...gotten, ...givenUp]) awaited.delete(name);
+    lostKept(givenUp);
+    for (const [name, at] of missing) awaited.set(name, at);
+    for (const [shard, countdown] of snapshots) snapshotMet(shard, countdown);
+  };
+
+  /** The newest list of changes read moved on to: where the next read of them stops. Apart, to keep `changesRead` short. */
+  const changesMoved = (newest: Changes['newest'], floor: string): string => {
     if (newest !== undefined && newest.countdown === changesFrom?.countdown) {
       for (const name of newest.names) changesFrom.names.add(name);
     } else if (newest !== undefined) changesFrom = newest;
     // At the first read with no list since the walk's few minutes: from there on.
     else changesFrom ??= { countdown: floor, names: new Set() };
-    const from = changesFrom.countdown;
-    for (const name of refusedChanges)
-      if (name.slice(changesFolder(epoch).length, -37) > from) refusedChanges.delete(name);
-    for (const name of [...gotten, ...givenUp]) awaited.delete(name);
+    return changesFrom.countdown;
+  };
+
+  /** Names a list gave and the store never did, for an hour: each shard's next walk reaches back past the oldest. */
+  const lostKept = (givenUp: readonly string[]): void => {
     for (const name of givenUp) {
-      const shard = Number.parseInt(name.slice(shardsFolder(epoch).length, shardsFolder(epoch).length + 2), 16);
+      const shard = shardOfName(name);
       const at = LAST_MS - Number(name.slice(shardsFolder(epoch).length + 3, shardsFolder(epoch).length + 16));
       lost.set(shard, Math.min(at, lost.get(shard) ?? at));
     }
-    for (const [name, at] of missing) awaited.set(name, at);
-    for (const [shard, countdown] of snapshots) snapshotMet(shard, countdown);
   };
 
   /** A sound snapshot of a shard read: its newest counts when the next is due. */
@@ -1418,7 +1707,11 @@ export function createAnchorLog({
 
   /** A read's marks, kept only once the whole read is: the newest sound file and snapshot of each shard. */
   const shardsRead = (found: Awaited<ReturnType<typeof readShards>>): void => {
-    for (const { shard, newest, snapshot, read } of found) {
+    for (const { shard, newest, snapshot, read, bare } of found) {
+      // A shard let go part way: what its walk read is gone, so is read again (PR3).
+      if (!takes(shard)) continue;
+      // Stood on the old files, the migration done: never let go, as its own files alone can't give it back.
+      if (bare && layout === 'sharded') bareShards.add(shard);
       for (const name of read) readSinceWalk.set(name, shard);
       const marks = shardMarks[shard];
       if (marks === undefined) continue;
@@ -1503,7 +1796,126 @@ export function createAnchorLog({
           if (marks !== undefined) marks.old = stamp;
         }
       }
+      // What keeps added since, or a read past what can be held with shards pinned, let go now if it may be.
+      letGo(undefined);
+      strained();
     }
+  };
+
+  // Reads and shards' reads again, one at a time: each walks the marks and tables the other moves. While one runs, a
+  // shard is let go only by it, as it counts what it has yet to merge.
+  let turns: Promise<unknown> = Promise.resolve();
+  let running = 0;
+  const inTurn = (work: () => Promise<void>): Promise<void> => {
+    const run = turns.then(async () => {
+      running += 1;
+      try {
+        await work();
+      } finally {
+        running -= 1;
+      }
+    });
+    turns = run;
+    return run;
+  };
+
+  /**
+   * A shard let go, read again as a first read reads it (PR3): its rebases first, then its folder listed back to its
+   * newest sound snapshot past at most a day's spoiled ones, every line's signature or its file's closing line checked
+   * again, a line of another shard the alarm. Its lines go in only once all are read, and only then is it held, so a
+   * part read never says a chain was never anchored. One with no sound snapshot of its own stands on the old files, as
+   * at a first read, read whole for it alone. One that can't be read, or can't be held beside what is pinned and
+   * waiting, stays let go, said, and is tried again when next asked for.
+   */
+  const shardLoaded = async (shard: number): Promise<void> => {
+    if (isResident(shard)) return;
+    const began = now().getTime();
+    const stage = packedLines<Anchor>(false);
+    const foreign = { count: 0 };
+    loading = shard;
+    try {
+      for (const rebase of rebases.values()) {
+        if (shardOf(rebase.chain) !== shard) continue;
+        rebaseAnchored(rebase);
+        seenElsewhere.delete(rebase.chain);
+      }
+      const found = { shard, ...(await readShard(shard, foreign, stage, new Set<number>(), undefined)) };
+      // No sound snapshot of its own: it stands on the old files, as at a first read, read whole for it alone. Never
+      // let go again, as that is a read of the whole old store.
+      if (found.bare) {
+        await readOld(foreign, stage, new Set<number>(), true);
+        bareShards.add(shard);
+      }
+      for (const { line, stamp } of stage.held()) merge(anchors, line, stamp);
+      resident[shard] = true;
+      uses += 1;
+      usedAt[shard] = uses;
+      shardsRead([found]);
+      walked(began, [found]);
+      reloads += 1;
+      logger.info('audit.anchor_shard_loaded', { shard: shardHex(shard), files: found.read.length });
+    } catch (error) {
+      purged(new Set([shard]), stage);
+      const reason = error instanceof BeyondMemory ? 'memory' : 'store';
+      logger.error('audit.anchor_shard_unreadable', {
+        shard: shardHex(shard),
+        reason,
+        ...(reason === 'store' ? { err: error } : { mostBytes: mostFileBytes }),
+      });
+    } finally {
+      loading = undefined;
+      if (foreign.count > 0) logger.warn('audit.anchor_store_foreign', { files: foreign.count });
+    }
+  };
+
+  /** Whether the shard is held, read again first if it was let go and the store has been read whole. */
+  const held = async (shard: number): Promise<boolean> => {
+    if (isResident(shard)) return true;
+    if (state !== 'read') return false;
+    let load = loads.get(shard);
+    if (load === undefined) {
+      load = inTurn(() => shardLoaded(shard)).finally(() => loads.delete(shard));
+      loads.set(shard, load);
+    }
+    await load;
+    return isResident(shard);
+  };
+
+  /** Past what can be held with no read under way to count its own: shards let go now. */
+  const trimmed = (): void => {
+    if (running === 0) letGo(undefined);
+    strained();
+  };
+
+  // Within the hour begun at `strainFrom`: shards read again, and whether what is held stayed past the budget after
+  // letting go all it could (pinned shards and lines waiting).
+  let strainFrom: number | undefined;
+  let reloads = 0;
+  let pastBudget = false;
+
+  /**
+   * In a log that lets shards go, said at most hourly, each a warning: held past the budget with nothing more that may
+   * go, or more shards read again than there are. Never the error a log that holds every shard says past half.
+   */
+  const strained = (): void => {
+    if (!evicts || layout !== 'sharded') return;
+    const at = now().getTime();
+    const bytes = heldBytes(0);
+    if (bytes > mostFileBytes) pastBudget = true;
+    strainFrom ??= at;
+    if (at - strainFrom < SNAPSHOT_EVERY_MS) return;
+    if (pastBudget) {
+      logger.warn('audit.anchor_shards_past_budget', {
+        bytes,
+        mostBytes: mostFileBytes,
+        pinned: pins.filter((count) => count > 0).length,
+        waiting: waitingShards().size,
+      });
+    }
+    if (reloads > CHURN_RELOADS) logger.warn('audit.anchor_shards_churning', { reloads, withinMs: at - strainFrom });
+    strainFrom = at;
+    reloads = 0;
+    pastBudget = false;
   };
 
   const writeFailed = (error: unknown): void => {
@@ -1643,6 +2055,8 @@ export function createAnchorLog({
    * file is named in its folder and closes with a version 2 line, over the hash of every line before it.
    */
   const madeFile = async ({ kind, shard }: { kind: Kind; shard?: number }): Promise<Unsent> => {
+    // Never a file of a shard let go: a snapshot of it would stand for less than the whole (PR3). Nothing waits in one.
+    if (shard !== undefined && evicts && !isResident(shard)) throw new Error('a file of a shard not held');
     const at = now().getTime();
     // Taken before the lines are: an old file's line read after it leaves the shard's snapshot standing for less.
     const seedStamp = shard !== undefined && kind === 'snapshots' && layout === 'moving' ? stamped() : undefined;
@@ -1733,6 +2147,8 @@ export function createAnchorLog({
    * hourly, not each minute's delta; in the shards, once a flush that made any.
    */
   const nearMemory = (kind: Kind): void => {
+    // Past half is how a log that lets shards go runs: said instead when it can't get under, or reads too much again.
+    if (evicts && layout === 'sharded') return;
     const held = linesHeld();
     if (kind === 'snapshots' && held * KEPT_LINE_BYTES > mostFileBytes * NEAR_MEMORY) {
       logger.error('audit.anchor_store_near_memory', {
@@ -1815,8 +2231,14 @@ export function createAnchorLog({
     try {
       if (unsent !== undefined) await send(unsent);
       for (const shard of shardsDue()) {
-        unsent = await madeFile({ kind: shardKind(shard), shard });
-        await send(unsent);
+        // Held in until its file is in the store, or unsent: what it takes stops waiting before it is unsent.
+        making.add(shard);
+        try {
+          unsent = await madeFile({ kind: shardKind(shard), shard });
+          await send(unsent);
+        } finally {
+          making.delete(shard);
+        }
       }
     } finally {
       await changesWritten();
@@ -1900,6 +2322,9 @@ export function createAnchorLog({
       writeFailingSince = undefined;
     } catch (error) {
       writeFailed(error);
+    } finally {
+      // What was written waits no more, so its shard may go.
+      trimmed();
     }
   };
 
@@ -1909,6 +2334,8 @@ export function createAnchorLog({
     keep(anchor: Anchor) {
       // Signed before the chain's rebase, by a check that began on the chain as it was: nothing to keep.
       if (rebasedAfter(anchor.chain, anchor.at)) return;
+      // Its shard let go: compared with nothing, so never kept, nor a snapshot made of the shard without the rest.
+      if (!keepable(anchor.chain, 'a')) return;
       // The check reads the anchor again first; this holds should a caller not, as a wound-back head must never replace it.
       const held = anchors.get(anchor.chain);
       if (
@@ -1923,8 +2350,12 @@ export function createAnchorLog({
       anchors.set(anchor, stamp, fromRebase.has(anchor));
       pending.set(anchor, stamp);
     },
-    lastPass: (chain: Chain) => sides.p.get(chainName(chain)),
+    lastPass(chain: Chain) {
+      const name = chainName(chain);
+      return visible(name) ? sides.p.get(name) : undefined;
+    },
     keepPass(line: Anchor) {
+      if (!keepable(line.chain, 'p')) return;
       const stamp = stamped();
       sides.p.set(line, stamp);
       pendingSides.p.set(line, stamp);
@@ -1933,12 +2364,14 @@ export function createAnchorLog({
       pendingSides.u.delete(line.chain);
     },
     lastProgress(chain: Chain) {
-      const line = sides.u.get(chainName(chain));
+      const name = chainName(chain);
+      const line = visible(name) ? sides.u.get(name) : undefined;
       return line === undefined || overtaken(line) ? undefined : line;
     },
     keepProgress(line: Progress) {
       // A pass that began before the chain's rebase read the chain as it was: its place goes nowhere.
       if (rebasedAfter(line.chain, line.began)) return;
+      if (!keepable(line.chain, 'u')) return;
       const stamp = stamped();
       sides.u.set(line, stamp);
       pendingSides.u.set(line, stamp);
@@ -1955,17 +2388,66 @@ export function createAnchorLog({
       return times.length === 0 ? undefined : new Date(Math.max(...times));
     },
     read(): Promise<void> {
-      reading ??= catchUp().finally(() => {
+      reading ??= inTurn(catchUp).finally(() => {
         reading = undefined;
       });
       return reading;
     },
     state: () => state,
     readFailed,
-    organisations: () =>
-      [...anchors.keys()]
-        .filter((name) => name.startsWith(ORGANISATION))
-        .map((name) => name.slice(ORGANISATION.length)),
+    organisations() {
+      // And those of shards let go, seen all the same: an organisation off the list is still missed (PR3).
+      const held = [...anchors.keys()].filter((name) => name.startsWith(ORGANISATION));
+      const away = [...seenElsewhere]
+        .filter(([name, known]) => known.seq !== undefined && !anchors.has(name))
+        .map(([name]) => name);
+      return [...held, ...away].map((name) => name.slice(ORGANISATION.length));
+    },
+    holds: (chain: Chain) => !evicts || isResident(shardOfChain(chainName(chain))),
+    lastKnown(chain: Chain) {
+      const name = chainName(chain);
+      // Held: what is held, its shard's place in the queue to go untouched. Let go: what was last seen of it.
+      if (!evicts || isResident(shardOfChain(name))) {
+        const known = {
+          seq: anchors.get(name)?.seq,
+          passedAt: sides.p.get(name)?.at.getTime(),
+          placeAt: sides.u.get(name)?.at.getTime(),
+        };
+        return Object.values(known).every((value) => value === undefined) ? undefined : known;
+      }
+      return seenElsewhere.get(name);
+    },
+    async pin(chain: Chain) {
+      const shard = shardOfChain(chainName(chain));
+      // Counted at once, before any wait: a read meanwhile can't let it go.
+      pins[shard] = (pins[shard] ?? 0) + 1;
+      let open = true;
+      const release = (): void => {
+        if (!open) return;
+        open = false;
+        pins[shard] = (pins[shard] ?? 1) - 1;
+        trimmed();
+      };
+      if (!evicts || (await held(shard))) {
+        uses += 1;
+        usedAt[shard] = uses;
+        return release;
+      }
+      release();
+      return undefined;
+    },
+    memoryHeld() {
+      const tables = [anchors, sides.p, sides.u, pending, pendingSides.p, pendingSides.u];
+      return {
+        bytes: heldBytes(0),
+        mostBytes: mostFileBytes,
+        records: tables.reduce((sum, table) => sum + table.records, 0),
+        allocated: tables.reduce((sum, table) => sum + table.allocatedBytes, 0),
+        shards: resident.filter(Boolean).length,
+        pinned: pins.filter((count) => count > 0).length,
+        elsewhere: seenElsewhere.size,
+      };
+    },
     flush(): Promise<void> {
       flushing ??= writeDue().finally(() => {
         flushing = undefined;

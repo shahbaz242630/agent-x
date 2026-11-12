@@ -305,7 +305,12 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         waitsAsAWhole: handOffMarks.waitsAsAWhole,
         outbox,
         // The anchor check starts before the hand-off's first run: this list's order.
-        anchoring: { anchors: anchorStore, anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal) },
+        anchoring: {
+          anchors: anchorStore,
+          anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal),
+          // Tx A's shard held from the lane's first anchor through Tx A, where the log lets shards go (PL-65 PR3).
+          ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
+        },
       }),
     );
   // Each payment under way checked with the bank, its transaction moved to match (Phase 4 E1a); beside the hand-off,

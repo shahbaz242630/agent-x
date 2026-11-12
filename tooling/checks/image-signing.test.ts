@@ -138,7 +138,7 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       .filter(
         ([name, candidate]) =>
           !IMAGE_JOBS.includes(name) &&
-          !['release', 'image-prune', 'image-scan'].includes(name) &&
+          !['release', 'image-prune', 'image-kept-verify', 'image-scan'].includes(name) &&
           candidate.if !== "github.event_name == 'pull_request'",
       )
       .map(([name]) => name);

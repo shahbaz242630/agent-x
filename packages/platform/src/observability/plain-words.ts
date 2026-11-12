@@ -234,6 +234,26 @@ export const PLAIN_WORDS = {
     broke: 'Nothing: all are still checked, those past the number in turn from a place in the list, more slowly.',
     next: 'Raise the number it keeps notes on, if there is memory for it, and restart.',
   },
+  'audit.anchor_shard_not_held': {
+    happened: "An organisation's audit anchor was to be kept while its part of the anchor store was out of memory.",
+    broke: 'Nothing was kept, as it could not be compared. Its payments wait meanwhile.',
+    next: 'Nothing: that part is read back when next needed. If it repeats, give the API memory.',
+  },
+  'audit.anchor_shards_churning': {
+    happened: 'In the last hour the API read back more parts of the audit anchor store than there are.',
+    broke: 'Nothing yet: anchors are compared as before, but the store is read far more and checks run slower.',
+    next: 'Give the API more memory, so more of the store stays held.',
+  },
+  'audit.anchor_shards_past_budget': {
+    happened: 'The audit anchors held stayed past what the API may hold, with nothing more it could let go.',
+    broke: 'Nothing yet: what is held is in use or waiting to be written. Memory runs higher than planned.',
+    next: 'If it keeps repeating, give the API more memory, or look at why writes to the anchor store are failing.',
+  },
+  'audit.anchor_shard_unreadable': {
+    happened: 'A part of the audit anchor store could not be read back into memory whole.',
+    broke: 'Payments wait for the organisations in that part alone. Nobody is held.',
+    next: 'Tried again when next needed. If it repeats, read the reason: the store, memory, or playbook section H.',
+  },
   'audit.anchor_store_near_memory': {
     happened: 'The audit anchors held have passed half of what a process of this size can read back after a restart.',
     broke: 'Nothing yet. If organisations double, a restart would make payments wait for every one of them.',
