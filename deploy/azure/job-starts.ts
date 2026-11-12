@@ -46,8 +46,10 @@ import {
   workloadDifferences,
 } from './drift.ts';
 import { type History, realCheckout, realHistory } from './git.ts';
-import { jobName, JOBS_API, runCli } from './jobs.ts';
-import { realTemplates, runningIn } from './release.ts';
+import { azureTime, historyProblems, inWindow, jobName, JOBS_API, runCli } from './jobs.ts';
+import { COMMIT, realTemplates, runningIn } from './release.ts';
+
+export { azureTime, HISTORY_KEPT, historyProblems } from './jobs.ts';
 
 /** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
 export const DEFAULT_HOURS = 6;
@@ -104,20 +106,6 @@ export type Verdict =
   | { readonly kind: 'clean-up' }
   | { readonly kind: 'not-comparable'; readonly differences: readonly string[] }
   | { readonly kind: 'changed'; readonly differences: readonly string[] };
-
-/**
- * A time Azure gave, in ms. `systemData` writes UTC with no zone and seven
- * decimals (`2026-11-10T13:02:02.4268454`), which JavaScript would read as
- * local time, so a time with no zone is taken as UTC.
- */
-export function azureTime(value: unknown): number | undefined {
-  const written = text(value);
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/.exec(written);
-  if (match === null) return undefined;
-  const [, seconds, fraction = '', zone = 'Z'] = match;
-  const at = Date.parse(`${seconds ?? ''}${fraction.slice(0, 4)}${zone}`);
-  return Number.isNaN(at) ? undefined : at;
-}
 
 const strings = (value: unknown): readonly string[] | undefined =>
   Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : undefined;
@@ -389,38 +377,6 @@ export function listedRuns(az: Az, subscription: string, job: string): Run[] {
   );
 }
 
-/** A run started at or after `since` (ms); one with no start time counts, since its age is unknown. */
-const inWindow = (run: Run, since: number): boolean => run.startedAt === undefined || run.startedAt >= since;
-
-/**
- * How many runs a job's history keeps: "the most recent 100" (learn.microsoft.com
- * /azure/container-apps/jobs, "Get job execution history"; staging's migration
- * job lists exactly 100). A list that full whose oldest run is still in the
- * window may have lost runs off its end, which are then never compared.
- */
-export const HISTORY_KEPT = 100;
-
-/** More runs of one job than this per three hours is a finding of its own: a flood could push an override off the history. */
-const BUSY_PER_THREE_HOURS = 20;
-
-/** Why a job's runs in the window can't be taken as all of them or as ordinary, a line each, or none. */
-export function historyProblems(listed: readonly Run[], since: number, hours: number): string[] {
-  const problems: string[] = [];
-  const recent = listed.filter((run) => inWindow(run, since)).length;
-  // The earliest start listed, in whatever order Azure lists them: before the window, and the window is whole.
-  const reachesBack = listed.some((run) => run.startedAt !== undefined && run.startedAt < since);
-  if (listed.length >= HISTORY_KEPT && !reachesBack) {
-    problems.push(
-      `the run history may be incomplete: Azure keeps ${String(HISTORY_KEPT)} runs, and all ${String(recent)} listed started in the window, so older runs in it may be gone unchecked`,
-    );
-  }
-  const most = Math.ceil((hours * BUSY_PER_THREE_HOURS) / 3);
-  if (recent > most) {
-    problems.push(`it ran ${String(recent)} times in ${String(hours)} h, more than the ${String(most)} ever expected`);
-  }
-  return problems;
-}
-
 /** How many hours back to read, or a UsageError. */
 export function parseArguments(argv: readonly string[]): number {
   if (argv.length === 0) return DEFAULT_HOURS;
@@ -490,14 +446,28 @@ function migrateHeld(jobs: readonly DeployedJob[], subscription: string, steps: 
     if (!steps.history.isAncestor(running.release, steps.head())) {
       return heldFinding(`it names its build ${running.release}, which isn't in main's history`, []);
     }
-    const ran = new Set(runs.flatMap((run) => run.template?.containers.flatMap((container) => container.env) ?? []));
-    const later = [...ran]
-      .filter((setting) => setting.name === 'AGENTX_RELEASE' && typeof setting.value === 'string')
-      .map((setting) => String(setting.value))
-      .find((build) => build !== running.release && steps.history.isAncestor(running.release, build));
+    const ran = [
+      ...new Set(
+        runs.flatMap((run) =>
+          (run.template?.containers ?? [])
+            .flatMap((container) => container.env)
+            .filter((setting) => setting.name === 'AGENTX_RELEASE')
+            .map((setting) => String(setting.value)),
+        ),
+      ),
+    ];
+    // A run naming a build that isn't a commit here: no deploy starts one, so it is a finding, never an answer.
+    const strange = ran.filter((build) => !COMMIT.test(build) || !steps.history.isAncestor(build, build));
+    if (strange.length > 0) {
+      return heldFinding(
+        `a run of it names a build that isn't in main's history (${strange.map(shown).join(', ')})`,
+        [],
+      );
+    }
+    const later = ran.find((build) => build !== running.release && steps.history.isAncestor(running.release, build));
     if (later !== undefined) {
       return heldFinding(
-        `it names its build ${running.release}, older than ${later}, which a run of it ran: rolled back`,
+        `it names its build ${running.release}, older than ${later}, which a run of it ran: rolled back (if a person did it on purpose, deploy by hand a commit at least as new as ${later})`,
         [],
       );
     }

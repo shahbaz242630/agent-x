@@ -532,11 +532,33 @@ const identitiesOf = (workload: unknown): string =>
   ]);
 
 /**
+ * How many inactive revisions Azure keeps when an app sets none: "By default, you have access to 100 inactive
+ * revisions" (learn.microsoft.com/azure/container-apps/revisions). apps.bicep sets none, so staging keeps 100.
+ */
+const DEFAULT_INACTIVE_REVISIONS = 100;
+
+/**
+ * An app's own checks: its least replicas 0 or 1 (`apps --keep-running` sets 1), and the inactive revisions it keeps
+ * as its template does, absent read as Azure's default: the release reads them as the record of what ran
+ * (release.ts recordedBuilds), and a 0 would purge that record.
+ */
+function appDifferences(expected: unknown, live: unknown): string[] {
+  const said: string[] = [];
+  if (![0, 1].includes(Number(at(live, ['properties', 'template', 'scale', 'minReplicas'])))) {
+    said.push('its template.scale.minReplicas is neither 0 nor 1');
+  }
+  const kept = (workload: unknown): unknown =>
+    at(workload, ['properties', 'configuration', 'maxInactiveRevisions']) ?? DEFAULT_INACTIVE_REVISIONS;
+  if (kept(expected) !== kept(live)) said.push('its configuration.maxInactiveRevisions is not the template’s');
+  return said;
+}
+
+/**
  * Every way a workload differs from its template beyond its containers (AZ2c):
  * no init container; the same volumes, secrets (each a vault reference as its
  * identity, never a value), identities, registries, environment and plan; a
- * job's trigger, time limit and runs; an app's door, scale and grace. In words
- * with no value. An app's least replicas may be 0 or 1 (`apps --keep-running`).
+ * job's trigger, time limit and runs; an app's door, scale, grace and kept
+ * revisions. In words with no value.
  */
 export function workloadDifferences(
   kind: 'jobs' | 'containerApps',
@@ -562,12 +584,7 @@ export function workloadDifferences(
     const wanted = want ?? (path.at(-1) === 'activeRevisionsMode' && kind === 'containerApps' ? 'Single' : undefined);
     if (lower(wanted ?? null) !== lower(found ?? null)) said.push(`its ${path.join('.')} is not the template’s`);
   }
-  if (
-    kind === 'containerApps' &&
-    ![0, 1].includes(Number(at(live, ['properties', 'template', 'scale', 'minReplicas'])))
-  ) {
-    said.push('its template.scale.minReplicas is neither 0 nor 1');
-  }
+  if (kind === 'containerApps') said.push(...appDifferences(expected, live));
   if (identitiesOf(expected) !== identitiesOf(live)) said.push('it runs as other identities than the template’s');
   if (!same(volumesOf(expected), volumesOf(live))) said.push('its volumes are not the template’s');
   return [...said, ...secretDifferences(expected, live, bound)];

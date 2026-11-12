@@ -1,9 +1,15 @@
 // The watch on job runs with their containers changed (Carry-Forward S175).
 // Nothing here reaches Azure: the CLI is a stand-in that answers each list from
 // the jobs and runs a test gives it, the way `az rest` gives them.
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
+import { realHistory } from './git.ts';
 import {
   azureTime,
   DEFAULT_HOURS,
@@ -255,7 +261,7 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
     const done = await run(rolled, [], heldFor(rolled));
     expect(done.status).toBe(1);
     expect(done.lines).toContain(
-      `${FINDING_START}it names its build ${BUILD}, older than ${LATER_BUILD}, which a run of it ran: rolled back`,
+      `${FINDING_START}it names its build ${BUILD}, older than ${LATER_BUILD}, which a run of it ran: rolled back (if a person did it on purpose, deploy by hand a commit at least as new as ${LATER_BUILD})`,
     );
     // A run of an older build, or of its own, is no roll-back.
     const older: World = {
@@ -266,10 +272,58 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
       ...heldFor(older),
       history: {
         ...heldFor(older).history,
-        isAncestor: (one, other) => other === 'd'.repeat(40) || (one === LATER_BUILD && other === BUILD),
+        isAncestor: (one, other) =>
+          one === other || other === 'd'.repeat(40) || (one === LATER_BUILD && other === BUILD),
       },
     });
     expect(notLater.status).toBe(0);
+  });
+
+  it('finds a run naming a build that isn’t in main’s history, with the real history, never crashing (round 3, item 1)', async () => {
+    const repository = mkdtempSync(path.join(tmpdir(), 'agentx-watch-'));
+    const empty = `${repository}-no-config`;
+    writeFileSync(empty, '');
+    const env = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: empty,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'Fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    };
+    const git = (...args: readonly string[]): string =>
+      spawnSync('git', args, { cwd: repository, env, encoding: 'utf8', windowsHide: true }).stdout.trim();
+    git('init', '--quiet');
+    writeFileSync(path.join(repository, 'one'), 'one');
+    git('add', '--all');
+    git('commit', '--quiet', '--message', 'one');
+    const built = git('rev-parse', 'HEAD');
+    const builtAt = (build: string) => ({
+      ...MIGRATE,
+      env: MIGRATE.env.map((entry) => (entry.name === 'AGENTX_RELEASE' ? { ...entry, value: build } : entry)),
+    });
+    const held = (world: World): HeldSteps => ({
+      ...heldFor(world, { template: [builtAt(built)] }),
+      head: () => built,
+      history: realHistory(repository),
+    });
+    for (const odd of ['f'.repeat(40), 'x\n::error::y']) {
+      const world: World = {
+        jobs: [JOB(MIGRATE_JOB, [builtAt(built)])],
+        runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [builtAt(odd)])] },
+      };
+      const done = await run(world, [], held(world));
+      expect(done.status, odd).toBe(1);
+      expect(done.lines).toContain(
+        `${FINDING_START}a run of it names a build that isn't in main's history (${odd.replace(/[^\w.-]/g, '?')})`,
+      );
+    }
+    const asBuilt: World = {
+      jobs: [JOB(MIGRATE_JOB, [builtAt(built)])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [builtAt(built)])] },
+    };
+    expect((await run(asBuilt, [], held(asBuilt))).status).toBe(0);
   });
 
   it('is a finding when the job names a build off main', async () => {

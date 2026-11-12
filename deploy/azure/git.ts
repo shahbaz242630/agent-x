@@ -48,10 +48,13 @@ function git(repository: string, args: readonly string[]): Ran {
 export function realHistory(repository = REPOSITORY): History {
   return {
     isAncestor: (ancestor, commit) => {
+      // Either one not a commit here is no answer of ancestry: false (AZ2c: a record Azure keeps may name anything).
       // 1 is "no such commit here"; 128 (not a repository, say) is an error, not an answer.
-      const known = git(repository, ['rev-parse', '--verify', '--quiet', `${ancestor}^{commit}`]);
-      if (known.status === 1) return false;
-      if (known.status !== 0) throw new Error(`git couldn't look for ${ancestor}:\n${known.stderr}`);
+      for (const each of [ancestor, commit]) {
+        const known = git(repository, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${each}^{commit}`]);
+        if (known.status === 1) return false;
+        if (known.status !== 0) throw new Error(`git couldn't look for ${each}:\n${known.stderr}`);
+      }
       const done = git(repository, ['merge-base', '--is-ancestor', ancestor, commit]);
       if (done.status === 0 || done.status === 1) return done.status === 0;
       throw new Error(`git couldn't compare ${ancestor} and ${commit}:\n${done.stderr}`);

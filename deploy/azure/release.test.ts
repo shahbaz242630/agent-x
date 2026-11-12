@@ -5,7 +5,8 @@
 // (git.test.ts reads a real one).
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { fileReferences } from '../../tooling/bicep/references.ts';
 import type { Outcome } from '../image/verify.ts';
 import { type Az, type AzResult, type Deployment, DEPLOYMENTS, RECORDED, RECORDS_JOB, recordTag } from './deploy.ts';
-import type { History } from './git.ts';
+import { type History, realHistory } from './git.ts';
 import { jobName, JOBS_API } from './jobs.ts';
 import {
   changes,
@@ -25,6 +26,7 @@ import {
   type Decision,
   type Folder,
   HAND_DEPLOYED,
+  listedAll,
   LOAD_RUN_UP,
   handDeployedList,
   main,
@@ -163,6 +165,38 @@ function around(workload: Workload, containers: unknown, as: 'azure' | 'snapshot
       },
     },
   };
+}
+
+/**
+ * A throwaway repository of two commits, the second the first's child, for the real history (git.ts realHistory). This
+ * machine's git settings (signing, hooks) are kept out of it.
+ */
+function gitRepository(): { repository: string; commits: string[] } {
+  const repository = mkdtempSync(path.join(tmpdir(), 'agentx-release-'));
+  const empty = path.join(repository, '..', `${path.basename(repository)}-no-config`);
+  writeFileSync(empty, '');
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: empty,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+  };
+  const git = (...args: readonly string[]): string => {
+    const done = spawnSync('git', args, { cwd: repository, env, encoding: 'utf8', windowsHide: true });
+    if (done.status !== 0) throw new Error(`git ${args.join(' ')}: ${done.stderr}`);
+    return done.stdout.trim();
+  };
+  git('init', '--quiet');
+  const commits = ['one', 'two'].map((file) => {
+    writeFileSync(path.join(repository, file), file);
+    git('add', '--all');
+    git('commit', '--quiet', '--message', file);
+    return git('rev-parse', 'HEAD');
+  });
+  return { repository, commits };
 }
 
 /** What git says of this repository, a line each. */
@@ -1054,6 +1088,7 @@ async function checked(
         say: (said_) => said.push(said_),
         verify: signedAsNamed,
         pins: {},
+        now: () => new Date('2026-09-18T12:00:00Z'),
       },
     );
     return { status, said, calls, error: undefined };
@@ -1321,6 +1356,8 @@ class Staging {
   /** The pins the release is given (AZ2c H3), and what the image check answers. */
   pins: Readonly<Record<string, string | undefined>> = {};
   signed: (image: string, commit: string) => Outcome = signedAsNamed;
+  /** More revisions and runs on record than the release's own (AZ2c), as Azure lists them. */
+  recordExtra: { revisions: unknown[]; runs: unknown[] } = { revisions: [], runs: [] };
   latest = 'ca-agentx-stg-api--0000007';
   ready = 'ca-agentx-stg-api--0000007';
   revisions = new Map<string, HeldRevision>([
@@ -1565,15 +1602,18 @@ class Staging {
       );
       // Each run's template names its build (AZ2c: what deploys left on record); the first run's is OLD.
       return json({
-        value: listed.map(({ name, status, image, release }) => ({
-          name,
-          properties: {
-            status,
-            template: {
-              containers: [{ name: 'migrate', image, env: [{ name: 'AGENTX_RELEASE', value: release ?? OLD }] }],
+        value: [
+          ...listed.map(({ name, status, image, release }) => ({
+            name,
+            properties: {
+              status,
+              template: {
+                containers: [{ name: 'migrate', image, env: [{ name: 'AGENTX_RELEASE', value: release ?? OLD }] }],
+              },
             },
-          },
-        })),
+          })),
+          ...this.recordExtra.runs,
+        ],
       });
     }
     if (method === 'post' && url === `${jobBase}/start${query}`) return this.startMigrate();
@@ -1637,12 +1677,15 @@ class Staging {
         // The API's revisions, each with its build (AZ2c: what deploys left on record).
         if (method === 'get' && url === `${appBase}/revisions${query}`) {
           return json({
-            value: [...this.revisions].map(([name, held]) => ({
-              name,
-              properties: {
-                template: { containers: [{ name: 'api', env: [{ name: 'AGENTX_RELEASE', value: held.release }] }] },
-              },
-            })),
+            value: [
+              ...[...this.revisions].map(([name, held]) => ({
+                name,
+                properties: {
+                  template: { containers: [{ name: 'api', env: [{ name: 'AGENTX_RELEASE', value: held.release }] }] },
+                },
+              })),
+              ...this.recordExtra.revisions,
+            ],
           });
         }
         const revision = /\/revisions\/([^?]+)\?/.exec(url)?.[1];
@@ -1810,6 +1853,11 @@ describe('release', () => {
   });
 
   it('has nothing to do when both hold the commit and the API serves it; red when it holds it but does not', async () => {
+    // OLD before NEW; LATER a commit of main too, but on no line from NEW (a revision only ever names a main commit).
+    const servedLine = (): History => {
+      const line = ordinary();
+      return { ...line, isAncestor: (one, other) => (one === LATER && other === LATER) || line.isAncestor(one, other) };
+    };
     const holding = (): Staging => {
       const azure = new Staging();
       Object.assign(azure.job, { release: NEW, image: NEW_IMAGE });
@@ -1825,21 +1873,21 @@ describe('release', () => {
       trafficWeight: 100,
       healthState: 'Healthy',
     });
-    const served_ = await outcome(serving);
+    const served_ = await outcome(serving, servedLine());
     expect(served_.status).toBe(0);
     expect(served_.said.at(-1)).toBe(
       `Both already run ${NEW}, and the API serves it from ca-agentx-stg-api--0000007: a release has nothing to do.`,
     );
     // A release that stopped after the API's update: its template holds the commit, the old revision serves.
     const stopped = holding();
-    const red = await outcome(stopped);
+    const red = await outcome(stopped, servedLine());
     expect(red.status).toBe(1);
     expect(red.said.at(-1)).toBe(
       `Both hold ${NEW}, but the API doesn't serve it: it runs ${OLD} (${OLD_IMAGE}), not this release. Look at its revisions, then deploy by hand (apps).`,
     );
     const unready = holding();
     unready.latest = 'ca-agentx-stg-api--0000009';
-    const notReady = await outcome(unready);
+    const notReady = await outcome(unready, servedLine());
     expect(notReady.said.at(-1)).toBe(
       `Both hold ${NEW}, but the API doesn't serve it: its latest revision ca-agentx-stg-api--0000009 isn't the ready one (ca-agentx-stg-api--0000007). Look at its revisions, then deploy by hand (apps).`,
     );
@@ -1853,7 +1901,7 @@ describe('release', () => {
       trafficWeight: 100,
       healthState: 'Healthy',
     });
-    expect((await outcome(otherBuild)).said.at(-1)).toBe(
+    expect((await outcome(otherBuild, servedLine())).said.at(-1)).toBe(
       `Both hold ${NEW}, but the API doesn't serve it: it runs ${LATER} (${NEW_IMAGE}), not this release. Look at its revisions, then deploy by hand (apps).`,
     );
     // A revision whose container isn't the API's, carries no build, or has another beside it, is never taken as serving this release.
@@ -1873,7 +1921,7 @@ describe('release', () => {
         trafficWeight: 100,
         healthState: 'Healthy',
       });
-      expect((await outcome(odd)).said.at(-1)).toBe(
+      expect((await outcome(odd, servedLine())).said.at(-1)).toBe(
         `Both hold ${NEW}, but the API doesn't serve it: ${why}. Look at its revisions, then deploy by hand (apps).`,
       );
       expect(odd.writes).toEqual([]);
@@ -2492,7 +2540,7 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     const { status, message } = await outcome(broken);
     expect(status).toBeUndefined();
     expect(message).toBe(
-      `What apps.bicep gives the API and the migration job couldn't be read (bicep snapshot failed: /subscriptions/the subscription/x), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`,
+      `What ${OLD}'s apps.bicep gives migrate couldn't be read (bicep snapshot failed: /subscriptions/the subscription/x), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. This checkout couldn't make a temporary worktree of ${OLD}, the build migrate runs: check git works here and the clone has the whole history (CI checks out with fetch-depth 0), then run this again.`,
     );
     for (const azure of [elsewhere, broken]) expect(azure.writes).toEqual([]);
   });
@@ -2560,7 +2608,7 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     for (const [arrange, reason] of [
       [
         (azure: Staging) => azure.revisions.set('ca-agentx-stg-api--0000006', revisionAt(MID)),
-        `  api: it runs ${OLD}, older than ${MID}, which one of its revisions ran: rolled back, a suspected breach`,
+        `  api: it runs ${OLD}, older than ${MID}, which one of its revisions ran: rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${MID}; otherwise a suspected breach`,
       ],
       [
         (azure: Staging) =>
@@ -2571,14 +2619,14 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
             polls: 0,
             release: MID,
           }),
-        `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back, a suspected breach`,
+        `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${MID}; otherwise a suspected breach`,
       ],
       [
         (azure: Staging) => {
           Object.assign(azure.app, { release: MID, env: builtAt(MID) });
           azure.revisions.set('ca-agentx-stg-api--0000007', revisionAt(MID));
         },
-        `  migrate: it runs ${OLD}, behind the API's ${MID}, which no deploy leaves (migrate is always moved first): a suspected breach`,
+        `  migrate: it runs ${OLD}, behind the API's ${MID}, which a release never leaves (it moves migrate first). If a hand apps run failed part way (it updates both at once), run apps again; otherwise a suspected breach`,
       ],
     ] as const) {
       const done = await said(arrange);
@@ -2587,10 +2635,18 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
       expect(done.said).toContain(reason);
       expect(done.said).toContain(`A release of ${NEW} stops here, red: ${NOT_AS_DEPLOYED}`);
     }
+    // The way forward names the newest build on record, of several later ones.
+    const twoLater = await said((azure) => {
+      azure.revisions.set('ca-agentx-stg-api--0000005', revisionAt(MID));
+      azure.revisions.set('ca-agentx-stg-api--0000006', revisionAt(NEW));
+    });
+    expect(twoLater.said).toContain(
+      `  api: it runs ${OLD}, older than ${NEW}, which one of its revisions ran: rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${NEW}; otherwise a suspected breach`,
+    );
     // Migrate is held to the API's revisions as well as its own runs.
     const byRevision = await said((azure) => azure.revisions.set('ca-agentx-stg-api--0000006', revisionAt(MID)));
     expect(byRevision.said).toContain(
-      `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back, a suspected breach`,
+      `  migrate: it runs ${OLD}, older than ${MID}, which a run of it or an API revision ran: rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${MID}; otherwise a suspected breach`,
     );
     // Migrate ahead of the API, as --migrate-first or a stopped release leaves it: released as ever.
     const ahead = await said((azure) => {
@@ -2604,6 +2660,135 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
       });
     });
     expect(ahead.status).toBe(0);
+  });
+
+  it('refuses a record it can’t trust whole: a history at its cap still recent, or a flood (round 3, item 2b)', async () => {
+    /** A revision or run of OLD's, made at `time`, as Azure lists it. */
+    const kept = (field: 'createdTime' | 'startTime', time: string) => ({
+      name: 'x',
+      properties: {
+        [field]: time,
+        status: 'Succeeded',
+        template: { containers: [{ name: 'c', env: [{ name: 'AGENTX_RELEASE', value: OLD }] }] },
+      },
+    });
+    const many = (field: 'createdTime' | 'startTime', time: string): unknown[] =>
+      Array.from({ length: 100 }, () => kept(field, time));
+    // Staging's clock reads 2026-09-18 12:00 UTC.
+    const recent = '2026-09-18T11:00:00Z';
+    const old = '2026-09-10T11:00:00Z';
+    for (const [extra, reason] of [
+      [
+        { revisions: many('createdTime', recent), runs: [] },
+        "  api: the revision history may be incomplete: Azure keeps 100 revisions, and all 101 listed started in the window, so older revisions in it may be gone unchecked, so a roll-back can't be ruled out: a suspected breach",
+      ],
+      [
+        { revisions: [], runs: many('startTime', recent) },
+        "  migrate: the run history may be incomplete: Azure keeps 100 runs, and all 101 listed started in the window, so older runs in it may be gone unchecked, so a roll-back can't be ruled out: a suspected breach",
+      ],
+      [
+        { revisions: Array.from({ length: 41 }, () => kept('createdTime', recent)), runs: [] },
+        "  api: it made 42 revisions in 6 h, more than the 40 ever expected, so a roll-back can't be ruled out: a suspected breach",
+      ],
+    ] as const) {
+      const azure = new Staging();
+      azure.recordExtra = { revisions: [...extra.revisions], runs: [...extra.runs] };
+      const { status, said } = await outcome(azure);
+      expect(status, reason).toBe(1);
+      expect(said).toContain(reason);
+      expect(azure.writes).toEqual([]);
+    }
+    // A full list that reaches back past the window is whole.
+    const whole = new Staging();
+    whole.recordExtra = { revisions: many('createdTime', old), runs: many('startTime', old) };
+    const wholeDone = await outcome(whole);
+    expect(wholeDone.message).toBe('');
+    expect(wholeDone.status).toBe(0);
+  });
+
+  it('holds the inactive revisions the API keeps to its template, absent read as Azure’s 100 (round 3, item 2a)', async () => {
+    const keeping = async (count: unknown): Promise<number | undefined> => {
+      const azure = new Staging();
+      azure.meddleWith = (workload, resource) => {
+        if (workload !== 'api') return resource;
+        const copy = structuredClone(resource);
+        Object.assign((copy.properties as { configuration: object }).configuration, { maxInactiveRevisions: count });
+        return copy;
+      };
+      const { status, said } = await outcome(azure);
+      if (status === 1) expect(said).toContain('  api: its configuration.maxInactiveRevisions is not the template’s');
+      return status;
+    };
+    expect(await keeping(0)).toBe(1);
+    expect(await keeping(5)).toBe(1);
+    expect(await keeping(100)).toBe(0);
+    expect(await keeping(null)).toBe(0);
+  });
+
+  it('says a re-run’s own apps.bicep could not be read here, not a worktree, when it is this checkout’s (item 5)', async () => {
+    const azure = new Staging();
+    Object.assign(azure.job, { release: NEW, image: NEW_IMAGE });
+    Object.assign(azure.app, { release: NEW, image: NEW_IMAGE, env: builtAt(NEW) });
+    azure.templates = new Error('bicep failed');
+    expect((await outcome(azure)).message).toBe(
+      `What ${NEW}'s apps.bicep gives migrate couldn't be read (bicep failed), so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`,
+    );
+  });
+
+  it('calls a revision or run naming a build that isn’t in main’s history a suspected breach, never a crash (round 3, item 1)', async () => {
+    const { repository, commits } = gitRepository();
+    const [first = '', second = ''] = commits;
+    const azure = new Staging();
+    Object.assign(azure.job, { release: first });
+    Object.assign(azure.app, { release: first, env: builtAt(first) });
+    const serving = azure.revisions.get('ca-agentx-stg-api--0000007');
+    if (serving === undefined) throw new Error('the stand-in staging has no revision 0000007');
+    azure.revisions.set('ca-agentx-stg-api--0000007', { ...serving, release: first });
+    azure.runs = azure.runs.map((run) => ({ ...run, release: first }));
+    const named = (build: string) => ({
+      name: 'x',
+      properties: { template: { containers: [{ name: 'c', env: [{ name: 'AGENTX_RELEASE', value: build }] }] } },
+    });
+    const unknown = 'f'.repeat(40);
+    azure.recordExtra = { revisions: [named(unknown), named('x\n::error::y')], runs: [named(unknown)] };
+    const steps = {
+      ...azure.steps(realHistory(repository)),
+      folder: folderAt(second, SAID, true, azure.templates).folder,
+    };
+    expect(await check({ command: 'check', commit: second, digest: digest('2') }, steps)).toBe(1);
+    expect(steps.said).toContain(
+      `  api: a revision of it names a build that isn't in main's history (${unknown}, x???error??y): no deploy leaves one, a suspected breach`,
+    );
+    expect(steps.said).toContain(
+      `  migrate: a run of it names a build that isn't in main's history (${unknown}): no deploy leaves one, a suspected breach`,
+    );
+    // Without them, the same staging is as deployed.
+    azure.recordExtra = { revisions: [], runs: [] };
+    const clean = {
+      ...azure.steps(realHistory(repository)),
+      folder: folderAt(second, SAID, true, azure.templates).folder,
+    };
+    expect(await check({ command: 'check', commit: second, digest: digest('2') }, clean)).toBe(0);
+  });
+
+  it('reads a list page by page, and refuses a next page anywhere but Resource Manager (item 6)', () => {
+    const pages: Readonly<Record<string, unknown>> = {
+      'https://management.azure.com/one': { value: [1, 2], nextLink: 'https://management.azure.com/two' },
+      'https://management.azure.com/two': { value: [3], nextLink: null },
+      'https://management.azure.com/away': { value: [1], nextLink: 'https://management.azure.com.evil.example/two' },
+      'https://management.azure.com/odd': { value: 'x' },
+    };
+    const az: Az = {
+      interactive: () => 0,
+      run: (args) => ({ status: 0, stdout: JSON.stringify(pages[args[4] ?? '']), stderr: '' }),
+    };
+    expect(listedAll(az, 'https://management.azure.com/one', 'things')).toEqual([1, 2, 3]);
+    expect(() => listedAll(az, 'https://management.azure.com/away', 'things')).toThrow(
+      "Azure's list of things named its next page somewhere other than Resource Manager, so it wasn't read and nothing was changed.",
+    );
+    expect(() => listedAll(az, 'https://management.azure.com/odd', 'things')).toThrow(
+      "Azure's list of things wasn't a list.",
+    );
   });
 
   it('reads no template when a hand deploy is needed anyway', async () => {

@@ -75,10 +75,14 @@ describe('the history', () => {
   });
 
   it('is an error, never an answer, when git cannot say', () => {
-    // A commit to compare with that it doesn't have.
-    expect(() => realHistory(repository).isAncestor(made.first, MISSING)).toThrow(
-      `git couldn't compare ${made.first} and ${MISSING}`,
-    );
+    // A commit to compare with that it doesn't have, or a name that isn't one, on either side: no ancestry, never a
+    // crash (AZ2c: a revision or run Azure keeps may name anything).
+    const history = realHistory(repository);
+    for (const odd of [MISSING, 'x\n::error::y', '--all', 'HEAD~99', '']) {
+      expect(history.isAncestor(made.first, odd), odd).toBe(false);
+      expect(history.isAncestor(odd, made.first), odd).toBe(false);
+    }
+    expect(history.isAncestor(made.first, made.first)).toBe(true);
     // A folder that isn't a repository.
     expect(() => realHistory(dir).isAncestor(made.first, made.bicep)).toThrow(`git couldn't look for ${made.first}`);
     expect(() => realHistory(dir).changedFiles(made.first, made.bicep)).toThrow(

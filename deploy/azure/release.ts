@@ -92,7 +92,18 @@ import {
   workloadDifferences,
 } from './drift.ts';
 import { atCommit, type Checkout, type History, realCheckout, realHistory } from './git.ts';
-import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
+import {
+  azureTime,
+  ENDED,
+  GUID,
+  historyProblems,
+  isRunOf,
+  isStrings,
+  JOBS_API,
+  POLL_MS,
+  runCli,
+  START_ALLOWANCE_SECONDS,
+} from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
 export interface HandDeployed {
@@ -272,7 +283,7 @@ export const realTemplates: Templates = (subscription, commit) => {
 const RELEASE_SETTING = 'AGENTX_RELEASE';
 
 /** A commit, as git writes it in full. */
-const COMMIT = /^[0-9a-f]{40}$/;
+export const COMMIT = /^[0-9a-f]{40}$/;
 
 /** An image digest, as ghcr.io gives it. */
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -685,6 +696,8 @@ export interface CheckSteps {
   readonly verify: (image: string, commit: string) => Outcome;
   /** The pins set for the release (PINS), from its environment: none set is an empty record. */
   readonly pins: Readonly<Record<string, string | undefined>>;
+  /** The clock, which says how recent the oldest record is (recordedBuilds). */
+  readonly now: () => Date;
 }
 
 /** What a release of the commit would do, read from Azure and the history, with what each runs said. */
@@ -721,8 +734,9 @@ async function readersAt(commit: string, steps: CheckSteps): Promise<Readers | u
 }
 
 /** What to do when the templates can't be read: nothing was changed, and the release is run again from the commit. */
-const UNCHECKED_NEXT =
-  'so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed. Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).';
+const UNCHECKED_GAP =
+  'so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed.';
+const UNCHECKED_NEXT = `${UNCHECKED_GAP} Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`;
 
 /** The decisions held to what was deployed (AZ2c): a release about to write, and a re-run that has nothing to do. */
 const HELD: ReadonlySet<Decision['kind']> = new Set(['release', 'current', 'past']);
@@ -749,102 +763,178 @@ function heldToTemplates(
     );
   }
   const bound: Bound = new Map();
-  let reasons: string[];
-  try {
-    // Each build's own templates, read once each: a release's builds are staging's (decide holds them to this
-    // commit's for what apps reads); a re-run's may be later than this commit.
-    const byBuild = new Map<string, ReadonlyMap<Workload, unknown>>();
-    reasons = ORDER.flatMap((workload) => {
-      const read = reads.get(workload);
-      if (read === undefined) throw new Error(`nothing was read for ${workload}`);
-      const build = read.running.release;
-      const templates = byBuild.get(build) ?? steps.folder.templates(subscription, build);
-      byBuild.set(build, templates);
-      return workloadAgainst(workload, templates.get(workload), read, bound).map((line) => `${workload}: ${line}`);
-    });
-  } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    const why = error.message.replaceAll(subscription, 'the subscription');
-    throw new Error(
-      `What apps.bicep gives the API and the migration job couldn't be read (${why}), ${UNCHECKED_NEXT}`,
-      {
-        cause: error,
-      },
-    );
-  }
+  // Each build's templates read once, both workloads mostly running one build.
+  const byBuild = new Map<string, ReadonlyMap<Workload, unknown>>();
+  const reasons = ORDER.flatMap((workload) => heldWorkload(workload, reads, subscription, steps, { bound, byBuild }));
+  const recorded = recordedBuilds(steps.az, subscription, steps.now());
   reasons.push(
     ...unsignedBuilds(reads, steps.verify),
-    ...rolledBack(reads, recordedBuilds(steps.az, subscription), steps.history),
+    ...recorded.problems,
+    ...rolledBack(reads, recorded, steps.history),
     ...unpinned(bound, steps.pins, steps.say),
   );
   return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
 }
 
-/** The builds deploys have left on record: each of the API's revisions', and each of migrate's runs'. */
+/**
+ * One workload held to the apps.bicep of the build it runs (drift.ts), as `workload: …` lines; an error in plain words
+ * when that apps.bicep can't be read: this checkout's, or the build's own in a temporary worktree (git.ts atCommit).
+ */
+function heldWorkload(
+  workload: Workload,
+  reads: ReadonlyMap<Workload, Read>,
+  subscription: string,
+  steps: CheckSteps,
+  held: { readonly bound: Bound; readonly byBuild: Map<string, ReadonlyMap<Workload, unknown>> },
+): string[] {
+  const read = reads.get(workload);
+  if (read === undefined) throw new Error(`nothing was read for ${workload}`);
+  const build = read.running.release;
+  const bound = held.bound;
+  let templates: ReadonlyMap<Workload, unknown>;
+  try {
+    templates = held.byBuild.get(build) ?? steps.folder.templates(subscription, build);
+    held.byBuild.set(build, templates);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const why = error.message.replaceAll(subscription, 'the subscription');
+    const next = here(steps, build)
+      ? UNCHECKED_NEXT
+      : `${UNCHECKED_GAP} This checkout couldn't make a temporary worktree of ${build}, the build ${workload} runs: check git works here and the clone has the whole history (CI checks out with fetch-depth 0), then run this again.`;
+    throw new Error(`What ${build}'s apps.bicep gives ${workload} couldn't be read (${why}), ${next}`, {
+      cause: error,
+    });
+  }
+  return workloadAgainst(workload, templates.get(workload), read, bound).map((line) => `${workload}: ${line}`);
+}
+
+/** Whether this folder is a clean checkout of the commit, whose apps.bicep is then read here. */
+const here = (steps: CheckSteps, commit: string): boolean => {
+  const at = steps.folder.checkout();
+  return at.clean && at.head === commit;
+};
+
+/** The builds deploys have left on record, and why the record can't be trusted whole, if it can't. */
 interface OnRecord {
   readonly api: readonly string[];
   readonly migrate: readonly string[];
+  readonly problems: readonly string[];
 }
 
-/** Every item of a list Azure gives, page by page; only a link back to Resource Manager is followed. */
-function listedAll(az: Az, url: string, what: string): unknown[] {
+/** Every item of a list Azure gives, page by page; a next page anywhere but Resource Manager is refused (the token goes where the URL points). */
+export function listedAll(az: Az, url: string, what: string): unknown[] {
   const items: unknown[] = [];
   for (let next: string | undefined = url; next !== undefined;) {
     const page = get(az, next, what);
     if (!Array.isArray(page.value)) throw new Error(`Azure's list of ${what} wasn't a list.`);
     items.push(...(page.value as unknown[]));
-    next = typeof page.nextLink === 'string' && page.nextLink.startsWith(ARM) ? page.nextLink : undefined;
+    const link = page.nextLink;
+    if (link !== undefined && link !== null && !(typeof link === 'string' && link.startsWith(ARM))) {
+      throw new Error(
+        `Azure's list of ${what} named its next page somewhere other than Resource Manager, so it wasn't read and nothing was changed. Run this again; if it repeats, look at it before any release.`,
+      );
+    }
+    next = typeof link === 'string' ? link : undefined;
   }
   return items;
 }
 
-/** The build a revision or run names in its one container's AGENTX_RELEASE, if it names a commit. */
-function buildIn(item: unknown): string[] {
-  const containers = record(record(record(item).properties).template).containers;
+/** One revision or run on record: the build its one container's AGENTX_RELEASE names (any text, or none), and when it was made. */
+interface Kept {
+  readonly build: string | undefined;
+  readonly startedAt: number | undefined;
+}
+
+/** A revision or run as kept: its build, and its creation (a revision) or start (a run). */
+function keptOf(item: unknown): Kept {
+  const properties = record(record(item).properties);
+  const containers = record(properties.template).containers;
   const env = Array.isArray(containers) ? record(containers[0]).env : undefined;
   const found = (Array.isArray(env) ? env : []).map(record).find((setting) => setting.name === RELEASE_SETTING);
-  return typeof found?.value === 'string' && COMMIT.test(found.value) ? [found.value] : [];
+  return {
+    build: typeof found?.value === 'string' ? found.value : undefined,
+    startedAt: azureTime(properties.createdTime ?? properties.startTime),
+  };
 }
+
+/** How far back the record's own history is held to be whole: the job-start watch's window. */
+const RECORD_HOURS = 6;
 
 /**
  * What deploys have left on record (AZ2c): the builds of the API's revisions (Azure keeps each, a deploy can't take
- * one back) and of migrate's runs (its last 100; a flood of them is the watch's finding). Read, never written.
+ * one back; 100 inactive by default, which drift.ts holds) and of migrate's runs (its last 100). A list at that cap
+ * whose oldest is still recent, or a flood of new ones, may have pushed an older record off its end: red, as the
+ * job-start watch reads a job's runs (jobs.ts historyProblems). Read, never written.
  */
-function recordedBuilds(az: Az, subscription: string): OnRecord {
-  const revisions = workloadUrl(subscription, 'api').replace('?api-version=', '/revisions?api-version=');
+function recordedBuilds(az: Az, subscription: string, now: Date): OnRecord {
+  const since = now.getTime() - RECORD_HOURS * 3_600_000;
+  const revisionsUrl = workloadUrl(subscription, 'api').replace('?api-version=', '/revisions?api-version=');
+  const revisions = listedAll(az, revisionsUrl, "the API's revisions").map(keptOf);
+  const runs = listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").map(keptOf);
+  const builds = (kept: readonly Kept[]): string[] => [...new Set(kept.map((each) => String(each.build)))];
   return {
-    api: [...new Set(listedAll(az, revisions, "the API's revisions").flatMap(buildIn))],
-    migrate: [...new Set(listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").flatMap(buildIn))],
+    api: builds(revisions),
+    migrate: builds(runs),
+    problems: [
+      ...historyProblems(revisions, since, RECORD_HOURS, 'revision').map(
+        (problem) => `api: ${problem}, so a roll-back can't be ruled out: a suspected breach`,
+      ),
+      ...historyProblems(runs, since, RECORD_HOURS).map(
+        (problem) => `migrate: ${problem}, so a roll-back can't be ruled out: a suspected breach`,
+      ),
+    ],
   };
 }
+
+/** What to do after a roll-back: forward only, past the newest build on record. */
+const forwardPast = (newest: string): string =>
+  `If a person rolled it back on purpose, deploy by hand a commit at least as new as ${newest}; otherwise a suspected breach`;
 
 /**
  * AZ2c: a workload rolled back, even to an older commit's own signed image, is a suspected breach. A release moves
  * both forward together, migrate first, so: neither may run a commit older than one deploys have left on record
  * (the API against its own revisions, since migrate alone may be ahead after --migrate-first or a stopped release;
- * migrate against both), and migrate may never be behind the API. A record not in this history counts for nothing.
+ * migrate against both), and migrate may never be behind the API. A record naming a build that isn't a commit in this
+ * history is one no deploy left: a suspected breach too.
  */
 function rolledBack(reads: ReadonlyMap<Workload, Read>, recorded: OnRecord, history: History): string[] {
   const api = reads.get('api')?.running.release ?? '';
   const migrate = reads.get('migrate')?.running.release ?? '';
-  const later = (build: string, among: readonly string[]): string | undefined =>
-    [...new Set(among)].find((each) => each !== build && history.isAncestor(build, each));
+  const known = (build: string): boolean => COMMIT.test(build) && history.isAncestor(build, build);
   const said: string[] = [];
-  const apiLater = later(api, recorded.api);
+  for (const [workload, builds, kind] of [
+    ['api', recorded.api, 'revision'],
+    ['migrate', recorded.migrate, 'run'],
+  ] as const) {
+    const strange = builds.filter((build) => !known(build));
+    if (strange.length > 0) {
+      said.push(
+        `${workload}: a ${kind} of it names a build that isn't in main's history (${strange.map(shown).join(', ')}): no deploy leaves one, a suspected breach`,
+      );
+    }
+  }
+  /** The newest of the builds on record later than `build`, or nothing when none is. */
+  const newestAfter = (build: string, among: readonly string[]): string | undefined => {
+    const later = [...new Set(among)].filter(
+      (each) => each !== build && known(each) && history.isAncestor(build, each),
+    );
+    return later.find((each) => later.every((other) => other === each || !history.isAncestor(each, other)));
+  };
+  const apiLater = newestAfter(api, recorded.api);
   if (apiLater !== undefined) {
     said.push(
-      `api: it runs ${api}, older than ${apiLater}, which one of its revisions ran: rolled back, a suspected breach`,
+      `api: it runs ${api}, older than ${apiLater}, which one of its revisions ran: rolled back. ${forwardPast(apiLater)}`,
     );
   }
-  const migrateLater = later(migrate, [...recorded.migrate, ...recorded.api]);
+  const migrateLater = newestAfter(migrate, [...recorded.migrate, ...recorded.api]);
   if (migrateLater !== undefined) {
     said.push(
-      `migrate: it runs ${migrate}, older than ${migrateLater}, which a run of it or an API revision ran: rolled back, a suspected breach`,
+      `migrate: it runs ${migrate}, older than ${migrateLater}, which a run of it or an API revision ran: rolled back. ${forwardPast(migrateLater)}`,
     );
   }
   if (migrate !== api && history.isAncestor(migrate, api)) {
     said.push(
-      `migrate: it runs ${migrate}, behind the API's ${api}, which no deploy leaves (migrate is always moved first): a suspected breach`,
+      `migrate: it runs ${migrate}, behind the API's ${api}, which a release never leaves (it moves migrate first). If a hand apps run failed part way (it updates both at once), run apps again; otherwise a suspected breach`,
     );
   }
   return said;
@@ -1632,7 +1722,7 @@ export function main(
     () => parseArguments(argv),
     (request) => {
       const more = extras();
-      const steps = { az: az(), history: history(), folder: folder(), say, verify: more.verify, pins };
+      const steps = { az: az(), history: history(), folder: folder(), say, verify: more.verify, pins, now: more.now };
       return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...more });
     },
   );
