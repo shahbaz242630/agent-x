@@ -3,7 +3,8 @@
  * Schemathesis's fuzzing, each from its pinned image, against the API's own
  * `apps/api/openapi.json`, the staging origin given as AGENTX_DAST_ORIGIN; and
  * (ST4) ZAP's baseline scan of the pages the origin serves, the console's
- * (Phase 6 6A1), which no document lists: its spider and passive rules alone.
+ * (Phase 6 6A1), which no document lists: its spider (GETs only, never under
+ * /v1/) and passive rules alone.
  * Run by `.github/workflows/dast.yml` (weekly and on demand, never on a pull
  * request: staging is Free Trial compute) and by hand the same way:
  * `node tooling/dast/scan.ts`, with Docker running. With `--stack`, the End to
@@ -189,30 +190,76 @@ export function zapArgs(origin: string, dir: string): string[] {
   ];
 }
 
+/** The baseline's plan, written beside the results, as the container reads it. */
+export const BASELINE_PLAN = 'zap-baseline-plan.json';
+
+const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
- * ST4: ZAP's baseline scan, as `docker run` arguments, writing
- * `zap-baseline.json` in the mounted directory: its spider from the origin's
- * root (a minute, on the origin alone) and its passive rules, which only read
- * the answers. It sends nothing but GETs, so it needs no Origin of ours.
+ * ST4: ZAP's baseline, as an Automation Framework plan of our own rather than
+ * zap-baseline.py's (S186 review). The pinned 2.17.0 runs the script through a
+ * plan whose spider job sets neither form option (read with --plan-only), and
+ * the job's own defaults process forms and POST them; its context excludes
+ * nothing, so the spider would follow sign-in and step-up, each GET starting a
+ * login flow. Here, written out: the spider for a minute on the origin alone,
+ * two threads, forms neither processed nor posted, and nothing under /v1/,
+ * the API's operations, which the API scan covers from the document; then the
+ * passive rules, which only read the answers, and ZAP's JSON report. JSON is
+ * YAML, so the plan needs no package to write.
  */
-export function zapBaselineArgs(origin: string, dir: string): string[] {
+export function baselinePlan(origin: string): object {
+  const root = escapeRegex(origin);
+  return {
+    env: {
+      contexts: [
+        {
+          name: 'baseline',
+          urls: [`${origin}/`],
+          includePaths: [`${root}/.*`],
+          excludePaths: [`${root}/v1/.*`],
+        },
+      ],
+      parameters: { failOnError: true, failOnWarning: false, progressToStdout: false },
+    },
+    jobs: [
+      { type: 'passiveScan-config', parameters: { maxAlertsPerRule: 10, enableTags: false } },
+      {
+        type: 'spider',
+        parameters: {
+          context: 'baseline',
+          url: `${origin}/`,
+          maxDuration: 1,
+          threadCount: 2,
+          processForm: false,
+          postForm: false,
+        },
+      },
+      { type: 'passiveScan-wait', parameters: { maxDuration: 10 } },
+      {
+        type: 'report',
+        parameters: {
+          template: 'traditional-json',
+          reportDir: '/zap/wrk/',
+          reportFile: 'zap-baseline.json',
+          reportTitle: 'ZAP baseline',
+        },
+      },
+    ],
+  };
+}
+
+/** The baseline's run, as `docker run` arguments: ZAP from its pinned image, running the plan in the mounted directory. */
+export function zapBaselineArgs(dir: string): string[] {
   return [
     'run',
     '--rm',
     '--volume',
     `${dir}:/zap/wrk:rw`,
     SCANNER_IMAGES.zap,
-    'zap-baseline.py',
-    '-t',
-    `${origin}/`,
-    '-m',
-    '1',
-    '-J',
-    'zap-baseline.json',
-    '-I',
-    '-s',
-    '-T',
-    '10',
+    'zap.sh',
+    '-cmd',
+    '-autorun',
+    `/zap/wrk/${BASELINE_PLAN}`,
   ];
 }
 
@@ -545,7 +592,8 @@ async function main(argv: readonly string[]): Promise<number> {
   await wake(origin);
   runScanner('Schemathesis', schemathesisArgs(origin, dir), [0, 1]);
   await wake(origin);
-  runScanner('ZAP baseline', zapBaselineArgs(origin, dir), [0, 1, 2]);
+  writeFileSync(path.join(dir, BASELINE_PLAN), JSON.stringify(baselinePlan(origin), null, 2), 'utf8');
+  runScanner('ZAP baseline', zapBaselineArgs(dir), [0, 1, 2]);
   const zapReport = (file: string) => JSON.parse(readFileSync(path.join(dir, file), 'utf8')) as ZapReport;
   const all = distinct([
     ...zapFindings(zapReport('zap.json')),

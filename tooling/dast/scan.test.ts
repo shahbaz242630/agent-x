@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   acceptedReason,
+  BASELINE_PLAN,
+  baselinePlan,
   distinct,
   documentedPath,
   type Finding,
@@ -145,20 +147,55 @@ describe('B7 the dynamic scan of staging', () => {
     expect(options).toContain('-config replacer.full_list(0).matchtype=REQ_HEADER');
   });
 
-  it("ST4 runs ZAP's baseline from the same pinned image at the origin's root: a minute's spider and its passive rules", () => {
-    const args = zapBaselineArgs(ORIGIN, '/r');
-
-    expect(args.slice(0, 6)).toEqual([
+  it("ST4 runs ZAP's baseline from the same pinned image, as our own plan in the mounted directory", () => {
+    expect(zapBaselineArgs('/r')).toEqual([
       'run',
       '--rm',
       '--volume',
       '/r:/zap/wrk:rw',
       SCANNER_IMAGES.zap,
-      'zap-baseline.py',
+      'zap.sh',
+      '-cmd',
+      '-autorun',
+      `/zap/wrk/${BASELINE_PLAN}`,
     ]);
-    expect(args).toEqual(expect.arrayContaining(['-t', `${ORIGIN}/`, '-m', '1', '-J', 'zap-baseline.json', '-I']));
-    // Passive alone: never the active scan's attacks, and no document to read.
-    expect(args.join(' ')).not.toMatch(/zap-full-scan|zap-api-scan|openapi/);
+  });
+
+  // S186 review, proven with the pinned image against a logging page: ZAP's own
+  // defaults (zap-baseline.py's plan sets neither form option and excludes
+  // nothing) POSTed a form, sent a GET form and followed /v1/auth/sign-in and
+  // /v1/auth/step-up; this plan sent GET /, /about, robots.txt and sitemap.xml alone.
+  it("ST4's plan: the spider never processes or posts a form, never goes under /v1/, and stays on the origin", () => {
+    const plan = baselinePlan(ORIGIN) as {
+      env: { contexts: { name: string; urls: string[]; includePaths: string[]; excludePaths: string[] }[] };
+      jobs: { type: string; parameters: Record<string, unknown> }[];
+    };
+    const [context] = plan.env.contexts;
+    expect(context).toEqual({
+      name: 'baseline',
+      urls: [`${ORIGIN}/`],
+      includePaths: ['https://app\\.example\\.test/.*'],
+      excludePaths: ['https://app\\.example\\.test/v1/.*'],
+    });
+    const excluded = new RegExp(`^${context?.excludePaths[0] ?? ''}$`);
+    for (const path of ['/v1/auth/sign-in?returnTo=/', '/v1/auth/step-up', '/v1/auth/callback', '/v1/members']) {
+      expect(excluded.test(`${ORIGIN}${path}`), path).toBe(true);
+    }
+    expect(excluded.test(`${ORIGIN}/`)).toBe(false);
+    expect(excluded.test(`${ORIGIN}/assets/app.js`)).toBe(false);
+
+    expect(plan.jobs.map((job) => job.type)).toEqual(['passiveScan-config', 'spider', 'passiveScan-wait', 'report']);
+    expect(plan.jobs[1]?.parameters).toEqual({
+      context: 'baseline',
+      url: `${ORIGIN}/`,
+      maxDuration: 1,
+      threadCount: 2,
+      processForm: false,
+      postForm: false,
+    });
+    expect(plan.jobs[3]?.parameters).toMatchObject({ template: 'traditional-json', reportFile: 'zap-baseline.json' });
+    // Passive alone: never an active scan's attacks.
+    expect(JSON.stringify(plan)).not.toMatch(/activeScan|openapi|ajax/i);
   });
 
   it("ST4 reads the baseline's report as ZAP's, under its own tool", () => {
