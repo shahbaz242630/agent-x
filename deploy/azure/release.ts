@@ -329,7 +329,10 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   const found = record(containers[0]);
   const unknown = Object.keys(found).filter((field) => !CONTAINER_FIELDS.has(field));
   if (unknown.length > 0) return refuse(`its container has ${unknown.join(', ')}, which this tool doesn't copy`);
-  const { name, image, command, args, env, resources, volumeMounts } = found;
+  const { name, image, command, env, resources, volumeMounts } = found;
+  // Azure leaves an empty argument list out of what it gives back (staging's API from 12 Nov 2026, after #626's
+  // release): no arguments, as `[]`, which the release then sends back. Any other missing or odd list is refused.
+  const args = 'args' in found ? found.args : [];
   if (name !== expected) return refuse(`its container isn't named ${expected}`);
   if (typeof image !== 'string' || !isOurImage(image)) return refuse(`it doesn't run ${IMAGE_REPOSITORY} by digest`);
   if (!isStrings(command) || !isStrings(args)) return refuse('its command or arguments are not lists of words');
