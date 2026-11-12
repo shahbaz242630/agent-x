@@ -27,6 +27,7 @@ import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
 import {
   type AuditTables,
   createAuditTrail,
+  keepHoldWaitingHere,
   type SignedStates,
   TooManyEventsToRead,
   withSignedStates,
@@ -610,7 +611,11 @@ describe(`a summary left behind its membership: the alarm since 0089 (OR1c, Post
       built: { outcome: 'built', built: 2 },
       waiting: [{ subject_type: 'membership_grant', object_id: first, reason: 'holding' }],
     });
-    expect(lines('audit.integrity_failed')).toHaveLength(2);
+    expect(lines('audit.integrity_failed').map(({ objectId }) => objectId)).toEqual([bob.id, carol.id].sort());
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'holding', subjectType: 'membership_grant' }),
+      expect.objectContaining({ reason: 'holding', subjectType: 'membership_grant' }),
+    ]);
     // Committed with the repair; the hold then recorded, naming the same first record, which takes its row with it.
     expect(await hold()).toMatchObject({ outcome: 'held' });
     expect(await database.as('backup').query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual(
@@ -846,16 +851,48 @@ describe(`concurrent membership changes, in a forced lock order (ADR-006 §6, Po
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
-  it('a hold set while the job repairs a summary behind waits on the chain head the repair holds, never on its row', async () => {
+  /** A finding on the record in a transaction of its own: its hold is set as that transaction ends. */
+  const found = (subjectType: string, id: string) =>
+    withSignedStates(app, org, services(), (_tx, states) => {
+      states.mismatch(subjectType, { orgId: org, id });
+      return Promise.resolve();
+    });
+
+  it('the repair writes its waiting row only under the chain head, so a hold holding the head and writing it never deadlocks', async () => {
     const alice = await add('admin');
     const bob = await add('viewer');
     await leftBehind(oldImage, services(), { orgId: org, id: bob.id }, 'approver', userActor(alice.userId));
-    /** A finding on the record in a transaction of its own: its hold is set as that transaction ends. */
-    const found = (subjectType: string, id: string) =>
-      withSignedStates(app, org, services(), (_tx, states) => {
-        states.mismatch(subjectType, { orgId: org, id });
-        return Promise.resolve();
-      });
+    // Held on another record already, so the job's own hold keeps Bob's row waiting rather than taking it.
+    await found(MEMBERSHIPS.subject, alice.id);
+    const record = { orgId: org, subjectType: MEMBERSHIP_GRANTS.subject, objectId: bob.id };
+    // As a hold's transaction does: the chain head's lock first, held until let go, then the row.
+    const holding = await paused((pause) =>
+      withSignedStates(app, org, services(), async (tx, states) => {
+        await states.integrityHold(tx, org, 'head');
+        pause.reached();
+        await pause.until;
+        await keepHoldWaitingHere(tx, record, 'holding');
+      }),
+    );
+    // The job queues on the head at its repair's first record, its row not written yet.
+    const building = within(20_000, build(), 'the build');
+    await waitUntilQueued(database.as('admin'), 1);
+    holding.go();
+
+    // Had the job written its row before the head, the hold's row would wait on it: a deadlock.
+    await within(20_000, holding.done, 'the hold');
+    expect(await building).toEqual({ outcome: 'built', built: 1 });
+    expect(
+      await database
+        .as('backup')
+        .query('select subject_type, object_id from directory.holds_waiting where org_id = $1', [org]),
+    ).toEqual([{ subject_type: 'membership_grant', object_id: bob.id }]);
+  });
+
+  it('a hold set while the job holds its repair and row waits on the chain head, and every hold is recorded', async () => {
+    const alice = await add('admin');
+    const bob = await add('viewer');
+    await leftBehind(oldImage, services(), { orgId: org, id: bob.id }, 'approver', userActor(alice.userId));
     // Held on another record already, so each later hold keeps Bob's row waiting (the head's lock, then the row).
     await found(MEMBERSHIPS.subject, alice.id);
     // The repair done and its row written, holding the head's lock and the row, until let go.
