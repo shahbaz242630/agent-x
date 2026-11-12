@@ -160,7 +160,28 @@ param webCopies int = 3
 @maxValue(4)
 param zitadelMostCopies int = 4
 
+@description('The most copies of Zitadel\'s login pages production runs (SA3c): two always, more as its traffic asks. Read in production alone: staging keeps one.')
+@minValue(2)
+@maxValue(4)
+param loginMostCopies int = 4
+
 var names = resourceNames(environment, nameSuffix)
+
+// The login pages' copies (SA3c). None of their state is one copy's, read from
+// the pinned image itself: a sign-in's sessions are in the browser's cookies
+// and its request in the address, Next's server-action key is built into the
+// image, and the system user's key is the one mounted file. Production runs two
+// always, so sign-in outlives a copy, and up to `loginMostCopies`, at the size
+// staging runs; staging keeps one, scaling to zero (`appMinReplicas`).
+var loginScale = environment == 'production'
+  ? {
+      minReplicas: 2
+      maxReplicas: loginMostCopies
+    }
+  : {
+      minReplicas: appMinReplicas
+      maxReplicas: 1
+    }
 
 // Zitadel's copies and size (SA3a). None of its state is one copy's, read from
 // the pinned image itself: its memory cache is off and the caches it uses are
@@ -1489,10 +1510,10 @@ var apps = concat([
     args: []
     targetPort: 3000
     transport: 'auto'
-    // Nothing here holds state, but one replica is enough for a pilot and
-    // keeps the deployment's shape the same everywhere.
-    minReplicas: appMinReplicas
-    maxReplicas: 1
+    // Nothing here is one copy's (SA3c): production runs two to four, as
+    // Zitadel, and staging one (`loginScale`).
+    minReplicas: loginScale.minReplicas
+    maxReplicas: loginScale.maxReplicas
     stopSeconds: 30
     cpu: '0.5'
     memory: '1Gi'

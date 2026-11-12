@@ -670,7 +670,7 @@ type MostReplicas = { readonly most: number; readonly why: string } & (
 /**
  * The apps whose replicas must stay at one, with why: the API's jobs apart from it (4D2e D13) keep to one copy, as the
  * lease alone doesn't make a second safe for the copier. An app running the API is held by its role besides
- * (`roleScaleProblems`), and Zitadel by its environment (`ZITADEL_COPIES`).
+ * (`roleScaleProblems`), and sign-in's two apps by their environment (`SIGN_IN_COPIES`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
   jobs: "the API's jobs keep to one copy, which the lease alone doesn't make safe for the copier",
@@ -682,9 +682,9 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
  * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
  * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
- * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes; two copies
- * sharing one would also need the same 10 ms tick and sequence to make the same ID, and capping at four copies keeps
- * the odds small (SA3d tracks proving it).
+ * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes (FNV-1, its low 16
+ * bits, read from the image, SA3d); two copies sharing one make the same IDs whenever they make one in the same 10 ms,
+ * which the event store's key doesn't always refuse, so distinct IDs are an item before production (SA3d).
  */
 export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
@@ -696,9 +696,33 @@ export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostRe
   },
 };
 
+/**
+ * The login pages' most copies, by environment (SA3c). None of their state is one copy's, read from the pinned image
+ * itself (v4.17.3): a sign-in's sessions travel in the browser's own cookies (`sessions`, `fingerprintId`,
+ * `verificationCheck`) and its request in the address (`requestId`), Next's key for server actions is the one built
+ * into the image, the system user's key is the one mounted file, and its settings cache (on by default, 15 minutes)
+ * only lets each copy be as stale as one would be. Staging keeps one; production two to four, as Zitadel's.
+ */
+export const LOGIN_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
+  staging: { most: 1, why: 'staging keeps one copy of the login pages, as it does of Zitadel' },
+  production: {
+    most: 4,
+    why: "the login pages' copies stop at four (SA3c), as Zitadel's",
+    fewest: 2,
+    fewestWhy: 'sign-in must not hang on one copy',
+  },
+};
+
+/** Sign-in's two apps, held by environment rather than to one: Zitadel (SA3a) and its login pages (SA3c). */
+const SIGN_IN_COPIES: Readonly<Record<string, Readonly<Record<Expectations['environment'], MostReplicas>>>> = {
+  zitadel: ZITADEL_COPIES,
+  login: LOGIN_COPIES,
+};
+
 /** The most replicas a workload may run in an environment, or nothing where only the defaults hold it. */
 function mostReplicasOf(workload: string, environment: Expectations['environment']): MostReplicas | undefined {
-  if (workload === 'zitadel') return ZITADEL_COPIES[environment];
+  const signIn = SIGN_IN_COPIES[workload];
+  if (signIn !== undefined) return signIn[environment];
   const why = ONE_REPLICA[workload];
   return why === undefined ? undefined : { most: 1, why };
 }

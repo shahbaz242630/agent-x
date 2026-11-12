@@ -24,6 +24,7 @@ import {
   DECISION_HEADROOM,
   gateBusy,
   LOAD_RUN,
+  LOGIN_COPIES,
   ZITADEL_COPIES,
 } from './policy.ts';
 import {
@@ -218,6 +219,18 @@ function splitTheApi(from: Snapshot): Snapshot {
 }
 
 /**
+ * Production keeps two copies of Zitadel and of its login pages running (SA3a, SA3c). Counted with a revision swap's two
+ * more, two connections each keep Zitadel within staging's server: 8, 32 of 35 in all; the login pages hold none.
+ */
+function twoSignInCopies(snapshotted: Snapshot): void {
+  for (const resource of snapshotted.predictedResources as unknown as Mutable[]) {
+    const app = resource as unknown as PredictedResource;
+    if (APP('zitadel')(app) || APP('login')(app)) Object.assign(scaleOf(resource), { minReplicas: 2, maxReplicas: 2 });
+    if (APP('zitadel')(app)) setSetting(resource, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '2');
+  }
+}
+
+/**
  * Staging's resources as production's would name them: their tags and CI's
  * identity (where it is and whom its role is given to), and (unless a test
  * wants it left) CI's GitHub subject. Its API runs split, as production's must (4D2e D13).
@@ -229,13 +242,8 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       (resource) => (inside(resource, 'tags').environment = 'production'),
     ),
   );
+  twoSignInCopies(copy);
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
-    // Production keeps two Zitadel copies running (SA3a). Counted with a revision swap's two more, two connections
-    // each keep the sum within staging's server: 8 for Zitadel, 32 of 35 in all.
-    if (APP('zitadel')(resource as unknown as PredictedResource)) {
-      Object.assign(scaleOf(resource), { minReplicas: 2, maxReplicas: 2 });
-      setSetting(resource, 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', '2');
-    }
     // CI's identity and the job-start watch's (S175), both named by the environment.
     for (const who of ['release', 'job-watch']) {
       resource.id = String(resource.id).replace(`/id-agentx-stg-${who}`, `/id-agentx-prd-${who}`);
@@ -5008,9 +5016,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
         resource.tags === undefined ? resource : { ...resource, tags: { ...resource.tags, environment: 'production' } },
       ),
     };
-    // Staging's shape as production's: its one Zitadel copy, asleep, is short of production's two too (SA3a).
+    // Staging's shape as production's: its one copy of Zitadel and of its login pages, asleep, are each short of
+    // production's two too (SA3a, SA3c).
     expect(appsProblems(unsplit)).toEqual([
       'ca-agentx-stg-zitadel: must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy; it says 0',
+      'ca-agentx-stg-login: must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy; it says 0',
       'the deployment: must run the API split in production, web copies beside the jobs app (4D2e D13), whose identity alone keeps the anchors there',
     ]);
   });
@@ -6241,6 +6251,10 @@ describe('the load run (D2c, PL-38)', () => {
     expect(zitadel?.name).toBe('ca-agentx-prd-zitadel');
     expect(at(zitadel?.properties, 'template', 'scale')).toEqual({ minReplicas: 2, maxReplicas: 4 });
     expect(at(containerOf(zitadel as unknown as Mutable), 'resources')).toEqual({ cpu: 1, memory: '2Gi' });
+    // Its login pages too, at staging's size (SA3c).
+    const login = production.predictedResources.find(APP('login'));
+    expect(at(login?.properties, 'template', 'scale')).toEqual({ minReplicas: 2, maxReplicas: 4 });
+    expect(at(containerOf(login as unknown as Mutable), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
     const problems = policyProblems(production, { region: 'uaenorth', environment: 'production' });
     expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs')).toEqual([]);
     // Its count at production's defaults (Azure.md): web 60, jobs 20, Zitadel 10 x (4 + 2), and two more.
@@ -6252,6 +6266,41 @@ describe('the load run (D2c, PL-38)', () => {
     expect(at(copies, 'maxValue')).toBe(ZITADEL_COPIES.production.most);
     expect(at(copies, 'minValue')).toBe(ZITADEL_COPIES.production.fewest);
     expect(at(copies, 'defaultValue')).toBe(ZITADEL_COPIES.production.most);
+    const loginCopies = at(bicepFile('apps.bicep').template, 'parameters', 'loginMostCopies');
+    expect(at(loginCopies, 'maxValue')).toBe(LOGIN_COPIES.production.most);
+    expect(at(loginCopies, 'minValue')).toBe(LOGIN_COPIES.production.fewest);
+    expect(at(loginCopies, 'defaultValue')).toBe(LOGIN_COPIES.production.most);
+  });
+
+  it("apps: the login pages' copies, one on staging and two to four in production (SA3c)", () => {
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    const loginAt = (from: Snapshot, fewest: unknown, most: unknown): Snapshot =>
+      changed(APP('login'), (app) => Object.assign(scaleOf(app), { minReplicas: fewest, maxReplicas: most }), from);
+    const appsMessages = (snapshotted: Snapshot, expected: Expectations): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter(({ rule }) => rule === 'apps')
+        .map(({ message }) => message);
+    // Staging: one, asleep or awake; a second is refused.
+    for (const fewest of [0, 1]) expect(appsMessages(loginAt(staging, fewest, 1), STAGING)).toEqual([]);
+    expect(appsMessages(loginAt(staging, 1, 2), STAGING)).toEqual([
+      'must run at most one replica (maxReplicas 1): staging keeps one copy of the login pages, as it does of Zitadel; it says 2',
+    ]);
+    // Production: two to four running; a fifth, or fewer than two kept, is refused.
+    const productionLogin = (fewest: unknown, most: unknown): string[] =>
+      appsMessages(loginAt(productionLike({ subject: true }), fewest, most), production);
+    for (const [fewest, most] of [
+      [2, 2],
+      [2, 4],
+      [3, 4],
+    ] as const) {
+      expect({ fewest, most, problems: productionLogin(fewest, most) }).toEqual({ fewest, most, problems: [] });
+    }
+    expect(productionLogin(2, 5)).toEqual([
+      "must run at most 4 replicas (maxReplicas 4): the login pages' copies stop at four (SA3c), as Zitadel's; it says 5",
+    ]);
+    expect(productionLogin(1, 4)).toEqual([
+      'must keep at least 2 replicas running (minReplicas 2): sign-in must not hang on one copy; it says 1',
+    ]);
   });
 
   it("apps and jobs: a container at a size Azure's Consumption profile doesn't offer", () => {
