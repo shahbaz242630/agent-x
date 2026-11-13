@@ -768,8 +768,9 @@ export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostRe
 
 /**
  * The login pages' most copies, by environment (SA3c). None of their state is one copy's, read from the pinned image
- * itself (v4.17.3): a sign-in's sessions travel in the browser's own cookies (`sessions`, `fingerprintId`,
- * `verificationCheck`) and its request in the address (`requestId`), Next's key for server actions is the one built
+ * itself (v4.17.3; v4.19.5 signs each `sessions` entry with a key every copy derives alike from the one mounted login
+ * key file, as no ZITADEL_SESSION_COOKIE_SECRET is set): a sign-in's sessions travel in the browser's own cookies
+ * (`sessions`, `fingerprintId`, `verificationCheck`) and its request in the address (`requestId`), Next's key for server actions is the one built
  * into the image, the system user's key is the one mounted file, and its settings cache (on by default, 15 minutes)
  * only lets each copy be as stale as one would be. Staging keeps one; production two to four, as Zitadel's.
  */
@@ -802,7 +803,7 @@ const AZURE_RESERVED_CONNECTIONS = 15;
 
 /**
  * Zitadel's pool where it sets none: ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS's default, 10, read from the pinned
- * image's own binary (v4.17.3, 4D2e D12), not from its documentation.
+ * image's own binary (v4.17.3, 4D2e D12; the same in v4.19.5's defaults), not from its documentation.
  */
 const ZITADEL_POOL = { setting: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', unset: 10 } as const;
 
@@ -835,7 +836,7 @@ const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
       '/ui/console',
       '/ui/login',
       '/assets/v1/',
-      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3).
+      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3, unchanged in v4.19.5).
       '/zitadel.admin.v1.AdminService/',
       '/zitadel.management.v1.ManagementService/',
       '/zitadel.auth.v1.AuthService/',
