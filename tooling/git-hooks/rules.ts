@@ -99,6 +99,12 @@ const WORD_KEY_WITH_PASSWORD_NAMED =
 const PASSWORD_NAMED_ARGUMENT_WITH_WORD = /\b[A-Za-z0-9_]*passw(?:or)?d[A-Za-z0-9_]*\s*,\s*(['"`])[^'"`]{6,}\1/i;
 
 /**
+ * A password-named call given a quoted word, which GitGuardian read as a generic password, the word being it: a
+ * test building a refused login's log line for a role (PR #625, S187). Name the call for what it makes (`badLogin`).
+ */
+const PASSWORD_NAMED_CALL_WITH_WORD = /\b[A-Za-z0-9_]*passw(?:or)?d[A-Za-z0-9_]*\s*\(\s*(['"`])[^'"`]{6,}\1/i;
+
+/**
  * A call to something named "secret" with a quoted name holding a digit, which
  * GitGuardian read as a generic high-entropy secret: a test picking one of the
  * app's keys by its vault name, a key purpose and a version (PRs #66 and #67, S27).
@@ -171,6 +177,30 @@ export function pathProblems(file: string): Problem[] {
   }));
 }
 
+/** Shapes GitGuardian read as a secret, each with what to write instead, in the order they are reported. */
+const BAIT_SHAPES: readonly { readonly pattern: RegExp; readonly message: string }[] = [
+  {
+    pattern: PASSWORD_NAMED_CALL_WITH_WORD,
+    message:
+      'a password-named call given a quoted word; GitGuardian reads the word as the password. Name the call for what it makes (`badLogin`)',
+  },
+  {
+    pattern: PASSWORD_NAMED_ARGUMENT_WITH_WORD,
+    message:
+      'a password-named name beside a quoted word in a call; GitGuardian reads the word as the password. Name the variable for what it is (`loginFile`)',
+  },
+  {
+    pattern: SECRET_CALL_WITH_DIGIT,
+    message:
+      'a call named for a secret given a quoted name with a digit; GitGuardian reads the name as a secret. Build the name when the test runs',
+  },
+  {
+    pattern: PASSWORD_NAMED_BESIDE_DIGIT,
+    message:
+      'a quoted password-named name beside a quoted name with a digit; GitGuardian reads the pair as a password. Build the versioned name when the test runs',
+  },
+];
+
 /** What is wrong with one line of a file. */
 export function lineProblems(file: string, line: number, text: string): Problem[] {
   const problems: Problem[] = [];
@@ -203,23 +233,8 @@ export function lineProblems(file: string, line: number, text: string): Problem[
       'a quoted word paired with a quoted password-named name; GitGuardian reads the word as the password. Write the pair as one string ("api reads db-app-password")',
     );
   }
-  if (PASSWORD_NAMED_ARGUMENT_WITH_WORD.test(text)) {
-    add(
-      'scanner-bait',
-      'a password-named name beside a quoted word in a call; GitGuardian reads the word as the password. Name the variable for what it is (`loginFile`)',
-    );
-  }
-  if (SECRET_CALL_WITH_DIGIT.test(text)) {
-    add(
-      'scanner-bait',
-      'a call named for a secret given a quoted name with a digit; GitGuardian reads the name as a secret. Build the name when the test runs',
-    );
-  }
-  if (PASSWORD_NAMED_BESIDE_DIGIT.test(text)) {
-    add(
-      'scanner-bait',
-      'a quoted password-named name beside a quoted name with a digit; GitGuardian reads the pair as a password. Build the versioned name when the test runs',
-    );
+  for (const { pattern, message } of BAIT_SHAPES) {
+    if (pattern.test(text)) add('scanner-bait', message);
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {
     add(

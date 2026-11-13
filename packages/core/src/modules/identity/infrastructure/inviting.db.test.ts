@@ -32,6 +32,7 @@ import type { Role } from '../domain/membership.ts';
 import { invitationChange, INVITATIONS } from './invitations.ts';
 import { createInvitationWrites, type InvitationWrites, type InvitingAdmin } from './inviting.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -320,12 +321,11 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     const { org, admin } = await organization();
     const { id, challengeId } = await drafted(admin);
     await stepUp(admin, challengeId);
-    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
+    await deactivatedAsTheProduct(
+      app,
+      { keys, ids, logger: testLogger() },
+      { orgId: org, id: admin.membershipId },
+      OPERATOR,
     );
 
     expect(await confirm(admin, id)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });

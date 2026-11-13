@@ -6,13 +6,7 @@
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { addLink, type FundingSourcesTables, MOST_LINKS_STARTED_A_DAY } from '@agentx/core/modules/funding-sources';
-import {
-  addMembership,
-  type IdentityTables,
-  MEMBERSHIPS,
-  type Role,
-  userForSubject,
-} from '@agentx/core/modules/identity';
+import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
@@ -38,6 +32,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { deactivatedAsTheProduct } from './membership-changes.helper.test.ts';
 import {
   createFundingSourceLinks,
   railFor,
@@ -205,12 +200,11 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
   it('refuses an admin whose membership is deactivated, adding nothing', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
-    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
+    await deactivatedAsTheProduct(
+      app,
+      { keys, ids, logger: testLogger() },
+      { orgId: org, id: admin.membershipId },
+      OPERATOR,
     );
 
     expect(await start(admin)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });

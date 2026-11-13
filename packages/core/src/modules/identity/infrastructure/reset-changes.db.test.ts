@@ -42,6 +42,7 @@ import { createContactConfirmations } from './contact-confirmations.ts';
 import { confirmationSecret, draftReset, FACTOR_RESETS, MOST_RESET_RECORDS, resetChange } from './factor-resets.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import {
   activateContact,
   contactChange,
@@ -134,13 +135,7 @@ async function member(org: string, role: Role, userId?: string): Promise<Member>
 
 /** Deactivates the membership, as B4-5 does. */
 const deactivate = (org: string, membershipId: string) =>
-  withSignedStates(app, org, services(), (tx, states) =>
-    states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
-      actor: OPERATOR,
-      action: 'membership.deactivated',
-      details: {},
-    }),
-  );
+  deactivatedAsTheProduct(app, services(), { orgId: org, id: membershipId }, OPERATOR);
 
 /** A contact made ACTIVE by the admin now, as B6-1c does once stepped up: it counts 7 days on. */
 async function contact(org: string, admin: Member, email: string): Promise<string> {

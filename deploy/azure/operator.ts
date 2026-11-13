@@ -13,6 +13,14 @@
 //   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
 //   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
 //   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
+//   node deploy/azure/operator.ts counting-contacts --org <organisation ID>
+//
+// counting-contacts (OR2b, playbook K) lists an organisation's registered
+// contacts that count now, read-only: each one's ID, its address masked
+// (s***@company.ae) and when it started to count, so our team knows whom the
+// out-of-band check reaches and can match a reply. The whole address is never
+// shown or logged. A contact whose record can't be verified gives no list, and
+// no reset goes on. It writes nothing, so it needs no --id: run it again freely.
 //
 // factor-reset-notice (OR2, playbook K) tells every member of an organisation,
 // and its registered contacts that count now, that our team is resetting a
@@ -120,6 +128,9 @@ import {
   chainRecoveryRequest,
   chainRestoreRequest,
   DISCARD_FORK,
+  COUNTING_CONTACTS,
+  COUNTING_CONTACTS_USAGE,
+  countingContactsRequest,
   FACTOR_RESET_NOTICE,
   factorResetNoticeOf,
   factorResetNoticeRequest,
@@ -244,6 +255,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
+  node deploy/azure/operator.ts counting-contacts --org <organisation ID>
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -949,6 +961,68 @@ export function factorResetNotice(request: FactorResetNoticeArguments, steps: Jo
   }));
 }
 
+/** The listing of an organisation's counting contacts the partner asked for (OR2b): the organisation alone. */
+export interface CountingContactsArguments {
+  readonly orgId: string;
+}
+
+/** What was asked for, or a UsageError saying why it can't be done, by the operator's own words for it. */
+export function parseCountingContacts(argv: readonly string[]): CountingContactsArguments {
+  const [command, orgFlag, orgId, ...rest] = argv;
+  if (command !== COUNTING_CONTACTS || orgFlag !== '--org' || orgId === undefined || rest.length > 0) {
+    throw new UsageError(`say ${COUNTING_CONTACTS_USAGE}, and nothing else`);
+  }
+  if (!UUID_V7.test(orgId)) throw new UsageError(ORG_PROBLEM);
+  return { orgId };
+}
+
+/** Said after anything unclear: the listing only reads. */
+const LIST_AGAIN = 'Run the same command again: it only reads, so nothing is done twice.';
+
+/**
+ * What a listing's run found (OR2b), from the command's own lines about this
+ * organisation: 0 once listed, each contact on a line of its own with its
+ * address masked, or none; 1 otherwise, saying what to do next.
+ */
+function countingContactsOutcome(steps: JobSteps, lines: readonly LogLine[], orgId: string): number {
+  const said = commandLines(lines);
+  const listed = said.find((line) => line.event === 'operator.counting_contacts' && line.orgId === orgId);
+  if (listed !== undefined) {
+    const contacts = Array.isArray(listed.contacts) ? listed.contacts.map(record) : [];
+    if (contacts.length === 0) {
+      steps.say(
+        `${orgId} has no registered contact that counts now, so no one can confirm a reset out of band: don't go on (playbook K).`,
+      );
+      return 0;
+    }
+    steps.say(
+      `${String(contacts.length)} registered contact(s) of ${orgId} count now. Each is written to at the address Agent X holds (factor-reset-notice); go on only once one confirms in writing:`,
+    );
+    for (const contact of contacts) {
+      steps.say(`  ${String(contact.contactId)}  ${String(contact.masked)}  counts from ${String(contact.countsFrom)}`);
+    }
+    return 0;
+  }
+  const refused = said.find((line) => line.event === 'operator.refused' && line.orgId === orgId);
+  const refusedSaid = problemsSaid(refused);
+  if (refusedSaid !== undefined) {
+    steps.say(`The operator's command refused it, and listed no one: ${refusedSaid}. No reset goes on until it lists.`);
+    return 1;
+  }
+  return refusedOrUnclear(steps, said, LIST_AGAIN);
+}
+
+/** Lists an organisation's registered contacts that count now, on the operator's job (OR2b): 0 once listed. */
+export function countingContacts(asked: CountingContactsArguments, steps: JobSteps): Promise<number> {
+  return runRequest(steps, () => ({
+    text: countingContactsRequest(asked.orgId),
+    intro: `Listing the registered contacts of ${asked.orgId} that count now, read-only, each address masked.`,
+    tryAgain: LIST_AGAIN,
+    mayStillHold: `The request may still be on ${jobName('operator')}: it only reads. ${LIST_AGAIN} It takes the request off at its end, as does deploy.ts apps.`,
+    judge: (_run, lines) => countingContactsOutcome(steps, lines, asked.orgId),
+  }));
+}
+
 /** A chain recovery plan the partner asked for (4D2e E9): the organisation, and whether a fork may be planned away. */
 export interface RecoveryPlanArguments {
   readonly orgId: string;
@@ -1486,6 +1560,10 @@ export function main(
       if (argv[0] === FACTOR_RESET_NOTICE) {
         const request = parseFactorResetNotice(argv);
         return (steps) => factorResetNotice(request, steps);
+      }
+      if (argv[0] === COUNTING_CONTACTS) {
+        const asked = parseCountingContacts(argv);
+        return (steps) => countingContacts(asked, steps);
       }
       if (argv[0] === 'chain-recovery-plan') {
         const asked = parseRecoveryPlan(argv);

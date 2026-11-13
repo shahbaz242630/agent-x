@@ -1,14 +1,22 @@
 // The watch on job runs with their containers changed (Carry-Forward S175).
 // Nothing here reaches Azure: the CLI is a stand-in that answers each list from
 // the jobs and runs a test gives it, the way `az rest` gives them.
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
+import { type Anchor, type GitHubGet, lastRelease } from './anchor.ts';
+import { realHistory } from './git.ts';
 import {
   azureTime,
   DEFAULT_HOURS,
   type DeployedJob,
   differences,
+  type HeldSteps,
   main,
   parseArguments,
   type Run,
@@ -24,6 +32,9 @@ const GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/re
 /** Names assembled from their words, so no line pairs a secret-like name with a quoted value (GitGuardian, PRs #27 and #28). */
 const setting = (...words: readonly string[]): string => words.join('_');
 
+/** The build the jobs run, and the commit main's checkout is at unless a test says otherwise. */
+const BUILD = 'c'.repeat(40);
+
 /** The operator's container as a job lists it, with made-up values. */
 const OPERATOR = {
   name: 'operator',
@@ -35,7 +46,7 @@ const OPERATOR = {
     { name: setting('AGENTX', 'DB', 'PASSWORD', 'FILE'), value: '/mnt/secrets/db-operator-password' },
     { name: setting('AGENTX', 'HELD', 'REF'), secretRef: 'held-ref' },
     { name: 'AGENTX_DB_HOST', value: 'db.example.invalid' },
-    { name: 'AGENTX_RELEASE', value: 'commit-one' },
+    { name: 'AGENTX_RELEASE', value: BUILD },
   ],
   resources: { cpu: 0.5, memory: '1Gi' },
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
@@ -107,9 +118,42 @@ class FakeAz implements Az {
   }
 }
 
+const MIGRATE_JOB = 'job-agentx-stg-migrate';
+
+/** The migration job in a world, as its jobs list gives it; none when it has no migration job. */
+const migrateIn = (world: World): unknown =>
+  (world.jobs as readonly ReturnType<typeof JOB>[]).find((job) => job.name === MIGRATE_JOB);
+
+/**
+ * Main's head and history, and the apps.bicep of a commit, as the watch reads them (AZ2c): by default apps.bicep
+ * gives the migration job exactly what the world's job holds; a template given as containers is the job with those.
+ * Each commit whose apps.bicep was read is kept in `asked`.
+ */
+function heldFor(
+  world: World,
+  given: {
+    /** Main's line, newest first: by default the build the jobs run alone. */
+    readonly line?: readonly string[];
+    readonly template?: readonly unknown[] | Error;
+    readonly anchor?: () => Promise<Anchor>;
+  } = {},
+  asked: string[] = [],
+): HeldSteps {
+  return {
+    history: { mainline: () => new Map((given.line ?? [BUILD]).map((commit, place) => [commit, place] as const)) },
+    anchor: given.anchor ?? (() => Promise.resolve({ kind: 'unread' })),
+    templatesAt: (_subscription, commit) => {
+      asked.push(commit);
+      if (given.template instanceof Error) throw given.template;
+      return new Map([['migrate', given.template === undefined ? migrateIn(world) : JOB(MIGRATE_JOB, given.template)]]);
+    },
+  };
+}
+
 async function run(
   world: World,
   argv: readonly string[] = [],
+  held: HeldSteps = heldFor(world),
 ): Promise<{ status: number; lines: string[]; az: FakeAz }> {
   const lines: string[] = [];
   const az = new FakeAz(world);
@@ -118,6 +162,7 @@ async function run(
     (line) => lines.push(line),
     () => az,
     () => NOW,
+    () => held,
   );
   return { status, lines, az };
 }
@@ -130,6 +175,217 @@ const LATELY = '2026-11-10T12:16:55+00:00';
 const oneRun = (containers: readonly unknown[], startTime = LATELY, initContainers: unknown[] = []): World => ({
   jobs: [JOB(OPERATOR_JOB, [OPERATOR])],
   runs: { [OPERATOR_JOB]: [EXECUTION(RUN_NAME, startTime, containers, initContainers)] },
+});
+
+describe('AZ2c: the migration job itself held to its build’s apps.bicep', () => {
+  const MIGRATE = { ...OPERATOR, name: 'migrate', command: ['node', 'apps/migrate/src/main.ts'], args: [] };
+  /** The migration job as deployed, and a run of it as deployed: whatever the job runs, the run matches. */
+  const world = (container: Readonly<Record<string, unknown>>): World => ({
+    jobs: [JOB(MIGRATE_JOB, [container])],
+    runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [container])] },
+  });
+  const FINDING_START = `FOUND: ${MIGRATE_JOB} isn't as the apps.bicep of the build it names has it, beyond its image and build: `;
+
+  it('finds a job whose command was changed and then started: the run matches the job, the job not main', async () => {
+    const changed = { ...MIGRATE, command: ['node', '-e', 'fetch(process.env.X)'] };
+    const done = await run(world(changed), [], heldFor(world(changed), { template: [MIGRATE] }));
+    expect(done.status).toBe(1);
+    expect(done.lines).toContain(
+      'job-agentx-stg-migrate-x1 (started 2026-11-10 12:16 UTC): ran the job as it is deployed.',
+    );
+    expect(done.lines).toContain(`${FINDING_START}what differs is below, by name, never by value`);
+    expect(done.lines).toContain('  - its command is not the template’s');
+    expect(done.lines.some((line) => line.includes('Incident-Response-Playbook section B'))).toBe(true);
+    expect(done.lines.join('\n')).not.toContain('fetch');
+    // A setting's value changed is found by the setting's name alone.
+    const pointed = {
+      ...MIGRATE,
+      env: MIGRATE.env.map((entry) => (entry.name === 'AGENTX_DB_HOST' ? { ...entry, value: 'evil.example' } : entry)),
+    };
+    const elsewhere = await run(world(pointed), [], heldFor(world(pointed), { template: [MIGRATE] }));
+    expect(elsewhere.status).toBe(1);
+    expect(elsewhere.lines).toContain('  - its setting AGENTX_DB_HOST holds another value than the template gives');
+    expect(elsewhere.lines.join('\n')).not.toContain('evil');
+  });
+
+  it('reads the apps.bicep of the build the job names, and passes a job that differs only by its image', async () => {
+    const asked: string[] = [];
+    const older = { ...MIGRATE, image: `ghcr.io/shahbaz242630/agent-x@sha256:${'b'.repeat(64)}`, args: ['x'] };
+    const held = heldFor(world(older), { template: [MIGRATE] }, asked);
+    expect((await run(world(older), [], held)).lines).toContain('  - its arguments are not the template’s');
+    expect(asked).toEqual([BUILD]);
+    const asDeployed = { ...MIGRATE, image: older.image };
+    const passes = await run(world(asDeployed), [], heldFor(world(asDeployed), { template: [MIGRATE] }));
+    expect(passes.status).toBe(0);
+    expect(passes.lines).toContain(`${MIGRATE_JOB} is as ${BUILD}'s apps.bicep has it, beyond its image and build.`);
+  });
+
+  it('finds the rest of the job changed: an init container, a secret given a value, a volume remapped, another identity', async () => {
+    const changes: [(job: ReturnType<typeof JOB>) => void, string][] = [
+      [
+        (job) => Object.assign(job.properties.template, { initContainers: [{ name: 'x', image: 'evil' }] }),
+        'its template.initContainers is not the template’s',
+      ],
+      [
+        (job) => Object.assign(job.properties, { configuration: { secrets: [{ name: 's', value: 'evil' }] } }),
+        "it has a secret the template doesn't: s",
+      ],
+      [
+        (job) => Object.assign(job.properties.template, { volumes: [{ name: 'secrets', storageType: 'EmptyDir' }] }),
+        'its volumes are not the template’s',
+      ],
+      [
+        (job) => Object.assign(job, { identity: { type: 'SystemAssigned' } }),
+        'it runs as other identities than the template’s',
+      ],
+    ];
+    for (const [change, said] of changes) {
+      const job = JOB(MIGRATE_JOB, [MIGRATE]);
+      change(job);
+      const done = await run({ jobs: [job], runs: {} }, [], heldFor({ jobs: [], runs: {} }, { template: [MIGRATE] }));
+      expect(done.status, said).toBe(1);
+      expect(done.lines).toContain(`  - ${said}`);
+      expect(done.lines.join('\n')).not.toContain('evil');
+    }
+  });
+
+  it('is a finding when the job runs a build older than one its runs ran: rolled back', async () => {
+    const LATER_BUILD = 'e'.repeat(40);
+    const ranLater = {
+      ...MIGRATE,
+      env: MIGRATE.env.map((entry) => (entry.name === 'AGENTX_RELEASE' ? { ...entry, value: LATER_BUILD } : entry)),
+    };
+    const rolled: World = {
+      jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
+    };
+    const done = await run(rolled, [], heldFor(rolled, { line: [LATER_BUILD, BUILD] }));
+    expect(done.status).toBe(1);
+    expect(done.lines).toContain(
+      `${FINDING_START}it names its build ${BUILD}, older than ${LATER_BUILD}, which a run of it ran: rolled back (if a person did it on purpose, deploy by hand a commit at least as new as ${LATER_BUILD})`,
+    );
+    // A run of an older build, or of its own, is no roll-back.
+    const older: World = {
+      jobs: [JOB(MIGRATE_JOB, [MIGRATE])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-old1', '2026-11-09T12:00:00+00:00', [ranLater])] },
+    };
+    const notLater = await run(older, [], heldFor(older, { line: [BUILD, LATER_BUILD] }));
+    expect(notLater.status).toBe(0);
+  });
+
+  it('holds the job to the last release GitHub recorded, failing closed when it can’t be read (round 4)', async () => {
+    const LATER_BUILD = 'e'.repeat(40);
+    const deployed = world(MIGRATE);
+    const anchoredAt = (anchor: () => Promise<Anchor>) =>
+      run(deployed, [], heldFor(deployed, { line: [LATER_BUILD, BUILD], anchor }));
+    const older = await anchoredAt(() => Promise.resolve({ kind: 'release', commit: LATER_BUILD }));
+    expect(older.status).toBe(1);
+    expect(older.lines).toContain(
+      `${FINDING_START}migrate: it runs ${BUILD}, older than the last release GitHub recorded (${LATER_BUILD}): rolled back. If a person rolled it back on purpose, deploy by hand a commit at least as new as ${LATER_BUILD}; otherwise a suspected breach`,
+    );
+    const same = await anchoredAt(() => Promise.resolve({ kind: 'release', commit: BUILD }));
+    expect(same.status).toBe(0);
+    const unread = await anchoredAt(() => Promise.resolve({ kind: 'unread' }));
+    expect(unread.status).toBe(0);
+    expect(unread.lines).toContain(
+      "GitHub's record of the last release wasn't read (not a GitHub Actions run): roll-backs are held to Azure's own record alone.",
+    );
+    const failing: GitHubGet = () => Promise.reject(new Error('offline'));
+    const closed = await anchoredAt(() =>
+      lastRelease(
+        { GITHUB_ACTIONS: 'true', AGENTX_DEPLOYMENTS_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' },
+        () => 0,
+        failing,
+      ),
+    );
+    expect(closed.status).toBe(1);
+    expect(
+      closed.lines.some((line) =>
+        line.startsWith(
+          `${FINDING_START}it can't be compared (GitHub's record of the last release to staging couldn't be read (nothing answered)`,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('finds a run naming a build that isn’t in main’s history, with the real history, never crashing (round 3, item 1)', async () => {
+    const repository = mkdtempSync(path.join(tmpdir(), 'agentx-watch-'));
+    const empty = `${repository}-no-config`;
+    writeFileSync(empty, '');
+    const env = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: empty,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'Fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'Fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    };
+    const git = (...args: readonly string[]): string =>
+      spawnSync('git', args, { cwd: repository, env, encoding: 'utf8', windowsHide: true }).stdout.trim();
+    git('init', '--quiet');
+    writeFileSync(path.join(repository, 'one'), 'one');
+    git('add', '--all');
+    git('commit', '--quiet', '--message', 'one');
+    const built = git('rev-parse', 'HEAD');
+    const builtAt = (build: string) => ({
+      ...MIGRATE,
+      env: MIGRATE.env.map((entry) => (entry.name === 'AGENTX_RELEASE' ? { ...entry, value: build } : entry)),
+    });
+    const held = (world: World): HeldSteps => ({
+      ...heldFor(world, { template: [builtAt(built)] }),
+      history: realHistory(repository),
+    });
+    for (const odd of ['f'.repeat(40), 'x\n::error::y']) {
+      const world: World = {
+        jobs: [JOB(MIGRATE_JOB, [builtAt(built)])],
+        runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [builtAt(odd)])] },
+      };
+      const done = await run(world, [], held(world));
+      expect(done.status, odd).toBe(1);
+      expect(done.lines).toContain(
+        `${FINDING_START}a run of it names a build that isn't in main's history (${odd.replace(/[^\w.-]/g, '?')})`,
+      );
+    }
+    const asBuilt: World = {
+      jobs: [JOB(MIGRATE_JOB, [builtAt(built)])],
+      runs: { [MIGRATE_JOB]: [EXECUTION('job-agentx-stg-migrate-x1', LATELY, [builtAt(built)])] },
+    };
+    expect((await run(asBuilt, [], held(asBuilt))).status).toBe(0);
+  });
+
+  it('is a finding when the job names a build off main', async () => {
+    const offMain = await run(world(MIGRATE), [], heldFor(world(MIGRATE), { line: [] }));
+    expect(offMain.status).toBe(1);
+    expect(offMain.lines).toContain(`${FINDING_START}it names its build ${BUILD}, which isn't in main's history`);
+  });
+
+  it("is a finding when the job or main's apps.bicep can't be read, the subscription kept out", async () => {
+    const unreadable = await run(
+      world(MIGRATE),
+      [],
+      heldFor(world(MIGRATE), { template: new Error(`bicep failed\nin /subscriptions/${SUBSCRIPTION}`) }),
+    );
+    expect(unreadable.status).toBe(1);
+    expect(unreadable.lines).toContain(
+      `${FINDING_START}it can't be compared (bicep failed in /subscriptions/the subscription)`,
+    );
+    const odd = { ...MIGRATE, probes: [] };
+    const shaped = await run(world(odd), [], heldFor(world(odd), { template: [MIGRATE] }));
+    expect(shaped.status).toBe(1);
+    expect(
+      shaped.lines.some((line) =>
+        line.startsWith(`${FINDING_START}it can't be compared (jobs/job-agentx-stg-migrate isn't`),
+      ),
+    ).toBe(true);
+    // No migration job: nothing to hold.
+    const none = await run(
+      { jobs: [], runs: {} },
+      [],
+      heldFor({ jobs: [], runs: {} }, { template: new Error('never read') }),
+    );
+    expect(none.status).toBe(0);
+  });
 });
 
 describe('SEC-OPS-14 the job-start watch', () => {
@@ -158,6 +414,8 @@ describe('SEC-OPS-14 the job-start watch', () => {
       'Reading the runs of 2 jobs started since 2026-11-10 08:00 UTC (the last 6 h).',
       `${RUN_NAME} (started 2026-11-10 12:16 UTC): ran the job as it is deployed.`,
       'job-agentx-stg-migrate-x1 (started 2026-11-10 12:16 UTC): ran the job as it is deployed.',
+      "GitHub's record of the last release wasn't read (not a GitHub Actions run): roll-backs are held to Azure's own record alone.",
+      `job-agentx-stg-migrate is as ${BUILD}'s apps.bicep has it, beyond its image and build.`,
       "No run started since 2026-11-10 08:00 UTC ran other containers than its job's own.",
     ]);
     // Reads only: every call a GET or the account.

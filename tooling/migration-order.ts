@@ -24,6 +24,18 @@
 // migration has built an entry, it must leave coming.json in that same change, so
 // the list only ever holds what is still to come.
 //
+// **A right granted to the operator's role (OR2b).** The live guard holds that role to
+// exactly its list (schema-policy.ts operatorRights), so a new right on a table an
+// earlier migration built reads to the image before it as a widened right: the alarm at
+// once. So it lands first, the same way, in coming.json's operatorRights, as the guard
+// prints it (`SELECT on column identity.registered_contacts.id`, `SELECT on
+// audit.events`), and the migration granting it only after. A grant to the operator this
+// reader can't print that way (on a schema, a function, a sequence, ALL, WITH GRANT
+// OPTION, a name needing quotes), a right taken from it, anything else naming it, or a
+// DO block naming it, is refused outright: the image before would raise the alarm, and
+// no coming entry describes it. A grant on a table the same migration builds is that
+// table's, which the guard already reads as a release's.
+//
 // tooling/checks/migration-order.test.ts holds every migration to this; the release
 // (deploy/azure/release.ts) holds it again against what staging really runs, since
 // GitHub may drop a waiting release, so the code before a merge isn't always what
@@ -61,7 +73,12 @@ interface ComingBody {
 export interface Coming {
   readonly triggers: readonly ComingTrigger[];
   readonly bodies: readonly ComingBody[];
+  /** Rights the next release's migration grants the operator's role, as the live guard prints them; none when absent. */
+  readonly operatorRights?: readonly string[];
 }
+
+/** The operator's command's own role (schema-guard.ts OPERATOR_ROLE): the role a coming right is granted to. */
+const OPERATOR_ROLE = 'agentx_operator';
 
 /** Where the list is kept, from the repository's root. */
 export const COMING_FILE = 'packages/platform/src/db/coming.json';
@@ -87,6 +104,7 @@ export const GRANDFATHERED: ReadonlyMap<string, string> = new Map([
   ['0073', "D8's marks, shipped first in COMING_TRIGGERS when it was TypeScript, which this check can't read"],
   ['0075', "D9's marks, shipped first in COMING_TRIGGERS when it was TypeScript, which this check can't read"],
   ['0077', "D10's marks, shipped first in COMING_TRIGGERS when it was TypeScript, which this check can't read"],
+  ['0079', "PL-57's operator role's first rights, before coming operator rights existed (OR2b)"],
   ['0080', "PL-57's operator rule, shipped first in COMING_TRIGGERS when it was TypeScript"],
 ]);
 
@@ -94,6 +112,7 @@ export const GRANDFATHERED: ReadonlyMap<string, string> = new Map([
 export type Change =
   | { readonly kind: 'trigger'; readonly table: string; readonly name: string }
   | { readonly kind: 'body'; readonly function: string; readonly body: string }
+  | { readonly kind: 'operator'; readonly right: string }
   | { readonly kind: 'refused'; readonly what: string };
 
 /** A statement as read: its words (unquoted ones lower case), with every body taken out (each a `$$`), and those bodies. */
@@ -218,9 +237,17 @@ const CREATE_FUNCTION = new RegExp(String.raw`^create (?:or replace )?(?:functio
 const ALTER_ROUTINE = /^(?:alter|drop) (?:function|procedure|routine) (?:if exists )?(.*)$/;
 const SWITCHED_TRIGGER = /^alter table .* (?:enable|disable)(?: replica| always)? trigger /;
 const DYNAMIC = /\b(?:trigger|function|procedure|routine|execute)\b/i;
-/** A body that makes, alters or drops a trigger or routine, or runs SQL it builds: what it would do can't be read here. */
+/**
+ * A body that makes, alters or drops a trigger or routine, runs SQL it builds, or grants or revokes (S187 review: a
+ * function the migration then calls could grant unseen): what it would do can't be read here.
+ */
 const BODY_DDL =
-  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)/i;
+  /\b(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:constraint\s+)?(?:trigger|function|procedure|routine)\b|\bexecute\b(?!\s+(?:function|procedure)\b)|\b(?:grant|revoke)\b/i;
+/**
+ * A body's comments and strings, read left to right, taken out before BODY_DDL reads it: words there run nothing
+ * (a string runs only through EXECUTE, refused on its own), so a message naming a "grant summary" is no grant (0089).
+ */
+const BODY_TEXT = /--[^\n]*|\/\*[\s\S]*?\*\/|(?<![A-Za-z0-9_$\u0080-￿])[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'/g;
 /** A table attached as a partition takes the parent's row triggers. */
 const ATTACH_PARTITION = new RegExp(String.raw`^alter table (?:if exists )?(?:only )?\S+ attach partition ${NAME}`);
 
@@ -252,9 +279,16 @@ interface Built {
   readonly bodies: Map<string, string>;
   /** Each trigger made, as `table name`. */
   readonly triggers: Set<string>;
+  /** Each right granted to the operator's role, as the live guard prints it. */
+  readonly operatorRights: Set<string>;
 }
 
-const nothingBuilt = (): Built => ({ tables: new Set(), bodies: new Map(), triggers: new Set() });
+const nothingBuilt = (): Built => ({
+  tables: new Set(),
+  bodies: new Map(),
+  triggers: new Set(),
+  operatorRights: new Set(),
+});
 
 /** A trigger dropped: a change only if the same migration doesn't make it again, which is known once it is read. */
 interface Dropped {
@@ -291,8 +325,8 @@ function written(fn: Named, words: string, bodies: readonly string[], before: Bu
   if (!fn.qualified) return unqualified('writes', fn);
   const body = bodyOf(words, bodies);
   if (body === undefined) return refused(`writes ${fn.name} with no dollar-quoted body`);
-  if (BODY_DDL.test(body))
-    return refused(`writes ${fn.name} with a body that changes triggers or routines, or runs built SQL`);
+  if (BODY_DDL.test(body.replaceAll(BODY_TEXT, ' ')))
+    return refused(`writes ${fn.name} with a body that changes triggers or routines, runs built SQL, or grants`);
   const hash = hashOf(body);
   own.bodies.set(fn.name, hash);
   const was = before.bodies.get(fn.name);
@@ -322,8 +356,134 @@ function routinesRead(list: string, before: Built): Read {
   return known === undefined ? undefined : refused(`alters or drops ${known.name}`);
 }
 
+/** A name the live guard prints as it is written: lower case, nothing a quote would be needed for. */
+const PLAIN_NAME = '[a-z_][a-z0-9_]*';
+const PLAIN = new RegExp(`^${PLAIN_NAME}$`);
+/** A privilege on a table, or on columns of it, each its own right in the guard's list; ALL is not read. */
+const TABLE_PRIVILEGE = /^(select|insert|update|delete|truncate|references|trigger|maintain)(?: ?\((.+)\))?$/;
+/** What a grant names that isn't a table: the guard prints those otherwise, and no coming entry describes them. */
+const NOT_A_TABLE =
+  /^(?:schema|sequence|function|procedure|routine|database|all|large object|foreign|domain|type|language|tablespace|parameter)\b/;
+
+/** Each step through `text`, outside double quotes: where it is, and how deep in parentheses. */
+function* outsideQuotes(text: string): Generator<{ readonly at: number; readonly depth: number }> {
+  let [depth, quoted] = [0, false];
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at];
+    if (char === '"') quoted = !quoted;
+    if (quoted || char === '"') continue;
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    yield { at, depth };
+  }
+}
+
+/** `text` cut at each comma outside parentheses and double quotes, each part trimmed. */
+function partsOf(text: string): string[] {
+  const cuts = [...outsideQuotes(text)].filter(({ at, depth }) => depth === 0 && text[at] === ',').map(({ at }) => at);
+  return [-1, ...cuts].map((cut, index) => text.slice(cut + 1, cuts[index] ?? text.length).trim());
+}
+
+/** Where ` word ` first stands in `text` outside parentheses and double quotes; -1 for nowhere. */
+const wordAt = (text: string, word: string): number =>
+  [...outsideQuotes(text)].find(({ at, depth }) => depth === 0 && text.startsWith(` ${word} `, at))?.at ?? -1;
+
+/** A name part as Postgres keeps it, when the guard prints it as it is; undefined for any other. */
+const plainPart = (part: string): string | undefined => {
+  const name = unquoted(part.trim());
+  return PLAIN.test(name) ? name : undefined;
+};
+
+/** The operator's role named anywhere, in any case. */
+const OPERATOR_NAMED = new RegExp(String.raw`\b${OPERATOR_ROLE}\b`, 'i');
+
+/** A Unicode-escaped identifier or string (`U&"…"`, `U&'…'`), which could spell the role unread. */
+const UNICODE_ESCAPED = /\bu&["']/i;
+
+/**
+ * A string or a quoted name, read left to right so whichever opens first wins (S187 review: two chained passes let a
+ * `"` inside a string, or an apostrophe inside a name, move where strings end). `E'…'` strings take backslash escapes,
+ * an E starting one only where `statements()` (and Postgres) say so: not after an identifier's character (round 2).
+ */
+const QUOTED = /(?<![A-Za-z0-9_$\u0080-￿])[eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"/gs;
+
+/**
+ * A statement changing how later strings are read (`standard_conforming_strings`, `backslash_quote`): this reader
+ * assumes Postgres's defaults, and every migration in a run shares one connection (round 2).
+ */
+const STRING_RULES = /\b(?:standard_conforming_strings|backslash_quote)\b/;
+
+/**
+ * Whether a statement's words, their strings taken out (quoted names kept), name the operator's role. A Unicode escape
+ * counts as naming it, so its grant is refused as unreadable.
+ */
+const namesOperator = (words: string): boolean =>
+  UNICODE_ESCAPED.test(words) ||
+  OPERATOR_NAMED.test(words.replaceAll(QUOTED, (quoted) => (quoted.startsWith('"') ? quoted : "''")));
+
+/** The rights one privilege of a grant gives on its tables, as the guard prints them; undefined for a form it can't. */
+function rightsOf(privilege: string, tables: readonly string[]): string[] | undefined {
+  const read = TABLE_PRIVILEGE.exec(privilege);
+  if (read === null) return undefined;
+  const [, name = '', listed] = read;
+  const columns = listed === undefined ? [] : partsOf(listed).map(plainPart);
+  if (columns.includes(undefined)) return undefined;
+  const upper = name.toUpperCase();
+  return tables.flatMap((table) =>
+    listed === undefined ? [`${upper} on ${table}`] : columns.map((column) => `${upper} on column ${table}.${column}`),
+  );
+}
+
+/**
+ * The rights a GRANT naming the operator's role gives it, each as the live guard prints it, on tables this migration
+ * didn't itself build; refused in any form this reader can't print exactly, or naming the role otherwise.
+ */
+function operatorGrantRead(words: string, own: Built): Read[] {
+  const on = wordAt(words, 'on');
+  const rest = on === -1 ? '' : words.slice(on + ' on '.length);
+  const to = wordAt(rest, 'to');
+  const granted = rest.slice(to + ' to '.length).replace(/ granted by .*$/, '');
+  const handedOn = granted.endsWith(' with grant option');
+  const roles = partsOf(granted.replace(/ with grant option$/, '')).map(plainPart);
+  if (on === -1 || to === -1 || !roles.includes(OPERATOR_ROLE)) {
+    return [refused("names the operator's role outside a grant this check can read")];
+  }
+  if (handedOn) return [refused("lets the operator's role hand a right on")];
+  const objects = rest.slice(0, to);
+  if (NOT_A_TABLE.test(objects)) return [refused("grants the operator's role a right on something other than a table")];
+  const tables = partsOf(objects.replace(/^table /, '')).map((one) => one.split('.').map(plainPart));
+  if (tables.some((parts) => parts.length !== 2 || parts.includes(undefined))) {
+    return [refused("grants the operator's role a right on a table not named plainly with its schema")];
+  }
+  const named = tables.map((parts) => parts.join('.'));
+  const rights = partsOf(words.slice('grant '.length, on)).map((privilege) => rightsOf(privilege, named));
+  if (rights.includes(undefined)) return [refused("grants the operator's role a right this check can't print")];
+  return rights.flat().flatMap((right) => {
+    if (right === undefined) return [];
+    own.operatorRights.add(right);
+    // On a table this migration builds, the guard reads the right as that table's: a release's already.
+    const table = right
+      .replace(/^\w+ on (?:column )?/, '')
+      .split('.')
+      .slice(0, 2)
+      .join('.');
+    return own.tables.has(table) ? [] : [{ kind: 'operator' as const, right }];
+  });
+}
+
+/** A statement naming the operator's role: its grant read, anything else refused, as the image before would alarm. */
+function operatorRead(words: string, own: Built): Read[] | undefined {
+  if (!namesOperator(words)) return undefined;
+  if (words.startsWith('grant ')) return operatorGrantRead(words, own);
+  if (words.startsWith('revoke ')) return [refused("takes a right from the operator's role")];
+  return [refused("names the operator's role outside a grant this check can read")];
+}
+
 /** What one statement changes that the image before it must be told, given what earlier migrations built. */
 function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read {
+  if (STRING_RULES.test(words) || bodies.some((body) => STRING_RULES.test(body))) {
+    return refused('changes how strings are read, which this check assumes');
+  }
   const table = CREATE_TABLE.exec(words);
   if (table !== null) {
     // IF NOT EXISTS over a table an earlier migration built does nothing in Postgres: it stays "known".
@@ -346,6 +506,10 @@ function changeOf({ words, bodies }: Statement, before: Built, own: Built): Read
   if (/^do\b/.test(words) && [words, ...bodies].some((text) => DYNAMIC.test(text))) {
     return refused('runs a DO block naming a trigger, a function or EXECUTE');
   }
+  // Or the operator's role, strings and all: a grant in a DO block is a grant as surely as one outside it.
+  if (/^do\b/.test(words) && [words, ...bodies].some((text) => OPERATOR_NAMED.test(text))) {
+    return refused("runs a DO block naming the operator's role");
+  }
   return undefined;
 }
 
@@ -358,7 +522,13 @@ export interface Reading {
   readonly triggers: ReadonlySet<string>;
   /** Each body ever written, as `function hash`. */
   readonly everWritten: ReadonlySet<string>;
+  /** Each right ever granted to the operator's role, as the live guard prints it. */
+  readonly operatorRights: ReadonlySet<string>;
 }
+
+/** What one statement changes: a statement naming the operator's role is read for that alone. */
+const changesOf = (statement: Statement, before: Built, own: Built): Read[] =>
+  operatorRead(statement.words, own) ?? [changeOf(statement, before, own)];
 
 /** Every migration read in order. */
 export function readMigrations(migrations: readonly Migration[]): Reading {
@@ -367,7 +537,7 @@ export function readMigrations(migrations: readonly Migration[]): Reading {
   const changes = new Map<string, (Change | NewFunction)[]>();
   for (const migration of migrations.toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
     const own = nothingBuilt();
-    const read = statements(migration.sql).flatMap((one) => changeOf(one, built, own) ?? []);
+    const read = statements(migration.sql).flatMap((one) => changesOf(one, built, own).flatMap((each) => each ?? []));
     changes.set(
       migration.name,
       read.flatMap((one): (Change | NewFunction)[] => {
@@ -379,12 +549,13 @@ export function readMigrations(migrations: readonly Migration[]): Reading {
     );
     for (const table of own.tables) built.tables.add(table);
     for (const made of own.triggers) built.triggers.add(made);
+    for (const right of own.operatorRights) built.operatorRights.add(right);
     for (const [name, hash] of own.bodies) {
       built.bodies.set(name, hash);
       everWritten.add(`${name} ${hash}`);
     }
   }
-  return { changes, bodies: built.bodies, triggers: built.triggers, everWritten };
+  return { changes, bodies: built.bodies, triggers: built.triggers, everWritten, operatorRights: built.operatorRights };
 }
 
 /** Why a change the code before a migration didn't carry as coming is refused, or nothing when it did. */
@@ -396,6 +567,10 @@ export function unshipped(change: Change | NewFunction, coming: Coming): string 
       return coming.triggers.some(({ table, name }) => table === change.table && name === change.name)
         ? undefined
         : `adds ${change.name} on ${change.table}, which the code before it didn't carry in coming.json's triggers`;
+    case 'operator':
+      return (coming.operatorRights ?? []).includes(change.right)
+        ? undefined
+        : `grants the operator's role ${change.right}, which the code before it didn't carry in coming.json's operatorRights`;
     case 'body':
       return [...coming.bodies, ...coming.triggers].some(
         (one) => one.function === change.function && one.body === change.body,
@@ -426,18 +601,40 @@ export function leftBehind(coming: Coming, reading: Reading): string[] {
     ...coming.bodies
       .filter((one) => !reading.bodies.has(one.function))
       .map((one) => `coming body for ${one.function} names no function the migrations wrote`),
+    ...(coming.operatorRights ?? [])
+      .filter((right) => reading.operatorRights.has(right))
+      .map((right) => `coming operator right ${right} is already granted: take it out of coming.json`),
   ];
 }
 
 const HASH = /^[0-9a-f]{64}$/;
 const text = (value: unknown): value is string => typeof value === 'string' && value !== '';
+/** Postgres's table privileges, as the guard prints them: their names, not commands. */
+const TABLE_PRIVILEGES = 'SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN';
+
+/** A coming operator right as the live guard prints one: a privilege on a table, or on a column of one, named plainly. */
+const OPERATOR_RIGHT = new RegExp(
+  String.raw`^(?:(?:${TABLE_PRIVILEGES}) on ${PLAIN_NAME}\.${PLAIN_NAME}` +
+    String.raw`|(?:SELECT|INSERT|UPDATE|REFERENCES) on column ${PLAIN_NAME}\.${PLAIN_NAME}\.${PLAIN_NAME})$`,
+);
+
+/** The coming operator rights a coming.json lists, each as the guard prints one; none for a file from before them. */
+function operatorRightsOf(listed: unknown): string[] {
+  if (listed === undefined) return [];
+  if (!Array.isArray(listed) || !listed.every((one) => typeof one === 'string' && OPERATOR_RIGHT.test(one))) {
+    throw new Error(
+      "coming.json's operatorRights lists rights as the guard prints them, such as SELECT on column a.b.c",
+    );
+  }
+  return listed as string[];
+}
 
 /** coming.json read, or an error saying what is wrong with it; a commit without the file had nothing coming. */
 export function parseComing(json: string | undefined): Coming {
-  if (json === undefined) return { triggers: [], bodies: [] };
+  if (json === undefined) return { triggers: [], bodies: [], operatorRights: [] };
   const parsed = JSON.parse(json) as unknown;
   if (typeof parsed !== 'object' || parsed === null) throw new Error('coming.json must be an object');
-  const { triggers, bodies } = parsed as Record<string, unknown>;
+  const { triggers, bodies, operatorRights } = parsed as Record<string, unknown>;
   if (!Array.isArray(triggers) || !Array.isArray(bodies)) throw new Error('coming.json lists triggers and bodies');
   const entry = (one: unknown, fields: readonly string[]): Record<string, unknown> => {
     const fieldsOf = typeof one === 'object' && one !== null ? (one as Record<string, unknown>) : {};
@@ -455,6 +652,7 @@ export function parseComing(json: string | undefined): Coming {
       const { function: fn, body } = entry(one, ['function', 'body']);
       return { function: String(fn), body: String(body) };
     }),
+    operatorRights: operatorRightsOf(operatorRights),
   };
 }
 

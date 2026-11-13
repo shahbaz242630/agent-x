@@ -44,6 +44,7 @@ import {
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct, leftBehind } from '../membership-changes.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -54,6 +55,8 @@ type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTabl
 const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
+/** The owner's connection: since 0089 the only one that can move a membership past its summary (OR1c's case). */
+let owner: Database<Tables>;
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -192,9 +195,11 @@ const statusOf = async (org: string, id: string) => {
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+  owner = createDatabase<Tables>({ ...database.connection('owner'), maxConnections: 1 }, testLogger());
 });
 
 afterAll(async () => {
+  await owner.destroy();
   await app.destroy();
   await database.drop();
 });
@@ -271,13 +276,7 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
   it('brings back a person deactivated there, as the approver they were invited as, only once confirmed (B4-5c)', async () => {
     const who = await organization();
     const returning = await member(who.org, 'viewer');
-    await withSignedStates(app, who.org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: who.org, id: returning.membershipId }, OPERATOR);
     const { id } = await accepted(who, 'approver', returning.userId);
     expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
       outcome: 'deactivated',
@@ -299,6 +298,27 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
     expect(await noticesIn(who.org)).toEqual([
       { to: null, kind: 'member_rejoined', membershipId: returning.membershipId, role: 'approver' },
     ]);
+  });
+
+  it('refuses to bring back a person whose grant summary is behind as INTEGRITY_FAILED, still deactivated (OR1c)', async () => {
+    const who = await organization();
+    const returning = await member(who.org, 'viewer');
+    const key = { orgId: who.org, id: returning.membershipId };
+    await deactivatedAsTheProduct(app, services(), key, OPERATOR);
+    await leftBehind(owner, services(), key, 'developer', OPERATOR);
+    const { id } = await accepted(who, 'approver', returning.userId);
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+
+    expect(await confirm(who.admin, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+    expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
+      outcome: 'deactivated',
+      id: returning.membershipId,
+    });
   });
 
   it.each(['approver', 'admin'] as const)(
@@ -667,13 +687,7 @@ describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, ()
     // Theirs is made before the confirming admin's, so its ID is the lower of the two.
     const returning = await member(who.org, 'viewer');
     const admin = await member(who.org, 'admin');
-    await withSignedStates(app, who.org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: who.org, id: returning.membershipId }, OPERATOR);
     const { id } = await accepted(who, 'approver', returning.userId);
     const challengeId = await asked(admin, id);
     await stepUp(admin, challengeId);

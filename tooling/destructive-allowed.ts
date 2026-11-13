@@ -95,6 +95,7 @@ export const ALLOWED: readonly Allowed[] = [
   // --- Local folders, containers and the e2e stack ------------------------------------------------------------------
   ...(
     [
+      ['deploy/azure/git.ts', 'rmSync(made, { recursive'],
       ['deploy/azure/held-request.ts', 'rmSync(folder, { recursive'],
       ['deploy/azure/snapshot.ts', 'rmSync(dir, { recursive'],
       ['packages/testing/src/keys.ts', 'rmSync(directory, { recursive'],
@@ -349,6 +350,11 @@ export const ALLOWED: readonly Allowed[] = [
 
 /** Lines the shapes catch that run nothing destructive. */
 export const NOT_COMMANDS: readonly NotACommand[] = [
+  {
+    file: 'tooling/migration-order.ts',
+    match: 'const TABLE_PRIVILEGES',
+    why: "Postgres's table privilege names, matched in a coming operator right as the schema guard prints it",
+  },
   {
     file: 'apps/api/src/contract.ts',
     match: 'const OPENAPI_METHODS',

@@ -81,8 +81,9 @@ describe('the release job', () => {
     expect(release.concurrency).toEqual({ group: 'release-staging', 'cancel-in-progress': false });
   });
 
-  it('may read the code and ask for Azure’s token, and nothing else', () => {
-    expect(release.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+  it('may read the code, ask for Azure’s token and read GitHub’s deployments, and nothing else', () => {
+    // deployments: read, for the last release GitHub recorded (AZ2c), which an Azure sign-in can't touch.
+    expect(release.permissions).toEqual({ contents: 'read', 'id-token': 'write', deployments: 'read' });
   });
 
   it('is started by nothing that runs code a pull request controls with the trusted context', () => {
@@ -118,7 +119,8 @@ describe('the release job', () => {
       'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
       'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
     });
-    // No secret anywhere in the job: a client secret or certificate would be a credential to leak.
+    // No secret at all: a client secret or certificate would be one to leak, and the workflow runs on pull_request,
+    // where none may be named (the three AZ2c pins wait for a push-only release workflow, AZ2d).
     expect(JSON.stringify(release)).not.toMatch(/secrets\./);
   });
 
@@ -127,7 +129,11 @@ describe('the release job', () => {
     expect(releasing).toEqual([
       {
         name: 'Release this commit to staging',
-        env: { COMMIT: '${{ github.sha }}', DIGEST: '${{ needs.image-publish.outputs.digest }}' },
+        env: {
+          COMMIT: '${{ github.sha }}',
+          DIGEST: '${{ needs.image-publish.outputs.digest }}',
+          AGENTX_DEPLOYMENTS_TOKEN: '${{ github.token }}',
+        },
         run: 'node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"',
       },
     ]);
@@ -175,8 +181,8 @@ describe('the job-start watch', () => {
     expect(watch['timeout-minutes']).toBe(15);
   });
 
-  it('may read the code and ask for Azure’s token, and nothing else; its only secrets are its three IDs', () => {
-    expect(watch.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+  it('may read the code, ask for Azure’s token and read GitHub’s deployments, and nothing else; its only secrets are its three IDs', () => {
+    expect(watch.permissions).toEqual({ contents: 'read', 'id-token': 'write', deployments: 'read' });
     const named = [...text.matchAll(/secrets\.([A-Z_]+)/g)].map((match) => match[1]);
     expect([...new Set(named)].sort()).toEqual([
       'AZURE_WATCH_CLIENT_ID',
@@ -192,7 +198,7 @@ describe('the job-start watch', () => {
     const masking = at((step) => step.run?.includes('::add-mask::') === true);
     const bicep = at((step) => step.run === 'node tooling/bicep/install.ts');
     const signingIn = at((step) => AZURE_LOGIN.test(step.uses ?? ''));
-    expect(watchSteps[0]?.with).toEqual({ 'persist-credentials': false });
+    expect(watchSteps[0]?.with).toEqual({ 'persist-credentials': false, 'fetch-depth': 0 });
     expect(watchSteps[masking]?.env).toEqual({
       CLIENT: '${{ secrets.AZURE_WATCH_CLIENT_ID }}',
       TENANT: '${{ secrets.AZURE_WATCH_TENANT_ID }}',
@@ -209,6 +215,7 @@ describe('the job-start watch', () => {
     });
     expect(watchSteps[signingIn + 1]).toEqual({
       name: 'Check every job run of the last six hours',
+      env: { AGENTX_DEPLOYMENTS_TOKEN: '${{ github.token }}' },
       run: 'node deploy/azure/job-starts.ts',
     });
     expect(watchSteps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });

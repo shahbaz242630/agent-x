@@ -55,8 +55,15 @@
 // the one its migration wrote is the alarm at once, as a rewritten guard is the attack.
 // So the next release's body lands first too, in coming.json's bodies, beside the one
 // held now: the exact hash release-shaped, any other the alarm at once (decision 49).
-// tooling/checks/migration-order.test.ts refuses a migration whose trigger or body the
-// release before it didn't carry as coming, and an entry left behind once built.
+//
+// **A right granted to the operator's role on a table already built** is the same again
+// (OR2b): the role holds exactly its list, and a right more is the alarm at once. So the
+// next release's right lands first, in coming.json's operatorRights, as this file prints
+// it (`SELECT on column identity.registered_contacts.id`): held, and not handed on, it is
+// release-shaped; any other right, or one the operator may grant on, the alarm at once.
+// tooling/checks/migration-order.test.ts refuses a migration whose trigger, body or
+// operator's right the release before it didn't carry as coming, and an entry left behind
+// once built.
 //
 // **What it can read.** Everything here is readable by an ordinary role —
 // checked on 16 and 18 before it was written (pg_class, pg_namespace,
@@ -381,8 +388,25 @@ function operatorEventsTrigger(table: string): WrittenTrigger {
 /** The operator's rule's triggers (0080), one on each chain's events. */
 export const OPERATOR_EVENT_TRIGGERS: readonly WrittenTrigger[] = OPERATOR_EVENT_TABLES.map(operatorEventsTrigger);
 
-/** Every trigger a migration added to a table already built, as written: the marks' and the operator's rule's. */
-export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [...MARK_TRIGGERS, ...OPERATOR_EVENT_TRIGGERS];
+/**
+ * A membership's grant summary kept in step with it (OR1b, 0089): a commit refused where a membership's signed version
+ * moved past a summary that was in step with it. 0089 writes it, after 0088's image knew it as coming.
+ */
+export const GRANTS_IN_STEP_TRIGGER: WrittenTrigger = {
+  table: 'identity.memberships',
+  name: 'grants_in_step',
+  definition:
+    'CREATE CONSTRAINT TRIGGER grants_in_step AFTER UPDATE OF state_version ON identity.memberships DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((old.state_version IS DISTINCT FROM new.state_version)) EXECUTE FUNCTION identity.grants_in_step()',
+  function: 'identity.grants_in_step',
+  body: 'f7810e7a6ce09e59b2c9e82c00b096d69cab1f162964b27a127ef62d53f97052',
+};
+
+/** Every trigger a migration added to a table already built, as written: the marks', the operator's rule's, OR1b's. */
+export const BUILT_TRIGGERS: readonly WrittenTrigger[] = [
+  ...MARK_TRIGGERS,
+  ...OPERATOR_EVENT_TRIGGERS,
+  GRANTS_IN_STEP_TRIGGER,
+];
 
 /**
  * The triggers the next release's migration adds (this file's header): known here, so that this image reads them as
@@ -402,6 +426,13 @@ export interface ComingBody {
  * the body held now, never in its place. They leave the list for good with the migration that writes them.
  */
 const COMING_BODIES: readonly ComingBody[] = COMING.bodies;
+
+/**
+ * The rights the next release's migration grants the operator's role on tables this image knows (this file's header),
+ * each as operatorProblems prints it. They leave the list for good with the migration that grants them, into
+ * SCHEMA_POLICY's operatorRights.
+ */
+const COMING_OPERATOR_RIGHTS: readonly string[] = COMING.operatorRights;
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
@@ -587,6 +618,8 @@ export interface SchemaGuardOptions {
   readonly comingTriggers?: readonly WrittenTrigger[];
   /** The bodies a coming migration writes over functions already built. Defaults to the product's own. */
   readonly comingBodies?: readonly ComingBody[];
+  /** The rights a coming migration grants the operator's role on tables already built. Defaults to the product's own. */
+  readonly comingOperatorRights?: readonly string[];
   /**
    * What this image was built knowing: its triggers, tables and CHECKs. Defaults to the product's own; a test names
    * another to read a database as the image before a release would.
@@ -1407,23 +1440,36 @@ function backupProblems({ kind, object, privilege, grantable }: RoleRight): Sche
  * list and the database no longer the same release's. Each problem with the
  * table it is on, if any, so one on a table a release made or took away can be
  * held as that release's (a table renamed keeps its rights under its new name).
+ * A right held that a coming migration grants (`coming`) is that release's too,
+ * as long as it can't be handed on (OR2b).
  */
 function operatorProblems(
   held: readonly RoleRight[],
   listed: readonly string[],
-): readonly { readonly problem: SchemaProblem; readonly table: string | undefined }[] {
+  coming: readonly string[],
+): readonly { readonly problem: SchemaProblem; readonly table: string | undefined; readonly coming?: true }[] {
   const rights = new Set(held.map(({ object, privilege }) => `${privilege} on ${object}`));
   const tableOf = (object: string): string | undefined => {
     if (object.startsWith('column ')) return object.slice('column '.length).split('.').slice(0, 2).join('.');
     return object.includes(' ') ? undefined : object;
   };
   return [
-    ...held.flatMap(({ object, privilege, grantable }) =>
-      [
-        ...(listed.includes(`${privilege} on ${object}`) ? [] : [`${OPERATOR_ROLE} may ${privilege} on ${object}`]),
-        ...(grantable ? [`${OPERATOR_ROLE} may grant ${privilege} on ${object}`] : []),
-      ].map((problem) => ({ problem, table: tableOf(object) })),
-    ),
+    ...held.flatMap(({ object, privilege, grantable }) => {
+      const right = `${privilege} on ${object}`;
+      const table = tableOf(object);
+      return [
+        ...(listed.includes(right)
+          ? []
+          : [
+              {
+                problem: `${OPERATOR_ROLE} may ${right}`,
+                table,
+                ...(coming.includes(right) && !grantable ? { coming: true as const } : {}),
+              },
+            ]),
+        ...(grantable ? [{ problem: `${OPERATOR_ROLE} may grant ${right}`, table }] : []),
+      ];
+    }),
     ...listed
       .filter((right) => !rights.has(right))
       .map((right) => ({
@@ -1989,6 +2035,7 @@ export async function liveSchemaDrift<Schema>(
     fixedAtCreation = {},
     comingTriggers = COMING_TRIGGERS,
     comingBodies = COMING_BODIES,
+    comingOperatorRights = COMING_OPERATOR_RIGHTS,
     built: { triggers: writtenTriggers, tables: builtTables, checks: builtChecks, keys: builtKeys = BUILT_KEYS } = {
       triggers: BUILT_TRIGGERS,
       tables: BUILT_TABLES,
@@ -2067,10 +2114,11 @@ export async function liveSchemaDrift<Schema>(
   );
   const isNew = new Set(newTables.map(({ name }) => name));
   const gone = builtTables.filter((name) => !known.has(name));
-  // A right of the operator's on a table a release made, or one it took away, is that release's, as the table is.
-  const byRelease = (table: string | undefined): boolean =>
-    table !== undefined && (isNew.has(table) || gone.includes(table));
-  const operatorRightsDrift = operatorProblems(operatorHeld, policy.operatorRights);
+  // A right of the operator's on a table a release made, or one it took away, is that release's, as the table is;
+  // so is one a coming migration grants (OR2b).
+  const byRelease = ({ table, coming }: { readonly table: string | undefined; readonly coming?: true }): boolean =>
+    coming === true || (table !== undefined && (isNew.has(table) || gone.includes(table)));
+  const operatorRightsDrift = operatorProblems(operatorHeld, policy.operatorRights, comingOperatorRights);
   // A coming trigger only when exact and firing as written; any other falls to the rules below, the alarm at once.
   const comingDefinitions = new Set(comingTriggers.map(({ definition }) => definition));
   const isComing = ({ definition, enabled }: TriggerRow): boolean =>
@@ -2145,7 +2193,7 @@ export async function liveSchemaDrift<Schema>(
     ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
     ...allChecks.filter(({ validated }) => !validated).map((one) => `${checkNamed(one)} is not validated`),
     ...backupHeld.flatMap(backupProblems),
-    ...operatorRightsDrift.filter(({ table }) => !byRelease(table)).map(({ problem }) => problem),
+    ...operatorRightsDrift.filter((one) => !byRelease(one)).map(({ problem }) => problem),
   ];
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
@@ -2162,7 +2210,7 @@ export async function liveSchemaDrift<Schema>(
       ...allTriggers.filter(isComing).map((one) => `${one.table} carries ${quoted(one.name)}, a coming trigger`),
       ...(gone.length === 0 ? newShape : []),
       ...gone.map((name) => `${name} is a table the migrations built, and is not there`),
-      ...operatorRightsDrift.filter(({ table }) => byRelease(table)).map(({ problem }) => problem),
+      ...operatorRightsDrift.filter(byRelease).map(({ problem }) => problem),
     ]),
   };
 }

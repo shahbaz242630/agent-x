@@ -27,6 +27,7 @@ import {
   INVESTIGATE_OPERATION,
 } from './hold-investigations.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct } from '../membership-changes.helper.test.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -173,13 +174,7 @@ describe(`showing the hold to the organisation's admin (Postgres ${server.versio
   });
 
   it('refuses an admin since deactivated', async () => {
-    await withSignedStates(app, org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: org, id: admin.membershipId }, OPERATOR);
 
     expect(await investigations.show(admin, CORRELATION)).toEqual({
       outcome: 'refused',

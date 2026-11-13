@@ -118,6 +118,16 @@ const pasted = (...values: readonly string[]): Record<string, string> =>
 /** A PEM block's first line, assembled so no scanner reads the test as holding a key. */
 const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...label].join(' ') + '-----\n';
 
+describe('the entry (S187)', () => {
+  it('starts main without a top-level await, so apps can load migration-state.ts and release.ts, which import it', () => {
+    // A top-level await held this module loading until main ended, and main's own dynamic import of a module importing
+    // this one waited for it: Node exited "unsettled" before apps sent anything (the partner's first apps after #614).
+    const source = readFileSync(path.join(AZURE_DIR, 'deploy.ts'), 'utf8');
+    expect(source).not.toMatch(/^if \(import\.meta\.main\).*\bawait\b/m);
+    expect(source).toMatch(/^ {2}void main\(process\.argv\.slice\(2\)\)\.then\(/m);
+  });
+});
+
 describe('parseArguments', () => {
   it('reads the ways the tool is run', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation', loadSize: false, alwaysOn: false });
@@ -2259,6 +2269,12 @@ describe('deploy apps', () => {
         expect(done.terminal.said).toContainEqual(
           expect.stringMatching(/^Deployed, but ca-agentx-stg-api couldn't be confirmed stopped/),
         );
+      });
+
+      // AZ26: production's jobs app (ca-agentx-prd-jobs) hands payments off too, and stopApi stops the API alone. This
+      // fails the day deploy.ts learns another environment, so --api-stopped is taught to stop and confirm that app first.
+      it('knows staging alone: another environment must first teach it to stop its jobs app (AZ26)', () => {
+        expect(RESOURCE_GROUP).toBe('rg-agentx-staging');
       });
 
       it('is never taken with --keep-running or --load-run, and leaves plain apps as it was', async () => {

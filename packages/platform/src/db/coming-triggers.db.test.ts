@@ -14,6 +14,7 @@ import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
 import {
   BUILT_TRIGGERS,
+  GRANTS_IN_STEP_TRIGGER,
   liveSchemaDrift,
   liveSchemaProblems,
   MARK_TRIGGERS,
@@ -571,5 +572,38 @@ describe('0072 once its image is in: each part held at once', () => {
       await owner.query(replacing(source));
     }
     expect(await clean()).toEqual({ atOnce: [], releaseShaped: [] });
+  });
+});
+
+describe('0089, read as the image before it would read it (OR1b)', () => {
+  // The image before knew every trigger but 0089's as written, and 0089's as coming.
+  const before = {
+    triggers: BUILT_TRIGGERS.filter((one) => one !== GRANTS_IN_STEP_TRIGGER),
+    tables: BUILT_TABLES,
+    checks: BUILT_CHECKS,
+  };
+
+  it('knowing its trigger as coming: nothing is the alarm at once, and the trigger warns first', async () => {
+    expect(await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: [GRANTS_IN_STEP_TRIGGER] })).toEqual({
+      atOnce: [],
+      releaseShaped: ['identity.memberships carries "grants_in_step", a coming trigger'],
+    });
+  });
+
+  it('not knowing it, is the alarm at once: why it landed a release first', async () => {
+    const { atOnce } = await liveSchemaDrift(app, { ...ROLES, built: before, comingTriggers: [] });
+    expect(atOnce).toEqual(['identity.memberships carries the trigger "grants_in_step"']);
+  });
+
+  it('once its image is in, reads clean, and the trigger switched off is the alarm at once', async () => {
+    expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [], releaseShaped: [] });
+    await owner.query('alter table identity.memberships disable trigger grants_in_step');
+    try {
+      expect((await liveSchemaDrift(app, ROLES)).atOnce).toContain(
+        "identity.memberships's grants_in_step is switched off",
+      );
+    } finally {
+      await owner.query('alter table identity.memberships enable trigger grants_in_step');
+    }
   });
 });

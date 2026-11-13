@@ -12,7 +12,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import BUILT_CHECKS from './built-checks.json' with { type: 'json' };
 import BUILT_TABLES from './built-tables.json' with { type: 'json' };
-import { BUILT_TRIGGERS, liveSchemaDrift, MARK_TRIGGERS, OPERATOR_EVENT_TRIGGERS } from './schema-guard.ts';
+import {
+  BUILT_TRIGGERS,
+  GRANTS_IN_STEP_TRIGGER,
+  liveSchemaDrift,
+  MARK_TRIGGERS,
+  OPERATOR_EVENT_TRIGGERS,
+} from './schema-guard.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -82,8 +88,12 @@ describe(`the operator's events added by its role alone (PL-57, Postgres ${serve
     expect(await liveSchemaDrift(app, ROLES)).toEqual({ atOnce: [], releaseShaped: [] });
   });
 
-  // The image before 0080 knew the marks' triggers as written and these two as coming.
-  const imageBefore = { ...ROLES, built: { triggers: MARK_TRIGGERS, tables: BUILT_TABLES, checks: BUILT_CHECKS } };
+  // The image before 0080 knew the marks' triggers as written and these two as coming. The database here is migrated
+  // to today, so the triggers later migrations add (0089's) are known to it as written: only 0080's are in question.
+  const imageBefore = {
+    ...ROLES,
+    built: { triggers: [...MARK_TRIGGERS, GRANTS_IN_STEP_TRIGGER], tables: BUILT_TABLES, checks: BUILT_CHECKS },
+  };
 
   it('reads to the image before as release-shaped alone, so 0080 raises no alarm as it ends', async () => {
     expect(await liveSchemaDrift(app, { ...imageBefore, comingTriggers: OPERATOR_EVENT_TRIGGERS })).toEqual({

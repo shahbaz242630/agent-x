@@ -187,3 +187,112 @@ resource capReached 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = [
     }
   }
 ]
+
+// MO2: the alert rules themselves. Every rule above, and those in postgres.bicep and environment.bicep, is a resource
+// someone with rights could switch off, rewrite or delete, after which it tells nobody; and a rule whose query stops
+// running (a table or column renamed) tells nobody either. Activity log alerts watch both: they read Azure's own
+// record of changes and health, cost nothing, and need no workspace, so neither workspace's cap blinds them. Each
+// notifies once an event, as a stateless SEV-1 does. Global, as Azure offers them; the email names the rule, the
+// caller and the caller's address, which ADR-013 Amendment MO2 allows beside rule 3's counts-only.
+var group = resourceGroup().id
+
+// Each change that succeeded to an alert rule of any kind, to the action group they notify, or to an alert processing
+// rule (one that removes action groups mutes every alert, these two included), by anyone: CI never writes them (its
+// role can't), so outside a foundation deploy, which rewrites every rule, each is unexplained. And a diagnostic
+// setting deleted: the login alerts would go on running, healthy, over a table nothing reaches. Deploys never delete
+// one; writes to them and to the server's settings are left out, as every foundation deploy rewrites those.
+var watchedChanges = [
+  'Microsoft.Insights/scheduledQueryRules/write'
+  'Microsoft.Insights/scheduledQueryRules/delete'
+  'Microsoft.Insights/metricAlerts/write'
+  'Microsoft.Insights/metricAlerts/delete'
+  'Microsoft.Insights/activityLogAlerts/write'
+  'Microsoft.Insights/activityLogAlerts/delete'
+  'Microsoft.Insights/actionGroups/write'
+  'Microsoft.Insights/actionGroups/delete'
+  'Microsoft.AlertsManagement/actionRules/write'
+  'Microsoft.AlertsManagement/actionRules/delete'
+  'Microsoft.Insights/diagnosticSettings/delete'
+]
+
+resource rulesChanged 'Microsoft.Insights/activityLogAlerts@2026-01-01' = {
+  name: 'alert-agentx-${short}-alert-rules-changed'
+  location: 'Global'
+  tags: tags
+  properties: {
+    description: 'SEV-1. An alert rule, the action group or an alert processing rule in this resource group was changed, switched off or deleted, or a log setting of a resource was deleted. A foundation deploy rewrites every rule, one email each; at any other time someone may be silencing the alarms before acting. The email names the rule and who did it. Runbook: Incident-Response-Playbook.md section I.'
+    enabled: true
+    scopes: [group]
+    condition: {
+      allOf: [
+        {
+          field: 'category'
+          equals: 'Administrative'
+        }
+        {
+          field: 'status'
+          equals: 'Succeeded'
+        }
+        {
+          anyOf: [
+            for operation in watchedChanges: {
+              field: 'operationName'
+              equals: operation
+            }
+          ]
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        {
+          actionGroupId: partner.id
+        }
+      ]
+    }
+  }
+}
+
+// A log alert rule Azure reports as no longer running whole. Microsoft reports health for rules running every
+// 15 minutes or more often; the slower ones (the 80% warnings, the daily summary) stay Unknown, which this never matches.
+resource rulesUnhealthy 'Microsoft.Insights/activityLogAlerts@2026-01-01' = {
+  name: 'alert-agentx-${short}-alert-rules-unhealthy'
+  location: 'Global'
+  tags: tags
+  properties: {
+    description: 'SEV-1. Azure reports a log alert rule in this resource group degraded or unavailable: its query fails (a table or column renamed, a syntax error, too slow), or it was switched off. Until it runs again, what it watches tells nobody. The email names the rule. Runbook: Incident-Response-Playbook.md section I.'
+    enabled: true
+    scopes: [group]
+    condition: {
+      allOf: [
+        {
+          field: 'category'
+          equals: 'ResourceHealth'
+        }
+        {
+          field: 'resourceType'
+          equals: 'Microsoft.Insights/scheduledQueryRules'
+        }
+        {
+          anyOf: [
+            {
+              field: 'properties.currentHealthStatus'
+              equals: 'Degraded'
+            }
+            {
+              field: 'properties.currentHealthStatus'
+              equals: 'Unavailable'
+            }
+          ]
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        {
+          actionGroupId: partner.id
+        }
+      ]
+    }
+  }
+}

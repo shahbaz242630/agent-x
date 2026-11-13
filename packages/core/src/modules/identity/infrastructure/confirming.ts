@@ -47,6 +47,7 @@ import {
   invitationToConfirm,
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
+import { tamperThrown } from './membership-grants.ts';
 import {
   addMembership,
   isMembershipTaken,
@@ -193,6 +194,9 @@ export function createAcceptanceConfirmations({
     } catch (error) {
       if (error instanceof ConfirmationRefused) {
         return { refused: { outcome: 'refused', status: error.status, code: error.code } as const, services };
+      }
+      if (tamperThrown(error)) {
+        return { refused: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } as const, services };
       }
       throw error;
     }

@@ -4,6 +4,7 @@
 // service gives at send time. It depends on no other module: a module whose
 // change tells people (identity) calls it.
 export {
+  maskedEmail,
   messageFor,
   type NoticeMessage,
   type PaidRemittance,

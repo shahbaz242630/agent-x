@@ -51,6 +51,7 @@ import {
   openInvitation,
 } from './invitations.ts';
 import { addMembership, membersFor, membershipFor, MEMBERSHIPS } from './memberships.ts';
+import { deactivatedAsTheProduct, roleChangedAsTheProduct } from '../membership-changes.helper.test.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { createSessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
@@ -482,13 +483,7 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
         actor: OPERATOR,
       });
     });
-    await withSignedStates(app, org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: org, id: membershipId }, OPERATOR);
     return membershipId;
   }
 
@@ -553,31 +548,9 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
 
   /** Moves the admin who asked: deactivated, or no longer an admin. */
   async function adminMoved(who: { org: string; admin: string }, how: 'deactivated' | 'demoted'): Promise<void> {
-    await withSignedStates(app, who.org, services(), async (tx, states) => {
-      const key = { orgId: who.org, id: who.admin };
-      if (how === 'deactivated') {
-        await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
-          actor: OPERATOR,
-          action: 'membership.deactivated',
-          details: {},
-        });
-        return;
-      }
-      const state = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
-      if (state.outcome !== 'verified') throw new Error('the admin’s membership is not verified');
-      await states.record(
-        tx,
-        MEMBERSHIPS,
-        key,
-        state,
-        { role: 'developer' },
-        {
-          actor: OPERATOR,
-          action: 'membership.role_changed',
-          details: {},
-        },
-      );
-    });
+    const key = { orgId: who.org, id: who.admin };
+    if (how === 'deactivated') await deactivatedAsTheProduct(app, services(), key, OPERATOR);
+    else await roleChangedAsTheProduct(app, services(), key, 'developer', OPERATOR);
   }
 
   it.each(['deactivated', 'demoted'] as const)(
@@ -856,13 +829,7 @@ describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${
         actor: OPERATOR,
       });
     });
-    await withSignedStates(app, org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivatedAsTheProduct(app, services(), { orgId: org, id: membershipId }, OPERATOR);
     const { token } = await firstAdmin(org);
 
     expect(await accept(await person(), token)).toMatchObject({ invitation: { status: 'AWAITING_CONFIRMATION' } });

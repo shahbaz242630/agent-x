@@ -36,14 +36,18 @@ export type RuleId =
   | 'no-secret-literals'
   | 'database-private'
   | 'database-network'
+  | 'database-egress'
   | 'database-logins'
   | 'owner-login-alert'
+  | 'refused-login-alert'
+  | 'login-lines-alert'
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
   | 'database-disk'
   | 'database-zone'
   | 'database-measures'
+  | 'database-stall-evidence'
   | 'load-run'
   | 'load-database'
   | 'connections'
@@ -59,6 +63,7 @@ export type RuleId =
   | 'alert-window'
   | 'alert-runbook'
   | 'alert-delivery'
+  | 'alert-rules-watch'
   | 'resource-logs'
   | 'log-destinations'
   | 'activity-log'
@@ -69,6 +74,7 @@ export type RuleId =
   | 'apps-egress'
   | 'dns-watch'
   | 'dns-allow'
+  | 'dns-block-alert'
   | 'apps-logs'
   | 'app-errors-alert'
   | 'daily-words-alert'
@@ -92,6 +98,9 @@ export type RuleId =
   | 'release-identity'
   | 'release-access'
   | 'job-watch'
+  | 'role-actions'
+  | 'release-writes-alert'
+  | 'azure-policy'
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
@@ -119,6 +128,7 @@ const TYPES = {
   actionGroup: 'Microsoft.Insights/actionGroups',
   alert: 'Microsoft.Insights/scheduledQueryRules',
   metricAlert: 'Microsoft.Insights/metricAlerts',
+  activityAlert: 'Microsoft.Insights/activityLogAlerts',
   budget: 'Microsoft.Consumption/budgets',
   communication: 'Microsoft.Communication/communicationServices',
   emailService: 'Microsoft.Communication/emailServices',
@@ -141,6 +151,8 @@ const TYPES = {
   roleAssignment: 'Microsoft.Authorization/roleAssignments',
   roleDefinition: 'Microsoft.Authorization/roleDefinitions',
   lock: 'Microsoft.Authorization/locks',
+  policyDefinition: 'Microsoft.Authorization/policyDefinitions',
+  policyAssignment: 'Microsoft.Authorization/policyAssignments',
   group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
@@ -157,13 +169,15 @@ const TYPES = {
 } as const;
 
 /**
- * Types Azure offers only as global resources. The first four hold no
+ * Types Azure offers only as global resources (activity log alerts also in two European regions, never the UAE). The
+ * first five hold no
  * customer data or logs; email's three keep what they hold at rest in the data
  * location they are given, which rule `email` holds to the UAE.
  */
 const GLOBAL_TYPES: ReadonlySet<string> = new Set([
   TYPES.actionGroup,
   TYPES.metricAlert,
+  TYPES.activityAlert,
   TYPES.dnsZone,
   TYPES.dnsLink,
   TYPES.communication,
@@ -199,15 +213,29 @@ const BURSTABLE_VALUES: ReadonlyMap<string, string> = new Map([
   ['max_connections', '50'],
 ]);
 
+/**
+ * What a stall like the soak's 5 s commit pause leaves behind (MO5), every
+ * size alike: each checkpoint and each lock waited on for longer than a
+ * second in the server's log, and the server's own wait and transaction
+ * counts as Azure metrics, which go to no workspace.
+ */
+const STALL_EVIDENCE: ReadonlyMap<string, string> = new Map([
+  ['log_checkpoints', 'on'],
+  ['log_lock_waits', 'on'],
+  ['deadlock_timeout', '1000'],
+  ['metrics.collector_database_activity', 'on'],
+]);
+
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
 
 /**
- * The start of a line that prefix writes, up to the message, as the login
- * alert matches it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-LOG:  ` (S19).
- * Azure holds the log's time zone at UTC.
+ * The start of a line that prefix writes, up to its level, as the login alerts
+ * match it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-` then `LOG:  ` for a login
+ * (S19), `FATAL:  ` for one refused. Azure holds the log's time zone at UTC.
  */
-const LOG_LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  ';
+const LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-';
+const LOG_LINE_START = `${LINE_START}LOG:  `;
 
 /** The role that owns the app's tables and runs the migrations (db/bootstrap/roles.sql). */
 const OWNER_ROLE = 'agentx_owner';
@@ -217,34 +245,37 @@ const OWNER_ROLE = 'agentx_owner';
  * job and the environment it runs in, written again here so that changing it
  * takes both: each owner login paired with the nearest start of that job, and
  * counted unless the start is within two minutes and nothing else is paired
- * with it; a start with no login counted too; each judged only between 20 and
- * 50 minutes old, since Azure's lines for the job reach the workspace minutes
- * after Postgres's. postgres.bicep says why each number.
+ * with it; a start with no login counted too; each judged once 20 minutes old,
+ * since Azure's lines for the job reach the workspace minutes after Postgres's,
+ * or once it arrives if later (MO2), over the last 30 minutes of those moments.
+ * postgres.bicep says why each number.
  */
+const JUDGED = 'Judged = max_of(ingestion_time(), TimeGenerated + 20m)';
+
 const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   [
     'let near = 2m;',
     'let starts = ContainerAppSystemLogs',
     `    | where _ResourceId =~ "${environmentId}" and JobName == "${migrateJob}" and Reason == "ContainerStarted" and isnotempty(ReplicaName)`,
-    '    | project Start = TimeGenerated, Run = ReplicaName;',
+    `    | project Start = TimeGenerated, Run = ReplicaName, ${JUDGED};`,
     'let logins = PGSQLServerLogs',
     `    | where Message matches regex @"${LOG_LINE_START}connection authorized: user=${OWNER_ROLE} "`,
-    '    | project Login = TimeGenerated, Message;',
+    `    | project Login = TimeGenerated, Message, ${JUDGED};`,
     'let paired = logins',
     '    | extend Key = 1',
-    '    | join kind=leftouter (starts | extend Key = 1) on Key',
+    '    | join kind=leftouter (starts | project-away Judged | extend Key = 1) on Key',
     '    | extend Gap = coalesce(abs(Login - Start), 1d)',
-    '    | summarize arg_min(Gap, Run) by Login, Message;',
+    '    | summarize arg_min(Gap, Run) by Login, Message, Judged;',
     'let claims = paired',
     '    | where Gap <= near',
     '    | summarize Claims = count() by Run;',
     'let strays = paired',
-    '    | where Login between (ago(50m) .. ago(20m))',
+    '    | where Judged between (ago(30m) .. now())',
     '    | join kind=leftouter claims on Run',
     '    | where Gap > near or Claims > 1',
     '    | project Run;',
     'let unclaimed = starts',
-    '    | where Start between (ago(50m) .. ago(20m))',
+    '    | where Judged between (ago(30m) .. now())',
     '    | join kind=leftanti claims on Run',
     '    | project Run;',
     'union strays, unclaimed',
@@ -252,11 +283,40 @@ const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   ].join('\n');
 
 /**
- * When the owner-login alert runs, and the hour each run reads: its band is 30
- * minutes, so two runs 15 minutes apart judge every login and start, and the
- * hour holds the band's oldest one and whatever two minutes before it.
+ * What a login alert reads before it judges: Azure's most, two days, so a line
+ * that reaches the workspace late is in view when it arrives, with whatever it
+ * is paired with (MO2: a line over about 35 minutes late was never judged).
  */
-const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: 'PT1H' } as const;
+const LATE_LINES_READ = 'P2D';
+
+/**
+ * When the owner-login alert runs, and what each run reads: its band is 30
+ * minutes, so two runs 15 minutes apart judge every login and start.
+ */
+const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: LATE_LINES_READ } as const;
+
+/**
+ * The login alerts that count lines rather than pair them take those that
+ * arrived over the last 30 minutes, run every 15: a run late by up to 15
+ * leaves no gap, a line may notify twice, and a line arriving late is counted
+ * when it arrives (MO2).
+ */
+const ARRIVED_LATELY = 'where ingestion_time() > ago(30m)';
+
+/**
+ * The refused-login alert's query (MO2) for the server's admin: one FATAL line
+ * for each login refused as a privileged role, a wrong password or a connection
+ * the server's rules refuse, counted by when it arrived (ARRIVED_LATELY), so a
+ * late line is still seen. Quotes are RE2's
+ * `\x22`: Kusto's verbatim strings can't hold one.
+ */
+const refusedLoginQuery = (admin: string): string => {
+  const quote = String.raw`\x22`;
+  const host = `host ${quote}[^${quote}]*${quote}, user`;
+  const refused = `(password authentication failed for user|no pg_hba[.]conf entry for ${host}|pg_hba[.]conf rejects connection for ${host})`;
+  const roles = `${quote}(${admin}|${BACKUP_ROLE}|${OWNER_ROLE})${quote}`;
+  return `PGSQLServerLogs | ${ARRIVED_LATELY} | where Message matches regex @"${LINE_START}FATAL:  ${refused} ${roles}" | summarize Refused = count()`;
+};
 
 /**
  * What counts as an error event: our logger's level and Zitadel's three, in
@@ -472,6 +532,10 @@ const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
+  // AZ3: Stage G's mark (as the owner) and checks (as the app and the backup role), on its throwaway copy alone.
+  'stage-g reads db-owner-password',
+  'stage-g reads db-app-password',
+  'stage-g reads db-backup-password',
   // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
@@ -629,13 +693,14 @@ export const LOAD_RUN = {
 
 /**
  * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
- * runs as and what it reads. The mark and the checks as the set-up job's identity, which reads those logins already,
- * so no grant is added; the step as PL-38's jobs. Each reads a part of its identity's own (a test holds it to GRANTS).
+ * runs as and what it reads. The mark and the checks as Stage G's own identity (AZ3), which reads the owner's, the
+ * app's and the backup role's logins alone, never the server admin's; the step as PL-38's jobs. Each reads a part of
+ * its identity's own (a test holds it to GRANTS).
  */
 const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
-  'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
+  'load-mark': { runsAs: 'stage-g', reads: new Set(['db-owner-password']) },
   'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
-  'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
+  'load-check': { runsAs: 'stage-g', reads: new Set(['db-app-password', 'db-backup-password']) },
 };
 
 const isStageGJob = (workload: string): boolean => Object.hasOwn(STAGE_G_JOBS, workload);
@@ -1559,7 +1624,7 @@ const serverSettings = (snapshot: Snapshot, server: PredictedResource): Readonly
       .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
   );
 
-/** Every server states its zone, and measures nothing on a Burstable size (4D2d P5). */
+/** Every server states its zone, measures nothing on a Burstable size (4D2d P5), and keeps what names a stall (MO5). */
 const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
     if (!['1', '2', '3'].includes(String(at(server.properties, 'availabilityZone')))) {
@@ -1573,6 +1638,16 @@ const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
     const differing = [...BURSTABLE_VALUES]
       .filter(([name, value]) => settings.get(name) !== value)
       .map(([name]) => name);
+    const unrecorded = [...STALL_EVIDENCE]
+      .filter(([name, value]) => settings.get(name) !== value)
+      .map(([name, value]) => `${name}=${value}`);
+    if (unrecorded.length > 0) {
+      add({
+        rule: 'database-stall-evidence',
+        resource: server.name,
+        message: `keeps what names a stall (MO5): its checkpoints and lock waits over a second logged, and its wait counts as metrics; differing or not stated: ${unrecorded.join(', ')}`,
+      });
+    }
     if (at(server, 'sku', 'tier') === 'Burstable' && differing.length > 0) {
       add({
         rule: 'database-measures',
@@ -1642,14 +1717,20 @@ const database: Check = (snapshot, expected, add) => {
       snapshot,
       'stateless SEV-1',
       (criterion, alert) =>
-        queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+        at(alert.properties, 'overrideQueryTimeRange') === LATE_LINES_READ &&
+        queryIs(
+          at(criterion, 'query'),
+          'PGSQLServerLogs',
+          [ARRIVED_LATELY, `where Message matches regex ${pattern}`],
+          'count()',
+        ) &&
         watchesEveryWindow(alert, criterion),
       loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute by when each line arrived, over the two days before, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -1668,8 +1749,12 @@ const subnetRules = (snapshot: Snapshot, subnet: unknown, direction: string): re
   const apart = ofType(snapshot, TYPES.rule).filter((rule) => rule.id.startsWith(`${String(rulesId)}/securityRules/`));
   return [...inside, ...apart]
     .map((rule) => at(rule, 'properties'))
-    .filter((rule) => at(rule, 'direction') === direction);
+    .filter((rule) => sameWord(at(rule, 'direction'), direction));
 };
+
+/** Azure reads a rule's direction and access without case (`outbound` is `Outbound`), so these checks do too (AZ8e). */
+const sameWord = (value: unknown, word: string): boolean =>
+  typeof value === 'string' && value.toLowerCase() === word.toLowerCase();
 
 const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =>
   subnetRules(snapshot, subnet, 'Inbound');
@@ -1678,7 +1763,7 @@ const outboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] 
   subnetRules(snapshot, subnet, 'Outbound');
 
 const allowing = (inbound: readonly unknown[]): readonly unknown[] =>
-  inbound.filter((rule) => at(rule, 'access') === 'Allow');
+  inbound.filter((rule) => sameWord(at(rule, 'access'), 'Allow'));
 
 /**
  * The backstop of a direction: a rule that denies everything from `source`,
@@ -1693,7 +1778,7 @@ const deniesRest = (rules: readonly unknown[], source: string): boolean => {
   const lastAllow = Math.max(...allowing(rules).map((rule) => Number(at(rule, 'priority'))));
   return rules.some(
     (rule) =>
-      at(rule, 'access') === 'Deny' &&
+      sameWord(at(rule, 'access'), 'Deny') &&
       at(rule, 'protocol') === '*' &&
       at(rule, 'sourceAddressPrefix') === source &&
       at(rule, 'destinationAddressPrefix') === '*' &&
@@ -1847,31 +1932,69 @@ const appsEgress: Check = (snapshot, _expected, add) => {
     const apps = appsSubnetOf(network);
     const prefix = text(at(apps, 'properties', 'addressPrefix'));
     const database = list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'database');
-    const outbound = outboundRules(snapshot, apps);
-    const allows = allowing(outbound);
-    const problem = (message: string): void => {
-      add({ rule: 'apps-egress', resource: network.name, message });
-    };
     // The network's own region, not the expected one: this rule asks that the
     // key vault tag names where this deployment is, and `in-country` asks
     // separately that that is the UAE.
     const wanted = new Map(
       egressDoors(text(network.location), prefix, text(at(database, 'properties', 'addressPrefix'))),
     );
-    const open = new Set(allows.map(doorOf));
-    for (const [door, why] of wanted) {
-      if (!open.has(door)) problem(`its apps subnet must let out ${door}, for ${why}`);
+    for (const message of egressProblems(snapshot, apps, 'apps', wanted)) {
+      add({ rule: 'apps-egress', resource: network.name, message });
     }
-    for (const door of [...open].filter((door) => !wanted.has(door))) {
-      problem(`its apps subnet lets out ${door}, which nothing it runs needs`);
-    }
-    for (const source of new Set(
-      allows.map((rule) => text(at(rule, 'sourceAddressPrefix'))).filter((source) => source !== prefix),
-    )) {
-      problem(`its apps subnet lets out traffic from ${source || 'nowhere named'}, not from the subnet alone`);
-    }
-    if (!deniesRestOfTheInternet(outbound)) {
-      problem('its apps subnet must deny everything else out, after every rule that allows');
+  }
+};
+
+/**
+ * What is wrong with a subnet's way out, against the doors it must have,
+ * exactly: one missing, one extra, one from another source, or the rest not
+ * denied after them. Empty for a subnet whose way out is just `wanted`.
+ */
+function egressProblems(
+  snapshot: Snapshot,
+  subnet: unknown,
+  name: string,
+  wanted: ReadonlyMap<string, string>,
+): string[] {
+  const prefix = text(at(subnet, 'properties', 'addressPrefix'));
+  const outbound = outboundRules(snapshot, subnet);
+  const allows = allowing(outbound);
+  const problems: string[] = [];
+  const open = new Set(allows.map(doorOf));
+  for (const [door, why] of wanted) {
+    if (!open.has(door)) problems.push(`its ${name} subnet must let out ${door}, for ${why}`);
+  }
+  for (const door of [...open].filter((door) => !wanted.has(door))) {
+    problems.push(`its ${name} subnet lets out ${door}, which nothing it runs needs`);
+  }
+  for (const source of new Set(
+    allows.map((rule) => text(at(rule, 'sourceAddressPrefix'))).filter((source) => source !== prefix),
+  )) {
+    problems.push(`its ${name} subnet lets out traffic from ${source || 'nowhere named'}, not from the subnet alone`);
+  }
+  if (!deniesRestOfTheInternet(outbound)) {
+    problems.push(`its ${name} subnet must deny everything else out, after every rule that allows`);
+  }
+  return problems;
+}
+
+/**
+ * The way out of every Postgres subnet is an allowlist too (AZ8): Azure's
+ * default rules let the server reach the whole internet, so a server taken
+ * over could send the data out of the UAE (ADR-009). Microsoft names what a
+ * server in a subnet needs when an NSG denies the rest: port 5432 inside its
+ * subnet and Azure Storage, where the write-ahead log is archived, narrowed
+ * to the region. Azure's DNS is written down as the apps subnet's is.
+ */
+const databaseEgress: Check = (snapshot, _expected, add) => {
+  for (const { subnet, network } of postgresSubnets(snapshot)) {
+    const prefix = text(at(subnet, 'properties', 'addressPrefix'));
+    const wanted = new Map([
+      [`Tcp to ${prefix} on 5432`, "the server's own features inside its subnet, high availability among them"],
+      [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the storage below"],
+      [`Tcp to Storage.${text(network.location)} on 443`, 'the write-ahead log and backups, in this region alone'],
+    ]);
+    for (const message of egressProblems(snapshot, subnet, text(at(subnet, 'name')), wanted)) {
+      add({ rule: 'database-egress', resource: network.name, message });
     }
   }
 };
@@ -1887,33 +2010,49 @@ const dnsActionOf = (rule: PredictedResource): string =>
 const dnsRuleOn = (rule: PredictedResource): boolean =>
   text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled';
 
+/** This deployment's DNS lists that hold every name ('.'), their names by id. */
+const everyNameLists = (snapshot: Snapshot): ReadonlyMap<string, string> =>
+  new Map(
+    ofType(snapshot, TYPES.dnsDomainList)
+      .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
+      .map((domains) => [domains.id, domains.name]),
+  );
+
+/** A DNS policy's own rules: their ids sit under the policy's. */
+const dnsRulesOf = (snapshot: Snapshot, policy: string): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+
+/** The names of the every-name lists an enabled rule of `policy` blocks: the lookups no rule above it allows. */
+const blockedEveryName = (snapshot: Snapshot, policy: string): readonly string[] => {
+  const everyName = everyNameLists(snapshot);
+  return dnsRulesOf(snapshot, policy)
+    .filter((rule) => dnsRuleOn(rule) && dnsActionOf(rule) === 'block')
+    .flatMap((rule) => list(at(rule.properties, 'dnsResolverDomainLists')))
+    .flatMap((domains) => everyName.get(text(at(domains, 'id'))) ?? []);
+};
+
 /**
  * Every lookup the network makes is judged by a DNS policy of this deployment
  * (S68 audit finding 14): its rules see what Azure's DNS answers, which the
  * apps subnet's rules must let out and so can't filter. The network is linked
  * to one of the deployment's policies, which holds an enabled rule over every
- * name, in a list of this deployment, that alerts on or blocks each lookup,
- * so a name no rule above it names is still judged; and no rule allows every
- * name, which would let each lookup through before that rule is reached (it
- * would still be logged, Allow logs too, but never blocked once that rule
- * blocks). A broad Allow short of every name (`com.`) would shadow it the
- * same way: the allowlist that comes with Block must refuse those too. Azure
- * reads the state and the action without regard to case, so they are
+ * name, in a list of this deployment, that blocks each lookup (AZ1, S188:
+ * alerting alone let any name be answered), so a name no rule above it allows
+ * is refused and logged; and no rule allows every name, which would let each
+ * lookup through before that rule is reached (it would still be logged, Allow
+ * logs too, but never blocked). A broad Allow short of every name (`com.`)
+ * would shadow it the same way: the allowlist refuses those too (dns-allow).
+ * Azure reads the state and the action without regard to case, so they are
  * compared that way. Rule `resource-logs` sends what the policy sees to the
- * workspace.
+ * workspace, and `dns-block-alert` tells someone of each blocked lookup.
  */
 const dnsWatch: Check = (snapshot, _expected, add) => {
-  const everyName = new Set(
-    ofType(snapshot, TYPES.dnsDomainList)
-      .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
-      .map((domains) => domains.id),
-  );
-  const rulesOf = (policy: string): readonly PredictedResource[] =>
-    ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+  const everyName = everyNameLists(snapshot);
+  const rulesOf = (policy: string): readonly PredictedResource[] => dnsRulesOf(snapshot, policy);
   const coversEveryName = (rule: PredictedResource): boolean =>
     list(at(rule.properties, 'dnsResolverDomainLists')).some((domains) => everyName.has(text(at(domains, 'id'))));
   const watches = (rule: PredictedResource): boolean =>
-    dnsRuleOn(rule) && ['alert', 'block'].includes(dnsActionOf(rule)) && coversEveryName(rule);
+    dnsRuleOn(rule) && dnsActionOf(rule) === 'block' && coversEveryName(rule);
   for (const network of ofType(snapshot, TYPES.network)) {
     const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
       .filter((link) => at(link.properties, 'virtualNetwork', 'id') === network.id)
@@ -1928,7 +2067,7 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
         rule: 'dns-watch',
         resource: network.name,
         message:
-          "must be linked to this deployment's DNS policy, with an enabled rule alerting on or blocking every name ('.') and none allowing every name, so each lookup it makes is seen",
+          "must be linked to this deployment's DNS policy, with an enabled rule blocking every name ('.') and none allowing every name, so each lookup no Allow names is refused and logged",
       });
     }
   }
@@ -1968,6 +2107,54 @@ const dnsAllow: Check = (snapshot, _expected, add) => {
         rule: 'dns-allow',
         resource: rule.name,
         message: `allows names outside the reviewed list (dns-allowed.json): ${refused.join(', ')}`,
+      });
+    }
+  }
+};
+
+/**
+ * The lookups the catch-all refuses that are expected, each answered no-such-name before Block too, and each one's
+ * labels reaching only servers no customer runs (S85, S188: 6,698 of 14 days' 8,130 catch-all lookups): reverse
+ * lookups of the network's and the platform's private addresses (public AS112 servers), the root's own NS, the
+ * nodes' bare names, and CoreDNS's loop check (a HINFO of two random numbers). Anything else blocked is news.
+ */
+export const DNS_EXPECTED_LEFTOVERS =
+  'where not((QueryType == "PTR" and (QueryName endswith ".10.in-addr.arpa." or QueryName endswith ".100.100.in-addr.arpa.")) or (QueryType == "NS" and QueryName == ".") or (QueryType == "HINFO" and QueryName matches regex "^[0-9]+[.][0-9]+[.]$") or QueryName matches regex "^aks-[a-z0-9]+-[0-9]+-vmss[0-9A-Z]{6}[.]$")';
+
+/** The lookups an every-name list judged, by its name: the ones the catch-all blocks once it blocks. */
+const dnsCatchAllLines = (listName: string): string => `where ResolverPolicyDomainListId endswith "/${listName}"`;
+
+/**
+ * A stateless SEV-1 alert on the main workspace fires on any lookup a DNS policy's catch-all blocks, past the expected
+ * leftovers, every window (AZ1, S188; partner S98: Microsoft adds storage stamps and moves its chains, and a blocked
+ * one can stop the vault, sign-in, image pulls or a database's backups until its name is listed). Its query names the
+ * every-name list that policy's Block rule holds, so a renamed list never leaves it counting nothing; counts only.
+ */
+const dnsBlockAlert: Check = (snapshot, _expected, add) => {
+  for (const policy of ofType(snapshot, TYPES.dnsPolicy)) {
+    const alerted = blockedEveryName(snapshot, policy.id).some((listName) =>
+      workspaceAlerted(
+        snapshot,
+        'stateless SEV-1',
+        (criterion, alert) =>
+          queryIs(
+            at(criterion, 'query'),
+            'DNSQueryLogs',
+            [dnsCatchAllLines(listName), DNS_EXPECTED_LEFTOVERS],
+            'count()',
+          ) &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      ),
+    );
+    if (!alerted) {
+      add({
+        rule: 'dns-block-alert',
+        resource: policy.name,
+        message:
+          "needs an enabled stateless SEV-1 alert on this deployment's main workspace that fires on any lookup its every-name Block rule refuses, past the expected leftovers, watching every window and firing on the first",
       });
     }
   }
@@ -2936,7 +3123,8 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.exec(
+    // The playbook's alert sections: A to S, and W (a blocked DNS lookup, AZ1); T to V answer workflows, not alerts.
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-SW]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -3623,7 +3811,159 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the two days before, judging each line once 20 minutes old or once it arrives, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+      });
+    }
+  }
+};
+
+/**
+ * An enabled, stateless SEV-1 alert on the login alerts' workspace fires when a
+ * login as the owner, the server admin or the backup role is refused (MO2):
+ * nothing got in, but someone may be trying. It counts by when a line arrived,
+ * so a late one is still seen (refusedLoginQuery).
+ */
+const refusedLoginAlert: Check = (snapshot, _expected, add) => {
+  for (const server of ofType(snapshot, TYPES.server)) {
+    const query = refusedLoginQuery(String(at(server.properties, 'administratorLogin')));
+    const alerted = workspaceAlerted(
+      snapshot,
+      'stateless SEV-1',
+      (criterion, alert) =>
+        at(alert.properties, 'overrideQueryTimeRange') === LATE_LINES_READ &&
+        at(criterion, 'query') === query &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+      loginWorkspaceIds(snapshot),
+    );
+    if (!alerted) {
+      add({
+        rule: 'refused-login-alert',
+        resource: server.name,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the two days before, that fires on any refused login as ${OWNER_ROLE}, the server admin or ${BACKUP_ROLE} arriving since the run before (MO2)`,
+      });
+    }
+  }
+};
+
+/** The query of the alert on the server's lines stopping (MO6): none arrived over the hour, the cap's word aside. */
+const LOGIN_LINES_QUERY = `union (PGSQLServerLogs | where ingestion_time() > ago(60m)), ${overCap(60)} | summarize Lines = count()`;
+
+/**
+ * An enabled, stateless SEV-1 alert on the login alerts' workspace fires when no server log line has arrived there
+ * for an hour (MO6): a log setting rewritten (categories off, another workspace) leaves every login alert healthy
+ * over a table nothing reaches, and the rule watch sees only a setting deleted. Run every 15 minutes, as the login
+ * alerts are, over the hour the server's quietest gap (12 minutes on staging) never comes near.
+ */
+const loginLinesAlert: Check = (snapshot, _expected, add) => {
+  const alerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion, alert) =>
+      at(alert.properties, 'evaluationFrequency') === 'PT15M' &&
+      at(alert.properties, 'windowSize') === 'PT1H' &&
+      at(alert.properties, 'overrideQueryTimeRange') === 'P1D' &&
+      at(criterion, 'query') === LOGIN_LINES_QUERY &&
+      totals(criterion) &&
+      at(criterion, 'operator') === 'LessThan' &&
+      at(criterion, 'threshold') === 1 &&
+      at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+      at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+    loginWorkspaceIds(snapshot),
+  );
+  // No server, no lines to miss: the other login alerts are checked a server at a time.
+  if (!alerted && ofType(snapshot, TYPES.server).length > 0) {
+    add({
+      rule: 'login-lines-alert',
+      resource: 'the login workspace',
+      message:
+        "needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes, that fires when no database server log line has arrived for an hour and the workspace is not over its daily cap (MO6)",
+    });
+  }
+};
+
+/** An alert processing rule: one that removes action groups mutes every alert in its scope (MO2). */
+const PROCESSING_RULE = 'Microsoft.AlertsManagement/actionRules';
+
+/** One leaf of an activity log alert's condition: the event's field holds this value (Azure compares without case). */
+const leaf = (field: string, equals: string): Readonly<Record<string, string>> => ({ field, equals });
+
+/**
+ * The two watches on the alert rules themselves (MO2), each an activity log
+ * alert's whole condition: every change that succeeded to an alert rule of any
+ * kind or to an action group, and a log alert rule Azure reports degraded or
+ * unavailable. Exactly these: one more condition in `allOf` narrows what
+ * fires, and one fewer change kind leaves that kind unwatched.
+ */
+const RULE_WATCHES: readonly { readonly what: string; readonly condition: unknown }[] = [
+  {
+    what: 'a change to any alert rule, action group or alert processing rule, or a diagnostic setting deleted',
+    condition: {
+      allOf: [
+        leaf('category', 'Administrative'),
+        leaf('status', 'Succeeded'),
+        {
+          anyOf: [
+            ...[TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup, PROCESSING_RULE].flatMap(
+              (type) => [leaf('operationName', `${type}/write`), leaf('operationName', `${type}/delete`)],
+            ),
+            // Deploys never delete one; they rewrite every one, so its writes would be noise.
+            leaf('operationName', `${TYPES.diagnostics}/delete`),
+          ],
+        },
+      ],
+    },
+  },
+  {
+    what: 'a log alert rule degraded or unavailable',
+    condition: {
+      allOf: [
+        leaf('category', 'ResourceHealth'),
+        leaf('resourceType', TYPES.alert),
+        { anyOf: ['Degraded', 'Unavailable'].map((status) => leaf('properties.currentHealthStatus', status)) },
+      ],
+    },
+  },
+];
+
+/** The same JSON, whatever order an object's keys were written in. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, inner: unknown) =>
+    inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+      ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b)))
+      : inner,
+  );
+
+/**
+ * Each watch on the alert rules (MO2) is an enabled activity log alert on this
+ * deployment's resource group alone, with exactly its condition, a SEV-1
+ * description ending in its runbook section, and only action groups of this
+ * deployment that reach someone. Activity log alerts have no severity or
+ * resolving of their own: each event notifies once.
+ */
+const alertRulesWatch: Check = (snapshot, _expected, add) => {
+  const group = groupOf(snapshot);
+  for (const { what, condition } of RULE_WATCHES) {
+    const watched = ofType(snapshot, TYPES.activityAlert).some((alert) => {
+      const groups = list(at(alert.properties, 'actions', 'actionGroups'));
+      return (
+        at(alert.properties, 'enabled') === true &&
+        canonical(at(alert.properties, 'scopes')) === canonical([group]) &&
+        canonical(at(alert.properties, 'condition')) === canonical(condition) &&
+        /^SEV-1\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.test(
+          String(at(alert.properties, 'description')),
+        ) &&
+        groups.length > 0 &&
+        groups.every((one) => deliversAlerts(snapshot, at(one, 'actionGroupId')))
+      );
+    });
+    if (!watched) {
+      add({
+        rule: 'alert-rules-watch',
+        resource: 'the deployment',
+        message: `needs an enabled activity log alert on this deployment's resource group, SEV-1 with its runbook section, reaching someone, on ${what} (MO2): an alert rule switched off, deleted or failing tells nobody`,
       });
     }
   }
@@ -3806,6 +4146,9 @@ const secretAccess: Check = (snapshot, _expected, add) => {
       ACCESS_TYPE.test(resource.type) &&
       resource.type !== TYPES.roleAssignment &&
       resource.type !== TYPES.roleDefinition &&
+      // Azure's own refusals grant nothing, and are `azure-policy`'s to read.
+      resource.type !== TYPES.policyDefinition &&
+      resource.type !== TYPES.policyAssignment &&
       !deleteLock(resource)
     ) {
       add({
@@ -4116,6 +4459,504 @@ const jobWatch: Check = (snapshot, expected, add) => {
   }
   if (given.length !== 1) {
     problem('the deployment', `must give the job-start watch's role once; it gives it ${String(given.length)} times`);
+  }
+};
+
+/**
+ * What no custom role of the deployment may allow (AZ2): writing a door (a route
+ * config reaches an app whose ingress is internal, and needs nothing on the app,
+ * Security-Handoff §13), the environment itself, a grant or a role, an Azure
+ * Policy rule, its assignment or an exemption from one, a secret's listing, a
+ * token minted as an app or a job (`getAuthToken`), the vault or its access
+ * policies, a secret read (the vault is RBAC: `getSecret` is its data action), a
+ * storage account rewritten or its keys listed or remade (shared-key access back
+ * on opens every blob), a federated trust (a new way to sign in as an identity),
+ * giving an identity to a resource (`assign`), or a lock's removal. Without case, as Azure
+ * reads an action.
+ */
+const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
+  [
+    'Microsoft.App/managedEnvironments/httpRouteConfigs/write',
+    'Microsoft.App/managedEnvironments/write',
+    'Microsoft.App/containerApps/listSecrets/action',
+    'Microsoft.App/jobs/listSecrets/action',
+    'Microsoft.Authorization/roleAssignments/write',
+    'Microsoft.Authorization/policyAssignments/write',
+    'Microsoft.Authorization/policyAssignments/delete',
+    'Microsoft.Authorization/policyExemptions/write',
+    'Microsoft.Authorization/policyDefinitions/write',
+    'Microsoft.Authorization/policyDefinitions/delete',
+    'Microsoft.Authorization/roleDefinitions/write',
+    'Microsoft.Authorization/locks/delete',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+    'Microsoft.App/containerApps/getAuthToken/action',
+    'Microsoft.App/jobs/getAuthToken/action',
+    'Microsoft.KeyVault/vaults/write',
+    'Microsoft.KeyVault/vaults/accessPolicies/write',
+    // The vault is RBAC, so reading a secret is this data action, not a listing (S188 review).
+    'Microsoft.KeyVault/vaults/secrets/getSecret/action',
+    // A storage account rewritten can switch shared-key access back on, and then its keys open every blob.
+    'Microsoft.Storage/storageAccounts/write',
+    'Microsoft.Storage/storageAccounts/listKeys/action',
+    'Microsoft.Storage/storageAccounts/regenerateKey/action',
+  ].map((action) => action.toLowerCase()),
+);
+
+/** Starting a job's run, as Azure names the action, without case. */
+const JOB_START = 'microsoft.app/jobs/start/action';
+
+/**
+ * Every custom role the deployment defines (AZ2): no wildcard in any action or
+ * data action (`Microsoft.App/jobs/*\/action` would add a secret's listing and
+ * every action Azure adds later, Microsoft's jobs page), and none of
+ * FORBIDDEN_ACTIONS. And only CI's role may start a job (AZ3): a start is the
+ * job's secrets and identity (Microsoft's jobs page), and CI's is given on the
+ * migration job alone (`release-access`), so no identity of ours but CI's can
+ * start migrate, and none can start chain-restore or the operator's job; a
+ * person starts those, as the subscription's owner. CI's and the watch's roles
+ * are held to their exact lists besides (`release-identity`, `job-watch`): this
+ * holds every role, a new one included.
+ */
+const roleActions: Check = (snapshot, _expected, add) => {
+  const ci = releaseRoleName(groupOf(snapshot));
+  for (const role of ofType(snapshot, TYPES.roleDefinition)) {
+    const permissions = list(at(role.properties, 'permissions'));
+    const allowed = permissions.flatMap((entry) => [...list(at(entry, 'actions')), ...list(at(entry, 'dataActions'))]);
+    for (const action of allowed.map(String)) {
+      if (action.includes('*') || FORBIDDEN_ACTIONS.has(action.toLowerCase())) {
+        add({
+          rule: 'role-actions',
+          resource: role.name,
+          message: `allows ${action}: no role of ours allows a wildcard or one of FORBIDDEN_ACTIONS: a door, the environment, a grant or a role, a policy rule, its assignment or exemption, a secret's listing, an app's token, the vault, a trust, an identity's assignment or a lock's removal`,
+        });
+      }
+      if (action.toLowerCase() === JOB_START && role.name !== ci) {
+        add({
+          rule: 'role-actions',
+          resource: role.name,
+          message: `allows ${action}: only CI's role starts a job, and only the migration (release-access); a start uses the job's secrets`,
+        });
+      }
+    }
+  }
+};
+
+/** CI's writes a release makes (release.ts): the API written, the migration job written and started. */
+const releaseWritesQuery = (identity: string, api: string, migrate: string): string =>
+  [
+    'AzureActivity',
+    `where tostring(parse_json(Claims).xms_mirid) =~ "${identity}"`,
+    `where not((OperationNameValue =~ "Microsoft.App/containerApps/write" and _ResourceId =~ "${api}") or (OperationNameValue in~ ("Microsoft.App/jobs/write", "Microsoft.App/jobs/start/action") and _ResourceId =~ "${migrate}"))`,
+    'summarize Writes = count()',
+  ].join(' | ');
+
+/** The id of the deployment's app or job of this kind and work in its resource group, or '' for none. */
+const workloadIdOf = (snapshot: Snapshot, type: string, workload: string): string =>
+  ofType(snapshot, type).find(
+    (found) =>
+      found.id.toLowerCase().startsWith(`${groupOf(snapshot)}/providers/`.toLowerCase()) &&
+      jobWorkloadOf(found.name) === workload,
+  )?.id ?? '';
+
+/**
+ * A stateless SEV-1 alert on the main workspace fires on anything CI's identity
+ * does but a release's three writes (AZ2): any other write, delete or action, or
+ * one of the three on another resource, refused or not. Read from the sign-in's
+ * own claim naming the identity, the hour before every 15 minutes, as the
+ * activity log reaches the workspace late; one line is enough.
+ */
+const releaseWritesAlert: Check = (snapshot, expected, add) => {
+  const identity =
+    ofType(snapshot, TYPES.identity).find(
+      (found) => found.id.toLowerCase() === releaseIdentityId(snapshot, expected.environment),
+    )?.id ?? '';
+  const wanted = releaseWritesQuery(
+    identity,
+    workloadIdOf(snapshot, TYPES.app, 'api'),
+    workloadIdOf(snapshot, TYPES.job, 'migrate'),
+  ).toLowerCase();
+  const alerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion, alert) =>
+      identity !== '' &&
+      String(at(criterion, 'query')).toLowerCase() === wanted &&
+      totals(criterion) &&
+      at(criterion, 'operator') === 'GreaterThan' &&
+      at(criterion, 'threshold') === 0 &&
+      at(alert.properties, 'evaluationFrequency') === 'PT15M' &&
+      at(alert.properties, 'windowSize') === 'PT1H' &&
+      at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+      at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+  );
+  if (!alerted) {
+    add({
+      rule: 'release-writes-alert',
+      resource: 'the deployment',
+      message:
+        "needs an enabled stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on any activity-log line by CI's identity but a release's write of the API, write of the migration job and start of it",
+    });
+  }
+};
+
+/** A field an Azure Policy condition reads, as these checks can read it: a value, or none for a missing field. */
+type PolicyValue = unknown;
+
+/** One element of an array a `count` walks, and the alias that names it (`…containers[*].image` → `…containers[*]`). */
+interface PolicyScope {
+  readonly prefix: string;
+  readonly element: unknown;
+}
+
+/** A condition these checks can't read: the rule is refused rather than judged wrongly. */
+class UnreadCondition extends Error {}
+
+/** Azure Policy's `like`: one `*` at most, without case. */
+export function policyLike(value: unknown, pattern: unknown): boolean {
+  if (typeof value !== 'string' || typeof pattern !== 'string') return false;
+  const [before, after, ...more] = pattern.toLowerCase().split('*');
+  if (more.length > 0) throw new UnreadCondition(`like with more than one wildcard: ${pattern}`);
+  const text = value.toLowerCase();
+  if (after === undefined) return text === before;
+  return text.length >= (before ?? '').length + after.length && text.startsWith(before ?? '') && text.endsWith(after);
+}
+
+/** Azure Policy's equality: strings without case, anything else exactly. */
+const policySame = (value: unknown, wanted: unknown): boolean =>
+  typeof value === 'string' && typeof wanted === 'string'
+    ? value.toLowerCase() === wanted.toLowerCase()
+    : value === wanted;
+
+/**
+ * What a field names on a resource (Microsoft.App's aliases are its properties'
+ * paths), or undefined when it isn't there. Inside a `count`, its own array's
+ * alias names the element being counted.
+ */
+function policyFieldOf(resource: PredictedResource, field: string, scope?: PolicyScope): PolicyValue {
+  if (field === 'type') return resource.type;
+  if (field === 'name') return resource.name;
+  const inScope = scope !== undefined && field.startsWith(scope.prefix);
+  const path = inScope ? field.slice(scope.prefix.length) : field;
+  if (!inScope && !path.toLowerCase().startsWith(`${resource.type.toLowerCase()}/`)) return undefined;
+  const rest = inScope ? path : path.slice(resource.type.length + 1);
+  if (rest.includes('[*]')) throw new UnreadCondition(`an array field outside a count: ${field}`);
+  const keys = rest.split('.').filter((key) => key !== '');
+  return inScope ? at(scope.element, ...keys) : at(resource.properties, ...keys);
+}
+
+/** A leaf condition's test on one value. */
+function policyCompare(value: PolicyValue, condition: Readonly<Record<string, unknown>>): boolean {
+  const known: Readonly<Record<string, (wanted: unknown) => boolean>> = {
+    equals: (wanted) => value !== undefined && policySame(value, wanted),
+    notEquals: (wanted) => !(value !== undefined && policySame(value, wanted)),
+    like: (wanted) => policyLike(value, wanted),
+    notLike: (wanted) => !policyLike(value, wanted),
+    notContains: (wanted) =>
+      !(typeof value === 'string' && typeof wanted === 'string' && value.toLowerCase().includes(wanted.toLowerCase())),
+    exists: (wanted) => (value !== undefined) === (wanted === true || wanted === 'true'),
+    greater: (wanted) => typeof value === 'number' && typeof wanted === 'number' && value > wanted,
+    in: (wanted) => list(wanted).some((each) => policySame(value, each)),
+    notIn: (wanted) => !list(wanted).some((each) => policySame(value, each)),
+  };
+  const operators = Object.keys(condition).filter((key) => key !== 'field' && key !== 'count');
+  const [operator, ...more] = operators;
+  const test = operator === undefined ? undefined : known[operator];
+  if (operator === undefined || more.length > 0 || test === undefined) {
+    throw new UnreadCondition(`an operator these checks don't read: ${operators.join(', ')}`);
+  }
+  return test(condition[operator]);
+}
+
+/**
+ * Whether an Azure Policy condition matches a resource (and so, with Deny, Azure
+ * refuses it): `allOf`, `anyOf`, `not`, a field's test, or a `count` of an
+ * array's elements matching its `where`. Anything else is UnreadCondition.
+ */
+function policyMatches(condition: unknown, resource: PredictedResource, scope?: PolicyScope): boolean {
+  const object = (condition ?? {}) as Readonly<Record<string, unknown>>;
+  if ('allOf' in object) return list(object.allOf).every((each) => policyMatches(each, resource, scope));
+  if ('anyOf' in object) return list(object.anyOf).some((each) => policyMatches(each, resource, scope));
+  if ('not' in object) return !policyMatches(object.not, resource, scope);
+  if ('count' in object) {
+    const field = text(at(object.count, 'field'));
+    const cut = field.indexOf('[*]');
+    if (cut < 0 || field.slice(cut + 3).includes('[*]')) throw new UnreadCondition(`a count over ${field}`);
+    const prefix = field.slice(0, cut + 3);
+    const array = list(policyFieldOf(resource, field.slice(0, cut), scope));
+    const where = at(object.count, 'where');
+    const counted = array.filter(
+      (element) => where === undefined || policyMatches(where, resource, { prefix, element }),
+    ).length;
+    return policyCompare(counted, object);
+  }
+  if (typeof object.field !== 'string') throw new UnreadCondition('a condition with no field');
+  return policyCompare(policyFieldOf(resource, object.field, scope), object);
+}
+
+/** The most replicas any app runs in any environment (production's Zitadel, 4D2e D12): Azure refuses more. */
+const MOST_APP_REPLICAS = 4;
+
+/**
+ * Azure's own refusals (AZ2, modules/guardrails.bicep), by the part of the name
+ * after `agentx-<environment>-`, each with bad examples it must refuse, made
+ * from the deployment's own API app or migration job: so a rule whose alias or
+ * value is wrong, and refuses nothing, is caught here rather than by an attacker.
+ */
+const GUARDRAILS: Readonly<
+  Record<string, readonly (readonly [workload: string, change: Readonly<Record<string, unknown>>])[]>
+> = {
+  'apps-internal': [['api', { 'configuration.ingress.external': true }]],
+  'apps-https': [['api', { 'configuration.ingress.allowInsecure': true }]],
+  images: [
+    ['api', { 'template.containers.0.image': 'ghcr.io/shahbaz242630/agent-x:latest' }],
+    // Zitadel's own by tag alone: only the digest's own condition refuses it.
+    ['api', { 'template.containers.0.image': 'ghcr.io/zitadel/zitadel:latest' }],
+    ['migrate', { 'template.containers.0.image': 'ghcr.io/zitadel/zitadel-login:latest' }],
+    ['api', { 'template.containers.0.image': `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }],
+    ['api', { 'template.initContainers': [{ image: `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }] }],
+    ['api', { 'template.initContainers': [{ image: 'ghcr.io/zitadel/zitadel:latest' }] }],
+    ['migrate', { 'template.initContainers': [{ image: 'ghcr.io/zitadel/zitadel:latest' }] }],
+    ['migrate', { 'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-evil@sha256:${'0'.repeat(64)}` }],
+    ['migrate', { 'template.initContainers': [{ image: `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }] }],
+  ],
+  'jobs-by-hand': [
+    ['migrate', { 'configuration.triggerType': 'Schedule' }],
+    ['migrate', { 'configuration.manualTriggerConfig.parallelism': 2 }],
+    ['migrate', { 'configuration.manualTriggerConfig.replicaCompletionCount': 2 }],
+  ],
+  'app-replicas': [
+    ['api', { 'template.scale.maxReplicas': MOST_APP_REPLICAS + 1 }],
+    ['jobs', { 'template.scale.maxReplicas': 2 }],
+  ],
+  'allowed-types': [['', {}]],
+};
+
+/**
+ * The types Azure lets be made on the resource group (AZ2): every type the
+ * deployments create (policy.test.ts holds this to staging's snapshot, a load
+ * run's and Stage G's included) and the deployments' own records. A type
+ * the deployment adds and this leaves out is refused by Azure, which the rule's
+ * own run over the snapshot catches; one this names and nothing makes is one
+ * more door, caught here.
+ */
+export const ALLOWED_TYPES: readonly string[] = [
+  'Microsoft.App/containerApps',
+  'Microsoft.App/jobs',
+  'Microsoft.App/managedEnvironments',
+  'Microsoft.App/managedEnvironments/httpRouteConfigs',
+  'Microsoft.App/managedEnvironments/managedCertificates',
+  'Microsoft.Authorization/locks',
+  'Microsoft.Authorization/policyAssignments',
+  'Microsoft.Authorization/policyDefinitions',
+  'Microsoft.Authorization/roleAssignments',
+  'Microsoft.Authorization/roleDefinitions',
+  'Microsoft.Communication/communicationServices',
+  'Microsoft.Communication/emailServices',
+  'Microsoft.Communication/emailServices/domains',
+  'Microsoft.Consumption/budgets',
+  'Microsoft.DBforPostgreSQL/flexibleServers',
+  'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
+  'Microsoft.Insights/actionGroups',
+  // #627's activity-log alerts (rules changed, rules unhealthy), allowed before they land: global, with tags, so
+  // Indexed judges them, and a list that waited would refuse the foundation that brings them.
+  'Microsoft.Insights/activityLogAlerts',
+  'Microsoft.Insights/diagnosticSettings',
+  'Microsoft.Insights/metricAlerts',
+  'Microsoft.Insights/scheduledQueryRules',
+  'Microsoft.Insights/workbooks',
+  'Microsoft.KeyVault/vaults',
+  'Microsoft.KeyVault/vaults/secrets',
+  'Microsoft.ManagedIdentity/userAssignedIdentities',
+  'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials',
+  'Microsoft.Network/dnsResolverDomainLists',
+  'Microsoft.Network/dnsResolverPolicies',
+  'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
+  'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
+  'Microsoft.Network/networkSecurityGroups',
+  'Microsoft.Network/privateDnsZones',
+  'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+  'Microsoft.Network/virtualNetworks',
+  'Microsoft.OperationalInsights/workspaces',
+  'Microsoft.OperationalInsights/workspaces/savedSearches',
+  'Microsoft.Resources/deployments',
+  'Microsoft.Resources/resourceGroups',
+  'Microsoft.Storage/storageAccounts',
+  'Microsoft.Storage/storageAccounts/blobServices',
+  'Microsoft.Storage/storageAccounts/blobServices/containers',
+  'Microsoft.Storage/storageAccounts/managementPolicies',
+];
+
+/** A copy of a resource with each `path` (dotted, a number an array's index) set to its value. */
+function changedCopy(resource: PredictedResource, change: Readonly<Record<string, unknown>>): PredictedResource {
+  const copy = structuredClone(resource) as { properties?: unknown } & PredictedResource;
+  for (const [path, value] of Object.entries(change)) {
+    const keys = path.split('.');
+    const last = keys.pop() ?? '';
+    let place = copy.properties as Record<string, unknown>;
+    for (const key of keys) {
+      place[key] ??= {};
+      place = place[key] as Record<string, unknown>;
+    }
+    place[last] = value;
+  }
+  return copy;
+}
+
+/**
+ * The bad examples of one guardrail, from the deployment's API app and migration
+ * job: for the jobs app's cap, the API renamed as the jobs app; for the types
+ * allowed, a virtual machine.
+ */
+function badExamples(snapshot: Snapshot, guardrail: string): readonly PredictedResource[] {
+  const api = ofType(snapshot, TYPES.app).find((found) => jobWorkloadOf(found.name) === 'api');
+  const migrate = ofType(snapshot, TYPES.job).find((found) => jobWorkloadOf(found.name) === 'migrate');
+  return (GUARDRAILS[guardrail] ?? []).flatMap(([workload, change]) => {
+    if (guardrail === 'allowed-types') {
+      return [{ id: '/a/virtual/machine', type: 'Microsoft.Compute/virtualMachines', name: 'vm', apiVersion: '' }];
+    }
+    const from = workload === 'migrate' ? migrate : api;
+    if (from === undefined) return [];
+    const renamed = workload === 'jobs' ? { ...from, name: from.name.replace(/-api$/, '-jobs') } : from;
+    return [changedCopy(renamed, change)];
+  });
+}
+
+/**
+ * What Azure must let through besides what the deployment ships: CI's release (a
+ * PATCH of the containers alone, release.ts), with no ingress, trigger, scale or
+ * replica fields, so a rule that matched a missing field would refuse every
+ * release; and the load test's image by digest (D2c), with the API at the most
+ * replicas any environment runs.
+ */
+function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
+  const ours = [...ofType(snapshot, TYPES.app), ...ofType(snapshot, TYPES.job)].filter((found) =>
+    ['api', 'migrate'].includes(jobWorkloadOf(found.name)),
+  );
+  return [
+    ...ours.flatMap((found) => [
+      { ...found, properties: { template: { containers: [{ image: at(containersOf(found)[0], 'image') }] } } },
+      changedCopy(found, {
+        'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-load@sha256:${'0'.repeat(64)}`,
+        ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
+      }),
+    ]),
+    // #627's activity-log alert, global with tags (so Indexed judges it), before it is in the snapshot.
+    {
+      id: `${groupOf(snapshot)}/providers/Microsoft.Insights/activityLogAlerts/coming`,
+      type: 'Microsoft.Insights/activityLogAlerts',
+      name: 'an activity-log alert',
+      apiVersion: '2026-01-01',
+      location: 'global',
+    },
+  ];
+}
+
+/** What is wrong with one guardrail's definition and its assignment, or nothing. */
+function guardrailShapeProblems(
+  snapshot: Snapshot,
+  definition: PredictedResource,
+  problem: (resource: string, message: string) => void,
+): void {
+  const properties = definition.properties;
+  if (
+    !/^\/subscriptions\/[^/]+\/providers\/Microsoft\.Authorization\/policyDefinitions\/[^/]+$/i.test(definition.id) ||
+    at(properties, 'policyType') !== 'Custom' ||
+    at(properties, 'mode') !== 'Indexed' ||
+    text(at(properties, 'policyRule', 'then', 'effect')).toLowerCase() !== 'deny' ||
+    !isEmpty(at(properties, 'parameters'))
+  ) {
+    problem(
+      definition.name,
+      'must be a custom rule of the subscription, Indexed, with the Deny effect and no parameters, so Azure refuses what it matches',
+    );
+  }
+  const given = ofType(snapshot, TYPES.policyAssignment).filter(
+    (assignment) => text(at(assignment.properties, 'policyDefinitionId')).toLowerCase() === definition.id.toLowerCase(),
+  );
+  const atGroup = given.filter(
+    (assignment) =>
+      assignment.id.toLowerCase() ===
+        `${groupOf(snapshot)}/providers/${TYPES.policyAssignment}/${assignment.name}`.toLowerCase() &&
+      at(assignment.properties, 'enforcementMode') === 'Default' &&
+      isEmpty(at(assignment.properties, 'notScopes')) &&
+      list(at(assignment.properties, 'nonComplianceMessages')).some((entry) => text(at(entry, 'message')) !== ''),
+  );
+  if (given.length !== 1 || atGroup.length !== 1) {
+    problem(
+      definition.name,
+      "must be given once, on this deployment's resource group, enforced, with nothing left out of it and the words a refusal gets back",
+    );
+  }
+}
+
+/**
+ * What one guardrail's rule makes of the deployment, `mustPass` and its bad examples. Indexed, as Azure judges it:
+ * only a resource with a location (the types with tags and a location), so a child or an extension the rules never
+ * see, a vault secret or a role assignment, isn't judged here either.
+ */
+function guardrailRuleProblems(
+  snapshot: Snapshot,
+  guardrail: string,
+  definition: PredictedResource,
+  problem: (resource: string, message: string) => void,
+): void {
+  const condition = at(definition.properties, 'policyRule', 'if');
+  try {
+    const refused = [...snapshot.predictedResources, ...mustPass(snapshot)].filter(
+      (resource) => resource.location !== undefined && policyMatches(condition, resource),
+    );
+    for (const resource of refused) {
+      problem(
+        definition.name,
+        `refuses ${resource.name}, which this deployment ships or a release sends: Azure would refuse our own deploy`,
+      );
+    }
+    if (badExamples(snapshot, guardrail).some((resource) => !policyMatches(condition, resource))) {
+      problem(definition.name, `lets through what it is for (${guardrail}): its condition matches nothing it should`);
+    }
+  } catch (error) {
+    if (!(error instanceof UnreadCondition)) throw error;
+    problem(
+      definition.name,
+      `holds a condition these checks can't read (${error.message}), so none can say it's right`,
+    );
+  }
+}
+
+/**
+ * Azure's own refusals (AZ2, modules/guardrails.bicep): each of GUARDRAILS once,
+ * named `agentx-<environment>-<guardrail>`, a custom Indexed Deny rule given
+ * once on the resource group, enforced. Each rule refuses nothing the
+ * deployment ships nor anything of `mustPass`, and refuses each of its bad
+ * examples; the types allowed are exactly ALLOWED_TYPES.
+ * Nothing else in the deployment is a policy rule or an assignment of one.
+ */
+const azurePolicy: Check = (snapshot, expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'azure-policy', resource, message });
+  };
+  const names = new Set(Object.keys(GUARDRAILS).map((guardrail) => `agentx-${expected.environment}-${guardrail}`));
+  for (const resource of [...ofType(snapshot, TYPES.policyDefinition), ...ofType(snapshot, TYPES.policyAssignment)]) {
+    if (!names.has(resource.name)) problem(resource.name, 'is no rule of modules/guardrails.bicep: one no check reads');
+  }
+  for (const guardrail of Object.keys(GUARDRAILS)) {
+    const name = `agentx-${expected.environment}-${guardrail}`;
+    const found = ofType(snapshot, TYPES.policyDefinition).filter((definition) => definition.name === name);
+    const definition = found[0];
+    if (found.length !== 1 || definition === undefined) {
+      problem('the deployment', `needs the Azure Policy rule ${name} once; the snapshot has ${String(found.length)}`);
+      continue;
+    }
+    guardrailShapeProblems(snapshot, definition, problem);
+    guardrailRuleProblems(snapshot, guardrail, definition, problem);
+  }
+  const typesRule = ofType(snapshot, TYPES.policyDefinition).find(
+    (definition) => definition.name === `agentx-${expected.environment}-allowed-types`,
+  );
+  const allowed = list(at(typesRule?.properties, 'policyRule', 'if', 'not', 'in')).map((type) => text(type));
+  if (typesRule !== undefined && actionSet(allowed) !== actionSet(ALLOWED_TYPES)) {
+    problem(typesRule.name, `must allow exactly ${ALLOWED_TYPES.join(', ')}; it allows ${allowed.join(', ')}`);
   }
 };
 
@@ -5188,10 +6029,12 @@ const CHECKS: readonly Check[] = [
   databaseDisk,
   databaseZoneAndMeasures,
   databaseNetwork,
+  databaseEgress,
   appsNetwork,
   appsEgress,
   dnsWatch,
   dnsAllow,
+  dnsBlockAlert,
   vault,
   evidenceStore,
   anchorEpoch,
@@ -5226,10 +6069,16 @@ const CHECKS: readonly Check[] = [
   agentCancelCapAlert,
   decisionsSuppressedAlert,
   ownerLoginAlert,
+  refusedLoginAlert,
+  loginLinesAlert,
+  alertRulesWatch,
   identities,
   releaseIdentity,
   releaseAccess,
   jobWatch,
+  roleActions,
+  releaseWritesAlert,
+  azurePolicy,
   vaultSecrets,
   secretAccess,
   jobs,

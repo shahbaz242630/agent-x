@@ -145,7 +145,7 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
     ).toEqual([]);
   });
 
-  it('brings up to date, on its next run, a summary left behind after the organisation was found whole', async () => {
+  it('raises the alarm on a summary left behind once found whole, holds, and brings it up to date', async () => {
     const { org, before } = await organisation();
     const job = createGrantSummaryBuilding({
       list: () => Promise.resolve([org]),
@@ -157,8 +157,10 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
     await job.run();
     expect(lines('grant_summaries.built')).toEqual([expect.objectContaining({ built: 1 })]);
 
-    // An image from before OR1 changes the membership, writing no summary: left behind.
-    await withSignedStates(app, org, quiet(), async (tx, states) => {
+    // The membership changed past its summary: since 0089 (OR1b) refused from the app's role, so played on the owner's
+    // connection, which 0089 lets by. The alarm since OR1c.
+    const oldImage = createDatabase<Tables>({ ...database.connection('owner'), maxConnections: 1 }, testLogger());
+    await withSignedStates(oldImage, org, quiet(), async (tx, states) => {
       const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId: org, id: before }, 'change');
       if (state.outcome !== 'verified') throw new Error('not verified');
       await states.record(
@@ -174,6 +176,7 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
         },
       );
     });
+    await oldImage.destroy();
     await job.run();
 
     // The job's logger is the one it was made with: its second run's line after the first.
@@ -188,7 +191,20 @@ describe(`the grant summaries' job (OR1, Postgres ${server.version})`, () => {
         [org, before],
       );
     expect(rows).toEqual([{ membership_version: 2 }]);
-    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Raised once, by the build that read it for the change; the due look before it raises nothing.
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ orgId: org, reason: 'holding', subjectType: 'membership_grant', objectId: before }),
+    ]);
+    const held = await withSignedStates(app, org, quiet(), (tx, states) => states.integrityHold(tx, org, 'none'));
+    expect(held).toMatchObject({ outcome: 'held' });
+    // Its row kept with the repair went with the hold recorded.
+    expect(await database.as('backup').query('select 1 from directory.holds_waiting where org_id = $1', [org])).toEqual(
+      [],
+    );
+    // In step again: the next run builds nothing and raises nothing more.
+    await job.run();
+    expect(lines('grant_summaries.built')).toHaveLength(2);
+    expect(lines('audit.integrity_failed')).toHaveLength(1);
   });
 
   it('says so when the organisations can’t be listed, and stops when told to', async () => {

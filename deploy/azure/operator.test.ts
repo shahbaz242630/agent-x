@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   activityExportRequest,
   auditExportRequest,
+  countingContactsRequest,
   createOrganizationRequest,
   factorResetNoticeRequest,
   handoffRequest,
@@ -32,6 +33,7 @@ import {
   auditExport,
   chainRebase,
   chainRestore,
+  countingContacts,
   createOrganization,
   factorResetNotice,
   handoffChange,
@@ -42,6 +44,7 @@ import {
   OPERATOR_JOB,
   parseArguments,
   parseAuditExport,
+  parseCountingContacts,
   parseFirstAdmin,
   parseFactorResetNotice,
   parseHandoff,
@@ -253,7 +256,11 @@ type Ending =
   | 'notified'
   | 'notified-before'
   | 'notice-refused'
-  | 'notified-other';
+  | 'notified-other'
+  | 'contacts-listed'
+  | 'contacts-none'
+  | 'contacts-refused'
+  | 'contacts-other';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
@@ -631,6 +638,35 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.factor_reset_notified', noticeId: OTHER_ID, recordedBefore: false, elsewhere: [] }),
     TERMINATED,
   ],
+  // A listing's lines name its organisation, the request's only ID.
+  'contacts-listed': (orgId) => [
+    said({
+      event: 'operator.counting_contacts',
+      orgId,
+      count: 2,
+      contacts: [
+        { contactId: OTHER_ID, masked: 's***@company.example.test', countsFrom: '2026-10-08T09:00:00.000Z' },
+        { contactId: EXPORT_ORG, masked: 'f***@acme.example.test', countsFrom: '2026-10-09T09:00:00.000Z' },
+      ],
+    }),
+    TERMINATED,
+  ],
+  'contacts-none': (orgId) => [
+    said({ event: 'operator.counting_contacts', orgId, count: 0, contacts: [] }),
+    TERMINATED,
+  ],
+  'contacts-refused': (orgId) => [
+    said({
+      event: 'operator.refused',
+      orgId,
+      problems: ["a registered contact's record can't be verified: no list, and no reset goes on"],
+    }),
+    TERMINATED,
+  ],
+  'contacts-other': () => [
+    said({ event: 'operator.counting_contacts', orgId: OTHER_ID, count: 0, contacts: [] }),
+    TERMINATED,
+  ],
   'resumed-other': () => [
     said({ event: 'operator.handoff_resumed', platformEventId: OTHER_ID }),
     said({ event: 'operator.handoff_told', platformEventId: OTHER_ID, told: 3, toldBefore: 0, failed: 0 }),
@@ -668,6 +704,9 @@ const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'notified',
   'notified-before',
   'notified-other',
+  'contacts-listed',
+  'contacts-none',
+  'contacts-other',
 ]);
 
 /** How Azure settles a change: the state it ends in, or never. */
@@ -928,6 +967,7 @@ class FakeAzure implements Az {
         'state-restore': 8,
         'chain-rebase': 12,
         'factor-reset-notice': 8,
+        'counting-contacts': 2,
       }[String(words[0])] ?? 4;
     const id = String(words[at]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
@@ -2271,6 +2311,101 @@ describe("OR2 our team's reset notice, on the operator's job (playbook K)", () =
     await expect(
       main(
         ['factor-reset-notice', '--org', ORG],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`${shape}${String.fromCharCode(10)}${USAGE}`]);
+  });
+});
+
+describe("OR2b an organisation's counting contacts, on the operator's job (playbook K)", () => {
+  const ORG = '0199a1b2-c3d4-7e5f-8a6b-0000000000b2';
+  const shape = 'say counting-contacts --org <organisation ID>, and nothing else';
+
+  async function listRun(script: Script = {}) {
+    const az = new FakeAzure({ ending: 'contacts-listed', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await countingContacts(
+      { orgId: ORG },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    return { status, az, said: lines };
+  }
+
+  it('reads the organisation alone, and refuses anything else before writing anything', () => {
+    expect(parseCountingContacts(['counting-contacts', '--org', ORG])).toEqual({ orgId: ORG });
+    for (const argv of [
+      ['counting-contacts'],
+      ['counting-contacts', '--organisation', ORG],
+      ['counting-contacts', '--org', ORG, '--id', EARLIER_ID],
+    ]) {
+      expect(() => parseCountingContacts(argv)).toThrow(shape);
+    }
+    expect(() => parseCountingContacts(['counting-contacts', '--org', ORG.toUpperCase()])).toThrow(
+      "--org takes the organisation's ID: a UUIDv7, in lower case",
+    );
+  });
+
+  it("writes the operator's request, runs it, puts [] back, and shows each contact masked, never whole", async () => {
+    const done = await listRun();
+
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(countingContactsRequest(ORG));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.slice(-3)).toEqual([
+      `2 registered contact(s) of ${ORG} count now. Each is written to at the address Agent X holds (factor-reset-notice); go on only once one confirms in writing:`,
+      `  ${OTHER_ID}  s***@company.example.test  counts from 2026-10-08T09:00:00.000Z`,
+      `  ${EXPORT_ORG}  f***@acme.example.test  counts from 2026-10-09T09:00:00.000Z`,
+    ]);
+  });
+
+  it('says plainly when none counts: no one can confirm a reset', async () => {
+    const done = await listRun({ ending: 'contacts-none' });
+
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(
+      `${ORG} has no registered contact that counts now, so no one can confirm a reset out of band: don't go on (playbook K).`,
+    );
+  });
+
+  it('says a refusal and a run that found no request, listing no one', async () => {
+    const refused = await listRun({ ending: 'contacts-refused', states: ['Failed'] });
+    expect(refused.status).toBe(1);
+    expect(refused.said.at(-1)).toBe(
+      "The operator's command refused it, and listed no one: a registered contact's record can't be verified: no list, and no reset goes on. No reset goes on until it lists.",
+    );
+    const empty = await listRun({ ending: 'no-request', states: ['Failed'] });
+    expect(empty.status).toBe(1);
+    expect(empty.said.at(-1)).toBe(
+      "The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again: it only reads, so nothing is done twice.",
+    );
+  });
+
+  it("never takes another organisation's list for this one, nor a run whose lines say nothing", async () => {
+    for (const ending of ['contacts-other', 'silent'] as const) {
+      const done = await listRun({ ending });
+      expect({ ending, status: done.status }).toEqual({ ending, status: 1 });
+      expect(done.said.at(-1)).toBe(
+        "The run's lines don't say what it did: they may not all have arrived. Read the lines above. Run the same command again: it only reads, so nothing is done twice.",
+      );
+    }
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['counting-contacts', '--org'],
         (line) => lines.push(line),
         () => new FakeAzure({}),
       ),

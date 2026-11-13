@@ -36,6 +36,7 @@ import {
 } from './membership-changes.ts';
 import { MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
+import { leftBehind } from '../membership-changes.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -189,12 +190,17 @@ async function asOwner(org: string, id: string, column: string, value: string) {
   }
 }
 
+/** The owner's connection: since 0089 the only one that can move a membership past its summary (OR1c's case). */
+let owner: Database<Tables>;
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  owner = createDatabase<Tables>({ ...database.connection('owner'), maxConnections: 1 }, testLogger());
 });
 
 afterAll(async () => {
+  await owner.destroy();
   await app.destroy();
   await database.drop();
 });
@@ -693,6 +699,28 @@ describe(`changing a membership tampered with (B4-5a, Postgres ${server.version}
     });
     expect(await sessionsOf(viewer.userId)).toBe(1);
   });
+
+  it.each([
+    ['a role change', TO_APPROVER],
+    ['a deactivation', DEACTIVATE],
+  ] as const)(
+    'refuses %s of a member whose grant summary is behind as INTEGRITY_FAILED, ending no session (OR1c)',
+    async (_what, change) => {
+      const who = await organization();
+      const viewer = await member(who.org, 'viewer');
+      const key = { orgId: who.org, id: viewer.membershipId };
+      await leftBehind(owner, services(), key, 'developer', OPERATOR);
+      const challengeId = await steppedUp(who.admin, viewer.membershipId, change);
+
+      expect(await confirm(who.admin, viewer.membershipId, change, challengeId)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      expect(await sessionsOf(viewer.userId)).toBe(1);
+      expect(await membershipFor(app, services(), who.org, viewer.userId)).toMatchObject({ role: 'developer' });
+    },
+  );
 
   it('refuses an admin whose own membership was tampered with, as INTEGRITY_FAILED', async () => {
     const who = await organization();
