@@ -3,7 +3,6 @@
 // routes, and through a real server listening for the console's layer, which
 // stands in front of Fastify where inject never reaches.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -129,18 +128,12 @@ describe('the login service’s host on the API (SA1)', () => {
   });
 });
 
-/** A port free on this machine now, for a login service whose origin must name it before the server starts. */
+/** A port free on this machine now, for a login service whose origin must name it before the server starts (a throwaway API server, as node:net is out of bounds here). */
 async function freePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve) => {
-    probe.listen(0, '127.0.0.1', resolve);
-  });
-  const address = probe.address();
-  await new Promise<void>((resolve) => {
-    probe.close(() => {
-      resolve();
-    });
-  });
+  const probe = await routeServer({});
+  await probe.listen({ host: '127.0.0.1', port: 0 });
+  const address = probe.server.address();
+  await probe.close();
   if (address === null || typeof address === 'string') throw new Error('no port');
   return address.port;
 }
