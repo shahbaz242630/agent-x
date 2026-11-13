@@ -66,6 +66,7 @@ import {
   shapedForPolicy,
   type Steps,
   type Terminal,
+  type Unattended,
   USAGE,
   UsageError,
   VAULT_SECRETS,
@@ -220,7 +221,7 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
+      [['deploy'], /say foundation, access, secrets, apps, alerts, dns or certificates, not deploy/],
       [
         ['apps', '--commit'],
         /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped, --migrate-first and --back-to-generation <n>/,
@@ -1197,6 +1198,8 @@ interface Scenario {
   readonly generation?: number;
   /** The database's migrations (AZ6): holding every one the image brings unless given, and no way to read them for null. */
   readonly migrations?: RecordingMigrations | null;
+  /** CI's approved infrastructure deploy (AZ5): a person at the terminal unless given. */
+  readonly unattended?: Unattended;
 }
 
 /** A stand-in for the migrations' reading and running (AZ6), answering as told and recording what it was asked. */
@@ -1252,6 +1255,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     ...(scenario.checkout === null ? {} : { checkout: () => scenario.checkout ?? { head: COMMIT, clean: true } }),
     ...(scenario.generation === undefined ? {} : { generation: scenario.generation }),
     ...(scenario.migrations === null ? {} : { migrations: scenario.migrations ?? new RecordingMigrations() }),
+    ...(scenario.unattended === undefined ? {} : { unattended: scenario.unattended }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -3825,7 +3829,7 @@ describe('the tool and the deployment agree', () => {
       ['foundation', environment.foundation],
       ...[...environment.parts].map(([file, part]) => [file.split('.')[1] ?? file, part] as const),
     ]);
-    expect([...deployments.keys()].toSorted()).toEqual(['apps', 'certificates', 'foundation', 'secrets']);
+    expect([...deployments.keys()].toSorted()).toEqual(['access', 'apps', 'certificates', 'foundation', 'secrets']);
     expect([...deployments].filter(([, part]) => alerting(part)).map(([name]) => name)).toEqual([...ALERTING]);
   });
 
@@ -3873,7 +3877,7 @@ describe('the tool and the deployment agree', () => {
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.run}', 'false')`);
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.digest}', '')`);
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
-    expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')");
+    expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', '')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
   });
 
@@ -3971,5 +3975,208 @@ describe('the tool and the deployment agree', () => {
     expect(appsWith('1')).toEqual({ fewest: [1, 1, 1], problems: [] });
     // Anything but a number stops the deployment before Azure sees it.
     expect(() => appsWith('one')).toThrow(/Failed to evaluate parameter "appMinReplicas"/);
+  });
+});
+
+describe('deploy access: the partner’s own roles, guardrails, activity log and budget (AZ5, review S190)', () => {
+  it('confirms, asks the address alone, deploys at the subscription with its what-if, and records the commit', async () => {
+    const done = await run(['access'], { answers: ['y', 'ops@example.invalid'] });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.questions).toEqual([
+      'Deploy staging into it? [y/N] ',
+      'Address the budget emails go to (the alert address): ',
+    ]);
+    expect(done.terminal.hiddenQuestions).toEqual([]);
+    expect(done.az.deployment?.args).toEqual([
+      'deployment',
+      'sub',
+      'create',
+      '--subscription',
+      SUBSCRIPTION,
+      '--location',
+      'uaenorth',
+      '--name',
+      'agentx-staging-access-20260916T164215Z',
+      '--parameters',
+      'staging.access.bicepparam',
+      '--confirm-with-what-if',
+    ]);
+    expect(done.az.deployment?.values).toEqual({ AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' });
+    expect(done.checked).toEqual([{ AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' }]);
+    expect(done.az.tags['agentx-deployed-access']).toBe(COMMIT);
+  });
+
+  it('refuses an address that is none, and is never run unattended', async () => {
+    const wrong = await run(['access'], { answers: ['y', 'nobody'] });
+    expect((wrong.error as Error).message).toBe("That isn't an email address: nothing was deployed.");
+    expect(wrong.az.deployment).toBeUndefined();
+    const ci = await run(['access'], {
+      unattended: {
+        mode: 'deploy',
+        answers: { alertEmail: 'a@b.cd', authHost: 'a.b', appHost: 'c.d', adminEmail: 'e@f.gh', apiClientId: '1' },
+      },
+    });
+    expect((ci.error as Error).message).toBe(
+      "access is the partner's own deployment, never CI's: run node deploy/azure/deploy.ts access by hand. It was not sent.",
+    );
+    expect(ci.az.calls).toEqual([]);
+  });
+
+  it('ends red, deployed, when the what-if is declined or Azure fails it', async () => {
+    const declined = await run(['access'], {
+      answers: ['y', 'ops@example.invalid'],
+      az: new RecordingAz({ ended: 'Declined' }),
+    });
+    expect(declined.status).toBe(1);
+    expect(declined.az.tags['agentx-deployed-access']).toBeUndefined();
+  });
+});
+
+describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
+  const ANSWERS = {
+    alertEmail: 'ops@example.invalid',
+    authHost: 'Auth.Example.invalid',
+    appHost: APP_HOST,
+    adminEmail: 'admin@example.invalid',
+    apiClientId: CLIENT_ID,
+  } as const;
+  const deploying: Unattended = { mode: 'deploy', answers: ANSWERS };
+  const planning: Unattended = { mode: 'plan', answers: ANSWERS };
+  const asked = (terminal: { questions: string[]; hiddenQuestions: string[] }) => [
+    ...terminal.questions,
+    ...terminal.hiddenQuestions,
+  ];
+
+  it('foundation: asks nothing, takes the alert address from the environment, and sends no admin password, so the server keeps its own', async () => {
+    const done = await run(['foundation'], { unattended: deploying });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(asked(done.terminal)).toEqual([]);
+    expect(done.az.deployment?.values).toMatchObject({
+      AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid',
+      AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: '',
+      AGENTX_AZURE_DATABASE_SIZE: 'normal',
+      AGENTX_AZURE_ALWAYS_ON: 'false',
+    });
+    expect(done.terminal.said).toContain("The database admin's password isn't sent: the server keeps its own.");
+    expect(done.terminal.said).not.toContainEqual(expect.stringContaining('set on the server by this run'));
+  });
+
+  it('foundation: refuses a first deploy, whose admin password only the partner holds, before anything is sent', async () => {
+    const done = await run(['foundation'], { unattended: deploying, az: new RecordingAz({ servers: [], vaults: [] }) });
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toBe(
+      "There is no database server yet, and a first foundation sets its admin's password, which only the partner holds: run node deploy/azure/deploy.ts foundation by hand. Nothing was deployed.",
+    );
+    expect(done.az.deployment).toBeUndefined();
+    expect(asked(done.terminal)).toEqual([]);
+  });
+
+  it('foundation: ends red, asking nobody, when the alert address is still unconfirmed', async () => {
+    const done = await run(['foundation'], { unattended: deploying, az: new RecordingAz({ receivers: [[PENDING]] }) });
+    expect(done.status).toBe(1);
+    expect(asked(done.terminal)).toEqual([]);
+    expect(done.terminal.said).toContainEqual(expect.stringContaining('No alert email reaches:'));
+  });
+
+  it('foundation: stops before deleting a log alert that moves workspace, as a deletion stays a person’s (S172)', async () => {
+    const workspaces = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces`;
+    const owner = 'alert-psql-agentx-stg-abcdef-owner-login';
+    const id = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/microsoft.insights/scheduledqueryrules/${owner}`;
+    const done = await run(['foundation'], {
+      unattended: deploying,
+      az: new RecordingAz({ alerts: [{ id, name: owner, properties: { scopes: [`${workspaces}/log-agentx-stg`] } }] }),
+      planned: [{ name: owner, scopes: [`${workspaces}/log-agentx-stg-logins`], apiVersion: '2026-03-01' }],
+    });
+    expect(done.status).toBeUndefined();
+    expect((done.error as Error).message).toContain('Nothing was deployed, and nothing deleted.');
+    expect(done.az.calls.some((call) => call.args[0] === 'resource' && call.args[1] === 'delete')).toBe(false);
+    expect(done.az.deployment).toBeUndefined();
+    expect(asked(done.terminal)).toEqual([]);
+  });
+
+  const behind: MigrationState = {
+    kind: 'behind',
+    run: 'job-agentx-stg-migrate-old1x',
+    ran: 'd'.repeat(40),
+    missing: ['0090_new_rule.sql'],
+  };
+
+  it('apps: takes the hosts, the admin’s address and the client ID from the environment, and runs the migration first without asking', async () => {
+    const migrations = new RecordingMigrations(behind);
+    const done = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      migrations,
+    });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(asked(done.terminal)).toEqual([]);
+    expect(migrations.asked).toContain(`run first ${SUBSCRIPTION} ${COMMIT} ${DIGEST}`);
+    expect(done.az.deployment?.values).toMatchObject({
+      [APP_VARIABLES.authHost]: 'auth.example.invalid',
+      [APP_VARIABLES.appHost]: APP_HOST,
+      [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
+      [APP_VARIABLES.apiClientId]: CLIENT_ID,
+    });
+  });
+
+  it('apps: holds the approved what-if before the migration runs, and on a change runs nothing and sends nothing (review S190)', async () => {
+    const interactive = (az: RecordingAz) =>
+      az.calls.filter((call) => call.values !== undefined).map((call) => call.args[2]);
+    const approved = new RecordingMigrations(behind);
+    const sent = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      migrations: approved,
+    });
+    expect(sent.status).toBe(0);
+    // The check alone first (what-if in the command's place), then the deployment with its own what-if.
+    expect(interactive(sent.az)).toEqual(['what-if', 'create']);
+    const changed = new RecordingMigrations(behind);
+    const held = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      migrations: changed,
+      az: new RecordingAz({ status: 1 }),
+    });
+    expect(held.status).toBe(1);
+    expect(changed.asked.filter((line) => line.startsWith('run first'))).toEqual([]);
+    expect(interactive(held.az)).toEqual(['what-if']);
+    expect(held.terminal.said.at(-1)).toBe('The migration did not run, and apps was not sent.');
+    // A person at the terminal is asked as before, with no check of a plan.
+    expect(
+      interactive(
+        (
+          await run(['apps', '--commit', COMMIT], {
+            answers: ['y', 'auth.example.invalid', APP_HOST, 'admin@example.invalid', CLIENT_ID],
+            images: recordingImages(),
+          })
+        ).az,
+      ),
+    ).toEqual(['create']);
+  });
+
+  it('apps: a plan says the migration would run, and runs nothing', async () => {
+    const migrations = new RecordingMigrations(behind);
+    const done = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: planning,
+      images: recordingImages(),
+      migrations,
+    });
+    expect(done.error).toBeUndefined();
+    expect(asked(done.terminal)).toEqual([]);
+    expect(migrations.asked.filter((line) => line.startsWith('run first'))).toEqual([]);
+    expect(done.terminal.said).toContainEqual(expect.stringContaining('--migrate-first: the migration job will run'));
+  });
+
+  it('apps: refuses a host the environment gives in the wrong shape, sending nothing', async () => {
+    const done = await run(['apps', '--commit', COMMIT], {
+      unattended: { mode: 'deploy', answers: { ...ANSWERS, appHost: 'not a host' } },
+      images: recordingImages(),
+    });
+    expect((done.error as Error).message).toBe("not a host isn't a host name: nothing was deployed.");
+    expect(done.az.deployment).toBeUndefined();
   });
 });

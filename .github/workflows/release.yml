@@ -99,10 +99,17 @@ jobs:
   #   SHA-256 of a value only the partner's shell gives `apps`: the auth host,
   #   the app host and the API's client ID. The release holds the live API's
   #   values to them exactly; one not set is held to its shape and said so
+  # - after the infrastructure deploy (AZ5, the jobs at the end of this file): it
+  #   waits while one waits for the partner's Approve, and doesn't run when one
+  #   was rejected or failed. A plan that couldn't run leaves the release as it
+  #   was before AZ5: red, changing nothing, when a hand deploy is needed
   release:
     name: Release to staging (main)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [ci-image]
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.ci-image.result == 'success' &&
+      (needs.infra-deploy.result == 'success' || needs.infra-deploy.result == 'skipped')
+    needs: [ci-image, infra-plan, infra-deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: staging
@@ -252,3 +259,243 @@ jobs:
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.ci-image.outputs.digest }}
         run: node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"
+
+  # AZ5 (decision 40): the infrastructure deploy a merge needs, planned here and
+  # sent only once the partner taps Approve (deploy/azure/infra.ts). The plan
+  # signs in by OIDC as the what-if identity, which Azure trusts only in GitHub's
+  # `staging-whatif` environment (main only) and which can only read and ask
+  # Azure's what-if: it says which hand deploys the merge needs and what each
+  # would change, in names and paths on this job's summary page, and leaves the
+  # plan (the steps and each what-if's hash) for the deploy job.
+  # - the five answers a person types at deploy.ts's prompts are the
+  #   environment's secrets, which GitHub masks; the domain never is in the
+  #   repository, and infra.ts writes no host, address or GUID to the summary
+  # - a plan that needs nothing ends here, and the release goes on
+  infra-plan:
+    name: Infrastructure (main) - plan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci-image]
+    runs-on: ubuntu-latest
+    # Up to three what-ifs, each with the rules' 30 s check, the image's check and the history.
+    timeout-minutes: 45
+    environment: staging-whatif
+    permissions:
+      contents: read # to check out the plan tool and read the history
+      id-token: write # for the token Azure takes in place of a credential (OIDC)
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      needed: ${{ steps.plan.outputs.needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in the release job. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Mask the Azure IDs in the log
+        env:
+          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
+            if [ -z "${id}" ]; then
+              echo "::error::One of staging-whatif's three Azure IDs (client, tenant, subscription) is not set, so no plan was made and nothing was deployed. Set it in GitHub: Settings, Environments, staging-whatif, Variables; then re-run this job."
+              exit 1
+            fi
+            echo "::add-mask::${id}"
+          done
+
+      - name: Install the pinned Bicep compiler
+        run: node tooling/bicep/install.ts
+
+      # apps' plan checks the image as its deploy will, with the pinned cosign.
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Plan the infrastructure deploy this merge needs
+        id: plan
+        env:
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.ci-image.outputs.digest }}
+          AGENTX_AZURE_ALERT_EMAIL: ${{ secrets.AGENTX_AZURE_ALERT_EMAIL }}
+          AGENTX_AZURE_AUTH_HOST: ${{ secrets.AGENTX_AZURE_AUTH_HOST }}
+          AGENTX_AZURE_APP_HOST: ${{ secrets.AGENTX_AZURE_APP_HOST }}
+          AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: ${{ secrets.AGENTX_AZURE_ZITADEL_ADMIN_EMAIL }}
+          AGENTX_AZURE_API_OIDC_CLIENT_ID: ${{ secrets.AGENTX_AZURE_API_OIDC_CLIENT_ID }}
+        run: node deploy/azure/infra.ts plan "${COMMIT}" "${DIGEST}"
+
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear
+
+  # The approved deploy: it starts only once the partner taps Approve in GitHub's
+  # `staging-infra` environment (required reviewer the partner, main only, admins
+  # can't bypass; rejected or left, nothing deploys and the release doesn't run).
+  # It signs in as the infra identity, which Azure trusts only there, before each
+  # step, so no step runs on an old token, and runs the planned steps in order:
+  # each holds Azure's what-if to the plan's hash, so what is sent is what was
+  # approved (infra.ts). The set-up job follows apps when its files changed.
+  # In the release's own concurrency group (review S190), so it and any merge's
+  # release never write the apps at once; never cancelled part-way.
+  infra-deploy:
+    name: Infrastructure (main) - deploy, once approved
+    if: needs.infra-plan.outputs.needed == 'true'
+    needs: [ci-image, infra-plan]
+    runs-on: ubuntu-latest
+    # The foundation (up to 30), apps with its migration and its new revision (up to 45), the set-up job (15).
+    timeout-minutes: 120
+    environment: staging-infra
+    concurrency:
+      group: release-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read # to check out deploy.ts and read the history
+      id-token: write # for the token Azure takes in place of a credential (OIDC)
+    env:
+      COMMIT: ${{ github.sha }}
+      PLAN: ${{ needs.infra-plan.outputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in the release job. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Mask the Azure IDs in the log
+        env:
+          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
+            if [ -z "${id}" ]; then
+              echo "::error::One of staging-infra's three Azure IDs (client, tenant, subscription) is not set, so nothing was deployed and the release did not run. Set it in GitHub: Settings, Environments, staging-infra, Variables; then re-run this job."
+              exit 1
+            fi
+            echo "::add-mask::${id}"
+          done
+
+      - name: Install the pinned Bicep compiler
+        run: node tooling/bicep/install.ts
+
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'foundation')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the foundation, as approved
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'foundation')
+        env:
+          AGENTX_AZURE_ALERT_EMAIL: ${{ secrets.AGENTX_AZURE_ALERT_EMAIL }}
+          AGENTX_AZURE_AUTH_HOST: ${{ secrets.AGENTX_AZURE_AUTH_HOST }}
+          AGENTX_AZURE_APP_HOST: ${{ secrets.AGENTX_AZURE_APP_HOST }}
+          AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: ${{ secrets.AGENTX_AZURE_ZITADEL_ADMIN_EMAIL }}
+          AGENTX_AZURE_API_OIDC_CLIENT_ID: ${{ secrets.AGENTX_AZURE_API_OIDC_CLIENT_ID }}
+        run: node deploy/azure/infra.ts deploy foundation "${COMMIT}"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'secrets')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the secrets' machine part (secrets --keys), as approved
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'secrets')
+        env:
+          AGENTX_AZURE_ALERT_EMAIL: ${{ secrets.AGENTX_AZURE_ALERT_EMAIL }}
+          AGENTX_AZURE_AUTH_HOST: ${{ secrets.AGENTX_AZURE_AUTH_HOST }}
+          AGENTX_AZURE_APP_HOST: ${{ secrets.AGENTX_AZURE_APP_HOST }}
+          AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: ${{ secrets.AGENTX_AZURE_ZITADEL_ADMIN_EMAIL }}
+          AGENTX_AZURE_API_OIDC_CLIENT_ID: ${{ secrets.AGENTX_AZURE_API_OIDC_CLIENT_ID }}
+        run: node deploy/azure/infra.ts deploy secrets "${COMMIT}"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'apps')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the apps, their migration first, as approved
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'apps')
+        env:
+          AGENTX_AZURE_ALERT_EMAIL: ${{ secrets.AGENTX_AZURE_ALERT_EMAIL }}
+          AGENTX_AZURE_AUTH_HOST: ${{ secrets.AGENTX_AZURE_AUTH_HOST }}
+          AGENTX_AZURE_APP_HOST: ${{ secrets.AGENTX_AZURE_APP_HOST }}
+          AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: ${{ secrets.AGENTX_AZURE_ZITADEL_ADMIN_EMAIL }}
+          AGENTX_AZURE_API_OIDC_CLIENT_ID: ${{ secrets.AGENTX_AZURE_API_OIDC_CLIENT_ID }}
+        run: node deploy/azure/infra.ts deploy apps "${COMMIT}"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'db-setup')
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Each job reads its own secrets from the vault: nothing secret passes through here (jobs.ts).
+      - name: Run the set-up job, as approved
+        if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'db-setup')
+        run: node deploy/azure/jobs.ts run db-setup
+
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear
+
+  # The run's last word (AZ5, review S190): the approved deploy shares the
+  # release's concurrency group, and GitHub cancels an older waiting job there,
+  # grey, not red. So whatever happened above, this says whether staging got this
+  # merge: red when this is main's newest commit and its release didn't succeed,
+  # so a merge left behind is never taken for done (deploy/azure/landed.ts). It
+  # reads main's newest commit from GitHub's public API and touches no Azure.
+  release-landed:
+    name: Staging has main's newest release, or says why not
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci-image, infra-plan, infra-deploy, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # to check out the check
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner image's own Node 24, as in the release job. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Say whether staging got this merge
+        env:
+          COMMIT: ${{ github.sha }}
+          RESULT: ${{ needs.release.result }}
+          AGENTX_ACTIONS_TOKEN: ${{ github.token }}
+        run: node deploy/azure/landed.ts "${COMMIT}" "${RESULT}"

@@ -1487,6 +1487,13 @@ const tagged: Check = (snapshot, expected, add) => {
 
 const PARAMETER_REFERENCE = /^\[parameters\('([^']+)'\)\]$/;
 
+/**
+ * A parameter sent only when it is given (AZ5): the server admin's password, which CI's approved infrastructure deploy
+ * never holds, so Azure keeps the server's own. Still a parameter, never a value in the code. The snapshot names the
+ * foundation's parameter in the test and the module's in the value, so the two names aren't held equal.
+ */
+const PARAMETER_WHEN_GIVEN = /^\[if\(empty\(parameters\('[^']+'\)\), null\(\), parameters\('[^']+'\)\)\]$/;
+
 /** The parameter a value is, or undefined for anything else. */
 const parameterOf = (value: unknown): string | undefined =>
   typeof value === 'string' ? PARAMETER_REFERENCE.exec(value)?.[1] : undefined;
@@ -1521,7 +1528,8 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
       message: `${where} must come from a @secure() parameter, never a value in the code`,
     });
   };
-  const literal = (value: unknown): boolean => typeof value === 'string' && !PARAMETER_REFERENCE.test(value);
+  const literal = (value: unknown): boolean =>
+    typeof value === 'string' && !PARAMETER_REFERENCE.test(value) && !PARAMETER_WHEN_GIVEN.test(value);
   /** Whether a Container Apps secret is what its app or job may hold: its name and value exactly as `HELD` gives them. */
   const heldBy = (resource: PredictedResource, entry: unknown): boolean => {
     const held = HELD[jobWorkloadOf(resource.name)];
@@ -1559,12 +1567,13 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
 /**
  * The same for a parameters file, which the snapshot can't show: a secure
  * parameter's value comes from the deploying shell, with no default written
- * down, or from a key vault.
+ * down but an empty one (a value left out, AZ5: the server admin's password,
+ * which CI's approved deploy never holds), or from a key vault.
  */
 export function paramsFileProblems(file: string, text: string, secureParameters: readonly string[]): Problem[] {
   return secureParameters.flatMap((name) => {
     const assignment = new RegExp(`^param\\s+${name}\\s*=\\s*(.+)$`, 'm').exec(text)?.[1]?.trim();
-    const fromShell = assignment !== undefined && /^readEnvironmentVariable\('[A-Z0-9_]+'\)$/.test(assignment);
+    const fromShell = assignment !== undefined && /^readEnvironmentVariable\('[A-Z0-9_]+'(?:, '')?\)$/.test(assignment);
     const fromVault = assignment?.startsWith('az.getSecret(') === true;
     return assignment === undefined || fromShell || fromVault
       ? []
@@ -1572,7 +1581,7 @@ export function paramsFileProblems(file: string, text: string, secureParameters:
           {
             rule: 'no-secret-literals' as const,
             resource: file,
-            message: `${name} is secure: read it with readEnvironmentVariable('NAME') and no default, or az.getSecret, never a value in the file`,
+            message: `${name} is secure: read it with readEnvironmentVariable('NAME') and no default but an empty one, or az.getSecret, never a value in the file`,
           },
         ];
   });
@@ -4215,7 +4224,7 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
  * so it reads none. Nothing else in the deployment grants access (ACCESS_TYPE).
  */
 /**
- * A lock grants nothing: `CanNotDelete` only makes Azure refuse a delete (the live server's, postgres.bicep, S185). Any
+ * A lock grants nothing: `CanNotDelete` only makes Azure refuse a delete (the live server's, modules/server-lock.bicep, S185). Any
  * other level (`ReadOnly` would stop the server's own writes and key reads) stays refused as an unread access type.
  */
 const deleteLock = (resource: PredictedResource): boolean =>

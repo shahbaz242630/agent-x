@@ -113,6 +113,9 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       '.github/workflows/job-starts.yml: watch',
       `${LOAD_SIGNER.workflow}: load-image-attest`,
       `${LOAD_SIGNER.workflow}: load-image-publish`,
+      // AZ5: the infrastructure plan and its approved deploy, Azure's tokens too.
+      `${RELEASE_WORKFLOW}: infra-deploy`,
+      `${RELEASE_WORKFLOW}: infra-plan`,
       `${RELEASE_WORKFLOW}: release`,
     ]);
     // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.
@@ -149,7 +152,9 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect([job('image-publish').needs ?? []].flat().toSorted()).toEqual(others.toSorted());
     expect([job('image-sbom').needs ?? []].flat()).toEqual(['image-publish']);
     expect([job('image-attest').needs ?? []].flat().sort()).toEqual(['image-publish', 'image-sbom']);
-    expect([releaseJob('release').needs ?? []].flat()).toEqual(['ci-image']);
+    // And the infrastructure deploy a merge needs, once approved (AZ5), which waits for the same image.
+    expect([releaseJob('release').needs ?? []].flat()).toEqual(['ci-image', 'infra-plan', 'infra-deploy']);
+    expect([releaseJob('infra-plan').needs ?? []].flat()).toEqual(['ci-image']);
   });
 
   it('scans the published image by its digest, report only, in a job that can write nothing but code scanning', () => {

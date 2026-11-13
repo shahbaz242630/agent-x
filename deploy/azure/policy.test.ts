@@ -519,18 +519,21 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('has staging, its foundation and its parts, and every file lints clean with every linter rule an error', () => {
     expect([...deployed.keys()]).toEqual(['staging']);
     expect([...params.keys()]).toEqual([
+      'staging.access.bicepparam',
       'staging.apps.bicepparam',
       'staging.bicepparam',
       'staging.certificates.bicepparam',
       'staging.secrets.bicepparam',
     ]);
     expect([...params.values()].map((entry) => entry.deploys)).toEqual([
+      'access.bicep',
       'apps.bicep',
       'main.bicep',
       'certificates.bicep',
       'secrets.bicep',
     ]);
     expect([...bicepFiles.keys()]).toEqual([
+      'access.bicep',
       'apps.bicep',
       'certificates.bicep',
       'main.bicep',
@@ -622,8 +625,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-cap-reached',
       'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-changed',
       'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-unhealthy',
-      'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
-      'Microsoft.Consumption/budgets budget-agentx-staging',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-database',
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
@@ -653,7 +654,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_lock_waits$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/deadlock_timeout$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/metrics\.collector_database_activity$/),
-      'Microsoft.Authorization/locks keep-live-database',
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -716,13 +716,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-anchors$/,
       ),
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The anchors' role to the API's and the jobs' identities on staging (4D2e D13).
       expect.stringMatching(
@@ -730,9 +724,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -746,9 +737,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
@@ -759,9 +747,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/managementPolicies stagentxdlstg[a-z0-9]{6}\/default$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The downloads' role to the API's and the jobs' identities (4D2e D13).
       expect.stringMatching(
@@ -784,20 +769,33 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Communication\/communicationServices acs-agentx-stg-[a-z0-9]{6}$/),
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-release',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
       // The alert on CI doing anything but a release (AZ2).
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-release-writes',
-      // The job-start watch (S175): its identity, its trust, its read-only role and that role on the group.
+      // The job-start watch (S175): its identity, its trust, and its read-only role (access's) on the group.
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-job-watch',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-job-watch/github',
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
+    ]);
+  });
+
+  // AZ5 (review S190): what CI's approved deploy may never write, the partner's own deployment.
+  it('creates the custom roles, the guardrails, the activity log setting and the budget in access, and only them', () => {
+    const role: unknown = expect.stringMatching(
+      /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(
+      stagingPart('staging.access.bicepparam').predictedResources.map(
+        (resource) => `${resource.type} ${resource.name}`,
+      ),
+    ).toEqual([
+      'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
+      'Microsoft.Consumption/budgets budget-agentx-staging',
+      // The evidence store's four, the activity downloads', CI's and the job watch's.
+      ...Array.from({ length: 7 }, (): unknown => role),
+      // The live server's delete lock (S185), which CI may neither write nor lift.
+      'Microsoft.Authorization/locks keep-live-database',
       // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
         ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
@@ -805,6 +803,37 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         ),
       ),
     ]);
+    // Nothing else defines a role or a policy rule, or writes the budget or the subscription's activity log.
+    const elsewhere = [...(deployed.get('staging')?.parts ?? [])]
+      .filter(([file]) => file !== 'staging.access.bicepparam')
+      .flatMap(([, part]) => part.predictedResources)
+      .concat(stagingPart('staging.bicepparam').predictedResources)
+      .filter(
+        (resource) =>
+          /^Microsoft\.(?:Authorization\/(?:roleDefinitions|policyDefinitions|policyAssignments)|Consumption\/budgets)$/.test(
+            resource.type,
+          ) || resource.name === 'activity-log-to-workspace',
+      );
+    expect(elsewhere).toEqual([]);
+  });
+
+  // Review S190: CI's infrastructure identity holds Contributor and conditional grants alone, which write no
+  // role definition, policy, lock or exemption: a deployment CI sends holding one would fail part-way.
+  it("lets nothing CI may send (foundation, secrets, apps) write Azure's authorization but a grant", () => {
+    const sent = ['staging.bicepparam', 'staging.secrets.bicepparam', 'staging.apps.bicepparam'];
+    for (const file of sent) {
+      const authorization = stagingPart(file)
+        .predictedResources.filter((resource) => resource.type.toLowerCase().startsWith('microsoft.authorization/'))
+        .map((resource) => resource.type);
+      expect({ file, types: [...new Set(authorization)] }).toEqual({
+        file,
+        types: authorization.length === 0 ? [] : ['Microsoft.Authorization/roleAssignments'],
+      });
+    }
+    // And the lock that keeps the live server is there, in access.
+    expect(
+      stagingPart('staging.access.bicepparam').predictedResources.filter(type('Microsoft.Authorization/locks')),
+    ).toHaveLength(1);
   });
 
   it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {
@@ -1013,7 +1042,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'id',
       ),
     ).toBe(staging.predictedResources.find(APPS_RULES)?.id);
-    expect(at(server?.properties, 'administratorLoginPassword')).toBe("[parameters('postgresAdminPassword')]");
+    // Sent only when given (AZ5): CI's approved foundation never holds it, and the server keeps its own.
+    expect(at(server?.properties, 'administratorLoginPassword')).toBe(
+      "[if(empty(parameters('postgresAdminPassword')), null(), parameters('adminPassword'))]",
+    );
     // The secrets deployment's too: the vault and the identities the foundation creates.
     const vault = staging.predictedResources.find(VAULT);
     const apiReads = staging.predictedResources.find(READS('api', 'db-app-password'));
@@ -1120,6 +1152,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties').administratorLoginPassword = literal))),
     ).toEqual(['no-secret-literals']);
+    // Sent only when given (AZ5) is still a parameter; a value written in its place is not.
+    expect(
+      brokenRules(
+        changed(
+          SERVER,
+          (server) =>
+            (inside(server, 'properties').administratorLoginPassword =
+              "[if(empty(parameters('postgresAdminPassword')), null(), 'written in the code')]"),
+        ),
+      ),
+    ).toEqual(['no-secret-literals']);
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties', 'network').adminPassword = literal))),
     ).toEqual(['no-secret-literals']);
@@ -1179,6 +1222,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
         );
         expect(problems.map((problem) => problem.rule)).toEqual(['no-secret-literals']);
       }
+      // An empty default writes nothing down (AZ5: a value left out keeps the server's own password).
+      const leftOut = paramsFileProblems(
+        file,
+        String(entry?.text).replace(assignment, `param ${parameter} = readEnvironmentVariable('${variable}', '')`),
+        bicepFile(String(entry?.deploys)).secure,
+      );
+      expect(leftOut).toEqual([]);
     }
   });
 

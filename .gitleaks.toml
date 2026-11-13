@@ -5,6 +5,15 @@
 [extend]
 useDefault = true
 
+# Azure's built-in "Role Based Access Control Administrator" role ID, the same
+# in every tenant and published by Microsoft: an identifier, never a secret. Its
+# name holds "Access", which the default generic-api-key rule reads as a key
+# name (AZ5, S190). Exactly this one ID, so no real key is let through.
+[allowlist]
+description = "Azure built-in role IDs (public, the same in every tenant)"
+regexTarget = "secret"
+regexes = ['''^f58310d9-a9f6-439a-9e8d-f62e7b41a168$''']
+
 [[rules]]
 id = "postgres-connection-string-with-password"
 description = "Postgres connection string carrying a non-placeholder password"

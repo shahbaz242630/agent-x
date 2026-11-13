@@ -1,9 +1,10 @@
 // CI's way into Azure (G4; ADR-002 "Deploying"): after every merge to main, a
 // GitHub job updates our image in the API and the migration job, and starts
 // the migration. This hand-run deployment makes the identity it signs in as,
-// the trust that lets GitHub sign in without a stored credential, and the one
-// role it may be given. The apps deployment gives that role on the few
-// resources CI may touch (G4-2b); nothing here grants anything.
+// and the trust that lets GitHub sign in without a stored credential. Its one
+// role is the partner's `access` deployment's (modules/roles.bicep, AZ5), and
+// the apps deployment gives it on the few resources CI may touch (G4-2b);
+// nothing here grants anything.
 //
 // - the trust names one GitHub subject: a job of this repository in the GitHub
 //   environment of this environment's name. GitHub must let only main use that
@@ -14,12 +15,9 @@
 //   that reads a secret, opens a shell in a container, changes a door, or
 //   grants access (policy rule `release-identity`)
 
-import { releaseRoleName } from '../names.bicep'
-
 param location string
 param tags object
 param identityName string
-param roleName string
 
 @description('The GitHub subject CI signs in with (names.bicep releaseSubject).')
 param subject string
@@ -59,47 +57,6 @@ resource github 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdent
     subject: subject
     audiences: [
       'api://AzureADTokenExchange'
-    ]
-  }
-}
-
-// Assignable in this resource group only, and given on the API and the
-// migration job alone (apps.bicep, policy rule `release-access`). No linked
-// action (`managedEnvironments/join`, `userAssignedIdentities/assign`):
-// - Azure checks a linked action for a linked property a request carries, on
-//   the linked resource itself. CI's partial update (a PATCH of the template
-//   alone, never a body read back from Azure) carries neither the environment
-//   nor an identity, so it is expected to need neither: a reported REST PATCH
-//   of the containers alone did without `join` (microsoft/azure-container-apps
-//   issue 530). Nothing public shows a job's PATCH either way
-// - CI's first run proves it (G4-4), failing closed if not. If they are
-//   needed, they go on the environment and the two identities, not on the
-//   app and the job, where they would satisfy nothing
-resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  name: releaseRoleName(resourceGroup().id)
-  properties: {
-    roleName: roleName
-    description: 'CI after a merge: update our image in the API and the migration job, and run the migration. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: [
-          'Microsoft.App/containerApps/read'
-          'Microsoft.App/containerApps/write'
-          'Microsoft.App/containerApps/revisions/read'
-          'Microsoft.App/jobs/read'
-          'Microsoft.App/jobs/write'
-          'Microsoft.App/jobs/start/action'
-          'Microsoft.App/jobs/executions/read'
-          'Microsoft.App/jobs/execution/read'
-        ]
-        notActions: []
-        dataActions: []
-        notDataActions: []
-      }
     ]
   }
 }

@@ -1,9 +1,10 @@
 // The job-start watch's way into Azure (Carry-Forward S175): a scheduled GitHub
 // workflow (.github/workflows/job-starts.yml) reads every job's recent runs and
 // says any that ran other containers than its job's own
-// (deploy/azure/job-starts.ts). This makes the identity it signs in as, its
-// trust in GitHub, and its one role, given on the resource group: it may read
-// the jobs and their runs, and nothing else (policy rule `job-watch`).
+// (deploy/azure/job-starts.ts). This makes the identity it signs in as and its
+// trust in GitHub, and gives it its one role on the resource group (defined in
+// the partner's `access` deployment, modules/roles.bicep, AZ5): it may read the
+// jobs and their runs, and nothing else (policy rule `job-watch`).
 //
 // - the trust is main's own subject (names.bicep jobWatchSubject): a job of
 //   this repository running on main, which a scheduled run and one started by
@@ -21,7 +22,6 @@ import { jobWatchRoleName } from '../names.bicep'
 param location string
 param tags object
 param identityName string
-param roleName string
 
 @description('The GitHub subject the watch signs in with (names.bicep jobWatchSubject).')
 param subject string
@@ -49,30 +49,9 @@ resource github 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdent
   }
 }
 
-// Azure names both read actions on a run (`jobs/executions/read` lists them,
-// `jobs/execution/read` reads one), as CI's role does.
-resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: jobWatchRoleName(resourceGroup().id)
-  properties: {
-    roleName: roleName
-    description: 'The job-start watch: read the jobs and their runs. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: [
-          'Microsoft.App/jobs/read'
-          'Microsoft.App/jobs/executions/read'
-          'Microsoft.App/jobs/execution/read'
-        ]
-        notActions: []
-        dataActions: []
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 // A custom role is kept at the subscription wherever it is defined, so it is

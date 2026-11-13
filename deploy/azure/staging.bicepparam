@@ -13,12 +13,10 @@ param alertEmail = readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')
 // $3.29 on the day it is hit (ADR-013).
 param logDailyCapGb = 1
 
-// About $45-50 a month while switched on (ADR-002 Amendment G1), so the 80%
-// email arrives before the month's cost passes it.
-param budgetAmount = 60
-param budgetStartDate = '2026-09-01'
+// The budget is the partner's access deployment's (staging.access.bicepparam, AZ5).
 
-param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')
+// Empty in CI's approved infrastructure deploy alone (AZ5), which never holds it: the server keeps its own.
+param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', '')
 // deploy.ts always sets it (load only with --load-size, D2c); the default serves the policy tests.
 param databaseSize = readEnvironmentVariable('AGENTX_AZURE_DATABASE_SIZE', 'normal')
 param databaseDiskGb = int(readEnvironmentVariable('AGENTX_AZURE_DATABASE_DISK_GB', '32'))

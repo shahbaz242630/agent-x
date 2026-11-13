@@ -84,21 +84,31 @@ describe('the pinned cosign', () => {
     const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
     expect(ci).not.toContain('tools:cosign');
     expect(ci).not.toContain(install);
-    // Twice, in the release workflow (AZ2d): inside the release job, and inside the read-only check of the images a
-    // prune kept (AZ9, S186).
+    // Four times, in the release workflow (AZ2d): inside the release job, inside the read-only check of the images a
+    // prune kept (AZ9, S186), and inside the infrastructure plan and its approved deploy, whose apps check the image
+    // as a hand deploy does (AZ5).
     const releasing = readFileSync('.github/workflows/release.yml', 'utf8');
     expect(releasing).not.toContain('tools:cosign');
-    expect(releasing.split(install)).toHaveLength(3);
-    const release = releasing.indexOf('\n  release:\n');
-    const prune = releasing.indexOf('\n  image-prune:\n');
-    const kept = releasing.indexOf('\n  image-kept-verify:\n');
-    expect(release).toBeGreaterThan(0);
-    expect(prune).toBeGreaterThan(release);
-    expect(kept).toBeGreaterThan(prune);
-    const first = releasing.indexOf(install);
-    expect(first).toBeGreaterThan(release);
-    expect(first).toBeLessThan(prune);
-    expect(releasing.indexOf(install, first + 1)).toBeGreaterThan(kept);
+    expect(releasing.split(install)).toHaveLength(5);
+    const jobs = ['release', 'image-prune', 'image-kept-verify', 'infra-plan', 'infra-deploy'].map((job) =>
+      releasing.indexOf(`\n  ${job}:\n`),
+    );
+    expect(jobs[0]).toBeGreaterThan(0);
+    expect(jobs.toSorted((a, b) => a - b)).toEqual(jobs);
+    const [release = 0, prune = 0, kept = 0, plan = 0, deploy = 0] = jobs;
+    const installs = [0, 1, 2, 3].reduce<number[]>(
+      (found) => [...found, releasing.indexOf(install, (found.at(-1) ?? -1) + 1)],
+      [],
+    );
+    // One inside each of the four jobs, never in the prune.
+    expect(
+      installs.map((at) => [at > release && at < prune, at > kept && at < plan, at > plan && at < deploy, at > deploy]),
+    ).toEqual([
+      [true, false, false, false],
+      [false, true, false, false],
+      [false, false, true, false],
+      [false, false, false, true],
+    ]);
   });
 });
 

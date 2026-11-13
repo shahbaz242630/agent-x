@@ -33,9 +33,6 @@ param workspaceId string
 @description('Who keeps the downloads, each `{ workload, identity }`: every app that runs the API (4D2e D13), a `web` copy handing a file out and the jobs building one, created by the foundation (environment.bicep) under that name.')
 param keepers array
 
-@description('A custom role\'s name is the whole directory\'s, so it carries the environment and the suffix.')
-param roleName string
-
 resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
   name: name
   location: location
@@ -148,29 +145,9 @@ resource keeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' ex
   }
 ]
 
-// Read a part of a file (Get Blob), and write one a block at a time (Put
-// Block, Put Block List), over a file of the same name; nothing else.
-resource downloadsRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource downloadsRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: guid(resourceGroup().id, 'activity-downloads')
-  properties: {
-    roleName: roleName
-    description: 'The API\'s activity log downloads: read and write a file in the downloads container. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: []
-        notActions: []
-        dataActions: [
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write'
-        ]
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 resource keeps 'Microsoft.Authorization/roleAssignments@2022-04-01' = [

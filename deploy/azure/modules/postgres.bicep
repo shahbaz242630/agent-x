@@ -53,7 +53,8 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
     version: '18'
     availabilityZone: zone
     administratorLogin: adminLogin
-    administratorLoginPassword: adminPassword
+    // Empty only from CI's approved infrastructure deploy (AZ5), which never holds it: Azure then keeps the server's own.
+    administratorLoginPassword: empty(adminPassword) ? null : adminPassword
     authConfig: {
       activeDirectoryAuth: 'Disabled'
       passwordAuth: 'Enabled'
@@ -187,18 +188,8 @@ resource setting 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2025-
   }
 ]
 
-// Deleting a server deletes every restore point with it (S184: a restore's first steps nearly did): Azure itself
-// refuses a delete while this lock stands, whoever asks and however. Changes still go through. A server of an older
-// generation (AZ25) keeps its lock too, so letting it go after the partner's sign-off is a deliberate removal by an
-// Owner first. Stage G's copies and the drill are restored by the CLI, not here, so they carry none and stay deletable.
-resource keepServer 'Microsoft.Authorization/locks@2020-05-01' = {
-  scope: server
-  name: 'keep-live-database'
-  properties: {
-    level: 'CanNotDelete'
-    notes: 'The live database and its restore points. Never delete before a replacement runs and is checked (Incident playbook L).'
-  }
-}
+// Its delete lock (S184/S185) is the partner's `access` deployment's (modules/server-lock.bicep, AZ5): CI's approved
+// deploy can't write a lock, and must never be able to lift one.
 
 // Kept under its old name, so a deploy moves the one setting to the login workspace rather than adding a second
 // beside it that would go on filling the main one.
