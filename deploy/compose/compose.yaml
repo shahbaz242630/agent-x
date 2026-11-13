@@ -237,7 +237,7 @@ services:
 
   # Zitadel's schemas in its own database, as its owner (ADR-003; Zitadel v4).
   zitadel-init:
-    image: ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc752c321c7041358dea8b33b63ea5e021ec499ad5e2d9f
+    image: ghcr.io/zitadel/zitadel:v4.19.5@sha256:a586456a208e0db4c633db0ba43c427c24b37846138b8b13ff16ad8e003a18d3
     command: ['init', 'zitadel']
     environment:
       <<: *zitadel-database
@@ -257,7 +257,7 @@ services:
   # `login-client` with a key prepare generated: Zitadel holds only the public
   # half, and no token is ever written to disk or shared between containers.
   zitadel:
-    image: ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc752c321c7041358dea8b33b63ea5e021ec499ad5e2d9f
+    image: ghcr.io/zitadel/zitadel:v4.19.5@sha256:a586456a208e0db4c633db0ba43c427c24b37846138b8b13ff16ad8e003a18d3
     command: ['start-from-setup', '--masterkeyFromEnv', '--tlsMode', 'disabled']
     environment:
       <<: *zitadel-database
@@ -328,7 +328,7 @@ services:
   # system user `login-client` with its private key, for Zitadel's own address
   # (AUDIENCE). The image runs as its own unprivileged user.
   login:
-    image: ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd1aa49dbc015617a0c1bc9e6abd956616856f0bb374269fae7da79059
+    image: ghcr.io/zitadel/zitadel-login:v4.19.5@sha256:2f8e57672fcd4f9a285d99355fae9f85fd7495768c090c07c3bbc2d84fc06617
     environment:
       ZITADEL_API_URL: http://zitadel:8080
       NEXT_PUBLIC_BASE_PATH: /ui/v2/login

@@ -2083,7 +2083,7 @@ var doors = [
         reaches: 'zitadel'
       }
       // The gRPC-web services the console's browser code calls, and only
-      // those (its grpc.service.ts at v4.17.3 makes every client it has).
+      // those (its grpc.service.ts at v4.17.3, unchanged in v4.19.5, makes every client it has).
       // Each is the full service name with its slash, so no prefix also
       // matches zitadel.system or zitadel.instance.
       {
