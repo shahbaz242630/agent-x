@@ -54,10 +54,17 @@ describe('the name for a machine ID', () => {
   });
 
   it('is none at once for anything but a 16-bit whole number, never a search to the cap', () => {
-    // An endless cap: without the check, each of these would spin for ever and time the test out.
+    // A cap that throws the moment the search reads it: a search begun at all fails here, at once,
+    // rather than spinning to a real cap with the same answer (S189's mutation pass).
+    const unread = {
+      valueOf: () => {
+        throw new Error('the search began');
+      },
+    } as unknown as number;
     for (const id of [-1, 65_536, 1.5, Number.NaN]) {
-      expect({ id, name: machineNameFor(id, Number.POSITIVE_INFINITY) }).toEqual({ id, name: undefined });
+      expect({ id, name: machineNameFor(id, unread) }).toEqual({ id, name: undefined });
     }
+    expect(() => machineNameFor(0, unread)).toThrow('the search began');
   });
 
   it('is none once the tries run out, and the cap leaves room many times the one in 65,536 needed', () => {
