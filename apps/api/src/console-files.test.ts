@@ -128,6 +128,10 @@ describe('the console’s files (6A1)', () => {
   it('keeps Fastify’s own server and its timeouts', async () => {
     const { app } = await listening(await readConsoleFiles(await build('timeouts')));
     expect(app.server.requestTimeout).toBe(30_000);
+    // AZ8c (S188): an idle connection outlives the ingress's keep-alive, so Envoy never sends a request down a
+    // socket Node just closed (a 502). Fastify's own 72 s, above the 60 s proxies keep; a 40-request probe of
+    // staging at 5.3 s gaps (past Node's bare 5 s) saw no 502 or 503.
+    expect(app.server.keepAliveTimeout).toBeGreaterThanOrEqual(65_000);
     expect(app.server.listeners('request')).toHaveLength(1);
   });
 
