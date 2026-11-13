@@ -31,9 +31,17 @@ var jobWorkloads = [
   'chain-restore'
 ]
 
+// The identity Stage G's mark and check jobs run as (4D2e; AZ3), on a Stage G
+// run alone: the owner's, the app's and the backup role's logins, and never the
+// server admin's, which the set-up job's identity they used to run as reads.
+@export()
+var loadWorkloads = [
+  'stage-g'
+]
+
 // Everything that runs, so each can be given only its own secrets (G2c).
 @export()
-var workloads = concat(appWorkloads, jobWorkloads)
+var workloads = concat(appWorkloads, jobWorkloads, loadWorkloads)
 
 // The app's keys (ADR-011 §2), one vault secret per key version, named as the
 // API reads them: key-<purpose>-v<version>. Each is created once and never

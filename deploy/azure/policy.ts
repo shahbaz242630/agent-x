@@ -97,6 +97,9 @@ export type RuleId =
   | 'release-identity'
   | 'release-access'
   | 'job-watch'
+  | 'role-actions'
+  | 'release-writes-alert'
+  | 'azure-policy'
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
@@ -147,6 +150,8 @@ const TYPES = {
   roleAssignment: 'Microsoft.Authorization/roleAssignments',
   roleDefinition: 'Microsoft.Authorization/roleDefinitions',
   lock: 'Microsoft.Authorization/locks',
+  policyDefinition: 'Microsoft.Authorization/policyDefinitions',
+  policyAssignment: 'Microsoft.Authorization/policyAssignments',
   group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
@@ -521,6 +526,10 @@ const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
+  // AZ3: Stage G's mark (as the owner) and checks (as the app and the backup role), on its throwaway copy alone.
+  'stage-g reads db-owner-password',
+  'stage-g reads db-app-password',
+  'stage-g reads db-backup-password',
   // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
@@ -678,13 +687,14 @@ export const LOAD_RUN = {
 
 /**
  * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
- * runs as and what it reads. The mark and the checks as the set-up job's identity, which reads those logins already,
- * so no grant is added; the step as PL-38's jobs. Each reads a part of its identity's own (a test holds it to GRANTS).
+ * runs as and what it reads. The mark and the checks as Stage G's own identity (AZ3), which reads the owner's, the
+ * app's and the backup role's logins alone, never the server admin's; the step as PL-38's jobs. Each reads a part of
+ * its identity's own (a test holds it to GRANTS).
  */
 const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
-  'load-mark': { runsAs: 'db-setup', reads: new Set(['db-owner-password']) },
+  'load-mark': { runsAs: 'stage-g', reads: new Set(['db-owner-password']) },
   'load-step': { runsAs: LOAD_RUN.runsAs, reads: LOAD_RUN.reads },
-  'load-check': { runsAs: 'db-setup', reads: new Set(['db-app-password', 'db-backup-password']) },
+  'load-check': { runsAs: 'stage-g', reads: new Set(['db-app-password', 'db-backup-password']) },
 };
 
 const isStageGJob = (workload: string): boolean => Object.hasOwn(STAGE_G_JOBS, workload);
@@ -4065,6 +4075,9 @@ const secretAccess: Check = (snapshot, _expected, add) => {
       ACCESS_TYPE.test(resource.type) &&
       resource.type !== TYPES.roleAssignment &&
       resource.type !== TYPES.roleDefinition &&
+      // Azure's own refusals grant nothing, and are `azure-policy`'s to read.
+      resource.type !== TYPES.policyDefinition &&
+      resource.type !== TYPES.policyAssignment &&
       !deleteLock(resource)
     ) {
       add({
@@ -4375,6 +4388,504 @@ const jobWatch: Check = (snapshot, expected, add) => {
   }
   if (given.length !== 1) {
     problem('the deployment', `must give the job-start watch's role once; it gives it ${String(given.length)} times`);
+  }
+};
+
+/**
+ * What no custom role of the deployment may allow (AZ2): writing a door (a route
+ * config reaches an app whose ingress is internal, and needs nothing on the app,
+ * Security-Handoff §13), the environment itself, a grant or a role, an Azure
+ * Policy rule, its assignment or an exemption from one, a secret's listing, a
+ * token minted as an app or a job (`getAuthToken`), the vault or its access
+ * policies, a secret read (the vault is RBAC: `getSecret` is its data action), a
+ * storage account rewritten or its keys listed or remade (shared-key access back
+ * on opens every blob), a federated trust (a new way to sign in as an identity),
+ * giving an identity to a resource (`assign`), or a lock's removal. Without case, as Azure
+ * reads an action.
+ */
+const FORBIDDEN_ACTIONS: ReadonlySet<string> = new Set(
+  [
+    'Microsoft.App/managedEnvironments/httpRouteConfigs/write',
+    'Microsoft.App/managedEnvironments/write',
+    'Microsoft.App/containerApps/listSecrets/action',
+    'Microsoft.App/jobs/listSecrets/action',
+    'Microsoft.Authorization/roleAssignments/write',
+    'Microsoft.Authorization/policyAssignments/write',
+    'Microsoft.Authorization/policyAssignments/delete',
+    'Microsoft.Authorization/policyExemptions/write',
+    'Microsoft.Authorization/policyDefinitions/write',
+    'Microsoft.Authorization/policyDefinitions/delete',
+    'Microsoft.Authorization/roleDefinitions/write',
+    'Microsoft.Authorization/locks/delete',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+    'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+    'Microsoft.App/containerApps/getAuthToken/action',
+    'Microsoft.App/jobs/getAuthToken/action',
+    'Microsoft.KeyVault/vaults/write',
+    'Microsoft.KeyVault/vaults/accessPolicies/write',
+    // The vault is RBAC, so reading a secret is this data action, not a listing (S188 review).
+    'Microsoft.KeyVault/vaults/secrets/getSecret/action',
+    // A storage account rewritten can switch shared-key access back on, and then its keys open every blob.
+    'Microsoft.Storage/storageAccounts/write',
+    'Microsoft.Storage/storageAccounts/listKeys/action',
+    'Microsoft.Storage/storageAccounts/regenerateKey/action',
+  ].map((action) => action.toLowerCase()),
+);
+
+/** Starting a job's run, as Azure names the action, without case. */
+const JOB_START = 'microsoft.app/jobs/start/action';
+
+/**
+ * Every custom role the deployment defines (AZ2): no wildcard in any action or
+ * data action (`Microsoft.App/jobs/*\/action` would add a secret's listing and
+ * every action Azure adds later, Microsoft's jobs page), and none of
+ * FORBIDDEN_ACTIONS. And only CI's role may start a job (AZ3): a start is the
+ * job's secrets and identity (Microsoft's jobs page), and CI's is given on the
+ * migration job alone (`release-access`), so no identity of ours but CI's can
+ * start migrate, and none can start chain-restore or the operator's job; a
+ * person starts those, as the subscription's owner. CI's and the watch's roles
+ * are held to their exact lists besides (`release-identity`, `job-watch`): this
+ * holds every role, a new one included.
+ */
+const roleActions: Check = (snapshot, _expected, add) => {
+  const ci = releaseRoleName(groupOf(snapshot));
+  for (const role of ofType(snapshot, TYPES.roleDefinition)) {
+    const permissions = list(at(role.properties, 'permissions'));
+    const allowed = permissions.flatMap((entry) => [...list(at(entry, 'actions')), ...list(at(entry, 'dataActions'))]);
+    for (const action of allowed.map(String)) {
+      if (action.includes('*') || FORBIDDEN_ACTIONS.has(action.toLowerCase())) {
+        add({
+          rule: 'role-actions',
+          resource: role.name,
+          message: `allows ${action}: no role of ours allows a wildcard or one of FORBIDDEN_ACTIONS: a door, the environment, a grant or a role, a policy rule, its assignment or exemption, a secret's listing, an app's token, the vault, a trust, an identity's assignment or a lock's removal`,
+        });
+      }
+      if (action.toLowerCase() === JOB_START && role.name !== ci) {
+        add({
+          rule: 'role-actions',
+          resource: role.name,
+          message: `allows ${action}: only CI's role starts a job, and only the migration (release-access); a start uses the job's secrets`,
+        });
+      }
+    }
+  }
+};
+
+/** CI's writes a release makes (release.ts): the API written, the migration job written and started. */
+const releaseWritesQuery = (identity: string, api: string, migrate: string): string =>
+  [
+    'AzureActivity',
+    `where tostring(parse_json(Claims).xms_mirid) =~ "${identity}"`,
+    `where not((OperationNameValue =~ "Microsoft.App/containerApps/write" and _ResourceId =~ "${api}") or (OperationNameValue in~ ("Microsoft.App/jobs/write", "Microsoft.App/jobs/start/action") and _ResourceId =~ "${migrate}"))`,
+    'summarize Writes = count()',
+  ].join(' | ');
+
+/** The id of the deployment's app or job of this kind and work in its resource group, or '' for none. */
+const workloadIdOf = (snapshot: Snapshot, type: string, workload: string): string =>
+  ofType(snapshot, type).find(
+    (found) =>
+      found.id.toLowerCase().startsWith(`${groupOf(snapshot)}/providers/`.toLowerCase()) &&
+      jobWorkloadOf(found.name) === workload,
+  )?.id ?? '';
+
+/**
+ * A stateless SEV-1 alert on the main workspace fires on anything CI's identity
+ * does but a release's three writes (AZ2): any other write, delete or action, or
+ * one of the three on another resource, refused or not. Read from the sign-in's
+ * own claim naming the identity, the hour before every 15 minutes, as the
+ * activity log reaches the workspace late; one line is enough.
+ */
+const releaseWritesAlert: Check = (snapshot, expected, add) => {
+  const identity =
+    ofType(snapshot, TYPES.identity).find(
+      (found) => found.id.toLowerCase() === releaseIdentityId(snapshot, expected.environment),
+    )?.id ?? '';
+  const wanted = releaseWritesQuery(
+    identity,
+    workloadIdOf(snapshot, TYPES.app, 'api'),
+    workloadIdOf(snapshot, TYPES.job, 'migrate'),
+  ).toLowerCase();
+  const alerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion, alert) =>
+      identity !== '' &&
+      String(at(criterion, 'query')).toLowerCase() === wanted &&
+      totals(criterion) &&
+      at(criterion, 'operator') === 'GreaterThan' &&
+      at(criterion, 'threshold') === 0 &&
+      at(alert.properties, 'evaluationFrequency') === 'PT15M' &&
+      at(alert.properties, 'windowSize') === 'PT1H' &&
+      at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+      at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+  );
+  if (!alerted) {
+    add({
+      rule: 'release-writes-alert',
+      resource: 'the deployment',
+      message:
+        "needs an enabled stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on any activity-log line by CI's identity but a release's write of the API, write of the migration job and start of it",
+    });
+  }
+};
+
+/** A field an Azure Policy condition reads, as these checks can read it: a value, or none for a missing field. */
+type PolicyValue = unknown;
+
+/** One element of an array a `count` walks, and the alias that names it (`…containers[*].image` → `…containers[*]`). */
+interface PolicyScope {
+  readonly prefix: string;
+  readonly element: unknown;
+}
+
+/** A condition these checks can't read: the rule is refused rather than judged wrongly. */
+class UnreadCondition extends Error {}
+
+/** Azure Policy's `like`: one `*` at most, without case. */
+export function policyLike(value: unknown, pattern: unknown): boolean {
+  if (typeof value !== 'string' || typeof pattern !== 'string') return false;
+  const [before, after, ...more] = pattern.toLowerCase().split('*');
+  if (more.length > 0) throw new UnreadCondition(`like with more than one wildcard: ${pattern}`);
+  const text = value.toLowerCase();
+  if (after === undefined) return text === before;
+  return text.length >= (before ?? '').length + after.length && text.startsWith(before ?? '') && text.endsWith(after);
+}
+
+/** Azure Policy's equality: strings without case, anything else exactly. */
+const policySame = (value: unknown, wanted: unknown): boolean =>
+  typeof value === 'string' && typeof wanted === 'string'
+    ? value.toLowerCase() === wanted.toLowerCase()
+    : value === wanted;
+
+/**
+ * What a field names on a resource (Microsoft.App's aliases are its properties'
+ * paths), or undefined when it isn't there. Inside a `count`, its own array's
+ * alias names the element being counted.
+ */
+function policyFieldOf(resource: PredictedResource, field: string, scope?: PolicyScope): PolicyValue {
+  if (field === 'type') return resource.type;
+  if (field === 'name') return resource.name;
+  const inScope = scope !== undefined && field.startsWith(scope.prefix);
+  const path = inScope ? field.slice(scope.prefix.length) : field;
+  if (!inScope && !path.toLowerCase().startsWith(`${resource.type.toLowerCase()}/`)) return undefined;
+  const rest = inScope ? path : path.slice(resource.type.length + 1);
+  if (rest.includes('[*]')) throw new UnreadCondition(`an array field outside a count: ${field}`);
+  const keys = rest.split('.').filter((key) => key !== '');
+  return inScope ? at(scope.element, ...keys) : at(resource.properties, ...keys);
+}
+
+/** A leaf condition's test on one value. */
+function policyCompare(value: PolicyValue, condition: Readonly<Record<string, unknown>>): boolean {
+  const known: Readonly<Record<string, (wanted: unknown) => boolean>> = {
+    equals: (wanted) => value !== undefined && policySame(value, wanted),
+    notEquals: (wanted) => !(value !== undefined && policySame(value, wanted)),
+    like: (wanted) => policyLike(value, wanted),
+    notLike: (wanted) => !policyLike(value, wanted),
+    notContains: (wanted) =>
+      !(typeof value === 'string' && typeof wanted === 'string' && value.toLowerCase().includes(wanted.toLowerCase())),
+    exists: (wanted) => (value !== undefined) === (wanted === true || wanted === 'true'),
+    greater: (wanted) => typeof value === 'number' && typeof wanted === 'number' && value > wanted,
+    in: (wanted) => list(wanted).some((each) => policySame(value, each)),
+    notIn: (wanted) => !list(wanted).some((each) => policySame(value, each)),
+  };
+  const operators = Object.keys(condition).filter((key) => key !== 'field' && key !== 'count');
+  const [operator, ...more] = operators;
+  const test = operator === undefined ? undefined : known[operator];
+  if (operator === undefined || more.length > 0 || test === undefined) {
+    throw new UnreadCondition(`an operator these checks don't read: ${operators.join(', ')}`);
+  }
+  return test(condition[operator]);
+}
+
+/**
+ * Whether an Azure Policy condition matches a resource (and so, with Deny, Azure
+ * refuses it): `allOf`, `anyOf`, `not`, a field's test, or a `count` of an
+ * array's elements matching its `where`. Anything else is UnreadCondition.
+ */
+function policyMatches(condition: unknown, resource: PredictedResource, scope?: PolicyScope): boolean {
+  const object = (condition ?? {}) as Readonly<Record<string, unknown>>;
+  if ('allOf' in object) return list(object.allOf).every((each) => policyMatches(each, resource, scope));
+  if ('anyOf' in object) return list(object.anyOf).some((each) => policyMatches(each, resource, scope));
+  if ('not' in object) return !policyMatches(object.not, resource, scope);
+  if ('count' in object) {
+    const field = text(at(object.count, 'field'));
+    const cut = field.indexOf('[*]');
+    if (cut < 0 || field.slice(cut + 3).includes('[*]')) throw new UnreadCondition(`a count over ${field}`);
+    const prefix = field.slice(0, cut + 3);
+    const array = list(policyFieldOf(resource, field.slice(0, cut), scope));
+    const where = at(object.count, 'where');
+    const counted = array.filter(
+      (element) => where === undefined || policyMatches(where, resource, { prefix, element }),
+    ).length;
+    return policyCompare(counted, object);
+  }
+  if (typeof object.field !== 'string') throw new UnreadCondition('a condition with no field');
+  return policyCompare(policyFieldOf(resource, object.field, scope), object);
+}
+
+/** The most replicas any app runs in any environment (production's Zitadel, 4D2e D12): Azure refuses more. */
+const MOST_APP_REPLICAS = 4;
+
+/**
+ * Azure's own refusals (AZ2, modules/guardrails.bicep), by the part of the name
+ * after `agentx-<environment>-`, each with bad examples it must refuse, made
+ * from the deployment's own API app or migration job: so a rule whose alias or
+ * value is wrong, and refuses nothing, is caught here rather than by an attacker.
+ */
+const GUARDRAILS: Readonly<
+  Record<string, readonly (readonly [workload: string, change: Readonly<Record<string, unknown>>])[]>
+> = {
+  'apps-internal': [['api', { 'configuration.ingress.external': true }]],
+  'apps-https': [['api', { 'configuration.ingress.allowInsecure': true }]],
+  images: [
+    ['api', { 'template.containers.0.image': 'ghcr.io/shahbaz242630/agent-x:latest' }],
+    // Zitadel's own by tag alone: only the digest's own condition refuses it.
+    ['api', { 'template.containers.0.image': 'ghcr.io/zitadel/zitadel:latest' }],
+    ['migrate', { 'template.containers.0.image': 'ghcr.io/zitadel/zitadel-login:latest' }],
+    ['api', { 'template.containers.0.image': `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }],
+    ['api', { 'template.initContainers': [{ image: `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }] }],
+    ['api', { 'template.initContainers': [{ image: 'ghcr.io/zitadel/zitadel:latest' }] }],
+    ['migrate', { 'template.initContainers': [{ image: 'ghcr.io/zitadel/zitadel:latest' }] }],
+    ['migrate', { 'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-evil@sha256:${'0'.repeat(64)}` }],
+    ['migrate', { 'template.initContainers': [{ image: `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }] }],
+  ],
+  'jobs-by-hand': [
+    ['migrate', { 'configuration.triggerType': 'Schedule' }],
+    ['migrate', { 'configuration.manualTriggerConfig.parallelism': 2 }],
+    ['migrate', { 'configuration.manualTriggerConfig.replicaCompletionCount': 2 }],
+  ],
+  'app-replicas': [
+    ['api', { 'template.scale.maxReplicas': MOST_APP_REPLICAS + 1 }],
+    ['jobs', { 'template.scale.maxReplicas': 2 }],
+  ],
+  'allowed-types': [['', {}]],
+};
+
+/**
+ * The types Azure lets be made on the resource group (AZ2): every type the
+ * deployments create (policy.test.ts holds this to staging's snapshot, a load
+ * run's and Stage G's included) and the deployments' own records. A type
+ * the deployment adds and this leaves out is refused by Azure, which the rule's
+ * own run over the snapshot catches; one this names and nothing makes is one
+ * more door, caught here.
+ */
+export const ALLOWED_TYPES: readonly string[] = [
+  'Microsoft.App/containerApps',
+  'Microsoft.App/jobs',
+  'Microsoft.App/managedEnvironments',
+  'Microsoft.App/managedEnvironments/httpRouteConfigs',
+  'Microsoft.App/managedEnvironments/managedCertificates',
+  'Microsoft.Authorization/locks',
+  'Microsoft.Authorization/policyAssignments',
+  'Microsoft.Authorization/policyDefinitions',
+  'Microsoft.Authorization/roleAssignments',
+  'Microsoft.Authorization/roleDefinitions',
+  'Microsoft.Communication/communicationServices',
+  'Microsoft.Communication/emailServices',
+  'Microsoft.Communication/emailServices/domains',
+  'Microsoft.Consumption/budgets',
+  'Microsoft.DBforPostgreSQL/flexibleServers',
+  'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
+  'Microsoft.Insights/actionGroups',
+  // #627's activity-log alerts (rules changed, rules unhealthy), allowed before they land: global, with tags, so
+  // Indexed judges them, and a list that waited would refuse the foundation that brings them.
+  'Microsoft.Insights/activityLogAlerts',
+  'Microsoft.Insights/diagnosticSettings',
+  'Microsoft.Insights/metricAlerts',
+  'Microsoft.Insights/scheduledQueryRules',
+  'Microsoft.Insights/workbooks',
+  'Microsoft.KeyVault/vaults',
+  'Microsoft.KeyVault/vaults/secrets',
+  'Microsoft.ManagedIdentity/userAssignedIdentities',
+  'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials',
+  'Microsoft.Network/dnsResolverDomainLists',
+  'Microsoft.Network/dnsResolverPolicies',
+  'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
+  'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
+  'Microsoft.Network/networkSecurityGroups',
+  'Microsoft.Network/privateDnsZones',
+  'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+  'Microsoft.Network/virtualNetworks',
+  'Microsoft.OperationalInsights/workspaces',
+  'Microsoft.OperationalInsights/workspaces/savedSearches',
+  'Microsoft.Resources/deployments',
+  'Microsoft.Resources/resourceGroups',
+  'Microsoft.Storage/storageAccounts',
+  'Microsoft.Storage/storageAccounts/blobServices',
+  'Microsoft.Storage/storageAccounts/blobServices/containers',
+  'Microsoft.Storage/storageAccounts/managementPolicies',
+];
+
+/** A copy of a resource with each `path` (dotted, a number an array's index) set to its value. */
+function changedCopy(resource: PredictedResource, change: Readonly<Record<string, unknown>>): PredictedResource {
+  const copy = structuredClone(resource) as { properties?: unknown } & PredictedResource;
+  for (const [path, value] of Object.entries(change)) {
+    const keys = path.split('.');
+    const last = keys.pop() ?? '';
+    let place = copy.properties as Record<string, unknown>;
+    for (const key of keys) {
+      place[key] ??= {};
+      place = place[key] as Record<string, unknown>;
+    }
+    place[last] = value;
+  }
+  return copy;
+}
+
+/**
+ * The bad examples of one guardrail, from the deployment's API app and migration
+ * job: for the jobs app's cap, the API renamed as the jobs app; for the types
+ * allowed, a virtual machine.
+ */
+function badExamples(snapshot: Snapshot, guardrail: string): readonly PredictedResource[] {
+  const api = ofType(snapshot, TYPES.app).find((found) => jobWorkloadOf(found.name) === 'api');
+  const migrate = ofType(snapshot, TYPES.job).find((found) => jobWorkloadOf(found.name) === 'migrate');
+  return (GUARDRAILS[guardrail] ?? []).flatMap(([workload, change]) => {
+    if (guardrail === 'allowed-types') {
+      return [{ id: '/a/virtual/machine', type: 'Microsoft.Compute/virtualMachines', name: 'vm', apiVersion: '' }];
+    }
+    const from = workload === 'migrate' ? migrate : api;
+    if (from === undefined) return [];
+    const renamed = workload === 'jobs' ? { ...from, name: from.name.replace(/-api$/, '-jobs') } : from;
+    return [changedCopy(renamed, change)];
+  });
+}
+
+/**
+ * What Azure must let through besides what the deployment ships: CI's release (a
+ * PATCH of the containers alone, release.ts), with no ingress, trigger, scale or
+ * replica fields, so a rule that matched a missing field would refuse every
+ * release; and the load test's image by digest (D2c), with the API at the most
+ * replicas any environment runs.
+ */
+function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
+  const ours = [...ofType(snapshot, TYPES.app), ...ofType(snapshot, TYPES.job)].filter((found) =>
+    ['api', 'migrate'].includes(jobWorkloadOf(found.name)),
+  );
+  return [
+    ...ours.flatMap((found) => [
+      { ...found, properties: { template: { containers: [{ image: at(containersOf(found)[0], 'image') }] } } },
+      changedCopy(found, {
+        'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-load@sha256:${'0'.repeat(64)}`,
+        ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
+      }),
+    ]),
+    // #627's activity-log alert, global with tags (so Indexed judges it), before it is in the snapshot.
+    {
+      id: `${groupOf(snapshot)}/providers/Microsoft.Insights/activityLogAlerts/coming`,
+      type: 'Microsoft.Insights/activityLogAlerts',
+      name: 'an activity-log alert',
+      apiVersion: '2026-01-01',
+      location: 'global',
+    },
+  ];
+}
+
+/** What is wrong with one guardrail's definition and its assignment, or nothing. */
+function guardrailShapeProblems(
+  snapshot: Snapshot,
+  definition: PredictedResource,
+  problem: (resource: string, message: string) => void,
+): void {
+  const properties = definition.properties;
+  if (
+    !/^\/subscriptions\/[^/]+\/providers\/Microsoft\.Authorization\/policyDefinitions\/[^/]+$/i.test(definition.id) ||
+    at(properties, 'policyType') !== 'Custom' ||
+    at(properties, 'mode') !== 'Indexed' ||
+    text(at(properties, 'policyRule', 'then', 'effect')).toLowerCase() !== 'deny' ||
+    !isEmpty(at(properties, 'parameters'))
+  ) {
+    problem(
+      definition.name,
+      'must be a custom rule of the subscription, Indexed, with the Deny effect and no parameters, so Azure refuses what it matches',
+    );
+  }
+  const given = ofType(snapshot, TYPES.policyAssignment).filter(
+    (assignment) => text(at(assignment.properties, 'policyDefinitionId')).toLowerCase() === definition.id.toLowerCase(),
+  );
+  const atGroup = given.filter(
+    (assignment) =>
+      assignment.id.toLowerCase() ===
+        `${groupOf(snapshot)}/providers/${TYPES.policyAssignment}/${assignment.name}`.toLowerCase() &&
+      at(assignment.properties, 'enforcementMode') === 'Default' &&
+      isEmpty(at(assignment.properties, 'notScopes')) &&
+      list(at(assignment.properties, 'nonComplianceMessages')).some((entry) => text(at(entry, 'message')) !== ''),
+  );
+  if (given.length !== 1 || atGroup.length !== 1) {
+    problem(
+      definition.name,
+      "must be given once, on this deployment's resource group, enforced, with nothing left out of it and the words a refusal gets back",
+    );
+  }
+}
+
+/**
+ * What one guardrail's rule makes of the deployment, `mustPass` and its bad examples. Indexed, as Azure judges it:
+ * only a resource with a location (the types with tags and a location), so a child or an extension the rules never
+ * see, a vault secret or a role assignment, isn't judged here either.
+ */
+function guardrailRuleProblems(
+  snapshot: Snapshot,
+  guardrail: string,
+  definition: PredictedResource,
+  problem: (resource: string, message: string) => void,
+): void {
+  const condition = at(definition.properties, 'policyRule', 'if');
+  try {
+    const refused = [...snapshot.predictedResources, ...mustPass(snapshot)].filter(
+      (resource) => resource.location !== undefined && policyMatches(condition, resource),
+    );
+    for (const resource of refused) {
+      problem(
+        definition.name,
+        `refuses ${resource.name}, which this deployment ships or a release sends: Azure would refuse our own deploy`,
+      );
+    }
+    if (badExamples(snapshot, guardrail).some((resource) => !policyMatches(condition, resource))) {
+      problem(definition.name, `lets through what it is for (${guardrail}): its condition matches nothing it should`);
+    }
+  } catch (error) {
+    if (!(error instanceof UnreadCondition)) throw error;
+    problem(
+      definition.name,
+      `holds a condition these checks can't read (${error.message}), so none can say it's right`,
+    );
+  }
+}
+
+/**
+ * Azure's own refusals (AZ2, modules/guardrails.bicep): each of GUARDRAILS once,
+ * named `agentx-<environment>-<guardrail>`, a custom Indexed Deny rule given
+ * once on the resource group, enforced. Each rule refuses nothing the
+ * deployment ships nor anything of `mustPass`, and refuses each of its bad
+ * examples; the types allowed are exactly ALLOWED_TYPES.
+ * Nothing else in the deployment is a policy rule or an assignment of one.
+ */
+const azurePolicy: Check = (snapshot, expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'azure-policy', resource, message });
+  };
+  const names = new Set(Object.keys(GUARDRAILS).map((guardrail) => `agentx-${expected.environment}-${guardrail}`));
+  for (const resource of [...ofType(snapshot, TYPES.policyDefinition), ...ofType(snapshot, TYPES.policyAssignment)]) {
+    if (!names.has(resource.name)) problem(resource.name, 'is no rule of modules/guardrails.bicep: one no check reads');
+  }
+  for (const guardrail of Object.keys(GUARDRAILS)) {
+    const name = `agentx-${expected.environment}-${guardrail}`;
+    const found = ofType(snapshot, TYPES.policyDefinition).filter((definition) => definition.name === name);
+    const definition = found[0];
+    if (found.length !== 1 || definition === undefined) {
+      problem('the deployment', `needs the Azure Policy rule ${name} once; the snapshot has ${String(found.length)}`);
+      continue;
+    }
+    guardrailShapeProblems(snapshot, definition, problem);
+    guardrailRuleProblems(snapshot, guardrail, definition, problem);
+  }
+  const typesRule = ofType(snapshot, TYPES.policyDefinition).find(
+    (definition) => definition.name === `agentx-${expected.environment}-allowed-types`,
+  );
+  const allowed = list(at(typesRule?.properties, 'policyRule', 'if', 'not', 'in')).map((type) => text(type));
+  if (typesRule !== undefined && actionSet(allowed) !== actionSet(ALLOWED_TYPES)) {
+    problem(typesRule.name, `must allow exactly ${ALLOWED_TYPES.join(', ')}; it allows ${allowed.join(', ')}`);
   }
 };
 
@@ -5480,6 +5991,9 @@ const CHECKS: readonly Check[] = [
   releaseIdentity,
   releaseAccess,
   jobWatch,
+  roleActions,
+  releaseWritesAlert,
+  azurePolicy,
   vaultSecrets,
   secretAccess,
   jobs,
