@@ -269,8 +269,8 @@ function grantee(change: WhatIfChange, ours: ReadonlyMap<string, string>): strin
   const principal = propertyOf(change.after, 'principalId') || propertyOf(change.before, 'principalId');
   const known = ours.get(principal);
   if (known !== undefined) return `grant to ${known}, an identity of this deployment`;
-  // An identity made by this same deployment has no ID until it exists: what-if leaves the expression.
-  if (principal.startsWith('[')) return 'grant to an identity this deployment makes';
+  // An identity made by this same deployment has no ID until it exists, and what-if leaves the expression; it says no more.
+  if (principal.startsWith('[')) return "grant to a principal the what-if can't resolve yet";
   return "grant to an existing principal this deployment doesn't make (<id>)";
 }
 
@@ -283,7 +283,8 @@ export function describeGrants(result: unknown): string[] {
   const changes = (result as { changes?: unknown } | null)?.changes;
   const all: readonly WhatIfChange[] = Array.isArray(changes) ? (changes as WhatIfChange[]) : [];
   const ours = new Map<string, string>();
-  for (const change of all) {
+  // Ignore (in the group, not in the template) and Delete are identities the deployment doesn't hold.
+  for (const change of all.filter((each) => !['Ignore', 'Delete'].includes(text(each.changeType)))) {
     const name = IDENTITY.exec(text(change.resourceId))?.[1];
     const principal = propertyOf(change.after, 'principalId') || propertyOf(change.before, 'principalId');
     if (name === undefined) continue;

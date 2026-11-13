@@ -258,11 +258,32 @@ describe('describeGrants: who each changed grant and trust is for (review S190)'
       'Who the changed grants and trusts are for:',
       '  Create grant to id-agentx-stg-api, an identity of this deployment: Microsoft.Authorization/roleAssignments/a',
       "  Create grant to an existing principal this deployment doesn't make (<id>): Microsoft.Authorization/roleAssignments/b",
-      '  Create grant to an identity this deployment makes: Microsoft.Authorization/roleAssignments/c',
+      "  Create grant to a principal the what-if can't resolve yet: Microsoft.Authorization/roleAssignments/c",
       "  Create trust on an existing identity this deployment doesn't make: id-someone-else",
     ]);
     expect(describeGrants({ status: 'Succeeded', changes: [grant('d', OURS, 'NoChange')] })).toEqual([]);
     expect(describeGrants(null)).toEqual([]);
+  });
+
+  it('takes an identity the template leaves out (Ignore) or deletes as not its own: a grant or trust to it is flagged', () => {
+    const OTHER = '33333333-3333-4333-8333-333333333333';
+    const GONE = '44444444-4444-4444-8444-444444444444';
+    const lines = describeGrants({
+      status: 'Succeeded',
+      changes: [
+        identity('id-agentx-stg-infra', OTHER, 'Ignore'),
+        identity('id-agentx-stg-old', GONE, 'Delete'),
+        trust('id-agentx-stg-infra', 'Create'),
+        grant('e', OTHER),
+        grant('f', GONE),
+      ],
+    });
+    expect(lines).toEqual([
+      'Who the changed grants and trusts are for:',
+      "  Create trust on an existing identity this deployment doesn't make: id-agentx-stg-infra",
+      "  Create grant to an existing principal this deployment doesn't make (<id>): Microsoft.Authorization/roleAssignments/e",
+      "  Create grant to an existing principal this deployment doesn't make (<id>): Microsoft.Authorization/roleAssignments/f",
+    ]);
   });
 });
 

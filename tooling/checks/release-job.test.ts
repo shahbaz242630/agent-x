@@ -443,7 +443,11 @@ describe('the run’s last word, whether staging got this merge', () => {
     expect(JSON.stringify(landed)).not.toMatch(/secrets\.|vars\./);
     expect(landed.steps?.at(-1)).toEqual({
       name: 'Say whether staging got this merge',
-      env: { COMMIT: '${{ github.sha }}', RESULT: '${{ needs.release.result }}' },
+      env: {
+        COMMIT: '${{ github.sha }}',
+        RESULT: '${{ needs.release.result }}',
+        AGENTX_ACTIONS_TOKEN: '${{ github.token }}',
+      },
       run: 'node deploy/azure/landed.ts "${COMMIT}" "${RESULT}"',
     });
   });

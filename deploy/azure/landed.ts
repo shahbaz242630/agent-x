@@ -51,7 +51,11 @@ export async function landed(commit: string, result: string, newest: NewestOnMai
 export const realNewest: NewestOnMain = async () => {
   try {
     const response = await fetch(`https://api.github.com/repos/${SOURCE_REPOSITORY}/commits/main`, {
-      headers: { accept: 'application/vnd.github+json' },
+      // The run's own read-only token when given: unsigned asks share a runner's 60 an hour.
+      headers: {
+        accept: 'application/vnd.github+json',
+        ...(process.env.AGENTX_ACTIONS_TOKEN ? { authorization: `Bearer ${process.env.AGENTX_ACTIONS_TOKEN}` } : {}),
+      },
       signal: AbortSignal.timeout(30_000),
     });
     const body = (await response.json()) as { sha?: unknown };

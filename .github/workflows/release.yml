@@ -497,4 +497,5 @@ jobs:
         env:
           COMMIT: ${{ github.sha }}
           RESULT: ${{ needs.release.result }}
+          AGENTX_ACTIONS_TOKEN: ${{ github.token }}
         run: node deploy/azure/landed.ts "${COMMIT}" "${RESULT}"
