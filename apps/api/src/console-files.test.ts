@@ -109,6 +109,7 @@ describe('the console’s files (6A1)', () => {
       ['/v1'],
       ['/v1/agents'],
       ['/health/deep'],
+      ['/internal/zitadel-machine-id'],
       ['/assets/missing-1.js'],
       ['/assets/index-Ab12_c.js?v=1'],
       ['/favicon.ico'],

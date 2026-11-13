@@ -592,10 +592,9 @@ export const PLAIN_WORDS = {
     next: 'Check which part the log names and whether it recovers by itself.',
   },
   'machine_ids.failed': {
-    happened: 'The API could not hand a starting copy of the login service (Zitadel) its machine number.',
-    broke:
-      'That Zitadel copy stops and its container starts again; until one answer works, it does not serve sign-ins. The copies already running are fine.',
-    next: 'Check the database answers (the line carries its error, if it failed) and the API can draw from platform_controls.zitadel_machine_ids. See the runbook.',
+    happened: 'The API could not give a starting login service (Zitadel) copy its machine number.',
+    broke: 'That copy restarts and serves no sign-ins until it gets one; running copies are fine.',
+    next: 'Check the database is answering; the line carries its error. See the runbook.',
   },
   'hold_history.failed': {
     happened: 'The full history check for an organisation on an integrity hold failed.',

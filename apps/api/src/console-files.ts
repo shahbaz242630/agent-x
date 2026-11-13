@@ -8,7 +8,7 @@
 // - A GET or HEAD of an asset by its exact path answers it, kept for a year
 //   (its name changes whenever its bytes do).
 // - A GET or HEAD of a console page (a plain path of lower-case letters,
-//   digits and hyphens, outside /v1 and /health, with at most a plain query
+//   digits and hyphens, outside /v1, /health and /internal, with at most a plain query
 //   for the page's filters) answers index.html, never kept, so a release
 //   reaches every browser at its next page load.
 // - Anything else goes on to Fastify, which answers it as it always has (a
@@ -46,10 +46,10 @@ const ASSET_NAME = /^[A-Za-z0-9_-]+\.[a-z0-9]+$/;
 
 /**
  * A console page's path: `/`, or segments of lower-case letters, digits and
- * hyphens, the first never one of the API's own (`v1`, `health`). The path
+ * hyphens, the first never one of the API's own (`v1`, `health`, `internal`: Zitadel's machine-ID route, SA3e, which a page answer would give every copy the same ID). The path
  * part, never a dot. One pattern, so browser-errors.ts's contract states it.
  */
-export const PAGE_PATH = /^\/(?!(?:v1|health)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
+export const PAGE_PATH = /^\/(?!(?:v1|health|internal)(?:\/|$))(?:[a-z0-9-]+(?:\/[a-z0-9-]+)*)?$/;
 
 /** Hashed assets: their name changes with their bytes, so a browser may keep them. */
 const KEPT = 'public, max-age=31536000, immutable';
