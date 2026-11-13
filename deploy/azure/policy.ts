@@ -36,6 +36,7 @@ export type RuleId =
   | 'no-secret-literals'
   | 'database-private'
   | 'database-network'
+  | 'database-egress'
   | 'database-logins'
   | 'owner-login-alert'
   | 'refused-login-alert'
@@ -1732,8 +1733,12 @@ const subnetRules = (snapshot: Snapshot, subnet: unknown, direction: string): re
   const apart = ofType(snapshot, TYPES.rule).filter((rule) => rule.id.startsWith(`${String(rulesId)}/securityRules/`));
   return [...inside, ...apart]
     .map((rule) => at(rule, 'properties'))
-    .filter((rule) => at(rule, 'direction') === direction);
+    .filter((rule) => sameWord(at(rule, 'direction'), direction));
 };
+
+/** Azure reads a rule's direction and access without case (`outbound` is `Outbound`), so these checks do too (AZ8e). */
+const sameWord = (value: unknown, word: string): boolean =>
+  typeof value === 'string' && value.toLowerCase() === word.toLowerCase();
 
 const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =>
   subnetRules(snapshot, subnet, 'Inbound');
@@ -1742,7 +1747,7 @@ const outboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] 
   subnetRules(snapshot, subnet, 'Outbound');
 
 const allowing = (inbound: readonly unknown[]): readonly unknown[] =>
-  inbound.filter((rule) => at(rule, 'access') === 'Allow');
+  inbound.filter((rule) => sameWord(at(rule, 'access'), 'Allow'));
 
 /**
  * The backstop of a direction: a rule that denies everything from `source`,
@@ -1757,7 +1762,7 @@ const deniesRest = (rules: readonly unknown[], source: string): boolean => {
   const lastAllow = Math.max(...allowing(rules).map((rule) => Number(at(rule, 'priority'))));
   return rules.some(
     (rule) =>
-      at(rule, 'access') === 'Deny' &&
+      sameWord(at(rule, 'access'), 'Deny') &&
       at(rule, 'protocol') === '*' &&
       at(rule, 'sourceAddressPrefix') === source &&
       at(rule, 'destinationAddressPrefix') === '*' &&
@@ -1911,31 +1916,69 @@ const appsEgress: Check = (snapshot, _expected, add) => {
     const apps = appsSubnetOf(network);
     const prefix = text(at(apps, 'properties', 'addressPrefix'));
     const database = list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'database');
-    const outbound = outboundRules(snapshot, apps);
-    const allows = allowing(outbound);
-    const problem = (message: string): void => {
-      add({ rule: 'apps-egress', resource: network.name, message });
-    };
     // The network's own region, not the expected one: this rule asks that the
     // key vault tag names where this deployment is, and `in-country` asks
     // separately that that is the UAE.
     const wanted = new Map(
       egressDoors(text(network.location), prefix, text(at(database, 'properties', 'addressPrefix'))),
     );
-    const open = new Set(allows.map(doorOf));
-    for (const [door, why] of wanted) {
-      if (!open.has(door)) problem(`its apps subnet must let out ${door}, for ${why}`);
+    for (const message of egressProblems(snapshot, apps, 'apps', wanted)) {
+      add({ rule: 'apps-egress', resource: network.name, message });
     }
-    for (const door of [...open].filter((door) => !wanted.has(door))) {
-      problem(`its apps subnet lets out ${door}, which nothing it runs needs`);
-    }
-    for (const source of new Set(
-      allows.map((rule) => text(at(rule, 'sourceAddressPrefix'))).filter((source) => source !== prefix),
-    )) {
-      problem(`its apps subnet lets out traffic from ${source || 'nowhere named'}, not from the subnet alone`);
-    }
-    if (!deniesRestOfTheInternet(outbound)) {
-      problem('its apps subnet must deny everything else out, after every rule that allows');
+  }
+};
+
+/**
+ * What is wrong with a subnet's way out, against the doors it must have,
+ * exactly: one missing, one extra, one from another source, or the rest not
+ * denied after them. Empty for a subnet whose way out is just `wanted`.
+ */
+function egressProblems(
+  snapshot: Snapshot,
+  subnet: unknown,
+  name: string,
+  wanted: ReadonlyMap<string, string>,
+): string[] {
+  const prefix = text(at(subnet, 'properties', 'addressPrefix'));
+  const outbound = outboundRules(snapshot, subnet);
+  const allows = allowing(outbound);
+  const problems: string[] = [];
+  const open = new Set(allows.map(doorOf));
+  for (const [door, why] of wanted) {
+    if (!open.has(door)) problems.push(`its ${name} subnet must let out ${door}, for ${why}`);
+  }
+  for (const door of [...open].filter((door) => !wanted.has(door))) {
+    problems.push(`its ${name} subnet lets out ${door}, which nothing it runs needs`);
+  }
+  for (const source of new Set(
+    allows.map((rule) => text(at(rule, 'sourceAddressPrefix'))).filter((source) => source !== prefix),
+  )) {
+    problems.push(`its ${name} subnet lets out traffic from ${source || 'nowhere named'}, not from the subnet alone`);
+  }
+  if (!deniesRestOfTheInternet(outbound)) {
+    problems.push(`its ${name} subnet must deny everything else out, after every rule that allows`);
+  }
+  return problems;
+}
+
+/**
+ * The way out of every Postgres subnet is an allowlist too (AZ8): Azure's
+ * default rules let the server reach the whole internet, so a server taken
+ * over could send the data out of the UAE (ADR-009). Microsoft names what a
+ * server in a subnet needs when an NSG denies the rest: port 5432 inside its
+ * subnet and Azure Storage, where the write-ahead log is archived, narrowed
+ * to the region. Azure's DNS is written down as the apps subnet's is.
+ */
+const databaseEgress: Check = (snapshot, _expected, add) => {
+  for (const { subnet, network } of postgresSubnets(snapshot)) {
+    const prefix = text(at(subnet, 'properties', 'addressPrefix'));
+    const wanted = new Map([
+      [`Tcp to ${prefix} on 5432`, "the server's own features inside its subnet, high availability among them"],
+      [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the storage below"],
+      [`Tcp to Storage.${text(network.location)} on 443`, 'the write-ahead log and backups, in this region alone'],
+    ]);
+    for (const message of egressProblems(snapshot, subnet, text(at(subnet, 'name')), wanted)) {
+      add({ rule: 'database-egress', resource: network.name, message });
     }
   }
 };
@@ -5391,6 +5434,7 @@ const CHECKS: readonly Check[] = [
   databaseDisk,
   databaseZoneAndMeasures,
   databaseNetwork,
+  databaseEgress,
   appsNetwork,
   appsEgress,
   dnsWatch,
