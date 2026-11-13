@@ -38,12 +38,15 @@ export type RuleId =
   | 'database-network'
   | 'database-logins'
   | 'owner-login-alert'
+  | 'refused-login-alert'
+  | 'login-lines-alert'
   | 'database-tls'
   | 'database-backup'
   | 'database-size'
   | 'database-disk'
   | 'database-zone'
   | 'database-measures'
+  | 'database-stall-evidence'
   | 'load-run'
   | 'load-database'
   | 'connections'
@@ -59,6 +62,7 @@ export type RuleId =
   | 'alert-window'
   | 'alert-runbook'
   | 'alert-delivery'
+  | 'alert-rules-watch'
   | 'resource-logs'
   | 'log-destinations'
   | 'activity-log'
@@ -119,6 +123,7 @@ const TYPES = {
   actionGroup: 'Microsoft.Insights/actionGroups',
   alert: 'Microsoft.Insights/scheduledQueryRules',
   metricAlert: 'Microsoft.Insights/metricAlerts',
+  activityAlert: 'Microsoft.Insights/activityLogAlerts',
   budget: 'Microsoft.Consumption/budgets',
   communication: 'Microsoft.Communication/communicationServices',
   emailService: 'Microsoft.Communication/emailServices',
@@ -157,13 +162,15 @@ const TYPES = {
 } as const;
 
 /**
- * Types Azure offers only as global resources. The first four hold no
+ * Types Azure offers only as global resources (activity log alerts also in two European regions, never the UAE). The
+ * first five hold no
  * customer data or logs; email's three keep what they hold at rest in the data
  * location they are given, which rule `email` holds to the UAE.
  */
 const GLOBAL_TYPES: ReadonlySet<string> = new Set([
   TYPES.actionGroup,
   TYPES.metricAlert,
+  TYPES.activityAlert,
   TYPES.dnsZone,
   TYPES.dnsLink,
   TYPES.communication,
@@ -199,15 +206,29 @@ const BURSTABLE_VALUES: ReadonlyMap<string, string> = new Map([
   ['max_connections', '50'],
 ]);
 
+/**
+ * What a stall like the soak's 5 s commit pause leaves behind (MO5), every
+ * size alike: each checkpoint and each lock waited on for longer than a
+ * second in the server's log, and the server's own wait and transaction
+ * counts as Azure metrics, which go to no workspace.
+ */
+const STALL_EVIDENCE: ReadonlyMap<string, string> = new Map([
+  ['log_checkpoints', 'on'],
+  ['log_lock_waits', 'on'],
+  ['deadlock_timeout', '1000'],
+  ['metrics.collector_database_activity', 'on'],
+]);
+
 /** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
 const LOG_LINE_PREFIX = '%t-%c-';
 
 /**
- * The start of a line that prefix writes, up to the message, as the login
- * alert matches it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-LOG:  ` (S19).
- * Azure holds the log's time zone at UTC.
+ * The start of a line that prefix writes, up to its level, as the login alerts
+ * match it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-` then `LOG:  ` for a login
+ * (S19), `FATAL:  ` for one refused. Azure holds the log's time zone at UTC.
  */
-const LOG_LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  ';
+const LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-';
+const LOG_LINE_START = `${LINE_START}LOG:  `;
 
 /** The role that owns the app's tables and runs the migrations (db/bootstrap/roles.sql). */
 const OWNER_ROLE = 'agentx_owner';
@@ -217,34 +238,37 @@ const OWNER_ROLE = 'agentx_owner';
  * job and the environment it runs in, written again here so that changing it
  * takes both: each owner login paired with the nearest start of that job, and
  * counted unless the start is within two minutes and nothing else is paired
- * with it; a start with no login counted too; each judged only between 20 and
- * 50 minutes old, since Azure's lines for the job reach the workspace minutes
- * after Postgres's. postgres.bicep says why each number.
+ * with it; a start with no login counted too; each judged once 20 minutes old,
+ * since Azure's lines for the job reach the workspace minutes after Postgres's,
+ * or once it arrives if later (MO2), over the last 30 minutes of those moments.
+ * postgres.bicep says why each number.
  */
+const JUDGED = 'Judged = max_of(ingestion_time(), TimeGenerated + 20m)';
+
 const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   [
     'let near = 2m;',
     'let starts = ContainerAppSystemLogs',
     `    | where _ResourceId =~ "${environmentId}" and JobName == "${migrateJob}" and Reason == "ContainerStarted" and isnotempty(ReplicaName)`,
-    '    | project Start = TimeGenerated, Run = ReplicaName;',
+    `    | project Start = TimeGenerated, Run = ReplicaName, ${JUDGED};`,
     'let logins = PGSQLServerLogs',
     `    | where Message matches regex @"${LOG_LINE_START}connection authorized: user=${OWNER_ROLE} "`,
-    '    | project Login = TimeGenerated, Message;',
+    `    | project Login = TimeGenerated, Message, ${JUDGED};`,
     'let paired = logins',
     '    | extend Key = 1',
-    '    | join kind=leftouter (starts | extend Key = 1) on Key',
+    '    | join kind=leftouter (starts | project-away Judged | extend Key = 1) on Key',
     '    | extend Gap = coalesce(abs(Login - Start), 1d)',
-    '    | summarize arg_min(Gap, Run) by Login, Message;',
+    '    | summarize arg_min(Gap, Run) by Login, Message, Judged;',
     'let claims = paired',
     '    | where Gap <= near',
     '    | summarize Claims = count() by Run;',
     'let strays = paired',
-    '    | where Login between (ago(50m) .. ago(20m))',
+    '    | where Judged between (ago(30m) .. now())',
     '    | join kind=leftouter claims on Run',
     '    | where Gap > near or Claims > 1',
     '    | project Run;',
     'let unclaimed = starts',
-    '    | where Start between (ago(50m) .. ago(20m))',
+    '    | where Judged between (ago(30m) .. now())',
     '    | join kind=leftanti claims on Run',
     '    | project Run;',
     'union strays, unclaimed',
@@ -252,11 +276,40 @@ const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   ].join('\n');
 
 /**
- * When the owner-login alert runs, and the hour each run reads: its band is 30
- * minutes, so two runs 15 minutes apart judge every login and start, and the
- * hour holds the band's oldest one and whatever two minutes before it.
+ * What a login alert reads before it judges: Azure's most, two days, so a line
+ * that reaches the workspace late is in view when it arrives, with whatever it
+ * is paired with (MO2: a line over about 35 minutes late was never judged).
  */
-const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: 'PT1H' } as const;
+const LATE_LINES_READ = 'P2D';
+
+/**
+ * When the owner-login alert runs, and what each run reads: its band is 30
+ * minutes, so two runs 15 minutes apart judge every login and start.
+ */
+const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: LATE_LINES_READ } as const;
+
+/**
+ * The login alerts that count lines rather than pair them take those that
+ * arrived over the last 30 minutes, run every 15: a run late by up to 15
+ * leaves no gap, a line may notify twice, and a line arriving late is counted
+ * when it arrives (MO2).
+ */
+const ARRIVED_LATELY = 'where ingestion_time() > ago(30m)';
+
+/**
+ * The refused-login alert's query (MO2) for the server's admin: one FATAL line
+ * for each login refused as a privileged role, a wrong password or a connection
+ * the server's rules refuse, counted by when it arrived (ARRIVED_LATELY), so a
+ * late line is still seen. Quotes are RE2's
+ * `\x22`: Kusto's verbatim strings can't hold one.
+ */
+const refusedLoginQuery = (admin: string): string => {
+  const quote = String.raw`\x22`;
+  const host = `host ${quote}[^${quote}]*${quote}, user`;
+  const refused = `(password authentication failed for user|no pg_hba[.]conf entry for ${host}|pg_hba[.]conf rejects connection for ${host})`;
+  const roles = `${quote}(${admin}|${BACKUP_ROLE}|${OWNER_ROLE})${quote}`;
+  return `PGSQLServerLogs | ${ARRIVED_LATELY} | where Message matches regex @"${LINE_START}FATAL:  ${refused} ${roles}" | summarize Refused = count()`;
+};
 
 /**
  * What counts as an error event: our logger's level and Zitadel's three, in
@@ -1554,7 +1607,7 @@ const serverSettings = (snapshot: Snapshot, server: PredictedResource): Readonly
       .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
   );
 
-/** Every server states its zone, and measures nothing on a Burstable size (4D2d P5). */
+/** Every server states its zone, measures nothing on a Burstable size (4D2d P5), and keeps what names a stall (MO5). */
 const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
   for (const server of ofType(snapshot, TYPES.server)) {
     if (!['1', '2', '3'].includes(String(at(server.properties, 'availabilityZone')))) {
@@ -1568,6 +1621,16 @@ const databaseZoneAndMeasures: Check = (snapshot, _expected, add) => {
     const differing = [...BURSTABLE_VALUES]
       .filter(([name, value]) => settings.get(name) !== value)
       .map(([name]) => name);
+    const unrecorded = [...STALL_EVIDENCE]
+      .filter(([name, value]) => settings.get(name) !== value)
+      .map(([name, value]) => `${name}=${value}`);
+    if (unrecorded.length > 0) {
+      add({
+        rule: 'database-stall-evidence',
+        resource: server.name,
+        message: `keeps what names a stall (MO5): its checkpoints and lock waits over a second logged, and its wait counts as metrics; differing or not stated: ${unrecorded.join(', ')}`,
+      });
+    }
     if (at(server, 'sku', 'tier') === 'Burstable' && differing.length > 0) {
       add({
         rule: 'database-measures',
@@ -1637,14 +1700,20 @@ const database: Check = (snapshot, expected, add) => {
       snapshot,
       'stateless SEV-1',
       (criterion, alert) =>
-        queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+        at(alert.properties, 'overrideQueryTimeRange') === LATE_LINES_READ &&
+        queryIs(
+          at(criterion, 'query'),
+          'PGSQLServerLogs',
+          [ARRIVED_LATELY, `where Message matches regex ${pattern}`],
+          'count()',
+        ) &&
         watchesEveryWindow(alert, criterion),
       loginWorkspaceIds(snapshot),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the login alerts' workspace, watching every minute by when each line arrived, over the two days before, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -3618,7 +3687,159 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the two days before, judging each line once 20 minutes old or once it arrives, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
+      });
+    }
+  }
+};
+
+/**
+ * An enabled, stateless SEV-1 alert on the login alerts' workspace fires when a
+ * login as the owner, the server admin or the backup role is refused (MO2):
+ * nothing got in, but someone may be trying. It counts by when a line arrived,
+ * so a late one is still seen (refusedLoginQuery).
+ */
+const refusedLoginAlert: Check = (snapshot, _expected, add) => {
+  for (const server of ofType(snapshot, TYPES.server)) {
+    const query = refusedLoginQuery(String(at(server.properties, 'administratorLogin')));
+    const alerted = workspaceAlerted(
+      snapshot,
+      'stateless SEV-1',
+      (criterion, alert) =>
+        at(alert.properties, 'overrideQueryTimeRange') === LATE_LINES_READ &&
+        at(criterion, 'query') === query &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+      loginWorkspaceIds(snapshot),
+    );
+    if (!alerted) {
+      add({
+        rule: 'refused-login-alert',
+        resource: server.name,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes over the two days before, that fires on any refused login as ${OWNER_ROLE}, the server admin or ${BACKUP_ROLE} arriving since the run before (MO2)`,
+      });
+    }
+  }
+};
+
+/** The query of the alert on the server's lines stopping (MO6): none arrived over the hour, the cap's word aside. */
+const LOGIN_LINES_QUERY = `union (PGSQLServerLogs | where ingestion_time() > ago(60m)), ${overCap(60)} | summarize Lines = count()`;
+
+/**
+ * An enabled, stateless SEV-1 alert on the login alerts' workspace fires when no server log line has arrived there
+ * for an hour (MO6): a log setting rewritten (categories off, another workspace) leaves every login alert healthy
+ * over a table nothing reaches, and the rule watch sees only a setting deleted. Run every 15 minutes, as the login
+ * alerts are, over the hour the server's quietest gap (12 minutes on staging) never comes near.
+ */
+const loginLinesAlert: Check = (snapshot, _expected, add) => {
+  const alerted = workspaceAlerted(
+    snapshot,
+    'stateless SEV-1',
+    (criterion, alert) =>
+      at(alert.properties, 'evaluationFrequency') === 'PT15M' &&
+      at(alert.properties, 'windowSize') === 'PT1H' &&
+      at(alert.properties, 'overrideQueryTimeRange') === 'P1D' &&
+      at(criterion, 'query') === LOGIN_LINES_QUERY &&
+      totals(criterion) &&
+      at(criterion, 'operator') === 'LessThan' &&
+      at(criterion, 'threshold') === 1 &&
+      at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+      at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+    loginWorkspaceIds(snapshot),
+  );
+  // No server, no lines to miss: the other login alerts are checked a server at a time.
+  if (!alerted && ofType(snapshot, TYPES.server).length > 0) {
+    add({
+      rule: 'login-lines-alert',
+      resource: 'the login workspace',
+      message:
+        "needs an enabled, stateless SEV-1 alert on this deployment's login alerts' workspace, every 15 minutes, that fires when no database server log line has arrived for an hour and the workspace is not over its daily cap (MO6)",
+    });
+  }
+};
+
+/** An alert processing rule: one that removes action groups mutes every alert in its scope (MO2). */
+const PROCESSING_RULE = 'Microsoft.AlertsManagement/actionRules';
+
+/** One leaf of an activity log alert's condition: the event's field holds this value (Azure compares without case). */
+const leaf = (field: string, equals: string): Readonly<Record<string, string>> => ({ field, equals });
+
+/**
+ * The two watches on the alert rules themselves (MO2), each an activity log
+ * alert's whole condition: every change that succeeded to an alert rule of any
+ * kind or to an action group, and a log alert rule Azure reports degraded or
+ * unavailable. Exactly these: one more condition in `allOf` narrows what
+ * fires, and one fewer change kind leaves that kind unwatched.
+ */
+const RULE_WATCHES: readonly { readonly what: string; readonly condition: unknown }[] = [
+  {
+    what: 'a change to any alert rule, action group or alert processing rule, or a diagnostic setting deleted',
+    condition: {
+      allOf: [
+        leaf('category', 'Administrative'),
+        leaf('status', 'Succeeded'),
+        {
+          anyOf: [
+            ...[TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup, PROCESSING_RULE].flatMap(
+              (type) => [leaf('operationName', `${type}/write`), leaf('operationName', `${type}/delete`)],
+            ),
+            // Deploys never delete one; they rewrite every one, so its writes would be noise.
+            leaf('operationName', `${TYPES.diagnostics}/delete`),
+          ],
+        },
+      ],
+    },
+  },
+  {
+    what: 'a log alert rule degraded or unavailable',
+    condition: {
+      allOf: [
+        leaf('category', 'ResourceHealth'),
+        leaf('resourceType', TYPES.alert),
+        { anyOf: ['Degraded', 'Unavailable'].map((status) => leaf('properties.currentHealthStatus', status)) },
+      ],
+    },
+  },
+];
+
+/** The same JSON, whatever order an object's keys were written in. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, inner: unknown) =>
+    inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+      ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b)))
+      : inner,
+  );
+
+/**
+ * Each watch on the alert rules (MO2) is an enabled activity log alert on this
+ * deployment's resource group alone, with exactly its condition, a SEV-1
+ * description ending in its runbook section, and only action groups of this
+ * deployment that reach someone. Activity log alerts have no severity or
+ * resolving of their own: each event notifies once.
+ */
+const alertRulesWatch: Check = (snapshot, _expected, add) => {
+  const group = groupOf(snapshot);
+  for (const { what, condition } of RULE_WATCHES) {
+    const watched = ofType(snapshot, TYPES.activityAlert).some((alert) => {
+      const groups = list(at(alert.properties, 'actions', 'actionGroups'));
+      return (
+        at(alert.properties, 'enabled') === true &&
+        canonical(at(alert.properties, 'scopes')) === canonical([group]) &&
+        canonical(at(alert.properties, 'condition')) === canonical(condition) &&
+        /^SEV-1\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.test(
+          String(at(alert.properties, 'description')),
+        ) &&
+        groups.length > 0 &&
+        groups.every((one) => deliversAlerts(snapshot, at(one, 'actionGroupId')))
+      );
+    });
+    if (!watched) {
+      add({
+        rule: 'alert-rules-watch',
+        resource: 'the deployment',
+        message: `needs an enabled activity log alert on this deployment's resource group, SEV-1 with its runbook section, reaching someone, on ${what} (MO2): an alert rule switched off, deleted or failing tells nobody`,
       });
     }
   }
@@ -5208,6 +5429,9 @@ const CHECKS: readonly Check[] = [
   agentCancelCapAlert,
   decisionsSuppressedAlert,
   ownerLoginAlert,
+  refusedLoginAlert,
+  loginLinesAlert,
+  alertRulesWatch,
   identities,
   releaseIdentity,
   releaseAccess,

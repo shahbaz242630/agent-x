@@ -124,6 +124,10 @@ describe('text the secret scanners mistake for a secret', () => {
       join('      writeFileSync(pass', 'word, ', q, 'not-a-', 'real-one', q, ');'),
     ],
     [
+      'a password-named call given a quoted word (PR #625)',
+      join("      line('FATAL', wrongPass", 'word(', q, 'agentx_app', q, ')),'),
+    ],
+    [
       'a quoted reader keying a list of password-named secrets (PR #28)',
       join('  ', q, 'zitadel-init', q, ': [', q, 'db-zitadel-pass', 'word', q, '],'),
     ],
@@ -177,6 +181,10 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['a short word under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, 'none', q, ',')],
     ['a password-named variable beside a short word', join('  check(pass', 'word, ', q, 'utf8', q, ');')],
+    [
+      'a call named for the login refused, given a quoted word',
+      join("  line('FATAL', badLogin(", q, 'agentx_app', q, ')),'),
+    ],
     [
       'the file a login is in, beside a quoted word',
       join('  writeFileSync(loginFile, ', q, 'not-a-', 'real-one', q, ');'),
