@@ -644,6 +644,7 @@ jobs:
     permissions:
       contents: read # to check out the release tool and read the history
       id-token: write # for the token Azure takes in place of a credential (OIDC)
+      deployments: read # GitHub's record of the last release to staging, which an Azure sign-in can't touch (AZ2c)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -686,10 +687,17 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # The release reads three optional pins (AZ2c: the SHA-256 of the auth host, the app host, the API's client ID)
+      # but this workflow passes none: it runs on pull_request, where no secret may be named (check-workflows). They
+      # come with the release moved to a push-only workflow (Outstanding-Work AZ2d); until then each is held to its
+      # shape, and the release says so in one line.
       - name: Release this commit to staging
         env:
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
+          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above): not
+          # GITHUB_TOKEN, which cosign's GitHub keychain and az would pick up.
+          AGENTX_DEPLOYMENTS_TOKEN: ${{ github.token }}
         run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

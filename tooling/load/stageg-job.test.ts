@@ -290,7 +290,7 @@ describe('k6, for one step', () => {
       step: STEP,
       agents: 1,
       api: 'http://api.internal',
-      args: ['run', '--quiet', expect.stringMatching(/stage-g\.k6\.js$/) as unknown],
+      args: ['run', '--quiet', '--no-usage-report', expect.stringMatching(/stage-g\.k6\.js$/) as unknown],
     });
     expect(left()).toEqual(before);
   });

@@ -4,6 +4,9 @@
 // in this repository unless told otherwise. Anything git can't answer is an
 // error, never taken as an answer.
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** Reading the repository's history, which the release job must check out whole. */
@@ -16,6 +19,12 @@ export interface History {
   fileAt(commit: string, file: string): string | undefined;
   /** The names of the files directly in a folder at a commit. */
   filesIn(commit: string, folder: string): readonly string[];
+  /**
+   * Main's line, newest first: each commit on origin/main's first-parent history by how far it is from the tip (0),
+   * read once (AZ2c: the release places hundreds of builds on it). In main's history is having a place; `a` is
+   * older than or as old as `b` when its place is greater or the same. An error for a shallow clone.
+   */
+  mainline(): ReadonlyMap<string, number>;
 }
 
 /** The folder a hand deploy is sent from: the commit it is at, and whether anything differs from it. */
@@ -43,12 +52,16 @@ function git(repository: string, args: readonly string[]): Ran {
 }
 
 export function realHistory(repository = REPOSITORY): History {
+  let line: ReadonlyMap<string, number> | undefined;
   return {
     isAncestor: (ancestor, commit) => {
+      // Either one not a commit here is no answer of ancestry: false (AZ2c: a record Azure keeps may name anything).
       // 1 is "no such commit here"; 128 (not a repository, say) is an error, not an answer.
-      const known = git(repository, ['rev-parse', '--verify', '--quiet', `${ancestor}^{commit}`]);
-      if (known.status === 1) return false;
-      if (known.status !== 0) throw new Error(`git couldn't look for ${ancestor}:\n${known.stderr}`);
+      for (const each of [ancestor, commit]) {
+        const known = git(repository, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${each}^{commit}`]);
+        if (known.status === 1) return false;
+        if (known.status !== 0) throw new Error(`git couldn't look for ${each}:\n${known.stderr}`);
+      }
       const done = git(repository, ['merge-base', '--is-ancestor', ancestor, commit]);
       if (done.status === 0 || done.status === 1) return done.status === 0;
       throw new Error(`git couldn't compare ${ancestor} and ${commit}:\n${done.stderr}`);
@@ -74,7 +87,32 @@ export function realHistory(repository = REPOSITORY): History {
       if (done.status !== 0) throw new Error(`git couldn't list ${folder} at ${commit}:\n${done.stderr}`);
       return done.stdout.split(NUL).filter((file) => file !== '');
     },
+    mainline: () => {
+      line ??= mainlineOf(repository);
+      return line;
+    },
   };
+}
+
+/**
+ * Main's first-parent line from origin/main's tip (HEAD's where there is no origin/main), newest first, by place: one
+ * git process for every build a release places. Main's tip, not the commit released: a release run again for an older
+ * commit sees the builds released since. A shallow clone has no whole line: an error naming the fix.
+ */
+function mainlineOf(repository: string): ReadonlyMap<string, number> {
+  const shallow = git(repository, ['rev-parse', '--is-shallow-repository']);
+  if (shallow.status !== 0) throw new Error(`git couldn't say whether this clone is whole:\n${shallow.stderr}`);
+  if (shallow.stdout.trim() === 'true') {
+    throw new Error(
+      "this clone is shallow, so main's history can't be read whole: check it out with its whole history (fetch-depth 0)",
+    );
+  }
+  const tip = git(repository, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}']);
+  const from = tip.status === 0 ? tip.stdout.trim() : 'HEAD';
+  const listed = git(repository, ['rev-list', '--first-parent', from]);
+  if (listed.status !== 0) throw new Error(`git couldn't list main's history:\n${listed.stderr}`);
+  const commits = listed.stdout.split('\n').filter((commit) => commit !== '');
+  return new Map(commits.map((commit, place) => [commit, place] as const));
 }
 
 /** The commit the repository is at, and whether its files are exactly that commit's (nothing changed or added). */
@@ -84,4 +122,26 @@ export function realCheckout(repository = REPOSITORY): Checkout {
   const status = git(repository, ['status', '--porcelain', '-z']);
   if (status.status !== 0) throw new Error(`git couldn't say whether this folder has changes:\n${status.stderr}`);
   return { head: head.stdout.trim(), clean: status.stdout === '' };
+}
+
+/**
+ * `use` given a folder holding `folder` exactly as it is at `commit` (AZ2c: the
+ * watch reads the apps.bicep a job's build was deployed from): a temporary
+ * worktree with nothing else checked out, removed after, whatever `use` does.
+ * An error when git can't, never a folder of another commit.
+ */
+export function atCommit<T>(commit: string, folder: string, use: (dir: string) => T, repository = REPOSITORY): T {
+  const made = mkdtempSync(path.join(tmpdir(), 'agentx-at-'));
+  const tree = path.join(made, 'tree');
+  try {
+    const added = git(repository, ['worktree', 'add', '--no-checkout', '--detach', tree, commit]);
+    if (added.status !== 0) throw new Error(`git couldn't make a worktree at ${commit}:\n${added.stderr}`);
+    const out = git(tree, ['checkout', commit, '--', folder]);
+    if (out.status !== 0) throw new Error(`git couldn't check out ${folder} at ${commit}:\n${out.stderr}`);
+    return use(path.join(tree, folder));
+  } finally {
+    // Its folder removed, git forgets the worktree on the prune.
+    rmSync(made, { recursive: true, force: true });
+    git(repository, ['worktree', 'prune']);
+  }
 }

@@ -2109,6 +2109,12 @@ describe('deploy apps', () => {
         );
       });
 
+      // AZ26: production's jobs app (ca-agentx-prd-jobs) hands payments off too, and stopApi stops the API alone. This
+      // fails the day deploy.ts learns another environment, so --api-stopped is taught to stop and confirm that app first.
+      it('knows staging alone: another environment must first teach it to stop its jobs app (AZ26)', () => {
+        expect(RESOURCE_GROUP).toBe('rg-agentx-staging');
+      });
+
       it('is never taken with --keep-running or --load-run, and leaves plain apps as it was', async () => {
         expect(() => parseArguments(['apps', '--api-stopped', '--keep-running'])).toThrow(UsageError);
         expect(() => parseArguments(['apps', '--load-run', '--api-stopped'])).toThrow(UsageError);

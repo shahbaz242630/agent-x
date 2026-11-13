@@ -8,7 +8,8 @@
 //   may reach it from the network
 // - database: the Postgres server, delegated to it, with a private DNS zone so
 //   the server's name resolves to its private address inside the network.
-//   Only the apps subnet, and the server's own subnet, may reach its port
+//   Only the apps subnet, and the server's own subnet, may reach its port;
+//   it reaches out only to its own subnet and the region's Storage (AZ8)
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
@@ -351,6 +352,79 @@ resource databaseRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           access: 'Deny'
           protocol: '*'
           sourceAddressPrefix: 'VirtualNetwork'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      // Outbound (AZ8) is an allowlist too, as the apps subnet's. Azure's default
+      // rules let the server reach the whole internet; a server that was taken
+      // over (a stolen admin login turning on an extension that connects out,
+      // such as dblink or postgres_fdw) could send the data anywhere, out of
+      // the UAE (ADR-009). Microsoft names what a
+      // server in a subnet needs when an NSG denies the rest: port 5432 inside
+      // its subnet (high availability and the server's own features) and Azure
+      // Storage, where the write-ahead log is archived, narrowed to the region
+      // ("Network with private access", Microsoft Learn, 2026-07-13). No Entra
+      // tag: the server takes password logins only (postgres.bicep). Geo-redundant
+      // backup copies by storage replication, not from the server (Microsoft),
+      // so the paired region's tag isn't needed; a cross-region read replica
+      // would need it. Responses to the apps' connections are not new
+      // connections, so they pass whatever these rules say (NSGs are stateful).
+      {
+        name: 'allow-out-within-subnet'
+        properties: {
+          description: 'The server\'s own traffic to port 5432 inside its subnet, which Microsoft requires (high availability among it).'
+          priority: 200
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: databasePrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: databasePrefix
+          destinationPortRange: '5432'
+        }
+      }
+      {
+        // As the apps subnet's rule: Azure's DNS isn't subject to an NSG unless a
+        // rule names the AzurePlatformDNS tag, and none does; written down so the
+        // dependency is not relied on silently.
+        name: 'allow-out-azure-dns'
+        properties: {
+          description: 'Azure\'s own DNS, over TCP and UDP: it resolves the storage the server archives to.'
+          priority: 210
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: databasePrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: '168.63.129.16'
+          destinationPortRange: '53'
+        }
+      }
+      {
+        name: 'allow-out-storage'
+        properties: {
+          description: 'The write-ahead log and backups, to Azure Storage through the subnet\'s Storage endpoint, in this region only (Microsoft).'
+          priority: 220
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: databasePrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: 'Storage.${location}'
+          destinationPortRange: '443'
+        }
+      }
+      {
+        name: 'deny-out-rest'
+        properties: {
+          description: 'Overrides Azure\'s default rules that let the server reach the whole internet: nothing leaves but what is allowed above.'
+          priority: 4000
+          direction: 'Outbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: '*'
           sourcePortRange: '*'
           destinationAddressPrefix: '*'
           destinationPortRange: '*'

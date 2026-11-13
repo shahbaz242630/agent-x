@@ -588,6 +588,14 @@ describe('SEC-AV-07 a forged X-Forwarded-For does not dodge the rate limit', () 
     expect(status).toBe(200);
   });
 
+  it('gives two real clients behind the same trusted proxy separate buckets: one refused, the other still let in', async () => {
+    const { app } = await setup({ http: { rateLimitPerMinute: 10, trustedProxies: ['10.0.0.0/24'] } });
+    const from = (client: string) => ({ remoteAddress: '10.0.0.7', headers: { 'x-forwarded-for': client } });
+    expect(await afterRequests(app, 10, () => from('198.51.100.7'))).toBe(429);
+    expect((await app.inject({ url: '/health', ...from('203.0.113.9') })).statusCode).toBe(200);
+    expect((await app.inject({ url: '/health', ...from('198.51.100.7') })).statusCode).toBe(429);
+  });
+
   it('ignores the entries a client wrote before the one the trusted proxy added', async () => {
     const { app } = await setup({ http: { rateLimitPerMinute: 10, trustedProxies: ['10.0.0.1'] } });
     const status = await afterRequests(app, 10, (i) => ({

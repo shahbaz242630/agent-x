@@ -21,6 +21,15 @@
 // difference stays a finding. So an override that changes only those, followed
 // by a release, would pass as one: an older image of ours, and a release label.
 // A start doesn't move the job's change time.
+// **Its sharper half (AZ2c):** a job whose own template was changed (its command,
+// say), then started, runs as the job is, so no run differs. The migration job,
+// the one CI's release identity may write and start, is held besides, whole, to
+// what the apps.bicep of the build it names gives it beyond its image and build
+// (migrateHeld, read in a temporary worktree at that commit), and its build may
+// not be older than one its runs ran, nor than the last release GitHub recorded
+// for staging (anchor.ts: a roll-back); the other jobs only a person writes. **A known gap:** the API's revisions, the other record of what was
+// released, are beyond the watch's role (it reads jobs alone), so a roll-back of
+// the API is the release's to find (release.ts rolledBack), at its next run.
 // Azure keeps a job's last 100 runs: a full list still inside the window, or a
 // flood of runs, is a finding of its own. Nothing here stops a start: it only
 // makes one seen.
@@ -28,8 +37,20 @@
 // No setting's value is ever printed, nor a command or an argument: the
 // workflow's log is public. Each finding names the run, and the partner reads
 // the rest with `az containerapp job execution show`.
+import { type Anchor, anchorSaid, belowAnchor, lastRelease } from './anchor.ts';
 import { ARM, type Az, realAz, RESOURCE_GROUP, signedIn, text, UsageError } from './deploy.ts';
-import { jobName, JOBS_API, runCli } from './jobs.ts';
+import {
+  containersOf,
+  differences as templateDifferences,
+  expectedOf,
+  type Workload,
+  workloadDifferences,
+} from './drift.ts';
+import { type History, realHistory } from './git.ts';
+import { azureTime, historyProblems, inWindow, jobName, JOBS_API, runCli } from './jobs.ts';
+import { realTemplates, runningIn } from './release.ts';
+
+export { azureTime, HISTORY_KEPT, historyProblems } from './jobs.ts';
 
 /** How far back runs are read by default: twelve of the workflow's half-hourly runs, so a late cron or a short outage leaves no gap (a finding is then said more than once). */
 export const DEFAULT_HOURS = 6;
@@ -68,6 +89,8 @@ export interface DeployedJob {
   /** When the job last changed, in ms, or undefined when Azure didn't say. */
   readonly changedAt: number | undefined;
   readonly template: Template;
+  /** The job as Azure gave it, its identity and properties: what the migration job is held to apps.bicep by (AZ2c). */
+  readonly workload?: Workload;
 }
 
 export interface Run {
@@ -84,20 +107,6 @@ export type Verdict =
   | { readonly kind: 'clean-up' }
   | { readonly kind: 'not-comparable'; readonly differences: readonly string[] }
   | { readonly kind: 'changed'; readonly differences: readonly string[] };
-
-/**
- * A time Azure gave, in ms. `systemData` writes UTC with no zone and seven
- * decimals (`2026-11-10T13:02:02.4268454`), which JavaScript would read as
- * local time, so a time with no zone is taken as UTC.
- */
-export function azureTime(value: unknown): number | undefined {
-  const written = text(value);
-  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/.exec(written);
-  if (match === null) return undefined;
-  const [, seconds, fraction = '', zone = 'Z'] = match;
-  const at = Date.parse(`${seconds ?? ''}${fraction.slice(0, 4)}${zone}`);
-  return Number.isNaN(at) ? undefined : at;
-}
 
 const strings = (value: unknown): readonly string[] | undefined =>
   Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : undefined;
@@ -337,6 +346,7 @@ export function deployedJobs(az: Az, subscription: string): DeployedJob[] {
       const job = item as {
         name?: unknown;
         systemData?: { lastModifiedAt?: unknown };
+        identity?: unknown;
         properties?: { template?: unknown };
       };
       const name = text(job.name);
@@ -344,7 +354,8 @@ export function deployedJobs(az: Az, subscription: string): DeployedJob[] {
       if (!/^[a-z0-9-]+$/.test(name) || template === undefined) {
         throw new Error(`Azure listed a job "${name}" whose containers can't be read, so no run of it can be checked.`);
       }
-      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template };
+      const workload = { identity: job.identity, properties: job.properties };
+      return { name, changedAt: azureTime(job.systemData?.lastModifiedAt), template, workload };
     },
   );
 }
@@ -367,38 +378,6 @@ export function listedRuns(az: Az, subscription: string, job: string): Run[] {
   );
 }
 
-/** A run started at or after `since` (ms); one with no start time counts, since its age is unknown. */
-const inWindow = (run: Run, since: number): boolean => run.startedAt === undefined || run.startedAt >= since;
-
-/**
- * How many runs a job's history keeps: "the most recent 100" (learn.microsoft.com
- * /azure/container-apps/jobs, "Get job execution history"; staging's migration
- * job lists exactly 100). A list that full whose oldest run is still in the
- * window may have lost runs off its end, which are then never compared.
- */
-export const HISTORY_KEPT = 100;
-
-/** More runs of one job than this per three hours is a finding of its own: a flood could push an override off the history. */
-const BUSY_PER_THREE_HOURS = 20;
-
-/** Why a job's runs in the window can't be taken as all of them or as ordinary, a line each, or none. */
-export function historyProblems(listed: readonly Run[], since: number, hours: number): string[] {
-  const problems: string[] = [];
-  const recent = listed.filter((run) => inWindow(run, since)).length;
-  // The earliest start listed, in whatever order Azure lists them: before the window, and the window is whole.
-  const reachesBack = listed.some((run) => run.startedAt !== undefined && run.startedAt < since);
-  if (listed.length >= HISTORY_KEPT && !reachesBack) {
-    problems.push(
-      `the run history may be incomplete: Azure keeps ${String(HISTORY_KEPT)} runs, and all ${String(recent)} listed started in the window, so older runs in it may be gone unchecked`,
-    );
-  }
-  const most = Math.ceil((hours * BUSY_PER_THREE_HOURS) / 3);
-  if (recent > most) {
-    problems.push(`it ran ${String(recent)} times in ${String(hours)} h, more than the ${String(most)} ever expected`);
-  }
-  return problems;
-}
-
 /** How many hours back to read, or a UsageError. */
 export function parseArguments(argv: readonly string[]): number {
   if (argv.length === 0) return DEFAULT_HOURS;
@@ -412,14 +391,136 @@ export function parseArguments(argv: readonly string[]): number {
   return hours;
 }
 
+/**
+ * What holding the migration job to apps.bicep reads (AZ2c): the commit main is at, its history, and what the
+ * apps.bicep of any commit in it gives the release's workloads.
+ */
+export interface HeldSteps {
+  readonly history: Pick<History, 'mainline'>;
+  readonly templatesAt: (subscription: string, commit: string) => ReadonlyMap<string, unknown>;
+  /** The last release GitHub recorded for staging (anchor.ts). */
+  readonly anchor: () => Promise<Anchor>;
+}
+
+const realHeld = (): HeldSteps => {
+  const history = realHistory();
+  return {
+    history,
+    templatesAt: realTemplates,
+    anchor: () => lastRelease(process.env, (commit) => history.mainline().get(commit)),
+  };
+};
+
+/** What holding the migration job to apps.bicep found: lines said as they are, and findings. */
+interface Held {
+  readonly said: readonly string[];
+  readonly found: readonly string[];
+}
+
+const MIGRATE_JOB = jobName('migrate');
+
+/** Words on one line, so nothing in them can start a workflow command of its own in the log. */
+const oneLine = (words: string): string => words.replace(/[\r\n]+/g, ' ');
+
+/** A finding on the migration job as it is deployed, with what it means and what to do. */
+const heldFinding = (problem: string, lines: readonly string[]): Held => ({
+  said: [],
+  found: [
+    `FOUND: ${MIGRATE_JOB} isn't as the apps.bicep of the build it names has it, beyond its image and build: ${problem}`,
+    ...lines.map((line) => `  - ${line}`),
+    "  What it means: someone who may write the job (CI's release identity, or a person) changed it outside a deploy, and any start of it, ours included, runs that change with its secrets and its identity. A run compared with the job as it is now can't show it.",
+    '  What to do: treat it as a suspected breach (Incident-Response-Playbook section B; section T says how) until shown otherwise. Find who changed it in the activity log, then deploy it by hand with apps after checking who changed it, before anyone starts it.',
+  ],
+});
+
+/**
+ * AZ2c: the migration job itself (its container, and the rest of it: secrets, volumes, identity, trigger) held to what
+ * the apps.bicep of the build it names gives it, beyond its image and build, read from that commit in a temporary
+ * worktree. Its runs are compared with the job, so a job whose command was changed and then started looks as
+ * deployed; this is what shows that change. A build that isn't in main's history is a finding: every image a deploy
+ * may send was built on main, and so is a build older than one its runs ran (rolled back, even to an older commit's
+ * own signed image). The API isn't read: the watch's role reads the jobs alone, so its revisions, the release's other
+ * record, are the release's to hold.
+ */
+async function migrateHeld(
+  jobs: readonly DeployedJob[],
+  subscription: string,
+  steps: HeldSteps,
+  runs: readonly Run[],
+): Promise<Held> {
+  const job = jobs.find((each) => each.name === MIGRATE_JOB);
+  // No migration job (a new environment's first deploys): nothing a release could start.
+  if (job === undefined) return { said: [], found: [] };
+  try {
+    const running = runningIn('migrate', containersOf(job.workload));
+    // One read of main's line places every build (git.ts mainline): newer is nearer the tip.
+    const line = steps.history.mainline();
+    const place = (build: string): number | undefined => line.get(build);
+    const at = place(running.release);
+    if (at === undefined) {
+      return heldFinding(`it names its build ${running.release}, which isn't in main's history`, []);
+    }
+    const anchor = await steps.anchor();
+    const below = belowAnchor(anchor, { migrate: running.release }, place);
+    if (below.length > 0) return heldFinding(below.join('; '), []);
+    const unanchored = anchorSaid(anchor);
+    const ran = [
+      ...new Set(
+        runs.flatMap((run) =>
+          (run.template?.containers ?? [])
+            .flatMap((container) => container.env)
+            .filter((setting) => setting.name === 'AGENTX_RELEASE')
+            .map((setting) => String(setting.value)),
+        ),
+      ),
+    ];
+    // A run naming a build that isn't a commit here: no deploy starts one, so it is a finding, never an answer.
+    const strange = ran.filter((build) => place(build) === undefined);
+    if (strange.length > 0) {
+      return heldFinding(
+        `a run of it names a build that isn't in main's history (${strange.map(shown).join(', ')})`,
+        [],
+      );
+    }
+    const later = ran.find((build) => (place(build) ?? at) < at);
+    if (later !== undefined) {
+      return heldFinding(
+        `it names its build ${running.release}, older than ${later}, which a run of it ran: rolled back (if a person did it on purpose, deploy by hand a commit at least as new as ${later})`,
+        [],
+      );
+    }
+    const template = steps.templatesAt(subscription, running.release).get('migrate');
+    const bound = new Map<string, string>();
+    const said = [
+      ...templateDifferences(expectedOf(containersOf(template)), running.container, bound),
+      ...workloadDifferences('jobs', template, job.workload, bound),
+    ];
+    if (said.length > 0) return heldFinding('what differs is below, by name, never by value', said);
+    return {
+      said: [
+        ...(unanchored === undefined ? [] : [unanchored]),
+        `${MIGRATE_JOB} is as ${running.release}'s apps.bicep has it, beyond its image and build.`,
+      ],
+      found: [],
+    };
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    return heldFinding(
+      `it can't be compared (${oneLine(error.message.replaceAll(subscription, 'the subscription'))})`,
+      [],
+    );
+  }
+}
+
 export interface WatchSteps {
   readonly az: Az;
   readonly say: (line: string) => void;
   readonly now: () => Date;
+  readonly held: HeldSteps;
 }
 
 /** Reads every job's recent runs and says each that ran other containers: 1 when any did, else 0. */
-export function watch(hours: number, steps: WatchSteps): Promise<number> {
+export async function watch(hours: number, steps: WatchSteps): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
   const since = steps.now().getTime() - hours * 3_600_000;
   const jobs = deployedJobs(steps.az, subscription);
@@ -427,8 +528,10 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
     `Reading the runs of ${String(jobs.length)} jobs started since ${when(since)} (the last ${String(hours)} h).`,
   );
   const found: string[] = [];
+  let migrateRuns: readonly Run[] = [];
   for (const job of jobs) {
     const listed = listedRuns(steps.az, subscription, job.name);
+    if (job.name === MIGRATE_JOB) migrateRuns = listed;
     const problems = historyProblems(listed, since, hours);
     if (problems.length > 0) found.push(...historyLines(job, problems));
     for (const run of listed.filter((each) => inWindow(each, since))) {
@@ -453,12 +556,15 @@ export function watch(hours: number, steps: WatchSteps): Promise<number> {
       }
     }
   }
+  const held = await migrateHeld(jobs, subscription, steps.held, migrateRuns);
+  for (const line of held.said) steps.say(line);
+  found.push(...held.found);
   if (found.length === 0) {
     steps.say(`No run started since ${when(since)} ran other containers than its job's own.`);
-    return Promise.resolve(0);
+    return 0;
   }
   for (const line of found) steps.say(line);
-  return Promise.resolve(1);
+  return 1;
 }
 
 export function main(
@@ -466,12 +572,13 @@ export function main(
   say: (line: string) => void = console.log,
   az: () => Az = realAz,
   now: () => Date = () => new Date(),
+  held: () => HeldSteps = realHeld,
 ): Promise<number> {
   return runCli(
     USAGE,
     say,
     () => parseArguments(argv),
-    (hours) => watch(hours, { az: az(), say, now }),
+    (hours) => watch(hours, { az: az(), say, now, held: held() }),
   );
 }
 
