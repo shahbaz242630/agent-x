@@ -7,7 +7,7 @@
 // forward. So the release first holds each live container to what the commit's
 // own templates say, beyond the two things a release changes (the image and
 // AGENTX_RELEASE): its command, arguments, settings (names, and plain values; a
-// secret by the name it refers to), mounts and size.
+// secret by the name it refers to), mounts, size and probes.
 //
 // The expected container comes from the pinned Bicep's snapshot of
 // staging.apps.bicepparam in the real subscription (snapshot.ts), as `apps` would
@@ -29,6 +29,27 @@ import { deploymentSnapshot, inCopy } from './snapshot.ts';
 export type Setting =
   { readonly name: string; readonly value: string } | { readonly name: string; readonly secretRef: string };
 
+/** The kinds of health check Azure runs on a container, each at most once. */
+const PROBE_TYPES = ['Liveness', 'Readiness', 'Startup'] as const;
+
+/** A probe's timings, each a whole number of seconds or tries. */
+const PROBE_TIMINGS = [
+  'initialDelaySeconds',
+  'periodSeconds',
+  'timeoutSeconds',
+  'successThreshold',
+  'failureThreshold',
+] as const;
+
+/**
+ * One of a container's health checks (AZ8b), as apps.bicep sends it: a TCP connection to a port, and its timings.
+ * An HTTP check, or any other field, isn't one this tool reads.
+ */
+export type Probe = {
+  readonly type: (typeof PROBE_TYPES)[number];
+  readonly tcpSocket: { readonly port: number };
+} & Partial<Readonly<Record<(typeof PROBE_TIMINGS)[number], number>>>;
+
 /** A container as a release reads it from Azure (release.ts `Container`, which adds its name and image): the fields compared. */
 export interface LiveContainer {
   readonly command: readonly string[];
@@ -36,6 +57,8 @@ export interface LiveContainer {
   readonly env: readonly Setting[];
   readonly resources: { readonly cpu: number; readonly memory: string };
   readonly volumeMounts: readonly { readonly volumeName: string; readonly mountPath: string }[];
+  /** Left out when there are none, as Azure leaves them out, so a release sends back what it read. */
+  readonly probes?: readonly Probe[];
 }
 
 /** The settings a release writes itself (release.ts RELEASE_SETTING): its value is never compared. */
@@ -260,10 +283,55 @@ interface Expected {
   readonly env: ReadonlyMap<string, ExpectedSetting>;
   readonly resources: { readonly cpu: number; readonly memory: string };
   readonly volumeMounts: readonly { readonly volumeName: string; readonly mountPath: string }[];
+  readonly probes: readonly Probe[];
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Absent, as Azure writes it: null, an empty list or an empty object. */
+const absent = (value: unknown): boolean =>
+  value === undefined ||
+  value === null ||
+  (Array.isArray(value) && value.length === 0) ||
+  (isRecord(value) && Object.keys(value).length === 0);
+
+/** A record's fields with the absent ones (Azure's nulls) left out. */
+const present = (value: unknown): Readonly<Record<string, unknown>> =>
+  isRecord(value) ? Object.fromEntries(Object.entries(value).filter(([, field]) => !absent(field))) : {};
+
+const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0;
+
+/**
+ * A container's probes (AZ8b), each with only the fields given, or `refuse` saying why they can't be read: none when
+ * absent or empty, as Azure leaves them out; else each a kind at most once, a TCP port and whole-number timings. A
+ * field this tool doesn't know is refused, never guessed at, so a release never drops it.
+ */
+export function probesIn(value: unknown, refuse: (why: string) => never): Probe[] {
+  if (absent(value)) return [];
+  if (!Array.isArray(value)) return refuse('its probes are not a list');
+  const kinds = new Set<string>();
+  return value.map((entry): Probe => {
+    const { type, tcpSocket, ...timings } = present(entry);
+    const kind = PROBE_TYPES.find((known) => known === type);
+    if (kind === undefined || kinds.has(kind))
+      return refuse('a probe is not a liveness, readiness or startup one, once');
+    kinds.add(kind);
+    const { port, ...more } = present(tcpSocket);
+    if (!isCount(port) || Object.keys(more).length > 0) return refuse(`its ${kind} probe is not a TCP port alone`);
+    const odd = Object.keys(timings).filter(
+      (field) => !(PROBE_TIMINGS as readonly string[]).includes(field) || !isCount(timings[field]),
+    );
+    if (odd.length > 0) {
+      return refuse(`its ${kind} probe has ${odd.map(shown).join(', ')}, which this tool doesn't copy`);
+    }
+    return { type: kind, tcpSocket: { port }, ...(timings as Partial<Record<(typeof PROBE_TIMINGS)[number], number>>) };
+  });
+}
+
+/** Probes as one text, by kind and with keys in order, so the same checks read the same whatever order Azure gives. */
+const probesKey = (probes: readonly Probe[]): string =>
+  JSON.stringify(probes.toSorted((one, other) => one.type.localeCompare(other.type)).map(canonical));
 
 const wordsOf = (value: unknown, what: string): Part[][] => {
   if (value === undefined) return [];
@@ -280,7 +348,7 @@ export function expectedOf(containers: unknown): Expected {
   if (!Array.isArray(containers) || containers.length !== 1 || !isRecord(containers[0])) {
     throw new Error('the template must give exactly one container');
   }
-  const { command, args, env, resources, volumeMounts } = containers[0];
+  const { command, args, env, resources, volumeMounts, probes } = containers[0];
   const settings = new Map<string, ExpectedSetting>();
   for (const entry of Array.isArray(env) ? (env as unknown[]) : []) {
     const { name, value, secretRef } = isRecord(entry) ? entry : {};
@@ -304,6 +372,9 @@ export function expectedOf(containers: unknown): Expected {
     env: settings,
     resources: { cpu: size.cpu, memory: size.memory },
     volumeMounts: mounts,
+    probes: probesIn(probes, (why) => {
+      throw new Error(why);
+    }),
   };
 }
 
@@ -352,6 +423,7 @@ export function differences(expected: Expected, live: LiveContainer, bound: Boun
   }
   const mounts = (list: LiveContainer['volumeMounts']): string => list.map(mountKey).sort().join(' ');
   if (mounts(live.volumeMounts) !== mounts(expected.volumeMounts)) said.push('its mounts are not the template’s');
+  if (probesKey(live.probes ?? []) !== probesKey(expected.probes)) said.push('its probes are not the template’s');
   return said;
 }
 
@@ -392,6 +464,7 @@ export function deployable(
     }),
     resources: expected.resources,
     volumeMounts: expected.volumeMounts,
+    ...(expected.probes.length > 0 ? { probes: expected.probes } : {}),
   };
 }
 
@@ -409,13 +482,6 @@ const recordIn = (value: unknown, ...path: readonly string[]): Readonly<Record<s
 
 /** A workload's template's containers. */
 export const containersOf = (workload: unknown): unknown => recordIn(workload, 'properties', 'template').containers;
-
-/** Absent, as Azure writes it: null, an empty list or an empty object. */
-const absent = (value: unknown): boolean =>
-  value === undefined ||
-  value === null ||
-  (Array.isArray(value) && value.length === 0) ||
-  (isRecord(value) && Object.keys(value).length === 0);
 
 /** A value with every absent field left out and objects' keys in order, so Azure's nulls read as the snapshot's nothing. */
 function canonical(value: unknown): unknown {
