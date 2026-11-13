@@ -15,11 +15,11 @@
 //   Locked account can't be deleted until its last file's time is up
 // - shared keys off: every request signs in with Entra, so a leaked key reads
 //   nothing; no public blob access; no copying in from another tenant
-// - on the public route for now (decision 27, PL-43: a private endpoint before
-//   the first client or live), but requests only from the apps subnet, through
-//   its Storage service endpoint, as the key vault takes them. Nobody reads an
-//   export from a laptop or the portal: how one is handed over is decided
-//   separately (decision 28)
+// - off the public route (AZ11; decision 27, PL-43): reached only through its
+//   blob private endpoint in the network's endpoints subnet, which only the apps
+//   subnet may reach (network.bicep); the network rule below stays as a second
+//   lock. Nobody reads an export from a laptop or the portal: how one is handed
+//   over is decided separately (decision 28)
 // - the operator's identity may only add a new file to `audit-exports`
 //   (`blobs/add/action`): it can't read, overwrite or list. The identity of the
 //   app that holds the jobs (`anchorKeepers`, 4D2e D13) may add a new file to
@@ -50,6 +50,8 @@ param location string
 param name string
 param tags object
 param appsSubnetId string
+param endpointsSubnetId string
+param blobZoneId string
 param workspaceId string
 param writerIdentityName string
 
@@ -110,7 +112,7 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     isSftpEnabled: false
     isLocalUserEnabled: false
     isNfsV3Enabled: false
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     networkAcls: {
       defaultAction: 'Deny'
       bypass: 'None'
@@ -141,6 +143,45 @@ resource account 'Microsoft.Storage/storageAccounts@2025-01-01' = {
         allowProtectedAppendWrites: false
       }
     }
+  }
+}
+
+// The store's one way in (AZ11): its blob service at a private address in the endpoints subnet.
+resource endpoint 'Microsoft.Network/privateEndpoints@2025-01-01' = {
+  name: 'pe-${name}-blob'
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: endpointsSubnetId
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'blob'
+        properties: {
+          privateLinkServiceId: account.id
+          groupIds: [
+            'blob'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+// Azure keeps the endpoint's A record in the zone the network resolves through.
+resource endpointDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2025-01-01' = {
+  parent: endpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'blob'
+        properties: {
+          privateDnsZoneId: blobZoneId
+        }
+      }
+    ]
   }
 }
 
