@@ -137,6 +137,7 @@ const TYPES = {
   diagnostics: 'Microsoft.Insights/diagnosticSettings',
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
+  endpoint: 'Microsoft.Network/privateEndpoints',
   dnsPolicy: 'Microsoft.Network/dnsResolverPolicies',
   dnsPolicyRule: 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
   dnsPolicyLink: 'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
@@ -4856,9 +4857,14 @@ export const ALLOWED_TYPES: readonly string[] = [
   'Microsoft.Network/dnsResolverPolicies',
   'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
   'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
+  // Made by Azure for the audit-export store's private endpoint (AZ11), never by a deployment: `mustPass` holds it.
+  'Microsoft.Network/networkInterfaces',
   'Microsoft.Network/networkSecurityGroups',
   'Microsoft.Network/privateDnsZones',
   'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+  // AZ11's endpoint and its zone group, allowed a foundation before they land (as #627's alerts were).
+  'Microsoft.Network/privateEndpoints',
+  'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
   'Microsoft.Network/virtualNetworks',
   'Microsoft.OperationalInsights/workspaces',
   'Microsoft.OperationalInsights/workspaces/savedSearches',
@@ -4932,6 +4938,19 @@ function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
       apiVersion: '2026-01-01',
       location: 'global',
     },
+    // AZ11's endpoint before it is in the snapshot, and the interface Azure makes for it: regional, with tags.
+    ...(
+      [
+        [TYPES.endpoint, 'a private endpoint'],
+        ['Microsoft.Network/networkInterfaces', "a private endpoint's interface"],
+      ] as const
+    ).map(([type, name]) => ({
+      id: `${groupOf(snapshot)}/providers/${type}/coming`,
+      type,
+      name,
+      apiVersion: '2025-01-01',
+      location: text(ofType(snapshot, TYPES.group)[0]?.location),
+    })),
   ];
 }
 
