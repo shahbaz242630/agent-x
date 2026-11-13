@@ -671,4 +671,67 @@ export function main(
   );
 }
 
+/**
+ * A time Azure gave, in ms. `systemData` writes UTC with no zone and seven
+ * decimals (`2026-11-10T13:02:02.4268454`), which JavaScript would read as
+ * local time, so a time with no zone is taken as UTC.
+ */
+export function azureTime(value: unknown): number | undefined {
+  const written = text(value);
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/.exec(written);
+  if (match === null) return undefined;
+  const [, seconds, fraction = '', zone = 'Z'] = match;
+  const at = Date.parse(`${seconds ?? ''}${fraction.slice(0, 4)}${zone}`);
+  return Number.isNaN(at) ? undefined : at;
+}
+
+/** Something Azure keeps a history of, by when it started (a job's run) or was made (an app's revision). */
+interface Started {
+  readonly startedAt: number | undefined;
+}
+
+/** Started at or after `since` (ms); one with no time counts, since its age is unknown. */
+export const inWindow = (item: Started, since: number): boolean =>
+  item.startedAt === undefined || item.startedAt >= since;
+
+/**
+ * How many runs a job's history keeps: "the most recent 100" (learn.microsoft.com
+ * /azure/container-apps/jobs, "Get job execution history"; staging's migration
+ * job lists exactly 100); and an app's inactive revisions, 100 by default
+ * (learn.microsoft.com/azure/container-apps/revisions, "Inactive status"). A list
+ * that full whose oldest is still in the window may have lost some off its end,
+ * which are then never compared.
+ */
+export const HISTORY_KEPT = 100;
+
+/** More runs of one job than this per three hours is a finding of its own: a flood could push an override off the history. */
+const BUSY_PER_THREE_HOURS = 20;
+
+/**
+ * Why a history (a job's runs, or an app's revisions) in the window can't be
+ * taken as all of it or as ordinary, a line each, or none.
+ */
+export function historyProblems(
+  listed: readonly Started[],
+  since: number,
+  hours: number,
+  noun: 'run' | 'revision' = 'run',
+): string[] {
+  const problems: string[] = [];
+  const recent = listed.filter((item) => inWindow(item, since)).length;
+  // The earliest listed, in whatever order Azure lists them: before the window, and the window is whole.
+  const reachesBack = listed.some((item) => item.startedAt !== undefined && item.startedAt < since);
+  if (listed.length >= HISTORY_KEPT && !reachesBack) {
+    problems.push(
+      `the ${noun} history may be incomplete: Azure keeps ${String(HISTORY_KEPT)} ${noun}s, and all ${String(recent)} listed started in the window, so older ${noun}s in it may be gone unchecked`,
+    );
+  }
+  const most = Math.ceil((hours * BUSY_PER_THREE_HOURS) / 3);
+  if (recent > most) {
+    const many = noun === 'run' ? `it ran ${String(recent)} times` : `it made ${String(recent)} revisions`;
+    problems.push(`${many} in ${String(hours)} h, more than the ${String(most)} ever expected`);
+  }
+  return problems;
+}
+
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

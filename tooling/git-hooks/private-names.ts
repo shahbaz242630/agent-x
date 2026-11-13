@@ -17,7 +17,7 @@ export const PRIVATE_NAME_FINGERPRINTS: readonly string[] = [
 /** A word shaped like a domain: labels of letters, digits and dashes, joined by dots. */
 const DOMAIN_LIKE = /[\p{L}\p{Nd}-]+(?:\.[\p{L}\p{Nd}-]+)+/gu;
 
-const fingerprintOf = (name: string): string => createHash('sha256').update(name, 'utf8').digest('hex');
+export const fingerprintOf = (name: string): string => createHash('sha256').update(name, 'utf8').digest('hex');
 
 /** Whether a line names one of the private names: a domain-like word, or a parent of one, whose fingerprint is listed. */
 function names(line: string, fingerprints: ReadonlySet<string>): boolean {

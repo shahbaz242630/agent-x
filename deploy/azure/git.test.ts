@@ -2,13 +2,13 @@
 // made here. This machine's git settings (signing, hooks) are kept out of it:
 // they are for our own repository, not a fixture.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { realCheckout, realHistory } from './git.ts';
+import { atCommit, realCheckout, realHistory } from './git.ts';
 import { decide, HAND_DEPLOYED, runningIn, type Workload, WORKLOADS } from './release.ts';
 
 const MISSING = 'd'.repeat(40);
@@ -75,10 +75,14 @@ describe('the history', () => {
   });
 
   it('is an error, never an answer, when git cannot say', () => {
-    // A commit to compare with that it doesn't have.
-    expect(() => realHistory(repository).isAncestor(made.first, MISSING)).toThrow(
-      `git couldn't compare ${made.first} and ${MISSING}`,
-    );
+    // A commit to compare with that it doesn't have, or a name that isn't one, on either side: no ancestry, never a
+    // crash (AZ2c: a revision or run Azure keeps may name anything).
+    const history = realHistory(repository);
+    for (const odd of [MISSING, 'x\n::error::y', '--all', 'HEAD~99', '']) {
+      expect(history.isAncestor(made.first, odd), odd).toBe(false);
+      expect(history.isAncestor(odd, made.first), odd).toBe(false);
+    }
+    expect(history.isAncestor(made.first, made.first)).toBe(true);
     // A folder that isn't a repository.
     expect(() => realHistory(dir).isAncestor(made.first, made.bicep)).toThrow(`git couldn't look for ${made.first}`);
     expect(() => realHistory(dir).changedFiles(made.first, made.bicep)).toThrow(
@@ -182,5 +186,57 @@ describe('the checkout', () => {
     const nowhere = path.join(dir, 'nowhere');
     expect(() => realCheckout(nowhere)).toThrow("git couldn't be run:");
     expect(() => realHistory(nowhere).isAncestor(made.first, made.bicep)).toThrow("git couldn't be run:");
+  });
+});
+
+describe('main’s line, read once (AZ2c: the release places hundreds of builds on it)', () => {
+  it('places each commit by how far it is from the tip, newest 0, and refuses a shallow clone', () => {
+    const line = realHistory(repository).mainline();
+    expect(line.get(made.unusual)).toBe(0);
+    expect(line.get(made.first)).toBe(line.size - 1);
+    expect((line.get(made.tool) ?? 0) > (line.get(made.bicep) ?? 0)).toBe(true);
+    expect(line.get(MISSING)).toBeUndefined();
+    // From origin/main's tip where there is one, not HEAD.
+    git('update-ref', 'refs/remotes/origin/main', made.bicep);
+    try {
+      const fromMain = realHistory(repository).mainline();
+      expect(fromMain.get(made.bicep)).toBe(0);
+      expect(fromMain.has(made.unusual)).toBe(false);
+    } finally {
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+    }
+    const shallow = path.join(dir, 'shallow');
+    git('clone', '--quiet', '--depth', '1', `file://${repository.replaceAll('\\', '/')}`, shallow);
+    expect(() => realHistory(shallow).mainline()).toThrow(
+      "this clone is shallow, so main's history can't be read whole: check it out with its whole history (fetch-depth 0)",
+    );
+  });
+});
+
+describe('a folder as it is at a commit (AZ2c: the watch reads a build’s own apps.bicep)', () => {
+  it('holds that commit’s files alone, in a worktree removed after, whatever the reader does', () => {
+    expect(atCommit(made.bicep, 'deploy/azure', (at) => readdirSync(at).sort(), repository)).toEqual([
+      'apps.bicep',
+      'release.ts',
+    ]);
+    expect(atCommit(made.tool, 'deploy/azure', (at) => readdirSync(at), repository)).toEqual(['release.ts']);
+    expect(() =>
+      atCommit(
+        made.bicep,
+        'deploy/azure',
+        () => {
+          throw new Error('the reader failed');
+        },
+        repository,
+      ),
+    ).toThrow('the reader failed');
+    expect(() => atCommit(MISSING, 'deploy/azure', () => 'read', repository)).toThrow(
+      `git couldn't make a worktree at ${MISSING}`,
+    );
+    expect(() => atCommit(made.first, 'deploy/azure', () => 'read', repository)).toThrow(
+      `git couldn't check out deploy/azure at ${made.first}`,
+    );
+    // Every worktree made is gone: only the repository's own is left.
+    expect(git('worktree', 'list', '--porcelain').match(/^worktree /gm)).toHaveLength(1);
   });
 });

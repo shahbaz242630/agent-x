@@ -2614,8 +2614,15 @@ function realMigrations(az: Az, say: (line: string) => void): Migrations {
     state: async (subscription, host, commit) =>
       (await import('./migration-state.ts')).migrationState(az, history, subscription, host, commit),
     runFirst: async (subscription, commit, digest) => {
-      const { migrateFirst } = await import('./release.ts');
-      const steps = { az, history, say, now: () => new Date(), sleep: (ms: number) => sleepFor(ms) };
+      const { migrateFirst, realTemplates } = await import('./release.ts');
+      const steps = {
+        az,
+        history,
+        say,
+        now: () => new Date(),
+        sleep: (ms: number) => sleepFor(ms),
+        templates: realTemplates,
+      };
       await migrateFirst(steps, subscription, commit, digest);
     },
   };
