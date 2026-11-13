@@ -332,6 +332,25 @@ describe('what a workload runs', () => {
     expect(released(read, read.image, read.release).args).toEqual([]);
   });
 
+  it("copies the API's probes and sends them back whole, and sends no probes field where there are none (AZ8b)", () => {
+    const liveness = {
+      type: 'Liveness',
+      tcpSocket: { port: 8080 },
+      initialDelaySeconds: 1,
+      periodSeconds: 10,
+      timeoutSeconds: 5,
+      successThreshold: 1,
+      failureThreshold: 6,
+    };
+    // Azure's nulls are left out of what is sent back.
+    const read = running('api', { probes: [{ ...liveness, httpGet: null }] });
+    expect(read.container.probes).toEqual([liveness]);
+    expect(released(read, NEW_IMAGE, NEW).probes).toEqual([liveness]);
+    for (const none of [{}, { probes: null }, { probes: [] }]) {
+      expect('probes' in released(running('api', none), NEW_IMAGE, NEW)).toBe(false);
+    }
+  });
+
   it("refuses anything that isn't the workload a release knows, saying why, so it is deployed by hand", () => {
     const container = azureContainer('api');
     const env = container.env as readonly Record<string, unknown>[];
@@ -346,8 +365,12 @@ describe('what a workload runs', () => {
     refused([], 'it must run exactly one container');
     refused([container, container], 'it must run exactly one container');
     refused(container, 'it must run exactly one container');
-    // A field this tool doesn't copy, such as a probe it would drop.
-    refused(with_({ probes: [], stdin: true }), "its container has probes, stdin, which this tool doesn't copy");
+    // A field this tool doesn't copy, which it would drop; and a probe it can't read (drift.test.ts has each case).
+    refused(with_({ probes: [], stdin: true }), "its container has stdin, which this tool doesn't copy");
+    refused(
+      with_({ probes: [{ type: 'Liveness', httpGet: { path: '/health', port: 8080 } }] }),
+      'its Liveness probe is not a TCP port alone',
+    );
     refused(with_({ name: 'migrate' }), "its container isn't named api");
     // Another image, one whose name is as long as ours, a tag in place of a
     // digest, or a repository whose name only starts like ours.
@@ -1261,7 +1284,7 @@ describe('check', () => {
       checked(staging(NEW, NEW_IMAGE), history([NEW])),
       checked(staging(LATER), history([NEW, LATER])),
       checked(staging(OLD), history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] })),
-      checked({ ...staging(OLD), api: [azureContainer('api', { probes: [] })] }, history([OLD, NEW])),
+      checked({ ...staging(OLD), api: [azureContainer('api', { stdin: true })] }, history([OLD, NEW])),
     ]);
     for (const { said, error } of outcomes) {
       const printed = [...said, error instanceof Error ? error.message : ''].join('\n');

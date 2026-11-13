@@ -1386,6 +1386,53 @@ var jobsApp = {
   )
 }
 
+// The API's size (AZ8b), its heap three quarters of its memory (policy.ts holds it
+// between a half and three quarters): its rate limits' counters take up to about
+// 92 MB, and Node's own default under 1 GiB is 560 MiB (4D2e D12, measured). The
+// load run measures each copy at two CPUs (D2c). Production's copies run at 1 vCPU
+// and 2 GiB, Cost-Model's smallest safe set-up: staging's one 0.5 vCPU copy misses
+// probes under the weekly scan. Staging keeps the smallest pair the Consumption
+// profile offers above its minimum, as the jobs take.
+var apiSize = loadRun
+  ? {
+      cpu: '2'
+      memory: '4Gi'
+      heap: '3072'
+    }
+  : environment == 'production'
+      ? {
+          cpu: '1'
+          memory: '2Gi'
+          heap: '1536'
+        }
+      : {
+          cpu: '0.5'
+          memory: '1Gi'
+          heap: '768'
+        }
+
+// Production's liveness check on the API (AZ8b): a TCP connection to its port every
+// 10 s, given 5 s, the copy restarted only after six misses in a row (a minute), so
+// a busy spell never restarts a copy that is only slow. Every timing is pinned, so
+// what Azure gives back is what this sends, as the release holds the live app to
+// it (drift.ts). Readiness and startup stay Azure's defaults, as staging runs them;
+// staging sets none.
+var apiProbes = environment == 'production'
+  ? [
+      {
+        type: 'Liveness'
+        tcpSocket: {
+          port: 8080
+        }
+        initialDelaySeconds: 1
+        periodSeconds: 10
+        timeoutSeconds: 5
+        successThreshold: 1
+        failureThreshold: 6
+      }
+    ]
+  : null
+
 // The three apps that serve traffic (ADR-002 Amendment G2d), and the API's jobs
 // apart from it where it is split (`jobsApp`). Each is shaped
 // like a job above — the work it does, its image and command, what it reads as
@@ -1400,10 +1447,8 @@ var apps = concat([
     // The API (Product-Documentation/API.md), as the app role and no other.
     workload: 'api'
     image: appImage
-    // Its heap three quarters of its memory (policy.ts holds it between a half and
-    // three quarters): its rate limits' counters take up to about 92 MB, and
-    // Node's own default under 1 GiB is 560 MiB (4D2e D12, measured).
-    command: ['node', '--max-old-space-size=${loadRun ? '3072' : '768'}', 'apps/api/src/main.ts']
+    // Its heap as its size says (`apiSize`).
+    command: ['node', '--max-old-space-size=${apiSize.heap}', 'apps/api/src/main.ts']
     args: []
     targetPort: 8080
     transport: 'auto'
@@ -1431,10 +1476,9 @@ var apps = concat([
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.
     stopSeconds: 30
-    // The smallest pair the Consumption profile offers above its minimum, as
-    // the jobs take; the load run measures each copy at two CPUs (D2c).
-    cpu: loadRun ? '2' : '0.5'
-    memory: loadRun ? '4Gi' : '1Gi'
+    cpu: apiSize.cpu
+    memory: apiSize.memory
+    probes: apiProbes
     files: apiFiles
     settings: concat(
       appOurSettings,
@@ -1780,6 +1824,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
               cpu: json(app.cpu)
               memory: app.memory
             }
+            // Only the API's in production sets any (`apiProbes`); none is Azure's defaults.
+            probes: app.?probes
             env: concat(
               app.settings,
               map(filter(app.files, file => !empty(file.setting)), file => {

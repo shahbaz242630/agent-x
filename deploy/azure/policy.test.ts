@@ -7388,6 +7388,26 @@ describe('the load run (D2c, PL-38)', () => {
     const login = production.predictedResources.find(APP('login'));
     expect(at(login?.properties, 'template', 'scale')).toEqual({ minReplicas: 2, maxReplicas: 4 });
     expect(at(containerOf(login as unknown as Mutable), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    // The API's copies at 1 vCPU and 2 GiB, its heap three quarters of it, with its liveness probe pinned (AZ8b);
+    // staging's at 0.5 vCPU and 1 GiB, with none, as it has run.
+    const apiOf = (from: Snapshot): Mutable =>
+      containerOf(from.predictedResources.find(APP('api')) as unknown as Mutable);
+    expect(at(apiOf(production), 'resources')).toEqual({ cpu: 1, memory: '2Gi' });
+    expect(at(apiOf(production), 'command')).toContain('--max-old-space-size=1536');
+    expect(at(apiOf(production), 'probes')).toEqual([
+      {
+        type: 'Liveness',
+        tcpSocket: { port: 8080 },
+        initialDelaySeconds: 1,
+        periodSeconds: 10,
+        timeoutSeconds: 5,
+        successThreshold: 1,
+        failureThreshold: 6,
+      },
+    ]);
+    expect(at(apiOf(staging), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    expect(at(apiOf(staging), 'command')).toContain('--max-old-space-size=768');
+    expect(at(apiOf(staging), 'probes') ?? null).toBeNull();
     const problems = policyProblems(production, { region: 'uaenorth', environment: 'production' });
     expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs')).toEqual([]);
     // Its count at production's defaults (Azure.md): web 60, jobs 20, Zitadel 10 x (4 + 2), and two more.
