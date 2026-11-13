@@ -81,7 +81,7 @@ async function succeeded(id: number, base: string, read: (url: string) => Promis
 }
 
 /** The token the release and the watch are given to read deployments with: not GITHUB_TOKEN, which cosign and az would pick up. */
-export const TOKEN_VARIABLE = 'AGENTX_DEPLOYMENTS_TOKEN';
+const TOKEN_VARIABLE = 'AGENTX_DEPLOYMENTS_TOKEN';
 
 /**
  * The commits of the deployments to staging that succeeded and could be the anchor, reading every page to the end of
