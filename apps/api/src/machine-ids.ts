@@ -69,9 +69,12 @@ export const bodyOf = (machine: string): string => JSON.stringify({ machine });
 
 /**
  * The name whose answer's body hashes, in Zitadel's way, to the machine ID `id`; none
- * within `mostTries`. The body's fixed start is hashed once, each try only its tail.
+ * within `mostTries`, and none at once for anything but a 16-bit whole number, which no
+ * hash's low 16 bits could equal (the search would only spin to its cap). The body's
+ * fixed start is hashed once, each try only its tail.
  */
 export function machineNameFor(id: number, mostTries: number = MOST_TRIES): string | undefined {
+  if (!Number.isInteger(id) || id < 0 || id > MOST_ID) return undefined;
   const name = (tries: number): string => `agentx-${String(id)}-${String(tries)}`;
   // `{"machine":"agentx-<id>-`: the body up to the try's number.
   const start = fnv1Of(bodyOf(name(0)).slice(0, -'0"}'.length));
@@ -114,8 +117,7 @@ export function registerMachineIds(app: FastifyInstance, machineIds: MachineIds 
       }
       const log = logger.child({ correlationId: request.id });
       const id = await machineIds.next();
-      const machine =
-        id !== undefined && Number.isInteger(id) && id >= 0 && id <= MOST_ID ? machineNameFor(id) : undefined;
+      const machine = id === undefined ? undefined : machineNameFor(id);
       if (machine === undefined) {
         // Zitadel's process panics on this answer and its container starts again, asking again.
         log.error(MACHINE_ID_FAILED, { id });

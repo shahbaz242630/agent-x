@@ -48,6 +48,18 @@ describe('the name for a machine ID', () => {
     }
   });
 
+  it('starts at the first try: 14359 fits at k = 0 (Go 1.25.5 hash/fnv New32 of its body: d6f3817)', () => {
+    expect(machineNameFor(14_359)).toBe('agentx-14359-0');
+    expect(fnv1Of(bodyOf('agentx-14359-0'))).toBe(0x0d_6f_38_17);
+  });
+
+  it('is none at once for anything but a 16-bit whole number, never a search to the cap', () => {
+    // An endless cap: without the check, each of these would spin for ever and time the test out.
+    for (const id of [-1, 65_536, 1.5, Number.NaN]) {
+      expect({ id, name: machineNameFor(id, Number.POSITIVE_INFINITY) }).toEqual({ id, name: undefined });
+    }
+  });
+
   it('is none once the tries run out, and the cap leaves room many times the one in 65,536 needed', () => {
     // agentx-0's first fit is its 66,366th try (above).
     expect(machineNameFor(0, 66_366)).toBeUndefined();
