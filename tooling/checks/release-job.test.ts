@@ -1,6 +1,7 @@
-// CI's release to staging (G4; ADR-002 "Deploying"): the one job that signs in
-// to Azure. What keeps it narrow is held here: it runs only on a push to main,
-// after the image is published and attested, in GitHub's `staging` environment
+// The release to staging (G4; ADR-002 "Deploying"): the one job that signs in
+// to Azure as CI's identity. What keeps it narrow is held here: it runs only on
+// a push to main, in a workflow nothing else starts (AZ2d), after CI's image of
+// the commit is published and attested, in GitHub's `staging` environment
 // (the only subject Azure trusts, and only main may use it), one at a time,
 // with no permission but reading the code and asking for Azure's token, and
 // with nothing of Azure's printed. It releases (G4-4c): the image checked, the
@@ -11,9 +12,11 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+import { ATTEST_JOB, DIGEST_ARTIFACT, RELEASE_WORKFLOW } from '../../deploy/image/published.ts';
 import { SIGNING_WORKFLOW } from '../../deploy/image/verify.ts';
 
 interface Step {
+  id?: string;
   name?: string;
   uses?: string;
   run?: string;
@@ -31,6 +34,7 @@ interface Job {
   environment?: unknown;
   concurrency?: unknown;
   permissions?: Record<string, string>;
+  outputs?: Record<string, string>;
   steps?: Step[];
 }
 
@@ -43,11 +47,15 @@ const workflows = readdirSync(WORKFLOW_DIR)
   }))
   .map(({ file, text }) => ({ file, text, jobs: (parse(text) as { jobs: Record<string, Job> }).jobs }));
 
+const releaseFile = workflows.find(({ file }) => file === RELEASE_WORKFLOW);
+if (releaseFile === undefined) throw new Error(`${RELEASE_WORKFLOW} is missing`);
+const release = releaseFile.jobs.release;
+if (release === undefined) throw new Error(`${RELEASE_WORKFLOW} has no release job`);
+const steps = release.steps ?? [];
+const ciImage = releaseFile.jobs['ci-image'];
+if (ciImage === undefined) throw new Error(`${RELEASE_WORKFLOW} has no ci-image job`);
 const ci = workflows.find(({ file }) => file === SIGNING_WORKFLOW);
 if (ci === undefined) throw new Error(`${SIGNING_WORKFLOW} is missing`);
-const release = ci.jobs.release;
-if (release === undefined) throw new Error(`${SIGNING_WORKFLOW} has no release job`);
-const steps = release.steps ?? [];
 
 const AZURE_LOGIN = /^azure\/login@[0-9a-f]{40}$/;
 
@@ -61,18 +69,20 @@ describe('the release job', () => {
         .filter(([, job]) => job.environment !== undefined)
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(naming).toEqual([`${SIGNING_WORKFLOW}: release`]);
+    expect(naming).toEqual([`${RELEASE_WORKFLOW}: release`]);
     const signingIn = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(signingIn).toEqual([`${SIGNING_WORKFLOW}: release`, `${WATCH_WORKFLOW}: watch`]);
+    expect(signingIn.sort()).toEqual([`${WATCH_WORKFLOW}: watch`, `${RELEASE_WORKFLOW}: release`]);
   });
 
-  it('runs only on a push to main, after the image is published and attested, in the staging environment', () => {
+  it('runs only on a push to main, after CI’s image is published and attested, in the staging environment', () => {
+    // A workflow that runs on nothing but a push to main, so it may read the environment's secrets (AZ2d).
+    expect((parse(releaseFile.text) as { on: unknown }).on).toEqual({ push: { branches: ['main'] } });
     expect(release.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect([release.needs ?? []].flat().sort()).toEqual(['image-attest', 'image-publish']);
+    expect([release.needs ?? []].flat()).toEqual(['ci-image']);
     // Azure trusts a job in this environment, which only main may use (the handoff: read back S23).
     expect(release.environment).toBe('staging');
   });
@@ -119,20 +129,25 @@ describe('the release job', () => {
       'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
       'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
     });
-    // No secret at all: a client secret or certificate would be one to leak, and the workflow runs on pull_request,
-    // where none may be named (the three AZ2c pins wait for a push-only release workflow, AZ2d).
-    expect(JSON.stringify(release)).not.toMatch(/secrets\./);
+    // No stored credential: a client secret or certificate would be one to leak. The job's only secrets are the
+    // three pins, given to the release step alone (below).
+    const named = [...JSON.stringify(release).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
+    expect(named.sort()).toEqual(['AGENTX_APP_HOST_SHA256', 'AGENTX_AUTH_HOST_SHA256', 'AGENTX_OIDC_CLIENT_ID_SHA256']);
   });
 
-  it('releases the commit it runs for, with the digest the image job published, and signs out whatever happens', () => {
-    const releasing = steps.filter((step) => step.run?.startsWith('node deploy/azure/release.ts ') === true);
-    expect(releasing).toEqual([
+  it('releases the commit it runs for, with the digest CI’s image job left, the three pins, and signs out whatever happens', () => {
+    const releaseSteps = steps.filter((step) => step.run?.startsWith('node deploy/azure/release.ts ') === true);
+    expect(releaseSteps).toEqual([
       {
         name: 'Release this commit to staging',
         env: {
           COMMIT: '${{ github.sha }}',
-          DIGEST: '${{ needs.image-publish.outputs.digest }}',
+          DIGEST: '${{ needs.ci-image.outputs.digest }}',
           AGENTX_DEPLOYMENTS_TOKEN: '${{ github.token }}',
+          // Each pin by the name release.ts reads it by (PINS); an empty one is held to shape alone.
+          AGENTX_AUTH_HOST_SHA256: '${{ secrets.AGENTX_AUTH_HOST_SHA256 }}',
+          AGENTX_APP_HOST_SHA256: '${{ secrets.AGENTX_APP_HOST_SHA256 }}',
+          AGENTX_OIDC_CLIENT_ID_SHA256: '${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}',
         },
         run: 'node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"',
       },
@@ -154,6 +169,74 @@ describe('the release job', () => {
 
   it('has an end past every wait of the release, within the sign-in token’s life', () => {
     expect(release['timeout-minutes']).toBe(60);
+  });
+});
+
+// AZ2d: the release can't `need` CI's image jobs from a workflow of its own, so
+// a first job waits for them (deploy/image/published.ts) and hands on the
+// digest CI's last image job left, once every check of that run had passed.
+describe('the wait for CI’s image', () => {
+  const waitSteps = ciImage.steps ?? [];
+  const ciJobs = ci.jobs;
+
+  it('runs only on a push to main, can only read, and has an end past the wait’s own', () => {
+    expect(ciImage.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(ciImage.permissions).toEqual({ contents: 'read', actions: 'read' });
+    expect(ciImage.environment).toBeUndefined();
+    expect(ciImage['timeout-minutes']).toBe(160);
+    expect(JSON.stringify(ciImage)).not.toMatch(/secrets\./);
+  });
+
+  it('waits for CI’s run of this commit, then downloads the digest from that run alone and checks its shape', () => {
+    expect(waitSteps.map((step) => step.uses?.replace(/@.*/, '') ?? 'run')).toEqual([
+      'actions/checkout',
+      'actions/setup-node',
+      'run',
+      'actions/download-artifact',
+      'run',
+    ]);
+    expect(waitSteps[0]?.with).toEqual({ 'persist-credentials': false });
+    expect(waitSteps[2]).toMatchObject({
+      id: 'ci',
+      env: { COMMIT: '${{ github.sha }}', AGENTX_ACTIONS_TOKEN: '${{ github.token }}' },
+      run: 'node deploy/image/published.ts "${COMMIT}"',
+    });
+    expect(waitSteps[3]?.with).toEqual({
+      name: DIGEST_ARTIFACT,
+      path: DIGEST_ARTIFACT,
+      'run-id': '${{ steps.ci.outputs.run-id }}',
+      'github-token': '${{ github.token }}',
+    });
+    expect(waitSteps[4]?.run).toContain(`digest="$(cat ${DIGEST_ARTIFACT}/digest)"`);
+    expect(waitSteps[4]?.run).toContain('if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then');
+    expect(ciImage.outputs).toEqual({ digest: '${{ steps.digest.outputs.digest }}' });
+  });
+
+  it('reads the digest CI’s last image job leaves, as its last step before logging out, once every check has passed', () => {
+    const attest = ciJobs['image-attest'];
+    expect(attest?.name).toBe(ATTEST_JOB);
+    const attestSteps = attest?.steps ?? [];
+    const upload = attestSteps.findIndex((step) => step.uses?.startsWith('actions/upload-artifact@') === true);
+    expect(attestSteps[upload]?.with).toEqual({
+      name: DIGEST_ARTIFACT,
+      path: `${DIGEST_ARTIFACT}/digest`,
+      'if-no-files-found': 'error',
+      'retention-days': 30,
+    });
+    expect(attestSteps[upload - 1]).toEqual({
+      name: 'Hand the digest to the release',
+      env: { DIGEST: '${{ needs.image-publish.outputs.digest }}' },
+      run: `mkdir -p ${DIGEST_ARTIFACT}\necho "\${DIGEST}" > ${DIGEST_ARTIFACT}/digest\n`,
+    });
+    expect(upload).toBe(attestSteps.length - 2);
+    // Every check of the image comes before it.
+    const lastCheck = attestSteps.findLastIndex((step) => step.run?.includes('node deploy/image/verify.ts') === true);
+    expect(lastCheck).toBeLessThan(upload - 1);
+  });
+
+  it('leaves CI with no release, prune or job in an environment: they live in the release workflow alone', () => {
+    for (const name of ['release', 'image-prune', 'image-kept-verify']) expect(ciJobs[name]).toBeUndefined();
+    expect(Object.keys(releaseFile.jobs)).toEqual(['ci-image', 'release', 'image-prune', 'image-kept-verify']);
   });
 });
 
