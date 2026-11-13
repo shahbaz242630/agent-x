@@ -8,9 +8,6 @@
 // its path or method, before the console's files or any route. Every other
 // host (the app host, the internal one) is left alone.
 
-/** The ports a browser leaves out of Host for each scheme. */
-const DEFAULT_PORTS: ReadonlySet<string> = new Set(['', '80', '443']);
-
 /** A Host header's host name, lower case, without a trailing dot, and its port ('' for none); undefined if it isn't one. */
 function hostOf(host: string): { readonly name: string; readonly port: string } | undefined {
   try {
@@ -25,11 +22,12 @@ function hostOf(host: string): { readonly name: string; readonly port: string } 
 
 /**
  * Whether a request's Host names the login service's public host, given its
- * origin (the OIDC issuer); never, without one. The host name in any case; a
- * port only where the issuer names one, so a local run's login service on
- * another port of localhost (http://localhost:8081) leaves the API's own
- * (localhost:8080) alone. An issuer on its scheme's own port matches a Host
- * with none, or with 80 or 443.
+ * origin (the OIDC issuer); never, without one. The host name in any case,
+ * on any port where the issuer names none: Azure's edge may match the door's
+ * host whatever port a client wrote, so `auth.host:8443` is the login host
+ * too. A port only where the issuer names one, so a local run's login service
+ * on another port of localhost (http://localhost:8081) leaves the API's own
+ * (localhost:8080) alone.
  */
 export function loginHostCheck(issuer: string | undefined): (host: string | undefined) => boolean {
   if (issuer === undefined) return () => false;
@@ -38,6 +36,6 @@ export function loginHostCheck(issuer: string | undefined): (host: string | unde
   return (host) => {
     const found = host === undefined ? undefined : hostOf(host);
     if (found?.name !== name) return false;
-    return login.port === '' ? DEFAULT_PORTS.has(found.port) : found.port === login.port;
+    return login.port === '' || found.port === login.port;
   };
 }

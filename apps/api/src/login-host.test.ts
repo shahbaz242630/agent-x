@@ -29,19 +29,21 @@ afterEach(async () => {
 describe('which hosts are the login service’s (SA1)', () => {
   const isLogin = loginHostCheck(LOGIN_ORIGIN);
 
-  it('is its host in any case, with a trailing dot, with no port or its scheme’s own', () => {
+  it('is its host in any case, with a trailing dot, on any port, where the issuer names none', () => {
     for (const host of [
       'auth.agentx.example',
       'AUTH.AgentX.Example',
       'auth.agentx.example.',
       'auth.agentx.example:443',
       'auth.agentx.example:80',
+      // Azure's edge may match the door's host whatever the port.
+      'auth.agentx.example:8443',
     ]) {
       expect(isLogin(host), host).toBe(true);
     }
   });
 
-  it('is never another host, another port, no host, or a Host that isn’t a plain host', () => {
+  it('is never another host, no host, or a Host that isn’t a plain host', () => {
     for (const host of [
       undefined,
       '',
@@ -49,7 +51,6 @@ describe('which hosts are the login service’s (SA1)', () => {
       'ca-agentx-stg-api.internal.example',
       'auth.agentx.example.evil',
       'xauth.agentx.example',
-      'auth.agentx.example:8443',
       'auth.agentx.example/x',
       'user@auth.agentx.example',
       'auth.agentx.example?x',
@@ -66,6 +67,7 @@ describe('which hosts are the login service’s (SA1)', () => {
     expect(local('LOCALHOST:8081')).toBe(true);
     expect(local('localhost:8080')).toBe(false);
     expect(local('localhost')).toBe(false);
+    expect(local('localhost:443')).toBe(false);
   });
 
   it('is nothing at all without an issuer: sign-in is off', () => {
@@ -98,7 +100,7 @@ describe('the login service’s host on the API (SA1)', () => {
 
   it('answers every path, read or write, with the plain 404, whatever the Host’s case or port', async () => {
     const app = await routeServer({ loginOrigin: LOGIN_ORIGIN });
-    for (const host of ['auth.agentx.example', 'AUTH.agentx.EXAMPLE:443']) {
+    for (const host of ['auth.agentx.example', 'AUTH.agentx.EXAMPLE:443', 'auth.agentx.example:8443']) {
       for (const path of PATHS) {
         expectPlain404(await app.inject({ url: path, headers: { host } }), `${host}${path}`);
       }
