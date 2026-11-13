@@ -174,7 +174,7 @@ export function belowAnchor(
   const at = place(anchor.commit);
   if (at === undefined) {
     return [
-      `the last release GitHub recorded (${anchor.commit}) isn't on main's line here, so nothing can be held to it: check out main's whole history (fetch-depth 0) and run this again`,
+      `the last release GitHub recorded (${anchor.commit}) isn't on main's line: if this checkout is shallow, check out main's whole history (fetch-depth 0) and run again; if main's history was rewritten, or a deployment record was made by hand, that GitHub deployment must be deleted (Incident-Response-Playbook section V), a suspected breach until explained`,
     ];
   }
   return Object.entries(builds)

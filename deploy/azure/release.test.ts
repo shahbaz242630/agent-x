@@ -2887,7 +2887,7 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     const elsewhere = await anchored(() => Promise.resolve({ kind: 'release', commit: 'f'.repeat(40) }));
     expect(elsewhere.status).toBe(1);
     expect(elsewhere.said).toContain(
-      `  the last release GitHub recorded (${'f'.repeat(40)}) isn't on main's line here, so nothing can be held to it: check out main's whole history (fetch-depth 0) and run this again`,
+      `  the last release GitHub recorded (${'f'.repeat(40)}) isn't on main's line: if this checkout is shallow, check out main's whole history (fetch-depth 0) and run again; if main's history was rewritten, or a deployment record was made by hand, that GitHub deployment must be deleted (Incident-Response-Playbook section V), a suspected breach until explained`,
     );
     // A workload whose build isn't on main's line here can't be placed: red, naming the fetch.
     const lineless = new Staging();
