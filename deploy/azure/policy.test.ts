@@ -542,6 +542,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'apiOidcClientSecret',
       'directoryToken',
       'resetToken',
+      'ourActors',
+      'ourServiceUsers',
       'appKeyValues',
     ]);
     for (const [environment, { together }] of deployed) {
@@ -812,6 +814,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `api-oidc-client-secret ${givenOnly('apiOidcClientSecret')}`,
       `zitadel-directory-token ${givenOnly('directoryToken')}`,
       `zitadel-reset-token ${givenOnly('resetToken')}`,
+      `zitadel-our-actors ${givenOnly('ourActors')}`,
+      `zitadel-our-service-users ${givenOnly('ourServiceUsers')}`,
       'zitadel-masterkey once',
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
@@ -849,6 +853,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'jobs reads zitadel-directory-token',
         'api reads zitadel-reset-token',
         'jobs reads zitadel-reset-token',
+        // SA2b: who makes our own routine changes in the login service, and for whom.
+        'api reads zitadel-our-actors',
+        'jobs reads zitadel-our-actors',
+        'api reads zitadel-our-service-users',
+        'jobs reads zitadel-our-service-users',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
@@ -881,7 +890,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(14);
+    expect(variables).toHaveLength(16);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
@@ -890,8 +899,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      // Fourteen written when given, each key, and the operator's keys' public halves (PL-57, E11).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(14 + APP_KEYS.length + 2);
+      // Sixteen written when given (our login lists among them, SA2b), each key, and the operator's keys' public
+      // halves (PL-57, E11).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(16 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -6382,6 +6392,50 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ).toEqual([
       "job-agentx-stg-chain-restore [workload-secrets] is given db-app-password, which GRANTS doesn't let chain-restore read",
     ]);
+  });
+
+  it('workload-secrets: our login IDs reach the API only from the vault, never as a value in the deployment (SA2b)', () => {
+    // As staging deploys it: both lists mounted from the vault, by the _FILE settings alone.
+    const api = staging.predictedResources.find(APP('api'));
+    expect(JSON.stringify(api)).toContain('AGENTX_IDP_OUR_ACTORS_FILE');
+    expect(JSON.stringify(api)).toContain('AGENTX_IDP_OUR_SERVICE_USERS_FILE');
+    for (const name of ['AGENTX_IDP_OUR_ACTORS', 'AGENTX_IDP_OUR_SERVICE_USERS']) {
+      const literal = changed(APP('api'), (app) => {
+        setSetting(app, name, '900000000000000001');
+      });
+      expect(brokenRules(literal)).toEqual(['workload-secrets']);
+      expect(policyProblems(literal, STAGING).map(describeProblem)).toEqual([
+        `ca-agentx-stg-api [workload-secrets] sets ${name} in the deployment, where anyone reading it sees it; mount it from the vault as ${name}_FILE`,
+      ]);
+    }
+    const setsOurs = (resource: string): string =>
+      `${resource} [workload-secrets] sets AGENTX_IDP_OUR_ACTORS in the deployment, where anyone reading it sees it; mount it from the vault as AGENTX_IDP_OUR_ACTORS_FILE`;
+    // The API's jobs app, where the API is split (4D2e D13), and any job.
+    const split = splitTheApi(structuredClone(staging));
+    const onJobsApp = changed(
+      APP('jobs'),
+      (app) => {
+        setSetting(app, 'AGENTX_IDP_OUR_ACTORS', '900000000000000001');
+      },
+      split,
+    );
+    // Only what workload-secrets says: the split alone leaves other rules to weigh (the anchors' role), not this one.
+    const secretsSaid = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter(({ rule }) => rule === 'workload-secrets')
+        .map(describeProblem);
+    expect(secretsSaid(split)).toEqual([]);
+    expect(secretsSaid(onJobsApp)).toEqual([setsOurs('ca-agentx-stg-jobs')]);
+    const onJob = changed(JOB('migrate'), (job) => {
+      setSetting(job, 'AGENTX_IDP_OUR_ACTORS', '900000000000000001');
+    });
+    expect(policyProblems(onJob, STAGING).map(describeProblem)).toEqual([setsOurs('job-agentx-stg-migrate')]);
+    // From a secret in the environment rather than a value: refused all the same, the file form alone.
+    const fromSecret = changed(APP('api'), (app) => {
+      settingsOf(app).push({ name: 'AGENTX_IDP_OUR_ACTORS', secretRef: 'zitadel-our-actors' });
+    });
+    expect(brokenRules(fromSecret)).toEqual(['workload-secrets']);
+    expect(policyProblems(fromSecret, STAGING).map(describeProblem)).toContain(setsOurs('ca-agentx-stg-api'));
   });
 
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {
