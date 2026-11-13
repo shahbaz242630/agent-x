@@ -654,7 +654,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_lock_waits$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/deadlock_timeout$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/metrics\.collector_database_activity$/),
-      'Microsoft.Authorization/locks keep-live-database',
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -795,6 +794,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Consumption/budgets budget-agentx-staging',
       // The evidence store's four, the activity downloads', CI's and the job watch's.
       ...Array.from({ length: 7 }, (): unknown => role),
+      // The live server's delete lock (S185), which CI may neither write nor lift.
+      'Microsoft.Authorization/locks keep-live-database',
       // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
         ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
@@ -814,6 +815,25 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
           ) || resource.name === 'activity-log-to-workspace',
       );
     expect(elsewhere).toEqual([]);
+  });
+
+  // Review S190: CI's infrastructure identity holds Contributor and conditional grants alone, which write no
+  // role definition, policy, lock or exemption: a deployment CI sends holding one would fail part-way.
+  it("lets nothing CI may send (foundation, secrets, apps) write Azure's authorization but a grant", () => {
+    const sent = ['staging.bicepparam', 'staging.secrets.bicepparam', 'staging.apps.bicepparam'];
+    for (const file of sent) {
+      const authorization = stagingPart(file)
+        .predictedResources.filter((resource) => resource.type.toLowerCase().startsWith('microsoft.authorization/'))
+        .map((resource) => resource.type);
+      expect({ file, types: [...new Set(authorization)] }).toEqual({
+        file,
+        types: authorization.length === 0 ? [] : ['Microsoft.Authorization/roleAssignments'],
+      });
+    }
+    // And the lock that keeps the live server is there, in access.
+    expect(
+      stagingPart('staging.access.bicepparam').predictedResources.filter(type('Microsoft.Authorization/locks')),
+    ).toHaveLength(1);
   });
 
   it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {

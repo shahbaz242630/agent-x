@@ -4222,7 +4222,7 @@ const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
  * so it reads none. Nothing else in the deployment grants access (ACCESS_TYPE).
  */
 /**
- * A lock grants nothing: `CanNotDelete` only makes Azure refuse a delete (the live server's, postgres.bicep, S185). Any
+ * A lock grants nothing: `CanNotDelete` only makes Azure refuse a delete (the live server's, modules/server-lock.bicep, S185). Any
  * other level (`ReadOnly` would stop the server's own writes and key reads) stays refused as an unread access type.
  */
 const deleteLock = (resource: PredictedResource): boolean =>

@@ -248,6 +248,60 @@ const SHOWN_LEAVES = 12;
  * What a what-if changes, in words: each resource, and the paths of its values, with the values themselves where a
  * reviewer must see them (leafLine). A new security-relevant resource is shown value by value too.
  */
+/** A what-if's resource as it reads it: its ID, Azure's word for the change, and its body after or before. */
+interface WhatIfChange {
+  readonly resourceId?: unknown;
+  readonly changeType?: unknown;
+  readonly before?: unknown;
+  readonly after?: unknown;
+}
+
+const IDENTITY = /\/providers\/Microsoft\.ManagedIdentity\/userAssignedIdentities\/([^/]+)$/i;
+const TRUST = /\/userAssignedIdentities\/([^/]+)\/federatedIdentityCredentials\/[^/]+$/i;
+const GRANT = /\/providers\/Microsoft\.Authorization\/roleAssignments\/[^/]+$/i;
+
+/** A body's `properties.<field>`, as text. */
+const propertyOf = (body: unknown, field: string): string =>
+  text((body as { properties?: Record<string, unknown> } | null)?.properties?.[field]);
+
+/** Who a grant is to, in words: an identity of this deployment by name, one it makes, or an existing principal. */
+function grantee(change: WhatIfChange, ours: ReadonlyMap<string, string>): string {
+  const principal = propertyOf(change.after, 'principalId') || propertyOf(change.before, 'principalId');
+  const known = ours.get(principal);
+  if (known !== undefined) return `grant to ${known}, an identity of this deployment`;
+  // An identity made by this same deployment has no ID until it exists: what-if leaves the expression.
+  if (principal.startsWith('[')) return 'grant to an identity this deployment makes';
+  return "grant to an existing principal this deployment doesn't make (<id>)";
+}
+
+/**
+ * Who each changed grant and trust is for (review S190), so the partner sees it before Approve: a grant to an identity
+ * this deployment holds is named; any other is flagged as a grant to an existing principal, which the deployment
+ * doesn't make. A trust on an identity this deployment doesn't hold is flagged the same way. Unchanged ones are none.
+ */
+export function describeGrants(result: unknown): string[] {
+  const changes = (result as { changes?: unknown } | null)?.changes;
+  const all: readonly WhatIfChange[] = Array.isArray(changes) ? (changes as WhatIfChange[]) : [];
+  const ours = new Map<string, string>();
+  for (const change of all) {
+    const name = IDENTITY.exec(text(change.resourceId))?.[1];
+    const principal = propertyOf(change.after, 'principalId') || propertyOf(change.before, 'principalId');
+    if (name === undefined) continue;
+    ours.set(`name:${name.toLowerCase()}`, name);
+    if (principal !== '') ours.set(principal, name);
+  }
+  const lines: string[] = [];
+  for (const change of all.filter((each) => !['NoChange', 'Ignore'].includes(text(each.changeType)))) {
+    const id = text(change.resourceId);
+    if (GRANT.test(id)) lines.push(`  ${text(change.changeType)} ${grantee(change, ours)}: ${local(id)}`);
+    const trusted = TRUST.exec(id)?.[1];
+    if (trusted !== undefined && !ours.has(`name:${trusted.toLowerCase()}`)) {
+      lines.push(`  ${text(change.changeType)} trust on an existing identity this deployment doesn't make: ${trusted}`);
+    }
+  }
+  return lines.length === 0 ? [] : ['Who the changed grants and trusts are for:', ...lines];
+}
+
 export function describeShape(part: Sent, shape: readonly Changed[]): string[] {
   if (shape.length === 0) return [`${part}: Azure's what-if shows no change.`];
   const lines = [`${part}: Azure's what-if shows ${String(shape.length)} resource(s) changing:`];
@@ -319,8 +373,9 @@ export function unattendedAz(
         say(`Azure's what-if of ${part} failed (${azureRefusal(asked.stderr)}): ${part} was not sent.`);
         return 1;
       }
-      const shape = whatIfShape(JSON.parse(asked.stdout));
-      for (const line of describeShape(part, shape)) say(line);
+      const result: unknown = JSON.parse(asked.stdout);
+      const shape = whatIfShape(result);
+      for (const line of [...describeShape(part, shape), ...describeGrants(result)]) say(line);
       const hash = shapeHash(shape);
       if (mode === 'plan') throw new Planned(part, hash);
       if (approved[part] !== hash) {
@@ -475,6 +530,9 @@ export async function plan(infra: InfraSteps, commit: string, digest: string): P
     return { steps: [], whatIf: {} };
   }
   infra.say(`This merge needs: ${needs.steps.join(', ')}. Each what-if follows; nothing is changed until Approve.`);
+  infra.say(
+    "If a newer merge's run plans too, it covers this one: approve the newest, and this run's wait may be cancelled (its last job, release-landed, says whether staging got main's newest).",
+  );
   const whatIf: Partial<Record<Sent, string>> = {};
   for (const step of needs.steps) {
     if (step === 'db-setup') infra.say('db-setup: then the set-up job runs (jobs.ts run db-setup), with its log.');

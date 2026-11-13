@@ -1054,6 +1054,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/release.bicep': ['foundation'],
       'deploy/azure/modules/roles.bicep': ['access'],
       'deploy/azure/modules/secret-access.bicep': ['secrets'],
+      // The live server's delete lock (S185), which CI may neither write nor lift.
+      'deploy/azure/modules/server-lock.bicep': ['access'],
       'deploy/azure/names.bicep': all,
       'deploy/azure/secrets.bicep': ['secrets'],
       'deploy/azure/staging.access.bicepparam': ['access'],

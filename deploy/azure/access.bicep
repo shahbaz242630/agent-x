@@ -6,12 +6,14 @@
 //
 // - every custom role our deployments give (modules/roles.bicep), by the same
 //   names they had in the foundation (moved, S190): Azure keeps each role
+// - the live database server's delete lock (S185, modules/server-lock.bicep)
 // - Azure's own refusals on the resource group (guardrails.bicep, AZ2)
 // - the subscription's activity log into the main workspace (ADR-012 §6)
 // - the budget
 //
 // A new environment runs foundation (its grants of these roles fail, the rest
-// is made), then access, then foundation again. The rules (policy.ts) check this
+// is made), then access, then foundation again. A new database generation
+// (playbook L) runs access after the foundation that made its server, to lock it. The rules (policy.ts) check this
 // deployment with the rest of the environment.
 import { resourceNames, uniqueSuffix } from 'names.bicep'
 
@@ -62,6 +64,14 @@ module roles 'modules/roles.bicep' = {
       release: names.releaseRole
       jobWatch: names.jobWatchRole
     }
+  }
+}
+
+// The live database server's delete lock (S185): a lock is no write CI may make, nor lift.
+module serverLock 'modules/server-lock.bicep' = {
+  scope: resourceGroup(names.group)
+  params: {
+    serverName: names.server
   }
 }
 

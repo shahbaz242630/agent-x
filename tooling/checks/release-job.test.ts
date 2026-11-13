@@ -260,6 +260,7 @@ describe('the wait for CI’s image', () => {
       'image-kept-verify',
       'infra-plan',
       'infra-deploy',
+      'release-landed',
     ]);
   });
 });
@@ -425,5 +426,25 @@ describe('the infrastructure plan and its approved deploy', () => {
       expect(before?.if).toBe(step.if);
     }
     expect(infraDeploy.env).toEqual({ COMMIT: '${{ github.sha }}', PLAN: '${{ needs.infra-plan.outputs.plan }}' });
+  });
+});
+
+// Review S190: the approved deploy shares the release's concurrency group, where GitHub cancels an older waiting
+// job grey; the run's last job says whether staging got the merge, red when it is main's newest and didn't.
+describe('the run’s last word, whether staging got this merge', () => {
+  const landed = releaseFile.jobs['release-landed'];
+  if (landed === undefined) throw new Error(`${RELEASE_WORKFLOW} has no release-landed job`);
+
+  it('runs after everything, whatever happened, on a push to main, reading the code alone', () => {
+    expect(landed.if).toBe("always() && github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(landed.needs).toEqual(['ci-image', 'infra-plan', 'infra-deploy', 'release']);
+    expect(landed.permissions).toEqual({ contents: 'read' });
+    expect(landed.environment).toBeUndefined();
+    expect(JSON.stringify(landed)).not.toMatch(/secrets\.|vars\./);
+    expect(landed.steps?.at(-1)).toEqual({
+      name: 'Say whether staging got this merge',
+      env: { COMMIT: '${{ github.sha }}', RESULT: '${{ needs.release.result }}' },
+      run: 'node deploy/azure/landed.ts "${COMMIT}" "${RESULT}"',
+    });
   });
 });

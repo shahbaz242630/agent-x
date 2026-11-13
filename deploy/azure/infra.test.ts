@@ -15,6 +15,7 @@ import {
   type Changed,
   deployDeployers,
   deployStep,
+  describeGrants,
   describeShape,
   type InfraSteps,
   main,
@@ -218,6 +219,50 @@ describe('describeShape on what a reviewer must see (review S190)', () => {
       '  Create Microsoft.Network/networkSecurityGroups/nsg/securityRules/new',
       '    properties.sourceAddressPrefix: null -> *',
     ]);
+  });
+});
+
+describe('describeGrants: who each changed grant and trust is for (review S190)', () => {
+  const GROUP = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers`;
+  const identity = (name: string, principalId?: string, changeType = 'NoChange') => ({
+    resourceId: `${GROUP}/Microsoft.ManagedIdentity/userAssignedIdentities/${name}`,
+    changeType,
+    after: { properties: principalId === undefined ? {} : { principalId } },
+  });
+  const grant = (name: string, principalId: string, changeType = 'Create') => ({
+    resourceId: `${GROUP}/Microsoft.Authorization/roleAssignments/${name}`,
+    changeType,
+    after: { properties: { principalId } },
+  });
+  const trust = (identityName: string, changeType = 'Modify') => ({
+    resourceId: `${GROUP}/Microsoft.ManagedIdentity/userAssignedIdentities/${identityName}/federatedIdentityCredentials/github`,
+    changeType,
+  });
+
+  it('names an identity of the deployment, and flags a grant or trust to anything it doesn’t make', () => {
+    const OURS = '11111111-1111-4111-8111-111111111111';
+    const lines = describeGrants({
+      status: 'Succeeded',
+      changes: [
+        identity('id-agentx-stg-api', OURS),
+        identity('id-agentx-stg-new', undefined, 'Create'),
+        grant('a', OURS),
+        grant('b', '22222222-2222-4222-8222-222222222222'),
+        grant('c', "[reference('id-agentx-stg-new').principalId]"),
+        grant('unchanged', '22222222-2222-4222-8222-222222222222', 'NoChange'),
+        trust('id-agentx-stg-api'),
+        trust('id-someone-else', 'Create'),
+      ],
+    });
+    expect(lines).toEqual([
+      'Who the changed grants and trusts are for:',
+      '  Create grant to id-agentx-stg-api, an identity of this deployment: Microsoft.Authorization/roleAssignments/a',
+      "  Create grant to an existing principal this deployment doesn't make (<id>): Microsoft.Authorization/roleAssignments/b",
+      '  Create grant to an identity this deployment makes: Microsoft.Authorization/roleAssignments/c',
+      "  Create trust on an existing identity this deployment doesn't make: id-someone-else",
+    ]);
+    expect(describeGrants({ status: 'Succeeded', changes: [grant('d', OURS, 'NoChange')] })).toEqual([]);
+    expect(describeGrants(null)).toEqual([]);
   });
 });
 
