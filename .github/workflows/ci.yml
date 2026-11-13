@@ -697,8 +697,9 @@ jobs:
           AGENTX_AUTH_HOST_SHA256: ${{ secrets.AGENTX_AUTH_HOST_SHA256 }}
           AGENTX_APP_HOST_SHA256: ${{ secrets.AGENTX_APP_HOST_SHA256 }}
           AGENTX_OIDC_CLIENT_ID_SHA256: ${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}
-          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above).
-          GITHUB_TOKEN: ${{ github.token }}
+          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above): not
+          # GITHUB_TOKEN, which cosign's GitHub keychain and az would pick up.
+          AGENTX_DEPLOYMENTS_TOKEN: ${{ github.token }}
         run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.

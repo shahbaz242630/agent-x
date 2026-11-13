@@ -142,7 +142,7 @@ describe('the release job', () => {
           AGENTX_AUTH_HOST_SHA256: '${{ secrets.AGENTX_AUTH_HOST_SHA256 }}',
           AGENTX_APP_HOST_SHA256: '${{ secrets.AGENTX_APP_HOST_SHA256 }}',
           AGENTX_OIDC_CLIENT_ID_SHA256: '${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}',
-          GITHUB_TOKEN: '${{ github.token }}',
+          AGENTX_DEPLOYMENTS_TOKEN: '${{ github.token }}',
         },
         run: 'node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"',
       },
@@ -225,7 +225,7 @@ describe('the job-start watch', () => {
     });
     expect(watchSteps[signingIn + 1]).toEqual({
       name: 'Check every job run of the last six hours',
-      env: { GITHUB_TOKEN: '${{ github.token }}' },
+      env: { AGENTX_DEPLOYMENTS_TOKEN: '${{ github.token }}' },
       run: 'node deploy/azure/job-starts.ts',
     });
     expect(watchSteps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });

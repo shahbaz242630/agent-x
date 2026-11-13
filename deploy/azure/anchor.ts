@@ -3,10 +3,10 @@
 // back, and restore the setting: Azure's own record of what ran is then purged.
 // GitHub records a deployment for every job that uses the `staging` environment
 // (the release job does), and a stolen Azure sign-in can't write that record. So
-// in CI the release and the job-start watch read the newest deployment to
-// staging that succeeded, and hold both workloads to be at least that new on
-// main's line. A hand `apps` deploy isn't a GitHub deployment; a newer one is
-// fine. Outside GitHub Actions there is no token: said in one line, not red. In
+// in CI the release and the job-start watch read the deployments to staging
+// that succeeded, take the newest of their commits on main's line, and hold
+// both workloads to be at least that new. A hand `apps` deploy isn't a GitHub
+// deployment; a newer one is fine. Outside GitHub Actions there is no token: said in one line, not red. In
 // GitHub Actions, a record that can't be read is red: fail closed.
 
 /** What GitHub says of the last release to staging: its commit, none ever, or not read (not a GitHub Actions run). */
@@ -31,7 +31,7 @@ const SUCCEEDED: ReadonlySet<string> = new Set(['success', 'inactive']);
 /** Why the record couldn't be read, in plain words: what broke and what next. */
 const unreadable = (why: string): Error =>
   new Error(
-    `GitHub's record of the last release to staging couldn't be read (${why}), so a roll-back past it can't be ruled out (AZ2c), and nothing was changed. The job needs \`deployments: read\` and its GITHUB_TOKEN; run it again, and if it repeats, read the staging environment's deployments on GitHub.`,
+    `GitHub's record of the last release to staging couldn't be read (${why}), so a roll-back past it can't be ruled out (AZ2c), and nothing was changed. The job needs \`deployments: read\` and its token in AGENTX_DEPLOYMENTS_TOKEN; run it again, and if it repeats, read the staging environment's deployments on GitHub.`,
   );
 
 const real: GitHubGet = async (url, token) => {
@@ -79,36 +79,62 @@ async function succeeded(
   return typeof state === 'string' && SUCCEEDED.has(state) ? sha : undefined;
 }
 
+/** The token the release and the watch are given to read deployments with: not GITHUB_TOKEN, which cosign and az would pick up. */
+export const TOKEN_VARIABLE = 'AGENTX_DEPLOYMENTS_TOKEN';
+
 /**
- * The last release GitHub recorded for staging: the newest deployment to it whose latest status says it succeeded
- * (this run's own, still in progress, never does). Not read outside GitHub Actions; an error in it when it can't be.
+ * The commits of the deployments to staging that succeeded, newest created first, reading every page to the end of
+ * the listing or the cap (each deployment's latest status: this run's own, still in progress, never succeeded).
+ * `ended` is false only when the cap was reached first.
  */
-export async function lastRelease(
-  env: Readonly<Record<string, string | undefined>>,
-  get: GitHubGet = real,
-): Promise<Anchor> {
-  if (env.GITHUB_ACTIONS !== 'true') return { kind: 'unread' };
-  const token = env.GITHUB_TOKEN ?? '';
-  const repository = env.GITHUB_REPOSITORY ?? '';
-  if (token === '' || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw unreadable('no GITHUB_TOKEN or repository given');
-  const base = `${API}/repos/${repository}/deployments`;
-  const read = (url: string): Promise<unknown> => readOrRefuse(get, url, token);
+async function successes(
+  read: (url: string) => Promise<unknown>,
+  base: string,
+): Promise<{ commits: string[]; ended: boolean }> {
+  const commits: string[] = [];
   for (let page = 1; page <= PAGES; page += 1) {
     const listed = await read(`${base}?environment=staging&per_page=${String(PER_PAGE)}&page=${String(page)}`);
     if (!Array.isArray(listed)) throw unreadable('its list of deployments was not a list');
-    if (listed.length === 0) return page === 1 ? { kind: 'none' } : failedAll();
     for (const deployment of listed as unknown[]) {
       const commit = await succeeded(deployment, base, read);
-      if (commit !== undefined) return { kind: 'release', commit };
+      if (commit !== undefined) commits.push(commit);
     }
+    if (listed.length < PER_PAGE) return { commits, ended: true };
   }
-  return failedAll();
+  return { commits, ended: false };
 }
 
-/** Deployments on record, and none of those read succeeded: never taken as "none". */
-const failedAll = (): never => {
-  throw unreadable(`none of its last ${String(PAGES * PER_PAGE)} deployments to staging succeeded`);
-};
+/**
+ * The last release GitHub recorded for staging: of the deployments to it that succeeded, the one whose commit is
+ * newest on main's line (`place`, git.ts mainline: newest 0), never merely the newest created, since a re-run of an
+ * old release job records a new deployment of an old commit. A success whose commit isn't on main's line is the
+ * anchor itself, which then holds nothing and is red (anchor.ts belowAnchor). None when the listing ends without a
+ * success (a fresh environment: this run's own is in progress; or only failures, hand `apps` deploys recording
+ * none); an error when the cap is reached without one, or in reading. Not read outside GitHub Actions.
+ */
+export async function lastRelease(
+  env: Readonly<Record<string, string | undefined>>,
+  place: (commit: string) => number | undefined,
+  get: GitHubGet = real,
+): Promise<Anchor> {
+  if (env.GITHUB_ACTIONS !== 'true') return { kind: 'unread' };
+  const token = env[TOKEN_VARIABLE] ?? '';
+  const repository = env.GITHUB_REPOSITORY ?? '';
+  if (token === '' || !/^[\w.-]+\/[\w.-]+$/.test(repository)) {
+    throw unreadable(`no ${TOKEN_VARIABLE} or repository given`);
+  }
+  const base = `${API}/repos/${repository}/deployments`;
+  const { commits, ended } = await successes((url) => readOrRefuse(get, url, token), base);
+  if (commits.length === 0) {
+    if (ended) return { kind: 'none' };
+    throw unreadable(`none of its last ${String(PAGES * PER_PAGE)} deployments to staging succeeded`);
+  }
+  const offLine = commits.find((commit) => place(commit) === undefined);
+  if (offLine !== undefined) return { kind: 'release', commit: offLine };
+  const [first = ''] = commits;
+  const newest = commits.reduce((best, each) => ((place(each) ?? 0) < (place(best) ?? 0) ? each : best), first);
+  return { kind: 'release', commit: newest };
+}
 
 /** What to do after a roll-back: forward only, past the newest build on record. */
 export const forwardPast = (newest: string): string =>

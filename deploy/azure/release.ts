@@ -1757,15 +1757,16 @@ export function main(
     () => parseArguments(argv),
     (request) => {
       const more = extras();
+      const line = history();
       const steps = {
         az: az(),
-        history: history(),
+        history: line,
         folder: folder(),
         say,
         verify: more.verify,
         pins: env,
         now: more.now,
-        anchor: () => lastRelease(env),
+        anchor: () => lastRelease(env, (commit: string) => line.mainline().get(commit)),
       };
       return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...more });
     },

@@ -2912,7 +2912,11 @@ describe('AZ2c: each workload held to what the commit gives it, beyond its image
     // In CI, a record GitHub won't give is red, writing nothing: fail closed.
     const failing: GitHubGet = () => Promise.resolve({ status: 403, body: undefined });
     const unreadable = await anchored(() =>
-      lastRelease({ GITHUB_ACTIONS: 'true', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' }, failing),
+      lastRelease(
+        { GITHUB_ACTIONS: 'true', AGENTX_DEPLOYMENTS_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' },
+        () => 0,
+        failing,
+      ),
     );
     expect(unreadable.status).toBeUndefined();
     expect(unreadable.writes).toEqual([]);

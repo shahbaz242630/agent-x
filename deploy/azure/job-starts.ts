@@ -402,11 +402,14 @@ export interface HeldSteps {
   readonly anchor: () => Promise<Anchor>;
 }
 
-const realHeld = (): HeldSteps => ({
-  history: realHistory(),
-  templatesAt: realTemplates,
-  anchor: () => lastRelease(process.env),
-});
+const realHeld = (): HeldSteps => {
+  const history = realHistory();
+  return {
+    history,
+    templatesAt: realTemplates,
+    anchor: () => lastRelease(process.env, (commit) => history.mainline().get(commit)),
+  };
+};
 
 /** What holding the migration job to apps.bicep found: lines said as they are, and findings. */
 interface Held {

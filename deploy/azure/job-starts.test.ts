@@ -292,7 +292,11 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
     );
     const failing: GitHubGet = () => Promise.reject(new Error('offline'));
     const closed = await anchoredAt(() =>
-      lastRelease({ GITHUB_ACTIONS: 'true', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' }, failing),
+      lastRelease(
+        { GITHUB_ACTIONS: 'true', AGENTX_DEPLOYMENTS_TOKEN: 't', GITHUB_REPOSITORY: 'owner/repo' },
+        () => 0,
+        failing,
+      ),
     );
     expect(closed.status).toBe(1);
     expect(
