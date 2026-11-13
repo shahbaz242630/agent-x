@@ -5034,6 +5034,104 @@
         }
       }
     },
+    "/internal/zitadel-machine-id": {
+      "get": {
+        "summary": "A Zitadel process's machine ID",
+        "description": "Asked by Zitadel's processes at start, inside the environment only: anywhere else, and wherever it is off, the answer is 404.",
+        "x-access": [
+          "public"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "machine": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "machine"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "summary": "A Zitadel process's machine ID",
+        "description": "Asked by Zitadel's processes at start, inside the environment only: anywhere else, and wherever it is off, the answer is 404.",
+        "x-access": [
+          "public"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "machine": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "machine"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/auth/sign-in": {
       "get": {
         "summary": "Start a sign-in",
@@ -5811,7 +5909,7 @@
                   "page": {
                     "type": "string",
                     "maxLength": 200,
-                    "pattern": "^\\/(?!(?:v1|health)(?:\\/|$))(?:[a-z0-9-]+(?:\\/[a-z0-9-]+)*)?$"
+                    "pattern": "^\\/(?!(?:v1|health|internal)(?:\\/|$))(?:[a-z0-9-]+(?:\\/[a-z0-9-]+)*)?$"
                   },
                   "stack": {
                     "type": "string",

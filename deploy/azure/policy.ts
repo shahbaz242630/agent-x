@@ -109,6 +109,7 @@ export type RuleId =
   | 'door-certificates'
   | 'workload-secrets'
   | 'container-telemetry'
+  | 'zitadel-machine-ids'
   | 'platform-settings';
 
 export interface Problem {
@@ -1003,8 +1004,8 @@ const SECRETS_IN_ENVIRONMENT: readonly {
  * deprecated in favour of, each of which offers an "auto" mode that follows the
  * standard `OTEL_*` variables. Every one of them is already the default; saying
  * so here is what makes the version that changes a default a change to this
- * file rather than a surprise. The one that isn't a default: Zitadel asks
- * Google Cloud's metadata server for a machine ID unless told not to (S19). Read off the defaults the pinned image carries
+ * file rather than a surprise. Zitadel's machine-ID webhook, whose default asks
+ * Google Cloud's metadata server (S19), is `zitadel-machine-ids`'s: it asks our API. Read off the defaults the pinned image carries
  * (G2d-2a); the jobs carry them too, so one list covers every container.
  */
 const TELEMETRY_OFF: readonly {
@@ -1020,7 +1021,6 @@ const TELEMETRY_OFF: readonly {
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: 'none',
       ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE: 'none',
       ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE: 'none',
-      ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'false',
     },
   },
   {
@@ -6120,6 +6120,88 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
   }
 };
 
+/**
+ * How every Zitadel process gets its 16-bit machine ID (SA3e): from the API, which hands
+ * them out in turn (apps/api/src/machine-ids.ts), never by its hostname's hash, where two
+ * copies can collide and mint the same IDs, nor its private address, which a replica here
+ * lacks. Zitadel tries private address, then hostname, then the webhook, and the first that
+ * answers wins, so the two before it are off outright.
+ */
+const ZITADEL_MACHINE_SWITCHES: Readonly<Record<string, string>> = {
+  ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED: 'false',
+  ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: 'false',
+  ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'true',
+};
+
+/** The API's internal host as apps.bicep writes it: `<API app>.internal.<the environment's domain>`. */
+const INTERNAL_HOST = /^format\('\{0\}\.internal\.\{1\}', '([^']+)', reference\('([^']+)', '[^']+'\)\.defaultDomain\)$/;
+
+/** The webhook's address: the machine-ID path on a host INTERNAL_HOST reads. */
+const MACHINE_WEBHOOK = /^\[format\('https:\/\/\{0\}\/internal\/zitadel-machine-id', (.+)\)\]$/;
+
+/** The host the API's AGENTX_MACHINE_IDS_HOST names, as an ARM expression, when it is its own internal host in this environment. */
+function apiInternalHost(snapshot: Snapshot, api: PredictedResource): string | undefined {
+  const values = containersOf(api).map((container) => settingsIn(container).get('AGENTX_MACHINE_IDS_HOST'));
+  const expression =
+    values.length === 1 && typeof values[0] === 'string' ? /^\[(.+)\]$/.exec(values[0])?.[1] : undefined;
+  const [, app, environment] = (expression === undefined ? null : INTERNAL_HOST.exec(expression)) ?? [];
+  const inThisEnvironment = ofType(snapshot, TYPES.environment).some((one) => one.id === environment);
+  return app === api.name && inThisEnvironment ? expression : undefined;
+}
+
+/**
+ * Every Zitadel container asks the API for its machine ID at the API's internal host
+ * (SA3e), with no JSONPath (Zitadel would hash its re-serialised match, not the body the
+ * API wrote); and the API hands them out on that host, the same one, and no other.
+ */
+/** What a Zitadel container's settings get wrong about its machine ID, asked at `host` (the API's, when it hands them out). */
+function machineIdProblems(settings: ReadonlyMap<string, unknown>, host: string | undefined): string[] {
+  const switches = Object.entries(ZITADEL_MACHINE_SWITCHES)
+    .filter(([name, wanted]) => settings.get(name) !== wanted)
+    .map(
+      ([name, wanted]) =>
+        `must set ${name} to ${wanted}: each process takes its machine ID from the API in turn, never its hostname's hash, where two copies can mint the same IDs (SA3e)`,
+    );
+  const url = settings.get('ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL');
+  const asks = typeof url === 'string' ? MACHINE_WEBHOOK.exec(url)?.[1] : undefined;
+  const where =
+    asks !== undefined && asks === host
+      ? []
+      : [
+          "must set ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL to https://<the API's internal host>/internal/zitadel-machine-id, the host the API hands machine IDs out on (SA3e)",
+        ];
+  const reshaped = [...settings.keys()]
+    .filter((name) => /^ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_(?:JPATH|HEADERS)/.test(name))
+    .map(
+      (name) =>
+        `sets ${name}: the API's answer is hashed as its body, as it is written, and needs no header of ours (Zitadel's default Metadata-Flavor header is harmless) (SA3e)`,
+    );
+  return [...switches, ...where, ...reshaped];
+}
+
+const zitadelMachineIds: Check = (snapshot, _expected, add) => {
+  const api = ofType(snapshot, TYPES.app).find((one) => jobWorkloadOf(one.name) === 'api');
+  const host = api === undefined ? undefined : apiInternalHost(snapshot, api);
+  const zitadels = workloadsIn(snapshot).filter((workload) =>
+    containersOf(workload).some((container) => text(at(container, 'image')).startsWith(ZITADEL_SERVER_IMAGE)),
+  );
+  if (api !== undefined && zitadels.length > 0 && host === undefined) {
+    add({
+      rule: 'zitadel-machine-ids',
+      resource: api.name,
+      message:
+        "must set AGENTX_MACHINE_IDS_HOST to its own internal host (<app>.internal.<the environment's domain>), where Zitadel asks for its machine IDs (SA3e)",
+    });
+  }
+  for (const workload of zitadels) {
+    for (const message of containersOf(workload).flatMap((container) =>
+      machineIdProblems(settingsIn(container), host),
+    )) {
+      add({ rule: 'zitadel-machine-ids', resource: workload.name, message });
+    }
+  }
+};
+
 /** How the variables Azure sets itself in every container start: the job's run, the app's revision, the port… */
 const PLATFORM_PREFIX = 'CONTAINER_APP_';
 
@@ -6226,6 +6308,7 @@ const CHECKS: readonly Check[] = [
   doorCertificates,
   workloadSecrets,
   containerTelemetry,
+  zitadelMachineIds,
   platformSettings,
 ];
 

@@ -47,7 +47,7 @@ describe('report', () => {
     expect(bodies()[1]).toEqual({ kind: 'rejection', message: 'No message', page: '/approvals' });
   });
 
-  it.each(['/Approvals', '/v1/statements', '/health', `/${'a'.repeat(200)}`])(
+  it.each(['/Approvals', '/v1/statements', '/health', '/internal/zitadel-machine-id', `/${'a'.repeat(200)}`])(
     'reports %s, not a console page, as the home page',
     (page) => {
       window.history.replaceState(null, '', page);
