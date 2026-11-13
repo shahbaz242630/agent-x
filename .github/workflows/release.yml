@@ -348,7 +348,8 @@ jobs:
   # step, so no step runs on an old token, and runs the planned steps in order:
   # each holds Azure's what-if to the plan's hash, so what is sent is what was
   # approved (infra.ts). The set-up job follows apps when its files changed.
-  # One at a time across merges; never cancelled part-way.
+  # In the release's own concurrency group (review S190), so it and any merge's
+  # release never write the apps at once; never cancelled part-way.
   infra-deploy:
     name: Infrastructure (main) - deploy, once approved
     if: needs.infra-plan.outputs.needed == 'true'
@@ -358,7 +359,7 @@ jobs:
     timeout-minutes: 120
     environment: staging-infra
     concurrency:
-      group: infra-staging
+      group: release-staging
       cancel-in-progress: false
     permissions:
       contents: read # to check out deploy.ts and read the history

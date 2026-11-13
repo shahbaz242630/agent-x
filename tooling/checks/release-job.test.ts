@@ -371,7 +371,7 @@ describe('the infrastructure plan and its approved deploy', () => {
     expect(infraDeploy.if).toBe("needs.infra-plan.outputs.needed == 'true'");
     expect(infraDeploy.needs).toEqual(['ci-image', 'infra-plan']);
     expect(infraDeploy.environment).toBe('staging-infra');
-    expect(infraDeploy.concurrency).toEqual({ group: 'infra-staging', 'cancel-in-progress': false });
+    expect(infraDeploy.concurrency).toEqual(release.concurrency);
     expect(infraDeploy.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
     expect(infraDeploy['timeout-minutes']).toBe(120);
   });

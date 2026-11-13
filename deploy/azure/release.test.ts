@@ -510,6 +510,7 @@ const SAID: ReadonlyMap<string, readonly string[]> = new Map(
   [...PARAMS_PATHS].map(([deployment, params]) => {
     const own: Readonly<Record<Deployment, readonly string[]>> = {
       foundation: ['main.bicep', 'modules/postgres.bicep', 'shared.json'],
+      access: ['access.bicep'],
       secrets: ['secrets.bicep', 'shared.json'],
       apps: ['apps.bicep'],
       certificates: ['certificates.bicep'],
@@ -769,7 +770,7 @@ describe('deciding a release', () => {
     );
     red(
       'deploy/azure/names.bicep',
-      'deploy.ts foundation, secrets, apps and certificates read it, so run each by hand in that order, each what-if read',
+      'deploy.ts foundation, access, secrets, apps and certificates read it, so run each by hand in that order, each what-if read',
     );
     // Read by no deployment: the gate's own list, and the set-up job's files.
     red('deploy/azure/hand-deployed.json', HAND_DEPLOYED[0]?.why ?? '');
@@ -817,6 +818,7 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
     'deploy.ts foundation reads it, so run it by hand, its what-if read, then run this release again';
   const every: Records = new Map([
     ['foundation', NEW],
+    ['access', NEW],
     ['secrets', NEW],
     ['certificates', NEW],
   ]);
@@ -973,6 +975,7 @@ describe('the hand deploys records', () => {
     expect(`jobs/${RECORDS_JOB}`).toBe(WORKLOADS.migrate.path);
     expect(RECORDED.map(recordTag)).toEqual([
       'agentx-deployed-foundation',
+      'agentx-deployed-access',
       'agentx-deployed-secrets',
       'agentx-deployed-certificates',
     ]);
@@ -983,7 +986,13 @@ describe('the hand deploys records', () => {
 describe('which hand deploys read each file', () => {
   it("is read from Bicep's answers by each file's path in the repository, in lower case, in DEPLOYMENTS order", () => {
     const readers = readersFrom(SAID);
-    expect(readers.get('deploy/azure/names.bicep')).toEqual(['foundation', 'secrets', 'apps', 'certificates']);
+    expect(readers.get('deploy/azure/names.bicep')).toEqual([
+      'foundation',
+      'access',
+      'secrets',
+      'apps',
+      'certificates',
+    ]);
     expect(readers.get('deploy/azure/modules/postgres.bicep')).toEqual(['foundation']);
     expect(readers.get('deploy/azure/staging.apps.bicepparam')).toEqual(['apps']);
     // A file said twice is one reader, and a path in the repository in another case is the same file.
@@ -1013,10 +1022,12 @@ describe('which hand deploys read each file', () => {
     expect([...PARAMS_PATHS.values()]).toEqual(Object.values(DEPLOYMENTS).map((file) => full(`deploy/azure/${file}`)));
   });
 
-  it('is what the pinned Bicep says of our deployments: the foundation alone reads the infrastructure', async () => {
+  it('is what the pinned Bicep says of our deployments: the foundation alone reads the infrastructure, access the roles and guardrails (AZ5)', async () => {
     const readers = readersFrom(await fileReferences([...PARAMS_PATHS.values()]));
-    const all = ['foundation', 'secrets', 'apps', 'certificates'];
+    const all = ['foundation', 'access', 'secrets', 'apps', 'certificates'];
     expect(Object.fromEntries(readers)).toEqual({
+      // The partner's own (AZ5): every custom role, the guardrails, the activity log and the budget.
+      'deploy/azure/access.bicep': ['access'],
       'deploy/azure/app-keys.json': all,
       'deploy/azure/apps.bicep': ['apps'],
       'deploy/azure/bicepconfig.json': all,
@@ -1032,8 +1043,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/environment.bicep': ['foundation'],
       'deploy/azure/modules/evidence.bicep': ['foundation', 'apps'],
       // Azure's own refusals (AZ2).
-      'deploy/azure/modules/guardrail-assignments.bicep': ['foundation'],
-      'deploy/azure/modules/guardrails.bicep': ['foundation'],
+      'deploy/azure/modules/guardrail-assignments.bicep': ['access'],
+      'deploy/azure/modules/guardrails.bicep': ['access'],
       'deploy/azure/modules/job-watch.bicep': ['foundation'],
       'deploy/azure/modules/keyvault.bicep': ['foundation'],
       'deploy/azure/modules/metrics.bicep': ['foundation'],
@@ -1041,9 +1052,11 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/network.bicep': ['foundation'],
       'deploy/azure/modules/postgres.bicep': ['foundation'],
       'deploy/azure/modules/release.bicep': ['foundation'],
+      'deploy/azure/modules/roles.bicep': ['access'],
       'deploy/azure/modules/secret-access.bicep': ['secrets'],
       'deploy/azure/names.bicep': all,
       'deploy/azure/secrets.bicep': ['secrets'],
+      'deploy/azure/staging.access.bicepparam': ['access'],
       'deploy/azure/staging.apps.bicepparam': ['apps'],
       'deploy/azure/staging.bicepparam': ['foundation'],
       'deploy/azure/staging.certificates.bicepparam': ['certificates'],

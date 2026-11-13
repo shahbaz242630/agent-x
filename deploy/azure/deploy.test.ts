@@ -221,7 +221,7 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
+      [['deploy'], /say foundation, access, secrets, apps, alerts, dns or certificates, not deploy/],
       [
         ['apps', '--commit'],
         /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped, --migrate-first and --back-to-generation <n>/,
@@ -3829,7 +3829,7 @@ describe('the tool and the deployment agree', () => {
       ['foundation', environment.foundation],
       ...[...environment.parts].map(([file, part]) => [file.split('.')[1] ?? file, part] as const),
     ]);
-    expect([...deployments.keys()].toSorted()).toEqual(['apps', 'certificates', 'foundation', 'secrets']);
+    expect([...deployments.keys()].toSorted()).toEqual(['access', 'apps', 'certificates', 'foundation', 'secrets']);
     expect([...deployments].filter(([, part]) => alerting(part)).map(([name]) => name)).toEqual([...ALERTING]);
   });
 
@@ -3978,6 +3978,61 @@ describe('the tool and the deployment agree', () => {
   });
 });
 
+describe('deploy access: the partner’s own roles, guardrails, activity log and budget (AZ5, review S190)', () => {
+  it('confirms, asks the address alone, deploys at the subscription with its what-if, and records the commit', async () => {
+    const done = await run(['access'], { answers: ['y', 'ops@example.invalid'] });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.questions).toEqual([
+      'Deploy staging into it? [y/N] ',
+      'Address the budget emails go to (the alert address): ',
+    ]);
+    expect(done.terminal.hiddenQuestions).toEqual([]);
+    expect(done.az.deployment?.args).toEqual([
+      'deployment',
+      'sub',
+      'create',
+      '--subscription',
+      SUBSCRIPTION,
+      '--location',
+      'uaenorth',
+      '--name',
+      'agentx-staging-access-20260916T164215Z',
+      '--parameters',
+      'staging.access.bicepparam',
+      '--confirm-with-what-if',
+    ]);
+    expect(done.az.deployment?.values).toEqual({ AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' });
+    expect(done.checked).toEqual([{ AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' }]);
+    expect(done.az.tags['agentx-deployed-access']).toBe(COMMIT);
+  });
+
+  it('refuses an address that is none, and is never run unattended', async () => {
+    const wrong = await run(['access'], { answers: ['y', 'nobody'] });
+    expect((wrong.error as Error).message).toBe("That isn't an email address: nothing was deployed.");
+    expect(wrong.az.deployment).toBeUndefined();
+    const ci = await run(['access'], {
+      unattended: {
+        mode: 'deploy',
+        answers: { alertEmail: 'a@b.cd', authHost: 'a.b', appHost: 'c.d', adminEmail: 'e@f.gh', apiClientId: '1' },
+      },
+    });
+    expect((ci.error as Error).message).toBe(
+      "access is the partner's own deployment, never CI's: run node deploy/azure/deploy.ts access by hand. It was not sent.",
+    );
+    expect(ci.az.calls).toEqual([]);
+  });
+
+  it('ends red, deployed, when the what-if is declined or Azure fails it', async () => {
+    const declined = await run(['access'], {
+      answers: ['y', 'ops@example.invalid'],
+      az: new RecordingAz({ ended: 'Declined' }),
+    });
+    expect(declined.status).toBe(1);
+    expect(declined.az.tags['agentx-deployed-access']).toBeUndefined();
+  });
+});
+
 describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
   const ANSWERS = {
     alertEmail: 'ops@example.invalid',
@@ -4065,6 +4120,42 @@ describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
       [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
       [APP_VARIABLES.apiClientId]: CLIENT_ID,
     });
+  });
+
+  it('apps: holds the approved what-if before the migration runs, and on a change runs nothing and sends nothing (review S190)', async () => {
+    const interactive = (az: RecordingAz) =>
+      az.calls.filter((call) => call.values !== undefined).map((call) => call.args[2]);
+    const approved = new RecordingMigrations(behind);
+    const sent = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      migrations: approved,
+    });
+    expect(sent.status).toBe(0);
+    // The check alone first (what-if in the command's place), then the deployment with its own what-if.
+    expect(interactive(sent.az)).toEqual(['what-if', 'create']);
+    const changed = new RecordingMigrations(behind);
+    const held = await run(['apps', '--migrate-first', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      migrations: changed,
+      az: new RecordingAz({ status: 1 }),
+    });
+    expect(held.status).toBe(1);
+    expect(changed.asked.filter((line) => line.startsWith('run first'))).toEqual([]);
+    expect(interactive(held.az)).toEqual(['what-if']);
+    expect(held.terminal.said.at(-1)).toBe('The migration did not run, and apps was not sent.');
+    // A person at the terminal is asked as before, with no check of a plan.
+    expect(
+      interactive(
+        (
+          await run(['apps', '--commit', COMMIT], {
+            answers: ['y', 'auth.example.invalid', APP_HOST, 'admin@example.invalid', CLIENT_ID],
+            images: recordingImages(),
+          })
+        ).az,
+      ),
+    ).toEqual(['create']);
   });
 
   it('apps: a plan says the migration would run, and runs nothing', async () => {

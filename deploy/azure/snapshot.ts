@@ -223,6 +223,12 @@ export const deploymentSnapshot = (
   subscription: string,
 ): Snapshot => snapshot(dir, paramsFile, resourceGroup, values, subscription);
 
+/** Whether a parameters file's template is deployed at the subscription (`targetScope = 'subscription'`). */
+export function atSubscription(dir: string, paramsFile: string): boolean {
+  const template = templateOf(readFileSync(path.join(dir, paramsFile), 'utf8'));
+  return /^targetScope = 'subscription'$/m.test(readFileSync(path.join(dir, template), 'utf8'));
+}
+
 export interface EnvironmentSnapshot {
   /** main.bicep's deployment alone. */
   readonly foundation: Snapshot;
@@ -250,7 +256,8 @@ export function environmentSnapshot(dir: string, environment: string, values: Sh
   const parts = new Map(
     paramsFiles(dir)
       .filter((file) => file.startsWith(`${environment}.`) && file !== `${environment}.bicepparam`)
-      .map((file) => [file, snapshot(dir, file, group.name, values)] as const),
+      // A part at the subscription (the partner's access deployment, AZ5) is snapshot there, as Azure deploys it.
+      .map((file) => [file, snapshot(dir, file, atSubscription(dir, file) ? undefined : group.name, values)] as const),
   );
   const all = [foundation, ...parts.values()];
   return {

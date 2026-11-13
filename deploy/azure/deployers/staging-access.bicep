@@ -1,15 +1,15 @@
 // The two identities' rights on staging's own resource group (AZ5).
 //
-// - infra: Contributor, which is what the partner's deploy writes in the group;
-//   a role of its own for what Contributor leaves out and the foundation writes
-//   (custom roles and the policy rules' assignments); and grants, limited by an
-//   Azure condition to the roles our Bicep gives (GRANTED_ROLES) and never to
-//   itself: a grant of any other role, or to the infra identity, is refused by
-//   Azure, so an approved deploy can't make itself an owner
+// - infra: Contributor, which is what the partner's deploy writes in the group,
+//   and grants, limited by an Azure condition to the roles our Bicep gives
+//   (customRoleWords) and never to itself: a grant of any other role, or to the
+//   infra identity, is refused by Azure. It writes no role definition and no
+//   policy (Contributor can't): every custom role, the guardrails, the activity
+//   log and the budget are the partner's `access` deployment (review S190), so
+//   an approved run can't widen a role it may grant, nor make itself an owner
 // - what-if: Reader, so Azure's what-if can read what each deployment touches
 targetScope = 'resourceGroup'
 
-param environment string
 @description('The infra identity\'s resource ID, which names its grants.')
 param infraId string
 @description('The what-if identity\'s resource ID, which names its grant.')
@@ -42,49 +42,11 @@ var grantedRoles = join(concat([vaultReaderRole], map(customRoleWords, word => g
 // only of those roles. Its syntax is Microsoft's own example, "Constrain roles and principals".
 var grantsCondition = '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${grantedRoles}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidNotEquals {${infraPrincipalId}})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${grantedRoles}}))'
 
-// What Contributor leaves out and the foundation writes: our custom roles and the guardrails' assignments.
-resource infraGrantsRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  name: guid(resourceGroup().id, 'agentx-${environment}-infra-group')
-  properties: {
-    roleName: 'Agent X infra deploy (${environment}, group)'
-    description: 'CI\'s approved infrastructure deploy (AZ5): the custom roles and the policy rules\' assignments the foundation writes in this group.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: [
-          'Microsoft.Authorization/roleDefinitions/read'
-          'Microsoft.Authorization/roleDefinitions/write'
-          'Microsoft.Authorization/policyAssignments/read'
-          'Microsoft.Authorization/policyAssignments/write'
-        ]
-        notActions: []
-        dataActions: []
-        notDataActions: []
-      }
-    ]
-  }
-}
-
-var infraGrantsRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', infraGrantsRole.name)
-
 resource infraContributes 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(resourceGroup().id, infraId, contributor)
   properties: {
     description: 'The approved infrastructure deploy writes the group (deploy/azure/deployers)'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', contributor)
-    principalId: infraPrincipalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-resource infraWritesRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, infraId, infraGrantsRoleId)
-  properties: {
-    description: 'The approved infrastructure deploy writes our custom roles and policy assignments (deploy/azure/deployers)'
-    roleDefinitionId: infraGrantsRoleId
     principalId: infraPrincipalId
     principalType: 'ServicePrincipal'
   }

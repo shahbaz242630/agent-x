@@ -99,6 +99,8 @@ export const APP_VARIABLES = {
  */
 export const DEPLOYMENTS = {
   foundation: `${ENVIRONMENT}.bicepparam`,
+  // The partner's alone (AZ5): the roles, the guardrails, the activity log and the budget, which CI never writes.
+  access: `${ENVIRONMENT}.access.bicepparam`,
   secrets: `${ENVIRONMENT}.secrets.bicepparam`,
   apps: `${ENVIRONMENT}.apps.bicepparam`,
   certificates: `${ENVIRONMENT}.certificates.bicepparam`,
@@ -111,8 +113,11 @@ export type Deployment = keyof typeof DEPLOYMENTS;
  * a changed file only these read as deployed once each one's record has it
  * (release.ts). apps needs none: its stamp is what the workloads run.
  */
-export const RECORDED = ['foundation', 'secrets', 'certificates'] as const satisfies readonly Deployment[];
+export const RECORDED = ['foundation', 'access', 'secrets', 'certificates'] as const satisfies readonly Deployment[];
 export type Recorded = (typeof RECORDED)[number];
+
+/** The deployments at the subscription, which make or reach beyond the resource group: the rest go into it. */
+const AT_SUBSCRIPTION: ReadonlySet<Deployment> = new Set(['foundation', 'access']);
 
 /** The tag that holds a hand deploy's record. */
 export const recordTag = (deployment: Recorded): string => `agentx-deployed-${deployment}`;
@@ -251,6 +256,7 @@ export type Request =
       /** The migration job runs the new image to success before the deployment is sent (AZ6), as CI's release does. */
       readonly migrateFirst?: boolean;
     } & ServerFlags)
+  | { readonly command: 'access' }
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
   | { readonly command: 'certificates' };
@@ -300,7 +306,8 @@ export const USAGE = `Usage, from your own terminal window:
   (--first-server and --back-to-generation only where deploy.ts asks for them: playbook L, AZ25)
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
-  node deploy/azure/deploy.ts certificates`;
+  node deploy/azure/deploy.ts certificates
+  node deploy/azure/deploy.ts access   (the partner's alone: roles, guardrails, activity log, budget; AZ5)`;
 
 /** `apps`'s options, each at most once, in either order. */
 function parseApps(options: readonly string[]): Request {
@@ -393,12 +400,14 @@ function loadDatabaseOf(name: string): string {
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...options] = argv;
-  if (command === 'alerts' || command === 'dns' || command === 'certificates') {
+  if (command === 'access' || command === 'alerts' || command === 'dns' || command === 'certificates') {
     if (options.length > 0) throw new UsageError(`${command} takes no options, not ${options.join(' ')}`);
     return { command };
   }
   if (command !== 'foundation' && command !== 'apps' && command !== 'secrets') {
-    throw new UsageError(`say foundation, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`);
+    throw new UsageError(
+      `say foundation, access, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`,
+    );
   }
   const { rest, flags } = takeServerFlags(command, options);
   if (command === 'apps') return { ...parseApps(rest), ...flags };
@@ -916,7 +925,7 @@ export function plannedAlerts(
   random: Random = randomBytes,
 ): PlannedAlert[] {
   const shaped = shapedForPolicy(values, random);
-  const group = part === 'foundation' ? undefined : RESOURCE_GROUP;
+  const group = AT_SUBSCRIPTION.has(part) ? undefined : RESOURCE_GROUP;
   return inCopy((dir) =>
     deploymentSnapshot(dir, DEPLOYMENTS[part], group, shaped, subscription)
       .predictedResources.filter((resource) => resource.type === LOG_ALERT)
@@ -1161,28 +1170,46 @@ function whatIfAndSend(
   part: Deployment,
   values: Readonly<Record<string, string>>,
 ): unknown {
-  const name = deploymentName(part, steps.now());
-  const kind = part === 'foundation' ? 'sub' : 'group';
-  const where = ['--subscription', subscription, ...(kind === 'group' ? ['--resource-group', RESOURCE_GROUP] : [])];
+  const { name, kind, where, create } = deploymentCommand(steps, subscription, part);
   steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
-  const status = steps.az.interactive(
-    [
-      'deployment',
-      kind,
-      'create',
-      ...where,
-      ...(part === 'foundation' ? ['--location', REGION] : []),
-      '--name',
-      name,
-      '--parameters',
-      DEPLOYMENTS[part],
-      '--confirm-with-what-if',
-    ],
-    values,
-  );
+  const status = steps.az.interactive(create, values);
   if (status !== 0) return undefined;
   const ended = howItEnded(steps, ['deployment', kind, 'show', ...where, '--name', name]);
   return succeeded(steps, name, ended) ? (ended.outputs ?? {}) : undefined;
+}
+
+/** The command that sends a deployment with its what-if first (`--confirm-with-what-if`), by its name and where. */
+function deploymentCommand(steps: Steps, subscription: string, part: Deployment) {
+  const name = deploymentName(part, steps.now());
+  const kind = AT_SUBSCRIPTION.has(part) ? 'sub' : 'group';
+  const where = ['--subscription', subscription, ...(kind === 'group' ? ['--resource-group', RESOURCE_GROUP] : [])];
+  const create = [
+    'deployment',
+    kind,
+    'create',
+    ...where,
+    ...(kind === 'sub' ? ['--location', REGION] : []),
+    '--name',
+    name,
+    '--parameters',
+    DEPLOYMENTS[part],
+    '--confirm-with-what-if',
+  ];
+  return { name, kind, where, create };
+}
+
+/**
+ * Unattended (AZ5), before anything is changed: Azure's what-if, asked alone (`what-if` in the command's place),
+ * which CI's CLI holds to the approved plan, sending nothing. True only when it is the one approved.
+ */
+function stillApproved(
+  steps: Steps,
+  subscription: string,
+  part: Deployment,
+  values: Readonly<Record<string, string>>,
+): boolean {
+  const { create } = deploymentCommand(steps, subscription, part);
+  return steps.az.interactive(create.with(2, 'what-if'), values) === 0;
 }
 
 /**
@@ -1241,6 +1268,29 @@ function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, c
     `Recorded on ${RECORDS_JOB}: ${deployment} sent ${commit}. CI's release takes it for what ${deployment} reads.`,
   );
   return true;
+}
+
+/**
+ * The partner's own deployment (AZ5, access.bicep): every custom role our deployments give, the guardrails, the
+ * activity log's setting and the budget. Never unattended: CI's approved deploy may write none of them, so no approved
+ * run can widen a role or weaken a guardrail. Recorded, as the foundation is.
+ */
+async function deployAccess(steps: Steps): Promise<number> {
+  if (steps.unattended !== undefined) {
+    throw new Error(
+      "access is the partner's own deployment, never CI's: run node deploy/azure/deploy.ts access by hand. It was not sent.",
+    );
+  }
+  const commit = sentFrom(steps, 'access');
+  const subscription = await confirmSubscription(steps);
+  confirmBicep(steps);
+  const email = await steps.terminal.ask('Address the budget emails go to (the alert address): ');
+  if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
+  const values = { [ALERT_EMAIL]: email };
+  checkPolicy(steps, values);
+  if ((await sendWithWhatIf(steps, subscription, 'access', values)) === undefined) return 1;
+  steps.terminal.say('Deployed: the custom roles, the guardrails, the activity log setting and the budget.');
+  return leaveRecord(steps, subscription, 'access', commit) ? 0 : 1;
 }
 
 async function deployFoundation(
@@ -2611,6 +2661,24 @@ async function runMigrationFirst(steps: Steps, subscription: string, release: st
   );
 }
 
+/**
+ * `--migrate-first`'s run once everything is checked (AZ6). Unattended (AZ5) a migration can't be undone, so the
+ * approved what-if is held to before it runs, not after: false, having said so, when it no longer is.
+ */
+async function migratedFirst(
+  steps: Steps,
+  subscription: string,
+  image: { readonly release: string; readonly digest: string },
+  values: Readonly<Record<string, string>>,
+): Promise<boolean> {
+  if (steps.unattended?.mode === 'deploy' && !stillApproved(steps, subscription, 'apps', values)) {
+    steps.terminal.say('The migration did not run, and apps was not sent.');
+    return false;
+  }
+  await runMigrationFirst(steps, subscription, image.release, image.digest);
+  return true;
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2690,7 +2758,7 @@ async function deployApps(
     [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
   };
   checkPolicy(steps, values);
-  if (runFirst) await runMigrationFirst(steps, subscription, release, digest);
+  if (runFirst && !(await migratedFirst(steps, subscription, { release, digest }, values))) return 1;
   if (!(await sendApps(steps, subscription, values, apiStopped === true))) return 1;
   return afterApps(steps, subscription, { image, keepRunning, loadRun, apiStopped: apiStopped === true });
 }
@@ -2738,6 +2806,8 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
       return checkDns(steps);
     case 'certificates':
       return deployCertificates(steps);
+    case 'access':
+      return deployAccess(steps);
   }
 }
 

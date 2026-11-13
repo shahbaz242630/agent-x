@@ -3,8 +3,9 @@
 // This is the foundation: the private network and the DNS policy watching its
 // lookups, the database server, the key
 // vault, the log workspace with its cap and alerts, the Container Apps
-// environment with one identity per app and job, CI's identity and role (G4),
-// the email service (B5-2), the activity log and the budget. The secrets (secrets.bicep), the apps and
+// environment with one identity per app and job, CI's identity (G4) and the
+// email service (B5-2). The roles, the guardrails, the activity log and the
+// budget are the partner's `access` deployment (AZ5). The secrets (secrets.bicep), the apps and
 // jobs (apps.bicep) and the doors' certificates are deployments of their own,
 // into the resource group this one creates.
 //
@@ -50,13 +51,6 @@ param alertEmail string
 @minValue(1)
 @maxValue(100)
 param logDailyCapGb int
-
-@description('The monthly budget in the subscription\'s currency; emails go out at 50%, 80% and 100% of it, and when the month\'s forecast passes it.')
-@minValue(10)
-param budgetAmount int
-
-@description('The first day of the budget\'s first month (yyyy-MM-01). Kept fixed: a budget\'s start date is not moved on redeploys.')
-param budgetStartDate string
 
 @description('The server admin\'s password: break-glass only, kept in the password manager (ADR-002). Never used by the app.')
 @secure()
@@ -338,12 +332,8 @@ module evidence 'modules/evidence.bicep' = {
     appsSubnetId: ids.appsSubnet
     workspaceId: ids.workspace
     writerIdentityName: identityName(environment, 'operator')
-    writerRoleName: 'Agent X evidence writer (${environment} ${nameSuffix})'
     anchorKeepers: anchorKeepers
-    anchorRoleName: 'Agent X audit anchors (${environment} ${nameSuffix})'
-    anchorReaderRoleName: 'Agent X audit anchors reader (${environment} ${nameSuffix})'
     restorerIdentityName: identityName(environment, 'chain-restore')
-    planReaderRoleName: 'Agent X recovery plans reader (${environment} ${nameSuffix})'
     retentionDays: evidenceRetentionDays
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
@@ -369,7 +359,6 @@ module activityDownloads 'modules/activity-downloads.bicep' = {
     appsSubnetId: ids.appsSubnet
     workspaceId: ids.workspace
     keepers: [apiKeeper, jobsKeeper]
-    roleName: 'Agent X activity downloads (${environment} ${nameSuffix})'
   }
   // The subnet's Storage endpoint, the workspace and the keepers' identities must exist first.
   dependsOn: [
@@ -409,7 +398,6 @@ module release 'modules/release.bicep' = {
     location: location
     tags: tags
     identityName: names.release
-    roleName: names.releaseRole
     subject: releaseSubject(environment)
     workspaceId: ids.workspace
     actionGroupId: ids.actionGroup
@@ -429,89 +417,13 @@ module jobWatch 'modules/job-watch.bicep' = {
     location: location
     tags: tags
     identityName: names.jobWatch
-    roleName: names.jobWatchRole
     subject: jobWatchSubject()
   }
 }
 
-// Azure's own refusals on the resource group (AZ2): an app open to the internet or
-// over plain http, an image not ours by digest, a job that starts itself, more
-// replicas than we run, or a type we don't deploy, whoever sends it.
-module guardrails 'modules/guardrails.bicep' = {
-  params: {
-    environment: environment
-    groupName: group.name
-  }
-}
-
-// Who changed what in this subscription, kept in the same workspace: every
-// change is meant to come from this code (ADR-012 §6), so a change from
-// anywhere else shows up here. The activity log costs nothing to collect.
-resource activityLog 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
-  name: 'activity-log-to-workspace'
-  properties: {
-    workspaceId: ids.workspace
-    logs: [
-      {
-        category: 'Administrative'
-        enabled: true
-      }
-      {
-        category: 'Security'
-        enabled: true
-      }
-      {
-        category: 'Policy'
-        enabled: true
-      }
-    ]
-  }
-  dependsOn: [monitoring]
-}
-
-// A cost alarm, not a limit: Azure keeps running when it is passed. Budget
-// emails carry costs, never log data.
-resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
-  name: 'budget-agentx-${environment}'
-  properties: {
-    category: 'Cost'
-    amount: budgetAmount
-    timeGrain: 'Monthly'
-    timePeriod: {
-      startDate: budgetStartDate
-    }
-    notifications: {
-      actual50: {
-        enabled: true
-        operator: 'GreaterThan'
-        threshold: 50
-        thresholdType: 'Actual'
-        contactEmails: [alertEmail]
-      }
-      actual80: {
-        enabled: true
-        operator: 'GreaterThan'
-        threshold: 80
-        thresholdType: 'Actual'
-        contactEmails: [alertEmail]
-      }
-      actual100: {
-        enabled: true
-        operator: 'GreaterThan'
-        threshold: 100
-        thresholdType: 'Actual'
-        contactEmails: [alertEmail]
-      }
-      forecast100: {
-        enabled: true
-        operator: 'GreaterThan'
-        threshold: 100
-        thresholdType: 'Forecasted'
-        contactEmails: [alertEmail]
-      }
-    }
-  }
-}
+// The custom roles, the guardrails (Azure Policy), the activity log's setting and
+// the budget are the partner's own `access` deployment (access.bicep, AZ5):
+// CI's approved infrastructure deploy may write none of them.
 
 output resourceGroupName string = group.name
 output workspaceId string = ids.workspace

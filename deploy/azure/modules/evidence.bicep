@@ -53,23 +53,11 @@ param appsSubnetId string
 param workspaceId string
 param writerIdentityName string
 
-@description('A custom role\'s name is the whole directory\'s, so it carries the environment and the suffix.')
-param writerRoleName string
-
 @description('Who keeps the anchors, each `{ workload, identity }`: the identity of the app that holds the jobs (4D2e D13), created by the foundation under that name, as the writer\'s is.')
 param anchorKeepers array
 
-@description('As `writerRoleName`, for the anchors\' role.')
-param anchorRoleName string
-
-@description('As `writerRoleName`, for the role the operator reads the anchors with (4D2e E9).')
-param anchorReaderRoleName string
-
 @description('The chain repair\'s identity (4D2e E10): it adds its records as the writer does and reads the anchors as the operator does. Created by the foundation under this name.')
 param restorerIdentityName string
-
-@description('As `writerRoleName`, for the role the chain repair reads a plan\'s file with (4D2e E10).')
-param planReaderRoleName string
 
 @description('How many days each file is kept unchangeable.')
 @minValue(1)
@@ -174,28 +162,9 @@ resource writer 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' ex
   name: writerIdentityName
 }
 
-// Put Blob of a file that isn't there yet, and nothing else (Microsoft:
-// `blobs/write` would also overwrite one, `blobs/read` read it back).
-resource writerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource writerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: guid(resourceGroup().id, 'evidence-writer')
-  properties: {
-    roleName: writerRoleName
-    description: 'The operator\'s audit export: add a new file to the export container. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: []
-        notActions: []
-        dataActions: [
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
-        ]
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 resource writes 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -215,30 +184,9 @@ resource anchorKeeper 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-
   }
 ]
 
-// Put Blob of a file that isn't there yet; Get Blob and List Blobs, which a
-// restart needs (Microsoft: both are `blobs/read`). Never `blobs/write`, which
-// would overwrite one, or `blobs/delete`.
-resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource anchorRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: guid(resourceGroup().id, 'audit-anchors')
-  properties: {
-    roleName: anchorRoleName
-    description: 'The API\'s audit anchors: add a new file to the anchors container, and read and list them. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: []
-        notActions: []
-        dataActions: [
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action'
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
-        ]
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
@@ -254,28 +202,9 @@ resource keepsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
   }
 ]
 
-// Get Blob and List Blobs (both `blobs/read`), and nothing else: the chain
-// repair (4D2e E10) checks a repair against the anchors and adds none.
-resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource anchorReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: guid(resourceGroup().id, 'audit-anchors-reader')
-  properties: {
-    roleName: anchorReaderRoleName
-    description: 'The chain repair: read and list the anchors container. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: []
-        notActions: []
-        dataActions: [
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
-        ]
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 // The operator's identity, the exports' writer above, holds the keepers' own role
@@ -322,30 +251,9 @@ resource restorerReadsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
-// Get Blob and List Blobs on the exports container (both `blobs/read`), and
-// nothing else: the chain repair reads the plan it is asked to apply, so the
-// repair is tied to the plan kept as evidence (4D2e E10). Its job already
-// reads the whole database as its owner, so these files tell it nothing more.
-resource planReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+// Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI: given here by name.
+resource planReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   name: guid(resourceGroup().id, 'evidence-plan-reader')
-  properties: {
-    roleName: planReaderRoleName
-    description: 'The chain repair: read and list the export container, for the plan it applies. Nothing else.'
-    type: 'CustomRole'
-    assignableScopes: [
-      resourceGroup().id
-    ]
-    permissions: [
-      {
-        actions: []
-        notActions: []
-        dataActions: [
-          'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'
-        ]
-        notDataActions: []
-      }
-    ]
-  }
 }
 
 resource restorerReadsPlans 'Microsoft.Authorization/roleAssignments@2022-04-01' = {

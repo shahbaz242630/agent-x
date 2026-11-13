@@ -519,18 +519,21 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('has staging, its foundation and its parts, and every file lints clean with every linter rule an error', () => {
     expect([...deployed.keys()]).toEqual(['staging']);
     expect([...params.keys()]).toEqual([
+      'staging.access.bicepparam',
       'staging.apps.bicepparam',
       'staging.bicepparam',
       'staging.certificates.bicepparam',
       'staging.secrets.bicepparam',
     ]);
     expect([...params.values()].map((entry) => entry.deploys)).toEqual([
+      'access.bicep',
       'apps.bicep',
       'main.bicep',
       'certificates.bicep',
       'secrets.bicep',
     ]);
     expect([...bicepFiles.keys()]).toEqual([
+      'access.bicep',
       'apps.bicep',
       'certificates.bicep',
       'main.bicep',
@@ -622,8 +625,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-login-logs-cap-reached',
       'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-changed',
       'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-unhealthy',
-      'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
-      'Microsoft.Consumption/budgets budget-agentx-staging',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-database',
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
@@ -716,13 +717,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-anchors$/,
       ),
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The anchors' role to the API's and the jobs' identities on staging (4D2e D13).
       expect.stringMatching(
@@ -730,9 +725,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
@@ -746,9 +738,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       'Microsoft.Insights/diagnosticSettings blob-logs-to-workspace',
@@ -759,9 +748,6 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/managementPolicies stagentxdlstg[a-z0-9]{6}\/default$/,
-      ),
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The downloads' role to the API's and the jobs' identities (4D2e D13).
       expect.stringMatching(
@@ -784,20 +770,31 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Communication\/communicationServices acs-agentx-stg-[a-z0-9]{6}$/),
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-release',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
-      expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
       // The alert on CI doing anything but a release (AZ2).
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-release-writes',
-      // The job-start watch (S175): its identity, its trust, its read-only role and that role on the group.
+      // The job-start watch (S175): its identity, its trust, and its read-only role (access's) on the group.
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-job-watch',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-job-watch/github',
       expect.stringMatching(
-        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-      ),
-      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
+    ]);
+  });
+
+  // AZ5 (review S190): what CI's approved deploy may never write, the partner's own deployment.
+  it('creates the custom roles, the guardrails, the activity log setting and the budget in access, and only them', () => {
+    const role: unknown = expect.stringMatching(
+      /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(
+      stagingPart('staging.access.bicepparam').predictedResources.map(
+        (resource) => `${resource.type} ${resource.name}`,
+      ),
+    ).toEqual([
+      'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
+      'Microsoft.Consumption/budgets budget-agentx-staging',
+      // The evidence store's four, the activity downloads', CI's and the job watch's.
+      ...Array.from({ length: 7 }, (): unknown => role),
       // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
         ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
@@ -805,6 +802,18 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         ),
       ),
     ]);
+    // Nothing else defines a role or a policy rule, or writes the budget or the subscription's activity log.
+    const elsewhere = [...(deployed.get('staging')?.parts ?? [])]
+      .filter(([file]) => file !== 'staging.access.bicepparam')
+      .flatMap(([, part]) => part.predictedResources)
+      .concat(stagingPart('staging.bicepparam').predictedResources)
+      .filter(
+        (resource) =>
+          /^Microsoft\.(?:Authorization\/(?:roleDefinitions|policyDefinitions|policyAssignments)|Consumption\/budgets)$/.test(
+            resource.type,
+          ) || resource.name === 'activity-log-to-workspace',
+      );
+    expect(elsewhere).toEqual([]);
   });
 
   it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {

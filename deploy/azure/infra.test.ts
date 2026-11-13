@@ -87,10 +87,37 @@ describe('whatIfShape and shapeHash', () => {
       before: `${IMAGE_REPOSITORY}@sha256:${'d'.repeat(64)}`,
       after: IMAGE,
     };
-    const build = { path: 'properties.template.containers.0.env.3.value', before: OLD, after: NEW };
-    expect(whatIfShape(result(modify([image, build])))).toEqual([]);
+    const build = { path: 'properties.template.containers.0.env.1.value', before: OLD, after: NEW };
+    // The setting is AGENTX_RELEASE by the resource's own body, not by its place.
+    const env = [
+      { name: 'AGENTX_ROLE', value: 'all' },
+      { name: 'AGENTX_RELEASE', value: NEW },
+    ];
+    const body = { properties: { template: { containers: [{ name: 'api', image: IMAGE, env }] } } };
+    const moved = { ...modify([image, build]), after: body };
+    expect(whatIfShape(result(moved))).toEqual([]);
     const cpu = { path: 'properties.template.containers.0.resources.cpu', before: 0.5, after: 1 };
     expect(whatIfShape(result(modify([image, cpu])))).toEqual([{ resource: API, change: 'Modify', leaves: [cpu] }]);
+    // Anything else counts: an image not ours, our image elsewhere, a commit in another setting or path.
+    const others = [
+      { ...image, after: `ghcr.io/someone/else@sha256:${'e'.repeat(64)}` },
+      { ...image, path: 'properties.template.volumes.0.image' },
+      { ...build, path: 'properties.template.containers.0.env.0.value' },
+      { ...build, path: 'tags.release' },
+    ];
+    for (const other of others) {
+      expect(whatIfShape(result({ ...modify([other]), after: body }))).toEqual([
+        { resource: API, change: 'Modify', leaves: [other] },
+      ]);
+    }
+    // A new workload's own image and build drop out the same way.
+    const created = { resourceId: API, changeType: 'Create', after: body };
+    expect(whatIfShape(result(created))[0]?.leaves.map((leaf) => leaf.path)).toEqual([
+      'properties.template.containers.0.env.0.name',
+      'properties.template.containers.0.env.0.value',
+      'properties.template.containers.0.env.1.name',
+      'properties.template.containers.0.name',
+    ]);
     // A deploy with nothing but a property-less change (Deploy) keeps it.
     expect(whatIfShape(result({ resourceId: API, changeType: 'Deploy' }))).toEqual([
       { resource: API, change: 'Deploy', leaves: [] },
@@ -99,9 +126,9 @@ describe('whatIfShape and shapeHash', () => {
 
   it('refuses a what-if that did not succeed', () => {
     expect(() => whatIfShape({ status: 'Failed', changes: [] })).toThrow(
-      "Azure's what-if didn't succeed (Failed): nothing was deployed.",
+      "Azure's what-if didn't succeed (Failed): this step was not sent.",
     );
-    expect(() => whatIfShape(null)).toThrow("Azure's what-if didn't succeed (no status): nothing was deployed.");
+    expect(() => whatIfShape(null)).toThrow("Azure's what-if didn't succeed (no status): this step was not sent.");
   });
 
   it('hashes the same changes the same, in any order or case of ID, and any other value otherwise', () => {
@@ -141,6 +168,56 @@ describe('describeShape', () => {
     expect(lines.at(-1)).toBe('    and 2 more');
     expect(lines.join('\n')).not.toMatch(/example|00000000/);
     expect(describeShape('secrets', [])).toEqual(["secrets: Azure's what-if shows no change."]);
+  });
+});
+
+describe('describeShape on what a reviewer must see (review S190)', () => {
+  it('shows the values of a grant, a rule and a way in, each GUID out but a built-in role by its name', () => {
+    const grant = `${API}/providers/Microsoft.Authorization/roleAssignments/0f0f0f0f-0000-4000-8000-000000000001`;
+    const role = (guid: string) =>
+      `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleDefinitions/${guid}`;
+    const lines = describeShape('apps', [
+      {
+        resource: grant,
+        change: 'Modify',
+        leaves: [
+          {
+            path: 'properties.roleDefinitionId',
+            before: role('acdd72a7-3385-48ef-bd42-f606fba81ae7'),
+            after: role('8e3af657-a8ff-443c-a75c-2fe8c4bcb635'),
+          },
+        ],
+      },
+      {
+        resource: API,
+        change: 'Modify',
+        leaves: [
+          { path: 'properties.configuration.ingress.external', before: false, after: true },
+          {
+            path: 'properties.configuration.ingress.ipSecurityRestrictions.0.ipAddressRange',
+            before: null,
+            after: '0.0.0.0/0',
+          },
+          { path: 'properties.template.containers.0.env.2.value', before: 'a', after: 'b' },
+        ],
+      },
+      {
+        resource: `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg/securityRules/new`,
+        change: 'Create',
+        leaves: [{ path: 'properties.sourceAddressPrefix', before: null, after: '*' }],
+      },
+    ]);
+    expect(lines).toEqual([
+      "apps: Azure's what-if shows 3 resource(s) changing:",
+      '  Modify Microsoft.App/containerApps/ca-agentx-stg-api/providers/Microsoft.Authorization/roleAssignments/0f0f0f0f-0000-4000-8000-000000000001',
+      '    properties.roleDefinitionId: /subscriptions/<id>/providers/Microsoft.Authorization/roleDefinitions/Reader -> /subscriptions/<id>/providers/Microsoft.Authorization/roleDefinitions/Owner',
+      '  Modify Microsoft.App/containerApps/ca-agentx-stg-api',
+      '    properties.configuration.ingress.external: false -> true',
+      '    properties.configuration.ingress.ipSecurityRestrictions.0.ipAddressRange: null -> 0.0.0.0/0',
+      '    properties.template.containers.0.env.2.value',
+      '  Create Microsoft.Network/networkSecurityGroups/nsg/securityRules/new',
+      '    properties.sourceAddressPrefix: null -> *',
+    ]);
   });
 });
 
@@ -221,7 +298,7 @@ describe('unattendedAz', () => {
       [
         { apps: EMPTY },
         { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed"}})' },
-        "Azure's what-if of apps failed (Forbidden, AuthorizationFailed): nothing was deployed.",
+        "Azure's what-if of apps failed (Forbidden, AuthorizationFailed): apps was not sent.",
       ],
     ] as const) {
       const { az, calls } = whatIfAz(whatIf === undefined ? {} : { whatIf });
@@ -230,6 +307,24 @@ describe('unattendedAz', () => {
       expect(calls.filter((call) => call.args[2] === 'create')).toEqual([]);
       expect(said.join('\n')).toContain(words);
     }
+  });
+
+  it('answers deploy.ts’s check alone (what-if in the command’s place) by the approved hash, sending nothing', () => {
+    const CHECK = ASKED.with(2, 'what-if');
+    const approved = whatIfAz();
+    expect(unattendedAz(approved.az, 'deploy', { apps: EMPTY }, () => undefined).interactive(CHECK, VALUES)).toBe(0);
+    const changed = whatIfAz();
+    const said: string[] = [];
+    expect(
+      unattendedAz(changed.az, 'deploy', { apps: 'f'.repeat(64) }, (line) => said.push(line)).interactive(
+        CHECK,
+        VALUES,
+      ),
+    ).toBe(1);
+    for (const { calls } of [approved, changed]) {
+      expect(calls.map((call) => call.args[2])).toEqual(['what-if']);
+    }
+    expect(said.at(-1)).toContain('so apps was not sent');
   });
 
   it('says what Azure gave when the deployment itself fails, never the request', () => {
@@ -251,7 +346,7 @@ describe('unattendedAz', () => {
     const { az } = whatIfAz();
     const unattended = unattendedAz(az, 'deploy', {}, () => undefined);
     expect(() => unattended.interactive(['deployment', 'group', 'show'], {})).toThrow(
-      "An unattended run can't answer az deployment group show: nothing was deployed.",
+      "An unattended run can't answer az deployment group show: it was not sent.",
     );
     expect(() =>
       unattended.interactive(
@@ -259,7 +354,7 @@ describe('unattendedAz', () => {
         {},
       ),
     ).toThrow(
-      'An unattended run sends foundation, secrets or apps, not staging.certificates.bicepparam: nothing was deployed.',
+      'An unattended run sends foundation, secrets or apps, not staging.certificates.bicepparam: it was not sent.',
     );
   });
 });
@@ -296,6 +391,17 @@ describe('needsOf', () => {
       byHand: [],
     });
     expect(needsOf(['db/bootstrap/roles.sql'], readers, never)).toEqual({ steps: ['apps', 'db-setup'], byHand: [] });
+    // A role, a guardrail or the budget (the partner's access deployment) is never CI's.
+    expect(
+      needsOf(
+        ['deploy/azure/modules/roles.bicep'],
+        new Map([['deploy/azure/modules/roles.bicep', ['access'] as const]]),
+        never,
+      ),
+    ).toEqual({
+      steps: [],
+      byHand: ['deploy/azure/modules/roles.bicep: access reads it, which only the partner runs (deploy.ts access)'],
+    });
     expect(needsOf(['deploy/azure/secrets.bicep', 'deploy/azure/infra.test.ts'], readers, never)).toEqual({
       steps: ['secrets'],
       byHand: [],
@@ -313,7 +419,7 @@ describe('needsOf', () => {
     const needs = needsOf(['deploy/azure/names.bicep', 'deploy/azure/deployers/deployers.bicep'], readers, never);
     expect(needs.steps).toEqual(['foundation', 'secrets', 'apps']);
     expect(needs.byHand).toEqual([
-      'deploy/azure/names.bicep: the certificates read it, issued only while the apps keep running, so a person runs it',
+      'deploy/azure/names.bicep: certificates reads it, which only the partner runs (deploy.ts certificates)',
       expect.stringMatching(/^deploy\/azure\/deployers\/deployers\.bicep: no deployment CI makes reads it \(/),
     ]);
   });
@@ -664,7 +770,7 @@ describe('the deployers (deployers/deployers.bicep)', () => {
       (match) => match[1],
     );
     const given = new Set<string>();
-    for (const file of ['modules/evidence.bicep', 'modules/activity-downloads.bicep', 'names.bicep']) {
+    for (const file of ['modules/roles.bicep', 'names.bicep']) {
       const source = readFileSync(path.join(AZURE_DIR, file), 'utf8');
       for (const match of source.matchAll(/guid\((?:resourceGroup\(\)\.id|groupId), '([a-z-]+)'\)/g))
         given.add(String(match[1]));
@@ -676,6 +782,10 @@ describe('the deployers (deployers/deployers.bicep)', () => {
     expect(access).toContain(`var vaultReaderRole = '${String(vaultReader)}'`);
     expect(access).toContain('ForAnyOfAnyValues:GuidNotEquals {${infraPrincipalId}}');
     const everything = `${text('deployers.bicep')}${access}${text('identities.bicep')}`;
+    // No role of its own in the group, and on the subscription the deployment record alone: no role, policy, setting
+    // or budget write (review S190), all of which are the partner's access deployment.
+    expect(access).not.toMatch(/roleDefinitions@/);
+    expect(text('deployers.bicep')).not.toMatch(/'Microsoft\.(?:Authorization|Consumption|Insights)\/[^']*\/write'/);
     // Owner, User Access Administrator, and any wildcard action.
     expect(everything).not.toMatch(/8e3af657-a8ff-443c-a75c-2fe8c4bcb635|18d7d88d-d35e-4fb5-a5c3-7773c20a72d9|\/\*'/);
   });

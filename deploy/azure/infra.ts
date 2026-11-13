@@ -24,8 +24,10 @@
 // What stays a person's: anything plan can't answer from a GitHub secret (the
 // database admin's and Zitadel's admin's passwords, an issued secret, a
 // rotation), the certificates (issued only while the apps keep running), a
-// first foundation, a log alert to delete (S172), and deployers.bicep itself.
-// Each of those leaves the plan empty and the release red, as before AZ5.
+// first foundation, a log alert to delete (S172), the partner's `access`
+// deployment (every custom role, the guardrails, the activity log and the
+// budget: review S190) and deployers.bicep itself. Each of those leaves the plan
+// empty and the release red, as before AZ5.
 import { createHash } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
 
@@ -100,11 +102,43 @@ export interface Changed {
   readonly leaves: readonly Leaf[];
 }
 
-/** An image of ours by digest, or a commit: what every release moves, so never a change of the set-up. */
-const MOVED_BY_RELEASES = [/^ghcr\.io\/[^@\s]+@sha256:[0-9a-f]{64}$/, /^[0-9a-f]{40}$/];
+/** Where a workload names its image, and a setting's value, as a what-if's paths name them. */
+const IMAGE_PATH = /^properties\.template\.(?:initContainers|containers)\.\d+\.image$/;
+const SETTING_PATH = /^properties\.template\.containers\.(\d+)\.env\.(\d+)\.value$/;
 
-const movedByReleases = (value: unknown): boolean =>
-  typeof value === 'string' && MOVED_BY_RELEASES.some((pattern) => pattern.test(value));
+/** Our own image by digest, the one every release moves (and nothing else's). */
+const ourImage = (value: unknown): boolean =>
+  typeof value === 'string' &&
+  value.startsWith(`${IMAGE_REPOSITORY}@sha256:`) &&
+  /^[0-9a-f]{64}$/.test(value.slice(-64));
+
+const absentOr = (value: unknown, test: (value: unknown) => boolean): boolean =>
+  value === undefined || value === null || test(value);
+
+/** The name of the setting a path's value is, read from the resource's own body before or after. */
+function settingName(bodies: readonly unknown[], container: string, setting: string): unknown {
+  for (const body of bodies) {
+    const containers = (body as { properties?: { template?: { containers?: unknown } } } | null)?.properties?.template
+      ?.containers;
+    const env = Array.isArray(containers) ? (containers[Number(container)] as { env?: unknown } | undefined)?.env : [];
+    const name = Array.isArray(env) ? (env[Number(setting)] as { name?: unknown } | undefined)?.name : undefined;
+    if (name !== undefined) return name;
+  }
+  return undefined;
+}
+
+/**
+ * A value every release moves, so never a change of the set-up: our own image at a workload's image path, and a
+ * commit in AGENTX_RELEASE. Anything else, an image of anyone else's or a commit-shaped value elsewhere, counts.
+ */
+function movedByReleases(leaf: Leaf, bodies: readonly unknown[]): boolean {
+  if (IMAGE_PATH.test(leaf.path)) return absentOr(leaf.before, ourImage) && absentOr(leaf.after, ourImage);
+  const setting = SETTING_PATH.exec(leaf.path);
+  if (setting === null || settingName(bodies, String(setting[1]), String(setting[2])) !== 'AGENTX_RELEASE')
+    return false;
+  const commit = (value: unknown): boolean => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+  return absentOr(leaf.before, commit) && absentOr(leaf.after, commit);
+}
 
 /** A what-if's property changes as leaves, each under its whole path (an array's items by index). */
 function deltaLeaves(deltas: unknown, prefix: string): Leaf[] {
@@ -127,24 +161,26 @@ const byText = (one: string, other: string): number => (one < other ? -1 : Numbe
 
 /**
  * What a what-if (az deployment … what-if --no-pretty-print) says changes, in a fixed order: each resource that
- * changes and each value with it. Unchanged and ignored resources drop out, and so does any value that is an image of
- * ours or a commit, and a resource whose only change that is: the plan runs before the deploy's own migration and
- * with the image the release would move too, so neither may make the two differ.
+ * changes and each value with it. Unchanged and ignored resources drop out, and so does a value every release moves
+ * (movedByReleases), and a resource whose only change that is: the plan runs before the deploy's own migration, so
+ * neither may make the two differ.
  */
 export function whatIfShape(result: unknown): Changed[] {
   const read = result as { status?: unknown; changes?: unknown } | null;
   if (read?.status !== 'Succeeded' || !Array.isArray(read.changes)) {
-    throw new Error(`Azure's what-if didn't succeed (${text(read?.status) || 'no status'}): nothing was deployed.`);
+    throw new Error(`Azure's what-if didn't succeed (${text(read?.status) || 'no status'}): this step was not sent.`);
   }
   return read.changes
-    .flatMap((item: { resourceId?: unknown; changeType?: unknown; after?: unknown; delta?: unknown }) => {
-      const change = text(item.changeType);
-      if (change === 'NoChange' || change === 'Ignore') return [];
-      const all = change === 'Create' ? bodyLeaves(item.after, '') : deltaLeaves(item.delta, '');
-      const leaves = all.filter((leaf) => !movedByReleases(leaf.before) && !movedByReleases(leaf.after));
-      if (change === 'Modify' && leaves.length === 0 && all.length > 0) return [];
-      return [{ resource: text(item.resourceId), change, leaves: leaves.toSorted((a, b) => byText(a.path, b.path)) }];
-    })
+    .flatMap(
+      (item: { resourceId?: unknown; changeType?: unknown; before?: unknown; after?: unknown; delta?: unknown }) => {
+        const change = text(item.changeType);
+        if (change === 'NoChange' || change === 'Ignore') return [];
+        const all = change === 'Create' ? bodyLeaves(item.after, '') : deltaLeaves(item.delta, '');
+        const leaves = all.filter((leaf) => !movedByReleases(leaf, [item.after, item.before]));
+        if (change === 'Modify' && leaves.length === 0 && all.length > 0) return [];
+        return [{ resource: text(item.resourceId), change, leaves: leaves.toSorted((a, b) => byText(a.path, b.path)) }];
+      },
+    )
     .toSorted((a, b) => byText(a.resource.toLowerCase(), b.resource.toLowerCase()));
 }
 
@@ -161,28 +197,72 @@ const local = (resource: string): string =>
     .replace(/^\/resourceGroups\/[^/]+/i, '')
     .replace(/^\/providers\//i, '');
 
-/** A value shown in the log: a number or a switch alone, since a text can name the domain or a person. */
-const plain = (value: unknown): boolean => typeof value === 'number' || typeof value === 'boolean';
+/** Built-in roles by their IDs, so a grant of one reads as what it is. */
+const BUILT_IN_ROLES: Readonly<Record<string, string>> = {
+  '8e3af657-a8ff-443c-a75c-2fe8c4bcb635': 'Owner',
+  '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9': 'User Access Administrator',
+  'f58310d9-a9f6-439a-9e8d-f62e7b41a168': 'Role Based Access Control Administrator',
+  'b24988ac-6180-42a0-ab88-20f7382dd24c': 'Contributor',
+  'acdd72a7-3385-48ef-bd42-f606fba81ae7': 'Reader',
+  '4633458b-17de-408a-b874-0445c86b69e6': 'Key Vault Secrets User',
+};
+
+const GUID_TEXT = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/**
+ * Whether a change is one a reviewer must see the values of before Approve (review S190): a grant or a role, a policy
+ * rule, a trust, the network's rules and the ways in (ingress, a door, a firewall, an allow-list).
+ */
+const securityRelevant = (resource: string, path: string): boolean =>
+  /\/Microsoft\.(?:Authorization|Network)\/|\/federatedIdentityCredentials\/|\/httpRouteConfigs\/|\/firewallRules\//i.test(
+    resource,
+  ) ||
+  /ingress|networkAcls|ipRules|ipSecurityRestrictions|publicNetworkAccess|allowedIps|virtualNetworkRules/i.test(path);
+
+/**
+ * A value as the plan shows it. Numbers and switches always; a text only where the change is security-relevant, its
+ * GUIDs out (a built-in role by its name), at most 200 characters: a text elsewhere can name the domain or a person.
+ */
+function shown(value: unknown, relevant: boolean): string | undefined {
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) {
+    return String(value);
+  }
+  if (!relevant) return undefined;
+  const raw = typeof value === 'string' ? value : JSON.stringify(value);
+  const clean = raw.replace(GUID_TEXT, (guid) => BUILT_IN_ROLES[guid.toLowerCase()] ?? '<id>');
+  return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
+}
+
+/** One value's line: its path, and what it was and becomes where both may be shown. */
+function leafLine(resource: string, leaf: Leaf): string {
+  const relevant = securityRelevant(resource, leaf.path);
+  const before = shown(leaf.before, relevant);
+  const after = shown(leaf.after, relevant);
+  return before === undefined || after === undefined ? `    ${leaf.path}` : `    ${leaf.path}: ${before} -> ${after}`;
+}
 
 /** At most this many values a resource are named, with how many more. */
 const SHOWN_LEAVES = 12;
 
-/** What a what-if changes, in words: each resource, and the paths of its values (numbers and switches with them). */
+/**
+ * What a what-if changes, in words: each resource, and the paths of its values, with the values themselves where a
+ * reviewer must see them (leafLine). A new security-relevant resource is shown value by value too.
+ */
 export function describeShape(part: Sent, shape: readonly Changed[]): string[] {
   if (shape.length === 0) return [`${part}: Azure's what-if shows no change.`];
   const lines = [`${part}: Azure's what-if shows ${String(shape.length)} resource(s) changing:`];
   for (const changed of shape) {
-    if (changed.change === 'Create') {
-      lines.push(`  Create ${local(changed.resource)} (${String(changed.leaves.length)} values)`);
-      continue;
-    }
-    lines.push(`  ${changed.change} ${local(changed.resource)}`);
-    for (const leaf of changed.leaves.slice(0, SHOWN_LEAVES)) {
-      const values = plain(leaf.before) && plain(leaf.after) ? `: ${String(leaf.before)} -> ${String(leaf.after)}` : '';
-      lines.push(`    ${leaf.path}${values}`);
-    }
-    if (changed.leaves.length > SHOWN_LEAVES)
+    const listed = changed.change !== 'Create' || securityRelevant(changed.resource, '');
+    lines.push(
+      listed
+        ? `  ${changed.change} ${local(changed.resource)}`
+        : `  Create ${local(changed.resource)} (${String(changed.leaves.length)} values)`,
+    );
+    if (!listed) continue;
+    for (const leaf of changed.leaves.slice(0, SHOWN_LEAVES)) lines.push(leafLine(changed.resource, leaf));
+    if (changed.leaves.length > SHOWN_LEAVES) {
       lines.push(`    and ${String(changed.leaves.length - SHOWN_LEAVES)} more`);
+    }
   }
   return lines;
 }
@@ -200,22 +280,24 @@ export class Planned extends Error {
   }
 }
 
-/** The deployment a deploy.ts command sends, by its parameters file; the certificates stay a person's. */
+/** The deployment a deploy.ts command sends, by its parameters file; the certificates and access stay a person's. */
 function partOf(args: readonly string[]): Sent {
   const file = args[args.indexOf('--parameters') + 1];
   const part = (Object.keys(DEPLOYMENTS) as Deployment[]).find((each) => DEPLOYMENTS[each] === file);
-  if (part === undefined || part === 'certificates') {
-    throw new Error(
-      `An unattended run sends foundation, secrets or apps, not ${file ?? 'nothing'}: nothing was deployed.`,
-    );
+  if (part === undefined || BY_HAND.has(part)) {
+    throw new Error(`An unattended run sends foundation, secrets or apps, not ${file ?? 'nothing'}: it was not sent.`);
   }
-  return part;
+  return part as Sent;
 }
+
+/** The deployments only a person runs: the certificates (issued only while the apps keep running) and access (AZ5). */
+const BY_HAND: ReadonlySet<Deployment> = new Set(['certificates', 'access']);
 
 /**
  * The CLI for an unattended run (AZ5): deploy.ts's what-if-and-send (`--confirm-with-what-if`, which waits for a
  * person's y) becomes the what-if alone, read as JSON and said in words; a plan ends there (Planned), a deploy sends
- * only when the what-if is the one approved. Everything else runs as deploy.ts runs it.
+ * only when the what-if is the one approved. deploy.ts's check alone (`what-if` in the command's place, asked before
+ * a migration) answers 0 only when it is, sending nothing. Everything else runs as deploy.ts runs it.
  */
 export function unattendedAz(
   base: Az,
@@ -226,14 +308,15 @@ export function unattendedAz(
   return {
     run: (args, values) => base.run(args, values),
     interactive: (args, values) => {
-      if (args[2] !== 'create' || !args.includes('--confirm-with-what-if')) {
-        throw new Error(`An unattended run can't answer az ${args.slice(0, 3).join(' ')}: nothing was deployed.`);
+      const checking = args[2] === 'what-if';
+      if ((args[2] !== 'create' && !checking) || !args.includes('--confirm-with-what-if')) {
+        throw new Error(`An unattended run can't answer az ${args.slice(0, 3).join(' ')}: it was not sent.`);
       }
       const part = partOf(args);
-      const sent = args.filter((arg) => arg !== '--confirm-with-what-if');
+      const sent = args.filter((arg) => arg !== '--confirm-with-what-if').with(2, 'create');
       const asked = base.run([...sent.with(2, 'what-if'), '--no-pretty-print', '--output', 'json'], values);
       if (asked.status !== 0) {
-        say(`Azure's what-if of ${part} failed (${azureRefusal(asked.stderr)}): nothing was deployed.`);
+        say(`Azure's what-if of ${part} failed (${azureRefusal(asked.stderr)}): ${part} was not sent.`);
         return 1;
       }
       const shape = whatIfShape(JSON.parse(asked.stdout));
@@ -242,10 +325,11 @@ export function unattendedAz(
       if (mode === 'plan') throw new Planned(part, hash);
       if (approved[part] !== hash) {
         say(
-          `${part}'s what-if isn't the one the partner approved: Azure or a later merge changed something since the plan. Nothing was deployed. Re-run this workflow's jobs, read the new plan, and approve that.`,
+          `${part}'s what-if isn't the one the partner approved: Azure or a later merge changed something since the plan, so ${part} was not sent (any step before it in this job was). Re-run this workflow's jobs, read the new plan, and approve that.`,
         );
         return 1;
       }
+      if (checking) return 0;
       const done = base.run([...sent, '--output', 'none'], values);
       if (done.status !== 0) {
         say(
@@ -262,7 +346,7 @@ export function unattendedTerminal(say: (line: string) => void): Terminal {
   const refuse = (question: string): Promise<string> =>
     Promise.reject(
       new Error(
-        `An unattended run can't answer "${question.trim()}": this step stays a hand deploy (deploy.ts). Nothing more was deployed.`,
+        `An unattended run can't answer "${question.trim()}": this step stays a hand deploy (deploy.ts), and was not sent.`,
       ),
     );
   return { say, ask: refuse, askHidden: refuse };
@@ -277,8 +361,8 @@ export interface Needs {
 /**
  * The steps for the files changed since what staging runs, as the release's gate reads them: a file a deployment
  * reads needs that deployment unless its record has it (`recorded`); a file of the set-up job's own areas needs apps,
- * for the image, then the job; any other file under deploy/azure, the certificates' and deployers' among them, is a
- * person's.
+ * for the image, then the job; a file the certificates or access read (every custom role, the guardrails, the budget:
+ * AZ5), and any other file under deploy/azure, the deployers' among them, is a person's.
  */
 export function needsOf(
   changed: readonly string[],
@@ -302,10 +386,10 @@ function fileNeeds(file: string, readers: Readers, recorded: (deployment: Deploy
   }
   const unrecorded = read.filter((deployment) => !recorded(deployment, file));
   return {
-    steps: unrecorded.filter((deployment): deployment is Sent => deployment !== 'certificates'),
-    byHand: unrecorded.includes('certificates')
-      ? [`${file}: the certificates read it, issued only while the apps keep running, so a person runs it`]
-      : [],
+    steps: unrecorded.filter((deployment): deployment is Sent => !BY_HAND.has(deployment)),
+    byHand: unrecorded
+      .filter((deployment) => BY_HAND.has(deployment))
+      .map((deployment) => `${file}: ${deployment} reads it, which only the partner runs (deploy.ts ${deployment})`),
   };
 }
 
