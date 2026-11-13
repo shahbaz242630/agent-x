@@ -77,24 +77,28 @@ describe('the pinned cosign', () => {
     expect(() => binaryFor('win32', 'arm64')).toThrow('No cosign binary is pinned for win32-arm64.');
   });
 
-  it('is installed by its own command, which CI runs in the release job and the kept-image check alone (the image jobs use cosign-installer)', () => {
+  it('is installed by its own command, which the release workflow runs in the release job and the kept-image check alone (the image jobs use cosign-installer)', () => {
     const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;
     expect(scripts['tools:cosign']).toBe('node tooling/cosign/install.ts');
+    const install = 'node tooling/cosign/install.ts';
     const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
     expect(ci).not.toContain('tools:cosign');
-    // Twice: inside the release job, and inside the read-only check of the images a prune kept (AZ9, S186).
-    const install = 'node tooling/cosign/install.ts';
-    expect(ci.split(install)).toHaveLength(3);
-    const release = ci.indexOf('\n  release:\n');
-    const prune = ci.indexOf('\n  image-prune:\n');
-    const kept = ci.indexOf('\n  image-kept-verify:\n');
+    expect(ci).not.toContain(install);
+    // Twice, in the release workflow (AZ2d): inside the release job, and inside the read-only check of the images a
+    // prune kept (AZ9, S186).
+    const releasing = readFileSync('.github/workflows/release.yml', 'utf8');
+    expect(releasing).not.toContain('tools:cosign');
+    expect(releasing.split(install)).toHaveLength(3);
+    const release = releasing.indexOf('\n  release:\n');
+    const prune = releasing.indexOf('\n  image-prune:\n');
+    const kept = releasing.indexOf('\n  image-kept-verify:\n');
     expect(release).toBeGreaterThan(0);
     expect(prune).toBeGreaterThan(release);
     expect(kept).toBeGreaterThan(prune);
-    const first = ci.indexOf(install);
+    const first = releasing.indexOf(install);
     expect(first).toBeGreaterThan(release);
     expect(first).toBeLessThan(prune);
-    expect(ci.indexOf(install, first + 1)).toBeGreaterThan(kept);
+    expect(releasing.indexOf(install, first + 1)).toBeGreaterThan(kept);
   });
 });
 

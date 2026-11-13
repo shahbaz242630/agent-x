@@ -1,0 +1,254 @@
+# The release to staging (G4; ADR-002 "Deploying") after every merge to main,
+# then the prune of old images and the check of the kept ones. A workflow of
+# its own, started only by a push to main (AZ2d): the release reads three
+# staging secrets, the pins of AZ2c, and no workflow that runs on pull_request
+# may name a secret (scripts/check-workflows.mjs). So nothing here ever runs
+# for a pull request.
+#
+# The same push starts CI (ci.yml), which builds, signs and attests the image.
+# This workflow can't `need` CI's jobs, so its first job waits for CI's run of
+# the same commit until its last image job has passed, and takes the digest
+# that job left (deploy/image/published.ts): a release still starts only once
+# CI's checks and its image are green, as before. A CI that fails leaves this
+# red, nothing released.
+#
+# All actions are pinned to full commit SHAs, the default token is read-only,
+# and no job keeps git credentials after checkout.
+name: Release (staging)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Waits for CI's run of this commit (at most 150 minutes, past CI's longest
+  # path to its image) and hands its digest on. It only reads: the code, and
+  # GitHub's record of CI's runs and their artifacts.
+  ci-image:
+    name: Wait for CI's checked image (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
+    permissions:
+      contents: read # to check out the wait
+      actions: read # to read CI's run of this commit, and download its digest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner image's own Node 24, as in the release job. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Wait for CI's image jobs on this commit
+        id: ci
+        env:
+          COMMIT: ${{ github.sha }}
+          # The job's own token (actions: read alone, above), by a name no tool picks up on its own.
+          AGENTX_ACTIONS_TOKEN: ${{ github.token }}
+        run: node deploy/image/published.ts "${COMMIT}"
+
+      # Refuses a download whose hash differs from the one recorded at upload.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-digest
+          path: release-digest
+          run-id: ${{ steps.ci.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Read the digest
+        id: digest
+        run: |
+          digest="$(cat release-digest/digest)"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::CI's run left no image digest the release can use, so nothing was released and staging is unchanged. Re-run CI's image jobs for this commit, then re-run this workflow."
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+  # The release, once CI's image is published, signed and its SBOM attached. It
+  # signs in to Azure by OIDC as CI's identity, with no stored credential: Azure
+  # trusts a job in GitHub's `staging` environment, which only main may use,
+  # and the identity's one role is given on the API and the migration job alone.
+  #
+  # It releases this commit (deploy/azure/release.ts, G4-4c): checks the image
+  # itself, then updates and runs the migration job, and only once that run has
+  # succeeded updates the API and waits until its new revision serves. A merge
+  # that needs a hand deploy (hand-deployed.json) turns it red, changing nothing.
+  # Its staging deployment starts the smoke test (smoke.yml).
+  #
+  # - one at a time across merges, never cancelling one that has started (a
+  #   release cancelled part-way leaves the migration job updated); GitHub keeps
+  #   one waiting and drops older waiting ones, whose commits the newer covers
+  # - the whole history, which the release reads its gate from
+  # - an hour at most: the release's own waits end within about 46 minutes (10
+  #   to settle each update, the job's 15 and 5 more for its run, 5 to serve),
+  #   and Azure's sign-in token isn't refreshed, so it is taken just before
+  # - the three Azure IDs are the GitHub environment's variables (none of them
+  #   is a secret); each is masked in the log before anything could print it
+  # - the three pins are the environment's secrets (AZ2c H3, AZ2d), each the
+  #   SHA-256 of a value only the partner's shell gives `apps`: the auth host,
+  #   the app host and the API's client ID. The release holds the live API's
+  #   values to them exactly; one not set is held to its shape and said so
+  release:
+    name: Release to staging (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: staging
+    concurrency:
+      group: release-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read # to check out the release tool and read the history
+      id-token: write # for the token Azure takes in place of a credential (OIDC)
+      deployments: read # GitHub's record of the last release to staging, which an Azure sign-in can't touch (AZ2c)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Mask the Azure IDs in the log
+        env:
+          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
+            if [ -z "${id}" ]; then
+              echo "::error::One of staging's three Azure IDs (client, tenant, subscription) is not set. Nothing was deployed. Set it in GitHub: Settings, Environments, staging, Variables; then re-run this job."
+              exit 1
+            fi
+            echo "::add-mask::${id}"
+          done
+
+      # The Azure CLI the release tool runs uses this pinned compiler, never one it downloads.
+      - name: Install the pinned Bicep compiler
+        run: node tooling/bicep/install.ts
+
+      # The release checks the image itself with cosign, the pinned one an
+      # operator's machine uses, checked against its SHA-256 as it arrives.
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Release this commit to staging
+        env:
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.ci-image.outputs.digest }}
+          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above): not
+          # GITHUB_TOKEN, which cosign's GitHub keychain and az would pick up.
+          AGENTX_DEPLOYMENTS_TOKEN: ${{ github.token }}
+          # The three pins (AZ2c H3): empty when not set, and then each value is held to its shape alone.
+          AGENTX_AUTH_HOST_SHA256: ${{ secrets.AGENTX_AUTH_HOST_SHA256 }}
+          AGENTX_APP_HOST_SHA256: ${{ secrets.AGENTX_APP_HOST_SHA256 }}
+          AGENTX_OIDC_CLIENT_ID_SHA256: ${{ secrets.AGENTX_OIDC_CLIENT_ID_SHA256 }}
+        run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
+
+      # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear
+
+  # Old image versions (G4-5; partner, S25: the 5 newest images are kept, and
+  # the one staging runs). Only after a release has gone green, which leaves
+  # staging on this run's image or a later commit's; the prune keeps both, and
+  # reads which commits are later from the whole history. One at a time.
+  #
+  # Its `packages: write` removes versions (G4-5b). It could push too, but
+  # nothing it pushed would pass the deploy check: it can't ask for a signing
+  # token, and it runs no code but ours (image-signing.test.ts).
+  image-prune:
+    name: Image (main) - prune old versions
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci-image, release]
+    runs-on: ubuntu-latest
+    # At most 200 removals a run, one a second (prune.ts).
+    timeout-minutes: 15
+    concurrency:
+      group: image-prune
+      cancel-in-progress: false
+    permissions:
+      contents: read # to check out the prune tool and read the history
+      packages: write # to remove old versions (it lists them and reads their indexes too)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Prune old image versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.ci-image.outputs.digest }}
+        run: node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"
+
+  # AZ9: every kept image up to this run's still verifies after the prune, with
+  # the deploy's own check (deploy/image/verify.ts) and the pinned cosign, so a
+  # prune that lost a signature or an SBOM is seen at once, not at a rollback.
+  # A job of its own: the prune job holds `packages: write` and runs nothing
+  # but the prune; this one only reads (image-prune.test.ts).
+  image-kept-verify:
+    name: Image (main) - kept images still verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci-image, image-prune]
+    runs-on: ubuntu-latest
+    # Two cosign checks an image, for at most six images.
+    timeout-minutes: 20
+    permissions:
+      contents: read # to check out the tools and read the history
+      packages: read # to list the package's versions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in CI's image-publish. It installs no packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      # The pinned cosign the release uses, checked against its SHA-256 as it arrives.
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
+      - name: Check every kept image up to this run's
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.ci-image.outputs.digest }}
+        run: node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"
