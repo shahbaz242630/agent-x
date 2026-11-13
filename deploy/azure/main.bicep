@@ -218,8 +218,10 @@ module dnsPolicy 'modules/dns-policy.bicep' = {
     tags: tags
     networkId: ids.network
     workspaceId: ids.workspace
+    actionGroupId: ids.actionGroup
+    blockedAlertName: 'alert-agentx-${short}-dns-blocked'
   }
-  // The network and the workspace must exist first.
+  // The network, the workspace and the action group must exist first.
   dependsOn: [
     network
     monitoring

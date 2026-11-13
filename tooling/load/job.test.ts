@@ -204,7 +204,7 @@ describe('k6, for one phase', () => {
         created: 1,
         api: 'http://api.internal',
         smoke: '0',
-        args: ['run', '--quiet', expect.stringMatching(/money-paths\.k6\.js$/) as unknown],
+        args: ['run', '--quiet', '--no-usage-report', expect.stringMatching(/money-paths\.k6\.js$/) as unknown],
       },
     });
     expect(left()).toEqual(before);

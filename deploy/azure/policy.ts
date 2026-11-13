@@ -69,6 +69,7 @@ export type RuleId =
   | 'apps-egress'
   | 'dns-watch'
   | 'dns-allow'
+  | 'dns-block-alert'
   | 'apps-logs'
   | 'app-errors-alert'
   | 'daily-words-alert'
@@ -1882,33 +1883,49 @@ const dnsActionOf = (rule: PredictedResource): string =>
 const dnsRuleOn = (rule: PredictedResource): boolean =>
   text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled';
 
+/** This deployment's DNS lists that hold every name ('.'), their names by id. */
+const everyNameLists = (snapshot: Snapshot): ReadonlyMap<string, string> =>
+  new Map(
+    ofType(snapshot, TYPES.dnsDomainList)
+      .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
+      .map((domains) => [domains.id, domains.name]),
+  );
+
+/** A DNS policy's own rules: their ids sit under the policy's. */
+const dnsRulesOf = (snapshot: Snapshot, policy: string): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+
+/** The names of the every-name lists an enabled rule of `policy` blocks: the lookups no rule above it allows. */
+const blockedEveryName = (snapshot: Snapshot, policy: string): readonly string[] => {
+  const everyName = everyNameLists(snapshot);
+  return dnsRulesOf(snapshot, policy)
+    .filter((rule) => dnsRuleOn(rule) && dnsActionOf(rule) === 'block')
+    .flatMap((rule) => list(at(rule.properties, 'dnsResolverDomainLists')))
+    .flatMap((domains) => everyName.get(text(at(domains, 'id'))) ?? []);
+};
+
 /**
  * Every lookup the network makes is judged by a DNS policy of this deployment
  * (S68 audit finding 14): its rules see what Azure's DNS answers, which the
  * apps subnet's rules must let out and so can't filter. The network is linked
  * to one of the deployment's policies, which holds an enabled rule over every
- * name, in a list of this deployment, that alerts on or blocks each lookup,
- * so a name no rule above it names is still judged; and no rule allows every
- * name, which would let each lookup through before that rule is reached (it
- * would still be logged, Allow logs too, but never blocked once that rule
- * blocks). A broad Allow short of every name (`com.`) would shadow it the
- * same way: the allowlist that comes with Block must refuse those too. Azure
- * reads the state and the action without regard to case, so they are
+ * name, in a list of this deployment, that blocks each lookup (AZ1, S188:
+ * alerting alone let any name be answered), so a name no rule above it allows
+ * is refused and logged; and no rule allows every name, which would let each
+ * lookup through before that rule is reached (it would still be logged, Allow
+ * logs too, but never blocked). A broad Allow short of every name (`com.`)
+ * would shadow it the same way: the allowlist refuses those too (dns-allow).
+ * Azure reads the state and the action without regard to case, so they are
  * compared that way. Rule `resource-logs` sends what the policy sees to the
- * workspace.
+ * workspace, and `dns-block-alert` tells someone of each blocked lookup.
  */
 const dnsWatch: Check = (snapshot, _expected, add) => {
-  const everyName = new Set(
-    ofType(snapshot, TYPES.dnsDomainList)
-      .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
-      .map((domains) => domains.id),
-  );
-  const rulesOf = (policy: string): readonly PredictedResource[] =>
-    ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+  const everyName = everyNameLists(snapshot);
+  const rulesOf = (policy: string): readonly PredictedResource[] => dnsRulesOf(snapshot, policy);
   const coversEveryName = (rule: PredictedResource): boolean =>
     list(at(rule.properties, 'dnsResolverDomainLists')).some((domains) => everyName.has(text(at(domains, 'id'))));
   const watches = (rule: PredictedResource): boolean =>
-    dnsRuleOn(rule) && ['alert', 'block'].includes(dnsActionOf(rule)) && coversEveryName(rule);
+    dnsRuleOn(rule) && dnsActionOf(rule) === 'block' && coversEveryName(rule);
   for (const network of ofType(snapshot, TYPES.network)) {
     const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
       .filter((link) => at(link.properties, 'virtualNetwork', 'id') === network.id)
@@ -1923,7 +1940,7 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
         rule: 'dns-watch',
         resource: network.name,
         message:
-          "must be linked to this deployment's DNS policy, with an enabled rule alerting on or blocking every name ('.') and none allowing every name, so each lookup it makes is seen",
+          "must be linked to this deployment's DNS policy, with an enabled rule blocking every name ('.') and none allowing every name, so each lookup no Allow names is refused and logged",
       });
     }
   }
@@ -1963,6 +1980,54 @@ const dnsAllow: Check = (snapshot, _expected, add) => {
         rule: 'dns-allow',
         resource: rule.name,
         message: `allows names outside the reviewed list (dns-allowed.json): ${refused.join(', ')}`,
+      });
+    }
+  }
+};
+
+/**
+ * The lookups the catch-all refuses that are expected, each answered no-such-name before Block too, and each one's
+ * labels reaching only servers no customer runs (S85, S188: 6,698 of 14 days' 8,130 catch-all lookups): reverse
+ * lookups of the network's and the platform's private addresses (public AS112 servers), the root's own NS, the
+ * nodes' bare names, and CoreDNS's loop check (a HINFO of two random numbers). Anything else blocked is news.
+ */
+export const DNS_EXPECTED_LEFTOVERS =
+  'where not((QueryType == "PTR" and (QueryName endswith ".10.in-addr.arpa." or QueryName endswith ".100.100.in-addr.arpa.")) or (QueryType == "NS" and QueryName == ".") or (QueryType == "HINFO" and QueryName matches regex "^[0-9]+[.][0-9]+[.]$") or QueryName matches regex "^aks-[a-z0-9]+-[0-9]+-vmss[0-9A-Z]{6}[.]$")';
+
+/** The lookups an every-name list judged, by its name: the ones the catch-all blocks once it blocks. */
+const dnsCatchAllLines = (listName: string): string => `where ResolverPolicyDomainListId endswith "/${listName}"`;
+
+/**
+ * A stateless SEV-1 alert on the main workspace fires on any lookup a DNS policy's catch-all blocks, past the expected
+ * leftovers, every window (AZ1, S188; partner S98: Microsoft adds storage stamps and moves its chains, and a blocked
+ * one can stop the vault, sign-in, image pulls or a database's backups until its name is listed). Its query names the
+ * every-name list that policy's Block rule holds, so a renamed list never leaves it counting nothing; counts only.
+ */
+const dnsBlockAlert: Check = (snapshot, _expected, add) => {
+  for (const policy of ofType(snapshot, TYPES.dnsPolicy)) {
+    const alerted = blockedEveryName(snapshot, policy.id).some((listName) =>
+      workspaceAlerted(
+        snapshot,
+        'stateless SEV-1',
+        (criterion, alert) =>
+          queryIs(
+            at(criterion, 'query'),
+            'DNSQueryLogs',
+            [dnsCatchAllLines(listName), DNS_EXPECTED_LEFTOVERS],
+            'count()',
+          ) &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
+      ),
+    );
+    if (!alerted) {
+      add({
+        rule: 'dns-block-alert',
+        resource: policy.name,
+        message:
+          "needs an enabled stateless SEV-1 alert on this deployment's main workspace that fires on any lookup its every-name Block rule refuses, past the expected leftovers, watching every window and firing on the first",
       });
     }
   }
@@ -2931,7 +2996,8 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-S]\.$/.exec(
+    // The playbook's alert sections: A to S, and W (a blocked DNS lookup, AZ1); T to V answer workflows, not alerts.
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-SW]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -5174,6 +5240,7 @@ const CHECKS: readonly Check[] = [
   appsEgress,
   dnsWatch,
   dnsAllow,
+  dnsBlockAlert,
   vault,
   evidenceStore,
   anchorEpoch,

@@ -1,5 +1,5 @@
 {
-  "about": "The names the network's lookups may be answered for once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026), each one Microsoft's or GitHub's, and from the names those lookups pass through (S84, 3 to 5 Oct): the policy judges every name in a CNAME chain, so a name we allow whose chain runs through one we don't still reached the catch-all; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone, and so are zones where no customer can point a name at a server they run (Entra's, Key Vault's and Microsoft's edge networks); in zones any customer can create names in (Traffic Manager, Front Door's and Azure CDN's, Akamai's three, cloudapp.net), only the exact names the chains pass through, which Microsoft may change: the logs are read again before the catch-all blocks. An exact name covers names under it too, and Traffic Manager takes a dotted profile name (`x.mcr` was available, S84), but a profile only points at a fixed target, which the catch-all judges in turn: what is left is which of several such profiles is looked up, and a profile's query counts its owner sees, a narrow channel resting on the same CNAME question as below (Carry-Forward). Not listed on purpose: reverse lookups (Azure sends them to public servers, which answer that no such name exists), and the login service's internal address (answered inside the environment: it never appears in the logs). This narrows which names are answered; whether a blocked name's labels still reach its own server (Azure follows CNAME chains, so it may resolve a name before judging it) is proven before relying on it (Carry-Forward). The policy's dns-allow rule refuses any Allow not listed here.",
+  "about": "The names the network's lookups may be answered for once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026), each one Microsoft's or GitHub's, and from the names those lookups pass through (S84, 3 to 5 Oct; S188, 14 days to 13 Nov): a name we allow whose chain ends at one we don't still reaches the catch-all. Microsoft says the policy chases a CNAME chain and a rule applies to a name anywhere in it; staging's logs show the action set by the chain's last name alone (3,029,619 of 3,029,619 lookups, 30 Oct to 13 Nov, S188), so every name of every chain seen is listed, safe under either reading; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone, and so are zones where no customer can point a name at a server they run (Entra's, Key Vault's and Microsoft's edge networks); in zones any customer can create names in (Traffic Manager, Front Door's and Azure CDN's, Akamai's three, cloudapp.net), only the exact names the chains pass through, which Microsoft may change: a lookup the catch-all blocks fires a SEV-1 alert (dns-policy.bicep), and the name is added here. An exact name covers names under it too, and Traffic Manager takes a dotted profile name (`x.mcr` was available, S84), but a profile only points at a fixed target, which the catch-all judges in turn: what is left is which of several such profiles is looked up, and a profile's query counts its owner sees, a narrow channel resting on the same CNAME question as below (Carry-Forward). Not listed on purpose: reverse lookups (Azure sends them to public servers, which answer that no such name exists), the root's NS, the nodes' bare names, CoreDNS's HINFO loop probes, `stats.grafana.org` (k6's usage report, turned off: S188), and the login service's internal address (answered inside the environment: it never appears in the logs). This narrows which names are answered; whether a blocked name's labels still reach its own server (Azure resolves a chain before judging it, and the logs say only its last name is judged) is proven from a container after Block is live, before relying on it (Carry-Forward). The policy's dns-allow rule refuses any Allow not listed here.",
   "domains": [
     {
       "domain": "microsoft.com.",
@@ -28,6 +28,14 @@
     {
       "domain": "shavamanifestazurecdnprod1.azureedge.net.",
       "why": "Microsoft's AKS manifests"
+    },
+    {
+      "domain": "shavamanifestazurecdnprod1.afd.azureedge.net.",
+      "why": "inside the chain of the AKS manifests' name, listed in case Block judges every hop (S188)"
+    },
+    {
+      "domain": "eafd-prod-chnr9b1-roxy-default-sni.aksroxy.azureedge.net.",
+      "why": "behind primary-cdn.pki.core.windows.net (certificates, S188)"
     },
     {
       "domain": "azurecontainerapps.dev.",
@@ -82,6 +90,10 @@
       "why": "Microsoft's edge, behind packages.microsoft.com and the certificate CDN"
     },
     {
+      "domain": "fb-t-msedge.net.",
+      "why": "Microsoft's edge fallback, behind packages.microsoft.com (S188), a zone only Microsoft creates names in"
+    },
+    {
       "domain": "microsoftmetrics.com.",
       "why": "The platform's own metrics service (Azure Monitor's shoebox and its global endpoint), a zone only Microsoft creates names in"
     },
@@ -106,12 +118,28 @@
       "why": "behind global.prod.microsoftmetrics.com (the platform's own metrics)"
     },
     {
+      "domain": "azurefd-t-fb-prod.trafficmanager.net.",
+      "why": "behind packages.microsoft.com (Front Door's fallback, S188)"
+    },
+    {
       "domain": "azurefd-critical-t-prod-stage2.trafficmanager.net.",
       "why": "behind packages.microsoft.com"
     },
     {
       "domain": "azurefd-critical-t-prod.trafficmanager.net.",
       "why": "behind primary-cdn.pki.core.windows.net (certificates)"
+    },
+    {
+      "domain": "dc.trafficmanager.net.",
+      "why": "inside the chain of dc.services.visualstudio.com (the platform's own telemetry), listed in case Block judges every hop (S188)"
+    },
+    {
+      "domain": "gig-ai-prod-westeurope-global.trafficmanager.net.",
+      "why": "inside the chain of dc.services.visualstudio.com, listed in case Block judges every hop (S188)"
+    },
+    {
+      "domain": "gig-hot-prod-mdm-westus2-level1.trafficmanager.net.",
+      "why": "behind westus2-mdm.prod.hot.ingest.monitor.core.windows.net (the platform's own metrics, S188)"
     },
     {
       "domain": "blob.dxb21prdstrz01a.trafficmanager.net.",
@@ -122,8 +150,16 @@
       "why": "behind the platform's storage accounts in the UAE"
     },
     {
+      "domain": "blob.dxb22prdstrz07a.trafficmanager.net.",
+      "why": "behind the managed storage of our Postgres servers' backups and the platform's storage accounts in the UAE (a fourth stamp, seen 1 Nov: S188)"
+    },
+    {
       "domain": "blob.dxb24prdstrz01a.trafficmanager.net.",
       "why": "behind the platform's storage accounts in the UAE (a third storage stamp, seen 9 Oct)"
+    },
+    {
+      "domain": "blob.dxb24prdstrz03a.trafficmanager.net.",
+      "why": "the one other UAE zone-redundant storage stamp that answered a probe of every dxb10-39/auh10-39 strz01-12 a-c name (13 Nov 2026, S188), not yet looked up: listed so a new Postgres server put there keeps its backups"
     },
     {
       "domain": "gig-warm-prod-shared-uaenorth.trafficmanager.net.",
@@ -132,6 +168,14 @@
     {
       "domain": "mcr.trafficmanager.net.",
       "why": "behind mcr.microsoft.com"
+    },
+    {
+      "domain": "mcrweudata.trafficmanager.net.",
+      "why": "inside the chain of westeurope.data.mcr.microsoft.com (image layers), listed in case Block judges every hop (S188)"
+    },
+    {
+      "domain": "prod3.prod.msftmetrics.trafficmanager.net.",
+      "why": "behind prod3.prod.microsoftmetrics.com (the platform's own metrics, S188)"
     },
     {
       "domain": "shoebox2.prod.msftmetrics.trafficmanager.net.",
@@ -156,6 +200,14 @@
     {
       "domain": "azglobal-red.cloudapp.net.",
       "why": "the other half of azglobal-black's pair, as shoebox2 answered from both (the platform's own metrics)"
+    },
+    {
+      "domain": "prod3-black.cloudapp.net.",
+      "why": "behind prod3.prod.microsoftmetrics.com (the platform's own metrics, S188)"
+    },
+    {
+      "domain": "prod3-red.cloudapp.net.",
+      "why": "behind prod3-red.prod.microsoftmetrics.com, the other half of prod3-black's pair (S188)"
     },
     {
       "domain": "shoebox2-black.cloudapp.net.",
@@ -186,8 +238,8 @@
       "why": "behind our email service"
     },
     {
-      "domain": "aen.tm.prd.r.kv.aadg.akadns.net.",
-      "why": "behind our key vault"
+      "domain": "prd.r.kv.aadg.akadns.net.",
+      "why": "behind our key vault: Entra's UAE North routing and its load balancers (aen.tm, aen-lb, aen-lb-aen-pool, three seen in 14 days, two of them new: S188), under Microsoft's own Akamai traffic domain aadg (Azure AD Global), where no other customer creates names"
     },
     {
       "domain": "aen.tm.r.prd.aadg.akadns.net.",
