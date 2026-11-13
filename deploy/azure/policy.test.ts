@@ -5474,11 +5474,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'agentx-staging-allowed-types: refuses vnet-agentx-staging, which this deployment ships or a release sends: Azure would refuse our own deploy',
         exactly,
       ]);
-      // #627's alerts left out: the foundation that brings them would be refused.
+      // The activity-log alerts left out: #627's two (now shipped) and the must-pass example are refused.
       const noAlerts = changed(DEFINITION('allowed-types'), (definition) => {
         typesOf(definition).in = allowed.filter((each) => each !== 'Microsoft.Insights/activityLogAlerts');
       });
       expect(policyProblemsOf(noAlerts)).toEqual([
+        'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-changed, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-unhealthy, which this deployment ships or a release sends: Azure would refuse our own deploy',
         'agentx-staging-allowed-types: refuses an activity-log alert, which this deployment ships or a release sends: Azure would refuse our own deploy',
         exactly,
       ]);
