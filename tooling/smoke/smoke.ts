@@ -2,10 +2,12 @@
 // its key lives: .github/workflows/smoke.yml): staging's test agent reads what
 // every agent reads, so a release that starts clean but is wired wrong (the
 // database, the key check's pepper, the partner switch, the door) turns red.
-// The log shows each read's path and status, never a body. Node builtins only.
-import { setTimeout as sleep } from 'node:timers/promises';
-
+// Then the auth host's door (auth-door.ts, SA1): Zitadel's sign-in still
+// reached, everything else the API's plain 404. The log shows each read's
+// path and status, never a body or a host. Node builtins only.
 import { originOf } from '../dast/scan.ts';
+import { askAwake, REAL, type Ways } from './ask.ts';
+import { authOriginOf, checkAuthDoor } from './auth-door.ts';
 
 /** The one shape a smoke key may have: reads alone, so a leaked key can ask for nothing. */
 export const SMOKE_SCOPES = ['sources:read', 'suppliers:read'] as const;
@@ -47,54 +49,18 @@ export const READS: readonly Read[] = [
   { path: '/v1/agent/suppliers', problem: isList('suppliers') },
 ];
 
-/** A fetch that answers, or throws on a dropped line. */
-type Fetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
-
-/** How the reads reach the door and wait, real by default. */
-interface Ways {
-  readonly fetcher: Fetch;
-  readonly now: () => Date;
-  /** How long a read may keep meeting a waking API. */
-  readonly wakeMs: number;
-  /** The wait between tries. */
-  readonly pause: () => Promise<unknown>;
-}
-
-const REAL: Ways = {
-  fetcher: fetch,
-  now: () => new Date(),
-  wakeMs: 180_000,
-  pause: () => sleep(10_000),
-};
-
-/**
- * One read, retried while the API wakes from zero (a 502, 503 or 504, or no
- * answer) for at most `wakeMs`; any other answer is final.
- */
-async function readOnce(
-  origin: string,
-  key: string,
-  read: Read,
-  { fetcher, now, wakeMs, pause }: Ways,
-): Promise<string> {
-  const until = now().getTime() + wakeMs;
-  for (;;) {
-    let last: string;
-    try {
-      const answer = await fetcher(`${origin}${read.path}`, {
-        headers: { authorization: `Bearer ${key}`, accept: 'application/json' },
-        signal: AbortSignal.timeout(30_000),
-      });
-      last = String(answer.status);
-      // A 200 is final: one that isn't a JSON object (the door serving a page) is wrong, not asleep.
-      if (answer.status === 200) return `${read.path}: ${verdict(read, await answer.text(), now())}`;
-      if (![502, 503, 504].includes(answer.status)) return `${read.path}: ${last}`;
-    } catch {
-      last = 'no answer';
-    }
-    if (now().getTime() >= until) return `${read.path}: ${last} after ${String(wakeMs / 1000)} s`;
-    await pause();
-  }
+/** One read: `path: 200`, or what was wrong. */
+async function readOnce(origin: string, key: string, read: Read, ways: Ways): Promise<string> {
+  const asked = await askAwake(
+    `${origin}${read.path}`,
+    { headers: { authorization: `Bearer ${key}`, accept: 'application/json' } },
+    ways,
+  );
+  if ('waited' in asked) return `${read.path}: ${asked.waited}`;
+  const { answer } = asked;
+  // A 200 is final: one that isn't a JSON object (the door serving a page) is wrong, not asleep.
+  if (answer.status === 200) return `${read.path}: ${verdict(read, await answer.text(), ways.now())}`;
+  return `${read.path}: ${String(answer.status)}`;
 }
 
 /** A 200's body judged: `200`, or what's wrong with it. */
@@ -143,17 +109,22 @@ export function storedKey(stored: string | undefined): { readonly key: string } 
 }
 
 async function main(): Promise<number> {
-  const stored = storedKey(process.env.AGENTX_SMOKE_KEY);
-  if ('problem' in stored) {
-    console.log(stored.problem);
-    return 1;
-  }
-  const { key } = stored;
-  const origin = originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN');
-  const { passed } = await smoke(origin, key, {}, (line) => {
+  const say = (line: string): void => {
     console.log(line);
-  });
-  return passed ? 0 : 1;
+  };
+  const origin = originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN');
+  const authOrigin = authOriginOf(origin);
+  const stored = storedKey(process.env.AGENTX_SMOKE_KEY);
+  let passed: boolean;
+  if ('problem' in stored) {
+    say(stored.problem);
+    passed = false;
+  } else {
+    passed = (await smoke(origin, stored.key, {}, say)).passed;
+  }
+  // The auth door needs no key, so it is checked whatever the key's state.
+  const door = await checkAuthDoor(authOrigin, {}, say);
+  return passed && door.passed ? 0 : 1;
 }
 
 if (import.meta.main) process.exitCode = await main();

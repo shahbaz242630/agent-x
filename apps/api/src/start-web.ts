@@ -150,6 +150,8 @@ export async function startWeb(
     activity: activitySinkOf(createActivityLog({ ids: uuidV7Ids }), database),
     placeOf: await loadPlaces(config.environment, logger),
     consoleFiles: await loadConsoleFiles(config.environment, logger),
+    // SA1: the login service's public host gets the API's 404 alone, never our console or routes.
+    loginOrigin: config.signIn?.issuer,
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(
         database,

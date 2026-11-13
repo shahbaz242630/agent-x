@@ -2009,17 +2009,25 @@ var doors = [
     ]
   }
   {
-    // The auth host: Zitadel, with its login pages under the base path the
-    // login container is built for, as the compose stack's edge serves them
-    // (deploy/compose/edge/nginx.conf).
+    // The auth host (SA1): an allow-list. Only what a browser needs from
+    // Zitadel goes to it, the login pages go to the login app, and every other
+    // path goes to the API, which answers every request on the auth host with
+    // a plain 404, never a console page or route (apps/api/src/login-host.ts,
+    // matched by the OIDC issuer's host). Our API and login app reach Zitadel
+    // inside the environment (AGENTX_OIDC_INTERNAL_ORIGIN, ZITADEL_API_URL), never
+    // through this door, so its system API, its instance services, its REST
+    // gateways (/admin/v1, /management/v1, /v2, ...), gRPC reflection,
+    // /openapi, /saml and /idps are reachable from nowhere outside. The
+    // compose edge stays a deny-list: the e2e drives Zitadel's REST gateways
+    // through it (tooling/e2e/zitadel.ts).
     door: 'auth'
     host: authHost
     routes: [
       {
         // Zitadel's health and debug pages are the platform's, not the
         // browser's, and its readiness page queries the database on every
-        // request. The API answers them with its own 404, in any case, so
-        // `/DEBUG` finds nothing either. No trailing slash, unlike the compose
+        // request. The API answers them with its 404, as it does every request
+        // on this host, in any case, so `/DEBUG` finds nothing either. No trailing slash, unlike the compose
         // edge's `/debug/`: `/debug` itself is caught too.
         description: 'Zitadel\'s debug pages on the auth host get the API\'s 404'
         prefix: '/debug'
@@ -2032,11 +2040,123 @@ var doors = [
         anyCase: false
         reaches: 'login'
       }
+      // The allow-list, each prefix in its one case (Zitadel's paths are
+      // case-sensitive, so another case would only widen the door). OpenID
+      // Connect for every sign-in: discovery, authorize, token, keys,
+      // userinfo and end_session.
       {
-        description: 'Every other path on the auth host goes to Zitadel'
-        prefix: '/'
+        description: 'Zitadel\'s OpenID discovery on the auth host'
+        prefix: '/.well-known/'
         anyCase: false
         reaches: 'zitadel'
+      }
+      {
+        description: 'Zitadel\'s OAuth endpoints on the auth host'
+        prefix: '/oauth/v2/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'Zitadel\'s OpenID Connect endpoints on the auth host'
+        prefix: '/oidc/v1/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      // The console's pages, the hosted login it can fall back to, and the
+      // branding images (logos, fonts) both of them load.
+      {
+        description: 'Zitadel\'s console on the auth host'
+        prefix: '/ui/console'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'Zitadel\'s hosted login on the auth host'
+        prefix: '/ui/login'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'Zitadel\'s branding assets on the auth host'
+        prefix: '/assets/v1/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      // The gRPC-web services the console's browser code calls, and only
+      // those (its grpc.service.ts at v4.17.3 makes every client it has).
+      // Each is the full service name with its slash, so no prefix also
+      // matches zitadel.system or zitadel.instance.
+      {
+        description: 'The console\'s AdminService (v1) on the auth host'
+        prefix: '/zitadel.admin.v1.AdminService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s ManagementService (v1) on the auth host'
+        prefix: '/zitadel.management.v1.ManagementService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s AuthService (v1) on the auth host'
+        prefix: '/zitadel.auth.v1.AuthService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s UserService (v2) on the auth host'
+        prefix: '/zitadel.user.v2.UserService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s SessionService (v2) on the auth host'
+        prefix: '/zitadel.session.v2.SessionService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s FeatureService (v2) on the auth host'
+        prefix: '/zitadel.feature.v2.FeatureService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s ActionService (v2) on the auth host'
+        prefix: '/zitadel.action.v2.ActionService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s WebKeyService (v2) on the auth host'
+        prefix: '/zitadel.webkey.v2.WebKeyService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s OrganizationService (v2) on the auth host'
+        prefix: '/zitadel.org.v2.OrganizationService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s AuthorizationService (v2) on the auth host'
+        prefix: '/zitadel.authorization.v2.AuthorizationService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'The console\'s ApplicationService (v2) on the auth host'
+        prefix: '/zitadel.application.v2.ApplicationService/'
+        anyCase: false
+        reaches: 'zitadel'
+      }
+      {
+        description: 'Every other path on the auth host goes to the API, which answers 404 on this host'
+        prefix: '/'
+        anyCase: false
+        reaches: 'api'
       }
     ]
   }
