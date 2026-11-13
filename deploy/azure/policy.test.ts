@@ -6201,7 +6201,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(doorProblems(changed(APP_DOOR, (door) => (hostOf(door).bindingType = 'SniEnabled')))).toEqual([]);
     // The routing, which must be exactly the listed lines in order.
     // The auth door (SA1): the debug pages and the login pages, then an
-    // allow-list of what a browser needs from Zitadel, then the API's 404.
+    // allow-list of what a browser needs from Zitadel, then the API, which answers 404 on that host.
     const authLines = [
       'prefix "/debug" in any case to api',
       'prefix "/ui/v2/login" to login',

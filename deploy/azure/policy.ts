@@ -819,10 +819,11 @@ const ONE_JOB_AND_ONE_MORE = 2;
  */
 const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
   app: ['prefix "/" to api'],
-  // Zitadel's debug pages get the API's 404, whatever their case; its login
+  // Zitadel's debug pages go to the API (a 404 there), whatever their case; its login
   // pages go to the login app; then an allow-list (SA1): only what a browser
-  // needs from Zitadel, each prefix in its one case, and everything else the
-  // API's 404. Zitadel's system API, instance services, REST gateways,
+  // needs from Zitadel, each prefix in its one case, and everything else to the
+  // API, which answers every request on the auth host with a plain 404
+  // (apps/api/src/login-host.ts). Zitadel's system API, instance services, REST gateways,
   // reflection, /openapi, /saml and /idps are never public.
   auth: [
     'prefix "/debug" in any case to api',

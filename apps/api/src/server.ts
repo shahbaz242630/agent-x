@@ -1,6 +1,8 @@
 // The API's HTTP server (ADR-001: Fastify), with the protections every route
 // gets. Each request, in order:
-// 1. gets its correlation ID (from the caller if it's a UUID) and the security headers
+// 1. gets its correlation ID (from the caller if it's a UUID) and the security
+//    headers; on the login service's public host, a plain 404 and nothing more
+//    (login-host.ts, SA1)
 // 2. is counted against its client address's rate limit (ADR-011 §4); a
 //    refusal is noted as a security event (B2-5b)
 // 3. is refused if it can change something but didn't come from our own origin
@@ -22,7 +24,8 @@
 // is checked, answered and documented through its zod schemas, and the API
 // serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
 // The console's own files are answered before any of this, by a layer in front
-// of Fastify that serves only its build (console-files.ts, 6A1).
+// of Fastify that serves only its build (console-files.ts, 6A1), never on the
+// login service's host.
 import type {
   AcceptanceConfirmations,
   ContactChanges,
@@ -60,6 +63,7 @@ import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody, troubleOf } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
+import { loginHostCheck } from './login-host.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import {
   createAgentCounter,
@@ -245,6 +249,8 @@ export interface ServerOptions {
   readonly myOrganizations?: ListMyOrganizations | undefined;
   /** The console's build (console-files.ts), served in front of Fastify; without it, the API alone. */
   readonly consoleFiles?: ConsoleFiles | undefined;
+  /** The login service's public origin, the OIDC issuer: a request naming its host gets a 404 (login-host.ts); none when not given. */
+  readonly loginOrigin?: string | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -339,7 +345,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     },
   });
 
-  if (options.consoleFiles !== undefined) putConsoleInFront(app.server, options.consoleFiles);
+  const onLoginHost = loginHostCheck(options.loginOrigin);
+  if (options.consoleFiles !== undefined) {
+    putConsoleInFront(app.server, options.consoleFiles, (request) => onLoginHost(request.headers.host));
+  }
   // Every line of a request carries its ID, whichever logger writes it (logger.ts); before anything that could write
   // one. Once is enough, a body arriving late included: Fastify's parser goes back into the scope it was entered from
   // (an AsyncResource), which api-sockets.test.ts holds to account on a real socket, an upgrade being what could change it.
@@ -350,6 +359,16 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // Again for the work after the answer (the activity row): when pipelined answers queue on a connection, Node finishes
   // one from inside the one before, so its hooks would run as that other request's. api-sockets.test.ts proves it.
   app.addHook('onResponse', inRequestScope);
+  // The login service's public host (SA1): a plain 404, before any other hook or route can answer. The Host as it
+  // reached the server, never X-Forwarded-Host, which the client writes.
+  app.addHook('onRequest', (request, reply, done) => {
+    if (!onLoginHost(request.headers.host)) {
+      done();
+      return;
+    }
+    void reply.headers(SECURITY_HEADERS).header(CORRELATION_HEADER, request.id);
+    void sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  });
   // First, so no route escapes it.
   await registerContract(app);
   // Each limit is this copy's share of it across every `web` copy (rate-limit.ts).

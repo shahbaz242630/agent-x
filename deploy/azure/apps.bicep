@@ -1903,8 +1903,10 @@ var doors = [
   {
     // The auth host (SA1): an allow-list. Only what a browser needs from
     // Zitadel goes to it, the login pages go to the login app, and every other
-    // path gets the API's own 404. Our API and login app reach Zitadel inside
-    // the environment (AGENTX_OIDC_INTERNAL_ORIGIN, ZITADEL_API_URL), never
+    // path goes to the API, which answers every request on the auth host with
+    // a plain 404, never a console page or route (apps/api/src/login-host.ts,
+    // matched by the OIDC issuer's host). Our API and login app reach Zitadel
+    // inside the environment (AGENTX_OIDC_INTERNAL_ORIGIN, ZITADEL_API_URL), never
     // through this door, so its system API, its instance services, its REST
     // gateways (/admin/v1, /management/v1, /v2, ...), gRPC reflection,
     // /openapi, /saml and /idps are reachable from nowhere outside. The
@@ -1916,8 +1918,8 @@ var doors = [
       {
         // Zitadel's health and debug pages are the platform's, not the
         // browser's, and its readiness page queries the database on every
-        // request. The API answers them with its own 404, in any case, so
-        // `/DEBUG` finds nothing either. No trailing slash, unlike the compose
+        // request. The API answers them with its 404, as it does every request
+        // on this host, in any case, so `/DEBUG` finds nothing either. No trailing slash, unlike the compose
         // edge's `/debug/`: `/debug` itself is caught too.
         description: 'Zitadel\'s debug pages on the auth host get the API\'s 404'
         prefix: '/debug'
@@ -2043,7 +2045,7 @@ var doors = [
         reaches: 'zitadel'
       }
       {
-        description: 'Every other path on the auth host gets the API\'s 404'
+        description: 'Every other path on the auth host goes to the API, which answers 404 on this host'
         prefix: '/'
         anyCase: false
         reaches: 'api'
