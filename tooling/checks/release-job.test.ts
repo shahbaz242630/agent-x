@@ -75,7 +75,7 @@ describe('the release job', () => {
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(signingIn.sort()).toEqual([`${WATCH_WORKFLOW}: watch`, `${RELEASE_WORKFLOW}: release`]);
+    expect(signingIn.toSorted()).toEqual([`${WATCH_WORKFLOW}: watch`, `${RELEASE_WORKFLOW}: release`]);
   });
 
   it('runs only on a push to main, after CI’s image is published and attested, in the staging environment', () => {
@@ -132,7 +132,11 @@ describe('the release job', () => {
     // No stored credential: a client secret or certificate would be one to leak. The job's only secrets are the
     // three pins, given to the release step alone (below).
     const named = [...JSON.stringify(release).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
-    expect(named.sort()).toEqual(['AGENTX_APP_HOST_SHA256', 'AGENTX_AUTH_HOST_SHA256', 'AGENTX_OIDC_CLIENT_ID_SHA256']);
+    expect(named.toSorted()).toEqual([
+      'AGENTX_APP_HOST_SHA256',
+      'AGENTX_AUTH_HOST_SHA256',
+      'AGENTX_OIDC_CLIENT_ID_SHA256',
+    ]);
   });
 
   it('releases the commit it runs for, with the digest CI’s image job left, the three pins, and signs out whatever happens', () => {

@@ -143,27 +143,32 @@ async function look(request: Request, get: GitHubGet): Promise<Seen> {
   return { kind: 'waiting', why: `CI's run ${String(id)} is ${String(run.status)}; its image isn't attested yet` };
 }
 
+/** One look, forgiving up to MISSES_FORGIVEN unanswered asks in a row (counted in `misses`) as waiting. */
+async function lookForgiving(request: Request, steps: Steps, misses: { count: number }): Promise<Seen> {
+  try {
+    const seen = await look(request, steps.get);
+    misses.count = 0;
+    return seen;
+  } catch (error) {
+    if (!(error instanceof Missed)) throw error;
+    misses.count += 1;
+    if (misses.count > MISSES_FORGIVEN) {
+      throw new Error(
+        `GitHub's Actions API couldn't be read ${String(misses.count)} times in a row (${error.message}), so whether CI's image of ${request.commit} is ready is unknown, ${NOTHING_RELEASED}. Re-run this workflow; if it repeats, check GitHub's status page.`,
+        { cause: error },
+      );
+    }
+    return { kind: 'waiting', why: `GitHub's Actions API didn't answer (${error.message}); asking again` };
+  }
+}
+
 /** Waits for CI's image of the commit: 0 with the run's ID in the output when it is ready; an error in plain words if never. */
 export async function wait(request: Request, steps: Steps): Promise<number> {
   const deadline = steps.now() + WAIT_MINUTES * 60_000;
   let said = '';
-  let misses = 0;
+  const misses = { count: 0 };
   for (;;) {
-    let seen: Seen;
-    try {
-      seen = await look(request, steps.get);
-      misses = 0;
-    } catch (error) {
-      if (!(error instanceof Missed)) throw error;
-      misses += 1;
-      if (misses > MISSES_FORGIVEN) {
-        throw new Error(
-          `GitHub's Actions API couldn't be read ${String(misses)} times in a row (${error.message}), so whether CI's image of ${request.commit} is ready is unknown, ${NOTHING_RELEASED}. Re-run this workflow; if it repeats, check GitHub's status page.`,
-          { cause: error },
-        );
-      }
-      seen = { kind: 'waiting', why: `GitHub's Actions API didn't answer (${error.message}); asking again` };
-    }
+    const seen = await lookForgiving(request, steps, misses);
     if (seen.kind === 'ready') {
       steps.say(`CI's run ${String(seen.run)} published, signed and attested the image of ${request.commit}.`);
       steps.output(`run-id=${String(seen.run)}`);
