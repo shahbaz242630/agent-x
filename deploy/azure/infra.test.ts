@@ -401,6 +401,13 @@ describe('unattendedAz', () => {
     ).toThrow(
       'An unattended run sends foundation, secrets or apps, not staging.certificates.bicepparam: it was not sent.',
     );
+    // Nor the partner's access deployment (review S190, mutation M13): a role, a guardrail, the lock, the budget.
+    expect(() =>
+      unattended.interactive(
+        ASKED.map((arg) => (arg === 'staging.apps.bicepparam' ? 'staging.access.bicepparam' : arg)),
+        {},
+      ),
+    ).toThrow('An unattended run sends foundation, secrets or apps, not staging.access.bicepparam: it was not sent.');
   });
 });
 
