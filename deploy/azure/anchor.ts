@@ -63,41 +63,50 @@ async function readOrRefuse(get: GitHubGet, url: string, token: string): Promise
   return answer.body;
 }
 
-/** The commit a deployment was made for, if its latest status says it succeeded; nothing otherwise. */
-async function succeeded(
-  deployment: unknown,
-  base: string,
-  read: (url: string) => Promise<unknown>,
-): Promise<string | undefined> {
+/** A deployment as listed: its id and commit, or an error when it names no commit. */
+function deploymentOf(deployment: unknown): { readonly id: number; readonly sha: string } {
   const { id, sha } = isRecord(deployment) ? deployment : {};
   if (typeof id !== 'number' || typeof sha !== 'string' || !COMMIT.test(sha)) {
     throw unreadable('a deployment named no commit');
   }
+  return { id, sha };
+}
+
+/** Whether a deployment's latest status says it succeeded. */
+async function succeeded(id: number, base: string, read: (url: string) => Promise<unknown>): Promise<boolean> {
   const statuses = await read(`${base}/${String(id)}/statuses?per_page=1`);
   const [latest] = Array.isArray(statuses) ? (statuses as unknown[]) : [];
   const state = isRecord(latest) ? latest.state : undefined;
-  return typeof state === 'string' && SUCCEEDED.has(state) ? sha : undefined;
+  return typeof state === 'string' && SUCCEEDED.has(state);
 }
 
 /** The token the release and the watch are given to read deployments with: not GITHUB_TOKEN, which cosign and az would pick up. */
 export const TOKEN_VARIABLE = 'AGENTX_DEPLOYMENTS_TOKEN';
 
 /**
- * The commits of the deployments to staging that succeeded, newest created first, reading every page to the end of
- * the listing or the cap (each deployment's latest status: this run's own, still in progress, never succeeded).
- * `ended` is false only when the cap was reached first.
+ * The commits of the deployments to staging that succeeded and could be the anchor, reading every page to the end of
+ * the listing or the cap (each deployment's latest status: this run's own, still in progress, never succeeded). A
+ * status is read only for a commit newer on main's line than the newest success found so far, or one off the line:
+ * no other could be the anchor, and one status call each was most of the cost (155 calls on staging, S188). `ended`
+ * is false only when the cap was reached first.
  */
 async function successes(
   read: (url: string) => Promise<unknown>,
   base: string,
+  place: (commit: string) => number | undefined,
 ): Promise<{ commits: string[]; ended: boolean }> {
   const commits: string[] = [];
+  let best: number | undefined;
   for (let page = 1; page <= PAGES; page += 1) {
     const listed = await read(`${base}?environment=staging&per_page=${String(PER_PAGE)}&page=${String(page)}`);
     if (!Array.isArray(listed)) throw unreadable('its list of deployments was not a list');
-    for (const deployment of listed as unknown[]) {
-      const commit = await succeeded(deployment, base, read);
-      if (commit !== undefined) commits.push(commit);
+    for (const { id, sha } of (listed as unknown[]).map(deploymentOf)) {
+      const at = place(sha);
+      const couldBeNewer = at === undefined || best === undefined || at < best;
+      if (couldBeNewer && (await succeeded(id, base, read))) {
+        commits.push(sha);
+        if (at !== undefined) best = at;
+      }
     }
     if (listed.length < PER_PAGE) return { commits, ended: true };
   }
@@ -124,7 +133,7 @@ export async function lastRelease(
     throw unreadable(`no ${TOKEN_VARIABLE} or repository given`);
   }
   const base = `${API}/repos/${repository}/deployments`;
-  const { commits, ended } = await successes((url) => readOrRefuse(get, url, token), base);
+  const { commits, ended } = await successes((url) => readOrRefuse(get, url, token), base, place);
   if (commits.length === 0) {
     if (ended) return { kind: 'none' };
     throw unreadable(`none of its last ${String(PAGES * PER_PAGE)} deployments to staging succeeded`);

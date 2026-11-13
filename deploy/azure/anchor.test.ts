@@ -86,6 +86,24 @@ describe('the last release GitHub recorded for staging', () => {
     expect(await lastRelease(IN_CI, place, offLine.get)).toEqual({ kind: 'release', commit: commit('f') });
   });
 
+  it('reads a status only for a commit newer on main’s line than the best success so far, or one off the line', async () => {
+    const { get, asked } = github({
+      [page(1)]: [
+        { id: 4, sha: commit('c') },
+        { id: 3, sha: commit('b') },
+        { id: 2, sha: commit('a') },
+        { id: 1, sha: commit('f') },
+      ],
+      [statuses(4)]: [{ state: 'success' }],
+      [statuses(3)]: [{ state: 'success' }],
+      [statuses(2)]: [{ state: 'success' }],
+      [statuses(1)]: [{ state: 'failure' }],
+    });
+    expect(await lastRelease(IN_CI, place, get)).toEqual({ kind: 'release', commit: commit('c') });
+    // c, the newest on the line, succeeded: b and a can't be newer, so their statuses are never asked; f is off it.
+    expect(asked).toEqual([page(1), statuses(4), statuses(1)].map((url) => `token ${url}`));
+  });
+
   it('reads every page to the end of the listing, a success on a later page counting', async () => {
     const { get } = github({
       ...fullPage(1000, commit('a'), 'failure'),
