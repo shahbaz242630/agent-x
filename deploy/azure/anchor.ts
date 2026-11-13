@@ -34,7 +34,8 @@ const unreadable = (why: string): Error =>
     `GitHub's record of the last release to staging couldn't be read (${why}), so a roll-back past it can't be ruled out (AZ2c), and nothing was changed. The job needs \`deployments: read\` and its token in AGENTX_DEPLOYMENTS_TOKEN; run it again, and if it repeats, read the staging environment's deployments on GitHub.`,
   );
 
-const real: GitHubGet = async (url, token) => {
+/** A GET of GitHub's REST API as a token, shared with the release's wait for CI's image (deploy/image/published.ts). */
+export const realGitHubGet: GitHubGet = async (url, token) => {
   const answer = await fetch(url, {
     headers: {
       Accept: 'application/vnd.github+json',
@@ -124,7 +125,7 @@ async function successes(
 export async function lastRelease(
   env: Readonly<Record<string, string | undefined>>,
   place: (commit: string) => number | undefined,
-  get: GitHubGet = real,
+  get: GitHubGet = realGitHubGet,
 ): Promise<Anchor> {
   if (env.GITHUB_ACTIONS !== 'true') return { kind: 'unread' };
   const token = env[TOKEN_VARIABLE] ?? '';

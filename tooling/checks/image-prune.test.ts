@@ -1,6 +1,6 @@
 // The prune of old image versions (0e G4-5; partner, S25: the 5 newest images
 // kept, and the one staging runs). What keeps it safe is held here: it runs
-// only on a push to main, only after the release has gone green (staging then
+// only on a push to main, in the release workflow (AZ2d), only after the release has gone green (staging then
 // runs this run's image or a later commit's, and the prune keeps both, read
 // from the whole history), one at a time, and it removes versions (G4-5b) with
 // no power to sign and no code but ours.
@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { SIGNING_WORKFLOW } from '../../deploy/image/verify.ts';
+import { RELEASE_WORKFLOW } from '../../deploy/image/published.ts';
 
 interface Step {
   name?: string;
@@ -29,15 +29,15 @@ interface Job {
   steps?: Step[];
 }
 
-const { jobs } = parse(readFileSync(SIGNING_WORKFLOW, 'utf8')) as { jobs: Record<string, Job> };
+const { jobs } = parse(readFileSync(RELEASE_WORKFLOW, 'utf8')) as { jobs: Record<string, Job> };
 const prune = jobs['image-prune'];
-if (prune === undefined) throw new Error(`${SIGNING_WORKFLOW} has no image-prune job`);
+if (prune === undefined) throw new Error(`${RELEASE_WORKFLOW} has no image-prune job`);
 const steps = prune.steps ?? [];
 
 describe('the image prune job', () => {
-  it('runs only on a push to main, after the release, with the digest the image job published', () => {
+  it('runs only on a push to main, after the release, with the digest CI’s image jobs left', () => {
     expect(prune.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect([prune.needs ?? []].flat().sort()).toEqual(['image-publish', 'release']);
+    expect([prune.needs ?? []].flat().sort()).toEqual(['ci-image', 'release']);
     expect(prune.environment).toBeUndefined();
   });
 
@@ -68,7 +68,7 @@ describe('the image prune job', () => {
       env: {
         GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
         COMMIT: '${{ github.sha }}',
-        DIGEST: '${{ needs.image-publish.outputs.digest }}',
+        DIGEST: '${{ needs.ci-image.outputs.digest }}',
       },
       run: 'node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"',
     });
@@ -77,12 +77,12 @@ describe('the image prune job', () => {
 
 describe('AZ9: the check that kept images still verify after the prune', () => {
   const kept = jobs['image-kept-verify'];
-  if (kept === undefined) throw new Error(`${SIGNING_WORKFLOW} has no image-kept-verify job`);
+  if (kept === undefined) throw new Error(`${RELEASE_WORKFLOW} has no image-kept-verify job`);
   const keptSteps = kept.steps ?? [];
 
   it('runs on a push to main, after the prune, and can only read', () => {
     expect(kept.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect([kept.needs ?? []].flat().sort()).toEqual(['image-prune', 'image-publish']);
+    expect([kept.needs ?? []].flat().sort()).toEqual(['ci-image', 'image-prune']);
     expect(kept.permissions).toEqual({ contents: 'read', packages: 'read' });
     expect(kept.environment).toBeUndefined();
   });
@@ -101,7 +101,7 @@ describe('AZ9: the check that kept images still verify after the prune', () => {
       env: {
         GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
         COMMIT: '${{ github.sha }}',
-        DIGEST: '${{ needs.image-publish.outputs.digest }}',
+        DIGEST: '${{ needs.ci-image.outputs.digest }}',
       },
       run: 'node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"',
     });

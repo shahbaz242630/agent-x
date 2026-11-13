@@ -1315,7 +1315,15 @@ describe('what stops it, and what it leaves', () => {
       'a container field it would drop',
       (job: Record<string, unknown>) => {
         const container = firstContainer(at(job, 'properties'));
-        if (container !== undefined) container.probes = [];
+        if (container !== undefined) container.stdin = true;
+      },
+      "its container has stdin, which this tool doesn't copy",
+    ],
+    [
+      'a probe, which a job never has (AZ8b)',
+      (job: Record<string, unknown>) => {
+        const container = firstContainer(at(job, 'properties'));
+        if (container !== undefined) container.probes = [{ type: 'Liveness', tcpSocket: { port: 8080 } }];
       },
       "its container has probes, which this tool doesn't copy",
     ],

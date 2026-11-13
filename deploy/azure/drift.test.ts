@@ -12,6 +12,8 @@ import {
   type LiveContainer,
   matches,
   partsOf,
+  type Probe,
+  probesIn,
   SHELL_MARKERS,
   templatesIn,
   type Workload,
@@ -220,6 +222,76 @@ describe('how a live container differs from its template', () => {
   });
 });
 
+/** Production's liveness probe on the API (AZ8b), as apps.bicep sends it. */
+const LIVENESS: Probe = {
+  type: 'Liveness',
+  tcpSocket: { port: 8080 },
+  initialDelaySeconds: 1,
+  periodSeconds: 10,
+  timeoutSeconds: 5,
+  successThreshold: 1,
+  failureThreshold: 6,
+};
+const READINESS: Probe = { type: 'Readiness', tcpSocket: { port: 8080 }, periodSeconds: 5 };
+
+describe("a container's probes (AZ8b)", () => {
+  const refuse = (why: string): never => {
+    throw new Error(why);
+  };
+
+  it('reads none when absent or empty, and each with its given fields alone, Azure’s nulls left out', () => {
+    for (const none of [undefined, null, [], {}]) expect(probesIn(none, refuse)).toEqual([]);
+    expect(probesIn([LIVENESS, READINESS], refuse)).toEqual([LIVENESS, READINESS]);
+    expect(
+      probesIn(
+        [{ ...LIVENESS, httpGet: null, terminationGracePeriodSeconds: null, tcpSocket: { port: 8080, host: null } }],
+        refuse,
+      ),
+    ).toEqual([LIVENESS]);
+  });
+
+  it("refuses what it can't copy, naming a field never a value", () => {
+    for (const [value, why] of [
+      [LIVENESS, 'its probes are not a list'],
+      ['x', 'its probes are not a list'],
+      [[{ ...LIVENESS, type: 'Other' }], 'a probe is not a liveness, readiness or startup one, once'],
+      [[null], 'a probe is not a liveness, readiness or startup one, once'],
+      [[LIVENESS, LIVENESS], 'a probe is not a liveness, readiness or startup one, once'],
+      [[{ ...LIVENESS, tcpSocket: undefined }], 'its Liveness probe is not a TCP port alone'],
+      [[{ ...LIVENESS, tcpSocket: { port: '8080' } }], 'its Liveness probe is not a TCP port alone'],
+      [[{ ...LIVENESS, tcpSocket: { port: 8080, host: 'x' } }], 'its Liveness probe is not a TCP port alone'],
+      [
+        [{ ...LIVENESS, httpGet: { path: '/health', port: 8080 } }],
+        "its Liveness probe has httpGet, which this tool doesn't copy",
+      ],
+      [[{ ...LIVENESS, periodSeconds: 1.5 }], "its Liveness probe has periodSeconds, which this tool doesn't copy"],
+      [[{ ...LIVENESS, timeoutSeconds: -1 }], "its Liveness probe has timeoutSeconds, which this tool doesn't copy"],
+      [[{ ...READINESS, 'a\nb': 1 }], "its Readiness probe has a?b, which this tool doesn't copy"],
+    ] as const) {
+      expect(() => probesIn(value, refuse), JSON.stringify(value)).toThrow(why);
+    }
+  });
+
+  it('finds probes changed, added or dropped, in any order Azure gives them', () => {
+    const template = [{ ...TEMPLATE[0], probes: [LIVENESS, READINESS] }];
+    expect(differs({ probes: [READINESS, LIVENESS] }, template)).toEqual([]);
+    expect(differs({ probes: [{ ...LIVENESS, failureThreshold: 60 }, READINESS] }, template)).toEqual([
+      'its probes are not the template’s',
+    ]);
+    expect(differs({}, template)).toEqual(['its probes are not the template’s']);
+    expect(differs({ probes: [LIVENESS] })).toEqual(['its probes are not the template’s']);
+    expect(() => expectedOf([{ ...TEMPLATE[0], probes: [{ type: 'Liveness' }] }])).toThrow(
+      'its Liveness probe is not a TCP port alone',
+    );
+  });
+
+  it('sends the template’s probes, and no field for none', () => {
+    const template = [{ ...TEMPLATE[0], probes: [LIVENESS] }];
+    expect(deployable('migrate', template, 'i', 'c').probes).toEqual([LIVENESS]);
+    expect('probes' in deployable('migrate', [{ ...TEMPLATE[0], probes: null }], 'i', 'c')).toBe(false);
+  });
+});
+
 describe('the container a template sends (migrate ahead of a hand deploy)', () => {
   it("is the template's, with the image and build given, in the shape a release reads", () => {
     const image = `ghcr.io/shahbaz242630/agent-x@sha256:${'2'.repeat(64)}`;
@@ -289,7 +361,10 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
       ),
       resources: expectedApi.resources,
       volumeMounts: expectedApi.volumeMounts,
+      // All three, pinned (AZ8b), in the order Azure may give them back.
+      probes: expectedApi.probes.toReversed(),
     };
+    expect(expectedApi.probes.map(({ type }) => type)).toEqual(['Startup', 'Readiness', 'Liveness']);
     // The values only Azure or the shell gives are there to be matched.
     expect(live.env.length).toBeGreaterThan(20);
     expect(
@@ -301,6 +376,9 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
     // The API's own command, and a host the shell gives pointed elsewhere, are each found.
     expect(differences(expectedApi, { ...live, command: ['node', '-e', 'x'] }, new Map())).toEqual([
       'its command is not the template’s',
+    ]);
+    expect(differences(expectedApi, { ...live, probes: (live.probes ?? []).slice(1) }, new Map())).toEqual([
+      'its probes are not the template’s',
     ]);
     const issuer = live.env.map((setting) =>
       setting.name === 'AGENTX_EMAIL_ENDPOINT' ? { ...setting, value: 'https://evil.example' } : setting,

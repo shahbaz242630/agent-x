@@ -7480,6 +7480,31 @@ describe('the load run (D2c, PL-38)', () => {
     const login = production.predictedResources.find(APP('login'));
     expect(at(login?.properties, 'template', 'scale')).toEqual({ minReplicas: 2, maxReplicas: 4 });
     expect(at(containerOf(login as unknown as Mutable), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    // The API's copies at 1 vCPU and 2 GiB, its heap three quarters of it; staging's at 0.5 vCPU and 1 GiB. Both with
+    // all three probes pinned (AZ8b): startup and readiness at Azure's documented defaults, liveness its own.
+    const apiOf = (from: Snapshot): Mutable =>
+      containerOf(from.predictedResources.find(APP('api')) as unknown as Mutable);
+    const tcp = (type: string, [delay, period, timeout, failures]: readonly number[]): Mutable => ({
+      type,
+      tcpSocket: { port: 8080 },
+      initialDelaySeconds: delay,
+      periodSeconds: period,
+      timeoutSeconds: timeout,
+      successThreshold: 1,
+      failureThreshold: failures,
+    });
+    const probes = [tcp('Startup', [1, 1, 3, 240]), tcp('Readiness', [3, 5, 5, 48]), tcp('Liveness', [1, 10, 5, 6])];
+    expect(at(apiOf(production), 'resources')).toEqual({ cpu: 1, memory: '2Gi' });
+    expect(at(apiOf(production), 'command')).toContain('--max-old-space-size=1536');
+    expect(at(apiOf(production), 'probes')).toEqual(probes);
+    expect(at(apiOf(staging), 'resources')).toEqual({ cpu: 0.5, memory: '1Gi' });
+    expect(at(apiOf(staging), 'command')).toContain('--max-old-space-size=768');
+    expect(at(apiOf(staging), 'probes')).toEqual(probes);
+    // Every other app keeps Azure's defaults.
+    for (const workload of ['zitadel', 'login', 'jobs']) {
+      const app = production.predictedResources.find(APP(workload)) as unknown as Mutable;
+      expect(at(containerOf(app), 'probes') ?? null, workload).toBeNull();
+    }
     const problems = policyProblems(production, { region: 'uaenorth', environment: 'production' });
     expect(problems.filter(({ rule }) => rule === 'apps' || rule === 'jobs')).toEqual([]);
     // Its count at production's defaults (Azure.md): web 60, jobs 20, Zitadel 10 x (4 + 2), and two more.

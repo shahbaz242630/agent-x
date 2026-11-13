@@ -17,6 +17,7 @@ import {
   SIGNING_WORKFLOW,
   SOURCE_REPOSITORY,
 } from '../../deploy/image/verify.ts';
+import { RELEASE_WORKFLOW } from '../../deploy/image/published.ts';
 
 interface Step {
   name?: string;
@@ -70,6 +71,10 @@ function helpersFor(file: string, workflow: Workflow) {
   return { job, steps, indexOf };
 }
 const { job, steps, indexOf } = helpersFor(SIGNING_WORKFLOW, ci);
+// The release, the prune and the check of the kept images run in a push-only workflow of their own (AZ2d).
+const releasing = workflows.find(({ file }) => file === RELEASE_WORKFLOW)?.workflow;
+if (releasing === undefined) throw new Error(`${RELEASE_WORKFLOW} is missing`);
+const { job: releaseJob, steps: releaseSteps } = helpersFor(RELEASE_WORKFLOW, releasing);
 const expecting = (code: number) => (step: Step) => step.env?.EXPECTED_EXIT === String(code);
 const running = (command: string) => (step: Step) => step.run?.includes(command) === true;
 
@@ -86,18 +91,18 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     // The load test's image is published and signed the same way by its own workflow (below).
     expect(holding('packages').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,
-      `${SIGNING_WORKFLOW}: image-prune`,
       `${SIGNING_WORKFLOW}: image-publish`,
       `${LOAD_SIGNER.workflow}: load-image-attest`,
       `${LOAD_SIGNER.workflow}: load-image-publish`,
+      `${RELEASE_WORKFLOW}: image-prune`,
     ]);
     expect(
-      steps('image-prune').some((step) =>
+      releaseSteps('image-prune').some((step) =>
         /cosign|docker|oras|crane|curl|wget|\bgh\b/.test(`${step.uses ?? ''} ${step.run ?? ''}`),
       ),
     ).toBe(false);
-    expect(steps('image-prune').filter((step) => step.run !== undefined)).toHaveLength(1);
-    expect(steps('image-prune').find((step) => step.run !== undefined)?.run).toMatch(
+    expect(releaseSteps('image-prune').filter((step) => step.run !== undefined)).toHaveLength(1);
+    expect(releaseSteps('image-prune').find((step) => step.run !== undefined)?.run).toMatch(
       /^node deploy\/image\/prune\.ts prune /,
     );
     // The release job and the job-start watch ask for a token too, but Azure's (release-job.test.ts): they push
@@ -105,14 +110,14 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect(holding('id-token').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,
       `${SIGNING_WORKFLOW}: image-publish`,
-      `${SIGNING_WORKFLOW}: release`,
       '.github/workflows/job-starts.yml: watch',
       `${LOAD_SIGNER.workflow}: load-image-attest`,
       `${LOAD_SIGNER.workflow}: load-image-publish`,
+      `${RELEASE_WORKFLOW}: release`,
     ]);
     // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.
     expect(
-      steps('release').some((step) =>
+      releaseSteps('release').some((step) =>
         /cosign (?:sign|attest)|cosign-installer|docker (?:push|login)/.test(`${step.uses ?? ''} ${step.run ?? ''}`),
       ),
     ).toBe(false);
@@ -132,21 +137,19 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
   });
 
   it('publishes nothing until every other job on a push has passed, and releases only what it published', () => {
-    // The release job comes after the image jobs, releasing what they published (release-job.test.ts),
-    // and the prune after the release (image-prune.test.ts).
+    // The release comes after the image jobs, waiting for them from its own workflow and releasing what they
+    // published (release-job.test.ts), and the prune after the release (image-prune.test.ts).
     const others = Object.entries(jobs)
       .filter(
         ([name, candidate]) =>
-          !IMAGE_JOBS.includes(name) &&
-          !['release', 'image-prune', 'image-kept-verify', 'image-scan'].includes(name) &&
-          candidate.if !== "github.event_name == 'pull_request'",
+          !IMAGE_JOBS.includes(name) && name !== 'image-scan' && candidate.if !== "github.event_name == 'pull_request'",
       )
       .map(([name]) => name);
     expect(others.length).toBeGreaterThanOrEqual(5);
     expect([job('image-publish').needs ?? []].flat().toSorted()).toEqual(others.toSorted());
     expect([job('image-sbom').needs ?? []].flat()).toEqual(['image-publish']);
     expect([job('image-attest').needs ?? []].flat().sort()).toEqual(['image-publish', 'image-sbom']);
-    expect([job('release').needs ?? []].flat().sort()).toEqual(['image-attest', 'image-publish']);
+    expect([releaseJob('release').needs ?? []].flat()).toEqual(['ci-image']);
   });
 
   it('scans the published image by its digest, report only, in a job that can write nothing but code scanning', () => {

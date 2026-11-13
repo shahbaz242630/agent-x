@@ -370,7 +370,7 @@ describe('AZ2c: the migration job itself held to its build’s apps.bicep', () =
     expect(unreadable.lines).toContain(
       `${FINDING_START}it can't be compared (bicep failed in /subscriptions/the subscription)`,
     );
-    const odd = { ...MIGRATE, probes: [] };
+    const odd = { ...MIGRATE, stdin: true };
     const shaped = await run(world(odd), [], heldFor(world(odd), { template: [MIGRATE] }));
     expect(shaped.status).toBe(1);
     expect(

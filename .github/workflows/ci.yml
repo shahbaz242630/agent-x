@@ -3,8 +3,10 @@
 # Every job that runs on a pull request is a required status check on the main
 # ruleset, but Verify's test parts, which Verify itself requires. The three image jobs run only on a push to main, after every other
 # job passed, so they can't gate a PR: they publish and sign the image that
-# deployments run (SEC-SC-02). The release job then releases that image to
-# staging (G4). All actions are pinned to full commit SHAs, the default token
+# deployments run (SEC-SC-02). The release to staging (G4), the prune of old
+# images and the check of the kept ones run in release.yml, which waits for
+# this run's image jobs: it reads staging's secrets, which no workflow that runs
+# on pull_request may name (AZ2d). All actions are pinned to full commit SHAs, the default token
 # is read-only, and no job keeps git credentials after checkout.
 name: CI
 
@@ -606,181 +608,23 @@ jobs:
             exit 1
           fi
 
+      # The release (release.yml, AZ2d) runs in a workflow of its own, so it can't read this run's job outputs: it
+      # takes the digest from this artifact, left only once every check above has passed, and checks the image itself
+      # again. Kept 30 days, so a release can be re-run.
+      - name: Hand the digest to the release
+        env:
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: |
+          mkdir -p release-digest
+          echo "${DIGEST}" > release-digest/digest
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-digest
+          path: release-digest/digest
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Log out of the registry
         if: always()
         run: docker logout ghcr.io
-
-  # The release to staging (G4; ADR-002 "Deploying"), after every merge to main,
-  # once the image is published, signed and its SBOM attached. It signs in to
-  # Azure by OIDC as CI's identity, with no stored credential: Azure trusts a job
-  # in GitHub's `staging` environment, which only main may use, and the
-  # identity's one role is given on the API and the migration job alone.
-  #
-  # It releases this commit (deploy/azure/release.ts, G4-4c): checks the image
-  # itself, then updates and runs the migration job, and only once that run has
-  # succeeded updates the API and waits until its new revision serves. A merge
-  # that needs a hand deploy (hand-deployed.json) turns it red, changing nothing.
-  #
-  # - one at a time across merges, never cancelling one that has started (a
-  #   release cancelled part-way leaves the migration job updated); GitHub keeps
-  #   one waiting and drops older waiting ones, whose commits the newer covers
-  # - the whole history, which the release reads its gate from
-  # - an hour at most: the release's own waits end within about 46 minutes (10
-  #   to settle each update, the job's 15 and 5 more for its run, 5 to serve),
-  #   and Azure's sign-in token isn't refreshed, so it is taken just before
-  # - the three IDs are the GitHub environment's variables, not secrets (none
-  #   of them is one, and this workflow runs on pull requests, which may hold no
-  #   secret); each is masked in the log before anything could print it
-  release:
-    name: Release to staging (main)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [image-publish, image-attest]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: staging
-    concurrency:
-      group: release-staging
-      cancel-in-progress: false
-    permissions:
-      contents: read # to check out the release tool and read the history
-      id-token: write # for the token Azure takes in place of a credential (OIDC)
-      deployments: read # GitHub's record of the last release to staging, which an Azure sign-in can't touch (AZ2c)
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # The runner image's own Node 24, as in image-publish. It installs no packages.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: false
-          package-manager-cache: false
-
-      - name: Mask the Azure IDs in the log
-        env:
-          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
-            if [ -z "${id}" ]; then
-              echo "::error::One of staging's three Azure IDs (client, tenant, subscription) is not set. Nothing was deployed. Set it in GitHub: Settings, Environments, staging, Variables; then re-run this job."
-              exit 1
-            fi
-            echo "::add-mask::${id}"
-          done
-
-      # The Azure CLI the release tool runs uses this pinned compiler, never one it downloads.
-      - name: Install the pinned Bicep compiler
-        run: node tooling/bicep/install.ts
-
-      # The release checks the image itself with cosign, the pinned one an
-      # operator's machine uses, checked against its SHA-256 as it arrives.
-      - name: Install the pinned cosign
-        run: node tooling/cosign/install.ts
-
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      # The release reads three optional pins (AZ2c: the SHA-256 of the auth host, the app host, the API's client ID)
-      # but this workflow passes none: it runs on pull_request, where no secret may be named (check-workflows). They
-      # come with the release moved to a push-only workflow (Outstanding-Work AZ2d); until then each is held to its
-      # shape, and the release says so in one line.
-      - name: Release this commit to staging
-        env:
-          COMMIT: ${{ github.sha }}
-          DIGEST: ${{ needs.image-publish.outputs.digest }}
-          # The job's own token, to read the last release GitHub recorded (deployments: read alone, above): not
-          # GITHUB_TOKEN, which cosign's GitHub keychain and az would pick up.
-          AGENTX_DEPLOYMENTS_TOKEN: ${{ github.token }}
-        run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
-
-      # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.
-      - name: Sign out of Azure
-        if: always()
-        run: az account clear
-
-  # Old image versions (G4-5; partner, S25: the 5 newest images are kept, and
-  # the one staging runs). Only after a release has gone green, which leaves
-  # staging on this run's image or a later commit's; the prune keeps both, and
-  # reads which commits are later from the whole history. One at a time.
-  #
-  # Its `packages: write` removes versions (G4-5b). It could push too, but
-  # nothing it pushed would pass the deploy check: it can't ask for a signing
-  # token, and it runs no code but ours (image-signing.test.ts).
-  image-prune:
-    name: Image (main) - prune old versions
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [image-publish, release]
-    runs-on: ubuntu-latest
-    # At most 200 removals a run, one a second (prune.ts).
-    timeout-minutes: 15
-    concurrency:
-      group: image-prune
-      cancel-in-progress: false
-    permissions:
-      contents: read # to check out the prune tool and read the history
-      packages: write # to remove old versions (it lists them and reads their indexes too)
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # The runner image's own Node 24, as in image-publish. It installs no packages.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: false
-          package-manager-cache: false
-
-      - name: Prune old image versions
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT: ${{ github.sha }}
-          DIGEST: ${{ needs.image-publish.outputs.digest }}
-        run: node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"
-
-  # AZ9: every kept image up to this run's still verifies after the prune, with
-  # the deploy's own check (deploy/image/verify.ts) and the pinned cosign, so a
-  # prune that lost a signature or an SBOM is seen at once, not at a rollback.
-  # A job of its own: the prune job holds `packages: write` and runs nothing
-  # but the prune; this one only reads (image-prune.test.ts).
-  image-kept-verify:
-    name: Image (main) - kept images still verify
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [image-publish, image-prune]
-    runs-on: ubuntu-latest
-    # Two cosign checks an image, for at most six images.
-    timeout-minutes: 20
-    permissions:
-      contents: read # to check out the tools and read the history
-      packages: read # to list the package's versions
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # The runner image's own Node 24, as in image-publish. It installs no packages.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version-file: .nvmrc
-          check-latest: false
-          package-manager-cache: false
-
-      # The pinned cosign the release uses, checked against its SHA-256 as it arrives.
-      - name: Install the pinned cosign
-        run: node tooling/cosign/install.ts
-
-      - name: Check every kept image up to this run's
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT: ${{ github.sha }}
-          DIGEST: ${{ needs.image-publish.outputs.digest }}
-        run: node deploy/image/prune.ts verify-kept "${COMMIT}" "${DIGEST}"
