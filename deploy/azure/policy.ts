@@ -820,8 +820,35 @@ const ONE_JOB_AND_ONE_MORE = 2;
 const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
   app: ['prefix "/" to api'],
   // Zitadel's debug pages get the API's 404, whatever their case; its login
-  // pages go to the login app; everything else to Zitadel.
-  auth: ['prefix "/debug" in any case to api', 'prefix "/ui/v2/login" to login', 'prefix "/" to zitadel'],
+  // pages go to the login app; then an allow-list (SA1): only what a browser
+  // needs from Zitadel, each prefix in its one case, and everything else the
+  // API's 404. Zitadel's system API, instance services, REST gateways,
+  // reflection, /openapi, /saml and /idps are never public.
+  auth: [
+    'prefix "/debug" in any case to api',
+    'prefix "/ui/v2/login" to login',
+    ...[
+      '/.well-known/',
+      '/oauth/v2/',
+      '/oidc/v1/',
+      '/ui/console',
+      '/ui/login',
+      '/assets/v1/',
+      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3).
+      '/zitadel.admin.v1.AdminService/',
+      '/zitadel.management.v1.ManagementService/',
+      '/zitadel.auth.v1.AuthService/',
+      '/zitadel.user.v2.UserService/',
+      '/zitadel.session.v2.SessionService/',
+      '/zitadel.feature.v2.FeatureService/',
+      '/zitadel.action.v2.ActionService/',
+      '/zitadel.webkey.v2.WebKeyService/',
+      '/zitadel.org.v2.OrganizationService/',
+      '/zitadel.authorization.v2.AuthorizationService/',
+      '/zitadel.application.v2.ApplicationService/',
+    ].map((prefix) => `prefix "${prefix}" to zitadel`),
+    'prefix "/" to api',
+  ],
 };
 
 /** How a door binds its host's certificate: a managed one once it exists, or one it names. `Disabled` is plain http. */

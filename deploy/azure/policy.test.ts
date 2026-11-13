@@ -6200,10 +6200,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
     expect(doorProblems(changed(APP_DOOR, (door) => (hostOf(door).bindingType = 'SniEnabled')))).toEqual([]);
     // The routing, which must be exactly the listed lines in order.
-    const listed = {
-      app: 'prefix "/" to api',
-      auth: 'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel',
-    };
+    // The auth door (SA1): the debug pages and the login pages, then an
+    // allow-list of what a browser needs from Zitadel, then the API's 404.
+    const authLines = [
+      'prefix "/debug" in any case to api',
+      'prefix "/ui/v2/login" to login',
+      'prefix "/.well-known/" to zitadel',
+      'prefix "/oauth/v2/" to zitadel',
+      'prefix "/oidc/v1/" to zitadel',
+      'prefix "/ui/console" to zitadel',
+      'prefix "/ui/login" to zitadel',
+      'prefix "/assets/v1/" to zitadel',
+      'prefix "/zitadel.admin.v1.AdminService/" to zitadel',
+      'prefix "/zitadel.management.v1.ManagementService/" to zitadel',
+      'prefix "/zitadel.auth.v1.AuthService/" to zitadel',
+      'prefix "/zitadel.user.v2.UserService/" to zitadel',
+      'prefix "/zitadel.session.v2.SessionService/" to zitadel',
+      'prefix "/zitadel.feature.v2.FeatureService/" to zitadel',
+      'prefix "/zitadel.action.v2.ActionService/" to zitadel',
+      'prefix "/zitadel.webkey.v2.WebKeyService/" to zitadel',
+      'prefix "/zitadel.org.v2.OrganizationService/" to zitadel',
+      'prefix "/zitadel.authorization.v2.AuthorizationService/" to zitadel',
+      'prefix "/zitadel.application.v2.ApplicationService/" to zitadel',
+      'prefix "/" to api',
+    ];
+    const listed = { app: 'prefix "/" to api', auth: authLines.join('; ') };
+    // The auth door's lines with some changed: line index to its new text, or undefined to drop it.
+    const authWith = (changes: Readonly<Record<number, string | undefined>>, extra: readonly string[] = []): string =>
+      [
+        ...authLines.flatMap((line, index) => {
+          if (!(index in changes)) return [line];
+          const changed = changes[index];
+          return changed === undefined ? [] : [changed];
+        }),
+        ...extra,
+      ].join('; ');
     const routed = (name: string, lines: string): string =>
       `${name}: must route exactly as PUBLIC_DOORS says, in order: ${name === app ? listed.app : listed.auth}. It routes: ${lines}`;
     const rulesOf = (door: Mutable): Mutable[] => at(door, 'properties', 'rules') as Mutable[];
@@ -6211,19 +6242,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const targetOf = (door: Mutable, index = 0): Mutable => first(nth(rulesOf(door), index).targets);
     const authRouting = (change: (door: Mutable) => void): string[] => doorProblems(changed(AUTH_DOOR, change));
     const appRouting = (change: (door: Mutable) => void): string[] => doorProblems(changed(APP_DOOR, change));
-    // The login pages after `/`, where Zitadel would take them first.
-    expect(authRouting((door) => rulesOf(door).reverse())).toEqual([
-      routed(auth, 'prefix "/" to zitadel; prefix "/ui/v2/login" to login; prefix "/debug" in any case to api'),
+    // The rules backwards: `/` first, where the API would take every sign-in.
+    expect(authRouting((door) => rulesOf(door).reverse())).toEqual([routed(auth, [...authLines].reverse().join('; '))]);
+    // An allowed path moved after `/`, where it never matches.
+    expect(authRouting((door) => rulesOf(door).push(...rulesOf(door).splice(2, 1)))).toEqual([
+      routed(auth, authWith({ 2: undefined }, [authLines[2] ?? ''])),
     ]);
     // The debug pages matched in one case only, or with case left to Azure; `/` in any case.
     expect(authRouting((door) => (inside(routeOf(door), 'match').caseSensitive = true))).toEqual([
-      routed(auth, 'prefix "/debug" to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel'),
+      routed(auth, authWith({ 0: 'prefix "/debug" to api' })),
     ]);
     expect(authRouting((door) => delete inside(routeOf(door), 'match').caseSensitive)).toEqual([
-      routed(
-        auth,
-        'prefix "/debug" with case left to Azure to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel',
-      ),
+      routed(auth, authWith({ 0: 'prefix "/debug" with case left to Azure to api' })),
+    ]);
+    // An allowed prefix in any case, or with case left to Azure: wider than the one path Zitadel serves.
+    expect(authRouting((door) => (inside(routeOf(door, 8), 'match').caseSensitive = false))).toEqual([
+      routed(auth, authWith({ 8: 'prefix "/zitadel.admin.v1.AdminService/" in any case to zitadel' })),
+    ]);
+    expect(authRouting((door) => delete inside(routeOf(door, 3), 'match').caseSensitive)).toEqual([
+      routed(auth, authWith({ 3: 'prefix "/oauth/v2/" with case left to Azure to zitadel' })),
     ]);
     expect(appRouting((door) => (inside(routeOf(door), 'match').caseSensitive = false))).toEqual([
       routed(app, 'prefix "/" in any case to api'),
@@ -6248,7 +6285,37 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Another app of ours, one this deployment doesn't make (production's API
     // is an api, but not this deployment's), and none at all.
     expect(authRouting((door) => (targetOf(door).containerApp = 'ca-agentx-stg-zitadel'))).toEqual([
-      routed(auth, 'prefix "/debug" in any case to zitadel; prefix "/ui/v2/login" to login; prefix "/" to zitadel'),
+      routed(auth, authWith({ 0: 'prefix "/debug" in any case to zitadel' })),
+    ]);
+    // The deny-list again: every path no rule allows sent to Zitadel, not the API.
+    expect(authRouting((door) => (targetOf(door, -1).containerApp = 'ca-agentx-stg-zitadel'))).toEqual([
+      routed(auth, authWith({ 19: 'prefix "/" to zitadel' })),
+    ]);
+    // An allowed path sent to the API instead, and one dropped: the console breaks, so neither passes either.
+    expect(authRouting((door) => (targetOf(door, 4).containerApp = 'ca-agentx-stg-api'))).toEqual([
+      routed(auth, authWith({ 4: 'prefix "/oidc/v1/" to api' })),
+    ]);
+    expect(authRouting((door) => rulesOf(door).splice(12, 1))).toEqual([routed(auth, authWith({ 12: undefined }))]);
+    // Zitadel's system API, an instance service or a REST gateway let through
+    // before `/`, or an allowed service widened to every `zitadel.` service.
+    const systemRule =
+      (prefix: string): ((door: Mutable) => void) =>
+      (door) => {
+        const rule = structuredClone(nth(rulesOf(door), 2));
+        inside(first(rule.routes), 'match').prefix = prefix;
+        rulesOf(door).splice(-1, 0, rule);
+      };
+    for (const prefix of [
+      '/zitadel.system.v1.SystemService/',
+      '/zitadel.instance.v2.InstanceService/',
+      '/system/v1/',
+    ]) {
+      expect(authRouting(systemRule(prefix))).toEqual([
+        routed(auth, authWith({ 19: undefined }, [`prefix "${prefix}" to zitadel`, 'prefix "/" to api'])),
+      ]);
+    }
+    expect(authRouting((door) => (inside(routeOf(door, 8), 'match').prefix = '/zitadel.'))).toEqual([
+      routed(auth, authWith({ 8: 'prefix "/zitadel." to zitadel' })),
     ]);
     expect(appRouting((door) => (targetOf(door).containerApp = 'ca-agentx-prd-api'))).toEqual([
       routed(app, `prefix "/" to "ca-agentx-prd-api", which this deployment doesn't make`),
@@ -6259,20 +6326,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       routed(app, 'prefix "/" to api pinned to revision "ca-agentx-stg-api--0000001"'),
     ]);
     expect(authRouting((door) => (targetOf(door, 2).label = 'blue'))).toEqual([
-      routed(
-        auth,
-        'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel pinned to label "blue"',
-      ),
+      routed(auth, authWith({ 2: 'prefix "/.well-known/" to zitadel pinned to label "blue"' })),
     ]);
     // A second target on a rule, a rule too many, and no rules at all.
     expect(
       appRouting((door) => (first(rulesOf(door)).targets as Mutable[]).push({ containerApp: 'ca-agentx-stg-login' })),
     ).toEqual([routed(app, 'prefix "/" to api; prefix "/" to login')]);
     expect(authRouting((door) => rulesOf(door).push(structuredClone(first(rulesOf(door)))))).toEqual([
-      routed(
-        auth,
-        'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel; prefix "/debug" in any case to api',
-      ),
+      routed(auth, authWith({}, ['prefix "/debug" in any case to api'])),
     ]);
     expect(appRouting((door) => (inside(door, 'properties').rules = []))).toEqual([routed(app, 'nothing')]);
     // A door missing, or there twice.
