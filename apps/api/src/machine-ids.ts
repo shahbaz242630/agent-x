@@ -112,15 +112,22 @@ export function registerMachineIds(app: FastifyInstance, machineIds: MachineIds 
   app
     .withTypeProvider<ZodTypeProvider>()
     .get(MACHINE_ID_PATH, { schema: SCHEMA, config: { access: ['public'] } }, async (request, reply) => {
-      if (hostOf(request.headers.host) !== machineIds?.host) {
+      // Zitadel asks with GET alone: the HEAD Fastify adds would draw a number no one keeps.
+      if (request.method !== 'GET' || hostOf(request.headers.host) !== machineIds?.host) {
         return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       }
       const log = logger.child({ correlationId: request.id });
-      const id = await machineIds.next();
+      let id: number | undefined;
+      let err: unknown;
+      try {
+        id = await machineIds.next();
+      } catch (error) {
+        err = error;
+      }
       const machine = id === undefined ? undefined : machineNameFor(id);
       if (machine === undefined) {
         // Zitadel's process panics on this answer and its container starts again, asking again.
-        log.error(MACHINE_ID_FAILED, { id });
+        log.error(MACHINE_ID_FAILED, err === undefined ? { id } : { err });
         return sendErrorBody(reply, 500, 'INTERNAL_ERROR', request.id);
       }
       log.info(MACHINE_ID_HANDED_OUT, { id });

@@ -595,7 +595,7 @@ export const PLAIN_WORDS = {
     happened: 'The API could not hand a starting copy of the login service (Zitadel) its machine number.',
     broke:
       'That Zitadel copy stops and its container starts again; until one answer works, it does not serve sign-ins. The copies already running are fine.',
-    next: 'Check the database answers and the API can draw from platform_controls.zitadel_machine_ids. See the runbook.',
+    next: 'Check the database answers (the line carries its error, if it failed) and the API can draw from platform_controls.zitadel_machine_ids. See the runbook.',
   },
   'hold_history.failed': {
     happened: 'The full history check for an organisation on an integrity hold failed.',

@@ -144,8 +144,23 @@ describe(`GET ${MACHINE_ID_PATH}`, () => {
     }
   });
 
-  it('fails as any request does when the database does, so Zitadel asks again', async () => {
-    const { app } = await server(() => Promise.reject(new Error('connection lost')));
-    expect((await ask(app, INTERNAL_HOST)).statusCode).toBe(500);
+  it('fails, with its plain error line carrying the error, when the database does, so Zitadel asks again', async () => {
+    const { app, capture } = await server(() => Promise.reject(new Error('connection lost')));
+    const answer = await ask(app, INTERNAL_HOST);
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json<{ error: { code: string } }>().error.code).toBe('INTERNAL_ERROR');
+    expect(capture.lines().find((line) => line.event === 'machine_ids.failed')).toMatchObject({
+      level: 'error',
+      err: { message: 'connection lost' },
+    });
+  });
+
+  it('answers HEAD with the plain 404, drawing nothing and logging no number', async () => {
+    const next = vi.fn(() => Promise.resolve(7));
+    const { app, capture } = await server(next);
+    const answer = await app.inject({ method: 'HEAD', url: MACHINE_ID_PATH, headers: { host: INTERNAL_HOST } });
+    expect(answer.statusCode).toBe(404);
+    expect(next).not.toHaveBeenCalled();
+    expect(capture.lines().filter((line) => line.event === 'machine_ids.handed_out')).toEqual([]);
   });
 });

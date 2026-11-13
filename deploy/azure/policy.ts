@@ -6144,7 +6144,10 @@ function machineIdProblems(settings: ReadonlyMap<string, unknown>, host: string 
         ];
   const reshaped = [...settings.keys()]
     .filter((name) => /^ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_(?:JPATH|HEADERS)/.test(name))
-    .map((name) => `sets ${name}: the API's answer is hashed as its body, as it is written, and asks no header (SA3e)`);
+    .map(
+      (name) =>
+        `sets ${name}: the API's answer is hashed as its body, as it is written, and needs no header of ours (Zitadel's default Metadata-Flavor header is harmless) (SA3e)`,
+    );
   return [...switches, ...where, ...reshaped];
 }
 
