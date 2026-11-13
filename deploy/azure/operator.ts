@@ -458,6 +458,8 @@ function readOperatorJob(steps: JobSteps, target: HeldTarget): OperatorJob {
   const properties = record(found.properties);
   const configuration = record(properties.configuration);
   const running = runningAs(spec, known, record(properties.template).containers);
+  // A job has no probes in apps.bicep, and this tool sends its container back: one added outside a deploy is refused.
+  if (running.container.probes !== undefined) refuse("its container has probes, which this tool doesn't copy");
   if (JSON.stringify([...running.container.command, ...running.container.args]) !== JSON.stringify(runs)) {
     refuse(`it must run ${runs.join(' ')}`);
   }

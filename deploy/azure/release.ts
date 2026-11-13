@@ -87,6 +87,7 @@ import {
   differences,
   expectedOf,
   type LiveContainer,
+  probesIn,
   type Setting,
   shown,
   templatesIn,
@@ -302,6 +303,8 @@ const CONTAINER_FIELDS: ReadonlySet<string> = new Set([
   'env',
   'resources',
   'volumeMounts',
+  // Production's API has a liveness probe (AZ8b); each is read field by field (drift.ts probesIn).
+  'probes',
 ]);
 
 /** A container's size as Azure gives it: the two we set, and the disk it works out from them. */
@@ -362,7 +365,7 @@ export const runningIn = (workload: Workload, containers: unknown): Running =>
  * error saying why this isn't `known`: exactly one container, named as
  * apps.bicep names it, running our image by digest, with one AGENTX_RELEASE
  * naming a commit, and no field this tool doesn't copy, in the container, its
- * size, a setting or a mount. The operator's job is read this way too, to be
+ * size, a setting, a mount or a probe. The operator's job is read this way too, to be
  * kept on the API's build (operator.ts).
  */
 export function runningAs(spec: WorkloadSpec, known: string, containers: unknown): Running {
@@ -410,6 +413,7 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
     }
     return { volumeName, mountPath };
   });
+  const probes = probesIn(found.probes, refuse);
   return {
     container: {
       name: expected,
@@ -420,6 +424,7 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
       // The disk Azure gives the size (ephemeralStorage) is its to work out, not ours to send.
       resources: { cpu: size.cpu, memory: size.memory },
       volumeMounts: mounts,
+      ...(probes.length > 0 ? { probes } : {}),
     },
     image,
     release: build,
