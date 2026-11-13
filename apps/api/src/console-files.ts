@@ -13,7 +13,8 @@
 //   reaches every browser at its next page load.
 // - Anything else goes on to Fastify, which answers it as it always has (a
 //   dot, an upper-case letter, an asset with a query, a write: its JSON 404
-//   or route).
+//   or route), as does every request the server says to pass on (one on the
+//   login service's host, login-host.ts: SA1).
 // Each answer carries the security headers every API answer does: the CSP
 // (`default-src 'self'; script-src 'self'`) holds the console to its own
 // files, so the build inlines nothing (vite.config.ts).
@@ -154,9 +155,14 @@ function answerConsoleFile(files: ConsoleFiles, request: IncomingMessage, respon
  * leaves. Fastify's own server keeps its own timeouts, and no network module
  * is imported here (SEC-WEB-05's boundary rule). A host naming several
  * addresses (`localhost`) gets Fastify's extra servers without the layer: a
- * local run only, as a deployed API binds one address.
+ * local run only, as a deployed API binds one address. A request `passOn`
+ * picks goes straight to Fastify.
  */
-export function putConsoleInFront(server: Server, files: ConsoleFiles): void {
+export function putConsoleInFront(
+  server: Server,
+  files: ConsoleFiles,
+  passOn: (request: IncomingMessage) => boolean = () => false,
+): void {
   const listeners = server.listeners('request') as RequestListener[];
   const [fastify] = listeners;
   if (listeners.length !== 1 || fastify === undefined) {
@@ -166,6 +172,6 @@ export function putConsoleInFront(server: Server, files: ConsoleFiles): void {
   }
   server.removeListener('request', fastify);
   server.on('request', (request: IncomingMessage, response: ServerResponse) => {
-    if (!answerConsoleFile(files, request, response)) fastify(request, response);
+    if (passOn(request) || !answerConsoleFile(files, request, response)) fastify(request, response);
   });
 }

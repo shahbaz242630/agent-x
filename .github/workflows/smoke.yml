@@ -5,6 +5,9 @@
 # succeeds: only main's release job deploys there (release-job.test.ts). Both
 # values are repository secrets, never variables, whose values the public log
 # would print; the key holds the two read scopes alone, which the test checks.
+# Then the auth host beside it (tooling/smoke/auth-door.ts, SA1): Zitadel's
+# sign-in discovery reached, and its root, the API's health and Zitadel's
+# system API all the API's plain 404. Its host is masked too.
 name: Smoke (staging)
 
 on:
@@ -26,8 +29,8 @@ jobs:
       github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'staging' &&
       github.event.deployment.ref == 'main'
     runs-on: ubuntu-latest
-    # Three reads, each up to ~190 s while the API wakes, and the setup.
-    timeout-minutes: 15
+    # Three reads and four auth-host checks, each up to ~190 s while an app wakes, and the setup.
+    timeout-minutes: 25
     permissions:
       contents: read
     env:
@@ -38,7 +41,9 @@ jobs:
           if [ -z "$AGENTX_SMOKE_ORIGIN" ]; then echo 'The repository secret STAGING_APP_ORIGIN is not set.'; exit 1; fi
           echo "::add-mask::$AGENTX_SMOKE_ORIGIN"
           host="${AGENTX_SMOKE_ORIGIN#https://}"
-          echo "::add-mask::${host%/}"
+          host="${host%/}"
+          echo "::add-mask::$host"
+          echo "::add-mask::auth.${host#app.}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
