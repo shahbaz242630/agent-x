@@ -5485,6 +5485,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ...staging.predictedResources.map((resource) => resource.type),
         'Microsoft.Resources/deployments',
         'Microsoft.Insights/activityLogAlerts',
+        // AZ11's endpoint and zone group allowed before they land, and the interface Azure makes for the endpoint.
+        'Microsoft.Network/privateEndpoints',
+        'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
+        'Microsoft.Network/networkInterfaces',
       ];
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
@@ -5507,6 +5511,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-changed, which this deployment ships or a release sends: Azure would refuse our own deploy',
         'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-unhealthy, which this deployment ships or a release sends: Azure would refuse our own deploy',
         'agentx-staging-allowed-types: refuses an activity-log alert, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        exactly,
+      ]);
+      // AZ11's endpoint and its interface left out: their must-pass examples, in the group's region, are refused.
+      const noEndpoint = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.filter(
+          (each) => each !== 'Microsoft.Network/privateEndpoints' && each !== 'Microsoft.Network/networkInterfaces',
+        );
+      });
+      expect(policyProblemsOf(noEndpoint)).toEqual([
+        'agentx-staging-allowed-types: refuses a private endpoint, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        "agentx-staging-allowed-types: refuses a private endpoint's interface, which this deployment ships or a release sends: Azure would refuse our own deploy",
         exactly,
       ]);
       const more = changed(DEFINITION('allowed-types'), (definition) => {
