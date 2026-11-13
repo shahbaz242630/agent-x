@@ -35,6 +35,7 @@ interface Job {
   concurrency?: unknown;
   permissions?: Record<string, string>;
   outputs?: Record<string, string>;
+  env?: Record<string, string>;
   steps?: Step[];
 }
 
@@ -63,26 +64,38 @@ const AZURE_LOGIN = /^azure\/login@[0-9a-f]{40}$/;
 const WATCH_WORKFLOW = '.github/workflows/job-starts.yml';
 
 describe('the release job', () => {
-  it('is the only job anywhere that names an environment, and with the job-start watch the only one that signs in to Azure', () => {
+  it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the job-start watch', () => {
     const naming = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => job.environment !== undefined)
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(naming).toEqual([`${RELEASE_WORKFLOW}: release`]);
+    expect(naming).toEqual([
+      `${RELEASE_WORKFLOW}: release`,
+      `${RELEASE_WORKFLOW}: infra-plan`,
+      `${RELEASE_WORKFLOW}: infra-deploy`,
+    ]);
     const signingIn = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(signingIn.toSorted()).toEqual([`${WATCH_WORKFLOW}: watch`, `${RELEASE_WORKFLOW}: release`]);
+    expect(signingIn.toSorted()).toEqual([
+      `${WATCH_WORKFLOW}: watch`,
+      `${RELEASE_WORKFLOW}: infra-deploy`,
+      `${RELEASE_WORKFLOW}: infra-plan`,
+      `${RELEASE_WORKFLOW}: release`,
+    ]);
   });
 
   it('runs only on a push to main, after CI’s image is published and attested, in the staging environment', () => {
     // A workflow that runs on nothing but a push to main, so it may read the environment's secrets (AZ2d).
     expect((parse(releaseFile.text) as { on: unknown }).on).toEqual({ push: { branches: ['main'] } });
-    expect(release.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect([release.needs ?? []].flat()).toEqual(['ci-image']);
+    // After the infrastructure deploy (AZ5): only once it went or wasn't needed; a plan that failed skips it.
+    expect(release.if).toBe(
+      "!cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.ci-image.result == 'success' && (needs.infra-deploy.result == 'success' || needs.infra-deploy.result == 'skipped')",
+    );
+    expect([release.needs ?? []].flat()).toEqual(['ci-image', 'infra-plan', 'infra-deploy']);
     // Azure trusts a job in this environment, which only main may use (the handoff: read back S23).
     expect(release.environment).toBe('staging');
   });
@@ -240,7 +253,14 @@ describe('the wait for CI’s image', () => {
 
   it('leaves CI with no release, prune or job in an environment: they live in the release workflow alone', () => {
     for (const name of ['release', 'image-prune', 'image-kept-verify']) expect(ciJobs[name]).toBeUndefined();
-    expect(Object.keys(releaseFile.jobs)).toEqual(['ci-image', 'release', 'image-prune', 'image-kept-verify']);
+    expect(Object.keys(releaseFile.jobs)).toEqual([
+      'ci-image',
+      'release',
+      'image-prune',
+      'image-kept-verify',
+      'infra-plan',
+      'infra-deploy',
+    ]);
   });
 });
 
@@ -308,5 +328,102 @@ describe('the job-start watch', () => {
     expect(watchSteps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });
     // The release identity's ID is never named here: the watch signs in as itself alone.
     expect(text).not.toMatch(/AZURE_CLIENT_ID/);
+  });
+});
+
+// AZ5 (decision 40): the infrastructure deploy a merge needs, planned by a
+// read-only identity in `staging-whatif`, sent only after the partner's Approve
+// in `staging-infra` by an identity Azure trusts only there (deployers.bicep).
+// Both environments are main's alone; a pull request's run reaches neither.
+describe('the infrastructure plan and its approved deploy', () => {
+  const infraPlan = releaseFile.jobs['infra-plan'];
+  const infraDeploy = releaseFile.jobs['infra-deploy'];
+  if (infraPlan === undefined || infraDeploy === undefined) throw new Error(`${RELEASE_WORKFLOW} has no infra jobs`);
+  const planSteps = infraPlan.steps ?? [];
+  const deploySteps = infraDeploy.steps ?? [];
+  /** The five answers to deploy.ts's prompts (infra.ts ANSWER_VARIABLES), each from the environment's secret of its name. */
+  const ANSWERS = [
+    'AGENTX_AZURE_ALERT_EMAIL',
+    'AGENTX_AZURE_AUTH_HOST',
+    'AGENTX_AZURE_APP_HOST',
+    'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
+    'AGENTX_AZURE_API_OIDC_CLIENT_ID',
+  ];
+  const answersEnv = Object.fromEntries(ANSWERS.map((name) => [name, `\${{ secrets.${name} }}`]));
+  const LOGIN = {
+    'client-id': '${{ vars.AZURE_CLIENT_ID }}',
+    'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
+    'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+  };
+
+  it('plans on a push to main alone, after CI’s image, in staging-whatif, reading the code and asking Azure’s token', () => {
+    expect(infraPlan.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(infraPlan.needs).toEqual(['ci-image']);
+    expect(infraPlan.environment).toBe('staging-whatif');
+    expect(infraPlan.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(infraPlan.outputs).toEqual({
+      plan: '${{ steps.plan.outputs.plan }}',
+      needed: '${{ steps.plan.outputs.needed }}',
+    });
+  });
+
+  it('deploys only a plan that needs it, once approved in staging-infra, one at a time, never cancelled part-way', () => {
+    expect(infraDeploy.if).toBe("needs.infra-plan.outputs.needed == 'true'");
+    expect(infraDeploy.needs).toEqual(['ci-image', 'infra-plan']);
+    expect(infraDeploy.environment).toBe('staging-infra');
+    expect(infraDeploy.concurrency).toEqual({ group: 'infra-staging', 'cancel-in-progress': false });
+    expect(infraDeploy.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(infraDeploy['timeout-minutes']).toBe(120);
+  });
+
+  it('checks out the history without credentials, masks the IDs, signs in by OIDC alone and signs out whatever happens', () => {
+    for (const steps of [planSteps, deploySteps]) {
+      expect(steps[0]?.with).toEqual({ 'persist-credentials': false, 'fetch-depth': 0 });
+      const masking = steps.findIndex((step) => step.run?.includes('::add-mask::') === true);
+      const firstLogin = steps.findIndex((step) => AZURE_LOGIN.test(step.uses ?? ''));
+      expect(masking).toBeGreaterThan(0);
+      expect(firstLogin).toBeGreaterThan(masking);
+      for (const login of steps.filter((step) => step.uses?.startsWith('azure/login@') === true)) {
+        expect(login.uses).toMatch(AZURE_LOGIN);
+        expect(login.with).toEqual(LOGIN);
+      }
+      expect(steps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });
+    }
+  });
+
+  it('names no secret but the five answers, each in the step that runs infra.ts, never the job’s environment', () => {
+    for (const job of [infraPlan, infraDeploy]) {
+      const named = [...JSON.stringify(job).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
+      expect([...new Set(named)].toSorted()).toEqual(ANSWERS.toSorted());
+    }
+    expect(JSON.stringify(infraDeploy.env ?? {})).not.toMatch(/secrets\./);
+    expect(planSteps.filter((step) => step.env?.AGENTX_AZURE_AUTH_HOST !== undefined)).toEqual([
+      {
+        name: 'Plan the infrastructure deploy this merge needs',
+        id: 'plan',
+        env: { COMMIT: '${{ github.sha }}', DIGEST: '${{ needs.ci-image.outputs.digest }}', ...answersEnv },
+        run: 'node deploy/azure/infra.ts plan "${COMMIT}" "${DIGEST}"',
+      },
+    ]);
+    expect(
+      deploySteps.filter((step) => step.env?.AGENTX_AZURE_AUTH_HOST !== undefined).map((step) => step.env),
+    ).toEqual([answersEnv, answersEnv, answersEnv]);
+  });
+
+  it('runs each planned step in order, each just after its own sign-in, and the set-up job after apps', () => {
+    const planned = (step: string) => `contains(fromJSON(needs.infra-plan.outputs.plan).steps, '${step}')`;
+    const runs = deploySteps.filter((step) => step.run?.startsWith('node deploy/azure/') === true);
+    expect(runs.map((step) => [step.if, step.run])).toEqual([
+      [planned('foundation'), 'node deploy/azure/infra.ts deploy foundation "${COMMIT}"'],
+      [planned('secrets'), 'node deploy/azure/infra.ts deploy secrets "${COMMIT}"'],
+      [planned('apps'), 'node deploy/azure/infra.ts deploy apps "${COMMIT}"'],
+      [planned('db-setup'), 'node deploy/azure/jobs.ts run db-setup'],
+    ]);
+    for (const step of runs) {
+      const before = deploySteps[deploySteps.indexOf(step) - 1];
+      expect(before?.uses).toMatch(AZURE_LOGIN);
+      expect(before?.if).toBe(step.if);
+    }
+    expect(infraDeploy.env).toEqual({ COMMIT: '${{ github.sha }}', PLAN: '${{ needs.infra-plan.outputs.plan }}' });
   });
 });
