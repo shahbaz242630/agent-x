@@ -24,8 +24,8 @@
 //   only ever public because a door below says so (G2e), never by accident
 // - the apps scale as the environment allows, within two limits: the API scales
 //   as its role (AGENTX_ROLE all, as here, holds the jobs: one copy; policy.ts),
-//   Zitadel holds something one replica's (its projections and its ten database
-//   connections), and staging keeps
+//   Zitadel runs two to four copies in production and one on staging, each
+//   copy's ten database connections counted (SA3a), and staging keeps
 //   no replica at all while nothing runs (ADR-002), unless the operator deploys
 //   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
@@ -46,11 +46,9 @@ import {
   appKeys
   appName
   appsPrefix
-  appWorkloads
   doorName
   identityName
   jobName
-  jobWorkloads
   networkAddressSpace
   operatorHolds
   operatorOnly
@@ -61,6 +59,7 @@ import {
   restoreHolds
   shortName
   uniqueSuffix
+  workloads
 } from 'names.bicep'
 import { anchorContainerName, evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
@@ -155,7 +154,55 @@ param anchorEpoch int = 1
 @maxValue(10)
 param webCopies int = 3
 
+@description('The most Zitadel copies production runs (SA3a): two always, more as its traffic asks, each holding its own database connections, which policy.ts `connections` counts. Read in production alone: staging keeps one.')
+@minValue(2)
+@maxValue(4)
+param zitadelMostCopies int = 4
+
+@description('The most copies of Zitadel\'s login pages production runs (SA3c): two always, more as its traffic asks. Read in production alone: staging keeps one.')
+@minValue(2)
+@maxValue(4)
+param loginMostCopies int = 4
+
 var names = resourceNames(environment, nameSuffix)
+
+// The login pages' copies (SA3c). None of their state is one copy's, read from
+// the pinned image itself: a sign-in's sessions are in the browser's cookies
+// and its request in the address, Next's server-action key is built into the
+// image, and the system user's key is the one mounted file. Production runs two
+// always, so sign-in outlives a copy, and up to `loginMostCopies`, at the size
+// staging runs; staging keeps one, scaling to zero (`appMinReplicas`).
+var loginScale = environment == 'production'
+  ? {
+      minReplicas: 2
+      maxReplicas: loginMostCopies
+    }
+  : {
+      minReplicas: appMinReplicas
+      maxReplicas: 1
+    }
+
+// Zitadel's copies and size (SA3a). None of its state is one copy's, read from
+// the pinned image itself: its memory cache is off and the caches it uses are
+// in Postgres, each projection takes a Postgres lock before it writes, and every
+// copy mounts the one master key. Production runs two always, so sign-in
+// outlives a copy, and up to `zitadelMostCopies`, at 1 vCPU and 2 GiB each.
+// Staging keeps one at the smallest pair the Consumption profile offers above
+// its minimum, as the jobs take, scaling to zero (`appMinReplicas`): its
+// server's 35 user connections hold no second pool.
+var zitadelScale = environment == 'production'
+  ? {
+      minReplicas: 2
+      maxReplicas: zitadelMostCopies
+      cpu: '1'
+      memory: '2Gi'
+    }
+  : {
+      minReplicas: appMinReplicas
+      maxReplicas: 1
+      cpu: '0.5'
+      memory: '1Gi'
+    }
 
 // Where the API runs as `web` copies beside one `jobs` app (4D2e D13): production,
 // and staging's load run. Out of one, staging keeps a single API at AGENTX_ROLE
@@ -192,7 +239,7 @@ var secretsVolume = 'secrets'
 
 // Each identity's resource id, by the workload it belongs to.
 var identityIds = toObject(
-  concat(appWorkloads, jobWorkloads),
+  workloads,
   workload => workload,
   workload => resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', identityName(environment, workload))
 )
@@ -1020,20 +1067,20 @@ var loadJobs = map(
 // unless its host is a copy's by name, and the step and check unless the copy
 // carries the sentinel naming it, which load-mark alone writes:
 // - load-mark: the sentinel, as the copy's owner (a restore keeps staging's
-//   passwords), as the set-up job's identity, which reads that login already
+//   passwords), as Stage G's own identity (names.bicep `loadWorkloads`, AZ3)
 // - load-step: the seed's growth, or one step (its cohort, new keys, k6), as the
 //   app with its keys, as the API's identity, as PL-38's jobs; one step a run,
 //   up to the soak's full hour and its margin (stageg.ts STAGE_G_JOB_SECONDS)
 // - load-check: the step's checks, past the tenant walls as the backup role
-//   (stageg-checks.ts) and through them as the app, as the set-up job's identity,
-//   the one that reads the backup role's login: no new grant, no secrets run
+//   (stageg-checks.ts) and through them as the app, as Stage G's own identity,
+//   which reads the owner's, the app's and the backup role's logins and no other
+//   (secrets.bicep): never the server admin's, as the set-up job's does
 // The step and check read their command from the run's request, held as
 // PL-38's (`loadRequest`); the mark asks nothing.
 var stageGJobs = [
   {
     workload: 'load-mark'
-    // Accepted debt (S175): the set-up job's identity can also read db-admin-password; these two jobs exist only during a Stage G run and load.ts finish removes them; a dedicated identity before production.
-    runsAs: 'db-setup'
+    runsAs: 'stage-g'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
     args: ['mark']
@@ -1073,8 +1120,7 @@ var stageGJobs = [
   }
   {
     workload: 'load-check'
-    // Accepted debt (S175), as load-mark's above.
-    runsAs: 'db-setup'
+    runsAs: 'stage-g'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
     args: ['check']
@@ -1173,6 +1219,20 @@ var apiFiles = concat(
           setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
         }
       ],
+  // SA2b: who makes our own routine changes in the login service, and for whom
+  // (AGENTX_IDP_OUR_*), from the vault alone, never a value here: the list tells
+  // an attacker which accounts to aim at. The vault holds `none` for each until the
+  // partner writes ours (deploy.ts), which leaves the feature off.
+  [
+    {
+      reads: 'zitadel-our-actors'
+      setting: 'AGENTX_IDP_OUR_ACTORS_FILE'
+    }
+    {
+      reads: 'zitadel-our-service-users'
+      setting: 'AGENTX_IDP_OUR_SERVICE_USERS_FILE'
+    }
+  ],
   // B5-3: the email service's key, copied in by the secrets deployment,
   // and Zitadel's read-only token for the admins' addresses. The four
   // email settings are all or none, so neither in the load run.
@@ -1424,15 +1484,12 @@ var apps = concat([
     signsIn: false
     keepsDownloads: false
     keepsAnchors: false
-    // Its projections and its cache are one replica's; a second would also take
-    // ten more of the server's connections.
-    minReplicas: appMinReplicas
-    maxReplicas: 1
+    // Its copies and size by environment (`zitadelScale`, SA3a).
+    minReplicas: zitadelScale.minReplicas
+    maxReplicas: zitadelScale.maxReplicas
     stopSeconds: 30
-    // The smallest pair the Consumption profile offers above its minimum, as
-    // the jobs take.
-    cpu: '0.5'
-    memory: '1Gi'
+    cpu: zitadelScale.cpu
+    memory: zitadelScale.memory
     files: [
       {
         reads: 'zitadel-masterkey'
@@ -1465,10 +1522,10 @@ var apps = concat([
     args: []
     targetPort: 3000
     transport: 'auto'
-    // Nothing here holds state, but one replica is enough for a pilot and
-    // keeps the deployment's shape the same everywhere.
-    minReplicas: appMinReplicas
-    maxReplicas: 1
+    // Nothing here is one copy's (SA3c): production runs two to four, as
+    // Zitadel, and staging one (`loginScale`).
+    minReplicas: loginScale.minReplicas
+    maxReplicas: loginScale.maxReplicas
     stopSeconds: 30
     cpu: '0.5'
     memory: '1Gi'

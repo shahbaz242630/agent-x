@@ -1492,6 +1492,94 @@ describe('config: removing second factors once a reset has cooled off (B6-3c)', 
   });
 });
 
+describe('config: our own routine login changes, from the vault (SA2b)', () => {
+  // Obviously fake IDs: Zitadel's are 18 digits; no real one is ever written in this repository.
+  const ACTOR = '900000000000000001';
+  const SERVICE_USERS = '900000000000000003,900000000000000002';
+  const OURS: Env = { ...MINIMAL, AGENTX_IDP_OUR_ACTORS: ACTOR, AGENTX_IDP_OUR_SERVICE_USERS: SERVICE_USERS };
+  const ON = { actors: [ACTOR], serviceUsers: ['900000000000000002', '900000000000000003'] };
+
+  /** The two lists as the vault mounts them, each a file with the trailing line break a tool adds. */
+  function mounted(actors: string, serviceUsers: string): Env {
+    const folder = mkdtempSync(join(tmpdir(), 'agentx-config-'));
+    writeFileSync(join(folder, 'actors'), `${actors}\n`);
+    writeFileSync(join(folder, 'service-users'), `${serviceUsers}\r\n`);
+    return {
+      ...MINIMAL,
+      AGENTX_IDP_OUR_ACTORS_FILE: join(folder, 'actors'),
+      AGENTX_IDP_OUR_SERVICE_USERS_FILE: join(folder, 'service-users'),
+    };
+  }
+
+  it('is off with neither set, and off with the vault’s `none` in both', () => {
+    expect(loadConfig(MINIMAL).idpOurChanges).toBeUndefined();
+    expect(loadConfig(mounted('none', 'none')).idpOurChanges).toBeUndefined();
+    expect(
+      loadConfig({ ...MINIMAL, AGENTX_IDP_OUR_ACTORS: 'none', AGENTX_IDP_OUR_SERVICE_USERS: 'none' }).idpOurChanges,
+    ).toBeUndefined();
+  });
+
+  it('is on with both lists, set or mounted from the vault, each sorted and once', () => {
+    expect(loadConfig(OURS).idpOurChanges).toEqual(ON);
+    expect(loadConfig(mounted(ACTOR, `${SERVICE_USERS},900000000000000002`)).idpOurChanges).toEqual(ON);
+  });
+
+  it('refuses one list without the other, `none` counting as none', () => {
+    const half = [
+      'AGENTX_IDP_OUR_ACTORS and AGENTX_IDP_OUR_SERVICE_USERS: set both, or neither (every change alerts without them)',
+    ];
+    expect(problemsWith({ ...MINIMAL, AGENTX_IDP_OUR_ACTORS: ACTOR })).toEqual(half);
+    expect(problemsWith(mounted(ACTOR, 'none'))).toEqual(half);
+    expect(problemsWith(mounted('none', SERVICE_USERS))).toEqual(half);
+  });
+
+  it.each([
+    ['a name for an ID', 'agentx-resets', 'entry 1 is not a login service user ID'],
+    ['a space after a comma', `${ACTOR}, 900000000000000002`, 'entry 2 is not a login service user ID'],
+    ['an empty entry', `${ACTOR},`, 'entry 2 is not a login service user ID'],
+    ['a sign', '-900000000000000002', 'entry 1 is not a login service user ID'],
+    ['too long a number', '9'.repeat(31), 'entry 1 is not a login service user ID'],
+    ['None in capitals', 'None', 'entry 1 is not a login service user ID'],
+    ['none with an ID after it', 'none,900000000000000001', 'entry 1 is not a login service user ID'],
+    [
+      'too many',
+      Array.from({ length: 21 }, (_, at) => String(900000000000000100 + at)).join(','),
+      'names 21 IDs; at most 20',
+    ],
+  ])('refuses the start on %s, naming the setting and never the value', (_case, value, problem) => {
+    const problems = problemsWith(mounted(value, SERVICE_USERS));
+    expect(problems).toEqual([expect.stringMatching(new RegExp(`^AGENTX_IDP_OUR_ACTORS: ${problem}`))]);
+    expect(problems.join(' ')).not.toMatch(/9000000000000000\d\d|agentx-resets/);
+  });
+
+  it('takes a list of exactly 20 IDs, the most it allows', () => {
+    const twenty = Array.from({ length: 20 }, (_, at) => String(900000000000000100 + at)).join(',');
+    expect(problemsWith(mounted(twenty, SERVICE_USERS))).toEqual([]);
+  });
+
+  it('refuses both forms at once, an empty file, and one that can’t be read, as it does a secret', () => {
+    const both = { ...mounted(ACTOR, SERVICE_USERS), AGENTX_IDP_OUR_ACTORS: ACTOR };
+    expect(problemsWith(both)).toEqual(['set either AGENTX_IDP_OUR_ACTORS or AGENTX_IDP_OUR_ACTORS_FILE, not both']);
+    const empty = mounted(ACTOR, SERVICE_USERS);
+    writeFileSync(empty.AGENTX_IDP_OUR_SERVICE_USERS_FILE ?? '', '');
+    expect(problemsWith(empty)).toEqual(['AGENTX_IDP_OUR_SERVICE_USERS_FILE names an empty file']);
+    expect(problemsWith({ ...MINIMAL, AGENTX_IDP_OUR_ACTORS_FILE: join(tmpdir(), 'agentx-no-such-file') })).toEqual([
+      "AGENTX_IDP_OUR_ACTORS_FILE names a file that can't be read",
+    ]);
+  });
+
+  it('leaves the IDs out of the error a refused start throws', () => {
+    expect(() => loadConfig({ ...OURS, AGENTX_IDP_OUR_SERVICE_USERS: 'none' })).toThrow(ConfigError);
+    try {
+      loadConfig({ ...OURS, AGENTX_IDP_OUR_SERVICE_USERS: `${SERVICE_USERS},x` });
+    } catch (error) {
+      expect(String(error)).toContain('AGENTX_IDP_OUR_SERVICE_USERS: entry 3 is not a login service user ID');
+      expect(String(error)).not.toMatch(/9000000000000000\d\d/);
+    }
+    expect.assertions(3);
+  });
+});
+
 describe('config: sign-in (ADR-003 §5, §7)', () => {
   const ISSUER = 'https://auth.agentx.example';
   const SIGN_IN: Env = {

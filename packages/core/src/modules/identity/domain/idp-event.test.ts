@@ -114,6 +114,7 @@ describe('our own routine changes in the login service (SA2)', () => {
     ['a token for anyone else', token('312000000000000099')],
     ['a token by another login', token(DIRECTORY, '312000000000000099')],
     ['a token by no one named', token(DIRECTORY, null)],
+    ['a token on an aggregate that is not a user', { ...token(DIRECTORY), aggregateType: 'org' }],
     ['a grant to anyone else', grant({ userId: '312000000000000099', roles: ['IAM_OWNER_VIEWER'] })],
     ['an owner’s role to our service user', grant({ userId: DIRECTORY, roles: ['IAM_OWNER'] })],
     ['one of their roles and an owner’s', grant({ userId: DIRECTORY, roles: ['IAM_OWNER_VIEWER', 'ORG_OWNER'] })],

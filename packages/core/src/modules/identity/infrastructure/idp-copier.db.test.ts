@@ -455,8 +455,12 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
       ['error', 'idp.impersonated', 'user.impersonated'],
     ]);
     expect(lines('idp.rights_changed_by_us')).toEqual([
-      expect.objectContaining({ editor: ADMIN, target: service, eventType: 'instance.member.added' }),
+      expect.objectContaining({ eventType: 'instance.member.added', organisations: 0 }),
     ]);
+    // SA2b: no line names our admin or our service user, which the deployment keeps in the vault.
+    const written = JSON.stringify(capture.lines());
+    expect(written).not.toContain(ADMIN);
+    expect(written).not.toContain(service);
     // Our own are lines the alert's list leaves out.
     expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.token_issued_by_us');
     expect(LOGIN_SERVICE_ALERT_EVENTS).not.toContain('idp.rights_changed_by_us');

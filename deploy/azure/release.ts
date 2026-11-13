@@ -40,7 +40,10 @@
 //   the API's also sends an empty revision suffix, so one set by hand is
 //   cleared, never sent again and refused as taken (AZ7).
 //   Each container is Azure's own, with the image and AGENTX_RELEASE changed
-//   and nothing else; a field this tool doesn't know is refused, not guessed at
+//   and nothing else; a field this tool doesn't know is refused, not guessed at.
+//   The rest of each must first be what the commit's apps.bicep gives it (AZ2c,
+//   drift.ts): a command or setting changed outside a deploy stops the release
+//   red, before it could carry the change forward
 // - only images, commits, file names and Azure's own names are printed: the
 //   settings name the domain, and the subscription is Azure's, both kept out
 //   of CI's public logs. An error Azure gives is shown by its HTTP reason and
@@ -54,6 +57,7 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
+import { fingerprintOf } from '../../tooling/git-hooks/private-names.ts';
 import {
   COMING_FILE,
   MIGRATION_NAME,
@@ -62,6 +66,7 @@ import {
   refusals,
 } from '../../tooling/migration-order.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
+import { type Anchor, anchorSaid, belowAnchor, forwardPast, lastRelease } from './anchor.ts';
 import {
   ARM,
   type Az,
@@ -75,8 +80,31 @@ import {
   RESOURCE_GROUP,
   UsageError,
 } from './deploy.ts';
-import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
-import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
+import {
+  type Bound,
+  containersOf,
+  deployable,
+  differences,
+  expectedOf,
+  type LiveContainer,
+  type Setting,
+  shown,
+  templatesIn,
+  workloadDifferences,
+} from './drift.ts';
+import { atCommit, type Checkout, type History, realCheckout, realHistory } from './git.ts';
+import {
+  azureTime,
+  ENDED,
+  GUID,
+  historyProblems,
+  isRunOf,
+  isStrings,
+  JOBS_API,
+  POLL_MS,
+  runCli,
+  START_ALLOWANCE_SECONDS,
+} from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
 export interface HandDeployed {
@@ -226,11 +254,37 @@ export type Workload = keyof typeof WORKLOADS;
 /** The order a release updates them in: the migration first, and the API only once its run has succeeded (G4-3b). */
 export const ORDER: readonly Workload[] = ['migrate', 'api'];
 
+/**
+ * What a folder's apps.bicep gives each release workload (its identity and
+ * properties, as the snapshot has them), in the subscription.
+ */
+export type Templates = (subscription: string, commit: string) => ReadonlyMap<Workload, unknown>;
+
+/** The pinned Bicep's snapshot of a deploy/azure folder's apps deployment (drift.ts): this checkout's unless given. */
+export function templatesFrom(subscription: string, source?: string): ReadonlyMap<Workload, unknown> {
+  const named = ORDER.map((workload) => {
+    const [kind, name] = WORKLOADS[workload].path.split('/');
+    return { type: `Microsoft.App/${String(kind)}`, name: String(name) };
+  });
+  const workloads = templatesIn(subscription, named, source);
+  return new Map(ORDER.map((workload, index) => [workload, workloads[index]] as const));
+}
+
+/**
+ * The real ones, of a commit's apps.bicep: this checkout's when it is a clean checkout of the commit, else the
+ * commit's own, read in a temporary worktree (git.ts atCommit).
+ */
+export const realTemplates: Templates = (subscription, commit) => {
+  const here = realCheckout();
+  if (here.clean && here.head === commit) return templatesFrom(subscription);
+  return atCommit(commit, 'deploy/azure', (dir) => templatesFrom(subscription, dir));
+};
+
 /** The setting that names the build on every log line. */
 const RELEASE_SETTING = 'AGENTX_RELEASE';
 
 /** A commit, as git writes it in full. */
-const COMMIT = /^[0-9a-f]{40}$/;
+export const COMMIT = /^[0-9a-f]{40}$/;
 
 /** An image digest, as ghcr.io gives it. */
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -282,19 +336,10 @@ export function parseArguments(argv: readonly string[]): Request {
   return { command, commit, digest };
 }
 
-/** One setting: a value, or a reference to one of the workload's secrets (never a value in hand). */
-type Setting =
-  { readonly name: string; readonly value: string } | { readonly name: string; readonly secretRef: string };
-
 /** One container as a release sends it back: Azure's own fields, the ones this tool knows. */
-export interface Container {
+export interface Container extends LiveContainer {
   readonly name: string;
   readonly image: string;
-  readonly command: readonly string[];
-  readonly args: readonly string[];
-  readonly env: readonly Setting[];
-  readonly resources: { readonly cpu: number; readonly memory: string };
-  readonly volumeMounts: readonly { readonly volumeName: string; readonly mountPath: string }[];
 }
 
 /** What a workload runs: its one container, and the image and build in it. */
@@ -328,7 +373,8 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
   const found = record(containers[0]);
   const unknown = Object.keys(found).filter((field) => !CONTAINER_FIELDS.has(field));
-  if (unknown.length > 0) return refuse(`its container has ${unknown.join(', ')}, which this tool doesn't copy`);
+  if (unknown.length > 0)
+    return refuse(`its container has ${unknown.map(shown).join(', ')}, which this tool doesn't copy`);
   const { name, image, command, env, resources, volumeMounts } = found;
   // Azure leaves an empty argument list out of what it gives back (staging's API from 12 Nov 2026, after #626's
   // release): no arguments, as `[]`, which the release then sends back. Any other missing or odd list is refused.
@@ -339,15 +385,16 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   const size = record(resources);
   if (typeof size.cpu !== 'number' || typeof size.memory !== 'string') return refuse('its size is not given');
   const sized = Object.keys(size).filter((field) => !SIZE_FIELDS.has(field));
-  if (sized.length > 0) return refuse(`its size has ${sized.join(', ')}, which this tool doesn't copy`);
+  if (sized.length > 0) return refuse(`its size has ${sized.map(shown).join(', ')}, which this tool doesn't copy`);
   if (!Array.isArray(env)) return refuse('its settings are not a list');
   const settings = env.map((entry): Setting => {
     const { name: setting, value, secretRef, ...other } = record(entry);
     if (typeof setting !== 'string') return refuse('a setting has no name');
-    if (Object.keys(other).length > 0) return refuse(`the setting ${setting} has more than a name and its value`);
+    if (Object.keys(other).length > 0)
+      return refuse(`the setting ${shown(setting)} has more than a name and its value`);
     if (typeof value === 'string' && secretRef === undefined) return { name: setting, value };
     if (typeof secretRef === 'string' && value === undefined) return { name: setting, secretRef };
-    return refuse(`the setting ${setting} has neither a value nor a secret reference alone`);
+    return refuse(`the setting ${shown(setting)} has neither a value nor a secret reference alone`);
   });
   // A reference to the vault has no value, which reads as "undefined": no commit.
   const releases = env.map(record).filter((entry) => entry.name === RELEASE_SETTING);
@@ -399,6 +446,11 @@ export type Decision =
    * it goes round this gate and the old image would raise a false tamper alarm as the migration runs.
    */
   | { readonly kind: 'coming-first'; readonly reasons: readonly string[] }
+  /**
+   * The API or the migration job isn't as the commit's apps.bicep has it beyond its image and build (AZ2c): changed
+   * outside a deploy, which a release would carry forward, as it copies the rest of each container.
+   */
+  | { readonly kind: 'not-as-deployed'; readonly reasons: readonly string[] }
   | {
       readonly kind: 'release';
       readonly updates: ReadonlyMap<Workload, Container>;
@@ -577,6 +629,8 @@ function signedIn(az: Az, say: (line: string) => void): string {
 /** A workload as Azure has it: its properties, and what it runs. */
 export interface Read {
   readonly properties: Readonly<Record<string, unknown>>;
+  /** The identities it runs as, as Azure gives them. */
+  readonly identity: unknown;
   /** Its tags: the migration job's hold the hand deploys' records (T1b). */
   readonly tags: Readonly<Record<string, unknown>>;
   readonly running: Running;
@@ -586,7 +640,12 @@ export interface Read {
 export function readWorkload(az: Az, subscription: string, workload: Workload): Read {
   const found = get(az, workloadUrl(subscription, workload), workload);
   const properties = record(found.properties);
-  return { properties, tags: record(found.tags), running: runningIn(workload, record(properties.template).containers) };
+  return {
+    properties,
+    identity: found.identity,
+    tags: record(found.tags),
+    running: runningIn(workload, record(properties.template).containers),
+  };
 }
 
 /** The value a container's setting holds in the open, or nothing (none, or a secret reference). */
@@ -613,19 +672,35 @@ export function changes(before: Container, after: Container): string[] {
   return said;
 }
 
-/** What a check reads from this folder: the commit it is at, and what Bicep says each deployment reads. */
+/**
+ * What a check reads from this folder: the commit it is at, what Bicep says each deployment reads, and what its
+ * apps.bicep gives the two workloads.
+ */
 export interface Folder {
   readonly checkout: () => Checkout;
   readonly references: (paramsFiles: readonly string[]) => Promise<ReadonlyMap<string, readonly string[]>>;
+  readonly templates: Templates;
 }
 
-const realFolder = (): Folder => ({ checkout: () => realCheckout(), references: (files) => fileReferences(files) });
+const realFolder = (): Folder => ({
+  checkout: () => realCheckout(),
+  references: (files) => fileReferences(files),
+  templates: realTemplates,
+});
 
 export interface CheckSteps {
   readonly az: Az;
   readonly history: History;
   readonly folder: Folder;
   readonly say: (line: string) => void;
+  /** verify.ts's answer for an image, by digest, at a commit. */
+  readonly verify: (image: string, commit: string) => Outcome;
+  /** The pins set for the release (PINS), from its environment: none set is an empty record. */
+  readonly pins: Readonly<Record<string, string | undefined>>;
+  /** The clock, which says how recent the oldest record is (recordedBuilds). */
+  readonly now: () => Date;
+  /** The last release GitHub recorded for staging (anchor.ts): read in CI, not outside it. */
+  readonly anchor: () => Promise<Anchor>;
 }
 
 /** What a release of the commit would do, read from Azure and the history, with what each runs said. */
@@ -661,6 +736,317 @@ async function readersAt(commit: string, steps: CheckSteps): Promise<Readers | u
   }
 }
 
+/** What to do when the templates can't be read: nothing was changed, and the release is run again from the commit. */
+const UNCHECKED_GAP =
+  'so whether the API or the migration job was changed outside a deploy (AZ2c) is unknown, and nothing was changed.';
+const UNCHECKED_NEXT = `${UNCHECKED_GAP} Run this again from a clean checkout of the commit with the pinned Bicep (node tooling/bicep/install.ts).`;
+
+/** The decisions held to what was deployed (AZ2c): a release about to write, and a re-run that has nothing to do. */
+const HELD: ReadonlySet<Decision['kind']> = new Set(['release', 'current', 'past']);
+
+/**
+ * AZ2c: before anything is written, and on a re-run with nothing to do (read-only), each workload held to what the
+ * apps.bicep of the build it runs gives it beyond its image and build, its build to its image's signature and to what
+ * was deployed before it (rolledBack), and the shell's values to their pins; the decision unchanged when all hold.
+ * The folder must be a clean checkout of the commit (CI's is). Nothing read is printed but names: the subscription is
+ * masked out of Bicep's own words.
+ */
+async function heldToTemplates(
+  decision: Decision,
+  commit: string,
+  subscription: string,
+  reads: ReadonlyMap<Workload, Read>,
+  steps: CheckSteps,
+): Promise<Decision> {
+  if (!HELD.has(decision.kind)) return decision;
+  const here = steps.folder.checkout();
+  if (here.head !== commit || !here.clean) {
+    throw new Error(
+      `This folder is at ${here.head}${here.clean ? '' : ' with changes'}, not ${commit}, so what apps.bicep gives the API and the migration job can't be read, ${UNCHECKED_NEXT}`,
+    );
+  }
+  const bound: Bound = new Map();
+  // Each build's templates read once, both workloads mostly running one build.
+  const byBuild = new Map<string, ReadonlyMap<Workload, unknown>>();
+  const reasons = ORDER.flatMap((workload) => heldWorkload(workload, reads, subscription, steps, { bound, byBuild }));
+  const recorded = recordedBuilds(steps.az, subscription, steps.now());
+  const anchor = await steps.anchor();
+  const unanchored = anchorSaid(anchor);
+  if (unanchored !== undefined) steps.say(unanchored);
+  reasons.push(
+    ...unsignedBuilds(reads, steps.verify),
+    ...recorded.problems,
+    ...rolledBack(reads, recorded, steps.history, anchor),
+    ...unpinned(bound, steps.pins, steps.say),
+  );
+  return reasons.length === 0 ? decision : { kind: 'not-as-deployed', reasons };
+}
+
+/**
+ * One workload held to the apps.bicep of the build it runs (drift.ts), as `workload: …` lines; an error in plain words
+ * when that apps.bicep can't be read: this checkout's, or the build's own in a temporary worktree (git.ts atCommit).
+ */
+function heldWorkload(
+  workload: Workload,
+  reads: ReadonlyMap<Workload, Read>,
+  subscription: string,
+  steps: CheckSteps,
+  held: { readonly bound: Bound; readonly byBuild: Map<string, ReadonlyMap<Workload, unknown>> },
+): string[] {
+  const read = reads.get(workload);
+  if (read === undefined) throw new Error(`nothing was read for ${workload}`);
+  const build = read.running.release;
+  const bound = held.bound;
+  let templates: ReadonlyMap<Workload, unknown>;
+  try {
+    templates = held.byBuild.get(build) ?? steps.folder.templates(subscription, build);
+    held.byBuild.set(build, templates);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const why = error.message.replaceAll(subscription, 'the subscription');
+    const next = here(steps, build)
+      ? UNCHECKED_NEXT
+      : `${UNCHECKED_GAP} This checkout couldn't make a temporary worktree of ${build}, the build ${workload} runs: check git works here and the clone has the whole history (CI checks out with fetch-depth 0), then run this again.`;
+    throw new Error(`What ${build}'s apps.bicep gives ${workload} couldn't be read (${why}), ${next}`, {
+      cause: error,
+    });
+  }
+  return workloadAgainst(workload, templates.get(workload), read, bound).map((line) => `${workload}: ${line}`);
+}
+
+/** Whether this folder is a clean checkout of the commit, whose apps.bicep is then read here. */
+const here = (steps: CheckSteps, commit: string): boolean => {
+  const at = steps.folder.checkout();
+  return at.clean && at.head === commit;
+};
+
+/** The builds deploys have left on record, and why the record can't be trusted whole, if it can't. */
+interface OnRecord {
+  readonly api: readonly string[];
+  readonly migrate: readonly string[];
+  readonly problems: readonly string[];
+}
+
+/** Every item of a list Azure gives, page by page; a next page anywhere but Resource Manager is refused (the token goes where the URL points). */
+export function listedAll(az: Az, url: string, what: string): unknown[] {
+  const items: unknown[] = [];
+  for (let next: string | undefined = url; next !== undefined;) {
+    const page = get(az, next, what);
+    if (!Array.isArray(page.value)) throw new Error(`Azure's list of ${what} wasn't a list.`);
+    items.push(...(page.value as unknown[]));
+    const link = page.nextLink;
+    if (link !== undefined && link !== null && !(typeof link === 'string' && link.startsWith(ARM))) {
+      throw new Error(
+        `Azure's list of ${what} named its next page somewhere other than Resource Manager, so it wasn't read and nothing was changed. Run this again; if it repeats, look at it before any release.`,
+      );
+    }
+    next = typeof link === 'string' ? link : undefined;
+  }
+  return items;
+}
+
+/** One revision or run on record: the build its workload's container's AGENTX_RELEASE names (any text, or none), and when it was made. */
+interface Kept {
+  readonly build: string | undefined;
+  readonly startedAt: number | undefined;
+}
+
+/**
+ * A revision or run as kept: the build of the container named as the workload's (apps.bicep), never whichever comes
+ * first, and its creation (a revision) or start (a run). None of that name names no build: a record no deploy left.
+ */
+const keptOf =
+  (workload: Workload) =>
+  (item: unknown): Kept => {
+    const properties = record(record(item).properties);
+    const containers = record(properties.template).containers;
+    const own = (Array.isArray(containers) ? (containers as unknown[]) : [])
+      .map(record)
+      .find((container) => container.name === WORKLOADS[workload].container);
+    const env = own?.env;
+    const found = (Array.isArray(env) ? env : []).map(record).find((setting) => setting.name === RELEASE_SETTING);
+    return {
+      build: typeof found?.value === 'string' ? found.value : undefined,
+      startedAt: azureTime(properties.createdTime ?? properties.startTime),
+    };
+  };
+
+/** How far back the record's own history is held to be whole: the job-start watch's window. */
+const RECORD_HOURS = 6;
+
+/**
+ * What deploys have left on record (AZ2c): the builds of the API's revisions (Azure keeps each, a deploy can't take
+ * one back; 100 inactive by default, which drift.ts holds) and of migrate's runs (its last 100). A list at that cap
+ * whose oldest is still recent, or a flood of new ones, may have pushed an older record off its end: red, as the
+ * job-start watch reads a job's runs (jobs.ts historyProblems). Read, never written.
+ */
+function recordedBuilds(az: Az, subscription: string, now: Date): OnRecord {
+  const since = now.getTime() - RECORD_HOURS * 3_600_000;
+  const revisionsUrl = workloadUrl(subscription, 'api').replace('?api-version=', '/revisions?api-version=');
+  const revisions = listedAll(az, revisionsUrl, "the API's revisions").map(keptOf('api'));
+  const runs = listedAll(az, jobUrl(subscription, '/executions'), "migrate's runs").map(keptOf('migrate'));
+  const builds = (kept: readonly Kept[]): string[] => [...new Set(kept.map((each) => String(each.build)))];
+  return {
+    api: builds(revisions),
+    migrate: builds(runs),
+    problems: [
+      ...historyProblems(revisions, since, RECORD_HOURS, 'revision').map(
+        (problem) => `api: ${problem}, so a roll-back can't be ruled out: a suspected breach`,
+      ),
+      ...historyProblems(runs, since, RECORD_HOURS).map(
+        (problem) => `migrate: ${problem}, so a roll-back can't be ruled out: a suspected breach`,
+      ),
+    ],
+  };
+}
+
+/**
+ * AZ2c: a workload rolled back, even to an older commit's own signed image, is a suspected breach. A release moves
+ * both forward together, migrate first, so: neither may run a commit older than one deploys have left on record
+ * (the API against its own revisions, since migrate alone may be ahead after --migrate-first or a stopped release;
+ * migrate against both), and migrate may never be behind the API. A record naming a build that isn't a commit in this
+ * history is one no deploy left: a suspected breach too.
+ */
+function rolledBack(
+  reads: ReadonlyMap<Workload, Read>,
+  recorded: OnRecord,
+  history: History,
+  anchor: Anchor,
+): string[] {
+  const api = reads.get('api')?.running.release ?? '';
+  const migrate = reads.get('migrate')?.running.release ?? '';
+  // One read of main's line places every build (git.ts mainline): newer is nearer the tip.
+  const line = history.mainline();
+  const place = (build: string): number | undefined => line.get(build);
+  const said: string[] = [];
+  for (const [workload, builds, kind] of [
+    ['api', recorded.api, 'revision'],
+    ['migrate', recorded.migrate, 'run'],
+  ] as const) {
+    const strange = builds.filter((build) => place(build) === undefined);
+    if (strange.length > 0) {
+      said.push(
+        `${workload}: a ${kind} of it names a build that isn't in main's history (${strange.map(shown).join(', ')}): no deploy leaves one, a suspected breach (or this clone lacks main's newest commits: it reads origin/main, which git fetch origin main brings up to date)`,
+      );
+    }
+  }
+  /** The newest of the builds on record later than `build`, or nothing when none is. */
+  const newestAfter = (build: string, among: readonly string[]): string | undefined => {
+    let newest: string | undefined;
+    let best = place(build);
+    if (best === undefined) return undefined;
+    for (const each of new Set(among)) {
+      const at = place(each);
+      if (at !== undefined && at < best) {
+        best = at;
+        newest = each;
+      }
+    }
+    return newest;
+  };
+  for (const [workload, build] of [
+    ['api', api],
+    ['migrate', migrate],
+  ] as const) {
+    if (place(build) === undefined) {
+      said.push(
+        `${workload}: it runs ${shown(build)}, which isn't on main's line here, so how new it is can't be told: a suspected breach, unless this clone lacks main's newest commits (git fetch origin main; CI checks out with fetch-depth 0)`,
+      );
+    }
+  }
+  said.push(...belowAnchor(anchor, { api, migrate }, place));
+  const apiLater = newestAfter(api, recorded.api);
+  if (apiLater !== undefined) {
+    said.push(
+      `api: it runs ${api}, older than ${apiLater}, which one of its revisions ran: rolled back. ${forwardPast(apiLater)}`,
+    );
+  }
+  const migrateLater = newestAfter(migrate, [...recorded.migrate, ...recorded.api]);
+  if (migrateLater !== undefined) {
+    said.push(
+      `migrate: it runs ${migrate}, older than ${migrateLater}, which a run of it or an API revision ran: rolled back. ${forwardPast(migrateLater)}`,
+    );
+  }
+  if ((place(migrate) ?? -1) > (place(api) ?? Number.POSITIVE_INFINITY)) {
+    said.push(
+      `migrate: it runs ${migrate}, behind the API's ${api}, which a release never leaves (it moves migrate first). If a hand apps run failed part way (it updates both at once), run apps again; otherwise a suspected breach`,
+    );
+  }
+  return said;
+}
+
+/** The kind of workload, as Resource Manager names it. */
+const kindOf = (workload: Workload): 'jobs' | 'containerApps' =>
+  WORKLOADS[workload].path.startsWith('jobs/') ? 'jobs' : 'containerApps';
+
+/** Every way a workload read from Azure differs from its template (drift.ts): its container, then the rest of it. */
+function workloadAgainst(workload: Workload, template: unknown, read: Read, bound: Bound): string[] {
+  return [
+    ...differences(expectedOf(containersOf(template)), read.running.container, bound),
+    ...workloadDifferences(kindOf(workload), template, { identity: read.identity, properties: read.properties }, bound),
+  ];
+}
+
+/**
+ * AZ2c H2: each workload's build, as its AGENTX_RELEASE names it, must be the commit its image's signature names:
+ * CI signs each image for the one commit it was built from (verify.ts), and every deploy stamps that commit. A build
+ * that isn't, an older commit's name on today's image say, would hide a change from the history the gate reads. Each
+ * image and build is checked once.
+ */
+function unsignedBuilds(reads: ReadonlyMap<Workload, Read>, verify: CheckSteps['verify']): string[] {
+  const checked = new Map<string, Outcome>();
+  return ORDER.flatMap((workload) => {
+    const running = reads.get(workload)?.running;
+    if (running === undefined) return [];
+    const key = `${running.image} ${running.release}`;
+    const outcome = checked.get(key) ?? verify(running.image, running.release);
+    checked.set(key, outcome);
+    if (outcome.verified) return [];
+    return [
+      `${workload}: its image isn't CI's signed build of ${running.release}, the commit its ${RELEASE_SETTING} names (${outcome.reason}): a suspected breach`,
+    ];
+  });
+}
+
+/**
+ * AZ2c H3: the staging secrets that pin what only the partner's shell gives `apps`, each the SHA-256 of the value in
+ * lower case (as the domain guard keeps the domain, tooling/git-hooks/private-names.ts), by the marker it is matched
+ * by (drift.ts SHELL_MARKERS). The values never reach CI or this repository; their hashes only confirm them.
+ */
+const PINS = [
+  { variable: 'AGENTX_AUTH_HOST_SHA256', shell: 'AGENTX_AZURE_AUTH_HOST', what: 'auth host' },
+  { variable: 'AGENTX_APP_HOST_SHA256', shell: 'AGENTX_AZURE_APP_HOST', what: 'app host' },
+  { variable: 'AGENTX_OIDC_CLIENT_ID_SHA256', shell: 'AGENTX_AZURE_API_OIDC_CLIENT_ID', what: "API's client ID" },
+] as const;
+
+/**
+ * Each pinned value the live settings carry, held to its pin exactly: a reason for each that isn't. A pin not set is
+ * said in one line, not red: the value is then held to its shape alone. Neither the value nor its hash is printed.
+ */
+function unpinned(
+  bound: ReadonlyMap<string, string>,
+  pins: Readonly<Record<string, string | undefined>>,
+  say: (line: string) => void,
+): string[] {
+  const unset = PINS.filter(({ variable }) => (pins[variable]?.trim() ?? '') === '');
+  if (unset.length > 0) {
+    say(
+      `Not pinned (${unset.map(({ variable }) => variable).join(', ')} unset): the ${unset.map(({ what }) => what).join(', ')} held to shape alone. Nothing is wrong; set each as a staging secret to hold it exactly.`,
+    );
+  }
+  return PINS.flatMap(({ variable, shell, what }) => {
+    const pin = pins[variable]?.trim().toLowerCase() ?? '';
+    if (pin === '') return [];
+    if (!/^[0-9a-f]{64}$/.test(pin))
+      return [`${variable} isn't a SHA-256 (64 hex), so the ${what} can't be checked: set it again`];
+    const live = bound.get(`shell ${shell}`);
+    if (live === undefined) return [`no setting carries the ${what}, which ${variable} pins`];
+    return fingerprintOf(live.toLowerCase()) === pin
+      ? []
+      : [`api: the ${what} its settings carry isn't the one ${variable} pins`];
+  });
+}
+
 async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   const subscription = signedIn(steps.az, steps.say);
   const image = `${IMAGE_REPOSITORY}@${request.digest}`;
@@ -671,8 +1057,15 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   if (api !== undefined && settingValue(api.container, 'AGENTX_ROLE') === 'web') {
     return { subscription, image, reads, running, decision: { kind: 'load-run' } };
   }
+  const held = async (decided: Decision): Promise<Plan> => ({
+    subscription,
+    image,
+    reads,
+    running,
+    decision: await heldToTemplates(decided, request.commit, subscription, reads, steps),
+  });
   const first = decide(running, request.commit, image, steps.history);
-  if (first.kind !== 'by-hand') return { subscription, image, reads, running, decision: first };
+  if (first.kind !== 'by-hand') return held(first);
   const readers = await readersAt(request.commit, steps);
   const records = recordsIn(reads.get('migrate')?.tags ?? {}, steps.say);
   steps.say(
@@ -680,8 +1073,7 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
       ? 'The migration job holds no hand deploy records.'
       : `The migration job records: ${[...records].map(([deployment, sent]) => deployment + ' sent ' + sent).join('; ')}.`,
   );
-  const decision = decide(running, request.commit, image, steps.history, readers, records);
-  return { subscription, image, reads, running, decision };
+  return held(decide(running, request.commit, image, steps.history, readers, records));
 }
 
 /** What the records show deployed by hand, said before a release goes ahead. */
@@ -708,6 +1100,13 @@ export const COMING_FIRST =
   "the image staging runs wasn't told what this release's migration adds. Release a commit carrying it in coming.json first, then this one; never a hand deploy, which goes round this check and raises the false tamper alarm it prevents (decision 49).";
 
 /**
+ * What a release says when a workload isn't as its commit's apps.bicep has it (AZ2c): what happened, what broke, what
+ * next. A write with CI's sign-in leaves no request body in the activity log, so this is where such a change shows.
+ */
+export const NOT_AS_DEPLOYED =
+  "the API or the migration job isn't as this commit's apps.bicep has it, beyond its image and build (what differs is below, by name, never by value). Someone changed it outside a deploy: with CI's sign-in, or by hand. What broke: nothing was released or changed, since a release copies each container and would carry that change forward, and run it. What next: find who changed it in the resource group's activity log and treat it as a suspected breach until shown otherwise (Incident-Response-Playbook section B); then deploy it by hand with apps after checking who changed it, which puts back what apps.bicep says.";
+
+/**
  * A decision that leaves nothing to update, said: the status to end with, or
  * nothing when there are updates to make.
  */
@@ -731,6 +1130,11 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
   }
   if (decision.kind === 'by-hand') {
     say(`A release of ${commit} stops here, red: this needs a hand deploy.`);
+    for (const reason of decision.reasons) say(`  ${reason}`);
+    return 1;
+  }
+  if (decision.kind === 'not-as-deployed') {
+    say(`A release of ${commit} stops here, red: ${NOT_AS_DEPLOYED}`);
     for (const reason of decision.reasons) say(`  ${reason}`);
     return 1;
   }
@@ -1133,14 +1537,61 @@ function alreadyServed(steps: ReleaseSteps, subscription: string, api: Read, ima
   return 0;
 }
 
-/** What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door. */
-export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'>;
+/**
+ * What a migration run ahead of a hand deploy needs (AZ6): a release's steps, less the image check and the door, and
+ * what the hand deploy's checkout of the commit gives migrate (AZ2c).
+ */
+export type MigrateFirstSteps = RunSteps & Pick<ReleaseSteps, 'history'> & { readonly templates: Templates };
+
+/**
+ * The migration job's container as the hand deploy's commit gives it (AZ2c), with this image and build: never a copy
+ * of the live one, which a write outside a deploy may have changed (its command, say), so a hand deploy never runs such
+ * a change. Said when the live one differs beyond its image and build, by name alone: the hand deploy is the fix the
+ * release asks for, and the difference is a suspected breach to look into.
+ */
+function templateMigrate(
+  steps: MigrateFirstSteps,
+  subscription: string,
+  job: Read,
+  image: string,
+  commit: string,
+): Container {
+  const live = job.running;
+  const template = steps.templates(subscription, commit).get('migrate');
+  const containers = containersOf(template);
+  const beyond = workloadDifferences(
+    'jobs',
+    template,
+    { identity: job.identity, properties: job.properties },
+    new Map(),
+  );
+  let after: Container | undefined;
+  try {
+    after = deployable(WORKLOADS.migrate.container, containers, image, commit);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    beyond.push(error.message);
+  }
+  // M3: --migrate-first sends the containers alone; anything else the commit's migrate needs only apps can send.
+  if (beyond.length > 0 || after === undefined) {
+    throw new Error(
+      `migrate isn't as ${commit}'s apps.bicep has it beyond its containers (${beyond.join('; ')}), and --migrate-first sends its containers alone. If this commit adds a secret, mount or deploy-time setting to migrate: run apps --api-stopped first (Incident-Response-Playbook section L). If it doesn't, someone changed the job outside a deploy: treat it as a suspected breach (section B).`,
+    );
+  }
+  const said = differences(expectedOf(containers), live.container, new Map());
+  if (said.length > 0) {
+    steps.say(
+      `migrate isn't as ${commit}'s apps.bicep has it, beyond its image and build (${said.join('; ')}): it runs as apps.bicep says. If apps.bicep didn't change it since ${live.release}, someone changed it outside a deploy: treat it as a suspected breach (Incident-Response-Playbook section B).`,
+    );
+  }
+  return after;
+}
 
 /**
  * `deploy.ts apps --migrate-first` (AZ6): a release's first half alone, for a hand deploy whose image brings
  * migrations the database lacks (S174: deployed together, the API started on the new image before them, refused at
- * start and raised a false tamper alarm). The migration job is updated to the image and run to success, exactly as a
- * release does, and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
+ * start and raised a false tamper alarm). The migration job is updated to the image and run to success, as a release
+ * does, but with its container as the commit's apps.bicep gives it (AZ2c), and the API is left as it is. Held, as a release is, to decision 49 against the build the API runs,
  * since it checks the database while the migration runs. The run's name once it has succeeded; otherwise an error
  * saying what it left, and the deployment isn't sent. The image was checked by the caller (verify.ts).
  */
@@ -1173,7 +1624,7 @@ export async function migrateFirst(
     return timeLimit(job);
   });
   const left = `the API is unchanged, on ${apiRuns}`;
-  const after = released(job.running, image, commit);
+  const after = await leaving('nothing was changed.', () => templateMigrate(steps, subscription, job, image, commit));
   await leaving(`migrate may hold ${commit}, not run; ${left}.`, async () => {
     update(steps, subscription, 'migrate', job.running, after);
     await settledUpdate(steps, subscription, 'migrate', after);
@@ -1298,14 +1749,26 @@ export function main(
   history: () => History = realHistory,
   extras: () => Extras = realExtras,
   folder: () => Folder = realFolder,
+  env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<number> {
   return runCli(
     USAGE,
     say,
     () => parseArguments(argv),
     (request) => {
-      const steps = { az: az(), history: history(), folder: folder(), say };
-      return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...extras() });
+      const more = extras();
+      const line = history();
+      const steps = {
+        az: az(),
+        history: line,
+        folder: folder(),
+        say,
+        verify: more.verify,
+        pins: env,
+        now: more.now,
+        anchor: () => lastRelease(env, (commit: string) => line.mainline().get(commit)),
+      };
+      return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...more });
     },
   );
 }

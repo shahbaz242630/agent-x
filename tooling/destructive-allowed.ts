@@ -95,6 +95,7 @@ export const ALLOWED: readonly Allowed[] = [
   // --- Local folders, containers and the e2e stack ------------------------------------------------------------------
   ...(
     [
+      ['deploy/azure/git.ts', 'rmSync(made, { recursive'],
       ['deploy/azure/held-request.ts', 'rmSync(folder, { recursive'],
       ['deploy/azure/snapshot.ts', 'rmSync(dir, { recursive'],
       ['packages/testing/src/keys.ts', 'rmSync(directory, { recursive'],

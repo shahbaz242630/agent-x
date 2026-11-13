@@ -32,7 +32,15 @@ import {
 } from './database.ts';
 import { BUILT_PARTNER, type Partner, type PartnerDeclaration, partnerFrom, partnerProblems } from './partner.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
-import { allOk, logLevelProblems, releaseProblems, setting, type SettingName } from './settings.ts';
+import {
+  allOk,
+  type Checked,
+  loginIdList,
+  logLevelProblems,
+  releaseProblems,
+  setting,
+  type SettingName,
+} from './settings.ts';
 
 /**
  * The address a local run is reached at when none is set, on the default port.
@@ -367,6 +375,23 @@ function sessionProblems(idleMinutes: number, absoluteHours: number): string[] {
     : [];
 }
 
+/**
+ * One of SA2's lists of login service user IDs (SA2b), set directly or from the vault as `_FILE`, as a secret is:
+ * neither set, or `none`, is no list. A problem names the setting and the entry's place, never an ID.
+ */
+function ourLoginIds(
+  env: Env,
+  name: 'AGENTX_IDP_OUR_ACTORS' | 'AGENTX_IDP_OUR_SERVICE_USERS',
+): Checked<readonly string[] | undefined> {
+  const read = optionalSecretSetting(env, name);
+  if (!read.ok) return read;
+  if (read.value === undefined) return { ok: true, value: undefined };
+  const parsed = loginIdList.safeParse(read.value);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : { ok: false, problem: `${name}: ${parsed.error.issues.map((issue) => issue.message).join('; ')}` };
+}
+
 /** Port 0 takes any free port, which suits a test; a deployed app must be where its ingress sends traffic. */
 function portProblems(environment: Environment, value: number): string[] {
   return value === 0 && !LOCAL_ONLY.includes(environment)
@@ -414,8 +439,8 @@ function readSettings(env: Env, location: LocationChecks) {
     emailAccessKey: optionalSecretSetting(env, 'AGENTX_EMAIL_ACCESS_KEY'),
     directoryToken: optionalSecretSetting(env, 'AGENTX_DIRECTORY_TOKEN'),
     factorResetToken: optionalSecretSetting(env, 'AGENTX_FACTOR_RESET_TOKEN'),
-    idpOurActors: setting(env, 'AGENTX_IDP_OUR_ACTORS'),
-    idpOurServiceUsers: setting(env, 'AGENTX_IDP_OUR_SERVICE_USERS'),
+    idpOurActors: ourLoginIds(env, 'AGENTX_IDP_OUR_ACTORS'),
+    idpOurServiceUsers: ourLoginIds(env, 'AGENTX_IDP_OUR_SERVICE_USERS'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),

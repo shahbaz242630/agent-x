@@ -48,6 +48,10 @@ import {
   COPIED_SECRETS,
   secretsRunFor,
   issuedProblems,
+  disabledLoginLists,
+  loginIdProblems,
+  NO_LOGIN_IDS,
+  ourListsProblem,
   passwordProblems,
   peopleAskedFor,
   type PlannedAlert,
@@ -281,7 +285,53 @@ describe('parseArguments', () => {
   });
 });
 
+/** SA2b: our two lists of login IDs, as the vault names them. */
+const OUR_LISTS = ['zitadel-our-actors', 'zitadel-our-service-users'] as const;
+
 describe('the secrets a run writes', () => {
+  it('SA2b: writes none (off) for a list of our login IDs the vault lacks, on every kind of run, and keeps one it holds', () => {
+    for (const plan of [all, keysOnly, rotating('db-app-password')]) {
+      const values = secretValues(plan, pasted(aPaste(), aPaste()), quickMakers());
+      for (const name of OUR_LISTS) expect(values[variableOf(name)]).toBe(NO_LOGIN_IDS);
+      const kept = secretValues(plan, pasted(aPaste(), aPaste()), quickMakers(), [...OUR_LISTS]);
+      for (const name of OUR_LISTS) expect(kept[variableOf(name)]).toBe('');
+    }
+    // `--all` never asks for them: like an issued secret, only their names write them.
+    expect(peopleAskedFor(all)).not.toContain('zitadel-our-actors');
+  });
+
+  it('SA2b: rotates our two lists together, as pasted, and asks for both', () => {
+    const plan = parseArguments(['secrets', '--rotate', 'zitadel-our-actors']);
+    expect(plan).toEqual({ command: 'secrets', plan: rotating(...OUR_LISTS) });
+    const ids = rotating(...OUR_LISTS);
+    expect(peopleAskedFor(ids)).toEqual([...OUR_LISTS]);
+    const values = secretValues(
+      ids,
+      { 'zitadel-our-actors': '900000000000000001', 'zitadel-our-service-users': '900000000000000002' },
+      quickMakers(),
+    );
+    expect(values[variableOf('zitadel-our-actors')]).toBe('900000000000000001');
+    expect(values[variableOf('zitadel-our-service-users')]).toBe('900000000000000002');
+    // Both none turns the feature off again.
+    const off = secretValues(ids, { 'zitadel-our-actors': NO_LOGIN_IDS, 'zitadel-our-service-users': NO_LOGIN_IDS });
+    expect(off[variableOf('zitadel-our-actors')]).toBe(NO_LOGIN_IDS);
+    expect(describePlan(ids)).toContain('  zitadel-our-actors: written, from what you paste');
+  });
+
+  it('SA2b: refuses one list beside the other’s none, which would stop the API’s start, never naming a value', () => {
+    for (const people of [
+      { 'zitadel-our-actors': '900000000000000001', 'zitadel-our-service-users': NO_LOGIN_IDS },
+      { 'zitadel-our-actors': NO_LOGIN_IDS, 'zitadel-our-service-users': '900000000000000002' },
+    ]) {
+      expect(ourListsProblem(people)).toBe(
+        "zitadel-our-actors and zitadel-our-service-users go together: give both as lists of IDs, or both as none. One alone would stop the API's start, so nothing was deployed.",
+      );
+      expect(() => secretValues(rotating(...OUR_LISTS), people, quickMakers())).toThrow(/go together/);
+    }
+    // Neither pasted (another run): nothing to weigh.
+    expect(ourListsProblem({})).toBeUndefined();
+  });
+
   it('asks people only for their own secrets, and only when the run writes them', () => {
     expect(peopleAskedFor(all)).toEqual([...PEOPLE]);
     expect(peopleAskedFor(rotating('db-app-password'))).toEqual([]);
@@ -320,7 +370,7 @@ describe('the secrets a run writes', () => {
   });
 
   it('writes nothing but the keys and the master key on a keys run, and asks nobody', () => {
-    const values = secretValues(keysOnly, {}, quickMakers());
+    const values = secretValues(keysOnly, {}, quickMakers(), OUR_LISTS);
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
@@ -339,7 +389,7 @@ describe('the secrets a run writes', () => {
   });
 
   it('on a rotation, writes the named secrets and a fresh master key, and leaves every other one empty', () => {
-    const values = secretValues(rotating('db-app-password'), {}, quickMakers());
+    const values = secretValues(rotating('db-app-password'), {}, quickMakers(), OUR_LISTS);
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
@@ -373,6 +423,8 @@ describe('the secrets a run writes', () => {
       '  api-oidc-client-secret: kept as the vault has it',
       '  zitadel-directory-token: kept as the vault has it',
       '  zitadel-reset-token: kept as the vault has it',
+      '  zitadel-our-actors: kept as the vault has it, or written as none (off) if it has none yet',
+      '  zitadel-our-service-users: kept as the vault has it, or written as none (off) if it has none yet',
       // B5-3: copied from the email service on every run, whatever the run writes.
       '  acs-access-key: copied from its Azure service, as every run does',
       ...CREATED_ONCE.map((key) => `  ${key}: written only if the vault has none yet`),
@@ -406,6 +458,28 @@ describe('issuedProblems', () => {
     const problems = issuedProblems(value);
     expect(problems).toContainEqual(expect.stringMatching(problem));
     expect(problems.join(' ')).not.toContain(value.trim());
+  });
+});
+
+describe('loginIdProblems (SA2b)', () => {
+  it('takes our login IDs as the API reads them, or none', () => {
+    expect(loginIdProblems('900000000000000001')).toEqual([]);
+    expect(loginIdProblems('900000000000000001,900000000000000002')).toEqual([]);
+    expect(loginIdProblems(NO_LOGIN_IDS)).toEqual([]);
+  });
+
+  it.each([
+    ['a name for an ID', 'agentx-resets'],
+    ['a space a paste added', ' 900000000000000001'],
+    ['a space after a comma', '900000000000000001, 900000000000000002'],
+    ['an empty entry', '900000000000000001,'],
+    ['None in capitals', 'None'],
+    ['none with an ID after it', 'none,900000000000000001'],
+    ['a word beginning none', 'nonesense'],
+  ])('refuses %s, never repeating the value', (_what, value) => {
+    const problems = loginIdProblems(value);
+    expect(problems).toContainEqual(expect.stringMatching(/is not a login service user ID/));
+    expect(problems.join(' ')).not.toMatch(/9000000000000000\d\d|agentx-resets/);
   });
 });
 
@@ -1083,6 +1157,9 @@ class RecordingAz implements Az {
       'zitadel-directory-token',
       'zitadel-reset-token',
       'acs-access-key',
+      // SA2b: our login ID lists, which any secrets run writes as none until the partner's.
+      'zitadel-our-actors',
+      'zitadel-our-service-users',
     ];
     const pages = this.options.pages ?? {};
     const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
@@ -1793,9 +1870,11 @@ describe("what a secrets run did to the app's keys", () => {
 
 describe('deploy secrets', () => {
   /** What a first --all writes: every secret but the ones Zitadel issues, which only their names write (B2-6, B5-3). */
-  const nine = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source !== 'issued');
-  /** Every secret a deployment leaves: the nine, the email key it copies (B5-3) and the app's keys. */
-  const everything = [...nine, ...COPIED_SECRETS, ...CREATED_ONCE];
+  const nine = Object.keys(VAULT_SECRETS).filter(
+    (name) => VAULT_SECRETS[name]?.source !== 'issued' && VAULT_SECRETS[name]?.source !== 'ids',
+  );
+  /** Every secret a deployment leaves: the nine, our login lists as none (SA2b), the email key it copies (B5-3) and the app's keys. */
+  const everything = [...nine, ...OUR_LISTS, ...COPIED_SECRETS, ...CREATED_ONCE];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -1817,8 +1896,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Twenty-two secrets, three a page: the last one part full.
-      ...Array<string>(8).fill('rest --method get'),
+      // Twenty-four secrets, three a page, and the empty page Azure ends with.
+      ...Array<string>(9).fill('rest --method get'),
       ...RECORDING,
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
@@ -1855,7 +1934,9 @@ describe('deploy secrets', () => {
         expect(call.args.join(' ')).not.toContain(value);
       }
     }
-    done.terminal.neverSaid(Object.values(values));
+    // Our login lists go as none (SA2b), a word, not a secret, which the run's own lines use.
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(NO_LOGIN_IDS);
+    done.terminal.neverSaid(Object.values(values).filter((value) => value !== NO_LOGIN_IDS));
     expect(done.terminal.said.slice(-(everything.length + 2), -2)).toEqual(
       [...everything].sort().map((name) => `  ${name}`),
     );
@@ -1957,10 +2038,91 @@ describe('deploy secrets', () => {
     expect(done.terminal.said.at(-1)).toMatch(/start the set-up job now/);
   });
 
-  it('on a keys run, asks for nothing, writes only the keys and the master key, and checks every key is there', async () => {
+  it('SA2b: on a keys run where the vault lacks our login lists, writes each as none, so the apps can mount them', async () => {
     const done = await run(['secrets', '--keys'], {
       answers: ['y'],
       az: new RecordingAz({ before: nine, after: everything }),
+    });
+    expect(done.status).toBe(0);
+    expect(done.terminal.hiddenQuestions).toEqual([]);
+    const values = done.az.deployment?.values ?? {};
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(NO_LOGIN_IDS);
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS).toBe(NO_LOGIN_IDS);
+  });
+
+  it('SA2b: on a rotation of our login lists, asks for both, holds each to what the API reads, and writes them', async () => {
+    const actors = '900000000000000001';
+    const serviceUsers = '900000000000000002,900000000000000003';
+    const done = await run(['secrets', '--rotate', 'zitadel-our-service-users'], {
+      answers: ['y'],
+      hidden: ['agentx-admin', actors, actors, serviceUsers, serviceUsers],
+      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+    });
+    expect(done.status).toBe(0);
+    expect(done.terminal.said).toContainEqual(
+      "That won't do: entry 1 is not a login service user ID. Write each as its digits, comma-separated with no spaces, or none.",
+    );
+    const values = done.az.deployment?.values ?? {};
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(actors);
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS).toBe(serviceUsers);
+    done.terminal.neverSaid([actors, serviceUsers, 'agentx-admin']);
+  });
+
+  it('SA2b: refuses a rotation that pastes one list and none for the other, sending nothing', async () => {
+    const actors = '900000000000000001';
+    const done = await run(['secrets', '--rotate', 'zitadel-our-actors'], {
+      answers: ['y'],
+      hidden: [actors, actors, NO_LOGIN_IDS, NO_LOGIN_IDS],
+      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+    });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(/go together: .*nothing was deployed\.$/) as unknown,
+    });
+    expect(String(done.error)).not.toContain(actors);
+    expect(done.az.deployment).toBeUndefined();
+    done.terminal.neverSaid([actors]);
+  });
+
+  it('SA2b: refuses any run while one of our lists is disabled, so none is never written over it', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({
+        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        after: everything,
+      }),
+    });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The vault holds zitadel-our-service-users disabled\. .*Enable it again in the vault, or write both lists by name: secrets --rotate zitadel-our-actors zitadel-our-service-users\.$/,
+      ) as unknown,
+    });
+    expect(done.az.deployment).toBeUndefined();
+    expect(disabledLoginLists([{ name: 'api-oidc-client-secret', enabled: false }])).toEqual([]);
+  });
+
+  it('SA2b: lets a rotation by name write over a disabled list, as the refusal says it may', async () => {
+    const actors = '900000000000000001';
+    const serviceUsers = '900000000000000002';
+    const done = await run(['secrets', '--rotate', 'zitadel-our-actors'], {
+      answers: ['y'],
+      hidden: [actors, actors, serviceUsers, serviceUsers],
+      az: new RecordingAz({
+        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        after: everything,
+      }),
+    });
+    expect(done.status).toBe(0);
+    const values = done.az.deployment?.values ?? {};
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(actors);
+    expect(values.AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS).toBe(serviceUsers);
+    done.terminal.neverSaid([actors, serviceUsers]);
+  });
+
+  it('on a keys run, asks for nothing, writes only the keys and the master key, and checks every key is there', async () => {
+    // Our login lists held already (SA2b): one the vault lacks would be written as none, as the next test shows.
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
     });
     expect(done.status).toBe(0);
     expect(done.terminal.hiddenQuestions).toEqual([]);
@@ -2203,7 +2365,7 @@ describe('deploy apps', () => {
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too.*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, zitadel-our-actors, zitadel-our-service-users, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too, and writes none \(off\) for any of our login ID lists the vault lacks.*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
@@ -2227,6 +2389,7 @@ describe('deploy apps', () => {
       'api-oidc-client-secret',
       'zitadel-directory-token',
       'zitadel-reset-token',
+      ...OUR_LISTS,
       'acs-access-key',
     ]);
     const held = [
@@ -2235,7 +2398,11 @@ describe('deploy apps', () => {
       'zitadel-directory-token',
       'zitadel-reset-token',
       'acs-access-key',
+      ...OUR_LISTS,
     ];
+    // SA2b: our lists alone, before the first secrets run after them: any run writes them as none.
+    expect(issuedMissing(held.filter((name) => !name.startsWith('zitadel-our-')))).toEqual([...OUR_LISTS]);
+    expect(secretsRunFor([...OUR_LISTS])).toBe('secrets --keys');
     // B6-3c: the reset token alone, as staging lacks it until the partner's run.
     expect(issuedMissing(held.filter((name) => name !== 'zitadel-reset-token'))).toEqual(['zitadel-reset-token']);
     expect(secretsRunFor(['zitadel-reset-token'])).toBe('secrets --rotate zitadel-reset-token');
@@ -2512,9 +2679,11 @@ describe('deploy apps', () => {
       'bicep version',
       'keyvault list --subscription',
       'postgres flexible-server list',
-      // The vault holds the API's client secret (B2-6), its directory token and the email key (B5-3), which the
-      // API reads: three, a full page, and the empty page Azure ends with.
+      // The vault holds the API's client secret (B2-6), its directory token and the email key (B5-3), its reset
+      // token (B6-3c) and our login lists (SA2b), which the API reads: six, two full pages, and the empty page Azure
+      // ends with.
       'keyvault list --subscription',
+      'rest --method get',
       'rest --method get',
       'rest --method get',
       'deployment group create',
@@ -3758,7 +3927,11 @@ describe('the tool and the deployment agree', () => {
     expect(Object.keys(standIns).toSorted()).toEqual([...CREATED_ONCE].toSorted());
     for (const key of APP_KEYS) expect(standIns[key]).not.toBe(given[key]);
     expect(shaped.AGENTX_AZURE_ALERT_EMAIL).toBe('ops@example.invalid');
-    const rotation = shapedForPolicy(secretValues(rotating('db-app-password'), {}, quickMakers()), randomBytes);
+    // Our login lists held (SA2b), so the rotation writes nothing of them.
+    const rotation = shapedForPolicy(
+      secretValues(rotating('db-app-password'), {}, quickMakers(), [...OUR_LISTS]),
+      randomBytes,
+    );
     expect(
       Object.entries(rotation)
         .filter(([, value]) => value !== '')
