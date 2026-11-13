@@ -245,11 +245,22 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(fingerprintedSettings(loadConfig(SETTINGS)).partner).toEqual({ mode: 'live', gateRef: GATE_REF });
   });
 
-  it('SA2: names who makes our own routine login changes when set, and keeps the hash it had when not', () => {
-    const ours = { ...SETTINGS, AGENTX_IDP_OUR_ACTORS: '7', AGENTX_IDP_OUR_SERVICE_USERS: '8,9' };
+  it('SA2b: counts who makes our own routine login changes when set, never naming them, and keeps the hash it had when not', () => {
+    const ours = {
+      ...SETTINGS,
+      AGENTX_IDP_OUR_ACTORS: '900000000000000071',
+      AGENTX_IDP_OUR_SERVICE_USERS: '900000000000000081,900000000000000082',
+    };
+    const fingerprint = fingerprintOf(ours);
 
-    expect(fingerprintedSettings(loadConfig(ours)).idpOurChanges).toEqual({ actors: ['7'], serviceUsers: ['8', '9'] });
+    expect(fingerprintedSettings(loadConfig(ours)).idpOurChanges).toEqual({ actors: 1, serviceUsers: 2 });
     expect(hashOf(ours)).not.toBe(hashOf(SETTINGS));
+    // Another ID in the same place: the IDs never reach the hash, which a few guessable digits could be worked back from.
+    expect(hashOf({ ...ours, AGENTX_IDP_OUR_ACTORS: '900000000000000072' })).toBe(hashOf(ours));
+    expect(JSON.stringify([fingerprint, fingerprintedSettings(loadConfig(ours))])).not.toMatch(/9000000000000000\d\d/);
+    expect(hashOf({ ...ours, AGENTX_IDP_OUR_ACTORS: 'none', AGENTX_IDP_OUR_SERVICE_USERS: 'none' })).toBe(
+      hashOf(SETTINGS),
+    );
     expect(fingerprintedSettings(loadConfig(SETTINGS))).not.toHaveProperty('idpOurChanges', expect.anything());
   });
 

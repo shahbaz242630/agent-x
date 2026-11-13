@@ -93,6 +93,14 @@ param directoryToken string
 @secure()
 param resetToken string
 
+@description('The Zitadel user IDs that make our own routine changes in it (SA2b; the API\'s AGENTX_IDP_OUR_ACTORS), comma-separated, or none, pasted by a person: kept in the vault because the list tells an attacker which accounts to aim at. deploy.ts sends none for it while the vault has none, so the apps always have it to mount; empty leaves the vault\'s as it is.')
+@secure()
+param ourActors string
+
+@description('The Zitadel user IDs of the API\'s own service users those changes are made for (SA2b; AGENTX_IDP_OUR_SERVICE_USERS), as ourActors.')
+@secure()
+param ourServiceUsers string
+
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
 @secure()
@@ -169,6 +177,18 @@ var secrets = [
   {
     name: 'zitadel-reset-token'
     value: resetToken
+    readers: ['api', 'jobs']
+  }
+  // SA2b: who makes our own routine changes in the login service, and for whom: the API's copier tells those by an
+  // info line rather than the login-service alert. The jobs copy the events; the API reads them as the same process.
+  {
+    name: 'zitadel-our-actors'
+    value: ourActors
+    readers: ['api', 'jobs']
+  }
+  {
+    name: 'zitadel-our-service-users'
+    value: ourServiceUsers
     readers: ['api', 'jobs']
   }
 ]

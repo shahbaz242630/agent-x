@@ -41,7 +41,9 @@ export type SecretName =
   | 'AGENTX_OIDC_CLIENT_SECRET'
   | 'AGENTX_EMAIL_ACCESS_KEY'
   | 'AGENTX_DIRECTORY_TOKEN'
-  | 'AGENTX_FACTOR_RESET_TOKEN';
+  | 'AGENTX_FACTOR_RESET_TOKEN'
+  | 'AGENTX_IDP_OUR_ACTORS'
+  | 'AGENTX_IDP_OUR_SERVICE_USERS';
 
 const refused = (problem: string): Checked<never> => ({ ok: false, problem });
 

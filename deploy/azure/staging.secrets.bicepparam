@@ -25,4 +25,6 @@ param loginClientPublicKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_
 param apiOidcClientSecret = readEnvironmentVariable('AGENTX_AZURE_API_OIDC_CLIENT_SECRET')
 param directoryToken = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN')
 param resetToken = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_RESET_TOKEN')
+param ourActors = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_OUR_ACTORS')
+param ourServiceUsers = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS')
 param appKeyValues = readEnvironmentVariable('AGENTX_AZURE_APP_KEYS')

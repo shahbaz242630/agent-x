@@ -508,6 +508,8 @@ const GRANTS: ReadonlySet<string> = new Set([
   'jobs reads acs-access-key',
   'jobs reads zitadel-directory-token',
   'jobs reads zitadel-reset-token',
+  'jobs reads zitadel-our-actors',
+  'jobs reads zitadel-our-service-users',
   ...APP_KEYS.filter(
     (key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v') || operatorOnly(key),
   ).map((key) => `operator reads ${key}`),
@@ -519,6 +521,9 @@ const GRANTS: ReadonlySet<string> = new Set([
   'api reads zitadel-directory-token',
   // B6-3c: the login service's token for removing second factors once a reset has cooled off.
   'api reads zitadel-reset-token',
+  // SA2b: who makes our own routine changes in the login service, and for whom, kept in the vault alone.
+  'api reads zitadel-our-actors',
+  'api reads zitadel-our-service-users',
   'operator reads db-operator-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
@@ -5877,6 +5882,12 @@ function urlOfSecret(keyVaultUrl: string): { readonly vault: string; readonly se
   return vault === undefined || secret === undefined ? undefined : { vault, secret };
 }
 
+/**
+ * Settings a container may take only as a file from the vault, never as a value in the deployment (SA2b): which
+ * accounts are ours in the login service, which this public repository must never name.
+ */
+const VAULT_ONLY_SETTINGS: readonly string[] = ['AGENTX_IDP_OUR_ACTORS', 'AGENTX_IDP_OUR_SERVICE_USERS'];
+
 /** Whether a container's image may take a secret in this setting (`SECRETS_IN_ENVIRONMENT`). */
 const mayTakeSecretInEnvironment = (image: unknown, setting: string): boolean =>
   SECRETS_IN_ENVIRONMENT.some(({ images, settings }) => text(image).startsWith(images) && settings.test(setting));
@@ -6032,6 +6043,13 @@ function secretUseProblems(job: PredictedResource, given: readonly string[], pro
     problem(`reads ${name}, which it is not given`);
   }
   for (const container of containersOf(job)) {
+    for (const name of list(at(container, 'env'))
+      .map((entry) => text(at(entry, 'name')))
+      .filter((setting) => VAULT_ONLY_SETTINGS.includes(setting))) {
+      problem(
+        `sets ${name} in the deployment, where anyone reading it sees it; mount it from the vault as ${name}_FILE`,
+      );
+    }
     for (const entry of list(at(container, 'env')).filter((setting) => at(setting, 'secretRef') !== undefined)) {
       const setting = text(at(entry, 'name'));
       if (mayTakeSecretInEnvironment(at(container, 'image'), setting)) continue;
