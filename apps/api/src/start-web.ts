@@ -25,6 +25,7 @@ import {
 } from '@agentx/core/modules/identity';
 import { createActivityLog } from '@agentx/core/modules/activity';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
+import { nextMachineId } from '@agentx/core/modules/platform-controls';
 import { holdingsRecordChecks } from '@agentx/core/modules/spend-requests';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Config, partnerName } from '@agentx/platform/config';
@@ -132,6 +133,11 @@ export async function startWeb(
     logSample,
     ids: uuidV7Ids,
     healthChecks,
+    // Zitadel's machine IDs, on the API's internal host alone (SA3e).
+    machineIds:
+      config.http.machineIdsHost === undefined
+        ? undefined
+        : { host: config.http.machineIdsHost, next: () => nextMachineId(database) },
     signIn:
       signIn === undefined
         ? undefined
