@@ -1,7 +1,8 @@
 // In-country monitoring (ADR-013): the log workspaces in UAE North, their caps,
 // and the alerts that watch them. Everything the app and the platform log lands
 // in the main one; nothing leaves the UAE but alert notifications, and those
-// carry counts only.
+// carry counts only. Sent with the foundation: since AZ5, by CI after the
+// partner's Approve in GitHub's staging-infra environment.
 //
 // A second, small workspace holds only what the database login alerts read
 // (4D2e Stage F, PR 9): Postgres's server log and a copy of the Container Apps
