@@ -467,7 +467,8 @@ resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
 }
 
 // A type the deployments don't create (Indexed, as Azure's built-in "Allowed resource types"): every type they do
-// (policy rule `azure-policy` holds the list to the snapshot exactly), and the deployments' own records.
+// (policy rule `azure-policy` holds the list to the snapshot exactly), the deployments' own records, and AZ11's private
+// endpoint, its zone group and the network interface Azure makes for it, allowed a foundation before the endpoint lands.
 resource allowedTypes 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
   name: '${prefix}-allowed-types'
   properties: {
@@ -513,9 +514,12 @@ resource allowedTypes 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
             'Microsoft.Network/dnsResolverPolicies'
             'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules'
             'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks'
+            'Microsoft.Network/networkInterfaces'
             'Microsoft.Network/networkSecurityGroups'
             'Microsoft.Network/privateDnsZones'
             'Microsoft.Network/privateDnsZones/virtualNetworkLinks'
+            'Microsoft.Network/privateEndpoints'
+            'Microsoft.Network/privateEndpoints/privateDnsZoneGroups'
             'Microsoft.Network/virtualNetworks'
             'Microsoft.OperationalInsights/workspaces'
             'Microsoft.OperationalInsights/workspaces/savedSearches'

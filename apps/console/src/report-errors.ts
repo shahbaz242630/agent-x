@@ -38,7 +38,7 @@ export function report(kind: Kind, error: unknown): void {
   const body = JSON.stringify({
     kind,
     message: messageOf(error),
-    page: path.length <= PAGE_LENGTH && PAGE.test(path) && !/^\/(?:v1|health)(?:\/|$)/.test(path) ? path : '/',
+    page: path.length <= PAGE_LENGTH && PAGE.test(path) && !/^\/(?:v1|health|internal)(?:\/|$)/.test(path) ? path : '/',
     ...(stack !== undefined && stack !== '' && { stack }),
   });
   try {

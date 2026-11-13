@@ -1102,8 +1102,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'required',
     );
     // Without the environment there is nowhere of ours for the jobs to run, no
-    // platform lines for the owner-login alert to pair with, and the doors and
-    // their certificates belong to no environment of ours.
+    // platform lines for the owner-login alert to pair with, the doors and
+    // their certificates belong to no environment of ours, and Zitadel asks for its
+    // machine IDs at a host in none (SA3e).
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
       'login-workspace',
@@ -1112,6 +1113,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'apps',
       'public-doors',
       'door-certificates',
+      'zitadel-machine-ids',
     ]);
     const environment = staging.predictedResources.find(ENVIRONMENT);
     // A second environment also sends no logs of its own.
@@ -5535,6 +5537,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ...staging.predictedResources.map((resource) => resource.type),
         'Microsoft.Resources/deployments',
         'Microsoft.Insights/activityLogAlerts',
+        // AZ11's endpoint and zone group allowed before they land, and the interface Azure makes for the endpoint.
+        'Microsoft.Network/privateEndpoints',
+        'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
+        'Microsoft.Network/networkInterfaces',
       ];
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
@@ -5557,6 +5563,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-changed, which this deployment ships or a release sends: Azure would refuse our own deploy',
         'agentx-staging-allowed-types: refuses alert-agentx-stg-alert-rules-unhealthy, which this deployment ships or a release sends: Azure would refuse our own deploy',
         'agentx-staging-allowed-types: refuses an activity-log alert, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        exactly,
+      ]);
+      // AZ11's endpoint and its interface left out: their must-pass examples, in the group's region, are refused.
+      const noEndpoint = changed(DEFINITION('allowed-types'), (definition) => {
+        typesOf(definition).in = allowed.filter(
+          (each) => each !== 'Microsoft.Network/privateEndpoints' && each !== 'Microsoft.Network/networkInterfaces',
+        );
+      });
+      expect(policyProblemsOf(noEndpoint)).toEqual([
+        'agentx-staging-allowed-types: refuses a private endpoint, which this deployment ships or a release sends: Azure would refuse our own deploy',
+        "agentx-staging-allowed-types: refuses a private endpoint's interface, which this deployment ships or a release sends: Azure would refuse our own deploy",
         exactly,
       ]);
       const more = changed(DEFINITION('allowed-types'), (definition) => {
@@ -5978,12 +5995,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // An app the deployment needs, left out. Zitadel's own secrets are then
     // read by nothing, and the login pages have nothing to sign a call to. A
     // door would reach an app this deployment doesn't make, and so would CI's role.
+    // Without the API, Zitadel has nowhere to ask for its machine IDs (SA3e).
     for (const workload of ['api', 'login', 'zitadel']) {
       expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
         workload,
         rules:
           workload === 'api'
-            ? ['anchor-epoch', 'release-access', 'release-writes-alert', 'apps', 'public-doors']
+            ? ['anchor-epoch', 'release-access', 'release-writes-alert', 'apps', 'public-doors', 'zitadel-machine-ids']
             : ['apps', 'public-doors'],
       });
     }
@@ -6899,6 +6917,91 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it("zitadel-machine-ids: a Zitadel process's machine ID by its hostname, or asked anywhere but the API's internal host", () => {
+    const MACHINE = 'ZITADEL_MACHINE_IDENTIFICATION_';
+    const set = (entries: Mutable[], name: string, value: string): Mutable[] => [
+      ...entries.filter((entry) => entry.name !== name),
+      { name, value },
+    ];
+    for (const workload of ['zitadel-init', 'zitadel-setup', 'zitadel']) {
+      const pick = workload === 'zitadel' ? APP(workload) : JOB(workload);
+      const broken = (change: (entries: Mutable[]) => Mutable[]): RuleId[] =>
+        brokenRules(
+          changed(pick, (resource) => {
+            containerOf(resource).env = change(settingsOf(resource));
+          }),
+        );
+      // S19's hostname mode, which two copies can collide in; and with the webhook still on, since hostname is tried first.
+      expect({ workload, rules: broken((env) => set(env, `${MACHINE}HOSTNAME_ENABLED`, 'true')) }).toEqual({
+        workload,
+        rules: ['zitadel-machine-ids'],
+      });
+      expect({ workload, rules: broken((env) => set(env, `${MACHINE}PRIVATEIP_ENABLED`, 'true')) }).toEqual({
+        workload,
+        rules: ['zitadel-machine-ids'],
+      });
+      expect({ workload, rules: broken((env) => set(env, `${MACHINE}WEBHOOK_ENABLED`, 'false')) }).toEqual({
+        workload,
+        rules: ['zitadel-machine-ids'],
+      });
+      // Left to the image's defaults: private address on, then Google Cloud's metadata server.
+      expect({
+        workload,
+        rules: broken((env) => env.filter((entry) => !String(entry.name).startsWith(MACHINE))),
+      }).toEqual({ workload, rules: ['zitadel-machine-ids'] });
+      for (const url of [
+        'http://metadata.google.internal/computeMetadata/v1/instance/id',
+        'https://app.example.invalid/internal/zitadel-machine-id',
+        "[format('https://{0}/internal/zitadel-machine-id', format('{0}.internal.{1}', 'ca-agentx-stg-login', reference('/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-agentx-staging/providers/Microsoft.App/managedEnvironments/cae-agentx-staging', '2026-01-01').defaultDomain))]",
+      ]) {
+        expect({ workload, url, rules: broken((env) => set(env, `${MACHINE}WEBHOOK_URL`, url)) }).toEqual({
+          workload,
+          url,
+          rules: ['zitadel-machine-ids'],
+        });
+      }
+      expect({ workload, rules: broken((env) => set(env, `${MACHINE}WEBHOOK_JPATH`, '$.machine')) }).toEqual({
+        workload,
+        rules: ['zitadel-machine-ids'],
+      });
+    }
+    // The API not handing them out on its internal host: every Zitadel process would ask in vain, and panic.
+    for (const value of [undefined, 'app.example.invalid']) {
+      expect({
+        value,
+        rules: brokenRules(
+          changed(APP('api'), (app) => {
+            const kept = settingsOf(app).filter((entry) => entry.name !== 'AGENTX_MACHINE_IDS_HOST');
+            containerOf(app).env = value === undefined ? kept : [...kept, { name: 'AGENTX_MACHINE_IDS_HOST', value }];
+          }),
+        ),
+      }).toEqual({ value, rules: ['zitadel-machine-ids'] });
+    }
+    // The API and every Zitadel process agreeing on a host that isn't the API's own internal name in this
+    // environment: another app's (the login pages', which would 404 every ask), or another environment's.
+    const MACHINE_SETTINGS = new Set(['AGENTX_MACHINE_IDS_HOST', 'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL']);
+    const asksAndAnswers = (resource: PredictedResource): boolean =>
+      ['api', 'zitadel'].some((workload) => APP(workload)(resource)) ||
+      ['zitadel-init', 'zitadel-setup'].some((workload) => JOB(workload)(resource));
+    for (const [from, to] of [
+      ["'ca-agentx-stg-api'", "'ca-agentx-stg-login'"],
+      ['/managedEnvironments/cae-agentx-staging', '/managedEnvironments/cae-agentx-elsewhere'],
+    ] as const) {
+      expect({
+        to,
+        rules: brokenRules(
+          changed(asksAndAnswers, (resource) => {
+            containerOf(resource).env = settingsOf(resource).map((entry) =>
+              MACHINE_SETTINGS.has(String(entry.name))
+                ? { ...entry, value: String(entry.value).replace(from, to) }
+                : entry,
+            );
+          }),
+        ),
+      }).toEqual({ to, rules: ['zitadel-machine-ids'] });
+    }
+  });
+
   it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
     for (const setting of [
       { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'https://collector.example.invalid' },
@@ -6941,8 +7044,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE',
       'ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE',
       'ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE',
-      // Google Cloud's metadata server, which Zitadel asks for a machine ID by default (S19).
-      'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED',
     ]) {
       expect({
         name,
@@ -7103,15 +7204,21 @@ describe('what each job is told', () => {
         },
       });
     }
-    // Each Zitadel process is told apart by its hostname: the private-address
-    // default finds none on Container Apps, and setup panicked without one (S19).
+    // Each Zitadel process takes its machine ID from the API, in turn (SA3e): the
+    // private-address default finds none on Container Apps (S19), and two hostnames'
+    // hashes can collide. The API answers on its internal host alone.
+    const apiHost = settingsGiven('api').AGENTX_MACHINE_IDS_HOST;
+    expect(apiHost).toBe(
+      "[format('{0}.internal.{1}', 'ca-agentx-stg-api', reference('/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-agentx-staging/providers/Microsoft.App/managedEnvironments/cae-agentx-staging', '2026-01-01').defaultDomain)]",
+    );
     for (const workload of ['zitadel-init', 'zitadel-setup', 'zitadel']) {
       expect({ workload, settings: settingsGiven(workload) }).toMatchObject({
         workload,
         settings: {
           ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED: 'false',
-          ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: 'true',
-          ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'false',
+          ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: 'false',
+          ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'true',
+          ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL: `[format('https://{0}/internal/zitadel-machine-id', ${String(apiHost).slice(1, -1)})]`,
         },
       });
     }

@@ -23,7 +23,7 @@ import {
   type LogLevel,
 } from './common.ts';
 import { readLoginIds } from './login-ids.ts';
-import { databaseHost, identifier, text, tlsMode, wholeNumber } from './primitives.ts';
+import { databaseHost, hostName, identifier, text, tlsMode, wholeNumber } from './primitives.ts';
 import { refusedProxyEntries } from './proxies.ts';
 
 /**
@@ -209,6 +209,9 @@ const SETTINGS = {
   AGENTX_HTTP_PORT: { schema: wholeNumber({ min: 0, max: 65_535 }), default: '8080' },
   AGENTX_PUBLIC_ORIGIN: { schema: publicOrigin.optional() },
   AGENTX_TRUSTED_PROXIES: { schema: proxyList.optional() },
+  // SA3e: the API's own internal host name, the one host Zitadel's processes ask for their
+  // machine IDs on (apps/api/src/machine-ids.ts); unset, nobody gets one there.
+  AGENTX_MACHINE_IDS_HOST: { schema: hostName.optional() },
   AGENTX_RATE_LIMIT_PER_MINUTE: {
     schema: wholeNumber({
       min: 10,
@@ -477,6 +480,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_HTTP_PORT',
       'AGENTX_PUBLIC_ORIGIN',
       'AGENTX_TRUSTED_PROXIES',
+      'AGENTX_MACHINE_IDS_HOST',
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',

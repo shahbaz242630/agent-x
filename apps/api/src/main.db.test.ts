@@ -22,6 +22,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
+import { MACHINE_ID_PATH, fnv1Of } from './machine-ids.ts';
 import { type ApiProcess, runApi } from './main.ts';
 import { recordStart } from './start-record.ts';
 
@@ -165,6 +166,20 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     const seen = run.capture.lines().map((line) => String(line.event));
     expect(seen.filter((event) => /^audit\.|_sweep_done$|^idempotency\./.test(event))).toEqual([]);
+    await stop(run);
+    await expectNoApiConnections();
+  });
+
+  it("SA3e hands Zitadel's copies machine IDs from the database in turn, on the internal host alone", async () => {
+    const run = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_MACHINE_IDS_HOST: 'agentx-api.internal' }));
+    const ask = async (host: string) => run.api?.inject({ url: MACHINE_ID_PATH, headers: { host } });
+    const first = await ask('agentx-api.internal');
+    const second = await ask('agentx-api.internal');
+    expect(first?.statusCode).toBe(200);
+    // As Zitadel reads it: the answer's body bytes, FNV-1 32, the low 16 bits.
+    const ids = [first, second].map((each) => fnv1Of(each?.body ?? '') & 0xffff);
+    expect(ids[1]).toBe(((ids[0] ?? 0) + 1) & 0xffff);
+    expect((await ask('app.example.test'))?.statusCode).toBe(404);
     await stop(run);
     await expectNoApiConnections();
   });
