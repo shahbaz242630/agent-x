@@ -46,11 +46,9 @@ import {
   appKeys
   appName
   appsPrefix
-  appWorkloads
   doorName
   identityName
   jobName
-  jobWorkloads
   networkAddressSpace
   operatorHolds
   operatorOnly
@@ -61,6 +59,7 @@ import {
   restoreHolds
   shortName
   uniqueSuffix
+  workloads
 } from 'names.bicep'
 import { anchorContainerName, evidenceAccountName, evidenceContainerName } from 'modules/evidence.bicep'
 import { activityDownloadsAccountName, activityDownloadsContainerName } from 'modules/activity-downloads.bicep'
@@ -192,7 +191,7 @@ var secretsVolume = 'secrets'
 
 // Each identity's resource id, by the workload it belongs to.
 var identityIds = toObject(
-  concat(appWorkloads, jobWorkloads),
+  workloads,
   workload => workload,
   workload => resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', identityName(environment, workload))
 )
@@ -1020,20 +1019,20 @@ var loadJobs = map(
 // unless its host is a copy's by name, and the step and check unless the copy
 // carries the sentinel naming it, which load-mark alone writes:
 // - load-mark: the sentinel, as the copy's owner (a restore keeps staging's
-//   passwords), as the set-up job's identity, which reads that login already
+//   passwords), as Stage G's own identity (names.bicep `loadWorkloads`, AZ3)
 // - load-step: the seed's growth, or one step (its cohort, new keys, k6), as the
 //   app with its keys, as the API's identity, as PL-38's jobs; one step a run,
 //   up to the soak's full hour and its margin (stageg.ts STAGE_G_JOB_SECONDS)
 // - load-check: the step's checks, past the tenant walls as the backup role
-//   (stageg-checks.ts) and through them as the app, as the set-up job's identity,
-//   the one that reads the backup role's login: no new grant, no secrets run
+//   (stageg-checks.ts) and through them as the app, as Stage G's own identity,
+//   which reads the owner's, the app's and the backup role's logins and no other
+//   (secrets.bicep): never the server admin's, as the set-up job's does
 // The step and check read their command from the run's request, held as
 // PL-38's (`loadRequest`); the mark asks nothing.
 var stageGJobs = [
   {
     workload: 'load-mark'
-    // Accepted debt (S175): the set-up job's identity can also read db-admin-password; these two jobs exist only during a Stage G run and load.ts finish removes them; a dedicated identity before production.
-    runsAs: 'db-setup'
+    runsAs: 'stage-g'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
     args: ['mark']
@@ -1073,8 +1072,7 @@ var stageGJobs = [
   }
   {
     workload: 'load-check'
-    // Accepted debt (S175), as load-mark's above.
-    runsAs: 'db-setup'
+    runsAs: 'stage-g'
     image: loadImage
     command: ['node', 'tooling/load/stageg-job.ts']
     args: ['check']

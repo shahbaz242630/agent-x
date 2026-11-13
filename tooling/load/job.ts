@@ -298,7 +298,9 @@ export async function withSeedFile<T>(
 /**
  * Runs a k6 script with `env` beside this process's own work, never blocking
  * it (phase 5's freeze is asked from here while k6 runs), its output on ours:
- * true when it ran to the end, its thresholds the report's to judge.
+ * true when it ran to the end, its thresholds the report's to judge. Without
+ * k6's usage report to stats.grafana.org, a lookup staging's DNS filter
+ * blocks and alerts on (AZ1, S188: 128 lookups in Stage G's runs).
  */
 export async function k6Ran(
   [command, ...first]: readonly [string, ...string[]],
@@ -306,7 +308,7 @@ export async function k6Ran(
   env: Readonly<Record<string, string>>,
 ): Promise<boolean> {
   const status = await new Promise<number | null>((resolve) => {
-    spawn(command, [...first, 'run', '--quiet', script], {
+    spawn(command, [...first, 'run', '--quiet', '--no-usage-report', script], {
       env: { ...process.env, ...env },
       stdio: 'inherit',
       windowsHide: true,
