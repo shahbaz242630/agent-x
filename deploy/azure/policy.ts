@@ -731,17 +731,71 @@ const copyAnchorsOf = (copy: string): string => throwawayAnchorsContainer(throwa
  */
 const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
 
+/** The most replicas an app may run, and why; and, where it has a floor, the fewest it must keep running, and why. */
+type MostReplicas = { readonly most: number; readonly why: string } & (
+  | { readonly fewest?: undefined; readonly fewestWhy?: undefined }
+  | { readonly fewest: number; readonly fewestWhy: string }
+);
+
 /**
- * The apps whose replicas must stay at one, with why: Zitadel's projections and
- * cache are one replica's, and a second would take ten more of the server's 35
- * user connections (ADR-002 Amendment G1); the API's jobs apart from it (4D2e
- * D13) keep to one copy, as the lease alone doesn't make a second safe for the
- * copier. An app running the API is held by its role besides (`roleScaleProblems`).
+ * The apps whose replicas must stay at one, with why: the API's jobs apart from it (4D2e D13) keep to one copy, as the
+ * lease alone doesn't make a second safe for the copier. An app running the API is held by its role besides
+ * (`roleScaleProblems`), and sign-in's two apps by their environment (`SIGN_IN_COPIES`).
  */
 const ONE_REPLICA: Readonly<Record<string, string>> = {
-  zitadel: "its projections are one replica's, and a second would take ten more database connections",
   jobs: "the API's jobs keep to one copy, which the lease alone doesn't make safe for the copier",
 };
+
+/**
+ * Zitadel's most copies, by environment (SA3a). None of its state is one copy's, read from the pinned image itself
+ * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
+ * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
+ * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
+ * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
+ * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes (FNV-1, its low 16
+ * bits, read from the image, SA3d); two copies sharing one make the same IDs whenever they make one in the same 10 ms,
+ * which the event store's key doesn't always refuse, so distinct IDs are an item before production (SA3d).
+ */
+export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
+  staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
+  production: {
+    most: 4,
+    why: "Zitadel's copies stop at four (SA3a), each holding its own database connections",
+    fewest: 2,
+    fewestWhy: 'sign-in must not hang on one copy',
+  },
+};
+
+/**
+ * The login pages' most copies, by environment (SA3c). None of their state is one copy's, read from the pinned image
+ * itself (v4.17.3): a sign-in's sessions travel in the browser's own cookies (`sessions`, `fingerprintId`,
+ * `verificationCheck`) and its request in the address (`requestId`), Next's key for server actions is the one built
+ * into the image, the system user's key is the one mounted file, and its settings cache (on by default, 15 minutes)
+ * only lets each copy be as stale as one would be. Staging keeps one; production two to four, as Zitadel's.
+ */
+export const LOGIN_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
+  staging: { most: 1, why: 'staging keeps one copy of the login pages, as it does of Zitadel' },
+  production: {
+    most: 4,
+    why: "the login pages' copies stop at four (SA3c), as Zitadel's",
+    fewest: 2,
+    fewestWhy: 'sign-in must not hang on one copy',
+  },
+};
+
+/** Sign-in's two apps, held by environment rather than to one: Zitadel (SA3a) and its login pages (SA3c). */
+const SIGN_IN_COPIES: Readonly<Record<string, Readonly<Record<Expectations['environment'], MostReplicas>>>> = {
+  zitadel: ZITADEL_COPIES,
+  login: LOGIN_COPIES,
+};
+
+/** The most replicas a workload may run in an environment, or nothing where only the defaults hold it. */
+function mostReplicasOf(workload: string, environment: Expectations['environment']): MostReplicas | undefined {
+  const signIn = SIGN_IN_COPIES[workload];
+  if (signIn !== undefined) return signIn[environment];
+  const why = ONE_REPLICA[workload];
+  return why === undefined ? undefined : { most: 1, why };
+}
 
 /** What Azure keeps of a server's max_connections for itself: 35 of 50 left for everyone (postgres.bicep, S167). */
 const AZURE_RESERVED_CONNECTIONS = 15;
@@ -4999,6 +5053,35 @@ function containerProblems(workload: PredictedResource, problem: (message: strin
     if (!PINNED_IMAGE.test(image)) {
       problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
     }
+    sizeProblems(container, problem);
+  }
+}
+
+/** A Consumption size's step: a quarter vCPU, with half a GiB of memory (512 MiB) for each. */
+const CONSUMPTION_STEP = { cpu: 0.25, mebibytes: 512 } as const;
+
+/** The Consumption profile's largest size, in steps: 4 vCPU and 8Gi. */
+const CONSUMPTION_MOST_STEPS = 16;
+
+/**
+ * A container's size is one the Consumption profile offers (Microsoft Learn, "Containers in Azure Container Apps",
+ * vCPU and memory allocation requirements, checked 13 Nov 2026): 0.25 vCPU with 0.5Gi, then each quarter vCPU more with
+ * 0.5Gi more, up to 4 vCPU with 8Gi, memory always twice the vCPUs in GiB. Any other pair passes a what-if and fails
+ * the deployment.
+ */
+function sizeProblems(container: unknown, problem: (message: string) => void): void {
+  const cpu = at(container, 'resources', 'cpu');
+  const memory = at(container, 'resources', 'memory');
+  const steps = typeof cpu === 'number' ? cpu / CONSUMPTION_STEP.cpu : Number.NaN;
+  const offered =
+    Number.isInteger(steps) &&
+    steps >= 1 &&
+    steps <= CONSUMPTION_MOST_STEPS &&
+    mebibytesOf(memory) === steps * CONSUMPTION_STEP.mebibytes;
+  if (!offered) {
+    problem(
+      `must run at a size the Consumption profile offers (0.25 to 4 vCPU in quarters, with 2Gi for each vCPU); it says ${String(cpu)} vCPU and ${String(memory)}`,
+    );
   }
 }
 
@@ -5062,12 +5145,18 @@ function ingressProblems(ingress: unknown, servesNothing: boolean, problem: (mes
   }
 }
 
-/** An app's scale: at most one replica when `only` says why, at least one it may run, and no more kept than that. */
-function scaleProblems(scale: unknown, only: string | undefined, problem: (message: string) => void): void {
+/** An app's scale: no more replicas than `limit` allows where it has one, at least one, and no more kept than that. */
+function scaleProblems(scale: unknown, limit: MostReplicas | undefined, problem: (message: string) => void): void {
   const most = at(scale, 'maxReplicas');
   const fewest = at(scale, 'minReplicas');
-  if (only !== undefined && most !== 1) {
-    problem(`must run at most one replica (maxReplicas 1): ${only}; it says ${String(most)}`);
+  if (limit !== undefined && !(typeof most === 'number' && most <= limit.most)) {
+    const replicas = limit.most === 1 ? 'one replica' : `${String(limit.most)} replicas`;
+    problem(`must run at most ${replicas} (maxReplicas ${String(limit.most)}): ${limit.why}; it says ${String(most)}`);
+  }
+  if (limit?.fewest !== undefined && !(typeof fewest === 'number' && fewest >= limit.fewest)) {
+    problem(
+      `must keep at least ${String(limit.fewest)} replicas running (minReplicas ${String(limit.fewest)}): ${limit.fewestWhy}; it says ${String(fewest)}`,
+    );
   }
   if (typeof most !== 'number' || most < 1) {
     problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);
@@ -5227,7 +5316,8 @@ function roleScaleProblems(
  * public door** — the doors are the route configs (G2e), so an app whose ingress
  * is external is one reachable from the internet that nothing decided to
  * publish. Plain http is refused even inside the environment. The apps that
- * hold something one replica's keep to one (`ONE_REPLICA`), the API scales as
+ * hold something one replica's keep to one (`ONE_REPLICA`), Zitadel to its
+ * environment's most (`ZITADEL_COPIES`), the API scales as
  * its role (`roleScaleProblems`), and every app can
  * run at least one. Together they are the three apps a deployment needs, so a
  * dropped one is caught here rather than at the first deployment.
@@ -5253,7 +5343,7 @@ const apps: Check = (snapshot, expected, add) => {
       problem,
     );
     const scale = at(app.properties, 'template', 'scale');
-    scaleProblems(scale, ONE_REPLICA[workload], problem);
+    scaleProblems(scale, mostReplicasOf(workload, expected.environment), problem);
     if (api !== undefined) {
       roleScaleProblems(api, scale, problem);
       heapProblems(containersOf(app)[0], problem);
@@ -5575,12 +5665,35 @@ function apiConnections(app: PredictedResource, settings: ReadonlyMap<string, un
 }
 
 /**
+ * Zitadel's connections (SA3a), or why they can't be counted: its pool once for each copy it may run. In production,
+ * also each copy a change to its template starts beside them: Azure starts the new revision at minReplicas while the
+ * old still runs up to maxReplicas, so pool × (maxReplicas + minReplicas). Staging's one copy's overlap stays
+ * uncounted: Zitadel isn't redeployed with each release, and staging's server has no room for it.
+ */
+function zitadelConnections(app: PredictedResource, environment: Expectations['environment']): number | string {
+  const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
+  if (pool === undefined) {
+    return `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`;
+  }
+  const scale = at(app.properties, 'template', 'scale');
+  let copies = 0;
+  for (const name of environment === 'production' ? ['maxReplicas', 'minReplicas'] : ['maxReplicas']) {
+    const count = at(scale, name);
+    if (!Number.isInteger(count)) {
+      return `${app.name} must state ${name} as a whole number, so its connections can be counted`;
+    }
+    copies += Number(count);
+  }
+  return pool * copies;
+}
+
+/**
  * Every connection the apps may hold fits the server's (4D2e D12): two of each API copy's pool (a deploy runs the old
  * revision beside the new one), Zitadel's pool, one job and one to spare, within max_connections less what Azure keeps.
- * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's overlap isn't counted: it
- * runs one replica and isn't redeployed with each release.
+ * In a load run, the larger server's; otherwise the one this deployment states. Zitadel's pool counts once for each
+ * copy it may run, and in production for each a revision swap starts beside them too (`zitadelConnections`, SA3a).
  */
-const connections: Check = (snapshot, _expected, add) => {
+const connections: Check = (snapshot, expected, add) => {
   const [server] = ofType(snapshot, TYPES.server);
   if (server === undefined) return;
   const problem = (message: string): void => {
@@ -5595,12 +5708,7 @@ const connections: Check = (snapshot, _expected, add) => {
   const counts = ofType(snapshot, TYPES.app).flatMap((app) => {
     const settings = apiSettingsOf(app);
     if (settings !== undefined) return [apiConnections(app, settings)];
-    if (jobWorkloadOf(app.name) !== 'zitadel') return [];
-    const pool = countIn(settingsIn(containersOf(app)[0]), ZITADEL_POOL.setting, ZITADEL_POOL.unset);
-    return [
-      pool ??
-        `${app.name} must state ${ZITADEL_POOL.setting} as a whole number, or leave it to its image's ${String(ZITADEL_POOL.unset)}, so its connections can be counted`,
-    ];
+    return jobWorkloadOf(app.name) === 'zitadel' ? [zitadelConnections(app, expected.environment)] : [];
   });
   for (const unstated of counts.filter((count) => typeof count === 'string')) problem(unstated);
   const needed = [...counts.filter((count) => typeof count === 'number'), ONE_JOB_AND_ONE_MORE].reduce(
@@ -5610,7 +5718,7 @@ const connections: Check = (snapshot, _expected, add) => {
   const forUsers = stated - AZURE_RESERVED_CONNECTIONS;
   if (needed > forUsers) {
     problem(
-      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, Zitadel's, one job and one to spare`,
+      `has ${String(forUsers)} connections for users (max_connections ${String(stated)} less Azure's ${String(AZURE_RESERVED_CONNECTIONS)}), but the apps may hold ${String(needed)}: two of each API copy's pool, each Zitadel copy's, one job and one to spare`,
     );
   }
 };
