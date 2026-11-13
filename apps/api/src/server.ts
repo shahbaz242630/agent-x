@@ -60,6 +60,7 @@ import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody, troubleOf } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
+import { type MachineIds, registerMachineIds } from './machine-ids.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import {
   createAgentCounter,
@@ -129,6 +130,8 @@ export interface ServerOptions {
   readonly logger: Logger;
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
+  /** Zitadel's machine IDs, on the API's internal host alone (machine-ids.ts, SA3e); 404 to every ask when not given. */
+  readonly machineIds?: MachineIds | undefined;
   /** Which requests' lines of success are kept (log-sample.ts); all when not given. */
   readonly logSample?: LogSample | undefined;
   /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
@@ -430,6 +433,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
 
   registerHealth(app, options.healthChecks, logger);
+  registerMachineIds(app, options.machineIds, logger);
   registerSignIn(app, {
     signIn: options.signIn?.service,
     sessionSeconds: options.signIn?.sessionSeconds ?? 0,

@@ -16,6 +16,7 @@ export {
   PAUSE_ACTOR,
 } from './infrastructure/handoff-pause.ts';
 export { jobsBeating, releaseJobLease, takeJobLease } from './infrastructure/job-lease.ts';
+export { nextMachineId } from './infrastructure/machine-ids.ts';
 export {
   createPlatformChain,
   HEAD_WAIT_SECONDS,

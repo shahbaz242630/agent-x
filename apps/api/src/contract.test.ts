@@ -122,6 +122,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     expect(operations(app).sort()).toEqual([
       'DELETE /test/nested/things/{id}',
       'GET /health',
+      'GET /internal/zitadel-machine-id',
       'GET /test/items/{ref}',
       'GET /v1/access-log',
       'GET /v1/access-log/background-exports',
@@ -158,6 +159,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/suppliers',
       'GET /v1/suppliers/{id}',
       'HEAD /health',
+      'HEAD /internal/zitadel-machine-id',
       'HEAD /test/items/{ref}',
       'HEAD /v1/access-log',
       'HEAD /v1/access-log/background-exports',
@@ -1273,8 +1275,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), with each GET's HEAD.
-    expect(answers).toHaveLength(171);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), with each GET's HEAD.
+    expect(answers).toHaveLength(173);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
