@@ -13,6 +13,7 @@ import {
   describeProblem,
   ALLOWED_TYPES,
   DNS_ALLOWED,
+  DNS_EXPECTED_LEFTOVERS,
   type Expectations,
   kqlStages,
   leastRestoreDays,
@@ -357,6 +358,7 @@ const DNS_LISTS = type('Microsoft.Network/dnsResolverDomainLists');
 const EVERY_NAME_LIST = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-every-name');
 const ALLOWED_NAMES = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-allowed');
 const DNS_LOGS = named(/^lookups-to-workspace$/);
+const DNS_BLOCKED_ALERT = named(/^alert-agentx-.+-dns-blocked$/);
 const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
 const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
 const APP_LOGS = named(/^app-logs-to-workspace$/);
@@ -617,6 +619,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules dnspr-agentx-staging/watch-every-lookup',
       'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks dnspr-agentx-staging/network',
       'Microsoft.Insights/diagnosticSettings lookups-to-workspace',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-dns-blocked',
       expect.stringMatching(/^Microsoft\.KeyVault\/vaults kv-agentx-stg-[a-z0-9]{6}$/),
       'Microsoft.Insights/diagnosticSettings audit-to-workspace',
       expect.stringMatching(/^Microsoft\.DBforPostgreSQL\/flexibleServers psql-agentx-stg-[a-z0-9]{6}$/),
@@ -2875,7 +2878,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to S.
+    // The playbook's alert sections run from A to S, then W (a blocked DNS lookup, AZ1); T to V answer workflows.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
@@ -2883,7 +2886,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
     expect(brokenRules(changed(CAP_ALERT, inSection('S')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('T')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('W')))).toEqual([]);
+    for (const workflow of ['T', 'U', 'V', 'X'])
+      expect(brokenRules(changed(CAP_ALERT, inSection(workflow))), workflow).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -3113,7 +3118,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(OWNER_ALERT, onMain))).toEqual(['owner-login-alert']);
   });
 
-  it('dns-watch: a network no policy of ours watches, or whose every-name rule is off, allows, or covers less', () => {
+  it('dns-watch: a network no policy of ours watches, or whose every-name rule is off, allows, only alerts, or covers less', () => {
     const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/dnsResolverDomainLists/elsewhere';
     const properties = (resource: Mutable): Mutable => inside(resource, 'properties');
     for (const broken of [
@@ -3121,6 +3126,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       changed(DNS_LINK, (link) => (inside(link, 'properties', 'virtualNetwork').id = `${String(link.id)}-other`)),
       // Linked to a policy this deployment doesn't create.
       changed(DNS_LINK, (link) => (link.id = String(link.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
+    ]) {
+      expect(brokenRules(broken)).toEqual(['dns-watch']);
+    }
+    // The policy no longer blocking every name: nothing is refused, so its alert counts nothing either.
+    for (const broken of [
       without(WATCH_RULE),
       changed(WATCH_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
       changed(WATCH_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'disabled')),
@@ -3129,13 +3139,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       changed(WATCH_RULE, (rule) => (rule.id = String(rule.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
       changed(WATCH_RULE, (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = elsewhere)),
       changed(EVERY_NAME_LIST, (names) => (properties(names).domains = ['example.com.'])),
+      // Alerting alone answers every name (the rule before AZ1, S188).
+      changed(WATCH_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Alert')),
+      changed(WATCH_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'alert')),
     ]) {
-      expect(brokenRules(broken)).toEqual(['dns-watch']);
+      expect(brokenRules(broken)).toEqual(['dns-watch', 'dns-block-alert']);
     }
-    // Turned to Allow, it watches nothing and allows every name.
+    // Turned to Allow, it blocks nothing and allows every name.
     expect(
       brokenRules(changed(WATCH_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow'))),
-    ).toEqual(['dns-watch', 'dns-allow']);
+    ).toEqual(['dns-watch', 'dns-allow', 'dns-block-alert']);
     // A rule above it that allows every name lets each lookup through first.
     const rule = staging.predictedResources.find(WATCH_RULE);
     const allowAll = structuredClone(rule) as unknown as Mutable;
@@ -3145,10 +3158,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch', 'dns-allow']);
     inside(allowAll, 'properties', 'action').actionType = 'allow';
     expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch', 'dns-allow']);
-    // Blocking every name still sees each lookup.
-    expect(
-      brokenRules(changed(WATCH_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
-    ).toEqual([]);
+    // Staging blocks every name.
+    expect(inside(staging.predictedResources.find(WATCH_RULE), 'properties', 'action').actionType).toBe('Block');
     // Azure reads the action and the state without regard to case.
     expect(
       brokenRules(
@@ -3223,10 +3234,66 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'mcr.trafficmanager.net.',
       'x.b01.azurefd.net.',
       'shoebox2-red.cloudapp.net.',
+      // Under Microsoft's own Akamai traffic domain, and a Microsoft-only edge zone (S188).
+      'aadg.akadns.net.',
+      'fb-t-msedge.net.',
     ])
       expect(tooBroad(narrow), narrow).toBe(false);
     const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
     expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
+  });
+
+  it("dns-block-alert (AZ1): no alert on a lookup the catch-all blocks, or one that counts another list, hides more than the expected leftovers, can't fire, fires late or quietly", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const everyName = String(staging.predictedResources.find(EVERY_NAME_LIST)?.name);
+    const counted =
+      (...filters: readonly string[]) =>
+      (alert: Mutable) =>
+        (criterion(alert).query = ['DNSQueryLogs', ...filters, 'summarize Lookups = count()'].join(' | '));
+    const catchAll = (name: string): string => `where ResolverPolicyDomainListId endswith "/${name}"`;
+    // Staging's rule reads exactly the catch-all's list, past exactly the leftovers.
+    expect(
+      String(at(staging.predictedResources.find(DNS_BLOCKED_ALERT)?.properties, 'criteria', 'allOf', '0', 'query')),
+    ).toBe(`DNSQueryLogs | ${catchAll(everyName)} | ${DNS_EXPECTED_LEFTOVERS} | summarize Lookups = count()`);
+    expect(brokenRules(without(DNS_BLOCKED_ALERT))).toEqual(['dns-block-alert']);
+    const loginId = String(staging.predictedResources.find(LOGIN_WORKSPACE)?.id);
+    for (const change of [
+      // Another list: the allowed names, or a name merely ending like the catch-all's.
+      counted(catchAll(String(staging.predictedResources.find(ALLOWED_NAMES)?.name)), DNS_EXPECTED_LEFTOVERS),
+      counted(`where ResolverPolicyDomainListId endswith "${everyName}"`, DNS_EXPECTED_LEFTOVERS),
+      // Hiding more than the leftovers: every reverse lookup (a public address's owner reads its labels), any type of
+      // two-number name, the answered ones; or nothing hidden, or the list not named.
+      counted(catchAll(everyName), DNS_EXPECTED_LEFTOVERS.replace('".10.in-addr.arpa."', '".in-addr.arpa."')),
+      counted(catchAll(everyName), DNS_EXPECTED_LEFTOVERS.replace('QueryType == "HINFO" and ', '')),
+      counted(catchAll(everyName), DNS_EXPECTED_LEFTOVERS, 'where ResponseCode != 0'),
+      counted(catchAll(everyName)),
+      counted(DNS_EXPECTED_LEFTOVERS),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+      (alert: Mutable) => (properties(alert).scopes = [loginId]),
+    ]) {
+      expect(brokenRules(changed(DNS_BLOCKED_ALERT, change))).toEqual(['dns-block-alert']);
+    }
+    expect(brokenRules(changed(DNS_BLOCKED_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'dns-block-alert',
+      'alert-runbook',
+    ]);
+    for (const quiet of [
+      (alert: Mutable) => (properties(alert).autoMitigate = true),
+      (alert: Mutable) => (properties(alert).enabled = false),
+    ]) {
+      expect(brokenRules(changed(DNS_BLOCKED_ALERT, quiet))).toEqual(['dns-block-alert', 'alert-delivery']);
+    }
+    // The catch-all's list renamed, the alert left reading the old name, which no lookup will carry.
+    expect(brokenRules(changed(EVERY_NAME_LIST, (names) => (names.name = `${String(names.name)}-renamed`)))).toEqual([
+      'dns-block-alert',
+    ]);
+    expect(String(at(staging.predictedResources.find(DNS_BLOCKED_ALERT)?.properties, 'description'))).toMatch(
+      /^SEV-1\. .+ Runbook: Incident-Response-Playbook\.md section W\.$/,
+    );
   });
 
   it('SEC-DATA-09 log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {
