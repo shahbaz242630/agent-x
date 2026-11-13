@@ -24,6 +24,11 @@ export function wholeNumber(limits: { min: number; max: number; unit?: string; m
 /** A DNS name in lower case: labels of letters, digits and inner dashes, joined by dots. */
 const HOST_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
+/** A DNS name alone, in lower case: no IP address, no port. */
+export const hostName = text.regex(HOST_NAME, {
+  error: 'must be a host name in lower case (letters, digits, dots and dashes), with no port',
+});
+
 /** Where the database is: a service name (`db`), a DNS name, or an IP address. */
 export const databaseHost = text.pipe(
   z.union([z.string().regex(HOST_NAME), z.ipv4(), z.ipv6()], {

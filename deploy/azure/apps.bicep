@@ -259,11 +259,15 @@ var appsEnvironmentId = appsEnvironment.id
 // certificate serves, and peer-to-peer encryption covers it besides (G2b).
 var zitadelInternalUrl = 'https://${appName(environment, 'zitadel')}.internal.${appsEnvironment.properties.defaultDomain}'
 
+// The API's own name inside the environment: where the load test's traffic and
+// Zitadel's asks for a machine ID (SA3e) reach it, never out and back in.
+var apiInternalHost = '${appName(environment, 'api')}.internal.${appsEnvironment.properties.defaultDomain}'
+
 // Where the load test's traffic goes (D2c): the API inside the environment, as
 // Zitadel is reached, never out and back in through the public door.
 var loadApiSetting = {
   name: 'AGENTX_LOAD_API'
-  value: 'https://${appName(environment, 'api')}.internal.${appsEnvironment.properties.defaultDomain}'
+  value: 'https://${apiInternalHost}'
 }
 
 // Email (B5-3): the foundation's Communication Services and the domain it
@@ -402,12 +406,23 @@ var zitadelDatabase = [
   }
 ]
 
-// How Zitadel tells its processes apart in the IDs it makes (the first real
-// setup run, S19). Its defaults are the container's private address, which a
-// Container Apps replica doesn't have in the ranges Zitadel counts as private,
-// and then Google Cloud's metadata server, a call out that can only fail here;
-// with both failing, setup panicked. Every replica and job run has a hostname
-// of its own, which Zitadel hashes to the 16 bits it needs.
+// How Zitadel tells its processes apart in the IDs it makes: a 16-bit machine ID
+// each process holds (internal/id/sonyflake.go). Two processes holding the same
+// one can mint the same ID in the same 10 ms, which may merge two of its records,
+// and production runs 2 to 4 copies (SA3a). Its private-address mode finds no
+// address here in the ranges it counts, and its hostname mode (S19) hashes each
+// hostname into 16 bits, so two copies could collide by chance. So (SA3e) each
+// process asks the API at start, through its webhook mode, and the API hands the
+// numbers out in turn from a database sequence (apps/api/src/machine-ids.ts):
+// two live copies share one only after 65,536 starts. The other two modes are
+// off, as Zitadel tries them first and the first that answers wins. No JSONPath:
+// Zitadel would hash its re-serialised match, not the body the API wrote for it.
+//
+// The API's internal address, inside the environment, never a public door: the
+// API answers it on its internal host alone (`machineIdsHostSetting`). Zitadel
+// asks with no timeout and panics on a failure, so its container starts again
+// until the API answers; the API needs only its database to answer, never
+// Zitadel, and a request wakes it where it sleeps (staging).
 var zitadelMachine = [
   {
     name: 'ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED'
@@ -415,13 +430,29 @@ var zitadelMachine = [
   }
   {
     name: 'ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED'
-    value: 'true'
+    value: 'false'
   }
   {
     name: 'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED'
-    value: 'false'
+    value: 'true'
   }
 ]
+
+// Where it asks, added in each body that sets `asksMachineId`: the environment's
+// domain is Azure's to give, so it can't be in a list the loops are built from.
+var zitadelMachineWebhook = {
+  name: 'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL'
+  value: 'https://${apiInternalHost}/internal/zitadel-machine-id'
+}
+
+// The one host the API hands Zitadel's machine IDs out on: its own internal name.
+// A door carries its own host (the app or auth host), so the path is refused
+// through every door, the app door that sends every path to the API included.
+// Added in the body of the app that sets `handsOutMachineIds`, as the webhook is.
+var machineIdsHostSetting = {
+  name: 'AGENTX_MACHINE_IDS_HOST'
+  value: apiInternalHost
+}
 
 // What Zitadel writes, and what it must not send anywhere (ADR-013,
 // SEC-DATA-08): JSON lines at info level, which the workspace collects; no
@@ -836,6 +867,7 @@ var jobs = concat([
     files: []
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
+    asksMachineId: true
   }
   {
     // Zitadel's setup steps: the first instance, its admin and the rules every
@@ -861,6 +893,7 @@ var jobs = concat([
     ]
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
+    asksMachineId: true
   }
   {
     // The operator's command (B1c; ADR-011 §3), as its own role (PL-57) and no
@@ -1491,6 +1524,8 @@ var apps = concat([
     // Keeps the audit chains' anchors (`apiAnchorSettings`) where it holds the
     // jobs: out of a split. In one, the `jobs` app keeps them (4D2e D13).
     keepsAnchors: !split
+    // Hands Zitadel's processes their machine IDs, on its internal host alone (SA3e).
+    handsOutMachineIds: true
     // AGENTX_ROLE all (unset) holds the jobs and counts its rate limits as the
     // only copy (4D2e D12): at most one, none while staging sleeps. A split's
     // `web` copies run exactly as many as they count their limits for (D13).
@@ -1580,6 +1615,7 @@ var apps = concat([
         value: '{"login-client":{"Path":"${secretsPath}/login-client-public-key","Memberships":[{"MemberType":"System","Roles":["IAM_LOGIN_CLIENT"]}]}}'
       }
     ])
+    asksMachineId: true
   }
   {
     // Zitadel v4's login pages, a second container of the same version.
@@ -1752,7 +1788,8 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
               job.evidence ? evidenceSettings : [],
               (job.?readsAnchors ?? false) ? operatorAnchorSettings : [],
               (job.?restorerStores ?? false) ? restoreStoreSettings : [],
-              (job.?callsApi ?? false) ? [loadApiSetting] : []
+              (job.?callsApi ?? false) ? [loadApiSetting] : [],
+              (job.?asksMachineId ?? false) ? [zitadelMachineWebhook] : []
             )
             volumeMounts: empty(concat(job.files, job.held))
               ? []
@@ -1863,7 +1900,9 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
               }),
               app.sendsEmail ? emailSettings : app.signsIn ? zitadelOrigins : [],
               !app.keepsDownloads ? [] : app.workload == 'jobs' ? jobsDownloadsSettings : apiDownloadsSettings,
-              !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings
+              !app.keepsAnchors ? [] : app.workload == 'jobs' ? jobsAnchorSettings : apiAnchorSettings,
+              (app.?handsOutMachineIds ?? false) ? [machineIdsHostSetting] : [],
+              (app.?asksMachineId ?? false) ? [zitadelMachineWebhook] : []
             )
             volumeMounts: empty(app.files)
               ? []

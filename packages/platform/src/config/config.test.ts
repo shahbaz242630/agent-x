@@ -134,6 +134,21 @@ describe("config: several web copies, and the jobs' own pool (4D2e D12)", () => 
   });
 });
 
+describe("config: the API's internal host, where Zitadel's machine IDs are handed out (SA3e)", () => {
+  it('is off unless set, and takes a lower-case host name', () => {
+    expect(loadConfig(MINIMAL).http.machineIdsHost).toBeUndefined();
+    const host = 'ax-staging-api.internal.example.uaenorth.azurecontainerapps.io';
+    expect(loadConfig({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: host }).http.machineIdsHost).toBe(host);
+  });
+
+  it.each(['https://api.internal.example', 'api.internal.example:443', 'API.internal.example', ''])(
+    'refuses %j, which is no host name alone',
+    (value) => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: value })).toHaveLength(1);
+    },
+  );
+});
+
 describe('config: a correct config loads', () => {
   it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({

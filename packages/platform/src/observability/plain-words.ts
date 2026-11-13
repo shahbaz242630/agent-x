@@ -591,6 +591,11 @@ export const PLAIN_WORDS = {
     broke: 'The API told the uptime monitors it is unavailable.',
     next: 'Check which part the log names and whether it recovers by itself.',
   },
+  'machine_ids.failed': {
+    happened: 'The API could not give a starting login service (Zitadel) copy its machine number.',
+    broke: 'That copy restarts and serves no sign-ins until it gets one; running copies are fine.',
+    next: 'Check the database is answering; the line carries its error. See the runbook.',
+  },
   'hold_history.failed': {
     happened: 'The full history check for an organisation on an integrity hold failed.',
     broke: 'The hold cannot be cleared until this check finishes.',

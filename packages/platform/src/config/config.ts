@@ -72,6 +72,8 @@ export interface Config {
     readonly publicOrigin: string;
     /** SEC-AV-07: the proxies whose `X-Forwarded-For` is believed, as addresses or CIDR ranges. */
     readonly trustedProxies: readonly string[];
+    /** SA3e: the API's internal host name, the only one Zitadel's machine IDs are handed out on; off when unset. */
+    readonly machineIdsHost?: string | undefined;
     /** ADR-011 §4: the most requests one client address may make per minute. */
     readonly rateLimitPerMinute: number;
     /** ADR-011 §4 (B2-5c): the most requests one signed-in person may make per minute, from any address. */
@@ -425,6 +427,7 @@ function readSettings(env: Env, location: LocationChecks) {
     httpPort: setting(env, 'AGENTX_HTTP_PORT'),
     origin: setting(env, 'AGENTX_PUBLIC_ORIGIN'),
     trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
+    machineIdsHost: setting(env, 'AGENTX_MACHINE_IDS_HOST'),
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     rateLimitPerUser: setting(env, 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'),
     rateLimitPerAgent: setting(env, 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'),
@@ -702,6 +705,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       // Only development and test get here without one (publicOriginProblems).
       publicOrigin: checks.origin.value ?? LOCAL_PUBLIC_ORIGIN,
       trustedProxies: Object.freeze(checks.trustedProxies.value ?? []),
+      machineIdsHost: checks.machineIdsHost.value,
       rateLimitPerMinute: checks.rateLimit.value,
       rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
       rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,

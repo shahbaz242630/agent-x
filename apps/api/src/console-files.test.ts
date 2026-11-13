@@ -16,6 +16,7 @@ import { LogCapture } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { type ConsoleFiles, loadConsoleFiles, putConsoleInFront, readConsoleFiles } from './console-files.ts';
+import { MACHINE_ID_PATH, fnv1Of } from './machine-ids.ts';
 import { closeServers, routeServer } from './route-server.helper.test.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 
@@ -101,6 +102,22 @@ describe('the console’s files (6A1)', () => {
     expect(await head.text()).toBe('');
   });
 
+  it("hands Zitadel its machine ID through the real server, not the console's page (SA3e)", async () => {
+    // The shape that runs on Azure: the console layer in front, the route behind it, on the internal host.
+    const app = await routeServer({
+      consoleFiles: await readConsoleFiles(await build('machine-ids')),
+      machineIds: { host: '127.0.0.1', next: () => Promise.resolve(7) },
+    });
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const [address] = app.addresses().filter((each) => typeof each !== 'string');
+    const base = `http://127.0.0.1:${String(address?.port)}`;
+    const answer = await createOutboundFetch([base])(base + MACHINE_ID_PATH);
+    const body = await answer.text();
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get('content-type')).toMatch(/^application\/json/);
+    expect(fnv1Of(body) & 0xffff).toBe(7);
+  });
+
   it('leaves everything else to Fastify: API addresses, writes, unknown assets, dots, capitals and odd queries', async () => {
     const { base, fetch } = await listening(
       await readConsoleFiles(await build('others', { 'index-Ab12_c.js': SCRIPT })),
@@ -109,6 +126,7 @@ describe('the console’s files (6A1)', () => {
       ['/v1'],
       ['/v1/agents'],
       ['/health/deep'],
+      ['/internal/zitadel-machine-id'],
       ['/assets/missing-1.js'],
       ['/assets/index-Ab12_c.js?v=1'],
       ['/favicon.ico'],
