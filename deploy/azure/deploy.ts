@@ -663,7 +663,7 @@ export interface Terminal {
 }
 
 /** The operator's own terminal. Refused when either end isn't one: a hidden prompt needs a keyboard. */
-function realTerminal(): Terminal {
+export function realTerminal(): Terminal {
   const { stdin, stdout } = process;
   return {
     say: (line) => {
@@ -736,8 +736,8 @@ export interface AzResult {
 export interface Az {
   /** Runs the CLI with the operator's own terminal for its input and output: the status it ends with. */
   interactive(args: readonly string[], values: Readonly<Record<string, string>>): number | null;
-  /** Runs the CLI and returns what it printed. */
-  run(args: readonly string[]): AzResult;
+  /** Runs the CLI and returns what it printed; `values` go into its environment, as a deployment's do. */
+  run(args: readonly string[], values?: Readonly<Record<string, string>>): AzResult;
 }
 
 export interface AzInvocation {
@@ -806,15 +806,15 @@ export function retriedWhileOffline(
   note: (line: string) => void,
   tries = 21,
 ): Az['run'] {
-  return (args) => {
-    let done = run(args);
+  return (args, values) => {
+    let done = run(args, values);
     if (!repeatable(args)) return done;
     for (let attempt = 1; attempt < tries && done.status !== 0 && OFFLINE.test(done.stderr); attempt++) {
       note(
         `Couldn't reach Azure: this computer's internet is down. Trying again in 30 s (${String(attempt)} of ${String(tries - 1)}).`,
       );
       wait(30_000);
-      done = run(args);
+      done = run(args, values);
     }
     return done;
   };
@@ -828,10 +828,10 @@ const waitSync = (ms: number): void => {
 /** The CLI as every command here runs it (jobs.ts too). */
 export function realAz(): Az {
   const invocation = azInvocation(process.platform, process.env, installedBicep());
-  const once: Az['run'] = (args) => {
+  const once: Az['run'] = (args, values = {}) => {
     const done = spawnSync(invocation.command, [...invocation.prefix, ...args], {
       cwd: AZURE_DIR,
-      env: invocation.env,
+      env: { ...invocation.env, ...values },
       encoding: 'utf8',
       // A load run's API log comes back whole: ~19 MB with the many-agents phases (S164's review).
       maxBuffer: 128 * 1024 * 1024,
@@ -1025,6 +1025,26 @@ export interface Steps {
   readonly generation?: number;
   /** What the database holds of the image's migrations, and the migration run ahead of a deployment (AZ6). */
   readonly migrations?: Migrations;
+  /** CI's approved infrastructure deploy (AZ5, infra.ts): no person at a prompt. Left out, every question is asked. */
+  readonly unattended?: Unattended;
+}
+
+/** What a person types at a prompt, which CI's infrastructure deploy takes from its GitHub environment's secrets. */
+export type Answer = 'alertEmail' | 'authHost' | 'appHost' | 'adminEmail' | 'apiClientId';
+
+/**
+ * A run with no person at the terminal (AZ5): `plan` reads and asks Azure's what-if alone, under the read-only
+ * identity; `deploy` sends what the approved plan showed. Each answer stands for its prompt. Every other question
+ * fails the run (infra.ts's terminal), so a prompt added later can never be answered by chance.
+ */
+export interface Unattended {
+  readonly mode: 'plan' | 'deploy';
+  readonly answers: Readonly<Record<Answer, string>>;
+}
+
+/** A prompt's answer: typed by the operator, or the unattended run's. */
+async function answer(steps: Steps, which: Answer, question: string): Promise<string> {
+  return steps.unattended === undefined ? steps.terminal.ask(question) : steps.unattended.answers[which];
 }
 
 /** The database's migrations as apps reads and runs them (AZ6): migration-state.ts and release.ts in a real run. */
@@ -1049,6 +1069,8 @@ async function confirmSubscription(steps: Steps): Promise<string> {
   const id = signedIn(steps.az, (line) => {
     steps.terminal.say(line);
   });
+  // Unattended, GitHub's environment named the subscription the sign-in took, and the partner approved the run.
+  if (steps.unattended !== undefined) return id;
   if (!yes(await steps.terminal.ask(`Deploy ${ENVIRONMENT} into it? [y/N] `))) throw new Cancelled();
   return id;
 }
@@ -1235,13 +1257,11 @@ async function deployFoundation(
       "GitHub's published addresses have changed: it publishes one the file doesn't allow yet, or couldn't be read, and an image pull could fail. Run node deploy/azure/github-ranges.ts --write (or take the waiting data/github-ranges-* branch), merge the change, and redeploy from the merged commit.",
     );
   }
-  const { disk } = generationServer(steps, subscription, 'foundation', server);
-  const email = await steps.terminal.ask('Address the alerts go to: ');
+  const found = generationServer(steps, subscription, 'foundation', server);
+  const disk = found.disk;
+  const email = await answer(steps, 'alertEmail', 'Address the alerts go to: ');
   if (!EMAIL.test(email)) throw new Error("That isn't an email address: nothing was deployed.");
-  steps.terminal.say(
-    "The database admin's password is set on the server by this run. It must be the one in the password manager: a different one replaces it.",
-  );
-  const admin = await askPassword(steps.terminal, PERSON_LABELS['db-admin-password'] ?? 'the password');
+  const admin = await adminPassword(steps, found.server);
   const values = {
     [ALERT_EMAIL]: email,
     [ADMIN_PASSWORD]: admin,
@@ -1270,6 +1290,26 @@ async function deployFoundation(
     'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
   );
   return 1;
+}
+
+/**
+ * The server admin's password the foundation sends: pasted by the operator. Unattended (AZ5) none goes, as CI never
+ * holds a person's secret, and the server keeps its own (postgres.bicep); a first deploy, which must set it, is refused.
+ */
+async function adminPassword(steps: Steps, server: string | undefined): Promise<string> {
+  if (steps.unattended !== undefined) {
+    if (server === undefined) {
+      throw new Error(
+        "There is no database server yet, and a first foundation sets its admin's password, which only the partner holds: run node deploy/azure/deploy.ts foundation by hand. Nothing was deployed.",
+      );
+    }
+    steps.terminal.say("The database admin's password isn't sent: the server keeps its own.");
+    return '';
+  }
+  steps.terminal.say(
+    "The database admin's password is set on the server by this run. It must be the one in the password manager: a different one replaces it.",
+  );
+  return askPassword(steps.terminal, PERSON_LABELS['db-admin-password'] ?? 'the password');
 }
 
 /**
@@ -1628,7 +1668,8 @@ async function alertsReachable(steps: Steps, subscription: string): Promise<bool
       return true;
     }
     steps.terminal.say(['No alert email reaches:', ...unreached].join('\n'));
-    if (asked === CONFIRM_TRIES) return false;
+    // Unattended, nobody can confirm the address now: the run says so and ends red.
+    if (asked === CONFIRM_TRIES || steps.unattended !== undefined) return false;
     if (asked === 0) {
       steps.terminal.say(
         `Azure emails a one-time code, valid for 30 minutes, when the alert group is saved (from azure-noreply@microsoft.com; look in Junk too). In the Azure portal open Monitor, Alerts, Action groups, ${ACTION_GROUP}, and select Resend if the code has expired or never came.`,
@@ -1772,7 +1813,11 @@ async function clearMovedAlerts(
   for (const alert of moved) {
     steps.terminal.say(`  ${alert.name}: from ${workspaceNames(alert.scopes)} to ${workspaceNames(alert.to)}`);
   }
-  if (!yes(await steps.terminal.ask('Delete them now so this run recreates them? [y/N] '))) {
+  // A deletion stays a person's (AZ5): unattended, the run stops here with the same commands.
+  if (
+    steps.unattended !== undefined ||
+    !yes(await steps.terminal.ask('Delete them now so this run recreates them? [y/N] '))
+  ) {
     const commands = moved.map((alert) => `  az resource delete --ids ${alert.id}`).join('\n');
     throw new Error(
       `Nothing was deployed, and nothing deleted. To delete them yourself, run:\n${commands}\nthen run node deploy/azure/deploy.ts ${part} again, which creates them.`,
@@ -1971,16 +2016,16 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
 }
 
 /** A host name the operator types, held to DNS's shape. */
-async function askHost(steps: Steps, question: string): Promise<string> {
-  const host = (await steps.terminal.ask(question)).toLowerCase();
+async function askHost(steps: Steps, which: 'authHost' | 'appHost', question: string): Promise<string> {
+  const host = (await answer(steps, which, question)).toLowerCase();
   if (!HOST.test(host)) throw new Error(`${host} isn't a host name: nothing was deployed.`);
   return host;
 }
 
 /** The two doors' hosts, typed by the operator, in lower case, and not the same. */
 async function askHosts(steps: Steps): Promise<{ readonly authHost: string; readonly appHost: string }> {
-  const authHost = await askHost(steps, 'Host for sign-in (Zitadel): ');
-  const appHost = await askHost(steps, 'Host for the app (the API): ');
+  const authHost = await askHost(steps, 'authHost', 'Host for sign-in (Zitadel): ');
+  const appHost = await askHost(steps, 'appHost', 'Host for the app (the API): ');
   if (authHost === appHost) throw new Error('The two hosts must differ: nothing was deployed.');
   return { authHost, appHost };
 }
@@ -2552,7 +2597,11 @@ async function runMigrationFirst(steps: Steps, subscription: string, release: st
   steps.terminal.say(
     `--migrate-first: the migration job will run commit ${release}'s migrations on the database now, before the deployment's own what-if. A migration can't be undone; the API keeps its build until the deployment.`,
   );
-  if (!yes(await steps.terminal.ask('Run the migration now? [y/N] '))) throw new Cancelled();
+  // Unattended, the plan says so and runs nothing; the deploy runs it, the partner's approval of that plan its confirmation.
+  if (steps.unattended?.mode === 'plan') return;
+  if (steps.unattended === undefined && !yes(await steps.terminal.ask('Run the migration now? [y/N] '))) {
+    throw new Cancelled();
+  }
   steps.terminal.say(
     "Running the migration with this image first (a release's first half: migrate updated to it, run, and waited for)...",
   );
@@ -2620,9 +2669,11 @@ async function deployApps(
   );
   steps.terminal.say('Zitadel keeps the address it is first set up with, so type the two hosts as they will stay.');
   const { authHost, appHost } = await askHosts(steps);
-  const adminEmail = await steps.terminal.ask("Zitadel's first admin's address: ");
+  const adminEmail = await answer(steps, 'adminEmail', "Zitadel's first admin's address: ");
   if (!EMAIL.test(adminEmail)) throw new Error("That isn't an email address: nothing was deployed.");
-  const apiClientId = (await steps.terminal.ask("The API's client ID in Zitadel (its app's page shows it): ")).trim();
+  const apiClientId = (
+    await answer(steps, 'apiClientId', "The API's client ID in Zitadel (its app's page shows it): ")
+  ).trim();
   if (!CLIENT_ID.test(apiClientId)) {
     throw new Error("That isn't a client ID (1 to 255 visible characters, no spaces): nothing was deployed.");
   }
@@ -2723,6 +2774,24 @@ function rangesCurrent(): boolean {
   return done.status === 0;
 }
 
+/** The real steps a deploy runs with, at a terminal or (infra.ts) in CI. */
+export function realSteps(terminal: Terminal, az: Az): Steps {
+  return {
+    terminal,
+    az,
+    migrations: realMigrations(az, (line) => {
+      terminal.say(line);
+    }),
+    policy: (values) => policyCheck(values),
+    alerts: (part, subscription, values) => plannedAlerts(part, subscription, values),
+    rangesCurrent,
+    now: () => new Date(),
+    images: realImages(),
+    dns: realDns(),
+    checkout: () => realCheckout(),
+  };
+}
+
 export async function main(
   argv: readonly string[],
   isTerminal: boolean = process.stdin.isTTY && process.stdout.isTTY,
@@ -2743,22 +2812,7 @@ export async function main(
     return 1;
   }
   try {
-    const terminal = realTerminal();
-    const az = realAz();
-    return await deploy(request, {
-      terminal,
-      az,
-      migrations: realMigrations(az, (line) => {
-        terminal.say(line);
-      }),
-      policy: (values) => policyCheck(values),
-      alerts: (part, subscription, values) => plannedAlerts(part, subscription, values),
-      rangesCurrent,
-      now: () => new Date(),
-      images: realImages(),
-      dns: realDns(),
-      checkout: () => realCheckout(),
-    });
+    return await deploy(request, realSteps(realTerminal(), realAz()));
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     say(error.message);

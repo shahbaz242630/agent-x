@@ -1013,7 +1013,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'id',
       ),
     ).toBe(staging.predictedResources.find(APPS_RULES)?.id);
-    expect(at(server?.properties, 'administratorLoginPassword')).toBe("[parameters('postgresAdminPassword')]");
+    // Sent only when given (AZ5): CI's approved foundation never holds it, and the server keeps its own.
+    expect(at(server?.properties, 'administratorLoginPassword')).toBe(
+      "[if(empty(parameters('postgresAdminPassword')), null(), parameters('adminPassword'))]",
+    );
     // The secrets deployment's too: the vault and the identities the foundation creates.
     const vault = staging.predictedResources.find(VAULT);
     const apiReads = staging.predictedResources.find(READS('api', 'db-app-password'));
@@ -1118,6 +1121,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties').administratorLoginPassword = literal))),
     ).toEqual(['no-secret-literals']);
+    // Sent only when given (AZ5) is still a parameter; a value written in its place is not.
+    expect(
+      brokenRules(
+        changed(
+          SERVER,
+          (server) =>
+            (inside(server, 'properties').administratorLoginPassword =
+              "[if(empty(parameters('postgresAdminPassword')), null(), 'written in the code')]"),
+        ),
+      ),
+    ).toEqual(['no-secret-literals']);
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties', 'network').adminPassword = literal))),
     ).toEqual(['no-secret-literals']);
@@ -1177,6 +1191,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
         );
         expect(problems.map((problem) => problem.rule)).toEqual(['no-secret-literals']);
       }
+      // An empty default writes nothing down (AZ5: a value left out keeps the server's own password).
+      const leftOut = paramsFileProblems(
+        file,
+        String(entry?.text).replace(assignment, `param ${parameter} = readEnvironmentVariable('${variable}', '')`),
+        bicepFile(String(entry?.deploys)).secure,
+      );
+      expect(leftOut).toEqual([]);
     }
   });
 

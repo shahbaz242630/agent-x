@@ -161,7 +161,7 @@ export const TEST_FILE = '.test.ts';
  * without case, since the partner's Windows checkout puts `Deploy/Azure/x`
  * where `deploy/azure/x` goes; the exception with it, so `.TS` still counts.
  */
-const handDeployed = (file: string): HandDeployed | undefined =>
+export const handDeployed = (file: string): HandDeployed | undefined =>
   file.endsWith(TEST_FILE)
     ? undefined
     : HAND_DEPLOYED.find(

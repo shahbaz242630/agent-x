@@ -53,7 +53,8 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
     version: '18'
     availabilityZone: zone
     administratorLogin: adminLogin
-    administratorLoginPassword: adminPassword
+    // Empty only from CI's approved infrastructure deploy (AZ5), which never holds it: Azure then keeps the server's own.
+    administratorLoginPassword: empty(adminPassword) ? null : adminPassword
     authConfig: {
       activeDirectoryAuth: 'Disabled'
       passwordAuth: 'Enabled'
