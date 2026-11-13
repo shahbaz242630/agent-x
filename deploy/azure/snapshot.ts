@@ -224,7 +224,7 @@ export const deploymentSnapshot = (
 ): Snapshot => snapshot(dir, paramsFile, resourceGroup, values, subscription);
 
 /** Whether a parameters file's template is deployed at the subscription (`targetScope = 'subscription'`). */
-export function atSubscription(dir: string, paramsFile: string): boolean {
+function atSubscription(dir: string, paramsFile: string): boolean {
   const template = templateOf(readFileSync(path.join(dir, paramsFile), 'utf8'));
   return /^targetScope = 'subscription'$/m.test(readFileSync(path.join(dir, template), 'utf8'));
 }
