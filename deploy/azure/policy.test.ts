@@ -6851,6 +6851,29 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       }).toEqual({ value, rules: ['zitadel-machine-ids'] });
     }
+    // The API and every Zitadel process agreeing on a host that isn't the API's own internal name in this
+    // environment: another app's (the login pages', which would 404 every ask), or another environment's.
+    const MACHINE_SETTINGS = new Set(['AGENTX_MACHINE_IDS_HOST', 'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_URL']);
+    const asksAndAnswers = (resource: PredictedResource): boolean =>
+      ['api', 'zitadel'].some((workload) => APP(workload)(resource)) ||
+      ['zitadel-init', 'zitadel-setup'].some((workload) => JOB(workload)(resource));
+    for (const [from, to] of [
+      ["'ca-agentx-stg-api'", "'ca-agentx-stg-login'"],
+      ['/managedEnvironments/cae-agentx-staging', '/managedEnvironments/cae-agentx-elsewhere'],
+    ] as const) {
+      expect({
+        to,
+        rules: brokenRules(
+          changed(asksAndAnswers, (resource) => {
+            containerOf(resource).env = settingsOf(resource).map((entry) =>
+              MACHINE_SETTINGS.has(String(entry.name))
+                ? { ...entry, value: String(entry.value).replace(from, to) }
+                : entry,
+            );
+          }),
+        ),
+      }).toEqual({ to, rules: ['zitadel-machine-ids'] });
+    }
   });
 
   it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
