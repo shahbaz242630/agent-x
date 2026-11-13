@@ -2,6 +2,7 @@
 // and 6): one workbook of charts and a few saved queries as measures, all read
 // from the log lines the apps already write. No new tool, nothing collected
 // that isn't already, and no targets until real traffic says what normal is.
+// Sent with the foundation: since AZ5, by CI after the partner's Approve.
 //
 // - both live in the main workspace's region and read only that workspace, as
 //   the other saved queries do (environment.bicep): opening them needs an
