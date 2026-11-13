@@ -4,7 +4,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 
 /** A fetch that answers, or throws on a dropped line. */
-export type Fetch = (
+type Fetch = (
   url: string,
   init: { method?: string; headers: Record<string, string>; body?: string; signal: AbortSignal },
 ) => Promise<Response>;
