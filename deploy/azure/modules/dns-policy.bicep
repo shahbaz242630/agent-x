@@ -14,16 +14,19 @@
 // lookup still lands in the workspace's DNSQueryLogs: a lookup no allowed name
 // covers shows that rule's list in ResolverPolicyDomainListId. Microsoft warns
 // that blocking every name can stop Azure's own services, so the rule went to
-// Block only after 14 days of logs (30 Oct to 13 Nov 2026) showed every name
-// of every chain listed, and the alert below tells someone, within one 15
-// minute window, of any lookup it refuses but the expected leftovers.
+// Block only after the 31 days of logs kept (13 Oct to 13 Nov 2026) showed
+// every lookup's chain ending at a listed name but k6's usage report (turned
+// off), and the alert below tells someone, within one 15 minute window, of
+// any lookup it refuses but the expected leftovers.
 //
 // What Block can't promise (review, S78; S188): Azure resolves a CNAME chain
 // before any rule judges it, so a name's labels reach its own server however
 // the rule answers; and staging's logs show the action set by the chain's last
 // name alone (Microsoft says a rule applies to a name anywhere in the chain;
-// dns-allowed.json lists every hop for either reading), so a name of anyone's
-// pointing at an allowed one may be answered. Block decides which lookups are
+// dns-allowed.json lists the middle hops seen too, but not two old asked
+// names a stricter reading would block), and two asked names no entry covers
+// were allowed for their chains' ends, so a name of anyone's pointing at an
+// allowed one is likely answered. Block decides which lookups are
 // answered. Whether it stops labels leaving is tested from a container before
 // it is relied on (Azure.md, "DNS Block: the proof").
 //

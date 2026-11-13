@@ -2880,7 +2880,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'x.b01.azurefd.net.',
       'shoebox2-red.cloudapp.net.',
       // Under Microsoft's own Akamai traffic domain, and a Microsoft-only edge zone (S188).
-      'prd.r.kv.aadg.akadns.net.',
+      'aadg.akadns.net.',
       'fb-t-msedge.net.',
     ])
       expect(tooBroad(narrow), narrow).toBe(false);
