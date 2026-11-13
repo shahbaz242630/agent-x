@@ -1411,27 +1411,50 @@ var apiSize = loadRun
           heap: '768'
         }
 
-// Production's liveness check on the API (AZ8b): a TCP connection to its port every
-// 10 s, given 5 s, the copy restarted only after six misses in a row (a minute), so
-// a busy spell never restarts a copy that is only slow. Every timing is pinned, so
-// what Azure gives back is what this sends, as the release holds the live app to
-// it (drift.ts). Readiness and startup stay Azure's defaults, as staging runs them;
-// staging sets none.
-var apiProbes = environment == 'production'
-  ? [
-      {
-        type: 'Liveness'
-        tcpSocket: {
-          port: 8080
-        }
-        initialDelaySeconds: 1
-        periodSeconds: 10
-        timeoutSeconds: 5
-        successThreshold: 1
-        failureThreshold: 6
-      }
-    ]
-  : null
+// The API's health checks (AZ8b), all three pinned, every timing given, so Azure
+// adds no default of its own and gives back what this sends, as the release holds
+// the live app to it (drift.ts). Startup and readiness are Azure's own defaults for
+// an app with ingress, as Microsoft Learn's "Health probes in Azure Container Apps"
+// lists them (read S189), so they behave as before. Liveness is a TCP connection to
+// its port every 10 s, given 5 s, the copy restarted only after six misses in a row
+// (a minute): a busy spell never restarts a copy that is only slow (staging's one
+// 0.5 vCPU copy missed up to 18 a weekly scan, S188). Staging runs the same set, so
+// its releases prove Azure echoes them back before production depends on it.
+var apiProbes = [
+  {
+    type: 'Startup'
+    tcpSocket: {
+      port: 8080
+    }
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 3
+    successThreshold: 1
+    failureThreshold: 240
+  }
+  {
+    type: 'Readiness'
+    tcpSocket: {
+      port: 8080
+    }
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 48
+  }
+  {
+    type: 'Liveness'
+    tcpSocket: {
+      port: 8080
+    }
+    initialDelaySeconds: 1
+    periodSeconds: 10
+    timeoutSeconds: 5
+    successThreshold: 1
+    failureThreshold: 6
+  }
+]
 
 // The three apps that serve traffic (ADR-002 Amendment G2d), and the API's jobs
 // apart from it where it is split (`jobsApp`). Each is shaped
@@ -1824,7 +1847,7 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
               cpu: json(app.cpu)
               memory: app.memory
             }
-            // Only the API's in production sets any (`apiProbes`); none is Azure's defaults.
+            // Only the API sets any (`apiProbes`); the others keep Azure's defaults.
             probes: app.?probes
             env: concat(
               app.settings,

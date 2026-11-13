@@ -361,7 +361,10 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
       ),
       resources: expectedApi.resources,
       volumeMounts: expectedApi.volumeMounts,
+      // All three, pinned (AZ8b), in the order Azure may give them back.
+      probes: expectedApi.probes.toReversed(),
     };
+    expect(expectedApi.probes.map(({ type }) => type)).toEqual(['Startup', 'Readiness', 'Liveness']);
     // The values only Azure or the shell gives are there to be matched.
     expect(live.env.length).toBeGreaterThan(20);
     expect(
@@ -373,6 +376,9 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
     // The API's own command, and a host the shell gives pointed elsewhere, are each found.
     expect(differences(expectedApi, { ...live, command: ['node', '-e', 'x'] }, new Map())).toEqual([
       'its command is not the template’s',
+    ]);
+    expect(differences(expectedApi, { ...live, probes: (live.probes ?? []).slice(1) }, new Map())).toEqual([
+      'its probes are not the template’s',
     ]);
     const issuer = live.env.map((setting) =>
       setting.name === 'AGENTX_EMAIL_ENDPOINT' ? { ...setting, value: 'https://evil.example' } : setting,
