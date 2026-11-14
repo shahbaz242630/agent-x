@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { fileReferences } from '../../tooling/bicep/references.ts';
 import type { Outcome } from '../image/verify.ts';
 import { type Anchor, type GitHubGet, lastRelease } from './anchor.ts';
-import { type Az, type AzResult, type Deployment, DEPLOYMENTS, RECORDED, RECORDS_JOB, recordTag } from './deploy.ts';
+import { type Az, type AzResult, DEPLOYMENTS, type Part, PARTS, RECORDED, RECORDS_JOB, recordTag } from './deploy.ts';
 import { type History, realHistory } from './git.ts';
 import { jobName, JOBS_API } from './jobs.ts';
 import {
@@ -508,9 +508,10 @@ const full = (file: string): string => path.join(ROOT, file);
  */
 const SAID: ReadonlyMap<string, readonly string[]> = new Map(
   [...PARAMS_PATHS].map(([deployment, params]) => {
-    const own: Readonly<Record<Deployment, readonly string[]>> = {
+    const own: Readonly<Record<Part, readonly string[]>> = {
       foundation: ['main.bicep', 'modules/postgres.bicep', 'shared.json'],
       access: ['access.bicep'],
+      deployers: ['deployers/deployers.bicep'],
       secrets: ['secrets.bicep', 'shared.json'],
       apps: ['apps.bicep'],
       certificates: ['certificates.bicep'],
@@ -770,7 +771,7 @@ describe('deciding a release', () => {
     );
     red(
       'deploy/azure/names.bicep',
-      'deploy.ts foundation, access, secrets, apps and certificates read it, so run each by hand in that order, each what-if read',
+      'foundation, access, deployers, secrets, apps and certificates read it (infra.ts deployers, deploy.ts each other), so run each by hand in that order, each what-if read',
     );
     // Read by no deployment: the gate's own list, and the set-up job's files.
     red('deploy/azure/hand-deployed.json', HAND_DEPLOYED[0]?.why ?? '');
@@ -819,6 +820,7 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
   const every: Records = new Map([
     ['foundation', NEW],
     ['access', NEW],
+    ['deployers', NEW],
     ['secrets', NEW],
     ['certificates', NEW],
   ]);
@@ -852,6 +854,20 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
         `deploy/azure/shared.json changed since ${OLD}: deployed by hand, foundation from ${NEW}, secrets from ${MIDDLE}`,
       ],
     });
+  });
+
+  // AZ5h: the deployers record as the others do, so a change of theirs needs infra.ts deployers alone, no hand apps.
+  it('takes a deployers change as deployed once infra.ts deployers recorded it, and names that command until then', () => {
+    const deployers = 'deploy/azure/deployers/deployers.bicep';
+    expect(decided([deployers], new Map())).toEqual(
+      red(deployers, 'infra.ts deployers reads it, so run it by hand, its what-if read, then run this release again'),
+    );
+    expect(decided([deployers], new Map([['deployers', NEW]]))).toMatchObject({
+      kind: 'release',
+      deployed: [`${deployers} changed since ${OLD}: deployed by hand, deployers from ${NEW}`],
+    });
+    // Another part's record never stands in for it.
+    expect(decided([deployers], new Map([['access', NEW]])).kind).toBe('by-hand');
   });
 
   it('stays red, naming only the deploys whose record lacks the file, when any does', () => {
@@ -1055,19 +1071,23 @@ describe('the hand deploys records', () => {
     expect(RECORDED.map(recordTag)).toEqual([
       'agentx-deployed-foundation',
       'agentx-deployed-access',
+      // AZ5h: infra.ts deployers records too.
+      'agentx-deployed-deployers',
       'agentx-deployed-secrets',
       'agentx-deployed-certificates',
     ]);
-    expect([...RECORDED, 'apps'].sort()).toEqual(Object.keys(DEPLOYMENTS).sort());
+    expect([...RECORDED, 'apps'].sort()).toEqual([...PARTS].sort());
+    expect([...PARTS].filter((part) => part !== 'deployers')).toEqual(Object.keys(DEPLOYMENTS));
   });
 });
 
 describe('which hand deploys read each file', () => {
-  it("is read from Bicep's answers by each file's path in the repository, in lower case, in DEPLOYMENTS order", () => {
+  it("is read from Bicep's answers by each file's path in the repository, in lower case, in PARTS order", () => {
     const readers = readersFrom(SAID);
     expect(readers.get('deploy/azure/names.bicep')).toEqual([
       'foundation',
       'access',
+      'deployers',
       'secrets',
       'apps',
       'certificates',
@@ -1098,12 +1118,22 @@ describe('which hand deploys read each file', () => {
 
   it('asks about every parameters file here, each named once', () => {
     expect(Object.values(DEPLOYMENTS).sort()).toEqual(paramsFiles());
-    expect([...PARAMS_PATHS.values()]).toEqual(Object.values(DEPLOYMENTS).map((file) => full(`deploy/azure/${file}`)));
+    // The deployers' too (AZ5h), as infra.ts deployers sends it.
+    expect([...PARAMS_PATHS.values()]).toEqual(
+      [
+        'staging.bicepparam',
+        'staging.access.bicepparam',
+        'deployers/staging.bicepparam',
+        'staging.secrets.bicepparam',
+        'staging.apps.bicepparam',
+        'staging.certificates.bicepparam',
+      ].map((file) => full(`deploy/azure/${file}`)),
+    );
   });
 
   it('is what the pinned Bicep says of our deployments: the foundation alone reads the infrastructure, access the roles and guardrails (AZ5)', async () => {
     const readers = readersFrom(await fileReferences([...PARAMS_PATHS.values()]));
-    const all = ['foundation', 'access', 'secrets', 'apps', 'certificates'];
+    const all = ['foundation', 'access', 'deployers', 'secrets', 'apps', 'certificates'];
     expect(Object.fromEntries(readers)).toEqual({
       // The partner's own (AZ5): every custom role, the guardrails, the activity log and the budget.
       'deploy/azure/access.bicep': ['access'],
@@ -1113,6 +1143,12 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/certificates.bicep': ['certificates'],
       // The database server's generation (AZ25), through names.bicep: a change asks for every hand deploy.
       'deploy/azure/database-generation.json': all,
+      // CI's two deploy identities and the access alarm (AZ5, AZ5e), the partner's own; recorded since AZ5h.
+      'deploy/azure/deployers/deployers.bicep': ['deployers'],
+      'deploy/azure/deployers/identities.bicep': ['deployers'],
+      'deploy/azure/deployers/staging-access.bicep': ['deployers'],
+      'deploy/azure/deployers/staging.bicepparam': ['deployers'],
+      'deploy/azure/deployers/watch.bicep': ['deployers'],
       'deploy/azure/dns-allowed.json': ['foundation'],
       'deploy/azure/github-ranges.json': ['foundation'],
       'deploy/azure/main.bicep': ['foundation'],

@@ -108,12 +108,37 @@ export const DEPLOYMENTS = {
 export type Deployment = keyof typeof DEPLOYMENTS;
 
 /**
+ * Every part a person or CI deploys that the release's gate reads, in the order they are run: DEPLOYMENTS' five and
+ * the deployers (deployers/deployers.bicep), which infra.ts deploys from the partner's own terminal (AZ5).
+ */
+export const PARTS = [
+  'foundation',
+  'access',
+  'deployers',
+  'secrets',
+  'apps',
+  'certificates',
+] as const satisfies readonly (Deployment | 'deployers')[];
+export type Part = (typeof PARTS)[number];
+
+/** The command a person runs for a part: deploy.ts for DEPLOYMENTS', infra.ts for the deployers. */
+export const commandFor = (part: Part): string => (part === 'deployers' ? 'infra.ts deployers' : `deploy.ts ${part}`);
+
+/**
  * The hand deploys that record the commit they sent (T1b), each in its own tag
  * on the migration job, which CI's release reads already: the gate then takes
  * a changed file only these read as deployed once each one's record has it
- * (release.ts). apps needs none: its stamp is what the workloads run.
+ * (release.ts). apps needs none: its stamp is what the workloads run. The
+ * deployers record too (AZ5h): before, a change of theirs kept every release red
+ * until a hand apps.
  */
-export const RECORDED = ['foundation', 'access', 'secrets', 'certificates'] as const satisfies readonly Deployment[];
+export const RECORDED = [
+  'foundation',
+  'access',
+  'deployers',
+  'secrets',
+  'certificates',
+] as const satisfies readonly Part[];
 export type Recorded = (typeof RECORDED)[number];
 
 /** The deployments at the subscription, which make or reach beyond the resource group: the rest go into it. */
@@ -1219,7 +1244,7 @@ function stillApproved(
  * anything in it differs from that commit, since the record says the commit's
  * Bicep is what Azure was built from.
  */
-function sentFrom(steps: Steps, deployment: Recorded): string {
+export function sentFrom(steps: Pick<Steps, 'checkout'>, deployment: Recorded): string {
   if (steps.checkout === undefined) throw new Error('No way to read this folder was given.');
   const here = steps.checkout();
   if (!here.clean) {
@@ -1236,7 +1261,12 @@ function sentFrom(steps: Steps, deployment: Recorded): string {
  * job to hold it, and no release to accept it either, so nothing is recorded.
  * A record that can't be written leaves CI's release red, as it was before T1b.
  */
-function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, commit: string): boolean {
+export function leaveRecord(
+  steps: Pick<Steps, 'az' | 'terminal'>,
+  subscription: string,
+  deployment: Recorded,
+  commit: string,
+): boolean {
   const job = `/subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${RECORDS_JOB}`;
   const tag = recordTag(deployment);
   const unrecorded = (why: string): false => {

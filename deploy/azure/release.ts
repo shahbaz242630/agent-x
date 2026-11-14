@@ -70,8 +70,10 @@ import { type Anchor, anchorSaid, belowAnchor, forwardPast, lastRelease } from '
 import {
   ARM,
   type Az,
-  type Deployment,
+  commandFor,
   DEPLOYMENTS,
+  type Part,
+  PARTS,
   realAz,
   realImages,
   RECORDED,
@@ -176,13 +178,13 @@ const REPOSITORY = path.resolve(import.meta.dirname, '../..');
  * The hand deploys that read each file, by its path in the repository in lower
  * case (a Windows checkout's case may differ from git's), in DEPLOYMENTS order.
  */
-export type Readers = ReadonlyMap<string, readonly Deployment[]>;
+export type Readers = ReadonlyMap<string, readonly Part[]>;
 
-/** Each deployment's parameters file, by its full path: what Bicep is asked about. */
-export const PARAMS_PATHS: ReadonlyMap<Deployment, string> = new Map(
-  (Object.entries(DEPLOYMENTS) as [Deployment, string][]).map(([deployment, file]) => [
-    deployment,
-    path.join(import.meta.dirname, file),
+/** Each part's parameters file, by its full path: what Bicep is asked about; the deployers' as infra.ts sends it (AZ5h). */
+export const PARAMS_PATHS: ReadonlyMap<Part, string> = new Map(
+  PARTS.map((part) => [
+    part,
+    path.join(import.meta.dirname, part === 'deployers' ? 'deployers/staging.bicepparam' : DEPLOYMENTS[part]),
   ]),
 );
 
@@ -197,7 +199,7 @@ function inRepository(file: string): string {
 
 /** Readers from what Bicep says each parameters file's deployment reads, or an error when an answer is missing. */
 export function readersFrom(answers: ReadonlyMap<string, readonly string[]>): Readers {
-  const readers = new Map<string, Deployment[]>();
+  const readers = new Map<string, Part[]>();
   for (const [deployment, params] of PARAMS_PATHS) {
     const read = answers.get(params);
     if (read === undefined) throw new Error(`Bicep said nothing of what ${deployment} reads`);
@@ -216,12 +218,17 @@ const listed = (names: readonly string[]): string => `${names.slice(0, -1).join(
  * each of them, and then this release again, which each one's record lets
  * through; apps moves what staging runs itself, so nothing follows it.
  */
-function toRun(readers: readonly Deployment[]): string {
+function toRun(readers: readonly Part[]): string {
   const then = readers.includes('apps') ? '' : ', then run this release again';
-  if (readers.length === 1) {
-    return `deploy.ts ${String(readers[0])} reads it, so run it by hand, its what-if read${then}`;
+  const [only, ...more] = readers;
+  if (only !== undefined && more.length === 0) {
+    return `${commandFor(only)} reads it, so run it by hand, its what-if read${then}`;
   }
-  return `deploy.ts ${listed(readers)} read it, so run each by hand in that order, each what-if read${then}`;
+  // The deployers are infra.ts's (AZ5h): said once, so the order still reads as one list.
+  const which = readers.includes('deployers')
+    ? `${listed(readers)} read it (infra.ts deployers, deploy.ts each other)`
+    : `deploy.ts ${listed(readers)} read it`;
+  return `${which}, so run each by hand in that order, each what-if read${then}`;
 }
 
 /** The commit each recorded hand deploy last sent, as the migration job's tags hold them (T1b). */
@@ -472,7 +479,7 @@ function changedFile(
   file: string,
   release: string,
   readers: Readers | undefined,
-  recordFor: (deployment: Deployment, file: string) => string | undefined,
+  recordFor: (deployment: Part, file: string) => string | undefined,
 ): { readonly kind: 'reason' | 'deployed'; readonly line: string } | undefined {
   const area = handDeployed(file);
   if (area === undefined) return undefined;
@@ -543,7 +550,7 @@ function recordReader(
   commit: string,
   history: History,
   records: Records,
-): (deployment: Deployment, file: string) => string | undefined {
+): (deployment: Part, file: string) => string | undefined {
   const since = new Map<string, ReadonlySet<string>>();
   return (deployment, file) => {
     const sent = deployment === 'apps' ? undefined : records.get(deployment);
@@ -558,11 +565,11 @@ function recordReader(
 }
 
 /**
- * AZ5c: one line for each file behind its records, its deployments in the order they are run (DEPLOYMENTS), so
+ * AZ5c: one line for each file behind its records, its deployments in the order they are run (PARTS), so
  * "run each in that order" still holds; a file already named (`named`, in lower case) isn't named twice.
  */
 function behindLines(behind: readonly Behind[], named: ReadonlySet<string>): string[] {
-  const order: readonly string[] = Object.keys(DEPLOYMENTS);
+  const order: readonly string[] = PARTS;
   const byFile = new Map<string, { readonly file: string; readonly all: Behind[] }>();
   for (const each of behind) {
     const key = each.file.toLowerCase();
