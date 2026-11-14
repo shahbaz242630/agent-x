@@ -9,7 +9,8 @@
 //
 // - the conditions use only aliases Azure lists for Microsoft.App
 //   (`az provider show --namespace Microsoft.App --expand resourceTypes/aliases`,
-//   S188), the two ingress ones as Azure's own built-in definitions use them
+//   S188), the two ingress ones as Azure's own built-in definitions use them, and
+//   for Microsoft.OperationalInsights (the log cap's three, read the same way S193)
 // - Azure judges a PATCH on the resource as it would be after it, merged with
 //   what is stored (AZ2b, proved on staging S191: CI's partial update of the
 //   containers alone left a `maxReplicas exists: false` audit silent). So the

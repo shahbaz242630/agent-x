@@ -5070,36 +5070,20 @@ function changedCopy(resource: PredictedResource, change: Readonly<Record<string
 const mainWorkspaces = (snapshot: Snapshot): PredictedResource[] =>
   ofType(snapshot, TYPES.workspace).filter((workspace) => !LOGIN_WORKSPACE.test(workspace.name));
 
-/** Each `allOf` in a rule's condition, walked into wherever it sits. */
-function allOfs(condition: unknown): (readonly unknown[])[] {
-  if (Array.isArray(condition)) return condition.flatMap(allOfs);
-  if (typeof condition !== 'object' || condition === null) return [];
-  const own = 'allOf' in condition ? [list((condition as { allOf: unknown }).allOf)] : [];
-  return [...own, ...Object.values(condition).flatMap(allOfs)];
-}
-
 /**
- * AZ5g (partner S193): the log cap holds each main workspace at the cap it ships with, by a branch naming it, so a
- * larger cap (production's) is never left at a lower floor. A branch is an `allOf` of exactly the name equal to the
- * workspace's and its cap `less` than the shipped one.
+ * AZ5g (partner S193): the log cap holds each main workspace at the cap it ships with, so a larger cap (production's)
+ * is never left at a lower floor. Judged by what the rule does, not how it is written: a cap a hundredth below the
+ * shipped one must be refused (the shipped cap itself must pass, as every shipped resource must).
  */
 function logCapFloors(snapshot: Snapshot, definition: PredictedResource, problem: (message: string) => void): void {
-  const branches = allOfs(at(definition.properties, 'policyRule', 'if'));
+  const condition = at(definition.properties, 'policyRule', 'if');
   for (const workspace of mainWorkspaces(snapshot)) {
     const cap = at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb');
-    const held = branches.some(
-      (branch) =>
-        branch.length === 2 &&
-        branch.some((leaf) => at(leaf, 'field') === 'name' && at(leaf, 'equals') === workspace.name) &&
-        branch.some(
-          (leaf) =>
-            at(leaf, 'field') === 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb' &&
-            at(leaf, 'less') === cap,
-        ),
-    );
-    if (!held) {
+    const below =
+      typeof cap === 'number' ? changedCopy(workspace, { 'workspaceCapping.dailyQuotaGb': cap - 0.01 }) : undefined;
+    if (below === undefined || !policyMatches(condition, below)) {
       problem(
-        `needs a branch holding ${workspace.name} at its own cap (${String(cap)} GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet`,
+        `needs to hold ${workspace.name} at its own cap (${String(cap)} GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet`,
       );
     }
   }

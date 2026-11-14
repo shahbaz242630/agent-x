@@ -3010,7 +3010,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'workspace',
     ]);
     expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual(
-      ['workspace', 'login-workspace'],
+      ['workspace', 'login-workspace', 'azure-policy'],
     );
   });
 
@@ -5594,15 +5594,23 @@ describe('SEC-OPS-09 each rule can fail', () => {
             (firstLeaf(/ForQuery$/)(definition).field =
               'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForIngestion'),
         ],
-        [
-          'log-cap',
-          (definition) =>
-            (firstLeaf(/^type$/)(definition).equals = 'Microsoft.OperationalInsights/workspaces/savedSearches'),
-        ],
       ];
       for (const [guardrail, change] of cases) {
         expect(policyProblemsOf(changed(DEFINITION(guardrail), change))).toEqual([lets(guardrail)]);
       }
+      // The log cap on another type: nothing refused, staging's main workspace below its cap among it (AZ5g).
+      expect(
+        policyProblemsOf(
+          changed(
+            DEFINITION('log-cap'),
+            (definition) =>
+              (firstLeaf(/^type$/)(definition).equals = 'Microsoft.OperationalInsights/workspaces/savedSearches'),
+          ),
+        ),
+      ).toEqual([
+        lets('log-cap'),
+        'agentx-staging-log-cap: needs to hold log-agentx-stg at its own cap (1 GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet',
+      ]);
     });
 
     it('no rule refuses what we ship, a release sends, the load image, or four API replicas', () => {
@@ -5685,9 +5693,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ),
       ).toContain(refuses('log-cap', 'log-agentx-stg-logins'));
-      // The main floor above staging's cap: its own workspace refused, and the floor no longer its cap.
+      // The main floor above staging's cap: its own workspace refused.
       const floor =
-        'agentx-staging-log-cap: needs a branch holding log-agentx-stg at its own cap (1 GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet';
+        'agentx-staging-log-cap: needs to hold log-agentx-stg at its own cap (1 GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet';
       expect(
         policyProblemsOf(
           changed(DEFINITION('log-cap'), (definition) => {
@@ -5695,7 +5703,32 @@ describe('SEC-OPS-09 each rule can fail', () => {
             if (main !== undefined) main.less = 2;
           }),
         ),
-      ).toEqual([refuses('log-cap', 'log-agentx-stg'), floor]);
+      ).toEqual([refuses('log-cap', 'log-agentx-stg')]);
+      // The right branch made unreachable beside a lower one (review S193): judged by behaviour, still caught.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [, main] = lessLeaves(definition);
+            if (main !== undefined) main.less = 0.75;
+            const branches = list(inside(ruleOf(definition), 'if').allOf);
+            const anyOf = list((branches[1] as Mutable | undefined)?.anyOf);
+            anyOf.push({
+              allOf: [
+                { field: 'type', equals: 'x' },
+                {
+                  allOf: [
+                    { field: 'name', equals: 'log-agentx-stg' },
+                    {
+                      field: 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb',
+                      less: 1,
+                    },
+                  ],
+                },
+              ],
+            });
+          }),
+        ),
+      ).toEqual([floor]);
       // Below staging's cap (partner S193: production's larger cap left at a lower floor is the same gap): nothing
       // the examples catch, the floor check does.
       expect(
