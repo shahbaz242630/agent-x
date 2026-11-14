@@ -747,6 +747,11 @@ describe('answers, the summary and main', () => {
 
   it('takes each answer from its variable, and names those not set, never a value', () => {
     expect(answersFrom(ENV).authHost).toBe(ENV.AGENTX_AZURE_AUTH_HOST);
+    // A secret set through a pipe carries a line break: trimmed, as a typed answer is (S192).
+    expect(answersFrom({ ...ENV, AGENTX_AZURE_AUTH_HOST: ' auth.example.invalid\r\n' }).authHost).toBe(
+      'auth.example.invalid',
+    );
+    expect(() => answersFrom({ ...ENV, AGENTX_AZURE_APP_HOST: ' \r\n' })).toThrow(/doesn't give AGENTX_AZURE_APP_HOST/);
     expect(() => answersFrom({ ...ENV, AGENTX_AZURE_APP_HOST: '' })).toThrow(
       "GitHub's environment doesn't give AGENTX_AZURE_APP_HOST: set each as a secret of staging-whatif and staging-infra (Settings, Environments). Nothing was deployed.",
     );
