@@ -374,7 +374,12 @@ export function unattendedAz(
       }
       const part = partOf(args);
       const sent = args.filter((arg) => arg !== '--confirm-with-what-if').with(2, 'create');
-      const asked = base.run([...sent.with(2, 'what-if'), '--no-pretty-print', '--output', 'json'], values);
+      // Read rights alone (AZ5f): the plan's identity is read-only, and Azure's default what-if asks for the rights to
+      // deploy; the deploy itself, under the infra identity, still gets Azure's full check of those.
+      const asked = base.run(
+        [...sent.with(2, 'what-if'), '--validation-level', 'ProviderNoRbac', '--no-pretty-print', '--output', 'json'],
+        values,
+      );
       if (asked.status !== 0) {
         say(`Azure's what-if of ${part} failed (${azureRefusal(asked.stderr)}): ${part} was not sent.`);
         return 1;

@@ -358,6 +358,9 @@ describe('unattendedAz', () => {
       ...ASKED.slice(0, 2),
       'what-if',
       ...ASKED.slice(3, -1),
+      // AZ5f: read rights alone, as the plan's identity has.
+      '--validation-level',
+      'ProviderNoRbac',
       '--no-pretty-print',
       '--output',
       'json',
