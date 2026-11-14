@@ -10,11 +10,12 @@
 // - the conditions use only aliases Azure lists for Microsoft.App
 //   (`az provider show --namespace Microsoft.App --expand resourceTypes/aliases`,
 //   S188), the two ingress ones as Azure's own built-in definitions use them
-// - a missing field never matches: a field reads the request's payload
-//   (Microsoft's policy rule page), and CI's release sends a partial update (a
-//   PATCH of the containers alone), so a rule that read "not Manual" on a field
-//   the request leaves out would refuse it. Each condition asks for a bad value
-//   that is there
+// - Azure judges a PATCH on the resource as it would be after it, merged with
+//   what is stored (AZ2b, proved on staging S191: CI's partial update of the
+//   containers alone left a `maxReplicas exists: false` audit silent). So the
+//   replica and job rules (AZ2e) also refuse a field that is missing: Azure's
+//   default for a missing maxReplicas is 10, and a create must name them all.
+//   The image conditions keep their `exists`, inside a count of the containers
 // - numbers are compared by list (`notIn`), never `greater`: Azure throws on a
 //   type it can't compare, and a failed evaluation is a refusal
 // - a `count` walks an array alias (`…containers[*]`), as Microsoft's page
@@ -339,45 +340,21 @@ resource jobsByHand 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
           {
             anyOf: [
               {
-                allOf: [
-                  {
-                    field: 'Microsoft.App/jobs/configuration.triggerType'
-                    exists: true
-                  }
-                  {
-                    field: 'Microsoft.App/jobs/configuration.triggerType'
-                    notEquals: 'Manual'
-                  }
+                field: 'Microsoft.App/jobs/configuration.triggerType'
+                notEquals: 'Manual'
+              }
+              {
+                field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.parallelism'
+                notIn: [
+                  0
+                  1
                 ]
               }
               {
-                allOf: [
-                  {
-                    field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.parallelism'
-                    exists: true
-                  }
-                  {
-                    field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.parallelism'
-                    notIn: [
-                      0
-                      1
-                    ]
-                  }
-                ]
-              }
-              {
-                allOf: [
-                  {
-                    field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.replicaCompletionCount'
-                    exists: true
-                  }
-                  {
-                    field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.replicaCompletionCount'
-                    notIn: [
-                      0
-                      1
-                    ]
-                  }
+                field: 'Microsoft.App/jobs/configuration.manualTriggerConfig.replicaCompletionCount'
+                notIn: [
+                  0
+                  1
                 ]
               }
             ]
@@ -392,16 +369,15 @@ resource jobsByHand 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
 }
 
 // An app above four replicas, the most any environment runs (production's Zitadel; staging's load run three web copies),
-// or the jobs app above one (4D2e D12-D13). Known gap: a request that leaves maxReplicas out passes (the field must be
-// there, so CI's partial update passes), and Azure then takes its default, 10. Whether Azure judges a PATCH on its
-// payload or on the resource after it is to settle on staging (AZ2 report): if after, the guard goes.
+// or the jobs app above one (4D2e D12-D13). A missing maxReplicas is refused too (AZ2e): Azure's default would be 10,
+// and a PATCH is judged merged with the stored app (AZ2b), so CI's partial update still carries the stored number.
 resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
   name: '${prefix}-app-replicas'
   properties: {
     policyType: 'Custom'
     mode: 'Indexed'
     displayName: 'Agent X: app replicas capped'
-    description: 'The jobs app runs one replica, and no app more than four, the most any environment runs (4D2e D12-D13). Known gap: a request without maxReplicas passes, and Azure takes its default, 10.'
+    description: 'The jobs app runs one replica, and no app more than four, the most any environment runs (4D2e D12-D13). An app without maxReplicas is refused: Azure would take 10.'
     metadata: {
       category: 'Agent X'
     }
@@ -415,21 +391,13 @@ resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
           {
             anyOf: [
               {
-                allOf: [
-                  {
-                    field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
-                    exists: true
-                  }
-                  {
-                    field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
-                    notIn: [
-                      0
-                      1
-                      2
-                      3
-                      4
-                    ]
-                  }
+                field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
+                notIn: [
+                  0
+                  1
+                  2
+                  3
+                  4
                 ]
               }
               {
@@ -439,18 +407,10 @@ resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
                     like: '*-jobs'
                   }
                   {
-                    allOf: [
-                      {
-                        field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
-                        exists: true
-                      }
-                      {
-                        field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
-                        notIn: [
-                          0
-                          1
-                        ]
-                      }
+                    field: 'Microsoft.App/containerApps/template.scale.maxReplicas'
+                    notIn: [
+                      0
+                      1
                     ]
                   }
                 ]
