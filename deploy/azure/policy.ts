@@ -4881,6 +4881,7 @@ function policyCompare(value: PolicyValue, condition: Readonly<Record<string, un
       !(typeof value === 'string' && typeof wanted === 'string' && value.toLowerCase().includes(wanted.toLowerCase())),
     exists: (wanted) => (value !== undefined) === (wanted === true || wanted === 'true'),
     greater: (wanted) => typeof value === 'number' && typeof wanted === 'number' && value > wanted,
+    less: (wanted) => typeof value === 'number' && typeof wanted === 'number' && value < wanted,
     in: (wanted) => list(wanted).some((each) => policySame(value, each)),
     notIn: (wanted) => !list(wanted).some((each) => policySame(value, each)),
   };
@@ -4922,6 +4923,20 @@ function policyMatches(condition: unknown, resource: PredictedResource, scope?: 
 /** The most replicas any app runs in any environment (production's Zitadel, 4D2e D12): Azure refuses more. */
 const MOST_APP_REPLICAS = 4;
 
+/** A login workspace as modules/monitoring.bicep ships it in every environment, at its 1 GB cap (AZ5g). */
+const SHIPPED_LOGIN_WORKSPACE: PredictedResource = {
+  id: '/a/login/workspace',
+  type: 'Microsoft.OperationalInsights/workspaces',
+  name: 'log-agentx-stg-logins',
+  apiVersion: '2025-02-01',
+  location: 'uaenorth',
+  properties: {
+    workspaceCapping: { dailyQuotaGb: LOGIN_WORKSPACE_CAP_GB },
+    publicNetworkAccessForIngestion: 'Enabled',
+    publicNetworkAccessForQuery: 'Enabled',
+  },
+};
+
 /**
  * Azure's own refusals (AZ2, modules/guardrails.bicep), by the part of the name
  * after `agentx-<environment>-`, each with bad examples it must refuse, made
@@ -4959,6 +4974,18 @@ const GUARDRAILS: Readonly<
     ['jobs', { 'template.scale.maxReplicas': 2 }],
     // Azure's default for a missing maxReplicas is 10.
     ['api', { 'template.scale.maxReplicas': undefined }],
+  ],
+  // AZ5g: a login workspace's cap lowered, removed or gone, a network side shut; the main workspace's cap lowered.
+  // Whether the main one's floor is its own cap is logCapFloors' (a list of examples can't hold every cap).
+  'log-cap': [
+    ['logins', { 'workspaceCapping.dailyQuotaGb': 0.5 }],
+    ['logins', { 'workspaceCapping.dailyQuotaGb': -1 }],
+    ['logins', { 'workspaceCapping.dailyQuotaGb': undefined }],
+    ['logins', { workspaceCapping: undefined }],
+    ['logins', { publicNetworkAccessForIngestion: 'Disabled' }],
+    ['logins', { publicNetworkAccessForQuery: 'Disabled' }],
+    ['main', { 'workspaceCapping.dailyQuotaGb': 0.5 }],
+    ['main', { 'workspaceCapping.dailyQuotaGb': -1 }],
   ],
   'allowed-types': [['', {}]],
 };
@@ -5039,6 +5066,45 @@ function changedCopy(resource: PredictedResource, change: Readonly<Record<string
   return copy;
 }
 
+/** The environment's main log workspaces as the snapshot ships them: every one but a login workspace (AZ5g). */
+const mainWorkspaces = (snapshot: Snapshot): PredictedResource[] =>
+  ofType(snapshot, TYPES.workspace).filter((workspace) => !LOGIN_WORKSPACE.test(workspace.name));
+
+/** Each `allOf` in a rule's condition, walked into wherever it sits. */
+function allOfs(condition: unknown): (readonly unknown[])[] {
+  if (Array.isArray(condition)) return condition.flatMap(allOfs);
+  if (typeof condition !== 'object' || condition === null) return [];
+  const own = 'allOf' in condition ? [list((condition as { allOf: unknown }).allOf)] : [];
+  return [...own, ...Object.values(condition).flatMap(allOfs)];
+}
+
+/**
+ * AZ5g (partner S193): the log cap holds each main workspace at the cap it ships with, by a branch naming it, so a
+ * larger cap (production's) is never left at a lower floor. A branch is an `allOf` of exactly the name equal to the
+ * workspace's and its cap `less` than the shipped one.
+ */
+function logCapFloors(snapshot: Snapshot, definition: PredictedResource, problem: (message: string) => void): void {
+  const branches = allOfs(at(definition.properties, 'policyRule', 'if'));
+  for (const workspace of mainWorkspaces(snapshot)) {
+    const cap = at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb');
+    const held = branches.some(
+      (branch) =>
+        branch.length === 2 &&
+        branch.some((leaf) => at(leaf, 'field') === 'name' && at(leaf, 'equals') === workspace.name) &&
+        branch.some(
+          (leaf) =>
+            at(leaf, 'field') === 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb' &&
+            at(leaf, 'less') === cap,
+        ),
+    );
+    if (!held) {
+      problem(
+        `needs a branch holding ${workspace.name} at its own cap (${String(cap)} GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet`,
+      );
+    }
+  }
+}
+
 /**
  * The bad examples of one guardrail, from the deployment's API app and migration
  * job: for the jobs app's cap, the API renamed as the jobs app; for the types
@@ -5051,6 +5117,9 @@ function badExamples(snapshot: Snapshot, guardrail: string): readonly PredictedR
     if (guardrail === 'allowed-types') {
       return [{ id: '/a/virtual/machine', type: 'Microsoft.Compute/virtualMachines', name: 'vm', apiVersion: '' }];
     }
+    // Made here, not taken from the snapshot: the login floor stays tested whichever parts a snapshot holds.
+    if (workload === 'logins') return [changedCopy(SHIPPED_LOGIN_WORKSPACE, change)];
+    if (workload === 'main') return mainWorkspaces(snapshot).map((workspace) => changedCopy(workspace, change));
     const from = workload === 'migrate' ? migrate : api;
     if (from === undefined) return [];
     const renamed = workload === 'jobs' ? { ...from, name: from.name.replace(/-api$/, '-jobs') } : from;
@@ -5077,6 +5146,11 @@ function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
         ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
       }),
     ]),
+    // A login workspace as shipped, and each workspace raised for a load day (a decimal): none refused (AZ5g).
+    SHIPPED_LOGIN_WORKSPACE,
+    ...[SHIPPED_LOGIN_WORKSPACE, ...mainWorkspaces(snapshot)].map((workspace) =>
+      changedCopy(workspace, { 'workspaceCapping.dailyQuotaGb': 25.5 }),
+    ),
     // #627's activity-log alert, global with tags (so Indexed judges it), before it is in the snapshot.
     {
       id: `${groupOf(snapshot)}/providers/Microsoft.Insights/activityLogAlerts/coming`,
@@ -5199,6 +5273,11 @@ const azurePolicy: Check = (snapshot, expected, add) => {
     }
     guardrailShapeProblems(snapshot, definition, problem);
     guardrailRuleProblems(snapshot, guardrail, definition, problem);
+    if (guardrail === 'log-cap') {
+      logCapFloors(snapshot, definition, (message) => {
+        problem(definition.name, message);
+      });
+    }
   }
   const typesRule = ofType(snapshot, TYPES.policyDefinition).find(
     (definition) => definition.name === `agentx-${expected.environment}-allowed-types`,
