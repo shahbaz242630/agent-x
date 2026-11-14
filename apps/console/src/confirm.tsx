@@ -10,13 +10,14 @@
 // statement) is confirmed with the console's own words instead (6B1).
 // Confirming hands back the version of the API's words shown (CO3), which
 // the change sends back: the API refuses words it no longer confirms with.
-// It is modal for the keyboard too (WAI-ARIA's dialog pattern): focus starts
-// on Cancel, Tab and Shift+Tab go round its own controls only, focus that
-// leaves it some other way is brought back (to the pop-up itself while every
-// control is disabled, the change being sent), Escape cancels, and on closing
-// focus goes back to what was pressed to open it.
+// It is the browser's own modal (a <dialog> opened with showModal, CO12b,
+// modern-web-guidance "dialog"): the page behind is inert, Tab stays inside,
+// and Escape asks to close, which cancels unless the change is being sent.
+// Focus starts on Cancel (on the pop-up itself while every control is
+// disabled), and goes back to what was pressed to open it: React removes the
+// pop-up rather than closing it, so the browser's own return isn't relied on.
 import { useQuery } from '@tanstack/react-query';
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 
 import { api } from './api.ts';
 import { t } from './text.ts';
@@ -42,27 +43,6 @@ function useStatement(id: string | undefined) {
     refetchOnMount: 'always',
     select: ({ statements }) => statements.find((statement) => statement.id === id),
   });
-}
-
-/** What Tab may reach inside the pop-up: its enabled controls, in page order. */
-const FOCUSABLE =
-  'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
-
-/** Tab from the last control goes to the first, Shift+Tab from the first to the last: never out of the pop-up. */
-function tabRound(event: KeyboardEvent<HTMLElement>): void {
-  const inside = [...event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
-  const first = inside[0];
-  const last = inside.at(-1);
-  if (first === undefined || last === undefined) {
-    // Every control disabled (the change being sent): focus stays on the pop-up itself.
-    event.preventDefault();
-    event.currentTarget.focus();
-    return;
-  }
-  const from = event.shiftKey ? first : last;
-  if (document.activeElement !== from && inside.includes(document.activeElement as HTMLElement)) return;
-  event.preventDefault();
-  (event.shiftKey ? last : first).focus();
 }
 
 /** Where the words come from: the API's set by its id, or the console's own for a change the API states none for (a reject). */
@@ -101,23 +81,19 @@ export function Confirm({
   const [chosen, setChosen] = useState<string | null>(null);
   const titleId = useId();
   const cancel = useRef<HTMLButtonElement>(null);
-  const dialog = useRef<HTMLElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const opener = document.activeElement;
+    if (dialog.current?.open === false) dialog.current.showModal();
     cancel.current?.focus();
-    // Focus that leaves the pop-up some other way than Tab (a click on the page behind it) comes back to Cancel.
-    const keepIn = (event: FocusEvent) => {
-      if (!(event.target instanceof Node) || dialog.current?.contains(event.target) !== false) return;
-      // Cancel is disabled while the change is being sent: then the pop-up itself holds focus.
-      if (cancel.current?.disabled === false) cancel.current.focus();
-      else dialog.current.focus();
-    };
-    document.addEventListener('focusin', keepIn);
     return () => {
-      document.removeEventListener('focusin', keepIn);
       if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
   }, []);
+  // While the change is being sent every control is disabled, and a disabled one loses focus: the pop-up holds it.
+  useEffect(() => {
+    if (busy && !dialog.current?.contains(document.activeElement)) dialog.current?.focus();
+  }, [busy]);
   // Words only once read afresh, and none after a failed read (whatever was read before).
   const served = statement !== undefined;
   const fetching = served && words.isFetching;
@@ -132,63 +108,65 @@ export function Confirm({
   const single = choices.length === 1 ? choices[0] : undefined;
   const picked = single?.choice ?? chosen;
   return (
-    <div className="veil">
-      <section
-        ref={dialog}
-        tabIndex={-1}
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape' && !busy) onCancel();
-          if (event.key === 'Tab') tabRound(event);
-        }}
-      >
-        <h2 id={titleId}>{title}</h2>
-        {children}
-        {fetching && <p role="status">{t('loading')}</p>}
-        {unloaded && (
-          <p className="notice" role="alert">
-            {t('confirm.unloaded')}
-          </p>
-        )}
-        {single !== undefined && <p className="statement">{single.text}</p>}
-        {choices.length > 1 && (
-          <fieldset className="options">
-            <legend>{t('confirm.choose')}</legend>
-            {choices.map(({ choice, text }) => (
-              <label key={choice} className="option">
-                <input
-                  type="radio"
-                  name={titleId}
-                  value={choice}
-                  checked={chosen === choice}
-                  onChange={() => {
-                    setChosen(choice);
-                  }}
-                />
-                <span>{text}</span>
-              </label>
-            ))}
-          </fieldset>
-        )}
-        <div className="actions">
-          <button ref={cancel} type="button" className="secondary" disabled={busy} onClick={onCancel}>
-            {t('confirm.cancel')}
-          </button>
-          <button
-            type="button"
-            className="primary"
-            disabled={busy || !ready || picked === null}
-            onClick={() => {
-              if (picked !== null) onConfirm(picked, version);
-            }}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </section>
-    </div>
+    <dialog
+      ref={dialog}
+      tabIndex={-1}
+      className="dialog"
+      aria-labelledby={titleId}
+      // Escape (or the back gesture) asks to close: never closed by the browser, cancelled here unless sending.
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onCancel();
+      }}
+      // A browser may close it anyway on a second Escape with no click between: shown again while sending, else a cancel.
+      onClose={() => {
+        if (busy) dialog.current?.showModal();
+        else onCancel();
+      }}
+    >
+      <h2 id={titleId}>{title}</h2>
+      {children}
+      {fetching && <p role="status">{t('loading')}</p>}
+      {unloaded && (
+        <p className="notice" role="alert">
+          {t('confirm.unloaded')}
+        </p>
+      )}
+      {single !== undefined && <p className="statement">{single.text}</p>}
+      {choices.length > 1 && (
+        <fieldset className="options">
+          <legend>{t('confirm.choose')}</legend>
+          {choices.map(({ choice, text }) => (
+            <label key={choice} className="option">
+              <input
+                type="radio"
+                name={titleId}
+                value={choice}
+                checked={chosen === choice}
+                onChange={() => {
+                  setChosen(choice);
+                }}
+              />
+              <span>{text}</span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <div className="actions">
+        <button ref={cancel} type="button" className="secondary" disabled={busy} onClick={onCancel}>
+          {t('confirm.cancel')}
+        </button>
+        <button
+          type="button"
+          className="primary"
+          disabled={busy || !ready || picked === null}
+          onClick={() => {
+            if (picked !== null) onConfirm(picked, version);
+          }}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </dialog>
   );
 }
