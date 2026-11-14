@@ -54,14 +54,15 @@ body {
 }
 
 /* The base size on body alone (15px at the browser's default): the root keeps the person's own text size, so the
-   phone's text scale reaches every rem (CO12b, modern-web-guidance "respect-os-text-scale"). */
+   phone's text scale reaches every rem (CO12b, modern-web-guidance "respect-os-text-scale"). Every rem here was
+   written for a 15px root, so each is 15/16 of its old value: the look is unchanged at the default size. */
 body {
   font-size: 0.9375rem;
 }
 
 h1 {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.2656rem;
   font-weight: 700;
   line-height: 1.25;
   text-wrap: balance;
@@ -89,7 +90,7 @@ a {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  font-size: 0.86rem;
+  font-size: 0.8063rem;
 }
 
 button {
@@ -123,6 +124,7 @@ button:disabled {
 
 /* Pages before the shell: one panel, centred. */
 .center {
+  min-height: 100vh;
   min-height: 100dvh;
   display: grid;
   place-items: center;
@@ -174,7 +176,7 @@ button:disabled {
 
 .tag {
   margin-left: 8px;
-  font-size: 0.72rem;
+  font-size: 0.675rem;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -192,13 +194,14 @@ button:disabled {
 .notice {
   padding: 10px 12px;
   border-radius: 4px;
-  font-size: 0.9rem;
+  font-size: 0.8438rem;
 }
 
 /* The signed-in shell. */
 .shell {
   max-width: 960px;
   margin: 0 auto;
+  min-height: 100vh;
   min-height: 100dvh;
   background: var(--surface);
   border-left: 1px solid var(--rule);
@@ -215,7 +218,7 @@ button:disabled {
 }
 
 .org {
-  font-size: 0.86rem;
+  font-size: 0.8063rem;
   color: var(--ink-soft);
   background: none;
   border: 0;
@@ -237,7 +240,7 @@ button:disabled {
   padding: 10px 0;
   color: var(--ink-soft);
   text-decoration: none;
-  font-size: 0.93rem;
+  font-size: 0.8719rem;
   white-space: nowrap;
   border-bottom: 2px solid transparent;
 }
@@ -252,7 +255,7 @@ button:disabled {
   margin: 0;
   max-width: none;
   padding: 10px max(16px, env(safe-area-inset-left, 0px));
-  font-size: 0.9rem;
+  font-size: 0.8438rem;
   font-weight: 600;
 }
 
@@ -295,6 +298,7 @@ button:disabled {
 .dialog {
   width: 100%;
   max-width: min(560px, calc(100% - 32px));
+  max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   overflow-y: auto;
   color: var(--ink);
@@ -324,7 +328,7 @@ button:disabled {
 .dialog h2,
 .stepped h2 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.0781rem;
 }
 
 .statement {
@@ -345,7 +349,7 @@ button:disabled {
 .options legend {
   padding: 0 0 6px;
   color: var(--ink-soft);
-  font-size: 0.9rem;
+  font-size: 0.8438rem;
 }
 
 .option {
@@ -399,7 +403,7 @@ button:disabled {
   padding: 6px 0;
   color: var(--ink-soft);
   text-decoration: none;
-  font-size: 0.88rem;
+  font-size: 0.825rem;
   border-bottom: 2px solid transparent;
 }
 
@@ -433,7 +437,7 @@ button:disabled {
 }
 
 .row-main .muted {
-  font-size: 0.84rem;
+  font-size: 0.7875rem;
 }
 
 .amount {
@@ -444,11 +448,11 @@ button:disabled {
 }
 
 .amount.big {
-  font-size: 1.85rem;
+  font-size: 1.7344rem;
 }
 
 .kicker {
-  font-size: 0.74rem;
+  font-size: 0.6937rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -456,7 +460,7 @@ button:disabled {
 }
 
 .back {
-  font-size: 0.88rem;
+  font-size: 0.825rem;
   justify-self: start;
 }
 
@@ -471,13 +475,13 @@ button:disabled {
 
 .facts dt {
   color: var(--ink-soft);
-  font-size: 0.82rem;
+  font-size: 0.7687rem;
 }
 
 .facts dd {
   margin: 0;
   text-align: right;
-  font-size: 0.9rem;
+  font-size: 0.8438rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -493,12 +497,12 @@ button:disabled {
 }
 
 .fine {
-  font-size: 0.82rem;
+  font-size: 0.7687rem;
   color: var(--ink-soft);
 }
 
 .field {
-  font-size: 0.86rem;
+  font-size: 0.8063rem;
   font-weight: 600;
 }
 

@@ -82,14 +82,15 @@ export function Confirm({
   const titleId = useId();
   const cancel = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  // What was pressed to open it, taken once at the first render: StrictMode's second effect run would find Cancel.
+  const [opener] = useState(() => document.activeElement);
   useEffect(() => {
-    const opener = document.activeElement;
     if (dialog.current?.open === false) dialog.current.showModal();
     cancel.current?.focus();
     return () => {
       if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
-  }, []);
+  }, [opener]);
   // While the change is being sent every control is disabled, and a disabled one loses focus: the pop-up holds it.
   useEffect(() => {
     if (busy && !dialog.current?.contains(document.activeElement)) dialog.current?.focus();
@@ -113,7 +114,8 @@ export function Confirm({
       tabIndex={-1}
       className="dialog"
       aria-labelledby={titleId}
-      // Escape (or the back gesture) asks to close: never closed by the browser, cancelled here unless sending.
+      // Escape (or the back gesture) asks to close: never closed by the browser, cancelled here unless sending. Every
+      // caller removes the pop-up on onCancel, before a close the browser queues could reach onClose: one cancel.
       onCancel={(event) => {
         event.preventDefault();
         if (!busy) onCancel();
