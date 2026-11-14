@@ -531,6 +531,17 @@ describe('needsOf', () => {
       'deploy/azure/names.bicep: certificates reads it, which only the partner runs (deploy.ts certificates)',
       expect.stringMatching(/^deploy\/azure\/deployers\/deployers\.bicep: no deployment CI makes reads it \(/),
     ]);
+    // AZ5h: once Bicep names the deployers as its reader, the partner's own command is named, and its record clears it.
+    const deployers = new Map([['deploy/azure/deployers/deployers.bicep', ['deployers'] as const]]);
+    expect(needsOf(['deploy/azure/deployers/deployers.bicep'], deployers, never)).toEqual({
+      steps: [],
+      byHand: [
+        'deploy/azure/deployers/deployers.bicep: deployers reads it, which only the partner runs (infra.ts deployers)',
+      ],
+    });
+    expect(
+      needsOf(['deploy/azure/deployers/deployers.bicep'], deployers, (deployment) => deployment === 'deployers'),
+    ).toEqual({ steps: [], byHand: [] });
   });
 });
 
@@ -815,8 +826,8 @@ describe('deployDeployers, from the partner’s terminal', () => {
     };
     return { scripted, said, asked };
   };
-  /** A CLI whose what-if ends with `status`, and whose read back shows `state` with the two client IDs. */
-  const cli = (status: number, state: string) => {
+  /** A CLI whose what-if ends with `status`, whose read back shows `state` with the two client IDs, and the record held. */
+  const cli = (status: number, state: string, recorded: string = HEAD) => {
     const calls: (readonly string[])[] = [];
     const sent: Readonly<Record<string, string>>[] = [];
     const az: Az = {
@@ -828,6 +839,9 @@ describe('deployDeployers, from the partner’s terminal', () => {
       run: (args) => {
         calls.push(args);
         if (args[0] === 'account') return ok({ id: SUBSCRIPTION, name: 'Azure subscription 1' });
+        // AZ5h: the record written on the migration job, and read back as written.
+        if (args[0] === 'tag' && args[1] === 'update') return ok({});
+        if (args[0] === 'tag') return ok({ properties: { tags: { 'agentx-deployed-deployers': recorded } } });
         return ok({
           provisioningState: state,
           outputs: { infraClientId: { value: 'infra-client' }, whatIfClientId: { value: 'whatif-client' } },
@@ -838,11 +852,14 @@ describe('deployDeployers, from the partner’s terminal', () => {
   };
   const NOW = () => new Date('2026-11-13T10:00:00Z');
   const ADDRESS = 'alerts@example.test';
+  /** The commit this clean checkout is at, which the record holds. */
+  const HEAD = 'c'.repeat(40);
+  const clean = () => ({ head: HEAD, clean: true });
 
   it('asks first, deploys with the what-if answered by the partner, then gives each environment its client ID', async () => {
     const { scripted, said, asked } = terminal('y', ADDRESS);
     const { az, calls, sent } = cli(0, 'Succeeded');
-    expect(await deployDeployers(scripted, az, NOW)).toBe(0);
+    expect(await deployDeployers(scripted, az, NOW, clean)).toBe(0);
     expect(asked).toEqual([
       "Deploy staging's deployers into it? [y/N] ",
       'Address the access alarm emails (the alert address): ',
@@ -863,19 +880,42 @@ describe('deployDeployers, from the partner’s terminal', () => {
       'deployers/staging.bicepparam',
       '--confirm-with-what-if',
     ]);
-    expect(said.slice(-2)).toEqual(['  staging-infra: infra-client', '  staging-whatif: whatif-client']);
+    expect(said.slice(-3, -1)).toEqual(['  staging-infra: infra-client', '  staging-whatif: whatif-client']);
+    // AZ5h: the commit sent recorded on the migration job, merged into its tags, then read back.
+    expect(calls.slice(-2).map((call) => call.slice(0, 2))).toEqual([
+      ['tag', 'update'],
+      ['tag', 'list'],
+    ]);
+    expect(calls.at(-2)).toContain(`agentx-deployed-deployers=${HEAD}`);
+    expect(said.at(-1)).toBe(
+      `Recorded on job-agentx-stg-migrate: deployers sent ${HEAD}. CI's release takes it for what deployers reads.`,
+    );
+  });
+
+  it('refuses a checkout with changes not committed before asking anything, and says a record that did not hold', async () => {
+    const dirty = terminal('y', ADDRESS);
+    const untouched = cli(0, 'Succeeded');
+    await expect(
+      deployDeployers(dirty.scripted, untouched.az, NOW, () => ({ head: HEAD, clean: false })),
+    ).rejects.toThrow(/changes not committed\. deployers records the commit it sends/);
+    expect(untouched.calls).toEqual([]);
+    expect(dirty.asked).toEqual([]);
+    // Deployed, but the record reads back otherwise: said, and a failure, as for every recorded hand deploy.
+    const { scripted, said } = terminal('y', ADDRESS);
+    expect(await deployDeployers(scripted, cli(0, 'Succeeded', 'd'.repeat(40)).az, NOW, clean)).toBe(1);
+    expect(said.at(-1)).toMatch(/^Deployed, but not recorded \(agentx-deployed-deployers reads back as d{40}\)/);
   });
 
   it('does nothing on a no, and says so when the what-if is declined or the deployment failed', async () => {
     const declined = cli(0, 'Succeeded');
-    expect(await deployDeployers(terminal('n').scripted, declined.az, NOW)).toBe(1);
+    expect(await deployDeployers(terminal('n').scripted, declined.az, NOW, clean)).toBe(1);
     expect(declined.calls).toHaveLength(1);
     for (const [status, state] of [
       [1, 'Succeeded'],
       [0, 'Failed'],
     ] as const) {
       const { scripted, said } = terminal('y', ADDRESS);
-      expect(await deployDeployers(scripted, cli(status, state).az, NOW)).toBe(1);
+      expect(await deployDeployers(scripted, cli(status, state).az, NOW, clean)).toBe(1);
       expect(said.at(-1)).toMatch(
         /^The deployers weren't deployed \((?:declined or not read|Failed)\): nothing more was done\.$/,
       );
@@ -883,7 +923,7 @@ describe('deployDeployers, from the partner’s terminal', () => {
     // No address, nothing sent.
     const unaddressed = cli(0, 'Succeeded');
     const { scripted, said } = terminal('y', 'not an address');
-    expect(await deployDeployers(scripted, unaddressed.az, NOW)).toBe(1);
+    expect(await deployDeployers(scripted, unaddressed.az, NOW, clean)).toBe(1);
     expect(unaddressed.calls).toHaveLength(1);
     expect(said.at(-1)).toBe("That isn't an email address: nothing was deployed.");
   });
