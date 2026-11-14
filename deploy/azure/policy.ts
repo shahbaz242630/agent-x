@@ -2407,14 +2407,25 @@ function evidenceEndpointProblems(
     const zoneIds = zoneGroups.flatMap((group) =>
       list(at(group.properties, 'privateDnsZoneConfigs')).map((config) => at(config, 'properties', 'privateDnsZoneId')),
     );
-    const linked = (zone: PredictedResource): boolean =>
-      ofType(snapshot, TYPES.dnsLink).some(
-        (link) =>
-          link.id.startsWith(`${zone.id}/virtualNetworkLinks/`) &&
-          at(link.properties, 'virtualNetwork', 'id') === network?.id &&
-          // Without it, any other account behind a private endpoint elsewhere stops resolving in our network.
-          at(link.properties, 'resolutionPolicy') === 'NxDomainRedirect',
+    // Every link of the zone to this network alone (review S192: an added link elsewhere would learn the address),
+    // none registering machines' names, and at least one.
+    const linked = (zone: PredictedResource): boolean => {
+      const links = ofType(snapshot, TYPES.dnsLink).filter((link) =>
+        link.id.startsWith(`${zone.id}/virtualNetworkLinks/`),
       );
+      return (
+        links.length > 0 &&
+        links.every(
+          (link) =>
+            at(link.properties, 'virtualNetwork', 'id') === network?.id &&
+            at(link.properties, 'registrationEnabled') !== true &&
+            // Without it, any other account behind a private endpoint elsewhere stops resolving in our network.
+            at(link.properties, 'resolutionPolicy') === 'NxDomainRedirect',
+        )
+      );
+    };
+    // Declared in the network's own list, so its rules below are read: a subnet written apart fails closed (review S192).
+    const subnet = list(at(network?.properties, 'subnets')).find((each) => at(each, 'name') === 'endpoints');
     const required: readonly (readonly [string, boolean])[] = [
       [
         "one connection, to the audit-export store's blob service alone, approved automatically",
@@ -2423,7 +2434,10 @@ function evidenceEndpointProblems(
           JSON.stringify(at(connections[0], 'properties', 'groupIds')) === JSON.stringify(['blob']) &&
           list(at(endpoint.properties, 'manualPrivateLinkServiceConnections')).length === 0,
       ],
-      ["a place in this deployment's network's endpoints subnet", network !== undefined],
+      [
+        "a place in this deployment's network's endpoints subnet, declared in the network's own list",
+        network !== undefined && subnet !== undefined,
+      ],
       [
         `its address kept in ${BLOB_PRIVATE_ZONE}, linked to that network with fallback to public names (NxDomainRedirect)`,
         zoneIds.length === 1 && zones.some((zone) => zone.id === zoneIds[0] && linked(zone)),
@@ -2432,7 +2446,6 @@ function evidenceEndpointProblems(
     for (const [what, holds] of required) {
       if (!holds) problem(endpoint.name, `must have ${what}`);
     }
-    const subnet = list(at(network?.properties, 'subnets')).find((each) => at(each, 'name') === 'endpoints');
     if (subnet !== undefined && network !== undefined) {
       endpointsSubnetProblems(snapshot, network, subnet, problem);
     }

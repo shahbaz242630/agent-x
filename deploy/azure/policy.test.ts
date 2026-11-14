@@ -2242,6 +2242,27 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       ),
     ).toEqual(['evidence-store']);
+    // A second link to another network, or one registering names (review S192).
+    const link = staging.predictedResources.find(BLOB_LINK);
+    for (const extra of [
+      { virtualNetwork: { id: '/subscriptions/x/virtualNetworks/other' } },
+      { registrationEnabled: true },
+    ]) {
+      const copy = structuredClone(link) as unknown as Mutable;
+      copy.id = `${String(link?.id)}-second`;
+      Object.assign(inside(copy, 'properties'), extra);
+      expect(only(withExtra(copy))).toEqual(['evidence-store']);
+    }
+    // The endpoints subnet left out of the network's own list (written apart, its rules unread): fails closed;
+    // the apps' door to it then matches no subnet either.
+    expect(
+      only(
+        changed(NETWORK, (network) => {
+          const properties = inside(network, 'properties');
+          properties.subnets = (properties.subnets as Mutable[]).filter((each) => each.name !== 'endpoints');
+        }),
+      ),
+    ).toEqual(['apps-egress', 'evidence-store']);
     // The endpoints subnet delegated, skipping its rules, or letting in more, or anything out.
     for (const change of [
       (network: Mutable) =>
