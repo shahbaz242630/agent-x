@@ -9,7 +9,8 @@
 //
 // - the conditions use only aliases Azure lists for Microsoft.App
 //   (`az provider show --namespace Microsoft.App --expand resourceTypes/aliases`,
-//   S188), the two ingress ones as Azure's own built-in definitions use them
+//   S188), the two ingress ones as Azure's own built-in definitions use them, and
+//   for Microsoft.OperationalInsights (the log cap's three, read the same way S193)
 // - Azure judges a PATCH on the resource as it would be after it, merged with
 //   what is stored (AZ2b, proved on staging S191: CI's partial update of the
 //   containers alone left a `maxReplicas exists: false` audit silent). So the
@@ -17,7 +18,9 @@
 //   default for a missing maxReplicas is 10, and a create must name them all.
 //   The image conditions keep their `exists`, inside a count of the containers
 // - numbers are compared by list (`notIn`), never `greater`: Azure throws on a
-//   type it can't compare, and a failed evaluation is a refusal
+//   type it can't compare, and a failed evaluation is a refusal. The one
+//   exception is the log cap's `less` (AZ5g): a cap is any decimal, so no list
+//   holds it, and the alias is always a number
 // - a `count` walks an array alias (`…containers[*]`), as Microsoft's page
 //   requires, and its `where` reads each element's image
 // - Indexed mode, as Azure's built-in "Allowed resource types": only types with
@@ -426,6 +429,86 @@ resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
   }
 }
 
+// A log workspace whose daily cap is below its floor or gone, or whose intake or reading is shut to the public
+// network (AZ5g, the AZ5e review S192). CI's infra identity writes the workspaces inside an approved foundation: a cap
+// lowered there stops collection early each day, and the access alarm, the tamper alarm and every other one reading
+// the workspace go quiet, which the workspace-free alarm shows only as the usual workspace-write email.
+// - Each environment's main workspace has its own floor, by name, at the cap its foundation sets (logDailyCapGb), so
+//   a larger production cap is held too (partner S193). policy.ts holds each environment's main workspace to a branch
+//   here at its own cap: production's parameters fail CI until its branch is added. Written out, not a parameter: a
+//   snapshot leaves a parameter inside a policy rule unresolved (tried S193), and then no check could read it.
+// - The login workspaces keep 1 GB, as monitoring.bicep sets in every environment; a raised cap (a load day) passes.
+// - A missing cap is refused as AZ2e's fields are: Azure's default is none. `less` is safe: the alias is a number
+//   whenever it is there, and a missing one is refused either way (its own condition, or a failed evaluation).
+// - The network pair stays Enabled: diagnostic settings and the alerts never need it shut, and shutting the query
+//   side would cut our own reads of the logs.
+resource logCap 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
+  name: '${prefix}-log-cap'
+  properties: {
+    policyType: 'Custom'
+    mode: 'Indexed'
+    displayName: 'Agent X: log workspaces keep their cap and stay readable'
+    description: 'A log workspace keeps its daily cap (the main one that of its environment, each login one 1 GB), and its intake and reading stay open (AZ5g): a lowered cap would silence every alarm reading it.'
+    metadata: {
+      category: 'Agent X'
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.OperationalInsights/workspaces'
+          }
+          {
+            anyOf: [
+              {
+                field: 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb'
+                exists: false
+              }
+              {
+                allOf: [
+                  {
+                    field: 'name'
+                    like: '*-logins'
+                  }
+                  {
+                    field: 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb'
+                    less: 1
+                  }
+                ]
+              }
+              // Staging's main workspace, at staging.bicepparam's logDailyCapGb.
+              {
+                allOf: [
+                  {
+                    field: 'name'
+                    equals: 'log-agentx-stg'
+                  }
+                  {
+                    field: 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb'
+                    less: 1
+                  }
+                ]
+              }
+              {
+                field: 'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForIngestion'
+                notEquals: 'Enabled'
+              }
+              {
+                field: 'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForQuery'
+                notEquals: 'Enabled'
+              }
+            ]
+          }
+        ]
+      }
+      then: {
+        effect: 'deny'
+      }
+    }
+  }
+}
+
 // A type the deployments don't create (Indexed, as Azure's built-in "Allowed resource types"): every type they do
 // (policy rule `azure-policy` holds the list to the snapshot exactly), the deployments' own records, and AZ11's private
 // endpoint, its zone group and the network interface Azure makes for it, allowed a foundation before the endpoint lands.
@@ -538,6 +621,12 @@ module given 'guardrail-assignments.bicep' = {
         displayName: appReplicas.properties.displayName
         message: 'Refused: an app would run more replicas than Agent X ever runs here (the jobs app one). Nothing changed; deploy the app as deploy/azure/apps.bicep writes it.'
         definitionId: appReplicas.id
+      }
+      {
+        name: logCap.name
+        displayName: logCap.properties.displayName
+        message: 'Refused: a log workspace would lose its daily cap, go below the cap of its environment, or shut its intake or reading, which would silence the alarms that read it. Nothing changed; deploy the workspace as deploy/azure/modules/monitoring.bicep writes it.'
+        definitionId: logCap.id
       }
       {
         name: allowedTypes.name

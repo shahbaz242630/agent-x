@@ -808,9 +808,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Authorization/locks keep-live-database',
       // The main workspace's (AZ5e): the access alarm reads it, so CI may not delete it.
       'Microsoft.Authorization/locks keep-log-workspace',
-      // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
+      // Azure's own refusals (AZ2): seven rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
-        ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
+        ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'log-cap', 'allowed-types'].map(
           (guardrail) => `Microsoft.Authorization/${kind} agentx-staging-${guardrail}`,
         ),
       ),
@@ -2995,20 +2995,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
         changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'features').disableLocalAuth = false)),
       ),
     ).toEqual(['workspace']);
+    // Azure refuses it too (AZ5g's log-cap guardrail).
     expect(brokenRules(changed(MAIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual([
       'workspace',
+      'azure-policy',
     ]);
     expect(
       brokenRules(
         changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 0)),
       ),
-    ).toEqual(['workspace']);
+    ).toEqual(['workspace', 'azure-policy']);
     // The login alerts' workspace is held to the same, and to its own 1 GB besides.
     expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => (properties(workspace).retentionInDays = 90)))).toEqual([
       'workspace',
     ]);
     expect(brokenRules(changed(LOGIN_WORKSPACE, (workspace) => delete properties(workspace).workspaceCapping))).toEqual(
-      ['workspace', 'login-workspace'],
+      ['workspace', 'login-workspace', 'azure-policy'],
     );
   });
 
@@ -3024,7 +3026,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       brokenRules(
         changed(MAIN_WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
       ),
-    ).toEqual(['log-quota-alerts']);
+      // A cap moved without the log-cap guardrail's floor (AZ5g, partner S193) is caught too.
+    ).toEqual(['log-quota-alerts', 'azure-policy']);
     expect(brokenRules(without(CAP_ALERT))).toEqual(['log-quota-alerts']);
     for (const [pick, query] of [
       [QUOTA_ALERT, 'Usage | summarize IngestedMb = sum(Quantity)'],
@@ -5372,7 +5375,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       resource.type === 'Microsoft.Authorization/policyDefinitions' && resource.name === `agentx-staging-${guardrail}`;
     const ASSIGNMENT = (guardrail: string) => (resource: PredictedResource) =>
       resource.type === 'Microsoft.Authorization/policyAssignments' && resource.name === `agentx-staging-${guardrail}`;
-    const GUARDRAIL_NAMES = ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'];
+    const GUARDRAIL_NAMES = [
+      'apps-internal',
+      'apps-https',
+      'images',
+      'jobs-by-hand',
+      'app-replicas',
+      'log-cap',
+      'allowed-types',
+    ];
     const policyProblemsOf = (snapshotted: Snapshot): string[] =>
       policyProblems(snapshotted, STAGING)
         .filter((problem) => problem.rule === 'azure-policy')
@@ -5386,7 +5397,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       return 'field' in object && !('where' in object) ? [object] : Object.values(object).flatMap(leaves);
     };
 
-    it('gives each of the six rules once on the group, enforced, as Deny, Indexed, with the words a refusal gets back', () => {
+    it('gives each of the seven rules once on the group, enforced, as Deny, Indexed, with the words a refusal gets back', () => {
       const group = idOf(type('Microsoft.Resources/resourceGroups'));
       for (const guardrail of GUARDRAIL_NAMES) {
         const definition = staging.predictedResources.find(DEFINITION(guardrail));
@@ -5555,10 +5566,51 @@ describe('SEC-OPS-09 each rule can fail', () => {
               leaf.notIn = [0, 1, 2];
           },
         ],
+        // AZ5g: each of the log cap's conditions broken alone lets its bad example through.
+        [
+          'log-cap',
+          (definition) =>
+            (firstLeaf(/dailyQuotaGb$/)(definition).field =
+              'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForQuery'),
+        ],
+        [
+          'log-cap',
+          (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => 'less' in each);
+            if (leaf !== undefined) leaf.less = 0;
+          },
+        ],
+        // The login floor's name test on the main workspace's name: the login examples get through.
+        ['log-cap', (definition) => (firstLeaf(/^name$/)(definition).like = 'log-agentx-stg')],
+        [
+          'log-cap',
+          (definition) =>
+            (firstLeaf(/ForIngestion$/)(definition).field =
+              'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForQuery'),
+        ],
+        [
+          'log-cap',
+          (definition) =>
+            (firstLeaf(/ForQuery$/)(definition).field =
+              'Microsoft.OperationalInsights/workspaces/publicNetworkAccessForIngestion'),
+        ],
       ];
       for (const [guardrail, change] of cases) {
         expect(policyProblemsOf(changed(DEFINITION(guardrail), change))).toEqual([lets(guardrail)]);
       }
+      // The log cap on another type: nothing refused, staging's main workspace below its cap among it (AZ5g).
+      expect(
+        policyProblemsOf(
+          changed(
+            DEFINITION('log-cap'),
+            (definition) =>
+              (firstLeaf(/^type$/)(definition).equals = 'Microsoft.OperationalInsights/workspaces/savedSearches'),
+          ),
+        ),
+      ).toEqual([
+        lets('log-cap'),
+        'agentx-staging-log-cap: needs to hold log-agentx-stg at its own cap (1 GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet',
+      ]);
     });
 
     it('no rule refuses what we ship, a release sends, the load image, or four API replicas', () => {
@@ -5619,6 +5671,86 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ),
       ).toEqual([refuses('app-replicas', 'ca-agentx-stg-api')]);
+      // AZ5g: a login floor above 1 GB refuses the login workspaces as shipped; turned round, a cap raised for a
+      // load day is refused.
+      const lessLeaves = (definition: Mutable): Mutable[] =>
+        leaves(ruleOf(definition).if).filter((each) => 'less' in each);
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [login] = lessLeaves(definition);
+            if (login !== undefined) login.less = 2;
+          }),
+        ),
+      ).toContain(refuses('log-cap', 'log-agentx-stg-logins'));
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [login] = lessLeaves(definition);
+            if (login === undefined) return;
+            delete login.less;
+            login.greater = 1;
+          }),
+        ),
+      ).toContain(refuses('log-cap', 'log-agentx-stg-logins'));
+      // The main floor above staging's cap: its own workspace refused.
+      const floor =
+        'agentx-staging-log-cap: needs to hold log-agentx-stg at its own cap (1 GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet';
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [, main] = lessLeaves(definition);
+            if (main !== undefined) main.less = 2;
+          }),
+        ),
+      ).toEqual([refuses('log-cap', 'log-agentx-stg')]);
+      // The right branch made unreachable beside a lower one (review S193): judged by behaviour, still caught.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [, main] = lessLeaves(definition);
+            if (main !== undefined) main.less = 0.75;
+            const branches = list(inside(ruleOf(definition), 'if').allOf);
+            const anyOf = list((branches[1] as Mutable | undefined)?.anyOf);
+            anyOf.push({
+              allOf: [
+                { field: 'type', equals: 'x' },
+                {
+                  allOf: [
+                    { field: 'name', equals: 'log-agentx-stg' },
+                    {
+                      field: 'Microsoft.OperationalInsights/workspaces/workspaceCapping.dailyQuotaGb',
+                      less: 1,
+                    },
+                  ],
+                },
+              ],
+            });
+          }),
+        ),
+      ).toEqual([floor]);
+      // Below staging's cap (partner S193: production's larger cap left at a lower floor is the same gap): nothing
+      // the examples catch, the floor check does.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const [, main] = lessLeaves(definition);
+            if (main !== undefined) main.less = 0.75;
+          }),
+        ),
+      ).toEqual([floor]);
+      // The branch naming another workspace: staging's main one below its cap gets through, and has no floor.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const leaf = leaves(ruleOf(definition).if).find((each) => each.equals === 'log-agentx-stg');
+            if (leaf !== undefined) leaf.equals = 'log-agentx-prd';
+          }),
+        ),
+      ).toEqual([
+        'agentx-staging-log-cap: lets through what it is for (log-cap): its condition matches nothing it should',
+        floor,
+      ]);
       // Turned around, refusing an app that keeps to https: every app (the API as shipped, as a release leaves it,
       // and at four replicas), and the bad example let through.
       expect(
@@ -5711,6 +5843,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
           'an array field outside a count: Microsoft.App/containerApps/template.containers[*].image',
         ),
       ]);
+      // The log cap's floor check reads the same rule (AZ5g): said once in plain words, never a crash (review S193).
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const main = leaves(ruleOf(definition).if).filter((each) => 'less' in each)[1];
+            if (main !== undefined) {
+              main.lessOrEquals = main.less;
+              delete main.less;
+            }
+          }),
+        ),
+      ).toEqual([unread('log-cap', "an operator these checks don't read: lessOrEquals")]);
     });
 
     it('allows exactly the types the deployment creates and its records', () => {
