@@ -5516,11 +5516,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ],
         [
           'jobs-by-hand',
-          (definition) =>
-            (firstLeaf(/triggerType$/)(definition).field = 'Microsoft.App/jobs/configuration.triggerTypo'),
-        ],
-        [
-          'jobs-by-hand',
           (definition) => {
             for (const leaf of leaves(ruleOf(definition).if).filter(
               (each) => String(each.field).endsWith('.parallelism') && 'notIn' in each,
@@ -5569,14 +5564,27 @@ describe('SEC-OPS-09 each rule can fail', () => {
     it('no rule refuses what we ship, a release sends, the load image, or four API replicas', () => {
       const refuses = (guardrail: string, what: string): string =>
         `agentx-staging-${guardrail}: refuses ${what}, which this deployment ships or a release sends: Azure would refuse our own deploy`;
-      // The jobs' trigger read on a missing field: CI's PATCH of the containers alone would be refused.
+      // A misspelled trigger field reads as missing, which the rule now refuses (AZ2e): every job refused, so caught.
       expect(
         policyProblemsOf(
           changed(DEFINITION('jobs-by-hand'), (definition) => {
-            const guard = leaves(ruleOf(definition).if).find(
-              (leaf) => String(leaf.field).endsWith('triggerType') && 'exists' in leaf,
-            );
-            if (guard !== undefined) guard.exists = false;
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) =>
+              String(each.field).endsWith('triggerType'),
+            ))
+              leaf.field = 'Microsoft.App/jobs/configuration.triggerTypo';
+          }),
+        ),
+      ).toContain(refuses('jobs-by-hand', 'job-agentx-stg-migrate'));
+      // A trigger rule turned to refuse the one trigger we use: our own jobs, and a release of them, refused.
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('jobs-by-hand'), (definition) => {
+            for (const leaf of leaves(ruleOf(definition).if).filter((each) =>
+              String(each.field).endsWith('triggerType'),
+            )) {
+              delete leaf.notEquals;
+              leaf.equals = 'Manual';
+            }
           }),
         ),
       ).toContain(refuses('jobs-by-hand', 'job-agentx-stg-migrate'));
@@ -5611,8 +5619,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ),
       ).toEqual([refuses('app-replicas', 'ca-agentx-stg-api')]);
-      // Turned around, refusing an app that keeps to https: every app (the API twice, at four replicas too), and
-      // the bad example let through.
+      // Turned around, refusing an app that keeps to https: every app (the API as shipped, as a release leaves it,
+      // and at four replicas), and the bad example let through.
       expect(
         policyProblemsOf(
           changed(DEFINITION('apps-https'), (definition) => {
@@ -5621,9 +5629,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ),
       ).toEqual([
-        ...['ca-agentx-stg-api', 'ca-agentx-stg-zitadel', 'ca-agentx-stg-login', 'ca-agentx-stg-api'].map((app) =>
-          refuses('apps-https', app),
-        ),
+        ...[
+          'ca-agentx-stg-api',
+          'ca-agentx-stg-zitadel',
+          'ca-agentx-stg-login',
+          'ca-agentx-stg-api',
+          'ca-agentx-stg-api',
+        ].map((app) => refuses('apps-https', app)),
         'agentx-staging-apps-https: lets through what it is for (apps-https): its condition matches nothing it should',
       ]);
     });

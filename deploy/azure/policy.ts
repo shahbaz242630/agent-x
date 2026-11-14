@@ -4945,14 +4945,20 @@ const GUARDRAILS: Readonly<
     ['migrate', { 'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-evil@sha256:${'0'.repeat(64)}` }],
     ['migrate', { 'template.initContainers': [{ image: `docker.io/library/busybox@sha256:${'0'.repeat(64)}` }] }],
   ],
+  // A field left out is refused too (AZ2e): Azure judges the resource merged (AZ2b), so only a create can leave one out.
   'jobs-by-hand': [
     ['migrate', { 'configuration.triggerType': 'Schedule' }],
     ['migrate', { 'configuration.manualTriggerConfig.parallelism': 2 }],
     ['migrate', { 'configuration.manualTriggerConfig.replicaCompletionCount': 2 }],
+    ['migrate', { 'configuration.triggerType': undefined }],
+    ['migrate', { 'configuration.manualTriggerConfig.parallelism': undefined }],
+    ['migrate', { 'configuration.manualTriggerConfig.replicaCompletionCount': undefined }],
   ],
   'app-replicas': [
     ['api', { 'template.scale.maxReplicas': MOST_APP_REPLICAS + 1 }],
     ['jobs', { 'template.scale.maxReplicas': 2 }],
+    // Azure's default for a missing maxReplicas is 10.
+    ['api', { 'template.scale.maxReplicas': undefined }],
   ],
   'allowed-types': [['', {}]],
 };
@@ -5054,10 +5060,10 @@ function badExamples(snapshot: Snapshot, guardrail: string): readonly PredictedR
 
 /**
  * What Azure must let through besides what the deployment ships: CI's release (a
- * PATCH of the containers alone, release.ts), with no ingress, trigger, scale or
- * replica fields, so a rule that matched a missing field would refuse every
- * release; and the load test's image by digest (D2c), with the API at the most
- * replicas any environment runs.
+ * PATCH of the containers alone, release.ts), which Azure judges merged with the
+ * stored resource (AZ2b, S191), so it carries every stored field beside its image;
+ * and the load test's image by digest (D2c), with the API at the most replicas
+ * any environment runs.
  */
 function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
   const ours = [...ofType(snapshot, TYPES.app), ...ofType(snapshot, TYPES.job)].filter((found) =>
@@ -5065,7 +5071,7 @@ function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
   );
   return [
     ...ours.flatMap((found) => [
-      { ...found, properties: { template: { containers: [{ image: at(containersOf(found)[0], 'image') }] } } },
+      changedCopy(found, { 'template.containers.0.image': at(containersOf(found)[0], 'image') }),
       changedCopy(found, {
         'template.containers.0.image': `ghcr.io/shahbaz242630/agent-x-load@sha256:${'0'.repeat(64)}`,
         ...(found.type === TYPES.app ? { 'template.scale.maxReplicas': MOST_APP_REPLICAS } : {}),
