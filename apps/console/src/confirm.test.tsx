@@ -2,7 +2,7 @@
 // words, read afresh on each opening, picks no choice for the person, and
 // confirms nothing whose words couldn't be loaded.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -63,6 +63,12 @@ function shown(
 }
 
 const confirmButton = () => screen.getByRole('button', { name: 'Freeze' });
+
+/**
+ * Escape, as a browser sends it to an open modal dialog: a `cancel` event, which closes the dialog unless refused
+ * (jsdom sends none itself). True when the pop-up refused it, so the browser would have left it open.
+ */
+const escape = (): boolean => !fireEvent(screen.getByRole('dialog'), new Event('cancel', { cancelable: true }));
 
 describe('the shared confirm', () => {
   it('shows each choice in the API’s words with none picked, and confirms the one chosen', async () => {
@@ -188,48 +194,28 @@ describe('the shared confirm', () => {
     const { onCancel } = shown('mark_failed');
 
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
-    await userEvent.keyboard('{Escape}');
+    // Escape is refused for the browser and cancelled here: the pop-up closes when it is no longer shown.
+    expect(escape()).toBe(true);
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
     expect(onCancel).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps Tab and Shift+Tab going round its own controls, never out to the page behind it', async () => {
-    render(<button type="button">Behind</button>);
+  // CO12b: the page behind made inert, Tab kept inside, the backdrop: the browser's, from showModal, not built by hand.
+  it('is the browser’s own modal dialog, named by its title, with no hand-made modal parts', () => {
     shown('mark_failed');
-    await screen.findByText('Marking this payment failed frees it.');
-    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    const dialog = screen.getByRole('dialog', { name: 'Freeze the organisation?' });
 
-    await userEvent.tab();
-    expect(document.activeElement).toBe(confirmButton());
-    await userEvent.tab();
-    expect(document.activeElement).toBe(cancel);
-    await userEvent.tab({ shift: true });
-    expect(document.activeElement).toBe(confirmButton());
-    await userEvent.tab({ shift: true });
-    expect(document.activeElement).toBe(cancel);
+    expect(dialog.tagName).toBe('DIALOG');
+    expect(dialog).toHaveProperty('open', true);
+    expect(dialog.hasAttribute('role')).toBe(false);
+    expect(dialog.hasAttribute('aria-modal')).toBe(false);
   });
 
-  it('brings focus that leaves it some other way back to Cancel', () => {
-    render(<button type="button">Behind</button>);
-    shown('mark_failed');
-
-    screen.getByRole('button', { name: 'Behind' }).focus();
-
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
-  });
-
-  it('keeps focus on itself while every control is disabled, the change being sent', async () => {
-    render(<button type="button">Behind</button>);
+  it('holds focus on itself while every control is disabled, the change being sent', () => {
     shown('mark_failed', true);
-    const dialog = screen.getByRole('dialog');
 
-    screen.getByRole('button', { name: 'Behind' }).focus();
-    expect(document.activeElement).toBe(dialog);
-    await userEvent.tab();
-    expect(document.activeElement).toBe(dialog);
-    await userEvent.tab({ shift: true });
-    expect(document.activeElement).toBe(dialog);
+    expect(document.activeElement).toBe(screen.getByRole('dialog'));
   });
 
   it('gives focus back to what opened it once it closes', async () => {
@@ -264,7 +250,7 @@ describe('the shared confirm', () => {
 
     await userEvent.click(opener);
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
-    await userEvent.keyboard('{Escape}');
+    escape();
 
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(opener);
@@ -274,10 +260,22 @@ describe('the shared confirm', () => {
     const { onCancel } = shown('mark_failed', true);
 
     await screen.findByText('Marking this payment failed frees it.');
-    await userEvent.keyboard('{Escape}');
+    expect(escape()).toBe(true);
+    // A browser may close it anyway on a second Escape with no click between: it is shown again.
+    const dialog = screen.getByRole<HTMLDialogElement>('dialog');
+    dialog.close();
+    expect(dialog.open).toBe(true);
 
     expect(confirmButton()).toHaveProperty('disabled', true);
     expect(screen.getByRole('button', { name: 'Cancel' })).toHaveProperty('disabled', true);
     expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('takes a close by the browser as a cancel when nothing is being sent', () => {
+    const { onCancel } = shown('mark_failed');
+
+    screen.getByRole<HTMLDialogElement>('dialog').close();
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });

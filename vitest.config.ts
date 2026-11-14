@@ -33,6 +33,8 @@ export default defineConfig({
           name: 'console',
           include: [CONSOLE_TESTS],
           environment: 'jsdom',
+          // jsdom has no modal dialog: a stand-in for the shared confirm's <dialog> (CO12b).
+          setupFiles: ['apps/console/src/jsdom-setup.ts'],
         },
       },
       {
