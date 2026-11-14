@@ -8,6 +8,8 @@
 // budget are the partner's `access` deployment (AZ5). The secrets (secrets.bicep), the apps and
 // jobs (apps.bicep) and the doors' certificates are deployments of their own,
 // into the resource group this one creates.
+// A merge that changes it is planned by CI and sent by the partner's Approve in
+// GitHub's `staging-infra` (AZ5, decision 40); the first deploy stays a hand run.
 //
 //   bicep snapshot deploy/azure/staging.bicepparam   # what it would create
 //   az deployment sub create --location uaenorth \
