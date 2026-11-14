@@ -753,11 +753,11 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * Zitadel's most copies, by environment (SA3a). None of its state is one copy's, read from the pinned image itself
  * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
- * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
- * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
- * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes (FNV-1, its low 16
- * bits, read from the image, SA3d); two copies sharing one make the same IDs whenever they make one in the same 10 ms,
- * which the event store's key doesn't always refuse, so distinct IDs are an item before production (SA3d).
+ * master key from the vault (all unchanged in v4.19.5, S190). Staging keeps one: its server's 35 user connections hold
+ * no second pool. Production runs up to four, each one's pool counted against its server (`connections`), and keeps
+ * two running, so sign-in never hangs on one copy there. Each copy needs its own 16-bit machine ID for the IDs it makes
+ * (two sharing one make the same IDs in the same 10 ms, SA3d): Zitadel asks the API for one at start, which hands them
+ * out in turn from a database sequence (SA3e, apps/api/src/machine-ids.ts), so no two running copies share one.
  */
 export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
