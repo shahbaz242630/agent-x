@@ -5843,6 +5843,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
           'an array field outside a count: Microsoft.App/containerApps/template.containers[*].image',
         ),
       ]);
+      // The log cap's floor check reads the same rule (AZ5g): said once in plain words, never a crash (review S193).
+      expect(
+        policyProblemsOf(
+          changed(DEFINITION('log-cap'), (definition) => {
+            const main = leaves(ruleOf(definition).if).filter((each) => 'less' in each)[1];
+            if (main !== undefined) {
+              main.lessOrEquals = main.less;
+              delete main.less;
+            }
+          }),
+        ),
+      ).toEqual([unread('log-cap', "an operator these checks don't read: lessOrEquals")]);
     });
 
     it('allows exactly the types the deployment creates and its records', () => {

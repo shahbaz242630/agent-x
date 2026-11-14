@@ -5081,7 +5081,15 @@ function logCapFloors(snapshot: Snapshot, definition: PredictedResource, problem
     const cap = at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb');
     const below =
       typeof cap === 'number' ? changedCopy(workspace, { 'workspaceCapping.dailyQuotaGb': cap - 0.01 }) : undefined;
-    if (below === undefined || !policyMatches(condition, below)) {
+    let refused: boolean;
+    try {
+      refused = below !== undefined && policyMatches(condition, below);
+    } catch (error) {
+      // An unread condition is already said in plain words (guardrailRuleProblems): nothing more to judge here.
+      if (error instanceof UnreadCondition) return;
+      throw error;
+    }
+    if (!refused) {
       problem(
         `needs to hold ${workspace.name} at its own cap (${String(cap)} GB) in modules/guardrails.bicep: below it, the alarms reading it go quiet`,
       );
