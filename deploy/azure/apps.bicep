@@ -164,6 +164,9 @@ param zitadelMostCopies int = 4
 @maxValue(4)
 param loginMostCopies int = 4
 
+@description('The hand deploys\' records (T1b), `agentx-deployed-<part>` = the commit each last sent, as the migration job holds them now: carried onto its tags, since a deployment replaces a resource\'s whole set of tags and would otherwise remove them. deploy.ts reads them from the job, keeps the well-formed ones alone and sets them; none on a first deploy.')
+param records object = {}
+
 var names = resourceNames(environment, nameSuffix)
 
 // The login pages' copies (SA3c). None of their state is one copy's, read from
@@ -1733,7 +1736,8 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
   for job in jobs: {
     name: jobName(environment, job.workload)
     location: location
-    tags: tags
+    // The migration job alone holds the hand deploys' records (`records`), kept through every apps run.
+    tags: job.workload == 'migrate' ? union(tags, records) : tags
     // Its own identity and no other, so it can read its own secrets alone.
     identity: {
       type: 'UserAssigned'

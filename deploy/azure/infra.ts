@@ -52,6 +52,7 @@ import {
 import { type History, realHistory } from './git.ts';
 import {
   azureRefusal,
+  behindRecords,
   decide,
   handDeployed,
   ORDER,
@@ -127,16 +128,20 @@ function settingName(bodies: readonly unknown[], container: string, setting: str
   return undefined;
 }
 
+/** A commit, as git writes it in full. */
+const commit = (value: unknown): boolean => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+
 /**
  * A value every release moves, so never a change of the set-up: our own image at a workload's image path, and a
- * commit in AGENTX_RELEASE. Anything else, an image of anyone else's or a commit-shaped value elsewhere, counts.
+ * commit in AGENTX_RELEASE. Anything else, an image of anyone else's, any tag, or a commit-shaped value elsewhere,
+ * counts. The hand deploys' records (`tags.agentx-deployed-<part>`) count too: apps carries them (S191), so they show
+ * no change in the plan or the deploy, and a record lost or moved is shown to the partner before Approve.
  */
 function movedByReleases(leaf: Leaf, bodies: readonly unknown[]): boolean {
   if (IMAGE_PATH.test(leaf.path)) return absentOr(leaf.before, ourImage) && absentOr(leaf.after, ourImage);
   const setting = SETTING_PATH.exec(leaf.path);
   if (setting === null || settingName(bodies, String(setting[1]), String(setting[2])) !== 'AGENTX_RELEASE')
     return false;
-  const commit = (value: unknown): boolean => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
   return absentOr(leaf.before, commit) && absentOr(leaf.after, commit);
 }
 
@@ -488,7 +493,16 @@ export async function needsAt(infra: InfraSteps, commit: string, digest: string)
       !infra.history.changedFiles(sent, commit).some((each) => each.toLowerCase() === file.toLowerCase())
     );
   };
-  return needsOf([...changed], readers, recorded);
+  // AZ5c: each recorded deployment behind its own files, which a hand apps moved the workloads past, is needed too.
+  const behind = behindRecords(commit, infra.history, readers, records).map(({ deployment, file }) =>
+    fileNeeds(file, new Map([[file.toLowerCase(), [deployment]]]), () => false),
+  );
+  const fromWorkloads = needsOf([...changed], readers, recorded);
+  const steps = new Set([...fromWorkloads.steps, ...behind.flatMap((needs) => needs.steps)]);
+  return {
+    steps: STEPS.filter((step) => steps.has(step)),
+    byHand: [...new Set([...fromWorkloads.byHand, ...behind.flatMap((needs) => needs.byHand)])],
+  };
 }
 
 /** The deploy.ts request each step makes: the plain foundation, secrets' machine part, apps migrating first. */

@@ -213,6 +213,8 @@ export const LOAD_VARIABLES = {
   digest: 'AGENTX_AZURE_LOAD_IMAGE_DIGEST',
   database: 'AGENTX_AZURE_LOAD_DATABASE_HOST',
 } as const;
+/** staging.apps.bicepparam's records (T1b), as JSON: the migration job's own, which every apps run carries through. */
+export const RECORDS_VARIABLE = 'AGENTX_AZURE_RECORDS';
 
 /** Every variable that carries a secret: the ones the policy check replaces with stand-ins. */
 const SECRET_VARIABLES: ReadonlySet<string> = new Set(Object.values(VAULT_SECRETS).map((secret) => secret.variable));
@@ -1268,6 +1270,45 @@ function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, c
     `Recorded on ${RECORDS_JOB}: ${deployment} sent ${commit}. CI's release takes it for what ${deployment} reads.`,
   );
   return true;
+}
+
+/**
+ * The records the migration job holds now, as JSON for apps.bicep's `records`: a deployment replaces a resource's
+ * whole set of tags, so an apps run that left them out removed them, and CI's release then missed a foundation change
+ * no foundation had sent (S191 review). Only well-formed records are carried (release.ts recordsIn says any other);
+ * none before the first apps run, which creates the job. Any other failed read stops the run before anything is sent:
+ * deploying then would lose the records without a word.
+ */
+async function carriedRecords(steps: Steps, subscription: string): Promise<string> {
+  // Loaded when used, as realMigrations does: release.ts imports this file.
+  const { azureRefusal, recordsIn } = await import('./release.ts');
+  const url = `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${RECORDS_JOB}?api-version=${ENVIRONMENT_API}`;
+  const done = steps.az.run(['rest', '--method', 'get', '--url', url, '--output', 'json']);
+  const unread = (why: string): Error =>
+    new Error(
+      `Azure didn't give ${RECORDS_JOB}'s tags (${why}), which hold the commit each hand deploy last sent. This apps run would remove them, and CI's release would then miss a change nobody deployed, so nothing was deployed. Run apps again; if it fails the same way, read the job's tags in the Azure portal (Container Apps jobs, ${RECORDS_JOB}, Tags).`,
+    );
+  if (done.status !== 0) {
+    if (!/"code"\s*:\s*"ResourceNotFound"/.test(done.stderr)) throw unread(azureRefusal(done.stderr));
+    steps.terminal.say(`No ${RECORDS_JOB} yet (this apps run creates it), so there are no records to keep.`);
+    return '{}';
+  }
+  let tags: unknown;
+  try {
+    tags = (JSON.parse(done.stdout) as { tags?: unknown } | null)?.tags;
+  } catch (error) {
+    if (error instanceof SyntaxError) throw unread("its answer wasn't JSON");
+    throw error;
+  }
+  const held = typeof tags === 'object' && tags !== null ? (tags as Readonly<Record<string, unknown>>) : {};
+  const records = recordsIn(held, (line) => {
+    steps.terminal.say(`${line} This apps run leaves it off the job.`);
+  });
+  const kept = [...records].map(([deployment, sent]) => deployment + ' sent ' + sent).join('; ');
+  steps.terminal.say(
+    records.size === 0 ? `${RECORDS_JOB} holds no hand deploy records to keep.` : `Kept on ${RECORDS_JOB}: ${kept}.`,
+  );
+  return JSON.stringify(Object.fromEntries([...records].map(([deployment, sent]) => [recordTag(deployment), sent])));
 }
 
 /**
@@ -2712,6 +2753,7 @@ async function deployApps(
       `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
+  const records = await carriedRecords(steps, subscription);
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
   confirmCheckoutIs(steps, release);
@@ -2756,6 +2798,7 @@ async function deployApps(
     [LOAD_VARIABLES.run]: loadRun ? 'true' : 'false',
     [LOAD_VARIABLES.digest]: loadDigest,
     [LOAD_VARIABLES.database]: loadDatabaseHostOf(loadDatabase),
+    [RECORDS_VARIABLE]: records,
   };
   checkPolicy(steps, values);
   if (runFirst && !(await migratedFirst(steps, subscription, { release, digest }, values))) return 1;

@@ -31,6 +31,7 @@ import {
   CERTIFICATE_VARIABLES,
   deploy,
   deploymentName,
+  DEPLOYMENTS,
   describePlan,
   type DnsLookup,
   keyProblems,
@@ -59,6 +60,9 @@ import {
   policyCheck,
   realDns,
   realImages,
+  RECORDS_JOB,
+  RECORDS_VARIABLE,
+  recordTag,
   RESOURCE_GROUP,
   retriedWhileOffline,
   secretValues,
@@ -74,7 +78,13 @@ import {
 import type { Checkout } from './git.ts';
 import type { MigrationState } from './migration-state.ts';
 import { policyProblems } from './policy.ts';
-import { type EnvironmentSnapshot, environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
+import {
+  deploymentSnapshot,
+  type EnvironmentSnapshot,
+  environmentSnapshot,
+  inCopy,
+  type Snapshot,
+} from './snapshot.ts';
 
 const AZURE_DIR = import.meta.dirname;
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000a';
@@ -837,6 +847,11 @@ interface AzAnswers {
    * from the read back.
    */
   readonly record?: 'kept' | 'no job' | 'refused' | 'lost';
+  /**
+   * How apps reads the migration job's records before it deploys (S191): the job with its tags (the default); no job
+   * yet (a first deploy); the job with no tags; a read Azure refuses; or an answer that isn't JSON.
+   */
+  readonly recordsRead?: 'there' | 'untagged' | 'no job' | 'refused' | 'garbled';
 }
 
 /** How Azure has the API's newest revision at one read: a field left out is the default's. */
@@ -1039,6 +1054,7 @@ class RecordingAz implements Az {
   #restCall(args: readonly string[]): AzResult {
     const url = args[args.indexOf('--url') + 1] ?? '';
     if (url.includes('/containerApps/ca-agentx-stg-api')) return this.#api(args[2], url);
+    if (url.includes('/jobs/job-agentx-stg-migrate?')) return this.#recordsJob();
     if (args[2] === 'get' && url.includes('/containerApps/')) {
       this.#appReads += 1;
       return this.#appReads <= (this.options.removalReads ?? 1)
@@ -1094,6 +1110,30 @@ class RecordingAz implements Az {
         template: { containers: [{ name: 'api', image: image ?? `${IMAGE_REPOSITORY}@${digest}` }] },
       },
     });
+  }
+
+  /** The migration job, read for its records before apps deploys (S191), as the options say Azure answers. */
+  #recordsJob(): AzResult {
+    switch (this.options.recordsRead ?? 'there') {
+      case 'there':
+        return json({ name: 'job-agentx-stg-migrate', tags: this.tags });
+      case 'untagged':
+        return json({ name: 'job-agentx-stg-migrate' });
+      case 'no job':
+        return {
+          status: 3,
+          stdout: '',
+          stderr: `ERROR: Not Found({"error":{"code":"ResourceNotFound","message":"The Resource 'Microsoft.App/jobs/job-agentx-stg-migrate' under resource group 'rg-agentx-staging' was not found."}})\n`,
+        };
+      case 'refused':
+        return {
+          status: 1,
+          stdout: '',
+          stderr: `ERROR: Forbidden({"error":{"code":"AuthorizationFailed","message":"The client may not read /subscriptions/${SUBSCRIPTION}"}})`,
+        };
+      case 'garbled':
+        return { status: 0, stdout: 'not json', stderr: '' };
+    }
   }
 
   /** A write of the migration job's tags, as the options say Azure takes it. */
@@ -2690,6 +2730,8 @@ describe('deploy apps', () => {
       'rest --method get',
       'rest --method get',
       'rest --method get',
+      // The migration job, for the records the deployment keeps on it (S191).
+      'rest --method get',
       'deployment group create',
       'deployment group show',
       'containerapp list --subscription',
@@ -2714,6 +2756,8 @@ describe('deploy apps', () => {
       AGENTX_AZURE_LOAD_RUN: 'false',
       AGENTX_AZURE_LOAD_IMAGE_DIGEST: '',
       AGENTX_AZURE_LOAD_DATABASE_HOST: '',
+      // The job holds no records yet, so none are kept (S191).
+      AGENTX_AZURE_RECORDS: '{}',
     });
     expect(done.checked).toEqual([deployment?.values]);
     expect(done.terminal.said).toContain('Each app will scale to zero while nothing uses it.');
@@ -2729,6 +2773,62 @@ describe('deploy apps', () => {
     expect(done.terminal.said.slice(-1)[0]).toMatch(
       /^On a first deploy, run the four jobs next, in order \(deploy\/azure\/jobs\.ts\)\. Later, run migrate when a release adds a migration, and zitadel-setup when Zitadel moves to a new version\.$/,
     );
+  });
+
+  // S191 review: a deployment replaces the job's whole set of tags, so apps used to remove every record.
+  it("keeps the migration job's well-formed records through the deployment, and leaves off any other", async () => {
+    const az = new RecordingAz();
+    const foundation = 'a'.repeat(40);
+    const secrets = 'b'.repeat(40);
+    Object.assign(az.tags, {
+      'agentx-deployed-foundation': foundation,
+      'agentx-deployed-secrets': secrets,
+      // Not a commit, so it counts for nothing and is left off.
+      'agentx-deployed-access': 'main',
+      // No deployment records itself this way: apps' stamp is what the workloads run.
+      'agentx-deployed-apps': COMMIT,
+    });
+    const done = await run(['apps'], { answers, images: recordingImages(), az });
+    expect(done.status).toBe(0);
+    expect(JSON.parse(done.az.deployment?.values?.AGENTX_AZURE_RECORDS ?? '')).toEqual({
+      'agentx-deployed-foundation': foundation,
+      'agentx-deployed-secrets': secrets,
+    });
+    expect(done.terminal.said).toContain(
+      "The migration job's agentx-deployed-access isn't a commit, so it counts for nothing. This apps run leaves it off the job.",
+    );
+    expect(done.terminal.said).toContain(
+      `Kept on job-agentx-stg-migrate: foundation sent ${foundation}; secrets sent ${secrets}.`,
+    );
+    // The read names the job, at the version apps.bicep deploys it with.
+    const read = done.az.calls.find((call) => call.args.some((arg) => arg.includes('/jobs/job-agentx-stg-migrate?')));
+    expect(read?.args).toContain(
+      `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/jobs/job-agentx-stg-migrate?api-version=2026-01-01`,
+    );
+  });
+
+  it.each([
+    ['no job', 'No job-agentx-stg-migrate yet (this apps run creates it), so there are no records to keep.'],
+    ['untagged', 'job-agentx-stg-migrate holds no hand deploy records to keep.'],
+  ] as const)('keeps no records when the job is read as %s', async (recordsRead, said) => {
+    const done = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ recordsRead }) });
+    expect(done.status).toBe(0);
+    expect(done.az.deployment?.values?.AGENTX_AZURE_RECORDS).toBe('{}');
+    expect(done.terminal.said).toContain(said);
+  });
+
+  it.each([
+    ['refused', 'Forbidden, AuthorizationFailed'],
+    ['garbled', "its answer wasn't JSON"],
+  ] as const)('stops before deploying when the records read is %s, which would lose them', async (recordsRead, why) => {
+    const done = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ recordsRead }) });
+    expect(done.az.deployment).toBeUndefined();
+    expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+    expect((done.error as Error).message).toBe(
+      `Azure didn't give job-agentx-stg-migrate's tags (${why}), which hold the commit each hand deploy last sent. This apps run would remove them, and CI's release would then miss a change nobody deployed, so nothing was deployed. Run apps again; if it fails the same way, read the job's tags in the Azure portal (Container Apps jobs, job-agentx-stg-migrate, Tags).`,
+    );
+    // Never the subscription, which CI's public log would show.
+    expect((done.error as Error).message).not.toContain(SUBSCRIPTION);
   });
 
   it.each([
@@ -3876,6 +3976,8 @@ describe('the tool and the deployment agree', () => {
     // The load run's two (D2c), which apps always sets: their defaults serve the policy tests alone.
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.run}', 'false')`);
     expect(appsText).toContain(`readEnvironmentVariable('${LOAD_VARIABLES.digest}', '')`);
+    // The records apps keeps on the migration job (S191), as JSON: none unless deploy.ts reads some.
+    expect(appsText).toContain(`param records = json(readEnvironmentVariable('${RECORDS_VARIABLE}', '{}'))`);
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', '')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
@@ -3975,6 +4077,28 @@ describe('the tool and the deployment agree', () => {
     expect(appsWith('1')).toEqual({ fewest: [1, 1, 1], problems: [] });
     // Anything but a number stops the deployment before Azure sees it.
     expect(() => appsWith('one')).toThrow(/Failed to evaluate parameter "appMinReplicas"/);
+  });
+
+  // S191 review: a deployment replaces a resource's whole set of tags, so the records ride on the migration job's.
+  it("carries the records onto the migration job's tags alone, beside its own", () => {
+    const foundation = 'c'.repeat(40);
+    const jobsTags = (records: string | undefined) =>
+      inCopy((dir) => {
+        const values = records === undefined ? {} : { [RECORDS_VARIABLE]: records };
+        const apps = deploymentSnapshot(dir, DEPLOYMENTS.apps, RESOURCE_GROUP, values, SUBSCRIPTION);
+        return new Map(
+          apps.predictedResources
+            .filter((resource) => resource.type === 'Microsoft.App/jobs')
+            .map((resource) => [resource.name, resource.tags] as const),
+        );
+      });
+    const tagged = jobsTags(JSON.stringify({ [recordTag('foundation')]: foundation }));
+    const own = tagged.get('job-agentx-stg-db-setup');
+    expect(own).toBeDefined();
+    expect(tagged.get(RECORDS_JOB)).toEqual({ ...own, [recordTag('foundation')]: foundation });
+    for (const [name, tags] of tagged) if (name !== RECORDS_JOB) expect(tags).toEqual(own);
+    // None set (the policy tests, and a first deploy): the job's own tags alone.
+    expect(jobsTags(undefined).get(RECORDS_JOB)).toEqual(own);
   });
 });
 

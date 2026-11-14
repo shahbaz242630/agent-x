@@ -125,6 +125,24 @@ describe('whatIfShape and shapeHash', () => {
     ]);
   });
 
+  // S191 review: apps carries the records, so a record lost or moved is a real change the partner must see.
+  it("keeps a hand deploy's record on the migration job when it changes, lost or moved, like any other tag", () => {
+    const JOB = API.replace('containerApps/ca-agentx-stg-api', 'jobs/job-agentx-stg-migrate');
+    const record = (path: string, before: unknown, after: unknown) => ({ path, before, after });
+    const tagged = (...leaves: unknown[]) =>
+      modify([{ path: 'tags', propertyChangeType: 'Modify', children: leaves }], JOB);
+    for (const [kept, path] of [
+      [record('agentx-deployed-access', OLD, null), 'tags.agentx-deployed-access'],
+      [record('agentx-deployed-secrets', OLD, NEW), 'tags.agentx-deployed-secrets'],
+      [record('agentx-deployed-foundation', undefined, NEW), 'tags.agentx-deployed-foundation'],
+      [record('environment', 'staging', NEW), 'tags.environment'],
+    ] as const) {
+      expect(whatIfShape(result(tagged(kept)))).toEqual([
+        { resource: JOB, change: 'Modify', leaves: [{ path, before: kept.before, after: kept.after }] },
+      ]);
+    }
+  });
+
   it('refuses a what-if that did not succeed', () => {
     expect(() => whatIfShape({ status: 'Failed', changes: [] })).toThrow(
       "Azure's what-if didn't succeed (Failed): this step was not sent.",
@@ -366,6 +384,21 @@ describe('unattendedAz', () => {
         { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"AuthorizationFailed"}})' },
         "Azure's what-if of apps failed (Forbidden, AuthorizationFailed): apps was not sent.",
       ],
+      // AZ5d: the CLI's shape when the what-if's async answer can't be read, named by its code and the right alone.
+      [
+        { apps: EMPTY },
+        {
+          status: 1,
+          stdout: '',
+          stderr: `ERROR: (AuthorizationFailed) The client 'x' with object id 'y' does not have authorization to perform action 'Microsoft.Resources/subscriptions/operationresults/read' over scope '/subscriptions/${'0'.repeat(8)}' or the scope is invalid.\nCode: AuthorizationFailed\nMessage: The client 'x'`,
+        },
+        "Azure's what-if of apps failed (AuthorizationFailed, missing Microsoft.Resources/subscriptions/operationresults/read): apps was not sent.",
+      ],
+      [
+        { apps: EMPTY },
+        { status: 1, stdout: '', stderr: 'Code: InvalidTemplate\nMessage: about /subscriptions/abc' },
+        "Azure's what-if of apps failed (InvalidTemplate): apps was not sent.",
+      ],
     ] as const) {
       const { az, calls } = whatIfAz(whatIf === undefined ? {} : { whatIf });
       const said: string[] = [];
@@ -536,6 +569,10 @@ function infraOver(options: {
   readonly line?: readonly string[];
   readonly deploy?: (request: Request, steps: Steps) => Promise<number>;
   readonly tags?: Readonly<Record<string, string>>;
+  /** The commit the workloads run (a hand apps puts them at the merge's). */
+  readonly running?: string;
+  /** What changed since other commits than OLD (a record's). */
+  readonly since?: Readonly<Record<string, readonly string[]>>;
 }) {
   const said: string[] = [];
   const requests: { request: Request; steps: Steps }[] = [];
@@ -546,14 +583,14 @@ function infraOver(options: {
       const url = args[args.indexOf('--url') + 1] ?? '';
       const workload = url.includes('/jobs/') ? 'migrate' : 'api';
       return ok({
-        properties: { template: { containers: [container(workload, OLD, options.role)] } },
+        properties: { template: { containers: [container(workload, options.running ?? OLD, options.role)] } },
         tags: options.tags ?? {},
       });
     },
   };
   const infra: InfraSteps = {
     az,
-    history: history(options.line ?? [OLD, NEW], { [OLD]: options.changed ?? [] }),
+    history: history(options.line ?? [OLD, NEW], { [OLD]: options.changed ?? [], ...options.since }),
     references: () => Promise.resolve(SAID),
     say: (line) => said.push(line),
     answers: {
@@ -633,6 +670,29 @@ describe('needsAt and plan', () => {
       tags: { 'agentx-deployed-foundation': NEW },
     });
     expect((await needsAt(recorded.infra, NEW, DIGEST)).steps).toEqual(['apps']);
+  });
+
+  // AZ5c: S190's first dry run planned nothing after a hand apps at the merge, though no foundation had sent #646.
+  it('plans a deployment whose own record is behind on its files, though a hand apps moved the workloads past them', async () => {
+    const handApps = infraOver({
+      running: NEW,
+      tags: { 'agentx-deployed-foundation': OLD },
+      since: { [OLD]: ['deploy/azure/main.bicep', 'deploy/azure/apps.bicep'] },
+    });
+    expect(await needsAt(handApps.infra, NEW, DIGEST)).toEqual({ steps: ['foundation'], byHand: [] });
+    // A record behind on a file only a person deploys says so, and plans nothing for it.
+    const access = infraOver({
+      running: NEW,
+      tags: { 'agentx-deployed-access': OLD },
+      since: { [OLD]: ['deploy/azure/access.bicep'] },
+    });
+    expect(await needsAt(access.infra, NEW, DIGEST)).toEqual({
+      steps: [],
+      byHand: ['deploy/azure/access.bicep: access reads it, which only the partner runs (deploy.ts access)'],
+    });
+    // Every record current: nothing.
+    const current = infraOver({ running: NEW, tags: { 'agentx-deployed-foundation': NEW } });
+    expect(await needsAt(current.infra, NEW, DIGEST)).toEqual({ steps: [], byHand: [] });
   });
 });
 
@@ -859,6 +919,10 @@ describe('the deployers (deployers/deployers.bicep)', () => {
     // or budget write (review S190), all of which are the partner's access deployment.
     expect(access).not.toMatch(/roleDefinitions@/);
     expect(text('deployers.bicep')).not.toMatch(/'Microsoft\.(?:Authorization|Consumption|Insights)\/[^']*\/write'/);
+    // AZ5d: each role can read a what-if's async answer, which Azure serves from the subscription's results.
+    expect(
+      text('deployers.bicep').match(/'Microsoft\.Resources\/subscriptions\/operationresults\/read'/g),
+    ).toHaveLength(2);
     // Owner, User Access Administrator, and any wildcard action.
     expect(everything).not.toMatch(/8e3af657-a8ff-443c-a75c-2fe8c4bcb635|18d7d88d-d35e-4fb5-a5c3-7773c20a72d9|\/\*'/);
   });

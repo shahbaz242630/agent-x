@@ -82,6 +82,8 @@ resource infraSubscriptionRole 'Microsoft.Authorization/roleDefinitions@2022-04-
           'Microsoft.Resources/deployments/cancel/action'
           'Microsoft.Resources/deployments/operations/read'
           'Microsoft.Resources/deployments/operationstatuses/read'
+          // A what-if's answer is fetched from the subscription's async results, not the deployment's (AZ5d)
+          'Microsoft.Resources/subscriptions/operationresults/read'
         ]
         notActions: []
         dataActions: []
@@ -108,6 +110,8 @@ resource whatIfRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
           'Microsoft.Resources/deployments/whatIf/action'
           'Microsoft.Resources/deployments/validate/action'
           'Microsoft.Resources/deployments/operationstatuses/read'
+          // A what-if's answer is fetched from the subscription's async results, not the deployment's (AZ5d)
+          'Microsoft.Resources/subscriptions/operationresults/read'
         ]
         notActions: []
         dataActions: []
