@@ -613,7 +613,7 @@ export function loginIdProblems(value: string): string[] {
   return read.ok ? [] : [read.problem];
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** A host name as DNS writes it: lower case, two labels or more, none starting or ending with a hyphen. */
 const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;

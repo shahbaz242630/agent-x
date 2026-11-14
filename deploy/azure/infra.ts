@@ -41,6 +41,7 @@ import {
   type Deployment,
   DEPLOYMENTS,
   deploymentName,
+  EMAIL,
   realAz,
   realSteps,
   realTerminal,
@@ -648,6 +649,12 @@ export async function deployDeployers(terminal: Terminal, az: Az, now: () => Dat
   const subscription = text(account.id);
   terminal.say(`Signed in to the subscription "${text(account.name)}" (${subscription}).`);
   if (!/^y(?:es)?$/i.test(await terminal.ask("Deploy staging's deployers into it? [y/N] "))) return 1;
+  // The access alarm's address (AZ5e), asked as access asks it, so it stays out of the repository.
+  const email = await terminal.ask('Address the access alarm emails (the alert address): ');
+  if (!EMAIL.test(email)) {
+    terminal.say("That isn't an email address: nothing was deployed.");
+    return 1;
+  }
   const name = deploymentName('deployers', now());
   const where = ['--subscription', subscription, '--name', name];
   terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
@@ -663,7 +670,7 @@ export async function deployDeployers(terminal: Terminal, az: Az, now: () => Dat
       'deployers/staging.bicepparam',
       '--confirm-with-what-if',
     ],
-    {},
+    { [ANSWER_VARIABLES.alertEmail]: email },
   );
   const shown =
     status === 0

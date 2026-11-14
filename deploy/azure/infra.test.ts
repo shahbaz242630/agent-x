@@ -797,14 +797,15 @@ describe('answers, the summary and main', () => {
 
 describe('deployDeployers, from the partner’s terminal', () => {
   /** A terminal answering `answer` to its one question, keeping what it says. */
-  const terminal = (answer: string) => {
+  /** A terminal answering each question in turn, the last answer again after that. */
+  const terminal = (...answers: string[]) => {
     const said: string[] = [];
     const asked: string[] = [];
     const scripted: Terminal = {
       say: (line) => said.push(line),
       ask: (question) => {
         asked.push(question);
-        return Promise.resolve(answer);
+        return Promise.resolve(answers[Math.min(asked.length, answers.length) - 1] ?? '');
       },
       askHidden: () => Promise.reject(new Error('no hidden question')),
     };
@@ -813,9 +814,11 @@ describe('deployDeployers, from the partner’s terminal', () => {
   /** A CLI whose what-if ends with `status`, and whose read back shows `state` with the two client IDs. */
   const cli = (status: number, state: string) => {
     const calls: (readonly string[])[] = [];
+    const sent: Readonly<Record<string, string>>[] = [];
     const az: Az = {
-      interactive: (args) => {
+      interactive: (args, values) => {
         calls.push(args);
+        sent.push(values);
         return status;
       },
       run: (args) => {
@@ -827,15 +830,21 @@ describe('deployDeployers, from the partner’s terminal', () => {
         });
       },
     };
-    return { az, calls };
+    return { az, calls, sent };
   };
   const NOW = () => new Date('2026-11-13T10:00:00Z');
+  const ADDRESS = 'alerts@example.test';
 
   it('asks first, deploys with the what-if answered by the partner, then gives each environment its client ID', async () => {
-    const { scripted, said, asked } = terminal('y');
-    const { az, calls } = cli(0, 'Succeeded');
+    const { scripted, said, asked } = terminal('y', ADDRESS);
+    const { az, calls, sent } = cli(0, 'Succeeded');
     expect(await deployDeployers(scripted, az, NOW)).toBe(0);
-    expect(asked).toEqual(["Deploy staging's deployers into it? [y/N] "]);
+    expect(asked).toEqual([
+      "Deploy staging's deployers into it? [y/N] ",
+      'Address the access alarm emails (the alert address): ',
+    ]);
+    // The access alarm's address (AZ5e) as the parameters file reads it, never in the repository.
+    expect(sent[0]).toEqual({ AGENTX_AZURE_ALERT_EMAIL: ADDRESS });
     expect(calls[1]).toEqual([
       'deployment',
       'sub',
@@ -861,12 +870,18 @@ describe('deployDeployers, from the partner’s terminal', () => {
       [1, 'Succeeded'],
       [0, 'Failed'],
     ] as const) {
-      const { scripted, said } = terminal('y');
+      const { scripted, said } = terminal('y', ADDRESS);
       expect(await deployDeployers(scripted, cli(status, state).az, NOW)).toBe(1);
       expect(said.at(-1)).toMatch(
         /^The deployers weren't deployed \((?:declined or not read|Failed)\): nothing more was done\.$/,
       );
     }
+    // No address, nothing sent.
+    const unaddressed = cli(0, 'Succeeded');
+    const { scripted, said } = terminal('y', 'not an address');
+    expect(await deployDeployers(scripted, unaddressed.az, NOW)).toBe(1);
+    expect(unaddressed.calls).toHaveLength(1);
+    expect(said.at(-1)).toBe("That isn't an email address: nothing was deployed.");
   });
 
   it('main: names a secret the environment lacks before anything starts', async () => {
@@ -954,5 +969,38 @@ describe('the deployers (deployers/deployers.bicep)', () => {
       'staging-infra',
       'staging-whatif',
     ]);
+    // AZ5e: the access alarm, in this group (out of the infra identity's reach), on the main workspace.
+    const [alarm, ...moreAlarms] = of('Microsoft.Insights/scheduledQueryRules');
+    expect(moreAlarms).toEqual([]);
+    expect(alarm?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
+    const properties = alarm?.properties as {
+      enabled?: boolean;
+      scopes?: string[];
+      criteria?: { allOf?: { query?: string }[] };
+      actions?: { actionGroups?: string[] };
+    };
+    expect(properties.enabled).toBe(true);
+    expect(properties.scopes).toEqual([
+      `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces/log-agentx-stg`,
+    ]);
+    const query = String(properties.criteria?.allOf?.[0]?.query);
+    // Any app's, never a person's (the partner's own deploys), refused attempts included (no status filter).
+    expect(query).toContain('| where Caller !has "@" |');
+    expect(query).not.toMatch(/ActivityStatus/);
+    for (const operation of [
+      'roleAssignments/write',
+      'roleAssignments/delete',
+      'roleDefinitions/write',
+      'federatedIdentityCredentials/write',
+      'federatedIdentityCredentials/delete',
+      'policyAssignments/delete',
+      'policyDefinitions/write',
+      'locks/delete',
+    ]) {
+      expect(query).toContain(`/${operation}"`);
+    }
+    const [group] = of('Microsoft.Insights/actionGroups');
+    expect(group?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
+    expect(properties.actions?.actionGroups).toEqual([group?.id]);
   });
 });
