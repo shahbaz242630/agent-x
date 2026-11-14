@@ -586,16 +586,20 @@ export async function deployStep(infra: InfraSteps, step: Sent, commit: string, 
   return infra.deploy(requestFor(step, commit), stepsFor(infra, 'deploy', approved.whatIf));
 }
 
-/** Each prompt's answer from GitHub's environment, or an error naming the secret not set (never a value). */
+/**
+ * Each prompt's answer from GitHub's environment, or an error naming the secret not set (never a value). Trimmed, as
+ * the terminal trims a typed answer: a secret set through a pipe can carry a line break (S192's first apps plan).
+ */
 export function answersFrom(env: Readonly<Record<string, string | undefined>>): Record<Answer, string> {
-  const missing = Object.values(ANSWER_VARIABLES).filter((variable) => (env[variable] ?? '') === '');
+  const value = (variable: string): string => (env[variable] ?? '').trim();
+  const missing = Object.values(ANSWER_VARIABLES).filter((variable) => value(variable) === '');
   if (missing.length > 0) {
     throw new Error(
       `GitHub's environment doesn't give ${missing.join(', ')}: set each as a secret of staging-whatif and staging-infra (Settings, Environments). Nothing was deployed.`,
     );
   }
   return Object.fromEntries(
-    Object.entries(ANSWER_VARIABLES).map(([which, variable]) => [which, String(env[variable])]),
+    Object.entries(ANSWER_VARIABLES).map(([which, variable]) => [which, value(variable)]),
   ) as Record<Answer, string>;
 }
 

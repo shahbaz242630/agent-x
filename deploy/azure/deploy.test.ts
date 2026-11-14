@@ -19,6 +19,7 @@ import { APP_KEYS, PUBLIC_HALVES } from './app-keys.ts';
 const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
 import {
   ACTION_GROUP,
+  hostShapeProblem,
   ALERTING,
   APP_KEYS_VARIABLE,
   APP_VARIABLES,
@@ -4295,12 +4296,34 @@ describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
     expect(done.terminal.said).toContainEqual(expect.stringContaining('--migrate-first: the migration job will run'));
   });
 
+  it('says what is wrong with a host shape without its value, which CI masks (S192)', () => {
+    expect(
+      [
+        'https://auth.example.invalid',
+        'auth.example.invalid\r',
+        'auth.example.invalid/',
+        'auth.example.invalid:443',
+        'auth',
+        'auth_x.example',
+      ].map(hostShapeProblem),
+    ).toEqual([
+      'it starts with a scheme such as https://: give the name alone',
+      'it holds a space or a line break',
+      'it holds a slash: give the name alone, no path',
+      'it ends with a port: give the name alone',
+      'it has no dot: give the whole name',
+      "it isn't a DNS name (letters, digits and hyphens, dot-separated)",
+    ]);
+  });
+
   it('apps: refuses a host the environment gives in the wrong shape, sending nothing', async () => {
     const done = await run(['apps', '--commit', COMMIT], {
       unattended: { mode: 'deploy', answers: { ...ANSWERS, appHost: 'not a host' } },
       images: recordingImages(),
     });
-    expect((done.error as Error).message).toBe("not a host isn't a host name: nothing was deployed.");
+    expect((done.error as Error).message).toBe(
+      "not a host isn't a host name (it holds a space or a line break): nothing was deployed.",
+    );
     expect(done.az.deployment).toBeUndefined();
   });
 });
