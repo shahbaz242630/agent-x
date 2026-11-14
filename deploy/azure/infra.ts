@@ -37,20 +37,24 @@ import {
   type Answer,
   type Az,
   azJson,
+  commandFor,
   deploy,
   type Deployment,
   DEPLOYMENTS,
   deploymentName,
   EMAIL,
+  leaveRecord,
+  type Part,
   realAz,
   realSteps,
   realTerminal,
   type Request,
+  sentFrom,
   type Steps,
   type Terminal,
   text,
 } from './deploy.ts';
-import { type History, realHistory } from './git.ts';
+import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import {
   azureRefusal,
   behindRecords,
@@ -351,8 +355,11 @@ function partOf(args: readonly string[]): Sent {
   return part as Sent;
 }
 
-/** The deployments only a person runs: the certificates (issued only while the apps keep running) and access (AZ5). */
-const BY_HAND: ReadonlySet<Deployment> = new Set(['certificates', 'access']);
+/**
+ * The parts only a person runs: the certificates (issued only while the apps keep running), access and the deployers
+ * (AZ5: each can widen what CI may do).
+ */
+const BY_HAND: ReadonlySet<Part> = new Set(['certificates', 'access', 'deployers']);
 
 /**
  * The CLI for an unattended run (AZ5): deploy.ts's what-if-and-send (`--confirm-with-what-if`, which waits for a
@@ -428,13 +435,13 @@ export interface Needs {
 /**
  * The steps for the files changed since what staging runs, as the release's gate reads them: a file a deployment
  * reads needs that deployment unless its record has it (`recorded`); a file of the set-up job's own areas needs apps,
- * for the image, then the job; a file the certificates or access read (every custom role, the guardrails, the budget:
- * AZ5), and any other file under deploy/azure, the deployers' among them, is a person's.
+ * for the image, then the job; a file the certificates, access (every custom role, the guardrails, the budget: AZ5) or
+ * the deployers read, and any other file under deploy/azure, is a person's.
  */
 export function needsOf(
   changed: readonly string[],
   readers: Readers,
-  recorded: (deployment: Deployment, file: string) => boolean,
+  recorded: (deployment: Part, file: string) => boolean,
 ): Needs {
   const each = changed.map((file) => fileNeeds(file, readers, recorded));
   const steps = new Set(each.flatMap((needs) => needs.steps));
@@ -442,7 +449,7 @@ export function needsOf(
 }
 
 /** What one changed file needs (needsOf). */
-function fileNeeds(file: string, readers: Readers, recorded: (deployment: Deployment, file: string) => boolean): Needs {
+function fileNeeds(file: string, readers: Readers, recorded: (deployment: Part, file: string) => boolean): Needs {
   const area = handDeployed(file);
   if (area === undefined) return { steps: [], byHand: [] };
   const read = readers.get(file.toLowerCase());
@@ -456,7 +463,7 @@ function fileNeeds(file: string, readers: Readers, recorded: (deployment: Deploy
     steps: unrecorded.filter((deployment): deployment is Sent => !BY_HAND.has(deployment)),
     byHand: unrecorded
       .filter((deployment) => BY_HAND.has(deployment))
-      .map((deployment) => `${file}: ${deployment} reads it, which only the partner runs (deploy.ts ${deployment})`),
+      .map((deployment) => `${file}: ${deployment} reads it, which only the partner runs (${commandFor(deployment)})`),
   };
 }
 
@@ -491,7 +498,7 @@ export async function needsAt(infra: InfraSteps, commit: string, digest: string)
   const outside = [...releases].filter((release) => !infra.history.isAncestor(release, commit));
   if (outside.length > 0) return { steps: [], byHand: [`staging runs ${outside.join(', ')}, outside this history`] };
   const changed = new Set([...releases].flatMap((release) => infra.history.changedFiles(release, commit)));
-  const recorded = (deployment: Deployment, file: string): boolean => {
+  const recorded = (deployment: Part, file: string): boolean => {
     const sent = deployment === 'apps' ? undefined : records.get(deployment);
     return (
       sent !== undefined &&
@@ -645,10 +652,18 @@ async function runDeploy(infra: InfraSteps, args: readonly string[], outlets: Ou
 }
 
 /**
- * The deployers (deployers/deployers.bicep), from the partner's own terminal: Azure's what-if read and answered
- * there, as every hand deploy is, then the two client IDs GitHub's environments take.
+ * The deployers (deployers/deployers.bicep), from the partner's own terminal and a clean checkout: Azure's what-if
+ * read and answered there, as every hand deploy is, then the two client IDs GitHub's environments take, then the
+ * commit sent recorded on the migration job (AZ5h).
  */
-export async function deployDeployers(terminal: Terminal, az: Az, now: () => Date): Promise<number> {
+export async function deployDeployers(
+  terminal: Terminal,
+  az: Az,
+  now: () => Date,
+  checkout: () => Checkout = () => realCheckout(),
+): Promise<number> {
+  // From a clean checkout, as every recorded hand deploy: the record says this commit's Bicep is what Azure holds.
+  const commit = sentFrom({ checkout }, 'deployers');
   const account = azJson(az, ['account', 'show']) as { id?: unknown; name?: unknown };
   const subscription = text(account.id);
   terminal.say(`Signed in to the subscription "${text(account.name)}" (${subscription}).`);
@@ -695,7 +710,8 @@ export async function deployDeployers(terminal: Terminal, az: Az, now: () => Dat
   );
   terminal.say(`  staging-infra: ${text(ended.outputs?.infraClientId?.value)}`);
   terminal.say(`  staging-whatif: ${text(ended.outputs?.whatIfClientId?.value)}`);
-  return 0;
+  // AZ5h: recorded on the migration job, so CI's release takes a deployers change as sent without a hand apps.
+  return leaveRecord({ az, terminal }, subscription, 'deployers', commit) ? 0 : 1;
 }
 
 /** The command asked for, with the real CLI, history, Bicep and deploy.ts unless given (tests). */
