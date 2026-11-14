@@ -75,6 +75,7 @@ module watch 'watch.bicep' = {
     // The foundation's workspace, by name (names.bicep's): it exists before this runs.
     workspaceId: resourceId(subscription().subscriptionId, stagingGroupName, 'Microsoft.OperationalInsights/workspaces', 'log-agentx-${short}')
     alertEmail: alertEmail
+    infraPrincipalId: identities.outputs.infraPrincipalId
   }
 }
 

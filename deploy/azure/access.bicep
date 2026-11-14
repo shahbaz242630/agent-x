@@ -7,6 +7,8 @@
 // - every custom role our deployments give (modules/roles.bicep), by the same
 //   names they had in the foundation (moved, S190): Azure keeps each role
 // - the live database server's delete lock (S185, modules/server-lock.bicep)
+// - the main workspace's delete lock (AZ5e, modules/workspace-lock.bicep): the
+//   access alarm reads it, so CI may not delete it
 // - Azure's own refusals on the resource group (guardrails.bicep, AZ2)
 // - the subscription's activity log into the main workspace (ADR-012 §6)
 // - the budget
@@ -72,6 +74,14 @@ module serverLock 'modules/server-lock.bicep' = {
   scope: resourceGroup(names.group)
   params: {
     serverName: names.server
+  }
+}
+
+// The main workspace's delete lock (AZ5e): the access alarm reads the activity log from it.
+module workspaceLock 'modules/workspace-lock.bicep' = {
+  scope: resourceGroup(names.group)
+  params: {
+    workspaceName: names.workspace
   }
 }
 

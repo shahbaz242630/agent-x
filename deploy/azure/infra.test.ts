@@ -796,7 +796,6 @@ describe('answers, the summary and main', () => {
 });
 
 describe('deployDeployers, from the partner’s terminal', () => {
-  /** A terminal answering `answer` to its one question, keeping what it says. */
   /** A terminal answering each question in turn, the last answer again after that. */
   const terminal = (...answers: string[]) => {
     const said: string[] = [];
@@ -993,12 +992,63 @@ describe('the deployers (deployers/deployers.bicep)', () => {
       'roleDefinitions/write',
       'federatedIdentityCredentials/write',
       'federatedIdentityCredentials/delete',
+      'roleDefinitions/delete',
+      'policyAssignments/write',
       'policyAssignments/delete',
       'policyDefinitions/write',
+      'policyDefinitions/delete',
+      'policyExemptions/write',
+      'policySetDefinitions/delete',
       'locks/delete',
+      'accessPolicies/write',
     ]) {
       expect(query).toContain(`/${operation}"`);
     }
+    // Review S192: what would blind that alarm (its workspace rewritten or deleted, an alarm or log setting deleted)
+    // or a trust written, by the infra identity, on Azure's own alert, which reads no workspace and so no cap; and the
+    // alarm's own health.
+    const alerts = of('Microsoft.Insights/activityLogAlerts');
+    expect(alerts.map((each) => each.name)).toEqual([
+      'alert-agentx-stg-access-path-changed',
+      'alert-agentx-stg-access-alarm-unhealthy',
+    ]);
+    const path = alerts[0]?.properties as {
+      scopes?: string[];
+      condition?: { allOf?: { field?: string; equals?: string; anyOf?: { equals?: string }[] }[] };
+    };
+    expect(path.scopes).toEqual([`/subscriptions/${SUBSCRIPTION}`]);
+    const fields = path.condition?.allOf ?? [];
+    expect(fields.map((each) => each.field)).toEqual(['category', 'caller', 'status', undefined]);
+    // The infra identity's principal ID, from the identities module's own output: not the what-if's, not another's.
+    expect(fields[1]?.equals).toMatch(/^\[reference\(.*'identities-.*\)\.outputs\.infraPrincipalId\.value\]$/);
+    expect((fields[3]?.anyOf ?? []).map((each) => each.equals)).toEqual(
+      expect.arrayContaining([
+        'Microsoft.OperationalInsights/workspaces/write',
+        'Microsoft.OperationalInsights/workspaces/delete',
+        'Microsoft.Insights/diagnosticSettings/delete',
+        'Microsoft.Insights/actionGroups/delete',
+        'Microsoft.Insights/scheduledQueryRules/delete',
+        'Microsoft.Insights/activityLogAlerts/delete',
+        'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+        'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete',
+      ]),
+    );
+    expect((alerts[1]?.properties as { condition?: unknown }).condition).toEqual({
+      allOf: [
+        { field: 'category', equals: 'ResourceHealth' },
+        { field: 'resourceType', equals: 'Microsoft.Insights/scheduledQueryRules' },
+        {
+          anyOf: [
+            { field: 'properties.currentHealthStatus', equals: 'Degraded' },
+            { field: 'properties.currentHealthStatus', equals: 'Unavailable' },
+          ],
+        },
+      ],
+    });
+    expect((alerts[1]?.properties as { scopes?: string[] }).scopes).toEqual([
+      `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging-deployers`,
+    ]);
+    expect(String((properties as { skipQueryValidation?: unknown }).skipQueryValidation)).toBe('undefined');
     const [group] = of('Microsoft.Insights/actionGroups');
     expect(group?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
     expect(properties.actions?.actionGroups).toEqual([group?.id]);
