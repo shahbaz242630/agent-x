@@ -10,6 +10,9 @@
 //   the server's name resolves to its private address inside the network.
 //   Only the apps subnet, and the server's own subnet, may reach its port;
 //   it reaches out only to its own subnet and the region's Storage (AZ8)
+// - endpoints: the audit-export store's private endpoint (AZ11, PL-43), with a
+//   private DNS zone so the store's name resolves to its private address inside
+//   the network. Only the apps subnet may reach it, on 443
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
@@ -19,7 +22,10 @@ param location string
 param name string
 param appsRulesName string
 param databaseRulesName string
+param endpointsRulesName string
 param databaseZoneName string
+@description('Microsoft\'s fixed zone for blob private endpoints (main.bicep).')
+param blobZoneName string
 param tags object
 param addressSpace string
 
@@ -27,6 +33,7 @@ param addressSpace string
 // same function for what the API trusts as its proxy.
 var appsPrefix = appsSubnetPrefix(addressSpace)
 var databasePrefix = cidrSubnet(addressSpace, 24, 1)
+var endpointsPrefix = cidrSubnet(addressSpace, 24, 2)
 
 // GitHub's published addresses for pulling our image, refreshed by hand
 // (deploy/azure/github-ranges.ts says where they come from and how). Loaded at
@@ -144,6 +151,20 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           sourcePortRange: '*'
           destinationAddressPrefix: databasePrefix
           destinationPortRange: '5432'
+        }
+      }
+      {
+        name: 'allow-out-endpoints'
+        properties: {
+          description: 'The audit-export store, through its private endpoint, and nothing else in the network (AZ11).'
+          priority: 225
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: endpointsPrefix
+          destinationPortRange: '443'
         }
       }
       {
@@ -274,10 +295,10 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
       }
       {
         // The regional tag, as the key vault's: it still covers every account
-        // in this region, not ours alone (PL-43 closes that with a private endpoint).
+        // in this region, not ours alone; the audit exports' store left it for a private endpoint (AZ11).
         name: 'allow-out-storage'
         properties: {
-          description: 'Audit exports and activity downloads, to their stores through the subnet\'s Storage endpoint, in this region only.'
+          description: 'Activity downloads, to their store through the subnet\'s Storage endpoint, in this region only.'
           priority: 310
           direction: 'Outbound'
           access: 'Allow'
@@ -434,6 +455,60 @@ resource databaseRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
   }
 }
 
+// A private endpoint opens no connection of its own (NSGs are stateful), so the
+// apps' 443 is all that is let in and nothing is let out.
+resource endpointsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
+  name: endpointsRulesName
+  location: location
+  tags: tags
+  properties: {
+    securityRules: [
+      {
+        name: 'allow-https-from-apps'
+        properties: {
+          description: 'The apps and jobs reach the audit-export store\'s private endpoint; nothing else in the network does.'
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: endpointsPrefix
+          destinationPortRange: '443'
+        }
+      }
+      {
+        name: 'deny-rest-of-network'
+        properties: {
+          description: 'Overrides Azure\'s default rule that lets the whole network in.'
+          priority: 4000
+          direction: 'Inbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: 'VirtualNetwork'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      {
+        name: 'deny-out-rest'
+        properties: {
+          description: 'Overrides Azure\'s default rules that let the subnet reach the whole internet: nothing leaves.'
+          priority: 4000
+          direction: 'Outbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: '*'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+    ]
+  }
+}
+
 resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
   name: name
   location: location
@@ -458,8 +533,8 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
               }
             }
           ]
-          // Lets the key vault and the audit-export store take requests from
-          // this subnet and refuse the rest (keyvault.bicep, evidence.bicep).
+          // Lets the key vault and the activity downloads' store take requests
+          // from this subnet and refuse the rest (keyvault.bicep, activity-downloads.bicep).
           serviceEndpoints: [
             {
               service: 'Microsoft.KeyVault'
@@ -497,6 +572,17 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
           ]
         }
       }
+      {
+        name: 'endpoints'
+        properties: {
+          addressPrefix: endpointsPrefix
+          networkSecurityGroup: {
+            id: endpointsRules.id
+          }
+          // Without it Azure skips the subnet's NSG for its private endpoints (Microsoft).
+          privateEndpointNetworkPolicies: 'Enabled'
+        }
+      }
     ]
   }
 }
@@ -515,6 +601,28 @@ resource databaseDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
   tags: tags
   properties: {
     registrationEnabled: false
+    virtualNetwork: {
+      id: network.id
+    }
+  }
+}
+
+// The store's public name is a CNAME into this zone, so the apps' unchanged URL resolves to the endpoint.
+resource blobDns 'Microsoft.Network/privateDnsZones@2024-06-01' = {
+  name: blobZoneName
+  location: 'global'
+  tags: tags
+}
+
+resource blobDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
+  parent: blobDns
+  name: network.name
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    // Another account behind a private endpoint elsewhere (the platform's, the server's backups) still resolves publicly.
+    resolutionPolicy: 'NxDomainRedirect'
     virtualNetwork: {
       id: network.id
     }

@@ -160,6 +160,11 @@ resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   tags: tags
 }
 
+// Microsoft's fixed zone for blob private endpoints (AZ11): the store's public name is a CNAME into it.
+// Written out, not from environment(), so the snapshot resolves it for the policy (Azure's public cloud alone).
+#disable-next-line no-hardcoded-env-urls
+var blobZoneName = 'privatelink.blob.core.windows.net'
+
 // The ids one module hands another, built here from the same names rather than
 // passed on as module outputs. So a snapshot resolves every one of them, and
 // the policy can check each points at a resource this deployment creates.
@@ -170,7 +175,9 @@ var ids = {
   network: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks', names.network)
   appsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'apps')
   databaseSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'database')
+  endpointsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'endpoints')
   databaseZone: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/privateDnsZones', names.databaseZone)
+  blobZone: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/privateDnsZones', blobZoneName)
   appsEnvironment: resourceId(subscription().subscriptionId, group.name, 'Microsoft.App/managedEnvironments', names.appsEnvironment)
 }
 
@@ -195,7 +202,10 @@ module network 'modules/network.bicep' = {
     name: names.network
     appsRulesName: names.appsRules
     databaseRulesName: names.databaseRules
+    // Named here, not in names.bicep, as the budget is: only the foundation uses it.
+    endpointsRulesName: 'nsg-agentx-${environment}-endpoints'
     databaseZoneName: names.databaseZone
+    blobZoneName: blobZoneName
     tags: tags
     addressSpace: networkAddressSpace
   }
@@ -332,6 +342,8 @@ module evidence 'modules/evidence.bicep' = {
     name: evidenceAccountName(short, nameSuffix)
     tags: tags
     appsSubnetId: ids.appsSubnet
+    endpointsSubnetId: ids.endpointsSubnet
+    blobZoneId: ids.blobZone
     workspaceId: ids.workspace
     writerIdentityName: identityName(environment, 'operator')
     anchorKeepers: anchorKeepers
@@ -340,7 +352,8 @@ module evidence 'modules/evidence.bicep' = {
     immutability: evidenceImmutability
     redundancy: evidenceRedundancy
   }
-  // The subnet's Storage endpoint, the workspace and the operator's and the anchors' keepers' identities must exist first.
+  // The endpoints subnet, the zone linked to the network, the workspace and the operator's and the anchors' keepers' identities must exist first.
+  // The guardrail allowing the private endpoint's types is access's (AZ11a, live since 13 Nov 2026), deployed before this.
   dependsOn: [
     network
     monitoring
