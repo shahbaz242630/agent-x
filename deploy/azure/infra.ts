@@ -52,6 +52,7 @@ import {
 import { type History, realHistory } from './git.ts';
 import {
   azureRefusal,
+  behindRecords,
   decide,
   handDeployed,
   ORDER,
@@ -488,7 +489,16 @@ export async function needsAt(infra: InfraSteps, commit: string, digest: string)
       !infra.history.changedFiles(sent, commit).some((each) => each.toLowerCase() === file.toLowerCase())
     );
   };
-  return needsOf([...changed], readers, recorded);
+  // AZ5c: each recorded deployment behind its own files, which a hand apps moved the workloads past, is needed too.
+  const behind = behindRecords(commit, infra.history, readers, records).map(({ deployment, file }) =>
+    fileNeeds(file, new Map([[file.toLowerCase(), [deployment]]]), () => false),
+  );
+  const fromWorkloads = needsOf([...changed], readers, recorded);
+  const steps = new Set([...fromWorkloads.steps, ...behind.flatMap((needs) => needs.steps)]);
+  return {
+    steps: STEPS.filter((step) => steps.has(step)),
+    byHand: [...new Set([...fromWorkloads.byHand, ...behind.flatMap((needs) => needs.byHand)])],
+  };
 }
 
 /** The deploy.ts request each step makes: the plain foundation, secrets' machine part, apps migrating first. */

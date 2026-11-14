@@ -484,6 +484,36 @@ function changedFile(
   return { kind: 'deployed', line: `${file} changed since ${release}: deployed by hand, ${sent.join(', ')}` };
 }
 
+/** A file a recorded deployment reads, changed since that deployment's own record (behindRecords). */
+export interface Behind {
+  readonly deployment: Recorded;
+  readonly file: string;
+  readonly sent: string;
+}
+
+/**
+ * AZ5c: each file a recorded deployment reads that changed since its own record, whatever the workloads run. Measured
+ * from the workloads alone, a hand `apps` at a later commit moved them past a foundation or secrets change that was
+ * never sent (S190's first dry run). A record outside this history, or none, says nothing here (the workloads' own
+ * changes still do).
+ */
+export function behindRecords(
+  commit: string,
+  history: History,
+  readers: Readers | undefined,
+  records: Records,
+): Behind[] {
+  if (readers === undefined) return [];
+  return [...records].flatMap(([deployment, sent]) =>
+    history.isAncestor(sent, commit)
+      ? history
+          .changedFiles(sent, commit)
+          .filter((file) => readers.get(file.toLowerCase())?.includes(deployment) === true)
+          .map((file) => ({ deployment, file, sent }))
+      : [],
+  );
+}
+
 /**
  * Decision 49 (PL-66): each migration this release would run that adds a trigger to a table already built, or a new
  * body to a function already written, which the image staging runs (`release`) didn't carry as coming
@@ -528,10 +558,12 @@ export function decide(
     if (found === undefined) throw new Error(`nothing was read for ${workload}`);
     return [workload, found] as const;
   });
-  if (all.every(([, found]) => found.release === commit && found.image === image)) return { kind: 'current' };
   if (all.every(([, found]) => found.release !== commit && history.isAncestor(commit, found.release))) {
     return { kind: 'past' };
   }
+  const behind = behindRecords(commit, history, readers, records);
+  const current = all.every(([, found]) => found.release === commit && found.image === image);
+  if (current && behind.length === 0) return { kind: 'current' };
   // The files changed from each record's commit to this one, in lower case, read once each.
   const since = new Map<string, ReadonlySet<string>>();
   /** The commit a deploy's record says it sent this file as it is now, if one does. */
@@ -547,6 +579,7 @@ export function decide(
     return changed.has(file.toLowerCase()) ? undefined : sent;
   };
   const reasons = new Set<string>();
+  const named = new Set<string>();
   const deployed = new Set<string>();
   const notComing: string[] = [];
   for (const release of new Set(all.map(([, found]) => found.release))) {
@@ -558,10 +591,19 @@ export function decide(
     const changed = history.changedFiles(release, commit);
     for (const file of changed) {
       const found = changedFile(file, release, readers, recordFor);
-      if (found?.kind === 'reason') reasons.add(found.line);
+      if (found?.kind === 'reason') {
+        reasons.add(found.line);
+        named.add(file.toLowerCase());
+      }
       if (found?.kind === 'deployed') deployed.add(found.line);
     }
     notComing.push(...notYetComing(release, commit, changed, history));
+  }
+  // AZ5c: a file already named above isn't named twice, by its record.
+  for (const { deployment, file, sent } of behind) {
+    if (!named.has(file.toLowerCase())) {
+      reasons.add(`${file} changed since ${deployment} last sent ${sent}: ${toRun([deployment])}`);
+    }
   }
   // Before any hand deploy: once the coming entries are released, a rerun says what a person still has to deploy.
   if (notComing.length > 0) return { kind: 'coming-first', reasons: notComing };
@@ -583,15 +625,24 @@ export const workloadUrl = (subscription: string, workload: Workload): string =>
 
 /**
  * Why Azure refused, from what `az rest` printed: the HTTP reason and the
- * error's code (`ERROR: Forbidden({"error":{"code":"AuthorizationFailed",…}})`).
- * Nothing else is shown: the message can quote what was sent, the settings
- * among them, and names the subscription, and CI's log is public. The
- * resource group's activity log holds the whole of it.
+ * error's code (`ERROR: Forbidden({"error":{"code":"AuthorizationFailed",…}})`),
+ * or the code alone as the CLI prints a failed long-running call (`ERROR:
+ * (AuthorizationFailed) …` and `Code: AuthorizationFailed`, AZ5d), with the
+ * right refused when the error names one (`perform action '<operation>'`: an
+ * operation's name, never an ID). Nothing else is shown: the message can
+ * quote what was sent, the settings among them, and names the subscription,
+ * and CI's log is public. The resource group's activity log holds the whole of it.
  */
 export function azureRefusal(stderr: string): string {
   const reason = /ERROR:\s*([A-Za-z][A-Za-z ]*?)\s*\(/.exec(stderr)?.[1];
-  const code = /"code"\s*:\s*"([A-Za-z0-9.]+)"/.exec(stderr)?.[1];
-  const said = [reason, code].filter((part) => part !== undefined);
+  const code =
+    /"code"\s*:\s*"([A-Za-z0-9.]+)"/.exec(stderr)?.[1] ??
+    /ERROR:\s*\(([A-Za-z0-9.]+)\)/.exec(stderr)?.[1] ??
+    /^Code:\s*([A-Za-z0-9.]+)\s*$/m.exec(stderr)?.[1];
+  const action = /perform action '([A-Za-z0-9./]+)'/.exec(stderr)?.[1];
+  const said = [reason, code, action === undefined ? undefined : `missing ${action}`].filter(
+    (part) => part !== undefined,
+  );
   return said.length > 0 ? said.join(', ') : 'no reason given';
 }
 

@@ -941,6 +941,60 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
     );
     expect(decided([postgres], every, {}, null)).toEqual(red(postgres, HAND_DEPLOYED[0]?.why ?? ''));
   });
+
+  // AZ5c (S190's first dry run): a hand apps at the commit hid a foundation change no foundation had sent.
+  it('stays red when the workloads run the commit but a record is behind on a file its deployment reads', () => {
+    const current = at(NEW, NEW_IMAGE);
+    const handApps = (
+      records: Records,
+      since: Readonly<Record<string, readonly string[]>>,
+      // null: Bicep hasn't said (undefined would take the default).
+      known: Readers | null = readers,
+    ): Decision =>
+      decide(
+        both(current('api'), current('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, MIDDLE, NEW], since),
+        known ?? undefined,
+        records,
+      );
+    expect(handApps(new Map([['foundation', MIDDLE]]), { [MIDDLE]: [postgres] })).toEqual({
+      kind: 'by-hand',
+      reasons: [`${postgres} changed since foundation last sent ${MIDDLE}: ${runFoundation}`],
+    });
+    // A file the behind deployment doesn't read, or a record with nothing since, leaves the release current.
+    expect(handApps(new Map([['foundation', MIDDLE]]), { [MIDDLE]: ['apps/api/src/main.ts'] }).kind).toBe('current');
+    expect(handApps(new Map([['foundation', NEW]]), {}).kind).toBe('current');
+    // A record outside the history, or no word from Bicep, says nothing (the workloads' own changes still do).
+    expect(handApps(new Map([['foundation', commit('9')]]), { [MIDDLE]: [postgres] }).kind).toBe('current');
+    expect(handApps(new Map([['foundation', MIDDLE]]), { [MIDDLE]: [postgres] }, null).kind).toBe('current');
+  });
+
+  it("names a file behind its record once, and adds the files only the record's changes find", () => {
+    // The workloads' changes name postgres; its record's changes do too, and it is said once.
+    expect(decided([postgres], new Map([['foundation', MIDDLE]]), { [MIDDLE]: [postgres] })).toEqual(
+      red(postgres, runFoundation),
+    );
+    // The workloads run MIDDLE (a hand apps), foundation was last sent at OLD, and main.bicep changed between them:
+    // outside the workloads' own changes, so named by the record alone.
+    const main = 'deploy/azure/main.bicep';
+    const handApps = at(MIDDLE);
+    const code = 'apps/api/src/main.ts';
+    expect(
+      decide(
+        both(handApps('api'), handApps('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, MIDDLE, NEW], { [OLD]: [main, code], [MIDDLE]: [code] }),
+        readers,
+        new Map([['foundation', OLD]]),
+      ),
+    ).toEqual({
+      kind: 'by-hand',
+      reasons: [`${main} changed since foundation last sent ${OLD}: ${runFoundation}`],
+    });
+  });
 });
 
 describe('the hand deploys records', () => {
