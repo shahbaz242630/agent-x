@@ -138,6 +138,7 @@ const TYPES = {
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
   endpoint: 'Microsoft.Network/privateEndpoints',
+  endpointDns: 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
   dnsPolicy: 'Microsoft.Network/dnsResolverPolicies',
   dnsPolicyRule: 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
   dnsPolicyLink: 'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
@@ -752,11 +753,11 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * Zitadel's most copies, by environment (SA3a). None of its state is one copy's, read from the pinned image itself
  * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
- * master key from the vault. Staging keeps one: its server's 35 user connections hold no second pool. Production runs
- * up to four, each one's pool counted against its server (`connections`), and keeps two running, so sign-in never
- * hangs on one copy there. Each copy hashes its hostname to a 16-bit machine ID for the IDs it makes (FNV-1, its low 16
- * bits, read from the image, SA3d); two copies sharing one make the same IDs whenever they make one in the same 10 ms,
- * which the event store's key doesn't always refuse, so distinct IDs are an item before production (SA3d).
+ * master key from the vault (all unchanged in v4.19.5, S190). Staging keeps one: its server's 35 user connections hold
+ * no second pool. Production runs up to four, each one's pool counted against its server (`connections`), and keeps
+ * two running, so sign-in never hangs on one copy there. Each copy needs its own 16-bit machine ID for the IDs it makes
+ * (two sharing one make the same IDs in the same 10 ms, SA3d): Zitadel asks the API for one at start, which hands them
+ * out in turn from a database sequence (SA3e, apps/api/src/machine-ids.ts), so no two running copies share one.
  */
 export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostReplicas>> = {
   staging: { most: 1, why: "staging's server has no room for a second copy's database connections" },
@@ -1981,18 +1982,23 @@ const doorOf = (rule: unknown): string =>
   `${text(at(rule, 'protocol'))} to ${destinationOf(rule)} on ${text(at(rule, 'destinationPortRange'))}`;
 
 /**
- * Every door the apps subnet may have out, and why it is there. The first three
+ * Every door the apps subnet may have out, and why it is there. The first four
  * are this deployment's own addresses, the next five Azure's service tags,
  * which Azure keeps current; then GitHub's published addresses, two sets,
  * which nothing keeps current but the refresher (github-ranges.ts); and two
  * more service tags for the apps' own outbound calls: email (B5) and the
- * stores of the audit exports (E10c) and the activity downloads (L5c), in
- * this region alone.
+ * activity downloads' store (L5c), in this region alone.
  */
-const egressDoors = (region: string, apps: string, database: string): readonly (readonly [string, string])[] => [
+const egressDoors = (
+  region: string,
+  apps: string,
+  database: string,
+  endpoints: string,
+): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
   [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the database's private name and every host below"],
   [`Tcp to ${database} on 5432`, 'Postgres, in its own subnet'],
+  [`Tcp to ${endpoints} on 443`, 'the audit-export store, through its private endpoint (AZ11)'],
   [`Tcp to AzureKeyVault.${region} on 443`, 'the secrets each app and job reads, in this region alone'],
   ['Tcp to AzureMonitor on 443', "the apps' console logs on their way to the workspace"],
   ['Tcp to AzureActiveDirectory on 443', 'the token an identity reads its own secrets with'],
@@ -2008,8 +2014,8 @@ const egressDoors = (region: string, apps: string, database: string): readonly (
   ],
   // Broad, every Front Door site: the API's list of exact origins is the real limit.
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
-  // Every account in the region, not ours alone: the store's own network rule is the limit until PL-43.
-  [`Tcp to Storage.${region} on 443`, "the operator's audit exports and the API's activity downloads, to their stores"],
+  // Every account in the region, not ours alone: the store's own network rule is the limit.
+  [`Tcp to Storage.${region} on 443`, "the API's activity downloads, to their store"],
 ];
 
 /**
@@ -2024,12 +2030,19 @@ const appsEgress: Check = (snapshot, _expected, add) => {
   for (const network of ofType(snapshot, TYPES.network)) {
     const apps = appsSubnetOf(network);
     const prefix = text(at(apps, 'properties', 'addressPrefix'));
-    const database = list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'database');
+    const subnetPrefix = (name: string): string =>
+      text(
+        at(
+          list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === name),
+          'properties',
+          'addressPrefix',
+        ),
+      );
     // The network's own region, not the expected one: this rule asks that the
     // key vault tag names where this deployment is, and `in-country` asks
     // separately that that is the UAE.
     const wanted = new Map(
-      egressDoors(text(network.location), prefix, text(at(database, 'properties', 'addressPrefix'))),
+      egressDoors(text(network.location), prefix, subnetPrefix('database'), subnetPrefix('endpoints')),
     );
     for (const message of egressProblems(snapshot, apps, 'apps', wanted)) {
       add({ rule: 'apps-egress', resource: network.name, message });
@@ -2352,6 +2365,10 @@ function evidenceAccountProblems(
   const policy = at(properties, 'immutableStorageWithVersioning', 'immutabilityPolicy');
   const required: readonly (readonly [string, boolean])[] = [
     ...storeAccountLines(account, appsSubnets),
+    [
+      'no public network access: its private endpoint alone (AZ11)',
+      at(properties, 'publicNetworkAccess') === 'Disabled',
+    ],
     [`${kept.sku} copies`, at(account, 'sku', 'name') === kept.sku],
     [
       `version-level immutability, ${kept.state}, for this environment's days, with no appends to a kept file`,
@@ -2362,6 +2379,114 @@ function evidenceAccountProblems(
     ],
   ];
   return required.filter(([, holds]) => !holds).map(([what]) => what);
+}
+
+/** Microsoft's fixed zone for blob private endpoints, which the store's public name is a CNAME into. */
+const BLOB_PRIVATE_ZONE = 'privatelink.blob.core.windows.net';
+
+/**
+ * The store's one way in (AZ11, PL-43): the deployment's one private endpoint, to the store's blob service alone,
+ * approved automatically, in its network's `endpoints` subnet, its A record kept by Azure in the blob zone linked to
+ * that network. The subnet holds nothing else delegated, applies its rules to the endpoint, lets in TCP 443 from the
+ * apps subnet alone, denies the rest of the network, and lets nothing out.
+ */
+function evidenceEndpointProblems(
+  snapshot: Snapshot,
+  accounts: readonly PredictedResource[],
+  problem: (resource: string, message: string) => void,
+): void {
+  const endpoints = ofType(snapshot, TYPES.endpoint);
+  const zones = ofType(snapshot, TYPES.dnsZone).filter((zone) => zone.name === BLOB_PRIVATE_ZONE);
+  for (const endpoint of endpoints) {
+    const connections = list(at(endpoint.properties, 'privateLinkServiceConnections'));
+    const subnetId = text(at(endpoint.properties, 'subnet', 'id'));
+    const network = ofType(snapshot, TYPES.network).find((each) => subnetId === `${each.id}/subnets/endpoints`);
+    const zoneGroups = ofType(snapshot, TYPES.endpointDns).filter((group) =>
+      group.id.startsWith(`${endpoint.id}/privateDnsZoneGroups/`),
+    );
+    const zoneIds = zoneGroups.flatMap((group) =>
+      list(at(group.properties, 'privateDnsZoneConfigs')).map((config) => at(config, 'properties', 'privateDnsZoneId')),
+    );
+    // Every link of the zone to this network alone (review S192: an added link elsewhere would learn the address),
+    // none registering machines' names, and at least one.
+    const linked = (zone: PredictedResource): boolean => {
+      const links = ofType(snapshot, TYPES.dnsLink).filter((link) =>
+        link.id.startsWith(`${zone.id}/virtualNetworkLinks/`),
+      );
+      return (
+        links.length > 0 &&
+        links.every(
+          (link) =>
+            at(link.properties, 'virtualNetwork', 'id') === network?.id &&
+            at(link.properties, 'registrationEnabled') !== true &&
+            // Without it, any other account behind a private endpoint elsewhere stops resolving in our network.
+            at(link.properties, 'resolutionPolicy') === 'NxDomainRedirect',
+        )
+      );
+    };
+    // Declared in the network's own list, so its rules below are read: a subnet written apart fails closed (review S192).
+    const subnet = list(at(network?.properties, 'subnets')).find((each) => at(each, 'name') === 'endpoints');
+    const required: readonly (readonly [string, boolean])[] = [
+      [
+        "one connection, to the audit-export store's blob service alone, approved automatically",
+        connections.length === 1 &&
+          accounts.some((account) => at(connections[0], 'properties', 'privateLinkServiceId') === account.id) &&
+          JSON.stringify(at(connections[0], 'properties', 'groupIds')) === JSON.stringify(['blob']) &&
+          list(at(endpoint.properties, 'manualPrivateLinkServiceConnections')).length === 0,
+      ],
+      [
+        "a place in this deployment's network's endpoints subnet, declared in the network's own list",
+        network !== undefined && subnet !== undefined,
+      ],
+      [
+        `its address kept in ${BLOB_PRIVATE_ZONE}, linked to that network with fallback to public names (NxDomainRedirect)`,
+        zoneIds.length === 1 && zones.some((zone) => zone.id === zoneIds[0] && linked(zone)),
+      ],
+    ];
+    for (const [what, holds] of required) {
+      if (!holds) problem(endpoint.name, `must have ${what}`);
+    }
+    if (subnet !== undefined && network !== undefined) {
+      endpointsSubnetProblems(snapshot, network, subnet, problem);
+    }
+  }
+  if (endpoints.length !== accounts.length) {
+    problem(
+      'the deployment',
+      `needs one private endpoint, the audit-export store's; the snapshot has ${String(endpoints.length)}`,
+    );
+  }
+}
+
+/** The endpoints subnet's rules: in, TCP 443 from the apps subnet alone and the rest of the network denied; out, nothing. */
+function endpointsSubnetProblems(
+  snapshot: Snapshot,
+  network: PredictedResource,
+  subnet: unknown,
+  problem: (resource: string, message: string) => void,
+): void {
+  const prefix = at(subnet, 'properties', 'addressPrefix');
+  const appsPrefix = at(appsSubnetOf(network), 'properties', 'addressPrefix');
+  const inbound = inboundRules(snapshot, subnet);
+  const allows = allowing(inbound);
+  const fromApps = (rule: unknown): boolean =>
+    at(rule, 'protocol') === 'Tcp' &&
+    at(rule, 'sourceAddressPrefix') === appsPrefix &&
+    at(rule, 'destinationAddressPrefix') === prefix &&
+    at(rule, 'destinationPortRange') === '443';
+  if (
+    delegatedTo(subnet) !== undefined ||
+    at(subnet, 'properties', 'privateEndpointNetworkPolicies') !== 'Enabled' ||
+    allows.length === 0 ||
+    !allows.every(fromApps) ||
+    !deniesRestOfNetwork(inbound)
+  ) {
+    problem(
+      network.name,
+      'needs an endpoints subnet, delegated to nothing, that applies its rules to its private endpoints, lets in TCP 443 from the apps subnet alone and denies the rest of the network',
+    );
+  }
+  for (const message of egressProblems(snapshot, subnet, 'endpoints', new Map())) problem(network.name, message);
 }
 
 /** Whether a resource is a part of an activity downloads' account (`activity-downloads`'s, not `evidence-store`'s). */
@@ -2376,8 +2501,11 @@ const inDownloadsStore = (snapshot: Snapshot, resource: PredictedResource): bool
  * named as modules/evidence.bicep names it and as `evidenceAccountProblems`
  * says, with versioning on its one blob service and two private containers; no
  * other Storage resource (a lifecycle rule, a file share, a local user) but the
- * activity downloads' store's, which is `activity-downloads`'s; the apps subnet
- * keeps the service endpoint its network rule needs. Each container has one
+ * activity downloads' store's, which is `activity-downloads`'s; it is reached
+ * through its private endpoint alone (`evidenceEndpointProblems`, AZ11), and the
+ * apps subnet keeps the Storage service endpoint the activity downloads' store
+ * needs, which the store's own network rule (a fallback while public access is
+ * off) names too. Each container has one
  * custom role, assignable in the resource group alone, given on that
  * container alone: the exports' adds a new file and nothing else, to the
  * operator's identity, whose job alone is told where they go; the anchors' adds
@@ -2413,6 +2541,7 @@ const evidenceStore: Check = (snapshot, expected, add) => {
     problem('the deployment', `needs one audit-export store; the snapshot has ${String(accounts.length)}`);
   }
   evidencePartsProblems(snapshot, accounts, problem);
+  evidenceEndpointProblems(snapshot, accounts, problem);
   for (const network of ofType(snapshot, TYPES.network)) {
     const endpoints = list(at(appsSubnetOf(network), 'properties', 'serviceEndpoints'));
     const kept = endpoints.some(
@@ -2421,7 +2550,10 @@ const evidenceStore: Check = (snapshot, expected, add) => {
         JSON.stringify(at(endpoint, 'locations')) === JSON.stringify([network.location]),
     );
     if (!kept) {
-      problem(network.name, "must keep its apps subnet's Storage service endpoint, in its own region, for the store");
+      problem(
+        network.name,
+        "must keep its apps subnet's Storage service endpoint, in its own region: the activity downloads' store needs it, and the audit-export store's network rule names that subnet as its fallback",
+      );
     }
   }
   const writers = storeRoleProblems(
@@ -4877,7 +5009,7 @@ export const ALLOWED_TYPES: readonly string[] = [
   'Microsoft.Network/networkSecurityGroups',
   'Microsoft.Network/privateDnsZones',
   'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
-  // AZ11's endpoint and its zone group, allowed a foundation before they land (as #627's alerts were).
+  // AZ11's endpoint and its zone group, allowed a foundation ahead of them (AZ11a, as #627's alerts were).
   'Microsoft.Network/privateEndpoints',
   'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
   'Microsoft.Network/virtualNetworks',
@@ -4953,7 +5085,7 @@ function mustPass(snapshot: Snapshot): readonly PredictedResource[] {
       apiVersion: '2026-01-01',
       location: 'global',
     },
-    // AZ11's endpoint before it is in the snapshot, and the interface Azure makes for it: regional, with tags.
+    // AZ11's endpoint (kept, as #627's alert is, now it ships) and the interface Azure makes for it: regional, with tags.
     ...(
       [
         [TYPES.endpoint, 'a private endpoint'],

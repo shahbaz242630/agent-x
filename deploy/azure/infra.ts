@@ -41,6 +41,7 @@ import {
   type Deployment,
   DEPLOYMENTS,
   deploymentName,
+  EMAIL,
   realAz,
   realSteps,
   realTerminal,
@@ -586,16 +587,20 @@ export async function deployStep(infra: InfraSteps, step: Sent, commit: string, 
   return infra.deploy(requestFor(step, commit), stepsFor(infra, 'deploy', approved.whatIf));
 }
 
-/** Each prompt's answer from GitHub's environment, or an error naming the secret not set (never a value). */
+/**
+ * Each prompt's answer from GitHub's environment, or an error naming the secret not set (never a value). Trimmed, as
+ * the terminal trims a typed answer: a secret set through a pipe can carry a line break (S192's first apps plan).
+ */
 export function answersFrom(env: Readonly<Record<string, string | undefined>>): Record<Answer, string> {
-  const missing = Object.values(ANSWER_VARIABLES).filter((variable) => (env[variable] ?? '') === '');
+  const value = (variable: string): string => (env[variable] ?? '').trim();
+  const missing = Object.values(ANSWER_VARIABLES).filter((variable) => value(variable) === '');
   if (missing.length > 0) {
     throw new Error(
       `GitHub's environment doesn't give ${missing.join(', ')}: set each as a secret of staging-whatif and staging-infra (Settings, Environments). Nothing was deployed.`,
     );
   }
   return Object.fromEntries(
-    Object.entries(ANSWER_VARIABLES).map(([which, variable]) => [which, String(env[variable])]),
+    Object.entries(ANSWER_VARIABLES).map(([which, variable]) => [which, value(variable)]),
   ) as Record<Answer, string>;
 }
 
@@ -648,6 +653,12 @@ export async function deployDeployers(terminal: Terminal, az: Az, now: () => Dat
   const subscription = text(account.id);
   terminal.say(`Signed in to the subscription "${text(account.name)}" (${subscription}).`);
   if (!/^y(?:es)?$/i.test(await terminal.ask("Deploy staging's deployers into it? [y/N] "))) return 1;
+  // The access alarm's address (AZ5e), asked as access asks it, so it stays out of the repository.
+  const email = await terminal.ask('Address the access alarm emails (the alert address): ');
+  if (!EMAIL.test(email)) {
+    terminal.say("That isn't an email address: nothing was deployed.");
+    return 1;
+  }
   const name = deploymentName('deployers', now());
   const where = ['--subscription', subscription, '--name', name];
   terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
@@ -663,7 +674,7 @@ export async function deployDeployers(terminal: Terminal, az: Az, now: () => Dat
       'deployers/staging.bicepparam',
       '--confirm-with-what-if',
     ],
-    {},
+    { [ANSWER_VARIABLES.alertEmail]: email },
   );
   const shown =
     status === 0

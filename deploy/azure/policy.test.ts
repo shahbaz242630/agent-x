@@ -362,6 +362,9 @@ const RULES = type('Microsoft.Network/networkSecurityGroups');
 const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
 const NETWORK = type('Microsoft.Network/virtualNetworks');
+/** The database's private DNS zone or its link, not the blob endpoint's (AZ11). */
+const DATABASE_DNS = (wanted: string) => (resource: PredictedResource) =>
+  resource.type === wanted && resource.name.includes('.private.postgres.');
 const DNS_POLICY = type('Microsoft.Network/dnsResolverPolicies');
 const DNS_RULES = type('Microsoft.Network/dnsResolverPolicies/dnsSecurityRules');
 const WATCH_RULE = (resource: PredictedResource) =>
@@ -627,9 +630,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/activityLogAlerts alert-agentx-stg-alert-rules-unhealthy',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-database',
+      'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-endpoints',
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
       'Microsoft.Network/privateDnsZones agentx-staging.private.postgres.database.azure.com',
       'Microsoft.Network/privateDnsZones/virtualNetworkLinks agentx-staging.private.postgres.database.azure.com/vnet-agentx-staging',
+      'Microsoft.Network/privateDnsZones privatelink.blob.core.windows.net',
+      'Microsoft.Network/privateDnsZones/virtualNetworkLinks privatelink.blob.core.windows.net/vnet-agentx-staging',
       'Microsoft.Network/dnsResolverPolicies dnspr-agentx-staging',
       'Microsoft.Network/dnsResolverDomainLists dnsdl-agentx-staging-every-name',
       'Microsoft.Network/dnsResolverDomainLists dnsdl-agentx-staging-allowed',
@@ -708,6 +714,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-decisions-suppressed',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
+      expect.stringMatching(/^Microsoft\.Network\/privateEndpoints pe-stagentxstg[a-z0-9]{6}-blob$/),
+      expect.stringMatching(
+        /^Microsoft\.Network\/privateEndpoints\/privateDnsZoneGroups pe-stagentxstg[a-z0-9]{6}-blob\/default$/,
+      ),
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts\/blobServices stagentxstg[a-z0-9]{6}\/default$/),
       expect.stringMatching(
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-exports$/,
@@ -796,6 +806,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ...Array.from({ length: 7 }, (): unknown => role),
       // The live server's delete lock (S185), which CI may neither write nor lift.
       'Microsoft.Authorization/locks keep-live-database',
+      // The main workspace's (AZ5e): the access alarm reads it, so CI may not delete it.
+      'Microsoft.Authorization/locks keep-log-workspace',
       // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
         ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
@@ -830,10 +842,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         types: authorization.length === 0 ? [] : ['Microsoft.Authorization/roleAssignments'],
       });
     }
-    // And the lock that keeps the live server is there, in access.
+    // And the locks that keep the live server and the main workspace (AZ5e) are there, in access.
     expect(
-      stagingPart('staging.access.bicepparam').predictedResources.filter(type('Microsoft.Authorization/locks')),
-    ).toHaveLength(1);
+      stagingPart('staging.access.bicepparam')
+        .predictedResources.filter(type('Microsoft.Authorization/locks'))
+        .map((lock) => lock.name),
+    ).toEqual(['keep-live-database', 'keep-log-workspace']);
   });
 
   it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {
@@ -959,7 +973,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     const locks = staging.predictedResources.filter(type('Microsoft.Authorization/locks'));
     expect(locks.map((lock) => [lock.name, at(lock.properties, 'level')])).toEqual([
       ['keep-live-database', 'CanNotDelete'],
+      // The main workspace's (AZ5e), on the workspace alone.
+      ['keep-log-workspace', 'CanNotDelete'],
     ]);
+    expect(locks[1]?.id).toMatch(
+      /\/providers\/Microsoft\.OperationalInsights\/workspaces\/log-agentx-stg\/providers\/Microsoft\.Authorization\/locks\/keep-log-workspace$/,
+    );
     // Scoped to the server itself, not the group: Stage G's copies and the drill stay deletable.
     const server = staging.predictedResources.find(SERVER);
     expect(server).toBeDefined();
@@ -1246,15 +1265,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(SERVER, change))).toEqual(['database-private']);
     }
-    expect(brokenRules(without(type('Microsoft.Network/privateDnsZones/virtualNetworkLinks')))).toEqual([
+    expect(brokenRules(without(DATABASE_DNS('Microsoft.Network/privateDnsZones/virtualNetworkLinks')))).toEqual([
       'database-private',
     ]);
     // A link kept while its zone isn't one this deployment creates, or a link to another network.
-    expect(brokenRules(without(type('Microsoft.Network/privateDnsZones')))).toEqual(['database-private']);
+    expect(brokenRules(without(DATABASE_DNS('Microsoft.Network/privateDnsZones')))).toEqual(['database-private']);
     expect(
       brokenRules(
         changed(
-          type('Microsoft.Network/privateDnsZones/virtualNetworkLinks'),
+          DATABASE_DNS('Microsoft.Network/privateDnsZones/virtualNetworkLinks'),
           (link) => (inside(link, 'properties', 'virtualNetwork').id = '/subscriptions/x/virtualNetworks/other'),
         ),
       ),
@@ -2133,6 +2152,162 @@ describe('SEC-OPS-09 each rule can fail', () => {
         message: "sets AGENTX_EVIDENCE_DIR: only the operator's and the chain repair's jobs write to the store",
       },
     ]);
+  });
+
+  it('evidence-store: the store back on the public route, or its private endpoint, zone or subnet opened (AZ11, PL-43)', () => {
+    const ENDPOINT = type('Microsoft.Network/privateEndpoints');
+    const ZONE_GROUP = type('Microsoft.Network/privateEndpoints/privateDnsZoneGroups');
+    const BLOB_ZONE = (resource: PredictedResource) =>
+      type('Microsoft.Network/privateDnsZones')(resource) && resource.name.startsWith('privatelink.blob.');
+    const BLOB_LINK = (resource: PredictedResource) =>
+      type('Microsoft.Network/privateDnsZones/virtualNetworkLinks')(resource) &&
+      resource.name.startsWith('privatelink.blob.');
+    const ENDPOINTS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-endpoints');
+    const connection = (endpoint: Mutable): Mutable =>
+      inside(first(at(endpoint, 'properties', 'privateLinkServiceConnections')), 'properties');
+    const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
+    const rule = (group: Mutable, name: string): Mutable =>
+      inside(
+        rules(group).find((each) => each.name === name),
+        'properties',
+      );
+    const only = (snapshotted: Snapshot): RuleId[] => brokenRules(snapshotted);
+
+    expect(at(staging.predictedResources.find(EVIDENCE_STORE)?.properties, 'publicNetworkAccess')).toBe('Disabled');
+    for (const change of [
+      (store: Mutable) => (inside(store, 'properties').publicNetworkAccess = 'Enabled'),
+      (store: Mutable) => delete inside(store, 'properties').publicNetworkAccess,
+    ]) {
+      expect(only(changed(EVIDENCE_STORE, change))).toEqual(['evidence-store']);
+    }
+    // No endpoint, or a second.
+    expect(only(without(ENDPOINT))).toEqual(['evidence-store']);
+    const endpoint = staging.predictedResources.find(ENDPOINT);
+    expect(only(withExtra({ ...structuredClone(endpoint), id: `${String(endpoint?.id)}-second` }))).toEqual([
+      'evidence-store',
+    ]);
+    // To another account or service, by hand, or in another subnet.
+    const downloads = idOf(DOWNLOADS_STORE);
+    for (const change of [
+      (found: Mutable) => (connection(found).privateLinkServiceId = downloads),
+      (found: Mutable) => (connection(found).groupIds = ['file']),
+      (found: Mutable) => (connection(found).groupIds = ['blob', 'file']),
+      // A second connection, even one alike.
+      (found: Mutable) => {
+        const connections = at(found, 'properties', 'privateLinkServiceConnections') as Mutable[];
+        inside(found, 'properties').privateLinkServiceConnections = [
+          ...connections,
+          structuredClone(first(connections)),
+        ];
+      },
+      (found: Mutable) =>
+        (inside(found, 'properties').manualPrivateLinkServiceConnections = [
+          { name: 'other', properties: { privateLinkServiceId: downloads, groupIds: ['blob'] } },
+        ]),
+      (found: Mutable) =>
+        (inside(found, 'properties', 'subnet').id = String(at(found, 'properties', 'subnet', 'id')).replace(
+          /\/endpoints$/,
+          '/apps',
+        )),
+    ]) {
+      expect(only(changed(ENDPOINT, change))).toEqual(['evidence-store']);
+    }
+    // Its address kept nowhere, in the database's zone, or in a zone not linked to the network.
+    expect(only(without(ZONE_GROUP))).toEqual(['evidence-store']);
+    expect(
+      only(
+        changed(
+          ZONE_GROUP,
+          (group) =>
+            (inside(first(at(group, 'properties', 'privateDnsZoneConfigs')), 'properties').privateDnsZoneId = idOf(
+              DATABASE_DNS('Microsoft.Network/privateDnsZones'),
+            )),
+        ),
+      ),
+    ).toEqual(['evidence-store']);
+    // A second zone config, even one alike.
+    expect(
+      only(
+        changed(ZONE_GROUP, (group) => {
+          const configs = at(group, 'properties', 'privateDnsZoneConfigs') as Mutable[];
+          inside(group, 'properties').privateDnsZoneConfigs = [...configs, structuredClone(first(configs))];
+        }),
+      ),
+    ).toEqual(['evidence-store']);
+    // The link without its fallback to public names: other accounts behind private endpoints stop resolving.
+    for (const change of [
+      (link: Mutable) => delete inside(link, 'properties').resolutionPolicy,
+      (link: Mutable) => (inside(link, 'properties').resolutionPolicy = 'Default'),
+    ]) {
+      expect(only(changed(BLOB_LINK, change))).toEqual(['evidence-store']);
+    }
+    expect(only(without(BLOB_LINK))).toEqual(['evidence-store']);
+    expect(only(without(BLOB_ZONE))).toEqual(['evidence-store']);
+    expect(
+      only(
+        changed(
+          BLOB_LINK,
+          (link) => (inside(link, 'properties', 'virtualNetwork').id = '/subscriptions/x/virtualNetworks/other'),
+        ),
+      ),
+    ).toEqual(['evidence-store']);
+    // A second link to another network, or one registering names (review S192).
+    const link = staging.predictedResources.find(BLOB_LINK);
+    for (const extra of [
+      { virtualNetwork: { id: '/subscriptions/x/virtualNetworks/other' } },
+      { registrationEnabled: true },
+    ]) {
+      const copy = structuredClone(link) as unknown as Mutable;
+      copy.id = `${String(link?.id)}-second`;
+      Object.assign(inside(copy, 'properties'), extra);
+      expect(only(withExtra(copy))).toEqual(['evidence-store']);
+    }
+    // The endpoints subnet left out of the network's own list (written apart, its rules unread): fails closed;
+    // the apps' door to it then matches no subnet either.
+    expect(
+      only(
+        changed(NETWORK, (network) => {
+          const properties = inside(network, 'properties');
+          properties.subnets = (properties.subnets as Mutable[]).filter((each) => each.name !== 'endpoints');
+        }),
+      ),
+    ).toEqual(['apps-egress', 'evidence-store']);
+    // The endpoints subnet delegated, skipping its rules, or letting in more, or anything out.
+    for (const change of [
+      (network: Mutable) =>
+        (inside(subnet(network, 'endpoints'), 'properties').delegations = [
+          { name: 'x', properties: { serviceName: 'Microsoft.App/environments' } },
+        ]),
+      (network: Mutable) =>
+        (inside(subnet(network, 'endpoints'), 'properties').privateEndpointNetworkPolicies = 'Disabled'),
+    ]) {
+      expect(only(changed(NETWORK, change))).toEqual(['evidence-store']);
+    }
+    for (const change of [
+      (group: Mutable) => (rule(group, 'allow-https-from-apps').sourceAddressPrefix = 'VirtualNetwork'),
+      (group: Mutable) => (rule(group, 'allow-https-from-apps').destinationPortRange = '*'),
+      (group: Mutable) => (rule(group, 'allow-https-from-apps').protocol = '*'),
+      (group: Mutable) => (rule(group, 'deny-rest-of-network').access = 'Allow'),
+      // The backstop gone, or a Deny placed before the allow, so it is no backstop.
+      (group: Mutable) => {
+        group.properties = { securityRules: rules(group).filter((each) => each.name !== 'deny-rest-of-network') };
+      },
+      (group: Mutable) => (rule(group, 'deny-rest-of-network').priority = 90),
+      (group: Mutable) => (rule(group, 'deny-out-rest').access = 'Allow'),
+      (group: Mutable) => {
+        group.properties = { securityRules: rules(group).filter((each) => each.name !== 'allow-https-from-apps') };
+      },
+    ]) {
+      expect(only(changed(ENDPOINTS_RULES, change))).toEqual(['evidence-store']);
+    }
+    // The apps without their door to it.
+    expect(
+      only(
+        changed(APPS_RULES, (group) => {
+          group.properties = { securityRules: rules(group).filter((each) => each.name !== 'allow-out-endpoints') };
+        }),
+      ),
+    ).toEqual(['apps-egress']);
   });
 
   describe("evidence-store: the chains' anchors (4D2e E, PL-58)", () => {
@@ -5549,14 +5724,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ...staging.predictedResources.map((resource) => resource.type),
         'Microsoft.Resources/deployments',
         'Microsoft.Insights/activityLogAlerts',
-        // AZ11's endpoint and zone group allowed before they land, and the interface Azure makes for the endpoint.
-        'Microsoft.Network/privateEndpoints',
-        'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
+        // The interface Azure makes for the audit-export store's private endpoint (AZ11).
         'Microsoft.Network/networkInterfaces',
       ];
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
       expect(ALLOWED_TYPES).toHaveLength(new Set(made).size);
+      // An alert processing rule in the group could mute every alarm, the access alarm's among them (AZ5e review):
+      // only the allowed-types guardrail keeps CI from making one, so the type stays off the list.
+      expect(ALLOWED_TYPES).not.toContain('Microsoft.AlertsManagement/actionRules');
       const exactly: unknown = expect.stringMatching(
         /^agentx-staging-allowed-types: must allow exactly Microsoft\.App\//,
       );
@@ -5577,13 +5753,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'agentx-staging-allowed-types: refuses an activity-log alert, which this deployment ships or a release sends: Azure would refuse our own deploy',
         exactly,
       ]);
-      // AZ11's endpoint and its interface left out: their must-pass examples, in the group's region, are refused.
+      // AZ11's endpoint and its interface left out: the shipped endpoint and the must-pass examples are refused.
       const noEndpoint = changed(DEFINITION('allowed-types'), (definition) => {
         typesOf(definition).in = allowed.filter(
           (each) => each !== 'Microsoft.Network/privateEndpoints' && each !== 'Microsoft.Network/networkInterfaces',
         );
       });
       expect(policyProblemsOf(noEndpoint)).toEqual([
+        expect.stringMatching(/^agentx-staging-allowed-types: refuses pe-stagentxstg[a-z0-9]{6}-blob, which/),
         'agentx-staging-allowed-types: refuses a private endpoint, which this deployment ships or a release sends: Azure would refuse our own deploy',
         "agentx-staging-allowed-types: refuses a private endpoint's interface, which this deployment ships or a release sends: Azure would refuse our own deploy",
         exactly,

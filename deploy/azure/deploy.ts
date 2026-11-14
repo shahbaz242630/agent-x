@@ -613,7 +613,7 @@ export function loginIdProblems(value: string): string[] {
   return read.ok ? [] : [read.problem];
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** A host name as DNS writes it: lower case, two labels or more, none starting or ending with a hyphen. */
 const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
@@ -2106,10 +2106,25 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   return recorded ? 0 : 1;
 }
 
+/**
+ * What is wrong with a host's shape, said without its value: in CI the value is a masked secret, so the reason is
+ * all the log can show (S192: the first unattended apps plan stopped on one).
+ */
+export function hostShapeProblem(host: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) return 'it starts with a scheme such as https://: give the name alone';
+  if (/\s/.test(host)) return 'it holds a space or a line break';
+  if (host.includes('/')) return 'it holds a slash: give the name alone, no path';
+  if (/:\d*$/.test(host)) return 'it ends with a port: give the name alone';
+  if (!host.includes('.')) return 'it has no dot: give the whole name';
+  return "it isn't a DNS name (letters, digits and hyphens, dot-separated)";
+}
+
 /** A host name the operator types, held to DNS's shape. */
 async function askHost(steps: Steps, which: 'authHost' | 'appHost', question: string): Promise<string> {
   const host = (await answer(steps, which, question)).toLowerCase();
-  if (!HOST.test(host)) throw new Error(`${host} isn't a host name: nothing was deployed.`);
+  if (!HOST.test(host)) {
+    throw new Error(`${host} isn't a host name (${hostShapeProblem(host)}): nothing was deployed.`);
+  }
   return host;
 }
 

@@ -747,6 +747,11 @@ describe('answers, the summary and main', () => {
 
   it('takes each answer from its variable, and names those not set, never a value', () => {
     expect(answersFrom(ENV).authHost).toBe(ENV.AGENTX_AZURE_AUTH_HOST);
+    // A secret set through a pipe carries a line break: trimmed, as a typed answer is (S192).
+    expect(answersFrom({ ...ENV, AGENTX_AZURE_AUTH_HOST: ' auth.example.invalid\r\n' }).authHost).toBe(
+      'auth.example.invalid',
+    );
+    expect(() => answersFrom({ ...ENV, AGENTX_AZURE_APP_HOST: ' \r\n' })).toThrow(/doesn't give AGENTX_AZURE_APP_HOST/);
     expect(() => answersFrom({ ...ENV, AGENTX_AZURE_APP_HOST: '' })).toThrow(
       "GitHub's environment doesn't give AGENTX_AZURE_APP_HOST: set each as a secret of staging-whatif and staging-infra (Settings, Environments). Nothing was deployed.",
     );
@@ -796,15 +801,15 @@ describe('answers, the summary and main', () => {
 });
 
 describe('deployDeployers, from the partner’s terminal', () => {
-  /** A terminal answering `answer` to its one question, keeping what it says. */
-  const terminal = (answer: string) => {
+  /** A terminal answering each question in turn, the last answer again after that. */
+  const terminal = (...answers: string[]) => {
     const said: string[] = [];
     const asked: string[] = [];
     const scripted: Terminal = {
       say: (line) => said.push(line),
       ask: (question) => {
         asked.push(question);
-        return Promise.resolve(answer);
+        return Promise.resolve(answers[Math.min(asked.length, answers.length) - 1] ?? '');
       },
       askHidden: () => Promise.reject(new Error('no hidden question')),
     };
@@ -813,9 +818,11 @@ describe('deployDeployers, from the partner’s terminal', () => {
   /** A CLI whose what-if ends with `status`, and whose read back shows `state` with the two client IDs. */
   const cli = (status: number, state: string) => {
     const calls: (readonly string[])[] = [];
+    const sent: Readonly<Record<string, string>>[] = [];
     const az: Az = {
-      interactive: (args) => {
+      interactive: (args, values) => {
         calls.push(args);
+        sent.push(values);
         return status;
       },
       run: (args) => {
@@ -827,15 +834,21 @@ describe('deployDeployers, from the partner’s terminal', () => {
         });
       },
     };
-    return { az, calls };
+    return { az, calls, sent };
   };
   const NOW = () => new Date('2026-11-13T10:00:00Z');
+  const ADDRESS = 'alerts@example.test';
 
   it('asks first, deploys with the what-if answered by the partner, then gives each environment its client ID', async () => {
-    const { scripted, said, asked } = terminal('y');
-    const { az, calls } = cli(0, 'Succeeded');
+    const { scripted, said, asked } = terminal('y', ADDRESS);
+    const { az, calls, sent } = cli(0, 'Succeeded');
     expect(await deployDeployers(scripted, az, NOW)).toBe(0);
-    expect(asked).toEqual(["Deploy staging's deployers into it? [y/N] "]);
+    expect(asked).toEqual([
+      "Deploy staging's deployers into it? [y/N] ",
+      'Address the access alarm emails (the alert address): ',
+    ]);
+    // The access alarm's address (AZ5e) as the parameters file reads it, never in the repository.
+    expect(sent[0]).toEqual({ AGENTX_AZURE_ALERT_EMAIL: ADDRESS });
     expect(calls[1]).toEqual([
       'deployment',
       'sub',
@@ -861,12 +874,18 @@ describe('deployDeployers, from the partner’s terminal', () => {
       [1, 'Succeeded'],
       [0, 'Failed'],
     ] as const) {
-      const { scripted, said } = terminal('y');
+      const { scripted, said } = terminal('y', ADDRESS);
       expect(await deployDeployers(scripted, cli(status, state).az, NOW)).toBe(1);
       expect(said.at(-1)).toMatch(
         /^The deployers weren't deployed \((?:declined or not read|Failed)\): nothing more was done\.$/,
       );
     }
+    // No address, nothing sent.
+    const unaddressed = cli(0, 'Succeeded');
+    const { scripted, said } = terminal('y', 'not an address');
+    expect(await deployDeployers(scripted, unaddressed.az, NOW)).toBe(1);
+    expect(unaddressed.calls).toHaveLength(1);
+    expect(said.at(-1)).toBe("That isn't an email address: nothing was deployed.");
   });
 
   it('main: names a secret the environment lacks before anything starts', async () => {
@@ -954,5 +973,89 @@ describe('the deployers (deployers/deployers.bicep)', () => {
       'staging-infra',
       'staging-whatif',
     ]);
+    // AZ5e: the access alarm, in this group (out of the infra identity's reach), on the main workspace.
+    const [alarm, ...moreAlarms] = of('Microsoft.Insights/scheduledQueryRules');
+    expect(moreAlarms).toEqual([]);
+    expect(alarm?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
+    const properties = alarm?.properties as {
+      enabled?: boolean;
+      scopes?: string[];
+      criteria?: { allOf?: { query?: string }[] };
+      actions?: { actionGroups?: string[] };
+    };
+    expect(properties.enabled).toBe(true);
+    expect(properties.scopes).toEqual([
+      `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces/log-agentx-stg`,
+    ]);
+    const query = String(properties.criteria?.allOf?.[0]?.query);
+    // Any app's, never a person's (the partner's own deploys), refused attempts included (no status filter).
+    expect(query).toContain('| where Caller !has "@" |');
+    expect(query).not.toMatch(/ActivityStatus/);
+    for (const operation of [
+      'roleAssignments/write',
+      'roleAssignments/delete',
+      'roleDefinitions/write',
+      'federatedIdentityCredentials/write',
+      'federatedIdentityCredentials/delete',
+      'roleDefinitions/delete',
+      'policyAssignments/write',
+      'policyAssignments/delete',
+      'policyDefinitions/write',
+      'policyDefinitions/delete',
+      'policyExemptions/write',
+      'policySetDefinitions/delete',
+      'locks/delete',
+      'accessPolicies/write',
+    ]) {
+      expect(query).toContain(`/${operation}"`);
+    }
+    // Review S192: what would blind that alarm (its workspace rewritten or deleted, an alarm or log setting deleted)
+    // or a trust written, by the infra identity, on Azure's own alert, which reads no workspace and so no cap; and the
+    // alarm's own health.
+    const alerts = of('Microsoft.Insights/activityLogAlerts');
+    expect(alerts.map((each) => each.name)).toEqual([
+      'alert-agentx-stg-access-path-changed',
+      'alert-agentx-stg-access-alarm-unhealthy',
+    ]);
+    const path = alerts[0]?.properties as {
+      scopes?: string[];
+      condition?: { allOf?: { field?: string; equals?: string; anyOf?: { equals?: string }[] }[] };
+    };
+    expect(path.scopes).toEqual([`/subscriptions/${SUBSCRIPTION}`]);
+    const fields = path.condition?.allOf ?? [];
+    expect(fields.map((each) => each.field)).toEqual(['category', 'caller', 'status', undefined]);
+    // The infra identity's principal ID, from the identities module's own output: not the what-if's, not another's.
+    expect(fields[1]?.equals).toMatch(/^\[reference\(.*'identities-.*\)\.outputs\.infraPrincipalId\.value\]$/);
+    expect((fields[3]?.anyOf ?? []).map((each) => each.equals)).toEqual(
+      expect.arrayContaining([
+        'Microsoft.OperationalInsights/workspaces/write',
+        'Microsoft.OperationalInsights/workspaces/delete',
+        'Microsoft.Insights/diagnosticSettings/delete',
+        'Microsoft.Insights/actionGroups/delete',
+        'Microsoft.Insights/scheduledQueryRules/delete',
+        'Microsoft.Insights/activityLogAlerts/delete',
+        'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write',
+        'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete',
+      ]),
+    );
+    expect((alerts[1]?.properties as { condition?: unknown }).condition).toEqual({
+      allOf: [
+        { field: 'category', equals: 'ResourceHealth' },
+        { field: 'resourceType', equals: 'Microsoft.Insights/scheduledQueryRules' },
+        {
+          anyOf: [
+            { field: 'properties.currentHealthStatus', equals: 'Degraded' },
+            { field: 'properties.currentHealthStatus', equals: 'Unavailable' },
+          ],
+        },
+      ],
+    });
+    expect((alerts[1]?.properties as { scopes?: string[] }).scopes).toEqual([
+      `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging-deployers`,
+    ]);
+    expect(String((properties as { skipQueryValidation?: unknown }).skipQueryValidation)).toBe('undefined');
+    const [group] = of('Microsoft.Insights/actionGroups');
+    expect(group?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
+    expect(properties.actions?.actionGroups).toEqual([group?.id]);
   });
 });

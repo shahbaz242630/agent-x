@@ -429,6 +429,8 @@ resource appReplicas 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
 // A type the deployments don't create (Indexed, as Azure's built-in "Allowed resource types"): every type they do
 // (policy rule `azure-policy` holds the list to the snapshot exactly), the deployments' own records, and AZ11's private
 // endpoint, its zone group and the network interface Azure makes for it, allowed a foundation before the endpoint lands.
+// Never Microsoft.AlertsManagement/actionRules: one in the group could mute every alarm, the access alarm's among
+// them (AZ5e review S192), and this rule is all that keeps CI's Contributor from making one (policy.test.ts holds it).
 resource allowedTypes 'Microsoft.Authorization/policyDefinitions@2025-01-01' = {
   name: '${prefix}-allowed-types'
   properties: {
