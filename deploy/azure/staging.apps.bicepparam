@@ -72,3 +72,8 @@ param anchorPublicKeys = '1:YGJbtqiqwcHQT32ByJhe-28JTKwrMacr8rHCj_S91No'
 // The anchors' epoch, the API's and the operator's alike: raised by one only for a
 // sanctioned restore of the whole database (playbook H).
 param anchorEpoch = 1
+
+// The hand deploys' records (T1b), as JSON: deploy.ts reads them from the
+// migration job before every apps run and sets them, so the deployment, which
+// replaces the job's tags, keeps them; the default serves the policy tests.
+param records = json(readEnvironmentVariable('AGENTX_AZURE_RECORDS', '{}'))

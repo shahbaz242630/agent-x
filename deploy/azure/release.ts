@@ -536,6 +536,60 @@ function notYetComing(release: string, commit: string, changed: readonly string[
 }
 
 /**
+ * The commit a deploy's record says it sent a file as it is now, if one does: the files changed from each record's
+ * commit to `commit` are read once each, in lower case.
+ */
+function recordReader(
+  commit: string,
+  history: History,
+  records: Records,
+): (deployment: Deployment, file: string) => string | undefined {
+  const since = new Map<string, ReadonlySet<string>>();
+  return (deployment, file) => {
+    const sent = deployment === 'apps' ? undefined : records.get(deployment);
+    if (sent === undefined || !history.isAncestor(sent, commit)) return undefined;
+    let changed = since.get(sent);
+    if (changed === undefined) {
+      changed = new Set(history.changedFiles(sent, commit).map((each) => each.toLowerCase()));
+      since.set(sent, changed);
+    }
+    return changed.has(file.toLowerCase()) ? undefined : sent;
+  };
+}
+
+/**
+ * AZ5c: one line for each file behind its records, its deployments in the order they are run (DEPLOYMENTS), so
+ * "run each in that order" still holds; a file already named (`named`, in lower case) isn't named twice.
+ */
+function behindLines(behind: readonly Behind[], named: ReadonlySet<string>): string[] {
+  const order: readonly string[] = Object.keys(DEPLOYMENTS);
+  const byFile = new Map<string, { readonly file: string; readonly all: Behind[] }>();
+  for (const each of behind) {
+    const key = each.file.toLowerCase();
+    if (!named.has(key)) byFile.set(key, { file: each.file, all: [...(byFile.get(key)?.all ?? []), each] });
+  }
+  return [...byFile.values()].map(({ file, all }) => {
+    const inOrder = all.toSorted((one, other) => order.indexOf(one.deployment) - order.indexOf(other.deployment));
+    const sent = inOrder.map(({ deployment, sent: at }) => `${deployment} last sent ${at}`).join(', ');
+    return `${file} changed since ${sent}: ${toRun(inOrder.map(({ deployment }) => deployment))}`;
+  });
+}
+
+/** Where decide keeps what one changed file means (changedFile): a reason and the file named, or a line deployed. */
+function said(
+  found: { readonly kind: 'reason' | 'deployed'; readonly line: string },
+  file: string,
+  into: { readonly reasons: Set<string>; readonly named: Set<string>; readonly deployed: Set<string> },
+): void {
+  if (found.kind === 'deployed') {
+    into.deployed.add(found.line);
+    return;
+  }
+  into.reasons.add(found.line);
+  into.named.add(file.toLowerCase());
+}
+
+/**
  * What a release of `commit` would do, given what each workload runs: nothing
  * when both already run it, or both run a later commit that has it (a release
  * run again after a newer one); a hand deploy when what either runs isn't in
@@ -564,20 +618,7 @@ export function decide(
   const behind = behindRecords(commit, history, readers, records);
   const current = all.every(([, found]) => found.release === commit && found.image === image);
   if (current && behind.length === 0) return { kind: 'current' };
-  // The files changed from each record's commit to this one, in lower case, read once each.
-  const since = new Map<string, ReadonlySet<string>>();
-  /** The commit a deploy's record says it sent this file as it is now, if one does. */
-  const recordFor = (deployment: Deployment, file: string): string | undefined => {
-    if (deployment === 'apps') return undefined;
-    const sent = records.get(deployment);
-    if (sent === undefined || !history.isAncestor(sent, commit)) return undefined;
-    let changed = since.get(sent);
-    if (changed === undefined) {
-      changed = new Set(history.changedFiles(sent, commit).map((each) => each.toLowerCase()));
-      since.set(sent, changed);
-    }
-    return changed.has(file.toLowerCase()) ? undefined : sent;
-  };
+  const recordFor = recordReader(commit, history, records);
   const reasons = new Set<string>();
   const named = new Set<string>();
   const deployed = new Set<string>();
@@ -591,20 +632,11 @@ export function decide(
     const changed = history.changedFiles(release, commit);
     for (const file of changed) {
       const found = changedFile(file, release, readers, recordFor);
-      if (found?.kind === 'reason') {
-        reasons.add(found.line);
-        named.add(file.toLowerCase());
-      }
-      if (found?.kind === 'deployed') deployed.add(found.line);
+      if (found !== undefined) said(found, file, { reasons, named, deployed });
     }
     notComing.push(...notYetComing(release, commit, changed, history));
   }
-  // AZ5c: a file already named above isn't named twice, by its record.
-  for (const { deployment, file, sent } of behind) {
-    if (!named.has(file.toLowerCase())) {
-      reasons.add(`${file} changed since ${deployment} last sent ${sent}: ${toRun([deployment])}`);
-    }
-  }
+  for (const line of behindLines(behind, named)) reasons.add(line);
   // Before any hand deploy: once the coming entries are released, a rerun says what a person still has to deploy.
   if (notComing.length > 0) return { kind: 'coming-first', reasons: notComing };
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };

@@ -125,6 +125,34 @@ describe('whatIfShape and shapeHash', () => {
     ]);
   });
 
+  // S191 review: an approved foundation writes its record before apps' what-if is asked again, so the two would differ.
+  it("drops a hand deploy's record on the migration job when it is a commit, and keeps any other tag", () => {
+    const JOB = API.replace('containerApps/ca-agentx-stg-api', 'jobs/job-agentx-stg-migrate');
+    const record = (path: string, before: unknown, after: unknown) => ({ path, before, after });
+    const tagged = (...leaves: unknown[]) =>
+      modify([{ path: 'tags', propertyChangeType: 'Modify', children: leaves }], JOB);
+    for (const moved of [
+      record('agentx-deployed-foundation', undefined, NEW),
+      record('agentx-deployed-secrets', OLD, NEW),
+      record('agentx-deployed-access', OLD, null),
+    ]) {
+      expect(whatIfShape(result(tagged(moved)))).toEqual([]);
+    }
+    // Not a commit, another tag, or a deployment that records nothing: each counts.
+    for (const [kept, path] of [
+      [record('agentx-deployed-foundation', OLD, 'main'), 'tags.agentx-deployed-foundation'],
+      [record('environment', 'staging', NEW), 'tags.environment'],
+      [record('agentx-deployed-apps', undefined, NEW), 'tags.agentx-deployed-apps'],
+    ] as const) {
+      expect(whatIfShape(result(tagged(kept)))).toEqual([
+        { resource: JOB, change: 'Modify', leaves: [{ path, before: kept.before, after: kept.after }] },
+      ]);
+    }
+    // A new job's record drops out too.
+    const created = { resourceId: JOB, changeType: 'Create', after: { tags: { 'agentx-deployed-foundation': NEW } } };
+    expect(whatIfShape(result(created))).toEqual([{ resource: JOB, change: 'Create', leaves: [] }]);
+  });
+
   it('refuses a what-if that did not succeed', () => {
     expect(() => whatIfShape({ status: 'Failed', changes: [] })).toThrow(
       "Azure's what-if didn't succeed (Failed): this step was not sent.",

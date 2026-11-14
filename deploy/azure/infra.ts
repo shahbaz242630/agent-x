@@ -44,6 +44,8 @@ import {
   realAz,
   realSteps,
   realTerminal,
+  RECORDED,
+  recordTag,
   type Request,
   type Steps,
   type Terminal,
@@ -106,6 +108,8 @@ export interface Changed {
 /** Where a workload names its image, and a setting's value, as a what-if's paths name them. */
 const IMAGE_PATH = /^properties\.template\.(?:initContainers|containers)\.\d+\.image$/;
 const SETTING_PATH = /^properties\.template\.containers\.(\d+)\.env\.(\d+)\.value$/;
+/** Where a what-if names each hand deploy's record (T1b), a tag of the migration job's. */
+const RECORD_PATHS: ReadonlySet<string> = new Set(RECORDED.map((deployment) => `tags.${recordTag(deployment)}`));
 
 /** Our own image by digest, the one every release moves (and nothing else's). */
 const ourImage = (value: unknown): boolean =>
@@ -128,16 +132,22 @@ function settingName(bodies: readonly unknown[], container: string, setting: str
   return undefined;
 }
 
+/** A commit, as git writes it in full. */
+const commit = (value: unknown): boolean => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
+
 /**
- * A value every release moves, so never a change of the set-up: our own image at a workload's image path, and a
- * commit in AGENTX_RELEASE. Anything else, an image of anyone else's or a commit-shaped value elsewhere, counts.
+ * A value every release moves, so never a change of the set-up: our own image at a workload's image path, a commit
+ * in AGENTX_RELEASE, and a commit in a hand deploy's record on the migration job (`tags.agentx-deployed-<part>`,
+ * S191: an approved deploy's foundation writes its record before apps' what-if is asked again, which the plan's
+ * could not show). Anything else, an image of anyone else's, any other tag, or a commit-shaped value elsewhere,
+ * counts.
  */
 function movedByReleases(leaf: Leaf, bodies: readonly unknown[]): boolean {
   if (IMAGE_PATH.test(leaf.path)) return absentOr(leaf.before, ourImage) && absentOr(leaf.after, ourImage);
+  if (RECORD_PATHS.has(leaf.path)) return absentOr(leaf.before, commit) && absentOr(leaf.after, commit);
   const setting = SETTING_PATH.exec(leaf.path);
   if (setting === null || settingName(bodies, String(setting[1]), String(setting[2])) !== 'AGENTX_RELEASE')
     return false;
-  const commit = (value: unknown): boolean => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
   return absentOr(leaf.before, commit) && absentOr(leaf.after, commit);
 }
 

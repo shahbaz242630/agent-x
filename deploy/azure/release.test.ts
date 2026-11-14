@@ -995,6 +995,31 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
       reasons: [`${main} changed since foundation last sent ${OLD}: ${runFoundation}`],
     });
   });
+
+  // S191 review: two records behind on one file make one line, in the order they are run, so "in that order" holds.
+  it('names a file several records are behind on once, its deployments in the order they are run', () => {
+    const shared = 'deploy/azure/shared.json';
+    const current = at(NEW, NEW_IMAGE);
+    expect(
+      decide(
+        both(current('api'), current('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, MIDDLE, NEW], { [OLD]: [shared, postgres], [MIDDLE]: [shared] }),
+        readers,
+        // Secrets first, though the foundation runs before it.
+        new Map([
+          ['secrets', OLD],
+          ['foundation', MIDDLE],
+        ]),
+      ),
+    ).toEqual({
+      kind: 'by-hand',
+      reasons: [
+        `${shared} changed since foundation last sent ${MIDDLE}, secrets last sent ${OLD}: deploy.ts foundation and secrets read it, so run each by hand in that order, each what-if read, then run this release again`,
+      ],
+    });
+  });
 });
 
 describe('the hand deploys records', () => {
