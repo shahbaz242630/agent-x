@@ -806,6 +806,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ...Array.from({ length: 7 }, (): unknown => role),
       // The live server's delete lock (S185), which CI may neither write nor lift.
       'Microsoft.Authorization/locks keep-live-database',
+      // The main workspace's (AZ5e): the access alarm reads it, so CI may not delete it.
+      'Microsoft.Authorization/locks keep-log-workspace',
       // Azure's own refusals (AZ2): six rules of the subscription, each given on the group.
       ...['policyDefinitions', 'policyAssignments'].flatMap((kind) =>
         ['apps-internal', 'apps-https', 'images', 'jobs-by-hand', 'app-replicas', 'allowed-types'].map(
@@ -840,10 +842,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         types: authorization.length === 0 ? [] : ['Microsoft.Authorization/roleAssignments'],
       });
     }
-    // And the lock that keeps the live server is there, in access.
+    // And the locks that keep the live server and the main workspace (AZ5e) are there, in access.
     expect(
-      stagingPart('staging.access.bicepparam').predictedResources.filter(type('Microsoft.Authorization/locks')),
-    ).toHaveLength(1);
+      stagingPart('staging.access.bicepparam')
+        .predictedResources.filter(type('Microsoft.Authorization/locks'))
+        .map((lock) => lock.name),
+    ).toEqual(['keep-live-database', 'keep-log-workspace']);
   });
 
   it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {
@@ -969,7 +973,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     const locks = staging.predictedResources.filter(type('Microsoft.Authorization/locks'));
     expect(locks.map((lock) => [lock.name, at(lock.properties, 'level')])).toEqual([
       ['keep-live-database', 'CanNotDelete'],
+      // The main workspace's (AZ5e), on the workspace alone.
+      ['keep-log-workspace', 'CanNotDelete'],
     ]);
+    expect(locks[1]?.id).toMatch(
+      /\/providers\/Microsoft\.OperationalInsights\/workspaces\/log-agentx-stg\/providers\/Microsoft\.Authorization\/locks\/keep-log-workspace$/,
+    );
     // Scoped to the server itself, not the group: Stage G's copies and the drill stay deletable.
     const server = staging.predictedResources.find(SERVER);
     expect(server).toBeDefined();
@@ -5709,6 +5718,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(new Set(allowed)).toEqual(new Set(made));
       expect(new Set(ALLOWED_TYPES)).toEqual(new Set(made));
       expect(ALLOWED_TYPES).toHaveLength(new Set(made).size);
+      // An alert processing rule in the group could mute every alarm, the access alarm's among them (AZ5e review):
+      // only the allowed-types guardrail keeps CI from making one, so the type stays off the list.
+      expect(ALLOWED_TYPES).not.toContain('Microsoft.AlertsManagement/actionRules');
       const exactly: unknown = expect.stringMatching(
         /^agentx-staging-allowed-types: must allow exactly Microsoft\.App\//,
       );

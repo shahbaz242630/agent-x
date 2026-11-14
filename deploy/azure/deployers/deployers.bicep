@@ -19,6 +19,8 @@
 // - the what-if identity: trusted only for a job in `staging-whatif` (main only,
 //   no reviewer), the plan the partner reads before approving. It reads staging's
 //   group and asks Azure's what-if; it changes nothing
+// - the alarm on an app changing role grants, trusts, policy rules or locks
+//   across the subscription (watch.bicep, AZ5e), where the infra identity can't reach it
 //
 // The subjects are the immutable form names.bicep's githubRepository() writes;
 // infra.test.ts holds the two equal (names.bicep is read by every deployment,
@@ -35,6 +37,9 @@ param environment string
 
 @description('The region the identities are made in, as every resource here (ADR-009).')
 param location string
+
+@description('The alert address the access alarm emails, as the foundation has it.')
+param alertEmail string
 
 var short = 'stg'
 var repository = 'repo:shahbaz242630@205810405/agent-x@1368211207'
@@ -58,6 +63,19 @@ module identities 'identities.bicep' = {
     infraSubject: '${repository}:environment:${environment}-infra'
     whatIfName: whatIfName
     whatIfSubject: '${repository}:environment:${environment}-whatif'
+  }
+}
+
+module watch 'watch.bicep' = {
+  scope: deployers
+  params: {
+    tags: tags
+    short: short
+    location: location
+    // The foundation's workspace, by name (names.bicep's): it exists before this runs.
+    workspaceId: resourceId(subscription().subscriptionId, stagingGroupName, 'Microsoft.OperationalInsights/workspaces', 'log-agentx-${short}')
+    alertEmail: alertEmail
+    infraPrincipalId: identities.outputs.infraPrincipalId
   }
 }
 
