@@ -3476,12 +3476,12 @@ describe('what a hand deploy records (T1b)', () => {
       const refused = await run(argv, { ...told, az: staging({ record: 'refused' }) });
       expect(refused.status).toBe(1);
       expect(refused.terminal.said).toContain(
-        `Deployed, but not recorded (az tag update --resource-id ${RECORDS_JOB_ID} --operation Merge --tags agentx-deployed-${deployment}=${COMMIT} failed:\nERROR: (AuthorizationFailed) The client may not write tags.): CI's release stays red on what ${deployment} reads until apps runs.`,
+        `Deployed, but not recorded (az tag update --resource-id ${RECORDS_JOB_ID} --operation Merge --tags agentx-deployed-${deployment}=${COMMIT} failed:\nERROR: (AuthorizationFailed) The client may not write tags.): CI's release stays red on what ${deployment} reads until deploy.ts ${deployment} runs again and records (with no earlier record, apps also clears it).`,
       );
       const lost = await run(argv, { ...told, az: staging({ record: 'lost' }) });
       expect(lost.status).toBe(1);
       expect(lost.terminal.said).toContain(
-        `Deployed, but not recorded (agentx-deployed-${deployment} reads back as nothing): CI's release stays red on what ${deployment} reads until apps runs.`,
+        `Deployed, but not recorded (agentx-deployed-${deployment} reads back as nothing): CI's release stays red on what ${deployment} reads until deploy.ts ${deployment} runs again and records (with no earlier record, apps also clears it).`,
       );
     }
   });

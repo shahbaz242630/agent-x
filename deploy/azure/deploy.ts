@@ -1271,7 +1271,7 @@ export function leaveRecord(
   const tag = recordTag(deployment);
   const unrecorded = (why: string): false => {
     steps.terminal.say(
-      `Deployed, but not recorded (${why}): CI's release stays red on what ${deployment} reads until apps runs.`,
+      `Deployed, but not recorded (${why}): CI's release stays red on what ${deployment} reads until ${commandFor(deployment)} runs again and records (with no earlier record, apps also clears it).`,
     );
     return false;
   };

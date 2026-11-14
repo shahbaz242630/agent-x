@@ -176,7 +176,7 @@ const REPOSITORY = path.resolve(import.meta.dirname, '../..');
 
 /**
  * The hand deploys that read each file, by its path in the repository in lower
- * case (a Windows checkout's case may differ from git's), in DEPLOYMENTS order.
+ * case (a Windows checkout's case may differ from git's), in PARTS order.
  */
 export type Readers = ReadonlyMap<string, readonly Part[]>;
 
