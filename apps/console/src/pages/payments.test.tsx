@@ -107,11 +107,11 @@ let sent: { method: string; path: string; body: unknown }[];
 /** Answers `method path` with these in turn, the last one again after. */
 const answer = (key: string, ...given: Answer[]) => answers.set(key, given);
 
-function signedIn(role = 'admin') {
+function signedIn(role = 'admin', userId = ME) {
   answer('GET /v1/auth/session', {
     status: 200,
     body: {
-      userId: ME,
+      userId,
       authenticatedAt: '2026-10-26T05:00:00.000Z',
       methods: ['pwd', 'user', 'mfa'],
       idleExpiresAt: '2026-10-26T05:30:00.000Z',
@@ -494,6 +494,17 @@ describe('marking a payment failed (CO6, decision 38)', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(sessionStorage).toHaveLength(0);
     expect(goTo).not.toHaveBeenCalled();
+  });
+
+  it('marks a proposal theirs whatever the case of their ID: a UUID’s letters may come either way', async () => {
+    signedIn('admin', ME.toUpperCase());
+    answer(`GET /v1/payments/${ID}`, {
+      status: 200,
+      body: details({ markFailed: { markableFrom: LONG_AGO, openProposal: proposal(ME) } }),
+    });
+    open(`/payments/${ID}`);
+    const mark = await screen.findByRole('region', { name: 'Mark as failed' });
+    expect(within(mark).getByText(/\(you\)/)).toBeDefined();
   });
 
   it('withdraws in its own confirm, an empty body, by passkey', async () => {
