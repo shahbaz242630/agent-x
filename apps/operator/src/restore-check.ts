@@ -47,7 +47,7 @@ export interface RestoreCheckReport {
   readonly problems: readonly string[];
 }
 
-export interface LiveHead {
+interface LiveHead {
   /** The organisation whose chain it is, a whole field the log's scrub leaves as it is; null for the platform chain. */
   readonly orgId: string | null;
   readonly seq: bigint;
