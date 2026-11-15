@@ -7,17 +7,17 @@
 // banner at the top of every page says the organisation is frozen (shell.tsx).
 import { useState } from 'react';
 
-import { atOnce, FREEZING, REACTIVATING } from '../brakes.ts';
+import { atOnce, brakeRefusal, FREEZING, REACTIVATING } from '../brakes.ts';
 import { Confirm } from '../confirm.tsx';
 import { useActing } from '../session.tsx';
-import { ask } from '../step-up.ts';
+import { ask, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
-import { Said, useChange } from './brakes.tsx';
+import { Said, useChange } from './change.tsx';
 import { LineField, NOTE_MOST } from './line-field.tsx';
 
 export function Freeze() {
   const { organization } = useActing();
-  const { busy, said, run } = useChange();
+  const { busy, said, run } = useChange(brakeRefusal);
   // Which pop-up was opened: one opened as a freeze never turns into an unfreeze (someone else froze it meanwhile).
   const [open, setOpen] = useState<'freeze' | 'unfreeze' | null>(null);
   const [reason, setReason] = useState('');
@@ -34,25 +34,22 @@ export function Freeze() {
           organization: organization.id,
           body: { pendingRequests, confirmed: true, statementVersion },
         }),
-      t('freeze.done'),
-      close,
+      { done: t('freeze.done'), after: close },
     );
   // The reason and choice are asked with; the version of the words shown goes with the confirm (CO3).
   const unfreeze = (pendingRequests: string, statementVersion?: number) =>
     run(
       () =>
         ask(
-          {
-            label: t('unfreeze.label', names),
-            askPath: '/v1/organization/unfreeze',
-            confirmPath: '/v1/organization/unfreeze/confirm',
-            body: { reason: reason.trim(), pendingRequests },
-            organization: organization.id,
-          },
+          changeAt(
+            '/v1/organization/unfreeze',
+            t('unfreeze.label', names),
+            { reason: reason.trim(), pendingRequests },
+            organization.id,
+          ),
           { statementVersion },
         ),
-      t('unfreeze.done'),
-      close,
+      { done: t('unfreeze.done'), after: close },
     );
   const kind = frozen ? 'unfreeze' : 'freeze';
   return (

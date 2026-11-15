@@ -6,7 +6,7 @@
 // shouts; a payment the bank contradicts is tagged.
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router';
 
-import { GROUPS, groupIn, type ListedPayment, usePaymentList, type Which } from '../payments.ts';
+import { type Group, GROUPS, groupIn, type ListedPayment, usePaymentList, type Which } from '../payments.ts';
 import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
@@ -29,7 +29,8 @@ function Row({ payment, exceptions }: { readonly payment: ListedPayment; readonl
         <span className="row-main">
           <span>
             {payment.supplier.name}
-            {payment.contradicted && <span className="tag warn">{t('payments.contradicted')}</span>}
+            {/* On the exception list the why line says it already. */}
+            {payment.contradicted && !exceptions && <span className="tag warn">{t('payments.contradicted')}</span>}
           </span>
           <span className="muted">
             {t(`payments.status.${payment.status}`)} · <span className="mono">{payment.bankReference}</span> ·{' '}
@@ -44,7 +45,7 @@ function Row({ payment, exceptions }: { readonly payment: ListedPayment; readonl
 }
 
 /** The filter by group, kept in the address: a change replaces nothing else the person sees. */
-function Filter({ group }: { readonly group: Which }) {
+function Filter({ group }: { readonly group: Group | 'all' }) {
   const navigate = useNavigate();
   return (
     <>

@@ -259,6 +259,8 @@ describe('the exception list (BR-17)', () => {
     expect(within(unknown).getByText(/The bank's answer never came/)).toBeDefined();
     const contradicted = screen.getByText('Desert Print FZE').closest('a') as HTMLElement;
     expect(within(contradicted).getByText(/The bank's latest word disagrees/)).toBeDefined();
+    // The why line says it: no tag beside it.
+    expect(within(contradicted).queryByText('Bank disagrees')).toBeNull();
     expect(sentTo('GET', '/v1/payments/exceptions?limit=50')).toHaveLength(1);
     expect(screen.queryByLabelText('Show')).toBeNull();
   });
@@ -330,7 +332,10 @@ describe('one payment’s page (6C1)', () => {
     expect(saved).toEqual({ href: 'blob:payment', download: `payment-${ID}.json` });
     expect(nth(made, 0).type).toBe('application/json');
     expect(JSON.parse(await nth(made, 0).text())).toEqual(body);
-    expect(revoke).toHaveBeenCalledWith('blob:payment');
+    // Freed only once the click has been handled.
+    await waitFor(() => {
+      expect(revoke).toHaveBeenCalledWith('blob:payment');
+    });
   });
 
   it('says a payment this organisation doesn’t have, or an address naming none, can’t be found', async () => {
@@ -510,19 +515,44 @@ describe('marking a payment failed (CO6, decision 38)', () => {
     expect(kept()).toMatchObject({ confirmPath: `${PROPOSAL_PATH}/withdraw/confirm`, body: {} });
   });
 
-  it('says a change done at once as done, and reads the payment again', async () => {
+  it('never says a step done when its ask is answered with no passkey asked, and reads the payment again', async () => {
     signedIn();
-    answer(
-      `GET /v1/payments/${ID}`,
-      { status: 200, body: details({ markFailed: { markableFrom: LONG_AGO, openProposal: proposal() } }) },
-      { status: 200, body: details() },
-    );
+    answer(`GET /v1/payments/${ID}`, {
+      status: 200,
+      body: details({ markFailed: { markableFrom: LONG_AGO, openProposal: proposal() } }),
+    });
     answer(`POST ${PROPOSAL_PATH}/approve`, { status: 200, body: { id: ID, status: 'FAILED' } });
+    answer(`POST ${PROPOSAL_PATH}/withdraw`, { status: 200, body: proposal() });
     open(`/payments/${ID}`);
     await userEvent.click(await screen.findByRole('button', { name: 'Confirm it failed' }));
-    expect(await screen.findByText('Done.')).toBeDefined();
+    expect(await screen.findByText(/answered without asking for your passkey/)).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => {
+      expect(sentTo('GET', `/v1/payments/${ID}`)).toHaveLength(2);
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Withdraw proposal' }));
+    await userEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Continue with passkey' }),
+    );
+    await waitFor(() => {
+      expect(sentTo('GET', `/v1/payments/${ID}`)).toHaveLength(3);
+    });
+    expect(screen.getByText(/answered without asking for your passkey/)).toBeDefined();
     expect(goTo).not.toHaveBeenCalled();
-    expect(await screen.findByRole('button', { name: 'Propose marking it failed' })).toBeDefined();
+    expect(sessionStorage).toHaveLength(0);
+  });
+
+  it('says a proposal’s refused reference in its own words', async () => {
+    signedIn();
+    answer(`GET /v1/payments/${ID}`, { status: 200, body: details() });
+    answer(`POST ${PROPOSAL_PATH}`, { status: 400, body: { error: { code: 'BAD_REQUEST' } } });
+    open(`/payments/${ID}`);
+    await userEvent.type(await screen.findByLabelText("Your bank's reference for its written confirmation"), 'ENBD-1');
+    await userEvent.click(screen.getByRole('button', { name: 'Propose marking it failed' }));
+    await userEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Continue with passkey' }),
+    );
+    expect(await screen.findByText(/couldn't accept the bank's reference/)).toBeDefined();
   });
 
   it.each([
@@ -535,7 +565,7 @@ describe('marking a payment failed (CO6, decision 38)', () => {
     ['FAILURE_PROPOSAL_GRANTED_BY_PROPOSER', 403, /made you an admin/],
     ['FAILURE_PROPOSAL_CONFIRMER_TOO_NEW', 403, /less than 14 days ago/],
     ['FAILURE_PROPOSAL_ALONE_LOCKED', 409, /one admin alone can't confirm/],
-    ['BAD_REQUEST', 400, /couldn't accept the bank's reference/],
+    ['BAD_REQUEST', 400, /couldn't accept this step as it was sent/],
     ['FORBIDDEN', 403, /Only an admin can mark a payment failed/],
     ['NOT_FOUND', 404, /can't be found in this organisation any more/],
     ['SOMETHING_NEW', 409, /didn't make this change \(reason SOMETHING_NEW\)/],

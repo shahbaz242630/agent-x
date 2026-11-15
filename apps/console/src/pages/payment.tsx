@@ -10,13 +10,12 @@
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
-import { ApiError, isUuid } from '../api.ts';
+import { ApiError, isIntegrityFailed, isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import {
   downloadHistory,
   EVIDENCE_MOST,
   EVIDENCE_REFERENCE,
-  isIntegrityFailed,
   MARK_FAILED_CONFIRMED,
   markRefusal,
   type PaymentDetails,
@@ -26,9 +25,9 @@ import {
 } from '../payments.ts';
 import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
-import { type Asked, ask, askFirst } from '../step-up.ts';
+import { type Asked, ask, askFirst, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
-import { Said, useChange } from './brakes.tsx';
+import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { LineField } from './line-field.tsx';
 
@@ -150,52 +149,55 @@ function Proposed({ proposal, mine }: { readonly proposal: Proposal; readonly mi
 /** Marking an UNKNOWN payment failed: from when, the proposal open if any, and each admin's step. */
 function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
   const { organization, session } = useActing();
-  const { busy, said, run } = useChange(markRefusal);
+  const { busy, said, run } = useChange((error) => markRefusal(error, 'approve'));
   const [open, setOpen] = useState<Open>(NONE);
   const [reference, setReference] = useState('');
   const [broken, setBroken] = useState(false);
   const mark = payment.markFailed;
   if (mark === null || organization.role !== 'admin') return null;
+  const me = session.userId.toLowerCase();
   const names = { amount: amountText(payment.amountMinor, payment.currency), supplier: payment.supplier.name };
   const path = `/v1/payments/${encodeURIComponent(payment.id)}/failure-proposal`;
-  const change = (step: 'propose' | 'approve' | 'withdraw', body: Readonly<Record<string, unknown>>) => {
-    const at = step === 'propose' ? path : `${path}/${step}`;
-    return {
-      label: t(`payments.${step}Label`, names),
-      askPath: at,
-      confirmPath: `${at}/confirm`,
-      body,
-      organization: organization.id,
-    };
-  };
+  const change = (step: 'propose' | 'approve' | 'withdraw', body: Readonly<Record<string, unknown>>) =>
+    changeAt(step === 'propose' ? path : `${path}/${step}`, t(`payments.${step}Label`, names), body, organization.id);
   const close = () => {
     setOpen(NONE);
   };
-  const done = t('payments.markDone');
+  // Each step's done is said on its way back from the passkey (stepped-up.tsx): none here.
+  const sending = (step: 'propose' | 'approve' | 'withdraw') => ({
+    after: close,
+    refusal: (error: unknown) => markRefusal(error, step),
+  });
+  /**
+   * A step's ask only asks: answered with no passkey asked, nothing was
+   * proposed, confirmed or withdrawn (as a brake's atOnce the other way
+   * round), so it is refused, never said done, and the payment read again.
+   */
+  const stepping = async (asking: Promise<{ readonly done: unknown } | 'stepping'>) => {
+    if ((await asking) !== 'stepping') throw new ApiError(200, 'STEP_UP_NOT_ASKED');
+    return 'stepping';
+  };
   // The reference and the consequence are asked with; the version of the words shown goes with the confirm (CO3).
   const propose = (statementVersion?: number) =>
     run(
       () =>
-        ask(change('propose', { evidenceRef: reference.trim(), confirmed: MARK_FAILED_CONFIRMED }), {
-          statementVersion,
-        }),
-      done,
-      close,
+        stepping(
+          ask(change('propose', { evidenceRef: reference.trim(), confirmed: MARK_FAILED_CONFIRMED }), {
+            statementVersion,
+          }),
+        ),
+      sending('propose'),
     );
   // Asked first, as its answer names the proposal confirmed: shown with the words before the passkey.
   const approve = () =>
-    run(
-      async () => {
-        const asked = await askFirst(change('approve', { confirmed: MARK_FAILED_CONFIRMED }));
-        if ('done' in asked) return asked;
-        const { proposal } = asked.answer as { readonly proposal: Proposal };
-        setOpen({ kind: 'approve', proposal, stepUp: asked.stepUp });
-        return 'held';
-      },
-      done,
-      close,
-    );
-  const withdraw = () => run(() => ask(change('withdraw', {})), done, close);
+    run(async () => {
+      const asked = await askFirst(change('approve', { confirmed: MARK_FAILED_CONFIRMED }));
+      if ('done' in asked) throw new ApiError(200, 'STEP_UP_NOT_ASKED');
+      const { proposal } = asked.answer as { readonly proposal: Proposal };
+      setOpen({ kind: 'approve', proposal, stepUp: asked.stepUp });
+      return 'held';
+    }, sending('approve'));
+  const withdraw = () => run(() => stepping(ask(change('withdraw', {}))), sending('withdraw'));
   const proposal = mark.openProposal;
   const markable = Date.now() > new Date(mark.markableFrom).getTime();
 
@@ -204,7 +206,7 @@ function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
     step = (
       <>
         <p>{t('payments.proposalOpen')}</p>
-        <Proposed proposal={proposal} mine={proposal.proposedBy === session.userId.toLowerCase()} />
+        <Proposed proposal={proposal} mine={proposal.proposedBy === me} />
         <div className="decide">
           <button
             type="button"
@@ -283,11 +285,11 @@ function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
           busy={busy}
           onCancel={close}
           onConfirm={(_choice, statementVersion) =>
-            void run(() => Promise.resolve(open.stepUp(undefined, { statementVersion })), done, close)
+            void run(() => Promise.resolve(open.stepUp(undefined, { statementVersion })), sending('approve'))
           }
         >
           <p className="amount">{t('payments.approveLabel', names)}</p>
-          <Proposed proposal={open.proposal} mine={open.proposal.proposedBy === session.userId.toLowerCase()} />
+          <Proposed proposal={open.proposal} mine={open.proposal.proposedBy === me} />
         </Confirm>
       )}
       {open.kind === 'withdraw' && (
@@ -315,7 +317,7 @@ export function PaymentPage({ id }: { readonly id: string }) {
     </Link>
   );
   // An address that isn't a payment's ID names none: not found, as the API's 404 is, never a failure to retry.
-  const missing = !isUuid(id) || (payment.error instanceof ApiError && payment.error.status === 404);
+  const missing = isMissing(id, payment.error);
   if (missing || payment.isError) {
     let said = <Retry onRetry={() => void payment.refetch()} />;
     if (missing) said = <p className="notice">{t('payments.notFound')}</p>;

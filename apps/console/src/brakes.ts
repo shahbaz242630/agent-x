@@ -8,11 +8,11 @@
 // decide which buttons show; the API checks again whatever is pressed.
 import { useInfiniteQuery } from '@tanstack/react-query';
 
-import { api, ApiError, isRefusal, type RequestOptions } from './api.ts';
+import { api, ApiError, type RequestOptions } from './api.ts';
+import { refusalText } from './refusals.ts';
 import { pageQuery } from './requests.ts';
 import type { Role } from './session.tsx';
-import { StepUpStorageBlocked } from './step-up.ts';
-import { t, type TextKey } from './text.ts';
+import { t } from './text.ts';
 
 /** The kinds of thing with a brake, each its own list. */
 export type Kind = 'agents' | 'suppliers' | 'sources';
@@ -153,10 +153,4 @@ export async function atOnce(path: string, options: RequestOptions): Promise<voi
 }
 
 /** What a brake's refusal or failure says. */
-export function brakeRefusal(error: unknown): string {
-  if (error instanceof StepUpStorageBlocked) return t('request.storageBlocked');
-  if (!isRefusal(error)) return t('request.failed');
-  return REFUSALS.has(error.code)
-    ? t(`brakes.refused.${error.code}` as TextKey)
-    : t('request.refused.other', { code: error.code });
-}
+export const brakeRefusal = (error: unknown): string => refusalText(error, REFUSALS, 'brakes.refused');

@@ -34,6 +34,14 @@ export interface Change {
   readonly organization?: string | undefined;
 }
 
+/** A change asked at `at` and confirmed at its `/confirm`, as every step-up's routes are. */
+export const changeAt = (
+  at: string,
+  label: string,
+  body: Readonly<Record<string, unknown>>,
+  organization: string,
+): Change => ({ label, askPath: at, confirmPath: `${at}/confirm`, body, organization });
+
 /** Storage is blocked here (a private window, a policy): the change can't be carried over the sign-in. */
 export class StepUpStorageBlocked extends Error {
   constructor() {
@@ -90,6 +98,14 @@ export function forget(challenge: string): void {
   }
 }
 
+/** A page's own query (its filter, `?org=`, CO5): its address's, less a step-up's. */
+export function ownQuery(search: string): URLSearchParams {
+  const query = new URLSearchParams(search);
+  query.delete(STEPPED);
+  query.delete(STEP_UP_FAILED);
+  return query;
+}
+
 /** The most a way back may be, and what it may hold, as the API takes it (RETURN_PATH). */
 const RETURN_MOST = 512;
 const RETURN_CHARACTERS = /^[\w\-.~/%?=&]*$/;
@@ -101,9 +117,7 @@ const RETURN_CHARACTERS = /^[\w\-.~/%?=&]*$/;
  * characters, or holding what RETURN_PATH doesn't) keeps the path alone.
  */
 export function stepUpAddress(challenge: string, path: string, search = ''): string {
-  const query = new URLSearchParams(search);
-  query.delete(STEPPED);
-  query.delete(STEP_UP_FAILED);
+  const query = ownQuery(search);
   query.set(STEPPED, challenge);
   // URLSearchParams writes a space as `+`, which RETURN_PATH doesn't hold; `%20` says the same.
   const kept = `${path}?${query.toString().replaceAll('+', '%20')}`;

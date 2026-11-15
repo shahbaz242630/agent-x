@@ -173,7 +173,7 @@
   "brakes.refused.BAD_REQUEST": "Agent X couldn't accept what was entered, so nothing was changed. Check it is one line, with no phone or account numbers, and try again.",
   "unfreeze.reasonHint": "One line, up to 200 characters. It is kept for good, so leave out phone and account numbers.",
   "request.rejectReasonHint": "One line, up to 200 characters. It is kept for good, so leave out phone and account numbers.",
-  "request.refused.BAD_REQUEST": "Agent X couldn't accept your reason, so nothing was changed. Check it is one line, with no phone or account numbers, and try again.",
+  "request.refused.BAD_REQUEST": "Agent X couldn't accept this change as it was sent, so nothing was changed. Reload the page and try again.",
   "payments.title": "Payments",
   "payments.all": "All payments",
   "payments.exceptions": "To follow up",
@@ -239,7 +239,6 @@
   "payments.withdrawTitle": "Withdraw the proposal?",
   "payments.withdrawText": "Withdrawing ends this proposal: the payment stays as it is, with its outcome unknown. Every admin is told. An admin can propose again later.",
   "payments.withdrawLabel": "Withdraw the proposal to mark {amount} to {supplier} failed",
-  "payments.markDone": "Done.",
   "payments.refused.PAYMENT_NOT_UNKNOWN": "This payment's outcome is known now, so it can't be marked failed. Its page now shows where it stands.",
   "payments.refused.PAYMENT_TOO_RECENT": "This payment was sent to the bank less than a day ago, so it can't be marked failed yet. Wait for the time shown, and for your bank's written word.",
   "payments.refused.FAILURE_PROPOSAL_OPEN": "Another admin has already proposed marking this payment failed. Its page now shows the proposal.",
@@ -249,7 +248,10 @@
   "payments.refused.FAILURE_PROPOSAL_GRANTED_BY_PROPOSER": "The admin who proposed this made you an admin, so another admin must confirm it.",
   "payments.refused.FAILURE_PROPOSAL_CONFIRMER_TOO_NEW": "You joined this organisation less than 14 days ago, so another admin must confirm it.",
   "payments.refused.FAILURE_PROPOSAL_ALONE_LOCKED": "An admin or approver was removed or had their role changed in the last 14 days, so one admin alone can't confirm this now. Ask another admin.",
-  "payments.refused.BAD_REQUEST": "Agent X couldn't accept the bank's reference, so nothing was changed. Check it and try again.",
+  "payments.refused.BAD_REQUEST": "Agent X couldn't accept this step as it was sent, so nothing was changed. Reload the page and try again.",
   "payments.refused.FORBIDDEN": "Only an admin can mark a payment failed. Ask an admin.",
-  "payments.refused.NOT_FOUND": "This payment can't be found in this organisation any more. Nothing was changed."
+  "payments.refused.NOT_FOUND": "This payment can't be found in this organisation any more. Nothing was changed.",
+  "request.refused.badReason": "Agent X couldn't accept your reason, so nothing was changed. Check it is one line, with no phone or account numbers, and try again.",
+  "payments.refused.badReference": "Agent X couldn't accept the bank's reference, so nothing was changed. Check it and try again.",
+  "payments.refused.STEP_UP_NOT_ASKED": "Agent X answered without asking for your passkey, so nothing was changed. The page now shows where the payment stands; if this happens again, call support."
 }

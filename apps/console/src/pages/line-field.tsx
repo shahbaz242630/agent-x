@@ -1,7 +1,7 @@
 // A one-line text field with its label and its rule in plain words under it
 // (6B2's unfreeze reason, 6B1's reject reason, 6C1's bank reference): one
 // line, at most what the API takes, so nothing is typed that it would refuse
-// for length. A rule broken is said in place once the person has been told.
+// for length. A rule broken is said in place once it has been checked (on submit).
 import { useId } from 'react';
 
 /** The most characters a note kept for good may have, as the API takes it (keptNote): a reject's reason, an unfreeze's. */

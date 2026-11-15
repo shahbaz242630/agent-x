@@ -13,7 +13,7 @@ import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
 
 import { isRefusal, isUuid } from '../api.ts';
-import { confirm, forget, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
+import { confirm, forget, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
 type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed';
@@ -44,13 +44,9 @@ export function SteppedUp() {
     // Its sign-in was refused: the change is never confirmed with it, so nothing is kept for it.
     if (failedFor !== undefined) forget(failedFor);
   }, [failedFor]);
-  // The page's own query stays (its filter, `?org=`, CO5): only the step-up's is cleaned off.
   const close = () => {
     setSent('ready');
-    const kept = new URLSearchParams(query);
-    kept.delete(STEPPED);
-    kept.delete(STEP_UP_FAILED);
-    const rest = kept.toString();
+    const rest = ownQuery(query).toString();
     void navigate({ href: rest === '' ? pathname : `${pathname}?${rest}`, replace: true });
   };
   if (failedFor !== undefined) {

@@ -8,10 +8,10 @@
 // for what they type, and the refusals they can meet, are here too.
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
-import { api, ApiError, isRefusal, isUuid } from './api.ts';
+import { api, isIntegrityFailed, isUuid } from './api.ts';
+import { refusalText } from './refusals.ts';
 import { pageQuery } from './requests.ts';
-import { StepUpStorageBlocked } from './step-up.ts';
-import { t, type TextKey } from './text.ts';
+import { t } from './text.ts';
 
 type PaymentStatus =
   'SUBMISSION_PENDING' | 'SUBMITTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | 'REVERSED';
@@ -126,23 +126,23 @@ const REFUSALS = new Set([
   'FAILURE_PROPOSAL_GRANTED_BY_PROPOSER',
   'FAILURE_PROPOSAL_CONFIRMER_TOO_NEW',
   'FAILURE_PROPOSAL_ALONE_LOCKED',
+  'STEP_UP_NOT_ASKED',
   'BAD_REQUEST',
   'FORBIDDEN',
   'NOT_FOUND',
 ]);
 
-/** Whether an error is the API refusing a record that failed its integrity check (503, so not a refusal). */
-export const isIntegrityFailed = (error: unknown): boolean =>
-  error instanceof ApiError && error.code === 'INTEGRITY_FAILED';
+/** A proposal's own words for a code: what it sent that can be refused is the bank's reference. */
+const PROPOSE_WORDS = { BAD_REQUEST: 'payments.refused.badReference' } as const;
 
-/** What a refusal or failure marking a payment failed says. */
-export function markRefusal(error: unknown): string {
-  if (error instanceof StepUpStorageBlocked) return t('request.storageBlocked');
+/**
+ * What a refusal or failure marking a payment failed says: a record that
+ * failed the integrity check first (a 503, said as itself); a proposal's
+ * BAD_REQUEST is about the bank's reference, any other step's isn't.
+ */
+export function markRefusal(error: unknown, step: 'propose' | 'approve' | 'withdraw'): string {
   if (isIntegrityFailed(error)) return t('payments.integrity');
-  if (!isRefusal(error)) return t('request.failed');
-  return REFUSALS.has(error.code)
-    ? t(`payments.refused.${error.code}` as TextKey)
-    : t('request.refused.other', { code: error.code });
+  return refusalText(error, REFUSALS, 'payments.refused', step === 'propose' ? PROPOSE_WORDS : {});
 }
 
 /**
@@ -157,5 +157,8 @@ export function downloadHistory(payment: PaymentDetails): void {
   link.href = address;
   link.download = `payment-${payment.id}.json`;
   link.click();
-  URL.revokeObjectURL(address);
+  // Freed once the click has been handled: some browsers (older Safari, Firefox) cancel a download freed at once.
+  setTimeout(() => {
+    URL.revokeObjectURL(address);
+  }, 0);
 }

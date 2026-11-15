@@ -12,11 +12,10 @@
 // done. Who may decide is the API's to say: the buttons show for an admin or
 // approver only, and the API checks again whatever is pressed. The agent is
 // named with its ID, as two agents may share a name (SEC-AG-10).
-import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
-import { api, ApiError, isRefusal, isSignedOut, isUuid } from '../api.ts';
+import { api, isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import {
   amountText,
@@ -29,9 +28,11 @@ import {
   useTicking,
   waitingLeft,
 } from '../requests.ts';
-import { endSession, useActing } from '../session.tsx';
-import { type Asked, askFirst, StepUpStorageBlocked } from '../step-up.ts';
-import { t, type TextKey } from '../text.ts';
+import { refusalText } from '../refusals.ts';
+import { useActing } from '../session.tsx';
+import { type Asked, askFirst, changeAt } from '../step-up.ts';
+import { t } from '../text.ts';
+import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { LineField, NOTE_MOST } from './line-field.tsx';
 
@@ -50,13 +51,11 @@ const REFUSALS = new Set([
   'NOT_FOUND',
 ]);
 
-function refusalWords(error: unknown): string {
-  if (error instanceof StepUpStorageBlocked) return t('request.storageBlocked');
-  if (!isRefusal(error)) return t('request.failed');
-  return REFUSALS.has(error.code)
-    ? t(`request.refused.${error.code}` as TextKey)
-    : t('request.refused.other', { code: error.code });
-}
+const refusalWords = (error: unknown): string => refusalText(error, REFUSALS, 'request.refused');
+
+/** A reject's own words for a code: what it sent that can be refused is its reason. */
+const rejectWords = (error: unknown): string =>
+  refusalText(error, REFUSALS, 'request.refused', { BAD_REQUEST: 'request.refused.badReason' });
 
 /** What's open over the page: the reject's reason, or an approve's answer to look at before the passkey. */
 type Open =
@@ -169,11 +168,9 @@ function Weighed({ answer }: { readonly answer: ApproveAsked }) {
 
 function Actions({ request }: { readonly request: RequestDetails }) {
   const { organization } = useActing();
-  const queries = useQueryClient();
   const [open, setOpen] = useState<Open>(NONE);
   const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+  const { busy, said, run } = useChange(refusalWords);
   const names = { amount: amountText(request.amountMinor, request.currency), supplier: request.supplier.name };
   const path = `/v1/spend-requests/${encodeURIComponent(request.id)}`;
   const waiting = request.status === 'APPROVAL_REQUIRED';
@@ -183,59 +180,34 @@ function Actions({ request }: { readonly request: RequestDetails }) {
   const close = (): void => {
     setOpen(NONE);
   };
-  const reread = () => queries.invalidateQueries({ queryKey: ['requests', organization.id] });
-  /**
-   * Sends a change. Left to sign in again, or held open for the person to
-   * look at: nothing more. Otherwise read again, done or refused (a refusal
-   * says the request moved on, so its page must show where it stands); a
-   * failure on the way is said, and a 401 goes to sign-in.
-   */
-  const run = async (send: () => Promise<unknown>, done?: string) => {
-    setBusy(true);
-    setSaid(null);
-    try {
-      const sent = await send();
-      if (sent === 'stepping' || sent === 'held') return;
-      close();
-      if (done !== undefined) setSaid(done);
-      await reread();
-    } catch (error) {
-      if (isSignedOut(error)) {
-        endSession(queries);
-        return;
-      }
-      close();
-      setSaid(refusalWords(error));
-      if (isRefusal(error)) await reread();
-    } finally {
-      setBusy(false);
-    }
-  };
   const decide = (action: 'approve' | 'reject', body: Readonly<Record<string, unknown>>) =>
-    askFirst({
-      label: t(`request.${action}Label`, names),
-      askPath: `${path}/${action}`,
-      confirmPath: `${path}/${action}/confirm`,
-      body,
-      organization: organization.id,
-    });
+    askFirst(changeAt(`${path}/${action}`, t(`request.${action}Label`, names), body, organization.id));
   // Asked first: an answer that weighs it again, or would reject it, is shown before the passkey; any other goes on.
   const approve = () =>
-    run(async () => {
-      const asked = await decide('approve', request.needsRecheck ? { recheck: true } : {});
-      if ('done' in asked) return asked;
-      const answer = asked.answer as ApproveAsked;
-      if (answer.recheck === null && answer.rejection === null) return asked.stepUp();
-      setOpen({ kind: 'weighed', answer, stepUp: asked.stepUp });
-      return 'held';
-    });
+    run(
+      async () => {
+        const asked = await decide('approve', request.needsRecheck ? { recheck: true } : {});
+        if ('done' in asked) return asked;
+        const answer = asked.answer as ApproveAsked;
+        if (answer.recheck === null && answer.rejection === null) return asked.stepUp();
+        setOpen({ kind: 'weighed', answer, stepUp: asked.stepUp });
+        return 'held';
+      },
+      { after: close },
+    );
   const reject = () =>
-    run(async () => {
-      const asked = await decide('reject', { reason: reason.trim() });
-      return 'done' in asked ? asked : asked.stepUp();
-    });
+    run(
+      async () => {
+        const asked = await decide('reject', { reason: reason.trim() });
+        return 'done' in asked ? asked : asked.stepUp();
+      },
+      { after: close, refusal: rejectWords },
+    );
   const cancel = () =>
-    run(() => api.post(`${path}/cancel`, { organization: organization.id, body: {} }), t('request.cancelled'));
+    run(() => api.post(`${path}/cancel`, { organization: organization.id, body: {} }), {
+      done: t('request.cancelled'),
+      after: close,
+    });
 
   return (
     <>
@@ -265,18 +237,16 @@ function Actions({ request }: { readonly request: RequestDetails }) {
           {t('request.cancel')}
         </button>
       )}
-      {said !== null && (
-        <p className="notice" role="status">
-          {said}
-        </p>
-      )}
+      <Said said={said} />
       {open.kind === 'weighed' && (
         <WeighedConfirm
           open={open}
           names={names}
           busy={busy}
           onCancel={close}
-          onConfirm={(label, confirmed) => void run(() => Promise.resolve(open.stepUp(label, confirmed)))}
+          onConfirm={(label, confirmed) =>
+            void run(() => Promise.resolve(open.stepUp(label, confirmed)), { after: close })
+          }
         />
       )}
       {open.kind === 'reject' && (
@@ -362,7 +332,7 @@ export function RequestPage({ id }: { readonly id: string }) {
     </Link>
   );
   // An address that isn't a request's ID names none: not found, as the API's 404 is, never a failure to retry.
-  const missing = !isUuid(id) || (request.error instanceof ApiError && request.error.status === 404);
+  const missing = isMissing(id, request.error);
   if (missing || request.isError) {
     return (
       <section className="stack">
