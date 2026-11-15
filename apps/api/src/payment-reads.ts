@@ -119,6 +119,8 @@ interface TimelineEntry {
 interface MarkFailedShown {
   readonly markableFrom: Date;
   readonly openProposal: FailureProposalRecord | null;
+  /** The signed event the open proposal was believed by, or null: when a spend request's evidence read it (C2). */
+  readonly openProposalEventId: string | null;
 }
 
 export type PaymentFound =
@@ -247,6 +249,7 @@ async function markFailedOf(
   return {
     markableFrom: new Date(transaction.createdAt.getTime() + MARK_FAILED_AFTER_MS),
     openProposal: open.outcome === 'found' ? open.proposal : null,
+    openProposalEventId: open.outcome === 'found' ? open.state.eventId : null,
   };
 }
 
@@ -256,6 +259,8 @@ interface PaymentRead {
   readonly shown: PaymentShown;
   readonly instruction: InstructionRecord;
   readonly markFailed: MarkFailedShown | null;
+  /** The signed event its transaction was believed by: the moment it was read at (C2). */
+  readonly transactionEventId: string;
   /** Its proposals' IDs as their rows name it, not yet believed: their events must name this payment (aboutPayment). */
   readonly proposalIds: readonly string[];
 }
@@ -298,6 +303,7 @@ export async function paymentInOrder(
     shown: { payment, supplierId: version.version.supplierId, supplierName: version.version.displayName },
     instruction: instruction.instruction,
     markFailed,
+    transactionEventId: read.state.eventId,
     proposalIds: named.proposalIds,
   };
 }

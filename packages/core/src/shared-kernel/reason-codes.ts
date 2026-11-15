@@ -88,6 +88,12 @@ export const REASON_CODES = {
     "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
+  EVIDENCE_CHANGED_WHILE_READING:
+    'The spend request or its payment kept changing while its evidence was read, so no evidence was given (the download is still logged). Try again in a moment.',
+  EVIDENCE_EXPORTS_SPENT:
+    'You have downloaded spend-request evidence as many times as you may in an hour (5), so this one was not made. Try again later.',
+  EVIDENCE_TOO_LARGE:
+    'This spend request has more events than one evidence download may hold (2,000), so nothing was downloaded or logged. Download the audit log instead, filtered to the request and its payment.',
   FAILURE_PROPOSAL_ALONE_LOCKED:
     "No other admin can confirm this proposal, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be confirmed by one person alone until then. Nothing was changed.",
   FAILURE_PROPOSAL_CONFIRMER_TOO_NEW:

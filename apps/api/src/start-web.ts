@@ -331,7 +331,14 @@ export async function startWeb(
       logger,
     }),
     paymentReads: createPaymentReads({ database, keys, ids: uuidV7Ids, logger }),
-    spendRequestEvidence: createSpendRequestEvidence({ database, keys, ids: uuidV7Ids, logger, directory }),
+    spendRequestEvidence: createSpendRequestEvidence({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+      directory,
+    }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,

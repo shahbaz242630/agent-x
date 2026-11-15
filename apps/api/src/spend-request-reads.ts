@@ -45,13 +45,7 @@ import {
   type SpendRequestsTables,
   type VoidingShown,
 } from '@agentx/core/modules/spend-requests';
-import {
-  type SupplierRecord,
-  supplierOf,
-  suppliersNamed,
-  type SuppliersTables,
-  versionOf,
-} from '@agentx/core/modules/suppliers';
+import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
 import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -133,7 +127,7 @@ const integrityFailed = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
  * withSignedStates' for the organisation: `none` for no request of the
  * organisation's; `unbelieved` when a record fails its seal (its alarm
  * raised) or the request names others than the IDs first found by. With the
- * request's verified state and its supplier's record, for its evidence (C2).
+ * request's verified state, for its evidence (C2).
  */
 export async function requestInOrder(
   tx: ReadTx,
@@ -141,12 +135,7 @@ export async function requestInOrder(
   orgId: string,
   requestId: string,
 ): Promise<
-  | {
-      readonly outcome: 'found';
-      readonly shown: RequestShown;
-      readonly state: VerifiedState;
-      readonly supplier: SupplierRecord;
-    }
+  | { readonly outcome: 'found'; readonly shown: RequestShown; readonly state: VerifiedState }
   | { readonly outcome: 'none' }
   | { readonly outcome: 'unbelieved' }
 > {
@@ -187,7 +176,6 @@ export async function requestInOrder(
   return {
     outcome: 'found',
     state: read.state,
-    supplier: supplier.supplier,
     shown: {
       request,
       changedAt: read.state.recordedAt,

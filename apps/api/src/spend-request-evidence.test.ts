@@ -29,6 +29,7 @@ const EVENT = {
 /** A denied request's evidence: no reservation, no payment. */
 const EVIDENCE: Evidence = {
   id: '0199a0f0-0000-7000-8000-0000000c2a04',
+  recordSeq: '8',
   upToSeq: '8',
   spendRequest: {
     id: REQUEST_ID,

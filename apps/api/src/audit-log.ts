@@ -132,9 +132,6 @@ export const ACTOR_ASKED_ID = z.string().max(64);
 /** An object to filter to, as asked (CO7): its kind, as events name it, and its UUID. */
 export const SUBJECT_ASKED = { type: z.string().max(64), id: z.string().max(64) } as const;
 
-/** Problems with an object asked for: a kind of record as events name it, and a UUID. */
-export const subjectAskedProblems = (type: string, id: string) => subjectKeyProblems({ type, id });
-
 /** A whole number as the log's sequence names it, in text: JSON numbers can't hold every one. */
 export const SEQ = z.string().regex(/^[1-9][0-9]{0,18}$/);
 
@@ -234,13 +231,12 @@ const PAGE_SCHEMA = {
       const { subjectType, subjectId } = query;
       if ((subjectType === undefined) !== (subjectId === undefined)) {
         context.addIssue({ code: 'custom', message: 'an object is named by subjectType and subjectId together' });
-      } else if (subjectType !== undefined && subjectId !== undefined) {
-        if (subjectAskedProblems(subjectType, subjectId).length > 0) {
-          context.addIssue({
-            code: 'custom',
-            message: 'subjectType is lower-case words joined by _; subjectId a UUID',
-          });
-        }
+      } else if (
+        subjectType !== undefined &&
+        subjectId !== undefined &&
+        subjectKeyProblems({ type: subjectType, id: subjectId }).length > 0
+      ) {
+        context.addIssue({ code: 'custom', message: 'subjectType is lower-case words joined by _; subjectId a UUID' });
       }
     }),
   response: {

@@ -36,7 +36,7 @@ export async function eventsInRange(
     query = query.where('actor_type', '=', kept.type).where('actor_id', '=', kept.id);
   }
   // The trail's own check and pairs, as a page reads them (`e` names the table there as here).
-  if (subjects !== undefined) query = query.where(sql<boolean>`${subjectsAre(subjects)}`);
+  if (subjects !== undefined) query = query.where(subjectsAre(subjects));
   const row = await query.executeTakeFirstOrThrow();
   return { events: row.events, upToSeq: row.up_to };
 }

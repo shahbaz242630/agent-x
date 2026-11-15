@@ -226,12 +226,12 @@ const actorIs = ({ type, id }: AuditActor) => sql`e.actor_type = ${type} and e.a
  * object is (a type, a UUID) before the log is read: the pairs as rows, so 0005's
  * index by object finds each one's events.
  */
-export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<unknown> {
+export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<boolean> {
   if (subjects.length === 0) throw new RangeError('At least one object is read');
   const problems = subjects.flatMap(subjectKeyProblems);
   if (problems.length > 0) throw new AuditEventRefused(problems);
   const pairs = subjects.map(({ type, id }) => sql`(${type}, ${id}::uuid)`);
-  return sql`(e.subject_type, e.subject_id) in (${sql.join(pairs)})`;
+  return sql<boolean>`(e.subject_type, e.subject_id) in (${sql.join(pairs)})`;
 }
 
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */

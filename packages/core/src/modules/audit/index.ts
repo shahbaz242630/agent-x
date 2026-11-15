@@ -105,6 +105,7 @@ export {
 export { holdHistoryDue } from './infrastructure/hold-history-due.ts';
 export { keepHoldWaitingHere } from './infrastructure/holds-waiting.ts';
 export { eventsInRange, type LogRange } from './infrastructure/log-range.ts';
+export { type SignedRowRead, signedMoment } from './infrastructure/signed-moment.ts';
 export {
   cancelledSince,
   movedOtherwiseSince,

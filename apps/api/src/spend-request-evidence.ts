@@ -5,41 +5,64 @@
 //
 // - `POST /v1/spend-requests/{id}/evidence-exports`, with an idempotency key:
 //   the request is read first (another organisation's is NOT_FOUND, with
-//   nothing written); then the download is recorded, EVIDENCE_EXPORTED about
-//   the request's evidence, before a byte of it is read: so reading the
-//   evidence out is on the log. A retry with its key answers the same events,
-//   read again up to that record's own seq.
+//   nothing written); an admin's sixth download in an hour is
+//   EVIDENCE_EXPORTS_SPENT, and a request whose objects hold more events than
+//   one bundle may (MOST_EVIDENCE_EVENTS) is EVIDENCE_TOO_LARGE, each with
+//   nothing written; then the download is recorded, EVIDENCE_EXPORTED about the
+//   request's evidence, before a byte of it is read: so reading the evidence
+//   out is on the log. A retry with its key answers that record again
+//   (`recordSeq`), with the bundle as it stands then.
+// - One moment: the rows are read in two transactions (below), so the bundle
+//   holds at `upToSeq`, the newest of the record's seq and the signed events
+//   the rows were believed by (signedMoment), the log read up to it; a row that
+//   moved while the others were read (a hand-off landing in between) is read
+//   again, at most MOST_READS times, then EVIDENCE_CHANGED_WHILE_READING.
 // - Its answer is the bundle whole, machine-readable, in the contract's own
 //   JSON (the console's human-readable form is built from it): the request as
 //   decided (amount, supplier and order, the agent's purpose as written, its
 //   decision and reasons, its evaluation input's hash, the versions of the
 //   mandate, policies and supplier it was decided under, with the mandate's
-//   acceptance and the supplier version's verification as their signed
-//   events), the agent and the key it asked with, a person's approval, reject
-//   or a void, the limit reservation, the funding source by its holder's name
-//   and masked hint alone, and, once handed off, the instruction (route and
+//   acceptance and the supplier version's verification as their signed events,
+//   each found exactly), the agent and the key it asked with, a person's
+//   approval, reject or a void, the limit reservation, the funding source by
+//   its holder's name and masked hint alone, and, once handed off, the
+//   instruction (route, partner and its legal-entity and licence references,
 //   normalized hash), the payment (the partner's reference and word, its
 //   canonical status) and where its reconciliation stands. Then every signed
 //   event about the request and its objects (its evidence downloads, its
 //   instruction, payment, the payment's alerts, remittance and failure
-//   proposals), oldest first, with their chain hashes, so the links can be
-//   checked outside Agent X; each actor named as the audit log names them.
+//   proposals), oldest first, with their chain hashes; each actor named as the
+//   audit log names them. Filtered by object, the events are each checked
+//   whole but aren't consecutive in the chain: an event deleted from between
+//   them is caught by a walk of the whole chain (the audit log's own check),
+//   not here.
 // - Every record through its signed state and every event believed only whole,
 //   the reservation as the holdings check judges it: any that can't be is 503
 //   INTEGRITY_FAILED, the alarm raised and the organisation held, never a
 //   bundle with a part left out.
-// - Never in it: the payee's reference or account, the consent, the partner's
-//   legal references, a key's version, a keyed fingerprint or a MAC (the
-//   audit log's seals left out as on its page, and any fact of an event whose
-//   name is secret-shaped: evidenceFacts), SEC-EVD-04.
+// - Never in it: the payee's reference or account, the consent, a key's
+//   version, a keyed fingerprint or a MAC (the audit log's seals left out as on
+//   its page, and any fact of an event whose name is secret-shaped:
+//   evidenceFacts), SEC-EVD-04. The partner's legal-entity and licence
+//   references are the licensed partner's public identifiers, kept (S197).
 //
-// ADR-006's lock order is kept by reading in four transactions: the request
-// with its agent and supplier (3, 6, 8) and its holdings (10); the funding
-// source (5), the supplier's details it was decided under (6) and the payment
-// (6, 10); then the log alone, a batch to a transaction, with what names its
-// actors (agents read after no row of ours).
-import type { AuditActor, AuditSubjectKey, LogEvent, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
-import { createAuditTrail } from '@agentx/core/modules/audit';
+// ADR-006's lock order is kept by reading the rows in two transactions, the
+// request with its agent and supplier (3, 6, 8) and its holdings (10), then the
+// funding source (5), the supplier's details it was decided under (6) and the
+// payment (6, 10); one more finds their moment, and the log is read alone, a
+// batch to a transaction, with what names its actors (agents read after no row
+// of ours).
+import {
+  type AuditSubjectKey,
+  createAuditTrail,
+  eventsInRange,
+  type LogEvent,
+  type LogPageToRead,
+  type SignedRowRead,
+  signedMoment,
+  type SignedStates,
+  type VerifiedState,
+} from '@agentx/core/modules/audit';
 import {
   type ActorName,
   actorsOf,
@@ -51,7 +74,7 @@ import {
   EXPORT_BATCH,
   heldLogPage,
 } from '@agentx/core/modules/evidence';
-import { type FundingSourcesTables, sourceOf } from '@agentx/core/modules/funding-sources';
+import { type FundingSourcesTables, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { DirectoryNames } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import {
@@ -74,7 +97,7 @@ import {
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, VERIFIER_RECORDED, versionOf } from '@agentx/core/modules/suppliers';
 import { FAILURE_PROPOSALS, TRANSACTION, TRANSACTIONS } from '@agentx/core/modules/transactions';
-import { type IdGenerator, isReasonCode, type ReasonCode } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, isReasonCode, type ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction, IdempotentRequest } from '@agentx/platform/db';
 import { isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -85,16 +108,26 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { EXPORTING_ROLES } from './audit-log-exports.ts';
+import { EXPORTING_ROLES, exportsSpent } from './audit-log-exports.ts';
 import { LOG_EVENT, SEQ } from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { aboutPayment, paymentInOrder, type PaymentReadTables } from './payment-reads.ts';
 import { type Refused, refused } from './refused.ts';
-import { REASONS, reasonsOf, NOTHING, NOTHING_BODY_LIMIT } from './route-schemas.ts';
+import { REMITTANCE_SUBJECT } from './remittances.ts';
+import { NOTHING, NOTHING_BODY_LIMIT, REASONS, reasonsOf } from './route-schemas.ts';
 import { requestInOrder, type RequestReadTables } from './spend-request-reads.ts';
 import { createUseCaseWork, type Member, UseCaseRefused } from './use-case-work.ts';
 
 export const EVIDENCE_OPERATION = 'spend-requests.evidence-export';
+
+/** The advisory lock an admin's evidence downloads count their hourly budget under (ADR-006 §6, 2b). */
+const EVIDENCE_EXPORTS_LOCK = 'spend-request-evidence-exports';
+
+/** The most events one bundle holds: a request with more is downloaded through the audit log, filtered to it. */
+const MOST_EVIDENCE_EVENTS = 2000;
+
+/** How many times the rows are read for one moment before the download gives up (EVIDENCE_CHANGED_WHILE_READING). */
+const MOST_READS = 3;
 
 /** The tables the evidence reads: the request's, its payment's, its funding source's, its reservation's, and the log's. */
 export type EvidenceTables = RequestReadTables & PaymentReadTables & FundingSourcesTables & LimitReservationsTables;
@@ -108,9 +141,6 @@ const integrityFailed = () => new EvidenceRefused(503, 'INTEGRITY_FAILED');
 
 /** Every time the log can hold: the evidence is pinned by seq, never by time. */
 const ALL_TIME = { from: new Date('2000-01-01T00:00:00.000Z'), to: new Date('9999-12-31T00:00:00.000Z') } as const;
-
-/** The most events about the mandate's acceptances and the supplier's verifications read for the two it was decided under. */
-const BASIS_MOST = 100;
 
 const APPROVED = 'spend_request.approved';
 const REJECTED = 'spend_request.rejected';
@@ -173,38 +203,51 @@ async function requestPart(tx: EvidenceTx, states: SignedStates, keys: KeyProvid
   if (read.outcome !== 'found') throw integrityFailed();
   // Its reservation and order claim as the holdings check judges them: a mismatch is a tamper (its alarm raised).
   if (!(await requestHoldingsWhole(tx, states, keys, orgId, requestId, paymentHoldsOf))) throw integrityFailed();
-  const [reservation] = await reservationsFor(tx, [read.shown.request.id]);
+  const [reservation] = await reservationsFor(tx, [requestId]);
   return { ...read, reservation };
 }
 
+type RequestPart = Awaited<ReturnType<typeof requestPart>>;
+
+/** The objects a payment's events are about, by ID: its instruction, itself, and its failure proposals. */
+interface PaymentObjects {
+  readonly instructionId: string;
+  readonly transactionId: string;
+  readonly proposalIds: readonly string[];
+}
+
 /**
- * The payment's ID alone, by its request, then read through its signed state;
- * undefined for none handed off. An instruction with no payment (they are
- * made in one transaction, hand-off's Tx A) has already failed the holdings
- * check, which reads both by the request (paymentHoldsOf).
+ * The request's payment's objects, by their IDs alone; undefined for none
+ * handed off. For the count a download is capped by, before it is recorded,
+ * and to find the payment to read through its signed state. An instruction
+ * with no payment (they are made in one transaction, hand-off's Tx A) has
+ * already failed the holdings check, which reads both by the request.
  */
-async function paymentIdOf(tx: EvidenceTx, orgId: string, requestId: string) {
+async function paymentObjectsOf(tx: EvidenceTx, orgId: string, requestId: string): Promise<PaymentObjects | undefined> {
   const row = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state after
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state after, or counted
     .selectFrom(`${INSTRUCTIONS.table} as i`)
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same: its ID alone
     .innerJoin(`${TRANSACTIONS.table} as t`, (join) =>
       join.onRef('t.org_id', '=', 'i.org_id').onRef('t.instruction_id', '=', 'i.id'),
     )
-    .select(['t.id as transactionId'])
+    .select(['i.id as instructionId', 't.id as transactionId'])
     .where('i.org_id', '=', orgId)
     .where('i.spend_request_id', '=', requestId)
     .executeTakeFirst();
-  return row?.transactionId;
+  if (row === undefined) return undefined;
+  const proposals = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, for the events about them; each proposal's own first event must name this payment (aboutPayment)
+    .selectFrom(FAILURE_PROPOSALS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('transaction_id', '=', row.transactionId)
+    .execute();
+  return { ...row, proposalIds: proposals.map(({ id }) => id) };
 }
 
 /** The funding source, the supplier's details it was decided under, and its payment, in ADR-006's order (5, 6, 10). */
-async function fundingAndPayment(
-  tx: EvidenceTx,
-  states: SignedStates,
-  orgId: string,
-  request: Awaited<ReturnType<typeof requestPart>>,
-) {
+async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: string, request: RequestPart) {
   const { fundingSourceId, supplierId, id } = request.shown.request;
   const source = await sourceOf(tx, states, { orgId, id: fundingSourceId }, 'share');
   if (source.outcome !== 'found') throw integrityFailed();
@@ -213,52 +256,79 @@ async function fundingAndPayment(
   if (versionId === null) throw integrityFailed();
   const version = await versionOf(tx, states, { orgId, id: versionId }, supplierId);
   if (version.outcome !== 'found') throw integrityFailed();
-  const paymentId = await paymentIdOf(tx, orgId, id);
-  const payment = paymentId === undefined ? null : await paymentInOrder(tx, states, orgId, paymentId);
+  const objects = await paymentObjectsOf(tx, orgId, id);
+  const payment = objects === undefined ? null : await paymentInOrder(tx, states, orgId, objects.transactionId);
   // Found by its instruction's request, a signed field: a row moved to another request fails its seal there.
   if (payment !== null && payment.outcome !== 'found') throw integrityFailed();
-  return { source: source.source, version: version.version, payment };
+  return { source: source.source, sourceEventId: source.state.eventId, version: version.version, payment };
 }
 
 type FundingAndPayment = Awaited<ReturnType<typeof fundingAndPayment>>;
+type PaymentRead = FundingAndPayment['payment'];
+
+/** The objects of a payment read whole, by ID. */
+const objectsOfPayment = (payment: NonNullable<PaymentRead>): PaymentObjects => ({
+  instructionId: payment.instruction.id,
+  transactionId: payment.shown.payment.transaction.id,
+  proposalIds: payment.proposalIds,
+});
+
+/**
+ * The rows read through their signed states whose moves the bundle shows: the
+ * request, the funding source, and the payment's transaction and open proposal.
+ * The supplier's details and the instruction are each made once (madeOnce).
+ */
+function rowsReadOf(request: RequestPart, { source, sourceEventId, payment }: FundingAndPayment): SignedRowRead[] {
+  const rows: SignedRowRead[] = [
+    { subject: { type: SPEND_REQUESTS.subject, id: request.shown.request.id }, eventId: request.state.eventId },
+    { subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId },
+  ];
+  if (payment === null) return rows;
+  rows.push({
+    subject: { type: TRANSACTIONS.subject, id: payment.shown.payment.transaction.id },
+    eventId: payment.transactionEventId,
+  });
+  const proposal = payment.markFailed?.openProposal;
+  const proposalEventId = payment.markFailed?.openProposalEventId;
+  if (proposal && proposalEventId) {
+    rows.push({ subject: { type: FAILURE_PROPOSALS.subject, id: proposal.id }, eventId: proposalEventId });
+  }
+  return rows;
+}
 
 /** The objects whose events are the request's evidence: the request, its downloads, and its payment's when handed off. */
-function subjectsOf(requestId: string, payment: FundingAndPayment['payment']): readonly AuditSubjectKey[] {
+function subjectsOf(requestId: string, payment: PaymentObjects | undefined): readonly AuditSubjectKey[] {
   const own = [
     { type: SPEND_REQUESTS.subject, id: requestId },
     { type: EVIDENCE_SUBJECT, id: requestId },
   ];
-  if (payment === null) return own;
-  const transactionId = payment.shown.payment.transaction.id;
+  if (payment === undefined) return own;
+  const { instructionId, transactionId, proposalIds } = payment;
   return [
     ...own,
-    { type: INSTRUCTIONS.subject, id: payment.instruction.id },
+    { type: INSTRUCTIONS.subject, id: instructionId },
     { type: TRANSACTIONS.subject, id: transactionId },
     { type: PAYMENT_ALERT_SUBJECT, id: transactionId },
     { type: REMITTANCE_SUBJECT, id: transactionId },
-    ...payment.proposalIds.map((id) => ({ type: FAILURE_PROPOSALS.subject, id })),
+    ...proposalIds.map((id) => ({ type: FAILURE_PROPOSALS.subject, id })),
   ];
 }
-
-/** What a payment's remittance email records its outcome about (remittances.ts), by the payment's ID. */
-const REMITTANCE_SUBJECT = 'payment_remittance';
 
 /**
  * The events kept as the request's own: its and its downloads' as read, and
  * of its payment's only those aboutPayment keeps (a proposal row pointed at
  * it past the app brings in no other payment's events), with its remittance's.
  */
-function ownEvents(events: readonly LogEvent[], payment: FundingAndPayment['payment']): readonly LogEvent[] {
+function ownEvents(events: readonly LogEvent[], payment: PaymentRead): readonly LogEvent[] {
   if (payment === null) return events;
-  const { transaction } = payment.shown.payment;
-  const ids = { transactionId: transaction.id, instructionId: payment.instruction.id };
-  const ofPayment = new Set(aboutPayment(events, ids).map(({ id }) => id));
+  const { transactionId, instructionId } = objectsOfPayment(payment);
+  const ofPayment = new Set(aboutPayment(events, { transactionId, instructionId }).map(({ id }) => id));
   return events.filter(
     ({ id, event }) =>
       ofPayment.has(id) ||
       event.subject.type === SPEND_REQUESTS.subject ||
       event.subject.type === EVIDENCE_SUBJECT ||
-      (event.subject.type === REMITTANCE_SUBJECT && event.subject.id.toLowerCase() === transaction.id),
+      (event.subject.type === REMITTANCE_SUBJECT && event.subject.id.toLowerCase() === transactionId),
   );
 }
 
@@ -269,26 +339,67 @@ const voidingOf = (logged: LogEvent | undefined) => {
   return { eventId: logged.id, at: logged.recordedAt.toISOString(), reasons: reasonsOf(causes) };
 };
 
+/** The payment as the bundle shows it, once handed off: never its payee's reference or its consent. */
+function paymentEvidenceOf(payment: PaymentRead) {
+  if (payment === null) return null;
+  const { instruction, markFailed } = payment;
+  const { transaction, changedAt, contradicted } = payment.shown.payment;
+  return {
+    instruction: {
+      id: instruction.id,
+      route: instruction.route,
+      routeReason: instruction.routeReason,
+      partner: instruction.partner,
+      partnerLegalEntityId: instruction.partnerLegalEntityId,
+      partnerLicenceRef: instruction.partnerLicenceRef,
+      paymentReference: instruction.paymentReference,
+      intentHash: instruction.intentHash,
+      createdAt: instruction.createdAt.toISOString(),
+    },
+    id: transaction.id,
+    status: transaction.status,
+    partnerReference: transaction.paymentInstructionRef,
+    bankStatus: transaction.providerStatus,
+    rejectCode: transaction.rejectCode,
+    bankChangedAt: transaction.providerChangedAt?.toISOString() ?? null,
+    createdAt: transaction.createdAt.toISOString(),
+    changedAt: changedAt.toISOString(),
+    reconciliation: {
+      contradicted,
+      markableFrom: markFailed?.markableFrom.toISOString() ?? null,
+      openProposalId: markFailed?.openProposal?.id ?? null,
+    },
+  };
+}
+
+/** The log's part of a bundle: its events, the two it was decided under, and every actor's name. */
+interface LoggedPart {
+  readonly events: readonly LogEvent[];
+  readonly acceptance: ShownEvent | null;
+  readonly verification: ShownEvent | null;
+  readonly names: ReadonlyMap<string, ActorName>;
+}
+
 /** The bundle, from what was read: every part named, those that don't apply null. */
 function bundleOf(
-  record: { readonly id: string; readonly upToSeq: bigint },
-  request: Awaited<ReturnType<typeof requestPart>>,
-  { source, version, payment }: FundingAndPayment,
-  logged: {
-    readonly events: readonly LogEvent[];
-    readonly acceptance: ShownEvent | null;
-    readonly verification: ShownEvent | null;
+  record: {
+    readonly id: string;
+    readonly recordSeq: bigint;
+    readonly upToSeq: bigint;
+    readonly mandateVersionId: string | null;
   },
-  names: ReadonlyMap<string, ActorName>,
+  request: RequestPart,
+  { source, version, payment }: FundingAndPayment,
+  logged: LoggedPart,
 ) {
   const { shown, state, reservation } = request;
-  const { events } = logged;
+  const { events, names } = logged;
   const asked = shown.request;
   const approved = lastOf(events, APPROVED);
   const rejected = lastOf(events, REJECTED);
-  const transaction = payment?.shown.payment.transaction;
   return {
     id: record.id,
+    recordSeq: record.recordSeq.toString(),
     upToSeq: record.upToSeq.toString(),
     spendRequest: {
       id: asked.id,
@@ -310,7 +421,7 @@ function bundleOf(
     mandate:
       asked.mandateId === null
         ? null
-        : { id: asked.mandateId, versionId: fieldOf(state, 'mandate_version_id'), acceptance: logged.acceptance },
+        : { id: asked.mandateId, versionId: record.mandateVersionId, acceptance: logged.acceptance },
     policies: {
       organizationPolicyVersionId: fieldOf(state, 'organization_policy_version_id'),
       mandatePolicyVersionId: fieldOf(state, 'mandate_policy_version_id'),
@@ -346,33 +457,7 @@ function bundleOf(
             month: reservation.month,
             reservedAt: reservation.reservedAt.toISOString(),
           },
-    payment:
-      payment === null || transaction === undefined
-        ? null
-        : {
-            instruction: {
-              id: payment.instruction.id,
-              route: payment.instruction.route,
-              routeReason: payment.instruction.routeReason,
-              partner: payment.instruction.partner,
-              paymentReference: payment.instruction.paymentReference,
-              intentHash: payment.instruction.intentHash,
-              createdAt: payment.instruction.createdAt.toISOString(),
-            },
-            id: transaction.id,
-            status: transaction.status,
-            partnerReference: transaction.paymentInstructionRef,
-            bankStatus: transaction.providerStatus,
-            rejectCode: transaction.rejectCode,
-            bankChangedAt: transaction.providerChangedAt?.toISOString() ?? null,
-            createdAt: transaction.createdAt.toISOString(),
-            changedAt: payment.shown.payment.changedAt.toISOString(),
-            reconciliation: {
-              contradicted: payment.shown.payment.contradicted,
-              markableFrom: payment.markFailed?.markableFrom.toISOString() ?? null,
-              openProposalId: payment.markFailed?.openProposal?.id ?? null,
-            },
-          },
+    payment: paymentEvidenceOf(payment),
     events: events.map((event) => shownEvent(event, names)),
   };
 }
@@ -381,22 +466,48 @@ export function createSpendRequestEvidence({
   database,
   keys,
   ids,
+  clock,
   logger,
   directory,
+  mostEvents = MOST_EVIDENCE_EVENTS,
+  mostReads = MOST_READS,
+  betweenReads,
 }: {
   readonly database: Database<EvidenceTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  readonly clock: Clock;
   readonly logger: Logger;
   /** The login service's names; undefined when none is set up, and people are named from the kept copy. */
   readonly directory: DirectoryNames | undefined;
+  /** The cap, MOST_EVIDENCE_EVENTS unless a test sets it lower. */
+  readonly mostEvents?: number;
+  /** The reads for one moment, MOST_READS unless a test sets them. */
+  readonly mostReads?: number;
+  /** A test's change between the request's read and its payment's, as a hand-off landing in between: never set in the app. */
+  readonly betweenReads?: () => Promise<void>;
 }): SpendRequestEvidence {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: EvidenceRefused });
 
+  /** The rows read as one moment, at least the record's seq; undefined when one moved while the others were read. */
+  const rowsAtOneMoment = async (orgId: string, requestId: string, recordSeq: bigint, correlationId: string) => {
+    const request = await work.inOrganisation(orgId, correlationId, (tx, states) =>
+      requestPart(tx, states, keys, orgId, requestId),
+    );
+    await betweenReads?.();
+    const rows = await work.inOrganisation(orgId, correlationId, (tx, states) =>
+      fundingAndPayment(tx, states, orgId, request),
+    );
+    const moment = await work.inOrganisation(orgId, correlationId, (tx) =>
+      signedMoment(tx, orgId, rowsReadOf(request, rows), recordSeq),
+    );
+    return moment.outcome === 'moved' ? undefined : { request, rows, upToSeq: moment.upToSeq };
+  };
+
   /**
-   * The log's part, a batch to a transaction, up to the download's own seq:
-   * the events about `subjects` oldest first, and the mandate's acceptance and
-   * the supplier version's verification among `basis`'s; every actor named.
+   * The log's part, a batch to a transaction, up to the bundle's moment: the
+   * events about `subjects` oldest first, the mandate version's acceptance and
+   * the supplier version's verification, each found exactly; every actor named.
    */
   const loggedPart = async (
     orgId: string,
@@ -405,60 +516,79 @@ export function createSpendRequestEvidence({
     basis: {
       readonly mandate: AuditSubjectKey | null;
       readonly mandateVersionId: string | null;
-      readonly versionId: string;
       readonly supplierId: string;
+      readonly versionId: string;
     },
     correlationId: string,
-  ) => {
+  ): Promise<LoggedPart> => {
     // One namer for the whole bundle: once the login service fails, no later batch waits on it.
     const namer = createActorNamer({ directory, logger: logger.child({ correlationId }) });
     const names = new Map<string, ActorName>();
-    const batch = (asked: Parameters<typeof heldLogPage>[4]) =>
-      work.inOrganisation(orgId, correlationId, async (tx, states) => {
-        const page = await heldLogPage(tx, states, keys, orgId, asked);
-        if (page === 'tampered') throw integrityFailed();
-        for (const [key, name] of await namer.namesOf(actorsOf(page.events), page.held)) names.set(key, name);
-        return page;
-      });
-    const newestFirst: LogEvent[] = [];
-    for (let before: bigint | null = upToSeq + 1n; before !== null;) {
-      const page = await batch({ ...ALL_TIME, subjects, beforeSeq: before, limit: EXPORT_BATCH });
-      newestFirst.push(...page.events);
-      before = page.next;
-    }
-    const basisRead = await batch({
-      ...ALL_TIME,
-      subjects: [...(basis.mandate === null ? [] : [basis.mandate]), { type: SUPPLIERS.subject, id: basis.supplierId }],
-      actions: [MANDATE_ACCEPTED, VERIFIER_RECORDED],
-      beforeSeq: upToSeq + 1n,
-      limit: BASIS_MOST,
-    });
-    // The newest that names the version it was decided under: a mandate's acceptance, a supplier's verification.
-    const found = (action: string, detail: string, id: string | null) => {
-      const event = basisRead.events.find(
-        (logged) => logged.event.action === action && id !== null && textOf(logged, detail) === id,
-      );
-      return event === undefined ? null : shownEvent(event, names);
+    /** Every event asked for up to the moment, newest first, a batch at a time, until `enough` says stop. */
+    const newestFirst = async (
+      asked: Omit<LogPageToRead, 'from' | 'to' | 'limit'>,
+      enough: (events: readonly LogEvent[]) => boolean,
+    ) => {
+      const events: LogEvent[] = [];
+      for (let before: bigint | null = upToSeq + 1n; before !== null && !enough(events);) {
+        const beforeSeq = before;
+        const page = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+          const held = await heldLogPage(tx, states, keys, orgId, {
+            ...ALL_TIME,
+            ...asked,
+            beforeSeq,
+            limit: EXPORT_BATCH,
+          });
+          if (held === 'tampered') throw integrityFailed();
+          for (const [key, name] of await namer.namesOf(actorsOf(held.events), held.held)) names.set(key, name);
+          return held;
+        });
+        events.push(...page.events);
+        before = page.next;
+      }
+      return events;
     };
+    const events = await newestFirst({ subjects }, (read) => read.length > mostEvents);
+    // Counted before the download was recorded: more since is a request still busy, refused rather than cut short.
+    if (events.length > mostEvents) throw new EvidenceRefused(409, 'EVIDENCE_TOO_LARGE');
+    /** The newest `action` about `subject` whose `detail` names `id`, paged back to the log's start: null is none at all. */
+    const basisFound = async (subject: AuditSubjectKey, action: string, detail: string, id: string) => {
+      const namesIt = (logged: LogEvent) => textOf(logged, detail) === id;
+      const read = await newestFirst({ subjects: [subject], actions: [action] }, (sofar) => sofar.some(namesIt));
+      return read.find(namesIt);
+    };
+    const { mandate, mandateVersionId, supplierId, versionId } = basis;
+    const accepted =
+      mandate === null || mandateVersionId === null
+        ? undefined
+        : await basisFound(mandate, MANDATE_ACCEPTED, 'versionId', mandateVersionId);
+    const supplier = { type: SUPPLIERS.subject, id: supplierId };
+    const verified = await basisFound(supplier, VERIFIER_RECORDED, 'verifiedVersionId', versionId);
     return {
-      events: newestFirst.toReversed(),
+      events: events.toReversed(),
       names,
-      acceptance: found(MANDATE_ACCEPTED, 'versionId', basis.mandate === null ? null : basis.mandateVersionId),
-      verification: found(VERIFIER_RECORDED, 'verifiedVersionId', basis.versionId),
+      acceptance: accepted === undefined ? null : shownEvent(accepted, names),
+      verification: verified === undefined ? null : shownEvent(verified, names),
     };
   };
 
   return {
     async export(member, idempotent, requestId, correlationId) {
-      const actor: AuditActor = { type: 'user', id: member.userId };
+      const { orgId } = member;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         // Who may download it is read again for this decision, and the request is found before anything is written.
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        const read = await requestOf(tx, states, { orgId: member.orgId, id: requestId });
+        if (await exportsSpent(tx, clock, member, { lock: EVIDENCE_EXPORTS_LOCK, actions: [EVIDENCE_EXPORTED] })) {
+          throw new EvidenceRefused(409, 'EVIDENCE_EXPORTS_SPENT');
+        }
+        const read = await requestOf(tx, states, { orgId, id: requestId });
         if (read.outcome === 'missing') throw new EvidenceRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw integrityFailed();
-        const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, member.orgId, {
-          actor,
+        const subjects = subjectsOf(read.request.id, await paymentObjectsOf(tx, orgId, read.request.id));
+        const counted = await eventsInRange(tx, orgId, { ...ALL_TIME, subjects });
+        if (counted.events > mostEvents) throw new EvidenceRefused(409, 'EVIDENCE_TOO_LARGE');
+        const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, orgId, {
+          actor: { type: 'user', id: member.userId },
           action: EVIDENCE_EXPORTED,
           subject: { type: EVIDENCE_SUBJECT, id: read.request.id, version: 1 },
           details: { spendRequestId: read.request.id, status: read.request.status, format: 'json' },
@@ -467,43 +597,40 @@ export function createSpendRequestEvidence({
       });
       if (isUnwritten(done)) return done;
       const id = done.result.resourceId;
-      const { orgId } = member;
-      const read = await work.answered(orgId, correlationId, async (tx, states) => {
-        // Its own record, through the signed states, for the seq it was made at: a retry answers the same events.
-        const found = await states.eventOf(tx, orgId, { eventId: id });
-        if (found.outcome !== 'read' || found.event === undefined) throw integrityFailed();
-        const upToSeq = found.event.seq;
-        return { upToSeq, request: await requestPart(tx, states, keys, orgId, requestId) };
+      return work.orRefused(async (): Promise<EvidenceWrite> => {
+        // Its own record, through the signed states: a retry answers the same record, the bundle from its seq on.
+        const recordSeq = await work.inOrganisation(orgId, correlationId, async (tx, states) => {
+          const found = await states.eventOf(tx, orgId, { eventId: id });
+          if (found.outcome !== 'read' || found.event === undefined) throw integrityFailed();
+          return found.event.seq;
+        });
+        for (let reads = 0; reads < mostReads; reads += 1) {
+          const read = await rowsAtOneMoment(orgId, requestId, recordSeq, correlationId);
+          if (read === undefined) continue;
+          const { request, rows, upToSeq } = read;
+          const { mandateId, supplierId, id: spendRequestId } = request.shown.request;
+          const mandateVersionId = fieldOf(request.state, 'mandate_version_id');
+          const payment = rows.payment === null ? undefined : objectsOfPayment(rows.payment);
+          const logged = await loggedPart(
+            orgId,
+            upToSeq,
+            subjectsOf(spendRequestId, payment),
+            {
+              mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
+              mandateVersionId,
+              supplierId,
+              versionId: rows.version.id,
+            },
+            correlationId,
+          );
+          const events = ownEvents(logged.events, rows.payment);
+          return {
+            outcome: 'exported',
+            evidence: bundleOf({ id, recordSeq, upToSeq, mandateVersionId }, request, rows, { ...logged, events }),
+          };
+        }
+        return refused(409, 'EVIDENCE_CHANGED_WHILE_READING');
       });
-      if ('outcome' in read) return read;
-      const rows = await work.answered(orgId, correlationId, (tx, states) =>
-        fundingAndPayment(tx, states, orgId, read.request),
-      );
-      if ('outcome' in rows) return rows;
-      try {
-        const { request } = read;
-        const mandateId = request.shown.request.mandateId;
-        const logged = await loggedPart(
-          orgId,
-          read.upToSeq,
-          subjectsOf(request.shown.request.id, rows.payment),
-          {
-            mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
-            mandateVersionId: fieldOf(request.state, 'mandate_version_id'),
-            versionId: rows.version.id,
-            supplierId: request.shown.request.supplierId,
-          },
-          correlationId,
-        );
-        const events = ownEvents(logged.events, rows.payment);
-        return {
-          outcome: 'exported',
-          evidence: bundleOf({ id, upToSeq: read.upToSeq }, request, rows, { ...logged, events }, logged.names),
-        };
-      } catch (error) {
-        if (error instanceof EvidenceRefused) return refused(error.status, error.code);
-        throw error;
-      }
     },
   };
 }
@@ -561,12 +688,14 @@ const PAYMENT_EVIDENCE = z
         route: z.string().describe('The rail it was routed to.'),
         routeReason: z.string().describe('Why that rail.'),
         partner: z.string().describe('The payment partner it went to.'),
+        partnerLegalEntityId: z.string().describe('The licensed partner’s legal-entity reference, as sealed with it.'),
+        partnerLicenceRef: z.string().describe('The licensed partner’s licence reference, as sealed with it.'),
         paymentReference: z.string().describe('The payment reference the bank received.'),
         intentHash: z.string().describe('The normalized instruction’s hash, as sealed with it.'),
         createdAt: z.iso.datetime().describe('When it was made.'),
       })
       .describe(
-        'The instruction handed off, never its payee’s reference, its consent or the partner’s legal references.',
+        'The instruction handed off, with the licensed partner’s public references; never its payee’s reference or its consent.',
       ),
     id: z.uuid().describe('The payment, by its ID.'),
     status: z.enum(TRANSACTION.states).describe('Its canonical outcome as it stands.'),
@@ -596,7 +725,10 @@ const PAYMENT_EVIDENCE = z
 const EVIDENCE = z
   .object({
     id: z.uuid().describe('This download’s own record in the audit log (`spend_request.evidence_exported`).'),
-    upToSeq: SEQ.describe('The log is read up to this event, the download’s own record: a retry reads to the same.'),
+    recordSeq: SEQ.describe('The download’s own record’s place in the chain: a retry with its key answers the same.'),
+    upToSeq: SEQ.describe(
+      'The moment the bundle holds at: every row in it as it stood then, and every event about them up to and including this one. At least `recordSeq`; a retry reads the request as it stands then, so it may be later.',
+    ),
     spendRequest: REQUEST_EVIDENCE,
     agent: z
       .object({

@@ -197,6 +197,7 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
 
   return {
     inOrganisation,
+    orRefused,
     write,
     brakeWrite,
     routineBrakeWrite,

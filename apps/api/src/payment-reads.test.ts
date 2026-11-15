@@ -260,7 +260,11 @@ describe('GET /v1/payments/{id}: one in full (Phase 6 C1)', () => {
         found: {
           outcome: 'found',
           shown: unknown,
-          markFailed: { markableFrom: new Date('2026-10-15T09:00:00.000Z'), openProposal: PROPOSAL },
+          markFailed: {
+            markableFrom: new Date('2026-10-15T09:00:00.000Z'),
+            openProposal: PROPOSAL,
+            openProposalEventId: '0199a0f0-0000-7000-8000-0000000c1e01',
+          },
           timeline: [
             {
               at: new Date('2026-10-14T09:00:00.000Z'),
@@ -330,7 +334,11 @@ describe('GET /v1/payments/{id}: one in full (Phase 6 C1)', () => {
       found: {
         outcome: 'found',
         shown: unknown,
-        markFailed: { markableFrom: new Date('2026-10-15T09:00:00.000Z'), openProposal: null },
+        markFailed: {
+          markableFrom: new Date('2026-10-15T09:00:00.000Z'),
+          openProposal: null,
+          openProposalEventId: null,
+        },
         timeline: [],
         earlier: false,
       },

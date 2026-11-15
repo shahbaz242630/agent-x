@@ -31,6 +31,7 @@ import {
   createAuditTrail,
   eventsInRange,
   type LogEvent,
+  subjectKeyProblems,
 } from '@agentx/core/modules/audit';
 import {
   type ActorName,
@@ -64,7 +65,6 @@ import {
   MOST_ACTIONS_FILTERED,
   SEQ,
   SUBJECT_ASKED,
-  subjectAskedProblems,
 } from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
@@ -342,7 +342,7 @@ const EXPORT_SCHEMA = {
       if (body.actor !== undefined && actorProblems(body.actor).length > 0) {
         context.addIssue({ code: 'custom', message: 'actor.id is a UUID, or for system a process name' });
       }
-      if (body.subject !== undefined && subjectAskedProblems(body.subject.type, body.subject.id).length > 0) {
+      if (body.subject !== undefined && subjectKeyProblems(body.subject).length > 0) {
         context.addIssue({
           code: 'custom',
           message: 'subject.type is lower-case words joined by _; subject.id a UUID',
