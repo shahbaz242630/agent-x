@@ -742,7 +742,14 @@ describe('one payment in full (Phase 6 C1)', () => {
 
     if (found.outcome !== 'found') throw new Error('not found');
     expect(found.timeline.filter(({ what }) => what.endsWith('.noted'))).toEqual([
-      { at: expect.any(Date), what: 'transaction.noted', status: null, by: OPERATOR, via: null, evidenceRef: null },
+      {
+        at: expect.any(Date) as Date,
+        what: 'transaction.noted',
+        status: null,
+        by: OPERATOR,
+        via: null,
+        evidenceRef: null,
+      },
     ]);
     expect(JSON.stringify(found.timeline)).not.toContain('kept-out');
   });
