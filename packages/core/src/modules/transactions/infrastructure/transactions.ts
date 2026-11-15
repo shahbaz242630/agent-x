@@ -283,9 +283,20 @@ export async function noteTransactionFacts(
   return { outcome: 'noted' };
 }
 
-/** A handed-off request's payment, as its signed instruction and transaction hold it; or either tampered with (its alarm raised). */
+/**
+ * A handed-off request's payment, as its signed instruction and transaction
+ * hold it, with the transaction's ID and the signed event its state was
+ * believed by (the moment it was read at: a spend request's evidence, C2); or
+ * either tampered with (its alarm raised).
+ */
 export type PaymentCheck =
-  { readonly outcome: 'found'; readonly status: TransactionStatus } | { readonly outcome: 'tampered' };
+  | {
+      readonly outcome: 'found';
+      readonly status: TransactionStatus;
+      readonly transactionId: string;
+      readonly eventId: string;
+    }
+  | { readonly outcome: 'tampered' };
 
 /**
  * The payments of the requests named (at most 500), by request ID in lower
@@ -338,7 +349,12 @@ export async function paymentsOfRequests(
     payments.set(
       requestId.toLowerCase(),
       whole && transactionId !== null
-        ? { outcome: 'found', status: transactionFrom(transactionId, transaction.fields).status }
+        ? {
+            outcome: 'found',
+            status: transactionFrom(transactionId, transaction.fields).status,
+            transactionId: transactionId.toLowerCase(),
+            eventId: transaction.eventId,
+          }
         : { outcome: 'tampered' },
     );
   }

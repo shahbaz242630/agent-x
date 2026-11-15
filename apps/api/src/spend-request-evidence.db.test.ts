@@ -531,6 +531,47 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(await downloadsOf(w)).toHaveLength(1);
   });
 
+  it('reads the rows again when the payment settles between them: its reservation and status at one moment', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: SMALL() });
+    await createHandoff(runner(w)).run();
+    const settled = async () => {
+      clock.advanceBy(2 * STEP);
+      await createPaymentChecks(runner(w)).run();
+    };
+    let between = 0;
+    const settling = evidenceWith({
+      betweenReads: async () => {
+        between += 1;
+        if (between === 1) await settled();
+      },
+    });
+
+    const bundle = bundleOf(await exported(w.admin, request.id, undefined, settling));
+
+    // The first read judged the reservation HELD with the payment under way, then read the payment paid: read again.
+    expect(between).toBe(2);
+    expect(bundle.payment).toMatchObject({ status: 'SUCCEEDED' });
+    expect(bundle.reservation).toMatchObject({ state: 'FINALISED' });
+  });
+
+  it('refuses with one read when the payment settles between the reads: EVIDENCE_CHANGED_WHILE_READING', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: SMALL() });
+    await createHandoff(runner(w)).run();
+    const once = evidenceWith({
+      mostReads: 1,
+      betweenReads: async () => {
+        clock.advanceBy(2 * STEP);
+        await createPaymentChecks(runner(w)).run();
+      },
+    });
+
+    expect(await exported(w.admin, request.id, undefined, once)).toEqual(
+      refused(409, 'EVIDENCE_CHANGED_WHILE_READING'),
+    );
+  });
+
   it('answers a retry after an approval with the same record and the approval: the bundle as it stands then', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);

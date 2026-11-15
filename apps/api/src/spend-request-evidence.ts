@@ -96,7 +96,7 @@ import {
   SPEND_REQUESTS,
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, VERIFIER_RECORDED, versionOf } from '@agentx/core/modules/suppliers';
-import { FAILURE_PROPOSALS, TRANSACTION, TRANSACTIONS } from '@agentx/core/modules/transactions';
+import { FAILURE_PROPOSALS, paymentsOfRequests, TRANSACTION, TRANSACTIONS } from '@agentx/core/modules/transactions';
 import { type Clock, type IdGenerator, isReasonCode, type ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction, IdempotentRequest } from '@agentx/platform/db';
 import { isUnwritten } from '@agentx/platform/db';
@@ -204,7 +204,10 @@ async function requestPart(tx: EvidenceTx, states: SignedStates, keys: KeyProvid
   // Its reservation and order claim as the holdings check judges them: a mismatch is a tamper (its alarm raised).
   if (!(await requestHoldingsWhole(tx, states, keys, orgId, requestId, paymentHoldsOf))) throw integrityFailed();
   const [reservation] = await reservationsFor(tx, [requestId]);
-  return { ...read, reservation };
+  // The payment as the holdings check judged it, still locked `share`: the reservation stands with this moment of it.
+  const judged = (await paymentsOfRequests(tx, states, orgId, [requestId])).get(read.shown.request.id);
+  if (judged?.outcome === 'tampered') throw integrityFailed();
+  return { ...read, reservation, paymentJudged: judged };
 }
 
 type RequestPart = Awaited<ReturnType<typeof requestPart>>;
@@ -275,14 +278,22 @@ const objectsOfPayment = (payment: NonNullable<PaymentRead>): PaymentObjects => 
 
 /**
  * The rows read through their signed states whose moves the bundle shows: the
- * request, the funding source, and the payment's transaction and open proposal.
- * The supplier's details and the instruction are each made once (madeOnce).
+ * request and its payment as the holdings check judged them (the reservation's
+ * moment), the funding source, and the payment's transaction and open proposal
+ * as read with it. The supplier's details and the instruction are each made
+ * once (madeOnce).
  */
 function rowsReadOf(request: RequestPart, { source, sourceEventId, payment }: FundingAndPayment): SignedRowRead[] {
   const rows: SignedRowRead[] = [
     { subject: { type: SPEND_REQUESTS.subject, id: request.shown.request.id }, eventId: request.state.eventId },
     { subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId },
   ];
+  // The payment as the reservation was judged with it: settled since (its reservation moved by no signed event of
+  // the request's), its transaction's newer event shows it moved.
+  const judged = request.paymentJudged;
+  if (judged !== undefined) {
+    rows.push({ subject: { type: TRANSACTIONS.subject, id: judged.transactionId }, eventId: judged.eventId });
+  }
   if (payment === null) return rows;
   rows.push({
     subject: { type: TRANSACTIONS.subject, id: payment.shown.payment.transaction.id },
