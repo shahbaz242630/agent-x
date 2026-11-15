@@ -253,5 +253,5 @@
   "payments.refused.NOT_FOUND": "This payment can't be found in this organisation any more. Nothing was changed.",
   "request.refused.badReason": "Agent X couldn't accept your reason, so nothing was changed. Check it is one line, with no phone or account numbers, and try again.",
   "payments.refused.badReference": "Agent X couldn't accept the bank's reference, so nothing was changed. Check it and try again.",
-  "payments.refused.STEP_UP_NOT_ASKED": "Agent X answered without asking for your passkey, so nothing was changed. The page now shows where the payment stands; if this happens again, call support."
+  "payments.refused.STEP_UP_NOT_ASKED": "Agent X answered without asking for your passkey, which it should always ask here. The page now shows where the payment really stands; if this happens again, call support."
 }
