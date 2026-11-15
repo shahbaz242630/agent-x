@@ -10,13 +10,16 @@
 // never found; and no answer carries the payee's reference or the consent.
 // The routes' answers are payment-reads.test.ts.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { createSessions, createStepUpChallenges, ESTABLISHED_DAYS } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { MARK_FAILED_AFTER_MS } from '@agentx/core/modules/outcomes';
+import { lockPayment, MARK_FAILED_AFTER_MS, NO_FACTS, settlePayment } from '@agentx/core/modules/outcomes';
+import type { ExecutionLookup, FakeRail } from '@agentx/core/modules/providers';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { SUPPLIER_VERSIONS } from '@agentx/core/modules/suppliers';
 import {
   FAILURE_PROPOSALS,
+  moveTransaction,
   noteTransactionFacts,
   proposeFailure,
   TRANSACTIONS,
@@ -35,8 +38,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { handoffWorld, type HandoffWorldTables, payeeRefOf, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { askedFor, keys, type Member, OPERATOR, PASSKEY, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
+import {
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  createPaymentMarks,
+  type PaymentMarks,
+  PROPOSE_CONFIRM_OPERATION,
+  PROPOSE_OPERATION,
+} from './payment-marks.ts';
 import { createPaymentReads, type PaymentReads } from './payment-reads.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
@@ -66,6 +77,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let reads: PaymentReads;
+let marks: PaymentMarks;
 
 const shared = spendWorld({
   app: () => app,
@@ -75,7 +87,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { ask, quiet } = shared;
+const { ask, quiet, member, keyed, stepUp } = shared;
 const { ready, paymentOf } = handoffWorld({
   app: () => app,
   clock: () => clock,
@@ -98,12 +110,12 @@ const handoffOf = (w: World) =>
     databaseGate: handoffDatabaseGate(6),
   });
 
-const checksOf = (w: World) =>
+const checksOf = (w: World, rail: FakeRail = w.rail) =>
   createPaymentChecks({
     list: () => Promise.resolve([w.org]),
     database: app,
     outbox: createOutbox({ ids, clock }),
-    rail: w.rail,
+    rail,
     keys,
     ids,
     clock,
@@ -214,6 +226,82 @@ const proposedFor = async (w: World, transactionId: string) => {
   return id;
 };
 
+/** The world's fake, every lookup answered with the bank's status `providerStatus` in place of its own. */
+const bankAnswering = (w: World, providerStatus: 'Rejected' | 'AcceptedCreditSettlementCompleted'): FakeRail => ({
+  ...w.rail,
+  getExecution: async (ref): Promise<ExecutionLookup> => {
+    const found = await w.rail.getExecution(ref);
+    return found.kind === 'found'
+      ? {
+          kind: 'found',
+          execution: {
+            ...found.execution,
+            providerStatus,
+            rejectCode: providerStatus === 'Rejected' ? 'AANI.FF01' : null,
+          },
+        }
+      : found;
+  },
+});
+
+/** The payment moved to UNKNOWN on an answer that proves nothing, its facts kept as they were (the bank check's own way). */
+const lostTrack = (w: World, transactionId: string) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const key = { orgId: w.org, id: transactionId };
+    const locked = await lockPayment(tx, states, key);
+    await moveTransaction(tx, states, key, 'lose_track', NO_FACTS, {
+      actor: BANK_CHECK,
+      details: { via: 'bank_check' },
+    });
+    await settlePayment(tx, states, createOutbox({ ids, clock }), {
+      orgId: w.org,
+      requestId: locked.instruction.spendRequestId,
+      transactionId,
+      status: 'UNKNOWN',
+      at: clock.now(),
+      openProposal: locked.openProposal,
+    });
+  });
+
+/** The same person signed in again now, with a passkey: a new session, their membership as it was. */
+async function signedInAgain(who: Member): Promise<Member> {
+  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const { sessionId } = await sessions.open(app, who.userId, {
+    idpSessionId: 'V1_9',
+    authTime: clock.now(),
+    amr: [...PASSKEY],
+  });
+  return { ...who, sessionId };
+}
+
+/** Marked failed as the routes make it: one admin proposes, a second confirms, each with a passkey (gate H10). */
+async function markedFailedByTwoAdmins(w: World, paymentId: string) {
+  const firstMember = await member(w.org, 'admin');
+  const secondMember = await member(w.org, 'admin');
+  // Members long enough to be each other's second person (ADR-012 §1), and the payment past its day.
+  clock.advanceBy(ESTABLISHED_DAYS * 24 * 60 * 60_000 + 1);
+  const first = await signedInAgain(firstMember);
+  const second = await signedInAgain(secondMember);
+  const evidenceRef = 'BANK-NACK-77311';
+  const proposing = askedFor(
+    await marks.propose(first, keyed(first, PROPOSE_OPERATION), paymentId, evidenceRef, CORRELATION),
+  );
+  await stepUp(first, proposing);
+  const proposal = await marks.confirmProposal(
+    first,
+    keyed(first, PROPOSE_CONFIRM_OPERATION),
+    paymentId,
+    { evidenceRef, stepUpChallengeId: proposing },
+    CORRELATION,
+  );
+  expect(proposal).toMatchObject({ outcome: 'proposed' });
+  const approving = askedFor(await marks.approve(second, keyed(second, APPROVE_OPERATION), paymentId, CORRELATION));
+  await stepUp(second, approving);
+  expect(
+    await marks.confirmApproval(second, keyed(second, APPROVE_CONFIRM_OPERATION), paymentId, approving, CORRELATION),
+  ).toEqual({ outcome: 'marked', paymentId });
+}
+
 /** The IDs of the organisation's integrity holds. */
 const holdsOf = async (w: World) =>
   (
@@ -261,6 +349,15 @@ beforeEach(() => {
     logger,
   });
   reads = createPaymentReads({ database: app, keys, ids, logger });
+  marks = createPaymentMarks({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock }),
+    outbox: createOutbox({ ids, clock }),
+    logger,
+  });
 });
 
 describe('the team’s list of payments (Phase 6 C1)', () => {
@@ -394,37 +491,107 @@ describe('the team’s list of payments (Phase 6 C1)', () => {
 });
 
 describe('the exception list (Phase 6 C1; BR-17; S196 decision)', () => {
-  it('lists every UNKNOWN payment, and a paid one while the bank’s word contradicts it, until the bank agrees', async () => {
-    const { w, paid, alsoPaid, unknown } = await threePayments();
+  it('lists every UNKNOWN payment, and a paid one the bank check found contradicted, until the bank agrees', async () => {
+    const { w, requests, paid, alsoPaid, unknown } = await threePayments();
     expect(await listOf(w.org, 'exceptions')).toEqual({ rows: [[unknown.id, 'UNKNOWN']], next: null, unchecked: [] });
 
-    await bankSays(w, paid.id, 'Rejected', 'AANI.FF01');
+    // The bank check's first run after a start checks every paid one: the bank now rejects both.
+    await checksOf(w, bankAnswering(w, 'Rejected')).run();
+    expect(await transactionOf(w, requests[0]?.id ?? '')).toMatchObject({
+      status: 'SUCCEEDED',
+      providerStatus: 'Rejected',
+    });
 
     expect(await listOf(w.org, 'exceptions')).toEqual({
       rows: [
         [unknown.id, 'UNKNOWN'],
+        [alsoPaid.id, 'SUCCEEDED', 'contradicted'],
         [paid.id, 'SUCCEEDED', 'contradicted'],
       ],
       next: null,
       unchecked: [],
     });
-    expect(await listOf(w.org, 'exceptions', null, 1)).toMatchObject({ next: unknown.id });
-    expect(await listOf(w.org, 'exceptions', unknown.id, 1)).toEqual({
+    expect(await listOf(w.org, 'exceptions', null, 2)).toMatchObject({ next: alsoPaid.id });
+    expect(await listOf(w.org, 'exceptions', alsoPaid.id, 2)).toEqual({
       rows: [[paid.id, 'SUCCEEDED', 'contradicted']],
       next: null,
       unchecked: [],
     });
-    // The whole list says it too, and the one still agreed with isn't.
     expect(await listOf(w.org, 'paid')).toMatchObject({
       rows: [
-        [alsoPaid.id, 'SUCCEEDED'],
+        [alsoPaid.id, 'SUCCEEDED', 'contradicted'],
         [paid.id, 'SUCCEEDED', 'contradicted'],
       ],
     });
+    expect(await reads.show(w.org, paid.id, CORRELATION)).toMatchObject({
+      shown: { payment: { contradicted: true } },
+    });
 
-    await bankSays(w, paid.id, 'AcceptedCreditSettlementCompleted');
+    // The bank agrees again: both leave the list by themselves, their alerts kept in the log (and, crediting the
+    // UNKNOWN one too, the bank settles that as paid).
+    await checksOf(w, bankAnswering(w, 'AcceptedCreditSettlementCompleted')).run();
+
+    expect(await listOf(w.org, 'exceptions')).toEqual({ rows: [], next: null, unchecked: [] });
+    expect(await listOf(w.org, 'paid')).toMatchObject({
+      rows: [
+        [unknown.id, 'SUCCEEDED'],
+        [alsoPaid.id, 'SUCCEEDED'],
+        [paid.id, 'SUCCEEDED'],
+      ],
+    });
+    expect(await reads.show(w.org, paid.id, CORRELATION)).toMatchObject({
+      shown: { payment: { contradicted: false } },
+    });
+  });
+
+  it('never reads a kept word as contradicted without the bank check’s alert', async () => {
+    const { w, paid, unknown } = await threePayments();
+    await bankSays(w, paid.id, 'Rejected', 'AANI.FF01');
 
     expect(await listOf(w.org, 'exceptions')).toEqual({ rows: [[unknown.id, 'UNKNOWN']], next: null, unchecked: [] });
+    expect(await listOf(w.org, 'paid')).toMatchObject({ rows: [expect.any(Array), [paid.id, 'SUCCEEDED']] });
+  });
+
+  it('keeps a payment under way, lost track of, then marked failed by two admins off the list (S196 review)', async () => {
+    const { w, acting } = await ready();
+    const request = await ask(acting, w, { amount: SMALL() });
+    await handoffOf(w).run();
+    clock.advanceBy(STEP);
+    await checksOf(w).run();
+    const processing = await transactionOf(w, request.id);
+    expect(processing).toMatchObject({ status: 'PROCESSING', providerStatus: 'AcceptedSettlementCompleted' });
+    await lostTrack(w, processing.id);
+
+    await markedFailedByTwoAdmins(w, processing.id);
+
+    // The bank's word from before the lost track is kept, and on its own would read as contradicting FAILED.
+    expect(await transactionOf(w, request.id)).toMatchObject({
+      status: 'FAILED',
+      providerStatus: 'AcceptedSettlementCompleted',
+    });
+    expect(await listOf(w.org, 'exceptions')).toEqual({ rows: [], next: null, unchecked: [] });
+    expect(await listOf(w.org, 'failed')).toEqual({ rows: [[processing.id, 'FAILED']], next: null, unchecked: [] });
+    expect(await reads.show(w.org, processing.id, CORRELATION)).toMatchObject({
+      shown: { payment: { contradicted: false } },
+      markFailed: null,
+    });
+  });
+
+  it('refuses a list whose contradiction alert can’t be believed', async () => {
+    const { w, paid } = await threePayments();
+    await checksOf(w, bankAnswering(w, 'Rejected')).run();
+    const owner = await tamperAsOwner(database, TRANSACTIONS, w.org);
+    try {
+      await owner.query(
+        "update audit.events set details = '{}' where org_id = $1 and subject_type = 'payment_alert' and subject_id = $2",
+        [w.org, paid.id],
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await reads.list(w.org, { after: null, limit: 50 }, 'exceptions', CORRELATION)).toEqual(INTEGRITY_FAILED);
+    expect(await reads.show(w.org, paid.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
   });
 
   it('refuses an exception list holding one that can’t be believed', async () => {
@@ -550,6 +717,34 @@ describe('one payment in full (Phase 6 C1)', () => {
     for (const entry of found.timeline) {
       expect(Object.keys(entry).sort()).toEqual(['at', 'by', 'evidenceRef', 'status', 'via', 'what']);
     }
+  });
+
+  it('keeps only events about this payment’s own objects, and no facts past the allow-list', async () => {
+    const { w, paid } = await threePayments();
+    await withTenant(app, w.org, async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      const note = (type: string, id: string, details: Record<string, string | number>) =>
+        trail.record(tx, w.org, {
+          actor: OPERATOR,
+          action: `${type}.noted`,
+          subject: { type, id, version: 1 },
+          details,
+        });
+      // About this payment's transaction, with a status and facts that aren't of their kind.
+      await note('transaction', paid.id, { statusTo: 'SIDEWAYS', via: 7, evidenceRef: 9, note: 'kept-out' });
+      // Its instruction's ID under the transaction's and the alerts' types, and its own ID under the instruction's.
+      await note('transaction', paid.instructionId, {});
+      await note('payment_alert', paid.instructionId, {});
+      await note('instruction', paid.id, {});
+    });
+
+    const found = await reads.show(w.org, paid.id, CORRELATION);
+
+    if (found.outcome !== 'found') throw new Error('not found');
+    expect(found.timeline.filter(({ what }) => what.endsWith('.noted'))).toEqual([
+      { at: expect.any(Date), what: 'transaction.noted', status: null, by: OPERATOR, via: null, evidenceRef: null },
+    ]);
+    expect(JSON.stringify(found.timeline)).not.toContain('kept-out');
   });
 
   it('shows a paid one with no mark, and its newest events alone past the most, saying older were left out', async () => {

@@ -18,8 +18,9 @@ export {
   type PaymentMoved,
   settlePayment,
 } from './infrastructure/payment-outcome.ts';
-export { contradicts } from './infrastructure/contradiction.ts';
+export { contradicts, PAYMENT_ALERT_SUBJECT } from './infrastructure/contradiction.ts';
 export {
+  contradictionsOf,
   MOST_PAYMENTS_A_PAGE,
   paymentOf,
   type PaymentRecord,

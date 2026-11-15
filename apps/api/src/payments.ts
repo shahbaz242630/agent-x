@@ -26,7 +26,7 @@
 import { MOST_PAYMENTS_A_PAGE } from '@agentx/core/modules/outcomes';
 import { FAILURE_PROPOSAL, type FailureProposalRecord, TRANSACTION } from '@agentx/core/modules/transactions';
 import { isUnwritten } from '@agentx/platform/db';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
@@ -215,7 +215,7 @@ const PAYMENT_LISTED = z
     contradicted: z
       .boolean()
       .describe(
-        'Settled, and the bank’s latest word on it says otherwise (paid, then rejected; or failed, then paid or under way): Agent X leaves it as it is and has told your admins; take it up with your bank. False again once the bank agrees.',
+        'Settled, and the bank went back on it (paid, then rejected; or failed, then paid or under way): Agent X said so to your admins when it first did, leaves the payment as it is, and its latest word still says otherwise; take it up with your bank. False again once the bank agrees.',
       ),
   })
   .register(API_SCHEMAS, { id: 'PaymentListed', description: 'A payment, as the team sees it in a list.' });
@@ -328,23 +328,28 @@ export function registerPayments(
   const access = [...MARKING_ROLES];
   const members = { access: [...EVERY_MEMBER] };
 
-  routes.get('/v1/payments', { schema: LIST_SCHEMA, config: members }, async (request, reply) => {
+  /** A page of payments, all, one group's or the exceptions, as both lists answer it. */
+  const pageOf = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    { after, limit }: { readonly after?: string | undefined; readonly limit?: number | undefined },
+    which: PaymentGroup | 'all' | 'exceptions',
+  ) => {
     const { orgId } = memberInSessionOf(request);
-    const { after, limit, status } = request.query;
     const page = { after: after ?? null, limit: limit ?? MOST_PAYMENTS_A_PAGE };
-    const found = await need(reads).list(orgId, page, status ?? 'all', request.id);
+    const found = await need(reads).list(orgId, page, which, request.id);
     if (found.outcome === 'refused') return answerRefusal(found, request, reply);
     return { payments: found.payments.map(listed), next: found.next, unchecked: [...found.unchecked] };
-  });
+  };
+
+  routes.get('/v1/payments', { schema: LIST_SCHEMA, config: members }, (request, reply) =>
+    pageOf(request, reply, request.query, request.query.status ?? 'all'),
+  );
 
   // Its own route, before `/v1/payments/:id`: the exception list (BR-17).
-  routes.get('/v1/payments/exceptions', { schema: EXCEPTIONS_SCHEMA, config: members }, async (request, reply) => {
-    const { orgId } = memberInSessionOf(request);
-    const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_PAYMENTS_A_PAGE };
-    const found = await need(reads).list(orgId, page, 'exceptions', request.id);
-    if (found.outcome === 'refused') return answerRefusal(found, request, reply);
-    return { payments: found.payments.map(listed), next: found.next, unchecked: [...found.unchecked] };
-  });
+  routes.get('/v1/payments/exceptions', { schema: EXCEPTIONS_SCHEMA, config: members }, (request, reply) =>
+    pageOf(request, reply, request.query, 'exceptions'),
+  );
 
   routes.get('/v1/payments/:id', { schema: SHOW_SCHEMA, config: members }, async (request, reply) => {
     const { orgId } = memberInSessionOf(request);

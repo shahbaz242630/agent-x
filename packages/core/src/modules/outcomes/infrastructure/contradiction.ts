@@ -1,10 +1,17 @@
 // Whether the bank's word on a settled payment contradicts our status (rail
 // map §4; Phase 4 E1a): the one rule the bank check raises its `contradicted`
 // alert by (payment-checks.ts), and the one the team's exception list shows a
-// payment by while the word its row keeps still contradicts it (Phase 6 C1,
-// BR-17; S196 decision), written once.
+// payment by while the word its row keeps still contradicts it, once that
+// alert was raised (Phase 6 C1, BR-17; S196 decision, revised: payments-page.ts),
+// written once.
 import { type PaymentState, paymentStateOf, PROVIDER_STATUSES, type ProviderStatus } from '../../providers/index.ts';
 import { isSettled, TRANSACTION, type TransactionStatus } from '../../transactions/index.ts';
+
+/** The subject a payment's alerts are kept under in its audit log (payment-alerts.ts), its ID the transaction's. */
+export const PAYMENT_ALERT_SUBJECT = 'payment_alert';
+
+/** The alert the bank check raises as the bank first contradicts a settled payment (payment-alerts.ts). */
+export const CONTRADICTED_ALERT = 'payment.contradicted';
 
 /** Whether a settled payment's bank state contradicts it: paid and then not, or failed and then paid (rail map §4). */
 export const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
@@ -17,13 +24,17 @@ const isProviderStatus = (text: string): text is ProviderStatus =>
 
 /**
  * Whether the bank's word a payment's row keeps (its provider status) still
- * contradicts its status (S196 decision): settled, and that word mapped to its
+ * contradicts its status: settled, and that word mapped to its
  * state as the bank check maps it (`paymentStateOf`) contradicting it. The row
  * doesn't keep whether the bank proved no debit, which only splits a
  * `Rejected` between FAILED and UNKNOWN: for every settled status both give
  * the same verdict (SUCCEEDED and REVERSED: both contradict; FAILED and
  * CANCELLED: neither), so it is read as unproven. No word, or one the rail map
  * doesn't name, contradicts nothing. Once the bank agrees again, it no longer does.
+ * Alone, it isn't the exception list's rule: a payment marked failed (or any
+ * other move that keeps no facts) keeps the bank's last word from before, which
+ * may read as contradicting; the list also asks for the bank check's alert
+ * (payments-page.ts, S196 decision, revised).
  */
 export function contradictedNow(status: TransactionStatus, providerStatus: string | null): boolean {
   if (!isSettled(status) || providerStatus === null || !isProviderStatus(providerStatus)) return false;
