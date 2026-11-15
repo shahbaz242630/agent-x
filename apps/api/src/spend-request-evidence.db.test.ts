@@ -606,6 +606,22 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(await downloadsOf(w)).toEqual([]);
   });
 
+  it('counts the download’s own record against the cap: a request already at it is refused before it is logged', async () => {
+    const { w, acting } = await ready();
+    const denied = await ask(acting, w, { amount: AED(w.maxPayment * 10n) });
+    // Its events with one download recorded: the next bundle holds these and its own record, one more.
+    const held = bundleOf(await exported(w.admin, denied.id)).events.length;
+
+    expect(await exported(w.admin, denied.id, undefined, evidenceWith({ mostEvents: held }))).toEqual(
+      refused(409, 'EVIDENCE_TOO_LARGE'),
+    );
+    expect(await downloadsOf(w)).toHaveLength(1);
+    // The control: one more fits.
+    expect(
+      bundleOf(await exported(w.admin, denied.id, undefined, evidenceWith({ mostEvents: held + 1 }))).events,
+    ).toHaveLength(held + 1);
+  });
+
   it('answers another organisation’s request as NOT_FOUND, writing nothing', async () => {
     const { request } = await paid();
     const { w: other } = await ready();

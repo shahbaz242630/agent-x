@@ -597,7 +597,8 @@ export function createSpendRequestEvidence({
         if (read.outcome === 'tampered') throw integrityFailed();
         const subjects = subjectsOf(read.request.id, await paymentObjectsOf(tx, orgId, read.request.id));
         const counted = await eventsInRange(tx, orgId, { ...ALL_TIME, subjects });
-        if (counted.events > mostEvents) throw new EvidenceRefused(409, 'EVIDENCE_TOO_LARGE');
+        // The download's own record joins the bundle too: counted here, so one at the cap is refused before it is logged.
+        if (counted.events + 1 > mostEvents) throw new EvidenceRefused(409, 'EVIDENCE_TOO_LARGE');
         const recorded = await createAuditTrail({ keys, ids, correlationId }).record(tx, orgId, {
           actor: { type: 'user', id: member.userId },
           action: EVIDENCE_EXPORTED,
