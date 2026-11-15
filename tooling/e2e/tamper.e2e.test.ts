@@ -160,6 +160,11 @@ const paying = handoffWorld({
 });
 /** A real payment of a third organisation's (gate H10), foreign to both tenants: see seedPayment. */
 let payment: string;
+/**
+ * That organisation's admin, signed in: the own-ID control for a payment's
+ * reads (6C1), as neither tenant has a payment of its own to read.
+ */
+let paymentReader: Record<string, string>;
 
 interface Tenant {
   readonly world: World;
@@ -501,6 +506,8 @@ async function seedPayment(): Promise<string> {
   }
   const made = await paying.paymentOf(w, request.id);
   if (typeof made.transaction !== 'object') throw new Error(`no payment was made: ${JSON.stringify(made)}`);
+  const reader = await shared.signedInMember(w.org, 'admin');
+  paymentReader = { ...cookieHeader(reader.cookie), 'agentx-organization': w.org };
   return made.transaction.id;
 }
 
@@ -1358,8 +1365,10 @@ async function foreignResources(op: Operation, body: unknown): Promise<void> {
   currentAttack = 'foreign path IDs compared with absent IDs';
   const headers = roleRoute(op) ? cookieHeader(people.admin) : allowedHeaders(op);
   if (op.method === 'GET' || op.method === 'HEAD') {
-    // A hidden foreign record proves nothing when the route cannot read the caller's own record either.
-    const local = await controlSend(op, headers, body, routeOf(op, own));
+    // A hidden foreign record proves nothing when the route cannot read the caller's own record either. A
+    // payment's reads are controlled by its own organisation's admin: neither tenant has a payment (seedPayment).
+    const ownless = op.route.startsWith('/v1/payments/{id}');
+    const local = await controlSend(op, ownless ? paymentReader : headers, body, routeOf(op, own));
     if (local.status === 404)
       finding(
         op,

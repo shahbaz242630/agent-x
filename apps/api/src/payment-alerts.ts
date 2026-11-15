@@ -12,6 +12,7 @@
 // their callers.
 import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import { PAYMENT_ALERT_SUBJECT } from '@agentx/core/modules/outcomes';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -32,8 +33,8 @@ const KIND_OF = {
 /** The alerts a check raises again each time it runs: told once a payment, by the audit entry they leave. */
 const ONCE_A_PAYMENT: ReadonlySet<PaymentAlert> = new Set(['still_unknown', 'bank_lost']);
 
-/** The alert's own subject: the payment's transaction, never its signed state. */
-const SUBJECT_TYPE = 'payment_alert';
+/** The alert's own subject: the payment's transaction, never its signed state. The exception list reads it (payment-reads.ts). */
+const SUBJECT_TYPE = PAYMENT_ALERT_SUBJECT;
 
 /** The API, as the actor of the alert's event. */
 const ACTOR = { type: 'system', id: 'api' } as const;

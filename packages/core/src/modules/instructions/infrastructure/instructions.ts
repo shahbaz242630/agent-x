@@ -82,7 +82,7 @@ export interface NewInstruction {
 }
 
 /** An instruction as its signed state holds it, its intent's hash with it. */
-interface InstructionRecord extends Omit<NewInstruction, 'orgId' | 'createdAt'> {
+export interface InstructionRecord extends Omit<NewInstruction, 'orgId' | 'createdAt'> {
   readonly intentHash: string;
   readonly createdAt: Date;
 }
@@ -194,7 +194,7 @@ export async function makeInstruction(
 }
 
 /** The instruction its verified state holds: 0058's checks hold every field to its kind (none null), and the seal to what was written. */
-function recordOf(id: string, fields: ReadonlyMap<string, string | null>): InstructionRecord {
+export function instructionFrom(id: string, fields: ReadonlyMap<string, string | null>): InstructionRecord {
   const text = (column: string): string => String(fields.get(column));
   return {
     id,
@@ -226,7 +226,7 @@ export async function instructionOf(
   const state = await states.verifiedState(tx, INSTRUCTIONS, key, 'share');
   if (state.outcome === 'tampered') return state;
   if (state.outcome === 'missing') return state;
-  return { outcome: 'found', instruction: recordOf(key.id.toLowerCase(), state.fields) };
+  return { outcome: 'found', instruction: instructionFrom(key.id.toLowerCase(), state.fields) };
 }
 
 /**

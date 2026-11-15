@@ -72,7 +72,7 @@ export interface ProviderFacts {
 }
 
 /** A transaction as its signed state holds it. */
-interface TransactionRecord extends ProviderFacts {
+export interface TransactionRecord extends ProviderFacts {
   readonly id: string;
   readonly instructionId: string;
   readonly status: TransactionStatus;
@@ -140,7 +140,7 @@ export async function openTransaction(
  * them all, each its text or null), held to its kind by 0058's checks and the
  * status guard, and the seal to what was written.
  */
-function recordOf(id: string, fields: ReadonlyMap<string, string | null>): TransactionRecord {
+export function transactionFrom(id: string, fields: ReadonlyMap<string, string | null>): TransactionRecord {
   const nullable = (column: string) => fields.get(column) as string | null;
   const changedAt = nullable('provider_changed_at');
   return {
@@ -164,7 +164,7 @@ export async function transactionOf(
 ): Promise<TransactionCheck> {
   const state = await states.verifiedState(tx, TRANSACTIONS, key, lock);
   if (state.outcome !== 'verified') return state;
-  return { outcome: 'found', transaction: recordOf(key.id.toLowerCase(), state.fields), state };
+  return { outcome: 'found', transaction: transactionFrom(key.id.toLowerCase(), state.fields), state };
 }
 
 /** What a move came to: moved, refused by the machine (its facts still noted), or the row tampered with or gone. */
@@ -338,7 +338,7 @@ export async function paymentsOfRequests(
     payments.set(
       requestId.toLowerCase(),
       whole && transactionId !== null
-        ? { outcome: 'found', status: recordOf(transactionId, transaction.fields).status }
+        ? { outcome: 'found', status: transactionFrom(transactionId, transaction.fields).status }
         : { outcome: 'tampered' },
     );
   }
