@@ -122,12 +122,26 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     expect(asked).toMatchObject([{ actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
   });
 
+  it('asks for one object’s events when one is named (CO7)', async () => {
+    const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
+    const reply = await app.inject(
+      get(`${RANGE}&subjectType=spend_request&subjectId=0199a0f0-0000-7000-8000-00000000c2a1`),
+    );
+
+    expect(reply.statusCode).toBe(200);
+    expect(asked).toMatchObject([
+      { subjects: [{ type: 'spend_request', id: '0199a0f0-0000-7000-8000-00000000c2a1' }] },
+    ]);
+  });
+
   it('asks every action and a whole page when none are named, answering the end as null', async () => {
     const { app, asked } = await withLog({ outcome: 'page', events: [], next: null, names: new Map() });
     const reply = await app.inject(get(RANGE));
 
     expect(reply.json()).toEqual({ events: [], next: null });
-    expect(asked).toMatchObject([{ actions: undefined, actor: undefined, beforeSeq: undefined, limit: 100 }]);
+    expect(asked).toMatchObject([
+      { actions: undefined, actor: undefined, subjects: undefined, beforeSeq: undefined, limit: 100 },
+    ]);
   });
 
   it.each([
@@ -141,6 +155,13 @@ describe('GET /v1/audit-log (E10a, decision 24)', () => {
     ['an actor type it doesn’t know', `${RANGE}&actorType=bank&actorId=0199a0f0-0000-7000-8000-00000000a9e1`],
     ['a person named by something not a UUID', `${RANGE}&actorType=user&actorId=integrity-hold`],
     ['a part of Agent X named by something not a process name', `${RANGE}&actorType=system&actorId=Not%20One`],
+    ['an object’s type without its ID', `${RANGE}&subjectType=spend_request`],
+    ['an object’s ID without its type', `${RANGE}&subjectId=0199a0f0-0000-7000-8000-00000000c2a1`],
+    ['an object named by something not a UUID', `${RANGE}&subjectType=spend_request&subjectId=x`],
+    [
+      'an object type that isn’t lower-case words',
+      `${RANGE}&subjectType=Spend%20Request&subjectId=0199a0f0-0000-7000-8000-00000000c2a1`,
+    ],
     ['a start that isn’t a seq', `${RANGE}&before=0`],
     ['a field of its own', `${RANGE}&role=admin`],
   ])('refuses %s at the edge, the log never asked', async (_what, query) => {

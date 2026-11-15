@@ -2,9 +2,10 @@
 // S119, "nothing on our platform goes without log; logs available for both
 // user and us"; decision 24: admins only).
 //
-// - `GET /v1/audit-log?from&to[&actions][&actorType&actorId][&before][&limit]`:
+// - `GET /v1/audit-log?from&to[&actions][&actorType&actorId][&subjectType&subjectId][&before][&limit]`:
 //   every signed event of the organisation recorded in [from, to), of the
-//   actions named, by the one actor named (decision 26), newest first, a page at most MOST_LOG_EVENTS_A_PAGE: who (the actor), what (the
+//   actions named, by the one actor named (decision 26), about the one object
+//   named (CO7, on 0005's index by object), newest first, a page at most MOST_LOG_EVENTS_A_PAGE: who (the actor), what (the
 //   action and its subject) and every fact sealed with it, each choice and
 //   confirm with its statement version and step-up evidence among them.
 //   `next` names the event the next page starts before.
@@ -27,6 +28,7 @@ import {
   type LogEvent,
   type LogPageToRead,
   type SignedStates,
+  subjectKeyProblems,
 } from '@agentx/core/modules/audit';
 import {
   type ActorName,
@@ -127,10 +129,13 @@ export const ACTOR_TYPES = ['user', 'agent', 'system'] as const satisfies readon
 /** An actor to filter to, as asked: a person's or an agent's UUID, or a part of Agent X by its process name. */
 export const ACTOR_ASKED_ID = z.string().max(64);
 
+/** An object to filter to, as asked (CO7): its kind, as events name it, and its UUID. */
+export const SUBJECT_ASKED = { type: z.string().max(64), id: z.string().max(64) } as const;
+
 /** A whole number as the log's sequence names it, in text: JSON numbers can't hold every one. */
 export const SEQ = z.string().regex(/^[1-9][0-9]{0,18}$/);
 
-const LOG_EVENT = z
+export const LOG_EVENT = z
   .object({
     seq: SEQ.describe('Its place in the organisation’s chain, from 1.'),
     id: z.uuid().describe('The event, by its ID.'),
@@ -192,6 +197,10 @@ const PAGE_SCHEMA = {
       actorId: ACTOR_ASKED_ID.optional().describe(
         'Only events by this actor: a person’s or an agent’s Agent X ID, or a part of Agent X by name; with `actorType`.',
       ),
+      subjectType: SUBJECT_ASKED.type
+        .optional()
+        .describe('Only events about this kind of record, such as `spend_request`; with `subjectId`.'),
+      subjectId: SUBJECT_ASKED.id.optional().describe('Only events about this record, by its ID; with `subjectType`.'),
       before: SEQ.optional().describe('The page starts before this event: the page before’s `next`.'),
       limit: z.coerce
         .number()
@@ -219,6 +228,16 @@ const PAGE_SCHEMA = {
           context.addIssue({ code: 'custom', message: 'actorId is a UUID, or for system a process name' });
         }
       }
+      const { subjectType, subjectId } = query;
+      if ((subjectType === undefined) !== (subjectId === undefined)) {
+        context.addIssue({ code: 'custom', message: 'an object is named by subjectType and subjectId together' });
+      } else if (
+        subjectType !== undefined &&
+        subjectId !== undefined &&
+        subjectKeyProblems({ type: subjectType, id: subjectId }).length > 0
+      ) {
+        context.addIssue({ code: 'custom', message: 'subjectType is lower-case words joined by _; subjectId a UUID' });
+      }
     }),
   response: {
     200: z
@@ -242,7 +261,7 @@ export function registerAuditLog(app: FastifyInstance, { log }: { log: AuditLog 
 
   routes.get('/v1/audit-log', { schema: PAGE_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
     const { orgId } = memberInSessionOf(request);
-    const { from, to, actions, actorType, actorId, before, limit } = request.query;
+    const { from, to, actions, actorType, actorId, subjectType, subjectId, before, limit } = request.query;
     const page = await need(log).page(
       orgId,
       {
@@ -251,6 +270,8 @@ export function registerAuditLog(app: FastifyInstance, { log }: { log: AuditLog 
         actions: actions?.split(','),
         actor:
           actorType === undefined || actorId === undefined ? undefined : actorAsKept({ type: actorType, id: actorId }),
+        subjects:
+          subjectType === undefined || subjectId === undefined ? undefined : [{ type: subjectType, id: subjectId }],
         beforeSeq: before === undefined ? undefined : BigInt(before),
         limit: limit ?? MOST_LOG_EVENTS_A_PAGE,
       },

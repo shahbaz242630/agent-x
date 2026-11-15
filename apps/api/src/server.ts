@@ -101,6 +101,7 @@ import type { SpendRequestReads } from './spend-request-reads.ts';
 import type { SpendRequestRejects } from './spend-request-rejects.ts';
 import type { SpendRequestApprovals } from './spend-request-approvals.ts';
 import { registerSpendRequests } from './spend-requests.ts';
+import { registerSpendRequestEvidence, type SpendRequestEvidence } from './spend-request-evidence.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceChanges } from './funding-source-changes.ts';
 import type { FundingSourceLinks } from './funding-source-links.ts';
@@ -227,6 +228,8 @@ export interface ServerOptions {
   readonly spendRequestRejects?: SpendRequestRejects | undefined;
   /** Approving spend requests waiting for approval (spend-request-approvals.ts); without it, no one reaches those routes. */
   readonly spendRequestApprovals?: SpendRequestApprovals | undefined;
+  /** Downloading a spend request's evidence (spend-request-evidence.ts, BR-16); without it, no one reaches that route. */
+  readonly spendRequestEvidence?: SpendRequestEvidence | undefined;
   /** An admin marking an UNKNOWN payment failed (payment-marks.ts, decision 38); without it, no one reaches those routes. */
   readonly paymentMarks?: PaymentMarks | undefined;
   /** The team's reads of payments and their exceptions (payment-reads.ts); without it, no one reaches those routes. */
@@ -486,6 +489,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     rejects: options.spendRequestRejects,
     approvals: options.spendRequestApprovals,
   });
+  registerSpendRequestEvidence(app, { evidence: options.spendRequestEvidence });
   registerPayments(app, { marks: options.paymentMarks, reads: options.paymentReads });
   registerAgents(app, {
     registrations: options.agentRegistrations,

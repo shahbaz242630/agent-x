@@ -41,6 +41,7 @@ import { createActivityPages } from './activity-log.ts';
 import { createActivityLogExports } from './activity-log-exports.ts';
 import { createAuditLog } from './audit-log.ts';
 import { createAuditLogExports } from './audit-log-exports.ts';
+import { createSpendRequestEvidence } from './spend-request-evidence.ts';
 import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
@@ -330,6 +331,14 @@ export async function startWeb(
       logger,
     }),
     paymentReads: createPaymentReads({ database, keys, ids: uuidV7Ids, logger }),
+    spendRequestEvidence: createSpendRequestEvidence({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+      directory,
+    }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,

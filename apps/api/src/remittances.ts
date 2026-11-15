@@ -39,6 +39,9 @@ export type RemittanceTables = OrganizationsTables &
 /** The API, as the actor of the remittance's events. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
+/** What a payment's remittance outcome is recorded about, by the payment's ID (a spend request's evidence reads it too). */
+export const REMITTANCE_SUBJECT = 'payment_remittance';
+
 /** Why a remittance was skipped, as its event keeps it. */
 const SKIPPED_BECAUSE = { off: 'setting_off', no_email: 'no_email', not_succeeded: 'payment_not_succeeded' } as const;
 
@@ -72,7 +75,7 @@ export function createRemittances({
     createAuditTrail({ keys, ids }).record(tx, orgId, {
       actor: ACTOR,
       action,
-      subject: { type: 'payment_remittance', id: transactionId, version: 1 },
+      subject: { type: REMITTANCE_SUBJECT, id: transactionId, version: 1 },
       details,
     });
 

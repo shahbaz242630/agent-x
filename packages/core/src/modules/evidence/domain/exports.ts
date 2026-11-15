@@ -5,6 +5,16 @@
 /** The action a download records about the log, on the organisation's own chain. */
 export const AUDIT_LOG_EXPORTED = 'audit_log.exported';
 
+/**
+ * The action a download of one spend request's evidence records (Phase 6 C2,
+ * BR-16), on the organisation's own chain, about EVIDENCE_SUBJECT by the
+ * request's ID: never about the request itself, so downloads never add to the
+ * events its signed state is judged among.
+ */
+export const EVIDENCE_EXPORTED = 'spend_request.evidence_exported';
+/** What a download of a spend request's evidence is about: the request's evidence, by the request's ID. */
+export const EVIDENCE_SUBJECT = 'spend_request_evidence';
+
 /** The most events one download holds (partner, S121): a longer range is downloaded in parts. */
 export const MOST_EXPORTED_EVENTS = 10_000;
 

@@ -206,6 +206,12 @@ export interface LogPageToRead {
   readonly actions?: readonly string[] | undefined;
   /** Only this actor's, when named (decision 26: per person, one click). */
   readonly actor?: AuditActor | undefined;
+  /**
+   * Only events about one of these objects, when named (CO7's object filter;
+   * a spend request's evidence, Phase 6 C2): each a type and a UUID, found on
+   * 0005's index by object. None named is refused, as it would read nothing.
+   */
+  readonly subjects?: readonly AuditSubjectKey[] | undefined;
   /** Only events before this one in the chain: the page before's `next`. */
   readonly beforeSeq?: bigint | undefined;
   /** The most events the page holds. */
@@ -214,6 +220,19 @@ export interface LogPageToRead {
 
 /** The log's events by one actor, as kept. */
 const actorIs = ({ type, id }: AuditActor) => sql`e.actor_type = ${type} and e.actor_id = ${id}`;
+
+/**
+ * The log's events about any of `subjects`, each checked as an event's own
+ * object is (a type, a UUID) before the log is read: the pairs as rows, so 0005's
+ * index by object finds each one's events.
+ */
+export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<boolean> {
+  if (subjects.length === 0) throw new RangeError('At least one object is read');
+  const problems = subjects.flatMap(subjectKeyProblems);
+  if (problems.length > 0) throw new AuditEventRefused(problems);
+  const pairs = subjects.map(({ type, id }) => sql`(${type}, ${id}::uuid)`);
+  return sql<boolean>`(e.subject_type, e.subject_id) in (${sql.join(pairs)})`;
+}
 
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
 export interface LogEvent extends ReadEvent {
@@ -1679,7 +1698,11 @@ export function createAuditTrail({
       );
     },
 
-    async logPage(tx: AuditTransaction, orgId: string, { from, to, actions, actor, beforeSeq, limit }: LogPageToRead) {
+    async logPage(
+      tx: AuditTransaction,
+      orgId: string,
+      { from, to, actions, actor, subjects, beforeSeq, limit }: LogPageToRead,
+    ) {
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       if (from.getTime() >= to.getTime()) throw new RangeError('The page’s range starts before it ends');
       await assertTenant(tx, orgId);
@@ -1689,6 +1712,7 @@ export function createAuditTrail({
           sql`e.recorded_at >= ${from} and e.recorded_at < ${to}`,
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
           ...(actor === undefined ? [] : [actorIs(actorAsKept(actor))]),
+          ...(subjects === undefined ? [] : [subjectsAre(subjects)]),
           ...(beforeSeq === undefined ? [] : [sql`e.seq < ${beforeSeq}`]),
         ],
         sql` and `,
