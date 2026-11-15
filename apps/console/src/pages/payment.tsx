@@ -12,8 +12,8 @@ import { useState } from 'react';
 
 import { ApiError, isIntegrityFailed, isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
+import { saveJson } from '../download.ts';
 import {
-  downloadHistory,
   EVIDENCE_MOST,
   EVIDENCE_REFERENCE,
   MARK_FAILED_CONFIRMED,
@@ -112,7 +112,8 @@ function History({ payment }: { readonly payment: PaymentDetails }) {
         type="button"
         className="secondary"
         onClick={() => {
-          downloadHistory(payment);
+          // CO6: the trail downloadable, as the API answered it, named by the payment's ID.
+          saveJson(`payment-${payment.id}.json`, payment);
         }}
       >
         {t('payments.download')}

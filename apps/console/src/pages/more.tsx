@@ -10,9 +10,9 @@ import { Freeze } from './freeze.tsx';
 
 const UNTIL = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
-/** Everything that isn't a main section yet: the organisation's freeze, the other brakes, the session and signing out. */
+/** Everything that isn't a main section yet: the organisation's freeze, the other brakes, the logs, the session and signing out. */
 export function More() {
-  const { session } = useActing();
+  const { session, organization } = useActing();
   const queries = useQueryClient();
   const [leaving, setLeaving] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -40,6 +40,14 @@ export function More() {
         <Link to="/more/suppliers">{t('brakes.suppliers.title')}</Link>
         <Link to="/more/sources">{t('brakes.sources.title')}</Link>
       </nav>
+      {/* The logs are an admin's alone (decisions 24, 26): no one else is shown a way to them. */}
+      {organization.role === 'admin' && (
+        <nav className="stack" aria-label={t('more.records')}>
+          <h2>{t('more.records')}</h2>
+          <Link to="/more/audit-log">{t('logs.audit.title')}</Link>
+          <Link to="/more/access-log">{t('logs.access.title')}</Link>
+        </nav>
+      )}
       <h2>{t('more.sessionHeading')}</h2>
       <p className="muted">{t('more.session', { time: UNTIL.format(new Date(session.expiresAt)) })}</p>
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
