@@ -9,14 +9,14 @@
 // nothing written; a member not an admin FORBIDDEN; the hourly budget and the
 // events' cap; and a record that can't be believed refusing the bundle, 503
 // INTEGRITY_FAILED, the organisation held.
-import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
-import { EVIDENCE_EXPORTED, EVIDENCE_SUBJECT } from '@agentx/core/modules/evidence';
+import { createAuditTrail, type SignedRowRead, signedMoment, withSignedStates } from '@agentx/core/modules/audit';
+import { EVIDENCE_EXPORTED, EVIDENCE_SUBJECT, EXPORT_BATCH } from '@agentx/core/modules/evidence';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS, type InstructionRecord } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { SPEND_REQUESTS, voidPendingOf } from '@agentx/core/modules/spend-requests';
-import { SUPPLIER_VERSIONS } from '@agentx/core/modules/suppliers';
+import { SUPPLIER_VERSIONS, SUPPLIERS, VERIFIER_RECORDED } from '@agentx/core/modules/suppliers';
 import { TRANSACTIONS } from '@agentx/core/modules/transactions';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
@@ -670,5 +670,157 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
 
     expect(await exported(w.admin, request.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('refuses a bundle when its payment is changed past the app between the reads: INTEGRITY_FAILED, the organisation held', async () => {
+    const { w, request, transaction } = await paid();
+    // After the request's transaction read it whole: only the second read's own check can catch it.
+    const tampering = evidenceWith({
+      betweenReads: () => changedByOwner(w, TRANSACTIONS, transaction.id, ['provider_status', 'Rejected']),
+    });
+
+    expect(await exported(w.admin, request.id, undefined, tampering)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('refuses a bundle when the supplier’s details it was decided under change past the app between the reads: INTEGRITY_FAILED', async () => {
+    const { w, acting } = await ready();
+    // Waiting, so no payment of its own reads those details again after the read of them.
+    const waiting = await ask(acting, w);
+    const versionId = bundleOf(await exported(w.admin, waiting.id)).supplier.version.id;
+    const tampering = evidenceWith({
+      betweenReads: () => changedByOwner(w, SUPPLIER_VERSIONS, versionId, ['display_name', 'Pay me instead LLC']),
+    });
+
+    expect(await exported(w.admin, waiting.id, undefined, tampering)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('holds the log at its moment: a download recorded while the rows are read is left out of it', async () => {
+    const { w, request } = await paid();
+    let between = 0;
+    const reading = evidenceWith({
+      betweenReads: async () => {
+        between += 1;
+        if (between === 1) bundleOf(await exported(w.admin, request.id));
+      },
+    });
+
+    const bundle = bundleOf(await exported(w.admin, request.id, undefined, reading));
+
+    expect(await downloadsOf(w)).toHaveLength(2);
+    // The other download is newer than every row read and than this one's record: past the moment.
+    expect(bundle.upToSeq).toBe(bundle.recordSeq);
+    expect(bundle.events.filter(({ action }) => action === EVIDENCE_EXPORTED).map(({ id }) => id)).toEqual([bundle.id]);
+  });
+
+  it('refuses a bundle whose events grew past the cap while it was read, rather than cut it short: EVIDENCE_TOO_LARGE', async () => {
+    const { w, acting } = await ready();
+    const approved = await ask(acting, w, { amount: SMALL() });
+    // As it stands, with one download recorded: the next fits the cap with its own record, and no more.
+    const before = bundleOf(await exported(w.admin, approved.id)).events.length;
+    let between = 0;
+    // A hand-off landing between the reads: read again, its instruction's and payment's events push it over.
+    const growing = evidenceWith({
+      mostEvents: before + 1,
+      betweenReads: async () => {
+        between += 1;
+        if (between === 1) await createHandoff(runner(w)).run();
+      },
+    });
+
+    expect(await exported(w.admin, approved.id, undefined, growing)).toEqual(refused(409, 'EVIDENCE_TOO_LARGE'));
+    expect(between).toBe(2);
+    expect(await downloadsOf(w)).toHaveLength(2);
+  });
+
+  it('finds the verification of the very supplier details it was decided under, past a batch of newer ones', async () => {
+    const { w, request } = await paid();
+    const first = bundleOf(await exported(w.admin, request.id));
+    const verification = first.supplier.version.verification;
+    expect(verification).toMatchObject({ action: VERIFIER_RECORDED });
+    // A full batch of newer verifications of the supplier, each naming other details: the search pages past them.
+    await withTenant(app, w.org, async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (let made = 0; made < EXPORT_BATCH; made += 1) {
+        await trail.record(tx, w.org, {
+          actor: { type: 'user', id: w.admin.userId },
+          action: VERIFIER_RECORDED,
+          subject: { type: SUPPLIERS.subject, id: first.supplier.id, version: 1 },
+          details: { verifiedVersionId: ids.next() },
+        });
+      }
+    });
+
+    const later = bundleOf(await exported(w.admin, request.id));
+
+    expect(later.supplier.version.verification?.id).toBe(verification?.id);
+  });
+});
+
+describe('signedMoment: rows read in more than one transaction, at one moment (Phase 6 C2a)', () => {
+  /** The request's events that seal its state, oldest first. */
+  const sealedOf = (w: World, requestId: string) =>
+    withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['id', 'seq'])
+        .where('subject_type', '=', SPEND_REQUESTS.subject)
+        .where('subject_id', '=', requestId)
+        .where('details', 'like', '%"stateFingerprint":%')
+        .orderBy('seq')
+        .execute(),
+    );
+
+  const momentOf = (w: World, rows: readonly SignedRowRead[], fromSeq: bigint) =>
+    withTenant(app, w.org, (tx) => signedMoment(tx, w.org, rows, fromSeq));
+
+  /** A request approved, so its state is sealed by at least two events; the newest two of them. */
+  async function approvedRequest() {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await approvedBy(w.admin, waiting.id);
+    const sealed = await sealedOf(w, waiting.id);
+    const [older, newest] = sealed.slice(-2);
+    if (older === undefined || newest === undefined) throw new Error(`not sealed twice: ${JSON.stringify(sealed)}`);
+    const read = (eventId: string): SignedRowRead => ({
+      subject: { type: SPEND_REQUESTS.subject, id: waiting.id },
+      eventId,
+    });
+    return { w, requestId: waiting.id, older, newest, read };
+  }
+
+  it('holds at the newest seq read when nothing moved, and counts a move at that very seq', async () => {
+    const { w, older, newest, read } = await approvedRequest();
+
+    expect(await momentOf(w, [read(newest.id)], 0n)).toEqual({ outcome: 'moment', upToSeq: newest.seq });
+    // Read once at its older event and once at its newest: the newest, the moment itself, is a move in between.
+    expect(await momentOf(w, [read(older.id), read(newest.id)], 0n)).toEqual({ outcome: 'moved' });
+  });
+
+  it('counts only signed states as moves: an event about the row with no state sealed leaves the moment standing', async () => {
+    const { w, requestId, newest, read } = await approvedRequest();
+    const noted = await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'user', id: w.admin.userId },
+        action: 'probe.noted',
+        subject: { type: SPEND_REQUESTS.subject, id: requestId, version: 1 },
+        details: {},
+      }),
+    );
+
+    expect(await momentOf(w, [read(newest.id)], noted.seq)).toEqual({ outcome: 'moment', upToSeq: noted.seq });
+  });
+
+  it('never gives a moment for a row believed by an event the log doesn’t hold', async () => {
+    const { w, newest, read } = await approvedRequest();
+
+    expect(
+      await momentOf(
+        w,
+        [read(newest.id), { subject: { type: SOURCES.subject, id: w.source }, eventId: ids.next() }],
+        0n,
+      ),
+    ).toEqual({ outcome: 'moved' });
   });
 });

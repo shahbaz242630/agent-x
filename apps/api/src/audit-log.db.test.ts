@@ -94,6 +94,19 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
     if (both.outcome !== 'page') throw new Error(`no page: ${JSON.stringify(both)}`);
     expect(new Set(both.events.map(({ event }) => event.subject.type))).toEqual(new Set(['probe', 'agent']));
 
+    // Another object of the same kind is not the one named: the pair is matched, never the kind alone.
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'agent', id: w.agent },
+        action: 'probe.noted',
+        subject: { type: 'probe', id: w.agent, version: 1 },
+        details: {},
+      }),
+    );
+    const one = await log.page(w.org, { ...EVER, subjects: [probe], limit: MOST_LOG_EVENTS_A_PAGE }, CORRELATION);
+    if (one.outcome !== 'page') throw new Error(`no page: ${JSON.stringify(one)}`);
+    expect(one.events.map(({ event }) => event.subject.id.toLowerCase())).toEqual([w.org.toLowerCase()]);
+
     await expect(
       log.page(w.org, { ...EVER, subjects: [{ type: 'probe', id: 'x' }], limit: 1 }, CORRELATION),
     ).rejects.toThrow('subject.id must be a UUID');
