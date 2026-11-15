@@ -22,7 +22,10 @@ import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { CheckedPoint } from './chain.ts';
 
-/** Why a chain was moved on: a sanctioned repair (E10), or the platform chain begun again (playbook H). */
+/**
+ * Why a chain was moved on: `repaired`, an organisation's chain whose lost events the investigation gave up (playbook
+ * H; a repair itself never needs a rebase, AT5); or `recovered`, the platform chain begun again.
+ */
 export const REBASE_REASONS = ['repaired', 'recovered'] as const;
 export type RebaseReason = (typeof REBASE_REASONS)[number];
 

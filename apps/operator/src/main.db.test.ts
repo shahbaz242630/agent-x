@@ -206,6 +206,7 @@ async function run(argv: readonly string[], env: Record<string, string> = envFor
     text: capture.text,
     events: lines.map((line) => String(line.event)),
     line: (event: string) => lines.find((line) => line.event === event),
+    lines: (event: string) => lines.filter((line) => line.event === event),
   };
 }
 
@@ -820,11 +821,22 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
     const head = async () => database.as('owner').query('select seq from platform_controls.audit_head');
     const before = await head();
 
-    const { code, events, line } = await drill();
+    const { code, events, line, lines } = await drill();
 
-    expect(events).toEqual(['operator.starting', 'operator.restore_check_done']);
+    // Each chain's checked live head (AT8), 50 a line, never in the summary.
+    const chains = Number(line('operator.restore_check_done')?.chainsHeld);
+    expect(chains).toBeGreaterThan(0);
+    expect(events).toEqual([
+      'operator.starting',
+      ...Array<string>(Math.ceil(chains / 50)).fill('operator.restore_check_heads'),
+      'operator.restore_check_done',
+    ]);
     expect(code).toBe(0);
     expect(line('operator.restore_check_done')).toMatchObject({ problems: [], newSinceCopy: 0 });
+    expect(line('operator.restore_check_done')).not.toHaveProperty('liveHeads');
+    const heads = lines('operator.restore_check_heads').flatMap((said) => said.heads as unknown[]);
+    expect(heads).toHaveLength(chains);
+    expect(heads[0]).toMatchObject({ orgId: null, hash: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown });
     expect(await head()).toEqual(before);
     // Both pools closed: no connection of the command's is left on the server.
     await vi.waitFor(
@@ -848,7 +860,8 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
       const { code, events, line } = await drill();
 
       expect(code).toBe(1);
-      expect(events).toEqual(['operator.starting', 'operator.restore_check_failed']);
+      // The platform chain still held, so its live head is said (AT8) before the failure.
+      expect(events).toEqual(['operator.starting', 'operator.restore_check_heads', 'operator.restore_check_failed']);
       expect(line('operator.restore_check_failed')).toMatchObject({
         problems: ["the organisations' lists: unreadable (42501)"],
         problemCount: 1,
@@ -975,10 +988,31 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
       reason: 'behind_anchor',
       seq: String(head.seq + 3n),
       problem: null,
+      // Both heads, checked whole (AT8): the live one is what the rebase that gives up the lost events names.
+      liveHead: { seq: String(head.seq), hash: head.hash.toString('hex') },
+      copyHead: { seq: String(head.seq), hash: head.hash.toString('hex') },
+      // The copy is the live server here, so the live chain grows on from its head.
+      liveFromCopy: { seq: String(head.seq), hash: head.hash.toString('hex') },
     });
     expect(planLines(orgId, planId)).toEqual([
       expect.objectContaining({ k: 'plan', ok: false, reason: 'behind_anchor' }),
     ]);
+  });
+
+  it('says the live chain fails its own check rather than a head, refused on a broken chain (AT8)', async () => {
+    const { orgId } = await organisation();
+    // The copy is this same database, so both sides fail: the copy's check refuses the plan, the live one names why.
+    await database
+      .as('admin')
+      .query(`update audit.events set details = '{"broken":1}' where org_id = $1 and seq = 1`, [orgId]);
+    const { code, line } = await plan(orgId).running;
+    expect(code).toBe(1);
+    expect(line('operator.chain_recovery_refused')).toMatchObject({
+      reason: 'copy_broken',
+      liveHead: { problem: expect.stringMatching(/ at 1$/) as unknown },
+      copyHead: { problem: expect.stringMatching(/ at 1$/) as unknown },
+      liveFromCopy: { problem: expect.stringMatching(/ at 1$/) as unknown },
+    });
   });
 
   it("refuses without the evidence store, the anchors' store or their public keys, before it connects", async () => {

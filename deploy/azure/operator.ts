@@ -44,11 +44,13 @@
 // the database's owner, and applies that plan only if it is still the same. A
 // repair's every run sets off the owner-login SEV-1 alert, by design: it says
 // so before it starts. --discard-fork, given to both, lets a plan throw away
-// what the app wrote on a wound-back chain; it is never assumed. A repair says
-// the rebase's command with its head's number and hash.
+// what the app wrote on a wound-back chain; it is never assumed. A repaired
+// chain holds its anchor again, so no rebase follows a repair (AT5, S194). A
+// refused plan says the live head, checked whole (AT8); refused `behind_anchor`,
+// the rebase's command that gives up the events past it.
 //
 // chain-rebase (4D2e E11) moves a chain's anchor on to its checked head after a
-// sanctioned change (a repair, or the platform chain begun again), signed with
+// sanctioned change (events lost for good, or the platform chain begun again), signed with
 // the operator's rebase key on the operator's job: the API then trusts that head,
 // and the anchor alarm for the chain stops. Its --id is the rebase's: the same
 // command with it writes nothing twice, and finishes a run that stopped between
@@ -719,7 +721,7 @@ function restoreCheckOutcome(steps: JobSteps, run: Ended, lines: readonly LogLin
   // The command logs one of the two, never both.
   if (done !== undefined) {
     steps.say(
-      `The copy holds: all ${String(done.chainsChecked)} chains on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since; the platform chain at ${String(done.platformCopySeq)} on the copy, ${String(done.platformLiveSeq)} live).`,
+      `The copy holds: all ${String(done.chainsChecked)} chains on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since; the platform chain at ${String(done.platformCopySeq)} on the copy, ${String(done.platformLiveSeq)} live). Each chain's live head, checked whole, is in the lines operator.restore_check_heads (by organisation ID, its number and hash: what a rebase names).`,
     );
     return 0;
   }
@@ -1265,9 +1267,69 @@ function planOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Recovery
     steps.say(
       `No plan: refused as ${String(refusedPlan.reason)} at ${String(refusedPlan.seq)}${problem}. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.`,
     );
+    sayLiveHead(steps, refusedPlan, asked.orgId);
     return 1;
   }
   return refusedOrUnclear(steps, said, 'Run the same command again: a plan only reads.');
+}
+
+/** A head a refused plan read (AT8), as its line holds it: a number and hash, a check's problem, or a failed read. */
+function headOf(value: unknown): {
+  seq: string | undefined;
+  hash: string | undefined;
+  problem: string | undefined;
+  unreadable: string | undefined;
+} {
+  const fields = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+  const text = (name: string): string | undefined => (typeof fields[name] === 'string' ? fields[name] : undefined);
+  // A number only as digits, so comparing two never throws.
+  const seq = text('seq');
+  return {
+    seq: seq !== undefined && /^\d+$/.test(seq) ? seq : undefined,
+    hash: text('hash'),
+    problem: text('problem'),
+    unreadable: text('unreadable'),
+  };
+}
+
+/**
+ * The live head a refused plan read, checked whole (AT8), said after the refusal; for `behind_anchor`, the rebase that
+ * gives up the events past it, which only the investigation can accept, and only where the live chain grows on from
+ * the copy's head, so it gives up nothing this copy holds. Says nothing for a line from before AT8.
+ */
+function sayLiveHead(steps: JobSteps, line: Readonly<Record<string, unknown>>, orgId: string): void {
+  const live = headOf(line.liveHead);
+  if (live.unreadable !== undefined) {
+    steps.say(
+      `The live chain's head couldn't be read (database code ${live.unreadable}), so nothing is known of it. Run the same command again: a plan only reads.`,
+    );
+    return;
+  }
+  if (live.problem !== undefined) {
+    steps.say(`The live chain fails its own check (${live.problem}): no rebase can be made for it. Read playbook H.`);
+    return;
+  }
+  if (live.seq === undefined || live.hash === undefined) return;
+  steps.say(`The live chain checks whole to ${live.seq} (head ${live.hash}).`);
+  if (line.reason !== 'behind_anchor') return;
+  // A rebase only where the live chain grows on from the copy's head: then it gives up nothing this copy holds.
+  const fromCopy = headOf(line.liveFromCopy);
+  if (fromCopy.unreadable !== undefined) {
+    steps.say(
+      `Whether the live chain grows on from this copy couldn't be read (database code ${fromCopy.unreadable}), so no rebase is offered. Run the same command again: a plan only reads.`,
+    );
+    return;
+  }
+  if (fromCopy.seq === undefined) {
+    const why = fromCopy.problem === undefined ? '' : ` (from the copy's head: ${fromCopy.problem})`;
+    steps.say(
+      `Its anchor is at ${String(line.seq)}, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either${why}: it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches ${String(line.seq)} (playbook H); if none does, no tool yet puts this copy's events back before a rebase (AT9): stop there and call Claude.`,
+    );
+    return;
+  }
+  steps.say(
+    `Its anchor is at ${String(line.seq)}, and this copy doesn't reach it: the events past ${live.seq} are lost unless a later copy holds them. Only once the investigation accepts that they are lost for good, the rebase that gives them up: node deploy/azure/operator.ts chain-rebase --chain ${orgId} --seq ${live.seq} --hash ${live.hash} --reason repaired --evidence <incident reference>`,
+  );
 }
 
 /** A refusal the run said, or an unclear end: what to do next. Always 1. */
@@ -1310,12 +1372,10 @@ function restoreOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Resto
     steps.say(
       `Repaired: ${String(restored.putBack)} rows put back, ${String(restored.replaced)} replaced, ${String(restored.removed)} removed; the chain checks whole to ${String(restored.endsAt)}. The records are in the evidence store as ${records}. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
     );
-    // The head a rebase names (4D2e E11), said only by a repair that logs its hash.
-    if (typeof restored.endsAtHash === 'string') {
-      steps.say(
-        `If the anchor check then alarms "anchor" for this chain, the rebase, once its head is checked: node deploy/azure/operator.ts chain-rebase --chain ${asked.orgId} --seq ${String(restored.endsAt)} --hash ${restored.endsAtHash} --reason repaired --evidence <incident reference>`,
-      );
-    }
+    // No rebase follows a repair (AT5, S194): a plan never ends before the store's anchor, so the repaired chain holds it.
+    steps.say(
+      "No rebase is needed: a plan never ends before the chain's anchor, so the repaired chain holds it again. If the anchor check still alarms for this chain, treat it as new damage and make a new plan (playbook H); a rebase is only for events lost for good.",
+    );
     return 0;
   }
   const refusedRepair = about('operator.chain_restore_refused');
