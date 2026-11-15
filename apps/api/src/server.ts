@@ -108,6 +108,7 @@ import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { type PartnerEventIntake, registerPartnerEvents } from './partner-events.ts';
 import type { PaymentMarks } from './payment-marks.ts';
+import type { PaymentReads } from './payment-reads.ts';
 import { registerPayments } from './payments.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import type { OrganizationChanges } from './organization-changes.ts';
@@ -228,6 +229,8 @@ export interface ServerOptions {
   readonly spendRequestApprovals?: SpendRequestApprovals | undefined;
   /** An admin marking an UNKNOWN payment failed (payment-marks.ts, decision 38); without it, no one reaches those routes. */
   readonly paymentMarks?: PaymentMarks | undefined;
+  /** The team's reads of payments and their exceptions (payment-reads.ts); without it, no one reaches those routes. */
+  readonly paymentReads?: PaymentReads | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -483,7 +486,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     rejects: options.spendRequestRejects,
     approvals: options.spendRequestApprovals,
   });
-  registerPayments(app, { marks: options.paymentMarks });
+  registerPayments(app, { marks: options.paymentMarks, reads: options.paymentReads });
   registerAgents(app, {
     registrations: options.agentRegistrations,
     changes: options.agentChanges,

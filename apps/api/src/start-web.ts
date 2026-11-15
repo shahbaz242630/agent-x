@@ -58,6 +58,7 @@ import { createMandateMoves } from './mandate-moves.ts';
 import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createPaymentMarks } from './payment-marks.ts';
+import { createPaymentReads } from './payment-reads.ts';
 import { createPartnerEventIntake } from './partner-events.ts';
 import { activitySinkOf } from './activity-recorder.ts';
 import { loadPlaces } from './client-clues.ts';
@@ -328,6 +329,7 @@ export async function startWeb(
       outbox,
       logger,
     }),
+    paymentReads: createPaymentReads({ database, keys, ids: uuidV7Ids, logger }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,

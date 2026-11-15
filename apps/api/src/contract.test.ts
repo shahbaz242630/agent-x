@@ -151,6 +151,9 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/mandates/{id}',
       'GET /v1/mandates/{id}/policy',
       'GET /v1/members',
+      'GET /v1/payments',
+      'GET /v1/payments/exceptions',
+      'GET /v1/payments/{id}',
       'GET /v1/policies/organization',
       'GET /v1/registered-contacts',
       'GET /v1/spend-requests',
@@ -188,6 +191,9 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/mandates/{id}',
       'HEAD /v1/mandates/{id}/policy',
       'HEAD /v1/members',
+      'HEAD /v1/payments',
+      'HEAD /v1/payments/exceptions',
+      'HEAD /v1/payments/{id}',
       'HEAD /v1/policies/organization',
       'HEAD /v1/registered-contacts',
       'HEAD /v1/spend-requests',
@@ -1275,8 +1281,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), with each GET's HEAD.
-    expect(answers).toHaveLength(173);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), the team's payments, their exceptions and one payment (Phase 6 C1), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), with each GET's HEAD.
+    expect(answers).toHaveLength(179);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1341,6 +1347,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'OrganizationPolicyChangeAsked',
       'OrganizationUnfreezeAsked',
       'PayeeRegistration',
+      'PaymentDetails',
+      'PaymentListed',
       'PaymentMarkedFailed',
       'Policy',
       'PolicySimulation',
