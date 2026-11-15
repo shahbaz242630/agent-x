@@ -143,11 +143,15 @@ export async function askFirst(change: Change): Promise<{ readonly done: unknown
 
 /**
  * Asks for a change. Done at once: its answer. Asked for a step-up: the change
- * is kept, the browser leaves to sign in again, and this gives back `stepping`.
+ * is kept (its confirm sending `confirmed` too: the version of the words shown,
+ * CO3), the browser leaves to sign in again, and this gives back `stepping`.
  */
-export async function ask(change: Change): Promise<{ readonly done: unknown } | 'stepping'> {
+export async function ask(
+  change: Change,
+  confirmed?: Readonly<Record<string, unknown>>,
+): Promise<{ readonly done: unknown } | 'stepping'> {
   const asked = await askFirst(change);
-  return 'done' in asked ? asked : asked.stepUp();
+  return 'done' in asked ? asked : asked.stepUp(undefined, confirmed);
 }
 
 /**

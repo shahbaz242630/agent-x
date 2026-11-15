@@ -16,7 +16,7 @@ export interface Session {
   readonly expiresAt: string;
 }
 
-type Role = 'admin' | 'approver' | 'developer' | 'viewer';
+export type Role = 'admin' | 'approver' | 'developer' | 'viewer';
 
 export interface Organization {
   readonly id: string;

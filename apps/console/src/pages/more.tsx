@@ -1,14 +1,16 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
 import { api } from '../api.ts';
 import { goTo } from '../navigate.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
+import { Freeze } from './freeze.tsx';
 
 const UNTIL = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
-/** Everything that isn't a main section yet: for now, the session and signing out. */
+/** Everything that isn't a main section yet: the organisation's freeze, the other brakes, the session and signing out. */
 export function More() {
   const { session } = useActing();
   const queries = useQueryClient();
@@ -32,6 +34,13 @@ export function More() {
   return (
     <section className="stack">
       <h1>{t('more.title')}</h1>
+      <Freeze />
+      <nav className="stack" aria-label={t('more.brakes')}>
+        <h2>{t('more.brakes')}</h2>
+        <Link to="/more/suppliers">{t('brakes.suppliers.title')}</Link>
+        <Link to="/more/sources">{t('brakes.sources.title')}</Link>
+      </nav>
+      <h2>{t('more.sessionHeading')}</h2>
       <p className="muted">{t('more.session', { time: UNTIL.format(new Date(session.expiresAt)) })}</p>
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
         {t('more.signOut')}

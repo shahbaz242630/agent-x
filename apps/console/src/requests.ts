@@ -90,7 +90,8 @@ const LISTS = {
 type Listed = Readonly<Record<'waiting' | 'spendRequests', readonly ListedRequest[] | undefined>> &
   Omit<Page, 'requests'>;
 
-const pageQuery = (after: string | undefined): string =>
+/** A list's page query: 50 a page, after the cursor its last page gave (the brakes' lists read by it too). */
+export const pageQuery = (after: string | undefined): string =>
   new URLSearchParams({ limit: String(PAGE), ...(after !== undefined && { after }) }).toString();
 
 /** One of the two lists, a page at a time: `waiting` for approval, or `all` the organisation's. */

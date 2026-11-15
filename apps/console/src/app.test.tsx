@@ -87,10 +87,10 @@ describe('the console’s frame (6A1)', () => {
 
   it('asks a person in several to choose, remembers the choice, and lets them switch back', async () => {
     signedIn([ORG_A, ORG_B]);
-    open('/agents');
+    open('/payments');
     await userEvent.click(await screen.findByRole('button', { name: /Glide Logistics LLC/ }));
     expect(await screen.findByText(/This organisation is frozen/)).toBeDefined();
-    expect(screen.getByText("Your organisation's agents and their keys will appear here.")).toBeDefined();
+    expect(screen.getByText('Every payment and its timeline will appear here.')).toBeDefined();
     expect(localStorage.getItem('agentx.organization')).toBe(ORG_B.id);
     await userEvent.click(screen.getByRole('button', { name: 'Switch organisation' }));
     expect(await screen.findByText('Choose an organisation')).toBeDefined();
