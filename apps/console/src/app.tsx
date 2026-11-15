@@ -15,6 +15,7 @@ import {
 import type { ReactElement } from 'react';
 import { isRefusal, isSignedOut } from './api.ts';
 import { Approvals } from './pages/approvals.tsx';
+import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
 import { More } from './pages/more.tsx';
@@ -84,8 +85,10 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/approvals/all', component: () => <Approvals list="all" /> }),
   requestRoute,
   createRoute({ getParentRoute: () => root, path: '/payments', component: () => <Soon what="soon.payments" /> }),
-  createRoute({ getParentRoute: () => root, path: '/agents', component: () => <Soon what="soon.agents" /> }),
+  createRoute({ getParentRoute: () => root, path: '/agents', component: () => <BrakeList kind="agents" /> }),
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
+  createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: () => <BrakeList kind="suppliers" /> }),
+  createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
 ]);
 
 /** The console's queries: a 401 anywhere means the session is gone, so the session reads as none. */
