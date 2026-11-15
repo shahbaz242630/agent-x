@@ -1,6 +1,7 @@
 // Back from signing in again for a change (6A2, step-up.ts): the page the
-// change was asked on, with `?stepped=<challenge>`. The person sees the change
-// once more and confirms it, or doesn't; either way the address is cleaned.
+// change was asked on, with `?stepped=<challenge>` beside its own query. The
+// person sees the change once more and confirms it, or doesn't; either way the
+// step-up's query is cleaned off, the page's own kept (CO5).
 // A challenge with nothing kept for it (another tab's, already confirmed,
 // storage cleared) is said: the change wasn't made, and can be asked again.
 // Back with `?stepUpFailed=<challenge>` instead (CO2: the API refused the
@@ -12,7 +13,7 @@ import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
 
 import { isRefusal, isUuid } from '../api.ts';
-import { confirm, forget, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
+import { confirm, forget, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
 
 type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed';
@@ -45,7 +46,8 @@ export function SteppedUp() {
   }, [failedFor]);
   const close = () => {
     setSent('ready');
-    void navigate({ to: pathname, search: {}, replace: true });
+    const rest = ownQuery(query).toString();
+    void navigate({ href: rest === '' ? pathname : `${pathname}?${rest}`, replace: true });
   };
   if (failedFor !== undefined) {
     return (

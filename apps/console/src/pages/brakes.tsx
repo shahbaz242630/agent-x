@@ -8,59 +8,15 @@
 // bank account, after choosing what happens to the held requests for a
 // supplier (decision 9, the `reactivate` words). The buttons show by role only;
 // the API checks again whatever is pressed. Look A "Statement": nothing shouts.
-import { useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 
-import { isRefusal, isSignedOut } from '../api.ts';
 import { atOnce, type Braked, brakeRefusal, type Kind, KINDS, REACTIVATING, useBrakeList } from '../brakes.ts';
 import { Confirm } from '../confirm.tsx';
-import { endSession, useActing } from '../session.tsx';
-import { ask } from '../step-up.ts';
+import { useActing } from '../session.tsx';
+import { ask, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
+import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
-
-/**
- * Sends a change and says how it went: left to sign in again, nothing more;
- * done, its words; refused or failed, in plain words. Everything shown reads
- * again after a decision either way (a refusal says the thing moved on); a
- * 401 goes to sign-in.
- */
-export function useChange() {
-  const queries = useQueryClient();
-  const [busy, setBusy] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
-  const run = async (send: () => Promise<unknown>, done: string, after: () => void) => {
-    setBusy(true);
-    setSaid(null);
-    try {
-      const sent = await send();
-      if (sent === 'stepping') return;
-      after();
-      setSaid(done);
-      await queries.invalidateQueries();
-    } catch (error) {
-      if (isSignedOut(error)) {
-        endSession(queries);
-        return;
-      }
-      after();
-      setSaid(brakeRefusal(error));
-      if (isRefusal(error)) await queries.invalidateQueries();
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, said, run };
-}
-
-/** What a page says after a change: done, refused or failed. */
-export function Said({ said }: { readonly said: string | null }) {
-  return said === null ? null : (
-    <p className="notice" role="status">
-      {said}
-    </p>
-  );
-}
 
 interface Opened {
   readonly kind: 'suspend' | 'reactivate';
@@ -117,7 +73,7 @@ function Row({
 export function BrakeList({ kind }: { readonly kind: Kind }) {
   const { organization } = useActing();
   const listed = useBrakeList(kind, organization.id);
-  const { busy, said, run } = useChange();
+  const { busy, said, run } = useChange(brakeRefusal);
   const [open, setOpen] = useState<Open>(NONE);
   const { path, suspending, reactivateChooses } = KINDS[kind];
   const canSuspend = suspending.includes(organization.role);
@@ -134,22 +90,16 @@ export function BrakeList({ kind }: { readonly kind: Kind }) {
     run(
       () =>
         atOnce(`${at(thing)}/suspend`, { organization: organization.id, body: { pendingRequests, statementVersion } }),
-      t('brakes.suspendedDone', { name: thing.name }),
-      close,
+      { done: t('brakes.suspendedDone', { name: thing.name }), after: close },
     );
-  const reactivateChange = (thing: Braked, body: Readonly<Record<string, unknown>>) => ({
-    label: t('brakes.reactivateLabel', { name: thing.name }),
-    askPath: `${at(thing)}/reactivate`,
-    confirmPath: `${at(thing)}/reactivate/confirm`,
-    body,
-    organization: organization.id,
-  });
-  const done = (thing: Braked) => t('brakes.reactivatedDone', { name: thing.name });
+  const reactivateChange = (thing: Braked, body: Readonly<Record<string, unknown>>) =>
+    changeAt(`${at(thing)}/reactivate`, t('brakes.reactivateLabel', { name: thing.name }), body, organization.id);
+  const done = (thing: Braked) => ({ done: t('brakes.reactivatedDone', { name: thing.name }), after: close });
   // An agent or a bank account: nothing to choose, so straight to the passkey.
-  const reactivate = (thing: Braked) => run(() => ask(reactivateChange(thing, {})), done(thing), close);
+  const reactivate = (thing: Braked) => run(() => ask(reactivateChange(thing, {})), done(thing));
   // A supplier: the choice is asked with, and the version of the words shown is sent with the confirm (CO3).
   const reactivateChoosing = (thing: Braked, pendingRequests: string, statementVersion?: number) =>
-    run(() => ask(reactivateChange(thing, { pendingRequests }), { statementVersion }), done(thing), close);
+    run(() => ask(reactivateChange(thing, { pendingRequests }), { statementVersion }), done(thing));
 
   return (
     <section className="stack">

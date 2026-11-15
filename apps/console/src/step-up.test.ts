@@ -114,6 +114,31 @@ describe('stepUpAddress', () => {
     expect(address.searchParams.get('challenge')).toBe(CHALLENGE);
     expect(address.searchParams.get('returnTo')).toBe(`/approvals?stepped=${CHALLENGE}`);
   });
+
+  const returnTo = (path: string, search: string) =>
+    new URL(stepUpAddress(CHALLENGE, path, search), 'https://app.example').searchParams.get('returnTo');
+
+  it('keeps the page’s own query, less an earlier step-up’s, so a filter and `?org=` come back (CO5)', () => {
+    expect(returnTo('/payments', '?status=paid&org=o-1&stepped=old&stepUpFailed=old')).toBe(
+      `/payments?status=paid&org=o-1&stepped=${CHALLENGE}`,
+    );
+    // A space is written as %20: the API's way back holds no `+`.
+    expect(returnTo('/payments', '?q=a b')).toBe(`/payments?q=a%20b&stepped=${CHALLENGE}`);
+  });
+
+  it('keeps the path alone when the page’s query would make a way back the API refuses', () => {
+    expect(returnTo('/payments', `?q=${'a'.repeat(500)}`)).toBe(`/payments?stepped=${CHALLENGE}`);
+    expect(returnTo('/payments', '?q=a*b')).toBe(`/payments?stepped=${CHALLENGE}`);
+  });
+
+  it('comes back with the page’s query when a change is asked from it', async () => {
+    answer = () => json(202, { stepUpChallengeId: CHALLENGE });
+    window.history.replaceState(null, '', '/payments?status=unknown');
+
+    await ask(CHANGE);
+    expect(goTo).toHaveBeenCalledWith(stepUpAddress(CHALLENGE, '/payments', '?status=unknown'));
+    expect(vi.mocked(goTo).mock.calls[0]?.[0]).toContain(encodeURIComponent('/payments?status=unknown&stepped='));
+  });
 });
 
 describe('pendingFor', () => {

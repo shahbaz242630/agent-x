@@ -187,13 +187,23 @@ const SIGN_OUT_SCHEMA = {
 /** The query a step-up's page comes back with when it failed at the login service's return: the challenge it was for. */
 const STEP_UP_FAILED_QUERY = 'stepUpFailed';
 
+/** The query a step-up's page comes back with to confirm its change: never kept on a failed one. */
+const STEPPED_QUERY = 'stepped';
+
 /**
- * The page a failed step-up was asked on, said failed: its path alone (its
- * query held `?stepped=`, which would offer the change to confirm), with the
- * challenge, so the console forgets the change it kept for it.
+ * The page a failed step-up was asked on, said failed: its own query kept
+ * (its filter, `?org=`, CO5) less `?stepped=`, which would offer the change to
+ * confirm, with the challenge, so the console forgets the change it kept for it.
  */
-const failedStepUpPage = ({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string =>
-  `${returnTo.split('?', 1)[0] ?? '/'}?${new URLSearchParams({ [STEP_UP_FAILED_QUERY]: challengeId }).toString()}`;
+function failedStepUpPage({ returnTo, challengeId }: NonNullable<StepUpFailed['back']>): string {
+  const at = returnTo.indexOf('?');
+  const path = at === -1 ? returnTo : returnTo.slice(0, at);
+  // The rest is its query, any later `?` a part of it (URLSearchParams drops the leading one).
+  const query = new URLSearchParams(at === -1 ? '' : returnTo.slice(at));
+  query.delete(STEPPED_QUERY);
+  query.set(STEP_UP_FAILED_QUERY, challengeId);
+  return `${path}?${query.toString()}`;
+}
 
 /** Sign-out reads no body; this is the smallest limit the contract takes. */
 const SIGN_OUT_BODY_LIMIT = 1;
