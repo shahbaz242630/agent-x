@@ -118,9 +118,9 @@ afterEach(() => {
 });
 
 function open(path: string) {
-  render(
-    <App queries={createQueries()} router={createConsoleRouter(createMemoryHistory({ initialEntries: [path] }))} />,
-  );
+  const queries = createQueries();
+  render(<App queries={queries} router={createConsoleRouter(createMemoryHistory({ initialEntries: [path] }))} />);
+  return queries;
 }
 
 const sentTo = (method: string, path: string) => sent.filter((one) => one.method === method && one.path === path);
@@ -442,7 +442,30 @@ describe('freezing the organisation (6B2, decisions 10, 11 and 14)', () => {
     expect(goTo).not.toHaveBeenCalled();
   });
 
-  it('lets only an admin unfreeze, and a viewer not freeze', async () => {
+  it('closes a freeze pop-up when the organisation turns out frozen meanwhile, never showing it as an unfreeze', async () => {
+    signedIn();
+    answer(
+      'GET /v1/auth/organizations',
+      { status: 200, body: { organizations: [ORG], unreadable: [] } },
+      { status: 200, body: { organizations: [{ ...ORG, frozen: true }], unreadable: [] } },
+    );
+    const queries = open('/more');
+    await userEvent.click(await screen.findByRole('button', { name: 'Freeze organisation' }));
+    await userEvent.click(
+      await within(await screen.findByRole('dialog')).findByLabelText(/Every request is cancelled now/),
+    );
+    // Someone else froze it: the organisations read again (as on the window's focus).
+    await queries.invalidateQueries({ queryKey: ['organizations'] });
+    expect(await screen.findByRole('button', { name: 'Unfreeze organisation' })).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(sent.filter((one) => one.method === 'POST')).toHaveLength(0);
+  });
+
+  it('lets an approver freeze, only an admin unfreeze, and a viewer neither', async () => {
+    as('approver');
+    open('/more');
+    expect(await screen.findByRole('button', { name: 'Freeze organisation' })).toBeDefined();
+    cleanup();
     as('approver', true);
     open('/more');
     expect(await screen.findByText('Only an admin can unfreeze the organisation.')).toBeDefined();
