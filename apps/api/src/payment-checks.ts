@@ -71,6 +71,7 @@ import type { NotificationsTables, Outbox } from '@agentx/core/modules/notificat
 import {
   AFTER_SUBMITTED,
   answerAbout,
+  contradicts,
   factsOf,
   lockPayment,
   moveDetails,
@@ -86,7 +87,6 @@ import {
 import {
   type ExecutionLookup,
   type FinancialRailAdapter,
-  type PaymentState,
   paymentStateOf,
   RailUnavailable,
 } from '@agentx/core/modules/providers';
@@ -320,12 +320,6 @@ const nothingNew = ({ from, to, newBankStatus, bankLost }: Checked): boolean =>
 /** Whether the bank not finding this one by now is worth saying: handed to it, and past when its answer was due. */
 const lostTooLong = (status: TransactionStatus, createdAt: Date, now: Date): boolean =>
   (status === 'SUBMITTED' || status === 'PROCESSING') && now.getTime() - createdAt.getTime() > UNKNOWN_AFTER_MS;
-
-/** Whether a settled payment's bank state contradicts it: paid and then not, or failed and then paid (rail map §4). */
-const contradicts = (status: TransactionStatus, state: PaymentState): boolean =>
-  status === 'SUCCEEDED' || status === 'REVERSED'
-    ? state === 'FAILED' || state === 'UNKNOWN'
-    : state === 'SUCCEEDED' || state === 'PROCESSING';
 
 export interface PaymentChecks {
   /** Checks each organisation's payments under way that are due, a page at a time, until the signal is aborted. Never throws. */
