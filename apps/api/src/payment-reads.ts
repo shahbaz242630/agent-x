@@ -32,7 +32,12 @@
 // first event fell outside the newest TIMELINE_MOST leaves its later events
 // out too: shown short rather than unchecked.
 import type { AuditActor, PageAsked, ReadEvent, SignedStates } from '@agentx/core/modules/audit';
-import { INSTRUCTIONS, instructionOf, type InstructionsTables } from '@agentx/core/modules/instructions';
+import {
+  type InstructionRecord,
+  INSTRUCTIONS,
+  instructionOf,
+  type InstructionsTables,
+} from '@agentx/core/modules/instructions';
 import {
   contradictionsOf,
   MARK_FAILED_AFTER_MS,
@@ -168,41 +173,19 @@ const statusOf = (event: ReadEvent): TransactionStatus | null => {
   return TRANSACTION.states.find((status) => status === to) ?? null;
 };
 
-/**
- * The payment's history as its team is shown it, its newest events oldest
- * first. The read matches every subject type against every ID asked, and the
- * proposals' IDs come from rows not yet believed, so each event is kept only
- * where it is about this payment's own object of its type: its transaction and
- * its alerts by the payment's ID, its instruction by its own, and a proposal
- * only where the proposal's own first event names this payment, so a proposal
- * row pointed at it past the app can't bring in another payment's history.
- */
+/** The payment's history as its team is shown it, its newest events oldest first, each its own (aboutPayment). */
 function timelineOf(
   events: readonly ReadEvent[],
-  { transactionId, instructionId }: { readonly transactionId: string; readonly instructionId: string },
+  ids: { readonly transactionId: string; readonly instructionId: string },
 ): readonly TimelineEntry[] {
-  const proposals = new Set(
-    events
-      .filter(({ event }) => event.action === 'failure_proposal.made')
-      .filter((event) => textOf(event, 'transactionId') === transactionId)
-      .map(({ event }) => event.subject.id.toLowerCase()),
-  );
-  const ours: Readonly<Record<string, (id: string) => boolean>> = {
-    [TRANSACTIONS.subject]: (id) => id === transactionId,
-    [PAYMENT_ALERT_SUBJECT]: (id) => id === transactionId,
-    [INSTRUCTIONS.subject]: (id) => id === instructionId,
-    [FAILURE_PROPOSALS.subject]: (id) => proposals.has(id),
-  };
-  return events
-    .filter(({ event }) => ours[event.subject.type]?.(event.subject.id.toLowerCase()) === true)
-    .map((event) => ({
-      at: event.recordedAt,
-      what: event.event.action,
-      status: statusOf(event),
-      by: { type: event.event.actor.type, id: event.event.actor.id },
-      via: textOf(event, 'via'),
-      evidenceRef: textOf(event, 'evidenceRef'),
-    }));
+  return aboutPayment(events, ids).map((event) => ({
+    at: event.recordedAt,
+    what: event.event.action,
+    status: statusOf(event),
+    by: { type: event.event.actor.type, id: event.event.actor.id },
+    via: textOf(event, 'via'),
+    evidenceRef: textOf(event, 'evidenceRef'),
+  }));
 }
 
 /**
@@ -251,20 +234,99 @@ async function historyIn(tx: ReadTx, states: SignedStates, orgId: string, subjec
   return { events: earlier ? history.events.slice(1) : history.events, earlier };
 }
 
-/** Where marking it failed stands: from when, and the proposal open, for an UNKNOWN payment alone; else null. */
+/** Where marking it failed stands: from when, and the proposal open, for an UNKNOWN payment alone; else null; or tampered with. */
 async function markFailedOf(
   tx: ReadTx,
   states: SignedStates,
   orgId: string,
   transaction: TransactionRecord,
-): Promise<MarkFailedShown | null> {
+): Promise<MarkFailedShown | null | 'tampered'> {
   if (transaction.status !== 'UNKNOWN') return null;
   const open = await openProposalOf(tx, states, { orgId, transactionId: transaction.id }, 'share');
-  if (open.outcome === 'tampered') throw integrityFailed();
+  if (open.outcome === 'tampered') return 'tampered';
   return {
     markableFrom: new Date(transaction.createdAt.getTime() + MARK_FAILED_AFTER_MS),
     openProposal: open.outcome === 'found' ? open.proposal : null,
   };
+}
+
+/** A payment read whole (paymentInOrder): as shown, with its instruction, where marking it failed stands, and its proposals' IDs. */
+interface PaymentRead {
+  readonly outcome: 'found';
+  readonly shown: PaymentShown;
+  readonly instruction: InstructionRecord;
+  readonly markFailed: MarkFailedShown | null;
+  /** Its proposals' IDs as their rows name it, not yet believed: their events must name this payment (aboutPayment). */
+  readonly proposalIds: readonly string[];
+}
+
+/**
+ * One payment, its supplier's details first (ADR-006: 6 before 10), then its
+ * transaction and instruction, each verified and locked `share`, with where
+ * marking it failed stands and whether the bank contradicts it, in the
+ * caller's transaction (withSignedStates' for the organisation): `none` for
+ * no payment of the organisation's; `unbelieved` when a record fails its seal
+ * (its alarm raised) or the payment names others than the IDs first found by.
+ * The team's one payment and a spend request's evidence (C2) alike.
+ */
+export async function paymentInOrder(
+  tx: ReadTx,
+  states: SignedStates,
+  orgId: string,
+  paymentId: string,
+): Promise<PaymentRead | { readonly outcome: 'none' } | { readonly outcome: 'unbelieved' }> {
+  const named = await idsOf(tx, orgId, paymentId);
+  if (named === undefined) return { outcome: 'none' };
+  const version = await versionOf(tx, states, { orgId, id: named.versionId }, named.supplierId);
+  const read = await transactionOf(tx, states, { orgId, id: paymentId }, 'share');
+  if (version.outcome !== 'found' || read.outcome !== 'found') return { outcome: 'unbelieved' };
+  const instruction = await instructionOf(tx, states, { orgId, id: read.transaction.instructionId });
+  // The sealed payment names its instruction and its supplier's details: the IDs found first must be those.
+  if (
+    instruction.outcome !== 'found' ||
+    read.transaction.instructionId !== named.instructionId.toLowerCase() ||
+    instruction.instruction.supplierVersionId !== version.version.id
+  ) {
+    return { outcome: 'unbelieved' };
+  }
+  const markFailed = await markFailedOf(tx, states, orgId, read.transaction);
+  const alerts = await contradictionsOf(tx, states, orgId, [read.transaction]);
+  if (markFailed === 'tampered' || alerts.outcome === 'tampered') return { outcome: 'unbelieved' };
+  const payment = paymentOf(read.transaction, read.state.recordedAt, instruction.instruction, alerts.alerted);
+  return {
+    outcome: 'found',
+    shown: { payment, supplierId: version.version.supplierId, supplierName: version.version.displayName },
+    instruction: instruction.instruction,
+    markFailed,
+    proposalIds: named.proposalIds,
+  };
+}
+
+/**
+ * A payment's events kept as its own: its transaction's and alerts' by its
+ * ID, its instruction's by its own, and a proposal's only where the
+ * proposal's own first event names this payment. The read matches every
+ * subject type against every ID asked, and the proposals' IDs come from rows
+ * not yet believed, so a proposal row pointed at it past the app can't bring
+ * in another payment's history.
+ */
+export function aboutPayment<Event extends ReadEvent>(
+  events: readonly Event[],
+  { transactionId, instructionId }: { readonly transactionId: string; readonly instructionId: string },
+): readonly Event[] {
+  const proposals = new Set(
+    events
+      .filter(({ event }) => event.action === 'failure_proposal.made')
+      .filter((event) => textOf(event, 'transactionId') === transactionId)
+      .map(({ event }) => event.subject.id.toLowerCase()),
+  );
+  const ours: Readonly<Record<string, (id: string) => boolean>> = {
+    [TRANSACTIONS.subject]: (id) => id === transactionId,
+    [PAYMENT_ALERT_SUBJECT]: (id) => id === transactionId,
+    [INSTRUCTIONS.subject]: (id) => id === instructionId,
+    [FAILURE_PROPOSALS.subject]: (id) => proposals.has(id),
+  };
+  return events.filter(({ event }) => ours[event.subject.type]?.(event.subject.id.toLowerCase()) === true);
 }
 
 export function createPaymentReads({
@@ -307,33 +369,17 @@ export function createPaymentReads({
 
     show: (orgId, paymentId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
-        const named = await idsOf(tx, orgId, paymentId);
-        if (named === undefined) throw new PaymentReadRefused(404, 'NOT_FOUND');
-        const version = await versionOf(tx, states, { orgId, id: named.versionId }, named.supplierId);
-        const read = await transactionOf(tx, states, { orgId, id: paymentId }, 'share');
-        if (version.outcome !== 'found' || read.outcome !== 'found') throw integrityFailed();
-        const instruction = await instructionOf(tx, states, { orgId, id: read.transaction.instructionId });
-        // The sealed payment names its instruction and its supplier's details: the IDs found first must be those.
-        if (
-          instruction.outcome !== 'found' ||
-          read.transaction.instructionId !== named.instructionId.toLowerCase() ||
-          instruction.instruction.supplierVersionId !== version.version.id
-        ) {
-          throw integrityFailed();
-        }
-        const markFailed = await markFailedOf(tx, states, orgId, read.transaction);
-        const alerts = await contradictionsOf(tx, states, orgId, [read.transaction]);
-        if (alerts.outcome === 'tampered') throw integrityFailed();
-        const payment = paymentOf(read.transaction, read.state.recordedAt, instruction.instruction, alerts.alerted);
-        const history = await historyIn(tx, states, orgId, [named.instructionId, paymentId, ...named.proposalIds]);
+        const read = await paymentInOrder(tx, states, orgId, paymentId);
+        if (read.outcome === 'none') throw new PaymentReadRefused(404, 'NOT_FOUND');
+        if (read.outcome === 'unbelieved') throw integrityFailed();
+        const { transaction } = read.shown.payment;
+        const ids = { transactionId: transaction.id, instructionId: transaction.instructionId };
+        const history = await historyIn(tx, states, orgId, [ids.instructionId, ids.transactionId, ...read.proposalIds]);
         return {
           outcome: 'found' as const,
-          shown: { payment, supplierId: version.version.supplierId, supplierName: version.version.displayName },
-          markFailed,
-          timeline: timelineOf(history.events, {
-            transactionId: payment.transaction.id,
-            instructionId: read.transaction.instructionId,
-          }),
+          shown: read.shown,
+          markFailed: read.markFailed,
+          timeline: timelineOf(history.events, ids),
           earlier: history.earlier,
         };
       }),

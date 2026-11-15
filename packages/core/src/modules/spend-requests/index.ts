@@ -32,6 +32,7 @@ export {
   MOST_CHECKED_A_PAGE,
   NO_PAYMENTS,
   type PaymentsOf,
+  requestHoldingsWhole,
 } from './infrastructure/holdings-check.ts';
 export type { HeldAs, HeldSealed, PaymentHolds } from './domain/holdings.ts';
 export { type Approval, approveRequest } from './infrastructure/approvals.ts';

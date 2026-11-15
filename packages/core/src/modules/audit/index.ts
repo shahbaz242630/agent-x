@@ -16,6 +16,7 @@ export {
   AuditEventRefused,
   type AuditSubject,
   type AuditSubjectKey,
+  subjectKeyProblems,
 } from './domain/event.ts';
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
 export {

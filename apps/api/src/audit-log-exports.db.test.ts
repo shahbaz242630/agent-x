@@ -154,6 +154,29 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     });
   });
 
+  it('gives one object’s events alone, counted that way, the object named in the record (CO7)', async () => {
+    const w = await world();
+    const sealed = await noted(w, { note: 'about the probe' });
+
+    const file = fileOf(
+      await exports.export(
+        w.admin,
+        keyed(w.admin, EXPORT_OPERATION),
+        { ...asked('ndjson'), subjects: [{ type: 'probe', id: w.org.toUpperCase() }] },
+        CORRELATION,
+      ),
+    );
+    const lines = file.content
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { subject: { type: string } });
+    expect(lines.map(({ subject }) => subject.type)).toEqual(['probe']);
+    expect(file).toMatchObject({ events: 1, upToSeq: sealed.seq });
+
+    const recorded = await withTenant(app, w.org, (tx) => trail.recordedEvent(tx, w.org, { eventId: file.id }));
+    expect(recorded).toMatchObject({ event: { details: { subject: `probe:${w.org}`, events: 1 } } });
+  });
+
   it('gives CSV with a header and every cell quoted, its facts as JSON text', async () => {
     const w = await world();
     await noted(w, { note: '=HYPERLINK("x")' });

@@ -21,6 +21,8 @@ export {
   ACTIVITY_LOG_EXPORTED,
   MOST_EXPORTED_REQUESTS,
   AUDIT_LOG_EXPORTED,
+  EVIDENCE_EXPORTED,
+  EVIDENCE_SUBJECT,
   EXPORT_BATCH,
   MOST_EXPORT_DAYS,
   MOST_EXPORTED_EVENTS,
@@ -29,6 +31,7 @@ export { type ActorName, createActorNamer, SHOWN_FROM } from './infrastructure/a
 export {
   actorsOf,
   eventShown,
+  evidenceFacts,
   factsShown,
   heldLogPage,
   type LogReadTables,

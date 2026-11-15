@@ -29,7 +29,7 @@
 // causes (REQUEST_VOIDED, then each cause), so it knows what to wait for
 // before asking again.
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
-import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
+import type { PageAsked, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import {
   type Decided,
   decidedAgainst,
@@ -45,7 +45,13 @@ import {
   type SpendRequestsTables,
   type VoidingShown,
 } from '@agentx/core/modules/spend-requests';
-import { supplierOf, suppliersNamed, type SuppliersTables, versionOf } from '@agentx/core/modules/suppliers';
+import {
+  type SupplierRecord,
+  supplierOf,
+  suppliersNamed,
+  type SuppliersTables,
+  versionOf,
+} from '@agentx/core/modules/suppliers';
 import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -126,7 +132,8 @@ const integrityFailed = () => new RequestReadRefused(503, 'INTEGRITY_FAILED');
  * verified and locked `share`, in the caller's transaction, which must be
  * withSignedStates' for the organisation: `none` for no request of the
  * organisation's; `unbelieved` when a record fails its seal (its alarm
- * raised) or the request names others than the IDs first found by.
+ * raised) or the request names others than the IDs first found by. With the
+ * request's verified state and its supplier's record, for its evidence (C2).
  */
 export async function requestInOrder(
   tx: ReadTx,
@@ -134,7 +141,12 @@ export async function requestInOrder(
   orgId: string,
   requestId: string,
 ): Promise<
-  | { readonly outcome: 'found'; readonly shown: RequestShown }
+  | {
+      readonly outcome: 'found';
+      readonly shown: RequestShown;
+      readonly state: VerifiedState;
+      readonly supplier: SupplierRecord;
+    }
   | { readonly outcome: 'none' }
   | { readonly outcome: 'unbelieved' }
 > {
@@ -174,6 +186,8 @@ export async function requestInOrder(
   const [shown] = (await agentsShown(tx, orgId, [agent.agent])) as [AgentShown];
   return {
     outcome: 'found',
+    state: read.state,
+    supplier: supplier.supplier,
     shown: {
       request,
       changedAt: read.state.recordedAt,
@@ -316,7 +330,7 @@ export function createSpendRequestReads({
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
         if (read.outcome === 'unbelieved') throw integrityFailed();
-        return { ...read, ...(await denialIn(tx, states, orgId, read.shown.request)) };
+        return { outcome: read.outcome, shown: read.shown, ...(await denialIn(tx, states, orgId, read.shown.request)) };
       }),
 
     ofAgent: (orgId, agentId, requestId, correlationId) =>

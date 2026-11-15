@@ -77,6 +77,31 @@ describe('the organisation’s audit log (E10a, decision 24)', () => {
     expect(page.events.some((e) => theirs.has(e.id))).toBe(false);
   });
 
+  it('gives one object’s events alone when it is named (CO7), any of several, and refuses one not a UUID', async () => {
+    const w = await world();
+    await actedByItsAgent(w);
+    const probe = { type: 'probe', id: w.org.toUpperCase() };
+
+    const page = await log.page(w.org, { ...EVER, subjects: [probe], limit: MOST_LOG_EVENTS_A_PAGE }, CORRELATION);
+    if (page.outcome !== 'page') throw new Error(`no page: ${JSON.stringify(page)}`);
+    expect(page.events.map(({ event }) => [event.action, event.subject.type])).toEqual([['probe.noted', 'probe']]);
+
+    const both = await log.page(
+      w.org,
+      { ...EVER, subjects: [probe, { type: 'agent', id: w.agent }], limit: MOST_LOG_EVENTS_A_PAGE },
+      CORRELATION,
+    );
+    if (both.outcome !== 'page') throw new Error(`no page: ${JSON.stringify(both)}`);
+    expect(new Set(both.events.map(({ event }) => event.subject.type))).toEqual(new Set(['probe', 'agent']));
+
+    await expect(
+      log.page(w.org, { ...EVER, subjects: [{ type: 'probe', id: 'x' }], limit: 1 }, CORRELATION),
+    ).rejects.toThrow('subject.id must be a UUID');
+    await expect(log.page(w.org, { ...EVER, subjects: [], limit: 1 }, CORRELATION)).rejects.toThrow(
+      'At least one object is read',
+    );
+  });
+
   it('names each actor beside their ID: a person from the copy kept, an agent and Agent X’s parts by theirs (decision 25)', async () => {
     const w = await world();
     await actedByItsAgent(w);

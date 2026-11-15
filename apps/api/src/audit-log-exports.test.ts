@@ -82,6 +82,7 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
         to: new Date(BODY.to),
         actions: ['mandate.accepted'],
         actor: undefined,
+        subjects: undefined,
         format: 'csv',
       },
     ]);
@@ -92,6 +93,15 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
     await app.inject(post({ ...BODY, actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }));
 
     expect(asked).toMatchObject([{ actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1' } }]);
+  });
+
+  it('passes the one object named (CO7)', async () => {
+    const { app, asked } = await withExports(EXPORTED);
+    await app.inject(post({ ...BODY, subject: { type: 'spend_request', id: '0199a0f0-0000-7000-8000-00000000c2a1' } }));
+
+    expect(asked).toMatchObject([
+      { subjects: [{ type: 'spend_request', id: '0199a0f0-0000-7000-8000-00000000c2a1' }] },
+    ]);
   });
 
   it('passes a UUID in capitals as the log keeps it, in lower case', async () => {
@@ -121,6 +131,12 @@ describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {
     [
       'an actor with a field of its own',
       { ...BODY, actor: { type: 'agent', id: '0199a0f0-0000-7000-8000-00000000a9e1', role: 'x' } },
+    ],
+    ['an object with no ID', { ...BODY, subject: { type: 'spend_request' } }],
+    ['an object named by something not a UUID', { ...BODY, subject: { type: 'spend_request', id: 'x' } }],
+    [
+      'an object type that isn’t lower-case words',
+      { ...BODY, subject: { type: 'Spend Request', id: '0199a0f0-0000-7000-8000-00000000c2a1' } },
     ],
     ['a field of its own', { ...BODY, role: 'admin' }],
   ])('refuses %s at the edge, the download never asked', async (_what, body) => {

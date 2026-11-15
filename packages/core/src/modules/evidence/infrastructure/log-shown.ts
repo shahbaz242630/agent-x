@@ -30,6 +30,21 @@ const SEALS_NOT_SHOWN: ReadonlySet<string> = new Set(['stateFingerprint', 'state
 export const factsShown = (details: LogEvent['event']['details']) =>
   Object.entries(details).filter(([name]) => !SEALS_NOT_SHOWN.has(name));
 
+/**
+ * A fact's name that could carry a financial secret or a credential (PRD §8:
+ * "evidence export must omit financial secrets"): a consent, a payee's or an
+ * account's reference, an IBAN, a partner's legal references, a key's version,
+ * a keyed fingerprint, a token or a password. No event a spend request's
+ * evidence reads records one today; any added later is left out of the
+ * evidence all the same, never shown by default (SEC-EVD-04).
+ */
+const SECRET_SHAPED =
+  /consent|beneficiary|payee|iban|account(number|ref)|legalentity|licence|keyversion|fingerprint|token|secret|password|credential|^mac$/i;
+
+/** An event's facts as a spend request's evidence holds them: as shown on a page, and none that is secret-shaped. */
+export const evidenceFacts = (details: LogEvent['event']['details']) =>
+  factsShown(details).filter(([name]) => !SECRET_SHAPED.test(name));
+
 /** An event's own fields as an organisation is shown them, page or download, its actor named, beside its facts in the form each needs. */
 export const eventShown = (
   { seq, id, recordedAt, event, hash, prevHash }: LogEvent,
