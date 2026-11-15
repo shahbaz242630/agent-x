@@ -15,7 +15,12 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import { MARK_FAILED_AFTER_MS } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { SUPPLIER_VERSIONS } from '@agentx/core/modules/suppliers';
-import { noteTransactionFacts, TRANSACTIONS } from '@agentx/core/modules/transactions';
+import {
+  FAILURE_PROPOSALS,
+  noteTransactionFacts,
+  proposeFailure,
+  TRANSACTIONS,
+} from '@agentx/core/modules/transactions';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -28,7 +33,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createHandoff, handoffDatabaseGate } from './handoff.ts';
-import { ALLOWED, handoffWorld, type HandoffWorldTables, payeeRefOf, SMALL } from './handoff-world.helper.test.ts';
+import { handoffWorld, type HandoffWorldTables, payeeRefOf, SMALL } from './handoff-world.helper.test.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import { createPaymentChecks } from './payment-checks.ts';
@@ -187,6 +192,27 @@ async function instructionChanged(w: World, instructionId: string) {
     await owner.end();
   }
 }
+
+/** An admin's proposal to mark the payment failed, made OPEN as payment-marks.ts makes it once confirmed. */
+const proposedFor = async (w: World, transactionId: string) => {
+  const id = ids.next();
+  await withSignedStates(app, w.org, quiet(), (tx, states) =>
+    proposeFailure(
+      tx,
+      states,
+      {
+        orgId: w.org,
+        id,
+        transactionId,
+        evidenceRef: 'BANK-NACK-77311',
+        proposedBy: w.admin.userId,
+        createdAt: clock.now(),
+      },
+      { actor: { type: 'user', id: w.admin.userId }, details: {} },
+    ),
+  );
+  return id;
+};
 
 /** The IDs of the organisation's integrity holds. */
 const holdsOf = async (w: World) =>
@@ -423,6 +449,74 @@ describe('the exception list (Phase 6 C1; BR-17; S196 decision)', () => {
 });
 
 describe('one payment in full (Phase 6 C1)', () => {
+  it('shows an UNKNOWN one’s open proposal, and the proposal’s events in its history', async () => {
+    const { w, unknown } = await threePayments();
+    const proposalId = await proposedFor(w, unknown.id);
+
+    const found = await reads.show(w.org, unknown.id, CORRELATION);
+
+    expect(found).toMatchObject({
+      outcome: 'found',
+      markFailed: {
+        openProposal: { id: proposalId, transactionId: unknown.id, evidenceRef: 'BANK-NACK-77311', status: 'OPEN' },
+      },
+    });
+    if (found.outcome !== 'found') throw new Error('not found');
+    expect(found.timeline.at(-1)).toMatchObject({
+      what: 'failure_proposal.made',
+      status: null,
+      by: { type: 'user', id: w.admin.userId },
+    });
+  });
+
+  it('never brings another payment’s proposal into a history, its row pointed there past the app', async () => {
+    const { w, paid, unknown } = await threePayments();
+    const proposalId = await proposedFor(w, unknown.id);
+    const owner = await tamperAsOwner(database, FAILURE_PROPOSALS, w.org);
+    try {
+      await owner.query('alter table transactions.failure_proposals disable trigger user');
+      await owner.setColumn(proposalId, 'transaction_id', paid.id);
+      await owner.query('alter table transactions.failure_proposals enable trigger user');
+    } finally {
+      await owner.end();
+    }
+
+    const found = await reads.show(w.org, paid.id, CORRELATION);
+
+    if (found.outcome !== 'found') throw new Error('not found');
+    expect(found.timeline.map(({ what }) => what)).not.toContain('failure_proposal.made');
+  });
+
+  it('throws for a verified payment whose instruction has neither a row nor a history: past the app, a bug', async () => {
+    const { w, paid } = await threePayments();
+    const owner = await tamperAsOwner(database, INSTRUCTIONS, w.org);
+    try {
+      const events = await owner.query<{ id: string }>(
+        'select id from audit.events where org_id = $1 and subject_id = $2',
+        [w.org, paid.instructionId],
+      );
+      // A policy can't take a bound value: the ID is a UUID the database gave.
+      // eslint-disable-next-line agentx/no-string-built-sql -- built from that UUID alone, as the line above says
+      await owner.query(
+        `create policy tamper_hides_row on instructions.instructions as restrictive using (id <> '${paid.instructionId}'::uuid)`,
+      );
+      try {
+        await owner.withEventsHidden(
+          events.map(({ id }) => id),
+          async () => {
+            await expect(reads.list(w.org, { after: null, limit: 50 }, 'paid', CORRELATION)).rejects.toThrow(
+              "A verified transaction's instruction is missing",
+            );
+          },
+        );
+      } finally {
+        await owner.query('drop policy tamper_hides_row on instructions.instructions');
+      }
+    } finally {
+      await owner.end();
+    }
+  });
+
   it('shows an UNKNOWN one with when it may be marked failed and its history, as an allow-list of facts', async () => {
     const { w, requests, unknown } = await threePayments();
 

@@ -87,7 +87,7 @@ export type PaymentsListed =
   | Refused;
 
 /** One event of a payment's history, as its team is shown it: an allow-list of its facts. */
-export interface TimelineEntry {
+interface TimelineEntry {
   readonly at: Date;
   /** The event's action, as the audit log names it (`transaction.succeed`, `payment.contradicted`). */
   readonly what: string;
@@ -101,7 +101,7 @@ export interface TimelineEntry {
 }
 
 /** Where marking an UNKNOWN payment failed stands (gate H10): from when it may be proposed, and the proposal open. */
-export interface MarkFailedShown {
+interface MarkFailedShown {
   readonly markableFrom: Date;
   readonly openProposal: FailureProposalRecord | null;
 }
