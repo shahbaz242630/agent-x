@@ -13,7 +13,13 @@ import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createSessions, createStepUpChallenges, ESTABLISHED_DAYS } from '@agentx/core/modules/identity';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { lockPayment, MARK_FAILED_AFTER_MS, NO_FACTS, settlePayment } from '@agentx/core/modules/outcomes';
+import {
+  lockPayment,
+  MARK_FAILED_AFTER_MS,
+  NO_FACTS,
+  paymentsPage,
+  settlePayment,
+} from '@agentx/core/modules/outcomes';
 import type { ExecutionLookup, FakeRail } from '@agentx/core/modules/providers';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { SUPPLIER_VERSIONS } from '@agentx/core/modules/suppliers';
@@ -24,7 +30,7 @@ import {
   proposeFailure,
   TRANSACTIONS,
 } from '@agentx/core/modules/transactions';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -48,7 +54,8 @@ import {
   PROPOSE_CONFIRM_OPERATION,
   PROPOSE_OPERATION,
 } from './payment-marks.ts';
-import { createPaymentReads, type PaymentReads } from './payment-reads.ts';
+import { alertAdmins } from './payment-alerts.ts';
+import { createPaymentReads, type PaymentReads, TIMELINE_MOST } from './payment-reads.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld } from './spend-world.helper.test.ts';
@@ -193,6 +200,17 @@ const backlogged = (org: string, type: string, id: string) =>
     }
   });
 
+/** One event about the object, as the app's own activity would record it. */
+const noteAbout = (w: World, type: string, id: string, action: string) =>
+  withTenant(app, w.org, (tx) =>
+    createAuditTrail({ keys, ids }).record(tx, w.org, {
+      actor: OPERATOR,
+      action,
+      subject: { type, id, version: 1 },
+      details: {},
+    }),
+  );
+
 /** The instruction's amount doubled by the tables' owner with its guards off: as only something past the app could. */
 async function instructionChanged(w: World, instructionId: string) {
   const owner = await tamperAsOwner(database, INSTRUCTIONS, w.org);
@@ -227,11 +245,16 @@ const proposedFor = async (w: World, transactionId: string) => {
 };
 
 /** The world's fake, every lookup answered with the bank's status `providerStatus` in place of its own. */
-const bankAnswering = (w: World, providerStatus: 'Rejected' | 'AcceptedCreditSettlementCompleted'): FakeRail => ({
+const bankAnswering = (
+  w: World,
+  providerStatus: 'Rejected' | 'AcceptedCreditSettlementCompleted',
+  onlyInstructionId?: string,
+): FakeRail => ({
   ...w.rail,
   getExecution: async (ref): Promise<ExecutionLookup> => {
     const found = await w.rail.getExecution(ref);
-    return found.kind === 'found'
+    const asked = onlyInstructionId === undefined || ref.instructionId.toLowerCase() === onlyInstructionId;
+    return found.kind === 'found' && asked
       ? {
           kind: 'found',
           execution: {
@@ -544,6 +567,32 @@ describe('the exception list (Phase 6 C1; BR-17; S196 decision)', () => {
     });
   });
 
+  it('lists a payment by its own contradiction alert, never by another payment’s (S196 review, M09)', async () => {
+    const { w, paid, alsoPaid, unknown } = await threePayments();
+    await checksOf(w, bankAnswering(w, 'Rejected', paid.instructionId)).run();
+    await bankSays(w, alsoPaid.id, 'Rejected', 'AANI.FF01');
+
+    expect(await listOf(w.org, 'exceptions')).toEqual({
+      rows: [
+        [unknown.id, 'UNKNOWN'],
+        [paid.id, 'SUCCEEDED', 'contradicted'],
+      ],
+      next: null,
+      unchecked: [],
+    });
+  });
+
+  it('refuses a page of exceptions asked in another organisation’s transaction (the tenant’s check)', async () => {
+    const { w } = await ready();
+    const other = await ready();
+
+    await expect(
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        paymentsPage(tx, states, other.w.org, { after: null, limit: 50 }, 'exceptions'),
+      ),
+    ).rejects.toThrow(TenantContextError);
+  });
+
   it('never reads a kept word as contradicted without the bank check’s alert', async () => {
     const { w, paid, unknown } = await threePayments();
     await bankSays(w, paid.id, 'Rejected', 'AANI.FF01');
@@ -561,6 +610,14 @@ describe('the exception list (Phase 6 C1; BR-17; S196 decision)', () => {
     const processing = await transactionOf(w, request.id);
     expect(processing).toMatchObject({ status: 'PROCESSING', providerStatus: 'AcceptedSettlementCompleted' });
     await lostTrack(w, processing.id);
+    // Another of its alerts, not a contradiction: it never makes a payment one (S196 review, M10).
+    await withSignedStates(app, w.org, quiet(), (tx) =>
+      alertAdmins(
+        tx,
+        { keys, ids, outbox: createOutbox({ ids, clock }) },
+        { orgId: w.org, transactionId: processing.id, alert: 'still_unknown' },
+      ),
+    );
 
     await markedFailedByTwoAdmins(w, processing.id);
 
@@ -634,6 +691,22 @@ describe('one payment in full (Phase 6 C1)', () => {
       status: null,
       by: { type: 'user', id: w.admin.userId },
     });
+  });
+
+  it('refuses an UNKNOWN payment whose open proposal was changed past the app, raising its alarm (M23)', async () => {
+    const { w, unknown } = await threePayments();
+    const proposalId = await proposedFor(w, unknown.id);
+    const owner = await tamperAsOwner(database, FAILURE_PROPOSALS, w.org);
+    try {
+      await owner.query('alter table transactions.failure_proposals disable trigger user');
+      await owner.setColumn(proposalId, 'evidence_ref', 'BANK-OTHER-00001');
+      await owner.query('alter table transactions.failure_proposals enable trigger user');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await reads.show(w.org, unknown.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
+    expect(await holdsOf(w)).toHaveLength(1);
   });
 
   it('never brings another payment’s proposal into a history, its row pointed there past the app', async () => {
@@ -759,11 +832,35 @@ describe('one payment in full (Phase 6 C1)', () => {
     expect(await reads.show(w.org, paid.id, CORRELATION)).toMatchObject({ outcome: 'found', markFailed: null });
 
     await backlogged(w.org, 'payment_alert', paid.id);
+    await noteAbout(w, 'payment_alert', paid.id, 'payment_alert.latest');
     const found = await reads.show(w.org, paid.id, CORRELATION);
 
     expect(found).toMatchObject({ outcome: 'found', earlier: true });
     if (found.outcome !== 'found') throw new Error('not found');
-    expect(found.timeline).toHaveLength(100);
-    expect(found.timeline.every(({ what }) => what === 'payment_alert.noted')).toBe(true);
+    expect(found.timeline).toHaveLength(TIMELINE_MOST);
+    // Oldest first, of the newest: the latest event last (M30).
+    expect(found.timeline.at(-1)?.what).toBe('payment_alert.latest');
+    expect(found.timeline.slice(0, -1).every(({ what }) => what === 'payment_alert.noted')).toBe(true);
+  });
+
+  it('shows exactly the most events whole, saying none were left out (M29)', async () => {
+    const { w, paid } = await threePayments();
+    const held = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select((row) => row.fn.countAll<string>().as('events'))
+        .where('subject_type', 'in', ['instruction', 'transaction', 'failure_proposal', 'payment_alert'])
+        .where('subject_id', 'in', [paid.id, paid.instructionId])
+        .executeTakeFirstOrThrow(),
+    );
+    for (let added = Number(held.events); added < TIMELINE_MOST; added += 1) {
+      await noteAbout(w, 'payment_alert', paid.id, 'payment_alert.noted');
+    }
+
+    const found = await reads.show(w.org, paid.id, CORRELATION);
+
+    expect(found).toMatchObject({ outcome: 'found', earlier: false });
+    if (found.outcome !== 'found') throw new Error('not found');
+    expect(found.timeline).toHaveLength(TIMELINE_MOST);
   });
 });

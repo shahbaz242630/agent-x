@@ -5,7 +5,7 @@
 // history), never the payee's reference or the consent, the edge's refusals
 // before the use case runs, and the use case's own. What the use case reads
 // is payment-reads.db.test.ts.
-import type { FailureProposalRecord } from '@agentx/core/modules/transactions';
+import { type FailureProposalRecord, TRANSACTION } from '@agentx/core/modules/transactions';
 import type { PaymentRecord } from '@agentx/core/modules/outcomes';
 import { money } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';
@@ -13,7 +13,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { liveSession } from './live-session.helper.test.ts';
-import type { PaymentFound, PaymentReads, PaymentShown, PaymentsListed } from './payment-reads.ts';
+import {
+  PAYMENT_GROUPS,
+  type PaymentFound,
+  type PaymentReads,
+  type PaymentShown,
+  type PaymentsListed,
+} from './payment-reads.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -114,6 +120,21 @@ const get = (url: string, headers: Record<string, string> = {}): InjectOptions =
     origin: PUBLIC_ORIGIN,
     ...headers,
   },
+});
+
+describe('the groups a list may ask for (Phase 6 C1)', () => {
+  it('holds each status in exactly one group, pending the three under way (M31)', () => {
+    expect(PAYMENT_GROUPS).toEqual({
+      pending: ['SUBMISSION_PENDING', 'SUBMITTED', 'PROCESSING'],
+      paid: ['SUCCEEDED'],
+      failed: ['FAILED'],
+      cancelled: ['CANCELLED'],
+      unknown: ['UNKNOWN'],
+      reversed: ['REVERSED'],
+    });
+    const grouped = Object.values(PAYMENT_GROUPS).flat();
+    expect([...grouped].sort()).toEqual([...TRANSACTION.states].sort());
+  });
 });
 
 describe('GET /v1/payments: every payment, newest first (Phase 6 C1)', () => {
