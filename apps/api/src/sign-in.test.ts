@@ -867,8 +867,8 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     'refuses a step-up back with %s, sending the browser back to its page to say so (CO2), the session cookie left',
     async (_what, failure, userId) => {
       const standIn = new StandIn();
-      // The page's own query (`?stepped=`, which would offer the change to confirm) is dropped.
-      const back = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+      // The page's own query stays (CO5); `?stepped=`, which would offer the change to confirm, is dropped.
+      const back = { returnTo: `/approvals/abc?org=o-1&stepped=${CHALLENGE}`, challengeId: CHALLENGE };
       standIn.failWith = new StepUpFailed(failure, 'test', userId, back);
       const { app, noted, capture } = await server(standIn);
 
@@ -877,7 +877,7 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
       );
 
       expect(response.statusCode).toBe(302);
-      expect(response.headers.location).toBe(`/approvals/abc?stepUpFailed=${CHALLENGE}`);
+      expect(response.headers.location).toBe(`/approvals/abc?org=o-1&stepUpFailed=${CHALLENGE}`);
       expect(setCookies(response.headers['set-cookie'])).toEqual([
         `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
       ]);
@@ -906,7 +906,8 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     'sends a step-up %s back to its page to say so (CO2), the flow cookie cleared, the session left',
     async (_what, query, failure) => {
       const standIn = new StandIn();
-      standIn.refusedStepUp = { returnTo: `/approvals/abc?stepped=${CHALLENGE}`, challengeId: CHALLENGE };
+      // A way back with no query at all (made by hand: the console's always holds `?stepped=`) gets the challenge alone.
+      standIn.refusedStepUp = { returnTo: '/approvals/abc', challengeId: CHALLENGE };
       const { app, noted, capture } = await server(standIn);
 
       const response = await app.inject({

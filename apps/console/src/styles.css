@@ -268,14 +268,6 @@ button:disabled {
   gap: 14px;
 }
 
-.soon {
-  display: grid;
-  gap: 6px;
-  padding: 24px 0;
-  border-top: 1px solid var(--rule);
-  border-bottom: 1px solid var(--rule);
-}
-
 .loading {
   padding: 40px 16px;
   text-align: center;
@@ -506,7 +498,8 @@ button:disabled {
   font-weight: 600;
 }
 
-textarea {
+input[type='text'],
+select {
   font: inherit;
   width: 100%;
   padding: 8px 10px;
@@ -514,5 +507,4 @@ textarea {
   border-radius: 4px;
   background: var(--paper);
   color: var(--ink);
-  resize: vertical;
 }

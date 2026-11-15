@@ -90,7 +90,7 @@ describe('the console’s frame (6A1)', () => {
     open('/payments');
     await userEvent.click(await screen.findByRole('button', { name: /Glide Logistics LLC/ }));
     expect(await screen.findByText(/This organisation is frozen/)).toBeDefined();
-    expect(screen.getByText('Every payment and its timeline will appear here.')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Payments' })).toBeDefined();
     expect(localStorage.getItem('agentx.organization')).toBe(ORG_B.id);
     await userEvent.click(screen.getByRole('button', { name: 'Switch organisation' }));
     expect(await screen.findByText('Choose an organisation')).toBeDefined();
@@ -102,7 +102,7 @@ describe('the console’s frame (6A1)', () => {
     signedIn([ORG_A, ORG_B]);
     open('/payments');
     expect(await screen.findByText(/Glide Logistics LLC/)).toBeDefined();
-    expect(screen.getByText('Every payment and its timeline will appear here.')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Payments' })).toBeDefined();
   });
 
   it('says how to join when the person is in none, and that one can’t be opened when it can’t', async () => {

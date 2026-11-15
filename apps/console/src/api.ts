@@ -92,6 +92,10 @@ export const api = {
 /** A refusal (4xx): the API decided, and answers the same however often it is asked; a 5xx or no answer is a failure. */
 export const isRefusal = (error: unknown): error is ApiError => error instanceof ApiError && error.status < 500;
 
+/** Whether an error is the API refusing a record that failed its integrity check (503, so not a refusal). */
+export const isIntegrityFailed = (error: unknown): boolean =>
+  error instanceof ApiError && error.code === 'INTEGRITY_FAILED';
+
 /** Whether an error means the person isn't signed in (any more): their session ended, or never was. */
 export const isSignedOut = (error: unknown): boolean => error instanceof ApiError && error.status === 401;
 
@@ -99,6 +103,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Whether text is a UUID, as the API's IDs are: anything else names nothing it holds. */
 export const isUuid = (text: string): boolean => UUID.test(text);
+
+/** Whether a page's address names nothing to read: not an ID at all, or one the API answered 404 for. */
+export const isMissing = (id: string, error: unknown): boolean =>
+  !isUuid(id) || (error instanceof ApiError && error.status === 404);
 
 /** Where the browser goes to sign in, coming back to `returnTo` (a path of this console) after. */
 export function signInAddress(returnTo: string): string {
