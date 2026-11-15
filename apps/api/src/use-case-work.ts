@@ -228,6 +228,13 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
   };
 }
 
+/** The entry a verified list's own rows point to, in what a later read named: one missing is a bug. */
+export function pointedTo<T>(named: ReadonlyMap<string, T>, id: string): T {
+  const entry = named.get(id);
+  if (entry === undefined) throw new Error(`A verified row names one not read: ${id}`);
+  return entry;
+}
+
 type ChallengeHandle = Parameters<StepUpChallenges['open']>[0];
 
 /**

@@ -53,7 +53,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { type Refused, refused } from './refused.ts';
 import { isCarried, movedPast, pausedFromOf } from './suspensions.ts';
-import { createUseCaseWork, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
+import { createUseCaseWork, pointedTo, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
 export type RequestReadTables = UseCaseTables & AgentsTables & SuppliersTables & SpendRequestsTables;
 type ReadTx = DatabaseTransaction<RequestReadTables>;
@@ -233,13 +233,6 @@ async function carriedFrom(
     carried.set(supplier.id, await pausedFromOf(tx, states, orgId, supplier, integrityFailed));
   }
   return carried;
-}
-
-/** The entry a verified list's own rows point to; one missing is a bug. */
-function pointedTo<T>(named: ReadonlyMap<string, T>, id: string): T {
-  const entry = named.get(id);
-  if (entry === undefined) throw new Error(`A verified request names one not read: ${id}`);
-  return entry;
 }
 
 export function createSpendRequestReads({
