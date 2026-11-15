@@ -20,12 +20,13 @@ import { t } from '../text.ts';
 import { Loading, Retry } from './failed.tsx';
 
 /**
- * Sends a change and says how it went: left to sign in again, nothing more;
- * done, its words; refused or failed, in plain words. Everything shown reads
- * again after a decision either way (a refusal says the thing moved on); a
- * 401 goes to sign-in.
+ * Sends a change and says how it went: left to sign in again, or held open
+ * for the person to look at, nothing more; done, its words; refused or
+ * failed, in plain words (`refusal`: a brake's, or another screen's own).
+ * Everything shown reads again after a decision either way (a refusal says
+ * the thing moved on); a 401 goes to sign-in.
  */
-export function useChange() {
+export function useChange(refusal: (error: unknown) => string = brakeRefusal) {
   const queries = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
@@ -34,7 +35,7 @@ export function useChange() {
     setSaid(null);
     try {
       const sent = await send();
-      if (sent === 'stepping') return;
+      if (sent === 'stepping' || sent === 'held') return;
       after();
       setSaid(done);
       await queries.invalidateQueries();
@@ -44,7 +45,7 @@ export function useChange() {
         return;
       }
       after();
-      setSaid(brakeRefusal(error));
+      setSaid(refusal(error));
       if (isRefusal(error)) await queries.invalidateQueries();
     } finally {
       setBusy(false);

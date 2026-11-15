@@ -19,10 +19,11 @@ import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
 import { More } from './pages/more.tsx';
+import { PaymentPage } from './pages/payment.tsx';
+import { Payments } from './pages/payments.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
-import { Soon } from './pages/soon.tsx';
 import {
   ActingProvider,
   ENDED,
@@ -62,15 +63,24 @@ function Root() {
 
 const root = createRootRoute({ component: Root, notFoundComponent: NotFound });
 
+/**
+ * The ID an address such as `/approvals/<id>` names, from the address this route matched: the route's own typed
+ * read would refer to the route tree it is part of, and read as untyped.
+ */
+const useIdInAddress = (): string =>
+  useRouterState({ select: ({ location }) => location.pathname.split('/')[2] ?? '' });
+
 /** One request's page, the approver's email's link (6B1): `/approvals/<id>`, its organisation in `?org=`. */
 function Request(): ReactElement {
-  // From the address this route matched (`/approvals/<id>`): the route's own typed read would refer to the
-  // route tree it is part of, and read as untyped.
-  const id = useRouterState({ select: ({ location }) => location.pathname.split('/')[2] ?? '' });
+  const id = useIdInAddress();
   return <RequestPage key={id} id={id} />;
 }
 
-const requestRoute = createRoute({ getParentRoute: () => root, path: '/approvals/$id', component: Request });
+/** One payment's page (6C1): `/payments/<id>`, its organisation in `?org=` as a request's. */
+function Payment(): ReactElement {
+  const id = useIdInAddress();
+  return <PaymentPage key={id} id={id} />;
+}
 
 const routes = root.addChildren([
   createRoute({
@@ -83,8 +93,14 @@ const routes = root.addChildren([
   }),
   createRoute({ getParentRoute: () => root, path: '/approvals', component: () => <Approvals list="waiting" /> }),
   createRoute({ getParentRoute: () => root, path: '/approvals/all', component: () => <Approvals list="all" /> }),
-  requestRoute,
-  createRoute({ getParentRoute: () => root, path: '/payments', component: () => <Soon what="soon.payments" /> }),
+  createRoute({ getParentRoute: () => root, path: '/approvals/$id', component: Request }),
+  createRoute({ getParentRoute: () => root, path: '/payments', component: () => <Payments list="all" /> }),
+  createRoute({
+    getParentRoute: () => root,
+    path: '/payments/exceptions',
+    component: () => <Payments list="exceptions" />,
+  }),
+  createRoute({ getParentRoute: () => root, path: '/payments/$id', component: Payment }),
   createRoute({ getParentRoute: () => root, path: '/agents', component: () => <BrakeList kind="agents" /> }),
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: () => <BrakeList kind="suppliers" /> }),

@@ -431,6 +431,11 @@ describe('one request’s page (6B1)', () => {
     const dialog = screen.getByRole('dialog', { name: 'Reject this request?' });
     const go = within(dialog).getByRole('button', { name: 'Reject' });
     expect(go).toHaveProperty('disabled', true);
+    // One line of up to 200 characters, as the API keeps a reason (rejectReason), with its rule said under it.
+    const reason = within(dialog).getByLabelText('Your reason');
+    expect(reason.tagName).toBe('INPUT');
+    expect(reason.getAttribute('maxlength')).toBe('200');
+    expect(within(dialog).getByText(/One line, up to 200 characters/)).toBeDefined();
     await userEvent.type(within(dialog).getByLabelText('Your reason'), '   ');
     expect(go).toHaveProperty('disabled', true);
     await userEvent.type(within(dialog).getByLabelText('Your reason'), 'Not our order ');
@@ -440,6 +445,21 @@ describe('one request’s page (6B1)', () => {
       expect(goTo).toHaveBeenCalled();
     });
     expect(sentTo('POST', `/v1/spend-requests/${ID}/reject`)[0]?.body).toEqual({ reason: 'Not our order' });
+  });
+
+  it('says plainly a reason the API can’t keep, changing nothing', async () => {
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details() });
+    answer(`POST /v1/spend-requests/${ID}/reject`, { status: 400, body: { error: { code: 'BAD_REQUEST' } } });
+    open(`/approvals/${ID}`);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Reject' }));
+    const dialog = screen.getByRole('dialog', { name: 'Reject this request?' });
+    await userEvent.type(within(dialog).getByLabelText('Your reason'), 'Call 050 123 4567');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Reject' }));
+
+    expect(await screen.findByText(/couldn't accept your reason/)).toBeDefined();
+    expect(goTo).not.toHaveBeenCalled();
   });
 
   it('cancels in one click, with no step-up or confirm (decision 10), says so, and reads it again', async () => {

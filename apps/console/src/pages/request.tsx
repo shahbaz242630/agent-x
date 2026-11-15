@@ -14,7 +14,7 @@
 // named with its ID, as two agents may share a name (SEC-AG-10).
 import { useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId, useState } from 'react';
+import { useState } from 'react';
 
 import { api, ApiError, isRefusal, isSignedOut, isUuid } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
@@ -33,6 +33,7 @@ import { endSession, useActing } from '../session.tsx';
 import { type Asked, askFirst, StepUpStorageBlocked } from '../step-up.ts';
 import { t, type TextKey } from '../text.ts';
 import { Loading, Retry } from './failed.tsx';
+import { LineField, NOTE_MOST } from './line-field.tsx';
 
 /** The plain words for a refusal the person can act on; the code for any other. */
 const REFUSALS = new Set([
@@ -44,6 +45,7 @@ const REFUSALS = new Set([
   'ADMIN_APPROVAL_ONLY',
   'REQUEST_NOT_CANCELLABLE',
   'ORG_FROZEN',
+  'BAD_REQUEST',
   'FORBIDDEN',
   'NOT_FOUND',
 ]);
@@ -172,7 +174,6 @@ function Actions({ request }: { readonly request: RequestDetails }) {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
-  const reasonId = useId();
   const names = { amount: amountText(request.amountMinor, request.currency), supplier: request.supplier.name };
   const path = `/v1/spend-requests/${encodeURIComponent(request.id)}`;
   const waiting = request.status === 'APPROVAL_REQUIRED';
@@ -289,17 +290,13 @@ function Actions({ request }: { readonly request: RequestDetails }) {
           onConfirm={() => void reject()}
         >
           <p className="amount">{t('request.rejectLabel', names)}</p>
-          <label className="field" htmlFor={reasonId}>
-            {t('request.rejectReason')}
-          </label>
-          <textarea
-            id={reasonId}
-            maxLength={1600}
-            rows={3}
+          {/* One line of up to 200 characters, as the reason is kept for good (rejectReason): no long numbers. */}
+          <LineField
+            label={t('request.rejectReason')}
+            hint={t('request.rejectReasonHint')}
+            most={NOTE_MOST}
             value={reason}
-            onChange={(event) => {
-              setReason(event.target.value);
-            }}
+            onChange={setReason}
           />
         </Confirm>
       )}

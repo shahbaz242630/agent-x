@@ -78,6 +78,17 @@ describe('back from a step-up', () => {
     expect(screen.queryByText(`Done: ${PENDING.label}`)).toBeNull();
   });
 
+  it('keeps the page’s own query when it cleans the step-up’s off the address (CO5)', async () => {
+    sessionStorage.setItem(`agentx.step-up.${CHALLENGE}`, JSON.stringify(PENDING));
+    const history = createMemoryHistory({ initialEntries: [`/more?status=paid&stepped=${CHALLENGE}`] });
+    render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: "Don't make it" }));
+
+    expect(history.location.pathname).toBe('/more');
+    expect(history.location.search).toBe('?status=paid');
+  });
+
   it('makes no change when the person chooses not to, and forgets it', async () => {
     const history = backFromStepUp();
 

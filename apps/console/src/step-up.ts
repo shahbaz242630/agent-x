@@ -90,9 +90,27 @@ export function forget(challenge: string): void {
   }
 }
 
-/** Where the browser goes to sign in again for `challenge`, coming back to `page` to confirm. */
-export function stepUpAddress(challenge: string, page: string): string {
-  const returnTo = `${page}?${new URLSearchParams({ [STEPPED]: challenge }).toString()}`;
+/** The most a way back may be, and what it may hold, as the API takes it (RETURN_PATH). */
+const RETURN_MOST = 512;
+const RETURN_CHARACTERS = /^[\w\-.~/%?=&]*$/;
+
+/**
+ * Where the browser goes to sign in again for `challenge`, coming back to
+ * `path` to confirm, with the page's own query kept (its filter, `?org=`,
+ * CO5) less any earlier step-up's. A way back the API wouldn't take (over 512
+ * characters, or holding what RETURN_PATH doesn't) keeps the path alone.
+ */
+export function stepUpAddress(challenge: string, path: string, search = ''): string {
+  const query = new URLSearchParams(search);
+  query.delete(STEPPED);
+  query.delete(STEP_UP_FAILED);
+  query.set(STEPPED, challenge);
+  // URLSearchParams writes a space as `+`, which RETURN_PATH doesn't hold; `%20` says the same.
+  const kept = `${path}?${query.toString().replaceAll('+', '%20')}`;
+  const returnTo =
+    kept.length <= RETURN_MOST && RETURN_CHARACTERS.test(kept)
+      ? kept
+      : `${path}?${new URLSearchParams({ [STEPPED]: challenge }).toString()}`;
   return `/v1/auth/step-up?${new URLSearchParams({ challenge, returnTo }).toString()}`;
 }
 
@@ -135,7 +153,7 @@ export async function askFirst(change: Change): Promise<{ readonly done: unknown
         organization,
         idempotencyKey: crypto.randomUUID(),
       });
-      goTo(stepUpAddress(challenge, window.location.pathname));
+      goTo(stepUpAddress(challenge, window.location.pathname, window.location.search));
       return 'stepping';
     },
   };
