@@ -215,6 +215,12 @@ type Ending =
   | 'planned'
   | 'plan-refused'
   | 'plan-copy-broken'
+  | 'plan-behind-anchor'
+  | 'plan-live-broken'
+  | 'plan-copy-ahead'
+  | 'plan-live-unreadable'
+  | 'plan-copy-unreadable'
+  | 'plan-forked-copy'
   | 'restored'
   | 'restored-other'
   | 'restore-plan'
@@ -464,7 +470,96 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     TERMINATED,
   ],
   'plan-refused': (id) => [
-    said({ event: 'operator.chain_recovery_refused', planId: id, reason: 'fork', seq: '4', problem: null }),
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'fork',
+      seq: '4',
+      problem: null,
+      liveHead: { seq: '6', hash: 'ef'.repeat(32) },
+      copyHead: { seq: '5', hash: 'ab'.repeat(32) },
+      liveFromCopy: { problem: 'link at 5' },
+    }),
+    TERMINATED,
+  ],
+  'plan-behind-anchor': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'behind_anchor',
+      seq: '273',
+      problem: null,
+      liveHead: { seq: '271', hash: 'ef'.repeat(32) },
+      copyHead: { seq: '270', hash: 'ab'.repeat(32) },
+      liveFromCopy: { seq: '271', hash: 'ef'.repeat(32) },
+    }),
+    TERMINATED,
+  ],
+  'plan-copy-ahead': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'behind_anchor',
+      seq: '273',
+      problem: null,
+      liveHead: { seq: '265', hash: 'ef'.repeat(32) },
+      copyHead: { seq: '270', hash: 'ab'.repeat(32) },
+      liveFromCopy: { problem: 'anchor at 270' },
+    }),
+    TERMINATED,
+  ],
+  'plan-copy-unreadable': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'behind_anchor',
+      seq: '273',
+      problem: null,
+      liveHead: { seq: '271', hash: 'ef'.repeat(32) },
+      copyHead: { unreadable: '57P01' },
+      liveFromCopy: { unreadable: '57P01' },
+    }),
+    TERMINATED,
+  ],
+  // The copy took another branch from 266, though shorter than live: a plan with --discard-fork.
+  'plan-forked-copy': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      discardFork: true,
+      reason: 'behind_anchor',
+      seq: '273',
+      problem: null,
+      liveHead: { seq: '270', hash: 'ef'.repeat(32) },
+      copyHead: { seq: '268', hash: 'ab'.repeat(32) },
+      liveFromCopy: { problem: 'anchor at 268' },
+    }),
+    TERMINATED,
+  ],
+  'plan-live-unreadable': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'moved',
+      seq: '0',
+      problem: null,
+      liveHead: { unreadable: '57P01' },
+      copyHead: { unreadable: '57P01' },
+      liveFromCopy: { unreadable: '57P01' },
+    }),
+    TERMINATED,
+  ],
+  'plan-live-broken': (id) => [
+    said({
+      event: 'operator.chain_recovery_refused',
+      planId: id,
+      reason: 'new_seal',
+      seq: '5',
+      problem: null,
+      liveHead: { problem: 'link at 5' },
+      copyHead: { seq: '4', hash: 'ab'.repeat(32) },
+      liveFromCopy: { problem: 'link at 5' },
+    }),
     TERMINATED,
   ],
   'plan-copy-broken': (id) => [
@@ -1560,7 +1655,7 @@ describe("S78 the restore drill's check", () => {
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.said[1]).toBe("Checking the drill's copy against the live server, read-only.");
     expect(done.said.at(-1)).toBe(
-      'The copy holds: all 4 chains on it checked whole, and each leads to the live one (3 organisations on the copy, 1 made since; the platform chain at 9 on the copy, 11 live).',
+      "The copy holds: all 4 chains on it checked whole, and each leads to the live one (3 organisations on the copy, 1 made since; the platform chain at 9 on the copy, 11 live). Each chain's live head, checked whole, is in the lines operator.restore_check_heads (by organisation ID, its number and hash: what a rebase names).",
     );
   });
 
@@ -2486,14 +2581,70 @@ describe("4D2e E9 a chain recovery plan, on the operator's job", () => {
       states: ['Failed'],
     });
     expect(fork.status).toBe(1);
-    expect(fork.said.at(-1)).toBe(
+    expect(fork.said.at(-2)).toBe(
       'No plan: refused as fork at 4. Nothing was changed; the refusal is kept in the evidence store. Playbook H says what each reason means.',
     );
+    // The live head, checked whole (AT8); no rebase offered for a fork.
+    expect(fork.said.at(-1)).toBe(`The live chain checks whole to 6 (head ${'ef'.repeat(32)}).`);
+    // A line from before AT8 says no head.
     const broken = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
       ending: 'plan-copy-broken',
       states: ['Failed'],
     });
     expect(broken.said.at(-1)).toMatch(/^No plan: refused as copy_broken at 2 \(mac\)\./);
+  });
+
+  it('says the live head and the rebase that gives up the lost events, refused behind_anchor (AT8)', async () => {
+    const behind = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-behind-anchor',
+      states: ['Failed'],
+    });
+    expect(behind.status).toBe(1);
+    expect(behind.said.at(-2)).toBe(`The live chain checks whole to 271 (head ${'ef'.repeat(32)}).`);
+    expect(behind.said.at(-1)).toBe(
+      `Its anchor is at 273, and this copy doesn't reach it: the events past 271 are lost unless a later copy holds them. Only once the investigation accepts that they are lost for good, the rebase that gives them up: node deploy/azure/operator.ts chain-rebase --chain ${PLAN_ORG} --seq 271 --hash ${'ef'.repeat(32)} --reason repaired --evidence <incident reference>`,
+    );
+    const broken = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-live-broken',
+      states: ['Failed'],
+    });
+    expect(broken.said.at(-1)).toBe(
+      'The live chain fails its own check (link at 5): no rebase can be made for it. Read playbook H.',
+    );
+  });
+
+  it('offers no rebase while the copy holds events past the live head, and says a failed read as one (AT8)', async () => {
+    const ahead = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-copy-ahead',
+      states: ['Failed'],
+    });
+    expect(ahead.said.at(-1)).toBe(
+      "Its anchor is at 273, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either (from the copy's head: anchor at 270): it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches 273 (playbook H); if none does, no tool yet puts this copy's events back before a rebase (AT9): stop there and call Claude.",
+    );
+    expect(ahead.said.join(' ')).not.toContain('chain-rebase');
+    // A copy on another branch, shorter than live: the numbers alone would have offered a rebase.
+    const forked = await drill(['chain-recovery-plan', '--org', PLAN_ORG, '--discard-fork'], {
+      ending: 'plan-forked-copy',
+      states: ['Failed'],
+    });
+    expect(forked.said.at(-1)).toMatch(/^Its anchor is at 273, and this copy doesn't reach it, but the copy isn't/);
+    expect(forked.said.join(' ')).not.toContain('chain-rebase');
+    // The copy unread: whether it holds lost events is unknown, so no rebase either.
+    const copyUnread = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-copy-unreadable',
+      states: ['Failed'],
+    });
+    expect(copyUnread.said.at(-1)).toBe(
+      "Whether the live chain grows on from this copy couldn't be read (database code 57P01), so no rebase is offered. Run the same command again: a plan only reads.",
+    );
+    expect(copyUnread.said.join(' ')).not.toContain('chain-rebase');
+    const unreadable = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
+      ending: 'plan-live-unreadable',
+      states: ['Failed'],
+    });
+    expect(unreadable.said.at(-1)).toBe(
+      "The live chain's head couldn't be read (database code 57P01), so nothing is known of it. Run the same command again: a plan only reads.",
+    );
   });
 
   it('says a refusal, no request found, and lines that never came', async () => {
@@ -2562,14 +2713,13 @@ describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
     expect(done.said.at(-2)).toBe(
       `Repaired: 2 rows put back, 1 replaced, 0 removed; the chain checks whole to 9. The records are in the evidence store as ${PLAN_ORG}/chain-restore-${id}-start.ndjson and -outcome.ndjson. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
     );
-    // The rebase's command, with the repaired head (4D2e E11).
-    expect(done.said.at(-1)).toBe(
-      `If the anchor check then alarms "anchor" for this chain, the rebase, once its head is checked: node deploy/azure/operator.ts chain-rebase --chain ${PLAN_ORG} --seq 9 --hash ${'cd'.repeat(32)} --reason repaired --evidence <incident reference>`,
-    );
-    // A repair from before the head's hash was logged says no rebase.
+    // No rebase follows a repair (AT5, S194): the repaired chain holds its anchor.
+    expect(done.said.at(-1)).toMatch(/^No rebase is needed: a plan never ends before the chain's anchor/);
+    expect(done.said.join(' ')).not.toContain('chain-rebase');
+    // A repair from before the head's hash was logged says the same.
     const old = await drill(restore(), { restore: true, ending: 'restored-old' });
     expect(old.status).toBe(0);
-    expect(old.said.at(-1)).toMatch(/^Repaired: 1 rows put back/);
+    expect(old.said.at(-1)).toMatch(/^No rebase is needed/);
   });
 
   it('passes --discard-fork and an earlier --id through only when given', async () => {

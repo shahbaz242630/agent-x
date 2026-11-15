@@ -1,12 +1,13 @@
 // A chain's rebase (4D2e E11; playbook H): after a sanctioned change to an
-// audit chain (an organisation's chain repaired, E10; the platform chain begun
-// again), its anchor in the store can't be met, and the API's check would raise
-// the alarm for good. This moves the anchor on: it reads the anchors' store
-// (rebases first, as the API does), checks the live chain whole from its first
-// event, holds its head to the place the request names (the place the repair
-// ended at), and writes one signed rebase line naming the chain, that place,
-// the anchor it moves on from, why and the incident's reference, to
-// `e<epoch>/rebases/<ID>`, dated by the database's clock.
+// audit chain (an organisation's events lost for good, no copy holding them; the
+// platform chain begun again), its anchor in the store can't be met, and the API's
+// check would raise the alarm for good. A repair (E10) never needs one: a plan
+// never ends before the anchor (AT5, S194). This moves the anchor on: it reads the
+// anchors' store (rebases first, as the API does), checks the live chain whole from
+// its first event, holds its head to the place the request names (the head a person
+// checked: a refused plan prints it, AT8), and writes one signed rebase line
+// naming the chain, that place, the anchor it moves on from, why and the
+// incident's reference, to `e<epoch>/rebases/<ID>`, dated by the database's clock.
 //
 // Refused, never bent:
 // - `store`: the anchors' store couldn't be read whole, so there is nothing to
@@ -115,6 +116,63 @@ function checkWhole(
   return chain.kind === 'platform'
     ? createPlatformChain({ keys, ids: uuidV7Ids }).verifyAlone(live, anchor)
     : createAuditTrail({ keys, ids: uuidV7Ids }).verifyAlone(live, chain.orgId, anchor);
+}
+
+/** A chain's live head as its whole check reads it (AT8): what a rebase's --seq and --hash name, or why there is none. */
+export type CheckedHead =
+  | { readonly seq: string; readonly hash: string }
+  /** The chain fails its own check: the reason and where. */
+  | { readonly problem: string }
+  /** The chain couldn't be read, so nothing is known of it: the database's code alone. */
+  | { readonly unreadable: string };
+
+/** The chain's whole check, from `anchor` where given, as a CheckedHead with its point. Never throws. */
+async function headFrom(
+  database: Database<RebaseTables>,
+  keys: KeyProvider,
+  chain: Chain,
+  anchor: AnchorPoint | undefined,
+): Promise<{ readonly said: CheckedHead; readonly point?: AnchorPoint }> {
+  try {
+    const whole = await checkWhole(database, keys, chain, anchor);
+    return whole.ok
+      ? { said: { seq: whole.seq.toString(), hash: whole.hash.toString('hex') }, point: whole }
+      : { said: { problem: `${whole.problem.reason} at ${String(whole.problem.seq)}` } };
+  } catch (error) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'error';
+    return { said: { unreadable: code } };
+  }
+}
+
+/** Both sides' heads a refused plan says (AT8), each checked whole, and whether the live chain grows on from the copy's. */
+export interface CheckedHeads {
+  readonly liveHead: CheckedHead;
+  readonly copyHead: CheckedHead;
+  /**
+   * The live chain checked with the copy's head as its anchor: a head only where the copy is an earlier state of the
+   * live chain, so a rebase to the live head gives up nothing the copy holds. A problem where the copy is past the
+   * live head or on another branch; the copy's own CheckedHead where it has no head.
+   */
+  readonly liveFromCopy: CheckedHead;
+}
+
+/**
+ * The chain's heads on the copy and live, checked whole from their first events (AT8, S194): before this no tool
+ * printed a live head, and a rebase needs it. Never throws: a failed read is said as its database code alone, never
+ * its message.
+ */
+export async function checkedHeads(
+  copy: Database<RebaseTables>,
+  live: Database<RebaseTables>,
+  keys: KeyProvider,
+  chain: Chain,
+): Promise<CheckedHeads> {
+  const [onLive, onCopy] = await Promise.all([
+    headFrom(live, keys, chain, undefined),
+    headFrom(copy, keys, chain, undefined),
+  ]);
+  const fromCopy = onCopy.point === undefined ? onCopy : await headFrom(live, keys, chain, onCopy.point);
+  return { liveHead: onLive.said, copyHead: onCopy.said, liveFromCopy: fromCopy.said };
 }
 
 /** The chain's name as the store names it. */

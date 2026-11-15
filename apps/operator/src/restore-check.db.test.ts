@@ -11,6 +11,7 @@ import { createTestDatabase, type TestClient, type TestDatabase, testLogger, wri
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
+import { type CheckedHead, checkedHeads } from './chain-rebase.ts';
 import { checkRestoredCopy } from './restore-check.ts';
 
 const server = inject('postgres');
@@ -124,6 +125,15 @@ describe('SEC-AV-06 the restore drill check', () => {
     const grown = await check();
     expect(grown).toMatchObject({ problems: [], chainsHeld: 2, newSinceCopy: 1 });
     expect(grown.platformLiveSeq).toBeGreaterThan(grown.platformCopySeq ?? 0n);
+    // Each chain's live head, checked whole (AT8): the platform chain's is the live head, not the copy's.
+    expect(grown.liveHeads).toEqual([
+      { orgId: null, seq: grown.platformLiveSeq, hash: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown },
+      {
+        orgId: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown,
+        seq: expect.any(BigInt) as unknown,
+        hash: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+      },
+    ]);
   });
 
   it('fails a copy whose chains do not lead to the live ones', async () => {
@@ -141,6 +151,8 @@ describe('SEC-AV-06 the restore drill check', () => {
       `organisation ${onlyOnCopy}: on the copy, but not listed live`,
     ]);
     expect(report).toMatchObject({ chainsChecked: 3, chainsHeld: 1, platformLiveSeq: null, newSinceCopy: 1 });
+    // Only a chain that held on both sides has a head said.
+    expect(report.liveHeads).toHaveLength(1);
   });
 
   it('fails a copy broken on its own side, before the live server is read', async () => {
@@ -186,5 +198,42 @@ describe('SEC-AV-06 the restore drill check', () => {
     copy = await live.copy();
     const report = await check();
     expect(report).toMatchObject({ problems: [], chainsChecked: 1, chainsHeld: 1, copyOrganizations: 0 });
+  });
+});
+
+describe("AT8 a refused plan's heads: whether the live chain grows on from the copy", () => {
+  /** Both heads of the platform chain, and the live chain checked from the copy's. */
+  const heads = () => checkedHeads(operatorOn(theCopy(), true), operatorOn(live, true), keys, { kind: 'platform' });
+  const HEX = /^[0-9a-f]{64}$/;
+  /** A head's number, which the case's setup makes sure it has. */
+  const seqOf = (head: CheckedHead): bigint => ('seq' in head ? BigInt(head.seq) : -1n);
+
+  it('says the live head where the live chain grows on from the copy: a rebase gives up nothing the copy holds', async () => {
+    await copyWithOrganisation();
+    await organisationOn(live);
+    const said = await heads();
+    expect(said.liveHead).toEqual({
+      seq: expect.stringMatching(/^\d+$/) as unknown,
+      hash: expect.stringMatching(HEX) as unknown,
+    });
+    expect(said.liveFromCopy).toEqual(said.liveHead);
+    expect(seqOf(said.copyHead)).toBeLessThan(seqOf(said.liveHead));
+  });
+
+  it('says a problem, so no rebase, where the copy is past the live head', async () => {
+    await copyWithOrganisation();
+    await organisationOn(theCopy());
+    const said = await heads();
+    expect(said.liveFromCopy).toEqual({ problem: expect.stringMatching(/^anchor at \d+$/) as unknown });
+  });
+
+  it('says a problem, so no rebase, where the copy took another branch, though shorter than live', async () => {
+    await copyWithOrganisation();
+    await organisationOn(theCopy());
+    await organisationOn(live);
+    await organisationOn(live);
+    const said = await heads();
+    expect(seqOf(said.copyHead)).toBeLessThan(seqOf(said.liveHead));
+    expect(said.liveFromCopy).toEqual({ problem: expect.stringMatching(/^anchor at \d+$/) as unknown });
   });
 });

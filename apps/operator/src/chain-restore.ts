@@ -179,7 +179,7 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
       headReplaced: plan.head !== undefined,
       forkDiscarded: plan.forkDiscarded,
       endsAt: plan.endsAt.seq.toString(),
-      // The repaired head's hash: with endsAt, the place a rebase names (4D2e E11).
+      // The repaired head's hash, kept as evidence: no rebase follows a repair (AT5, S194), which holds its anchor.
       endsAtHash: plan.endsAt.hash.toString('hex'),
     };
   }

@@ -38,8 +38,21 @@ export interface RestoreCheckReport {
   /** Organisations the copy lists, and the live server lists past them (made since the restore point). */
   readonly copyOrganizations: number;
   readonly newSinceCopy: number;
+  /**
+   * Each chain that held on both sides, with its live head checked whole (AT8): what a rebase's --seq and --hash name,
+   * after a whole restore too. Logged in lines of their own, never in the summary line (one per organisation).
+   */
+  readonly liveHeads: readonly LiveHead[];
   /** Everything wrong, each naming its chain and reason; none means the copy holds. */
   readonly problems: readonly string[];
+}
+
+export interface LiveHead {
+  /** The organisation whose chain it is, a whole field the log's scrub leaves as it is; null for the platform chain. */
+  readonly orgId: string | null;
+  readonly seq: bigint;
+  /** The head's hash, 64 lower-case hex digits. */
+  readonly hash: string;
 }
 
 export interface RestoreCheckSides {
@@ -74,10 +87,12 @@ export async function checkRestoredCopy({ copy, live, keys }: RestoreCheckSides)
   const problems: string[] = [];
   let chainsChecked = 0;
   let chainsHeld = 0;
+  const liveHeads: LiveHead[] = [];
 
   /** One chain on both sides: its heads when it held on both, nothing when it didn't (a problem said). */
   const both = async (
     chain: string,
+    orgId: string | null,
     verify: (database: Database<OperatorTables>, anchor: AnchorPoint | undefined) => Promise<ChainReport>,
   ): Promise<{ readonly copySeq: bigint; readonly liveSeq: bigint } | undefined> => {
     chainsChecked += 1;
@@ -92,10 +107,11 @@ export async function checkRestoredCopy({ copy, live, keys }: RestoreCheckSides)
       return undefined;
     }
     chainsHeld += 1;
+    liveHeads.push({ orgId, seq: onLive.seq, hash: onLive.hash.toString('hex') });
     return { copySeq: onCopy.seq, liveSeq: onLive.seq };
   };
 
-  const heads = await both('platform', (database, anchor) => platform.verifyAlone(database, anchor));
+  const heads = await both('platform', null, (database, anchor) => platform.verifyAlone(database, anchor));
   let lists: readonly [string[], string[], string[]];
   try {
     lists = await Promise.all([
@@ -114,7 +130,7 @@ export async function checkRestoredCopy({ copy, live, keys }: RestoreCheckSides)
     if (!onList.has(orgId)) problems.push(`organisation ${orgId}: recorded as created on the copy, but not listed`);
   }
   for (const orgId of listed) {
-    await both(`organisation ${orgId}`, (database, anchor) => trail.verifyAlone(database, orgId, anchor));
+    await both(`organisation ${orgId}`, orgId, (database, anchor) => trail.verifyAlone(database, orgId, anchor));
     if (!onLive.has(orgId)) problems.push(`organisation ${orgId}: on the copy, but not listed live`);
   }
   return {
@@ -124,6 +140,7 @@ export async function checkRestoredCopy({ copy, live, keys }: RestoreCheckSides)
     platformLiveSeq: heads?.liveSeq ?? null,
     copyOrganizations: listed.length,
     newSinceCopy: liveListed.filter((orgId) => !onList.has(orgId)).length,
+    liveHeads,
     problems,
   };
 }

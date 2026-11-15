@@ -97,7 +97,7 @@ import {
 } from '@agentx/platform/storage';
 
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
-import { rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
+import { checkedHeads, rebaseChain, type RebaseOutcome, type RebaseTables } from './chain-rebase.ts';
 import { type AuditExportTables, exportAuditLog } from './audit-export.ts';
 import { azureBlobStore } from './azure-blob-store.ts';
 import { type CountingContactsTables, listCountingContacts } from './counting-contacts.ts';
@@ -861,13 +861,21 @@ async function onDrillSides(
   }
 }
 
+/** Chains' heads a restore-check line holds: as many as a logged list keeps (LOGGABLE_LIMITS.itemsPerArray). */
+const HEADS_PER_LINE = 50;
+
 /**
  * The restore drill's check (S78): the exit code, 0 only when the copy holds.
  * Nothing here raises the integrity alarm.
  */
 function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
   return onDrillSides(config, logger, RESTORE_CHECK, async (copy, live) => {
-    const report = await checkRestoredCopy({ copy, live, keys });
+    const { liveHeads, ...report } = await checkRestoredCopy({ copy, live, keys });
+    // Each chain's checked live head (AT8), a rebase's --seq and --hash: 10k organisations make 200 lines, well under
+    // a minute's cap for one event.
+    for (let at = 0; at < liveHeads.length; at += HEADS_PER_LINE) {
+      logger.info('operator.restore_check_heads', { heads: liveHeads.slice(at, at + HEADS_PER_LINE) });
+    }
     // The logger keeps the first 50 problems (LOGGABLE_LIMITS); the count says how many in all.
     const line = { ...report, problemCount: report.problems.length };
     if (report.problems.length > 0) {
@@ -954,12 +962,16 @@ async function chainRecovery(
       return 1;
     }
     if (!plan.ok) {
+      // Both heads, checked whole (AT8): the live one is a rebase's --seq and --hash where the events past it are lost
+      // for good; whether the live chain grows on from the copy's says whether this copy still holds some of them.
+      const heads = await checkedHeads(copy, live, keys, { kind: 'organisation', orgId });
       log.error('operator.chain_recovery_refused', {
         planId,
         discardFork,
         reason: plan.reason,
         seq: plan.seq,
         problem: plan.problem ?? null,
+        ...heads,
       });
       return 1;
     }
