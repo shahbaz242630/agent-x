@@ -3,7 +3,9 @@
 // made once in the hand-off's Tx A and read through its signed state.
 export {
   INSTRUCTIONS,
+  instructionFrom,
   instructionOf,
+  type InstructionRecord,
   instructionOfRequest,
   intentHashOf,
   makeInstruction,

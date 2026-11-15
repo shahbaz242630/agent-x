@@ -16,7 +16,9 @@ describe('contradicts: a settled payment the bank goes back on (rail map §4)', 
     ['FAILED', ['PROCESSING', 'SUCCEEDED']],
     ['CANCELLED', ['PROCESSING', 'SUCCEEDED']],
   ] as const)('a %s payment is contradicted by %j alone', (status, by) => {
-    expect(STATES.filter((state) => contradicts(status, state))).toEqual(STATES.filter((state) => by.includes(state)));
+    expect(STATES.filter((state) => contradicts(status, state))).toEqual(
+      STATES.filter((state) => (by as readonly PaymentState[]).includes(state)),
+    );
   });
 
   it('gives a bank rejection the same verdict proven or not, for every settled status', () => {

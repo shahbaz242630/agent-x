@@ -18,7 +18,14 @@ export {
   type PaymentMoved,
   settlePayment,
 } from './infrastructure/payment-outcome.ts';
-export { CONTRADICTING, contradictedNow, contradicts } from './infrastructure/contradiction.ts';
+export { contradicts } from './infrastructure/contradiction.ts';
+export {
+  MOST_PAYMENTS_A_PAGE,
+  paymentOf,
+  type PaymentRecord,
+  type PaymentsAsked,
+  paymentsPage,
+} from './infrastructure/payments-page.ts';
 export {
   MARK_FAILED_AFTER_MS,
   type MarkFailed,

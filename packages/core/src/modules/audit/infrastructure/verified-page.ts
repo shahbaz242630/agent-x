@@ -56,6 +56,14 @@ export interface PageShape {
   readonly rows: string;
   readonly statuses?: readonly string[];
   readonly order?: 'oldest' | 'newest';
+  /**
+   * The page's row IDs listed some other way than by `statuses` (a payment's
+   * exceptions, Phase 6 C1), in place of signedRowIds: the organisation's
+   * rows after `after` in the page's order, at most `limit` + 1, the one past
+   * the page telling there is a next. Each is still verified, so none passes
+   * unbelieved.
+   */
+  readonly ids?: (after: string | null, limit: number) => Promise<readonly string[]>;
 }
 
 /**
@@ -78,13 +86,15 @@ export async function verifiedPage<Item>(
   table: SignedStateTable,
   orgId: string,
   { after, limit }: PageAsked,
-  { most, rows, statuses, order }: PageShape,
+  { most, rows, statuses, order, ids: listed }: PageShape,
   show: (verified: readonly PageRow[]) => PageShown<Item> | Promise<PageShown<Item>>,
 ): Promise<VerifiedPage<Item>> {
   if (!Number.isInteger(limit) || limit < 1 || limit > most) {
     throw new RangeError(`A page is 1 to ${String(most)} ${rows}`);
   }
-  const ids = await signedRowIds(tx, table, orgId, limit, after, statuses ?? null, order);
+  const ids = listed
+    ? await listed(after, limit)
+    : await signedRowIds(tx, table, orgId, limit, after, statuses ?? null, order);
   const page = ids.slice(0, limit);
   const checks = await states.pageStates(tx, table, orgId, page);
   const verified: PageRow[] = [];

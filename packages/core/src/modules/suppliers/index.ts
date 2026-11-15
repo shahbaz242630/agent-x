@@ -74,6 +74,7 @@ export {
   VERIFIER_RECORDED,
   type VersionCheck,
   type VersionRecord,
+  versionsNamed,
   verifySupplier,
   changesEnteredSince,
   versionOf,

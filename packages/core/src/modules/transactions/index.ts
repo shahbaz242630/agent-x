@@ -23,6 +23,8 @@ export {
   TRANSACTIONS,
   transactionDueAfter,
   transactionDueNow,
+  transactionFrom,
   transactionOf,
+  type TransactionRecord,
 } from './infrastructure/transactions.ts';
 export type { PaymentsTables, TransactionsTables } from './infrastructure/tables.ts';

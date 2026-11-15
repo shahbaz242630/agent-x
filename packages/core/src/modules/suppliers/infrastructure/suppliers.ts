@@ -931,14 +931,19 @@ export async function versionOf(
   return versionIn(key.id, await states.verifiedState(tx, SUPPLIER_VERSIONS, key, 'share'), supplierId);
 }
 
-/** The version its check holds, found only as a version of `supplierId` (versionOf). */
-function versionIn(id: string, state: StateCheck, supplierId: string): VersionCheck {
-  if (state.outcome !== 'verified') return state;
-  const version = versionRecordOf(id.toLowerCase(), state.fields);
-  // The table's checks hold each field to its kind, and the seal to what was written.
+/** The version a verified state holds: the table's checks hold each field to its kind, and the seal to what was written. */
+function versionVerified(id: string, fields: ReadonlyMap<string, string | null>): VersionRecord {
+  const version = versionRecordOf(id, fields);
   if (version === undefined) {
     throw new Error(`A verified supplier version holds a field that isn't one of its own: ${id}`);
   }
+  return version;
+}
+
+/** The version its check holds, found only as a version of `supplierId` (versionOf). */
+function versionIn(id: string, state: StateCheck, supplierId: string): VersionCheck {
+  if (state.outcome !== 'verified') return state;
+  const version = versionVerified(id.toLowerCase(), state.fields);
   if (version.supplierId !== supplierId.toLowerCase()) return { outcome: 'missing' };
   return { outcome: 'found', version };
 }
@@ -1121,6 +1126,39 @@ export async function suppliersNamed(
   if (shown.outcome === 'tampered') return shown;
   for (const id of shown.unchecked ?? []) stuck.add(id);
   return { outcome: 'named', suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])), stuck };
+}
+
+/**
+ * The supplier versions named, verified together (each locked `share`), by ID
+ * in lower case, in the caller's transaction, which must be withSignedStates'
+ * for the organisation: for a list naming the versions its own verified rows
+ * point to (the details each payment was handed off to pay, Phase 6 C1), so
+ * one missing is a bug and throws. One that can't be checked now is in
+ * `stuck` (A1b: the list shows the rest); tampered with, at the first that is.
+ */
+export async function versionsNamed(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<
+  | {
+      readonly outcome: 'named';
+      readonly versions: ReadonlyMap<string, VersionRecord>;
+      readonly stuck: ReadonlySet<string>;
+    }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const checks = await states.pageStates(tx, SUPPLIER_VERSIONS, orgId, ids);
+  const versions = new Map<string, VersionRecord>();
+  const stuck = new Set<string>();
+  for (const [id, check] of checks) {
+    if (check.outcome === 'tampered') return check;
+    if (check.outcome === 'missing') throw new Error(`A supplier version a verified row names is missing: ${id}`);
+    if (check.outcome === 'backlog') stuck.add(id);
+    else versions.set(id, versionVerified(id, check.fields));
+  }
+  return { outcome: 'named', versions, stuck };
 }
 
 /**
