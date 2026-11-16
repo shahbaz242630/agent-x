@@ -11,6 +11,7 @@ import { api, isIntegrityFailed, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
 import type { Role } from './session.tsx';
 import { t } from './text.ts';
+import { isVisibleName, unitsMost } from './visible-name.ts';
 
 /** What an agent's keys may be given, as the API names them (SCOPES). */
 export const SCOPES = ['requests:read', 'requests:write', 'sources:read', 'suppliers:read'] as const;
@@ -77,38 +78,11 @@ export function useMembers(organization: string) {
 
 /** The most characters an agent's name may have (the API's MAX_NAME, counted in code points, as the table does). */
 const NAME_MOST = 100;
-/**
- * The most UTF-16 units such a name can take, which a field's maxLength counts: two for a character beyond the
- * basic plane (an emoji), so a valid name of 100 such characters can still be typed; the 100 is checked in code.
- */
-export const NAME_UNITS_MOST = NAME_MOST * 2;
-// The API's own rules for a visible name, as packages/core/src/shared-kernel/visible-name.ts has them, word for word:
-// what may not show anywhere; a joiner allowed only where a script needs it to shape a word; something readable; no
-// mark first nor five piled up.
-const INVISIBLE = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Script=Braille}]/u;
-const JOINER_IN_A_WORD =
-  /(?<=\p{M})\p{Join_Control}(?=[\p{L}\p{M}])|(?<=[\p{L}\p{M}])\p{Join_Control}(?=\p{M})|(?<=\p{Script=Arabic})\p{Join_Control}(?=\p{Script=Arabic})/gu;
-const JOINERS = /\p{Join_Control}/gu;
-const READABLE = /[\p{L}\p{N}]/u;
-const STACKED = /(?:^\p{M})|\p{M}{5}/u;
+/** The most UTF-16 units such a name can take, which a field's maxLength counts (unitsMost). */
+export const NAME_UNITS_MOST = unitsMost(NAME_MOST);
 
-/**
- * Whether a name keeps the API's rules for an agent's (isAgentName), checked
- * before anything is sent: 1 to 100 characters, a letter or digit, no space at
- * either end, nothing invisible, no pile of marks. The API checks again.
- */
-export function isAgentName(name: string): boolean {
-  const composed = name.normalize('NFC');
-  const length = Array.from(composed).length;
-  return (
-    length > 0 &&
-    length <= NAME_MOST &&
-    composed.trim() === composed &&
-    READABLE.test(composed) &&
-    !INVISIBLE.test(composed.replace(JOINER_IN_A_WORD, '')) &&
-    !STACKED.test(composed.replace(JOINERS, ''))
-  );
-}
+/** Whether a name keeps the API's rules for an agent's (isAgentName), checked before anything is sent; the API checks again. */
+export const isAgentName = (name: string): boolean => isVisibleName(name, NAME_MOST);
 
 /** Whether a key still works: not revoked, and not past its expiry. */
 export const isLive = (key: AgentKey, now = Date.now()): boolean =>

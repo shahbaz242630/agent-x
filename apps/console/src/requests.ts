@@ -177,8 +177,8 @@ export function useTicking(): void {
   }, []);
 }
 
-/** What's left before a waiting request expires, as its row and page say it. */
-function leftWords(expiresAt: string): string {
+/** What's left before `expiresAt`, as a waiting request's row and page say it, and a supplier's cooling-off (6D2). */
+export function leftWords(expiresAt: string): string {
   const left = leftText(expiresAt);
   if (left === null) return t('approvals.left.past');
   return 'hours' in left

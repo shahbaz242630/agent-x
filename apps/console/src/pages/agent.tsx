@@ -36,7 +36,7 @@ import { Said, useChange } from './change.tsx';
 import { Loading, NotShown } from './failed.tsx';
 
 /** A member as the console can name them: the API gives a role and IDs, no name. */
-function memberText(member: Member | undefined, me: string): string {
+export function memberText(member: Member | undefined, me: string): string {
   if (member === undefined) return t('agents.memberUnknown');
   const role = t(`choose.role.${member.role}`);
   return member.userId.toLowerCase() === me ? `${role} ${t('payments.you')}` : role;
