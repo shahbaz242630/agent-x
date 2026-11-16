@@ -138,7 +138,7 @@ export function knownMinorDigits(currency: string): number | undefined {
 }
 
 /** A currency's minor digits as Intl knows them (AED: 2); 2 for a code it doesn't. */
-const minorDigits = (currency: string): number => knownMinorDigits(currency) ?? 2;
+export const minorDigits = (currency: string): number => knownMinorDigits(currency) ?? 2;
 
 /**
  * An amount as a statement shows it: `AED 2,500.00`. Built from the whole

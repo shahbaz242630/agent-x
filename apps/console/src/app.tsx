@@ -29,9 +29,11 @@ import { MandateList } from './pages/mandates.tsx';
 import { More } from './pages/more.tsx';
 import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
+import { PolicyPage } from './pages/policy.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
+import { SimulatePage } from './pages/simulate.tsx';
 import { SupplierPage } from './pages/supplier.tsx';
 import { AddSupplier } from './pages/supplier-add.tsx';
 import {
@@ -140,6 +142,18 @@ function Payment(): ReactElement {
   return <PaymentPage key={id} id={id} />;
 }
 
+/** A mandate's own policy (6D3b): `/more/mandates/<id>/policy`, the ID the address's fourth part. */
+function MandatePolicy(): ReactElement {
+  const id = useIdInAddress(3);
+  return <PolicyPage key={id} target={{ kind: 'mandate', mandateId: id }} />;
+}
+
+/** The simulator for a mandate's agent (6D3b): `/more/mandates/<id>/simulate`. */
+function Simulate(): ReactElement {
+  const id = useIdInAddress(3);
+  return <SimulatePage key={id} mandateId={id} />;
+}
+
 const routes = root.addChildren([
   createRoute({
     getParentRoute: () => root,
@@ -172,6 +186,13 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more/mandates/$id/new-version', component: NewVersionAt }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
+  createRoute({
+    getParentRoute: () => root,
+    path: '/more/policy',
+    component: () => <PolicyPage target={{ kind: 'organization' }} />,
+  }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates/$id/policy', component: MandatePolicy }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates/$id/simulate', component: Simulate }),
 ]);
 
 /** The console's queries: a 401 anywhere means the session is gone, so the session reads as none. */
