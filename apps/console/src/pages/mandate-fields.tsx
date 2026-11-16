@@ -242,7 +242,7 @@ export function TermsFields({
         onChoose={(fundingSourceId) => {
           set({ fundingSourceId });
         }}
-        broken={broken('source')}
+        broken={broken('source') ?? broken('currency')}
       />
       {sources.length === 0 && <p className="muted">{t('mandates.form.noSources')}</p>}
       <Choices

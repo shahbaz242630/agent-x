@@ -9,6 +9,7 @@ import {
   amountMinor,
   amountTyped,
   carryIn,
+  currencyDigits,
   decidesTheDraft,
   draftBody,
   draftFailure,
@@ -76,6 +77,19 @@ describe('an amount typed in dirhams (6D3a)', () => {
     expect(amountMinor(typed)).toBeUndefined();
   });
 
+  it('reads a currency by its own minor digits', () => {
+    expect(amountMinor('2500', 0)).toBe(2500);
+    expect(amountMinor('2500.5', 0)).toBeUndefined();
+    expect(amountMinor('1.234', 3)).toBe(1234);
+    expect(amountMinor('1.2345', 3)).toBeUndefined();
+    expect(amountTyped(2500, 0)).toBe('2500');
+    expect(amountTyped(1234, 3)).toBe('1.234');
+    expect(currencyDigits('AED')).toBe(2);
+    expect(currencyDigits('JPY')).toBe(0);
+    expect(currencyDigits('KWD')).toBe(3);
+    expect(currencyDigits('A1')).toBeUndefined();
+  });
+
   it('shows whole fils to change as they read back, never grouped', () => {
     expect(amountTyped(250_050)).toBe('2500.50');
     expect(amountTyped(1)).toBe('0.01');
@@ -135,6 +149,19 @@ describe('a version’s terms as typed', () => {
     const future = { ...ends, endsAt: '2099-01-01T10:30' };
     expect(termsProblems(future, NOW)).toEqual([]);
     expect(termsBody(future, 'AED').endsAt).toBe(new Date('2099-01-01T10:30').toISOString());
+  });
+
+  it('checks and sends the amounts by the bank account’s currency, and refuses one it can’t read', () => {
+    expect(termsProblems(TERMS, NOW, 'JPY')).toEqual(['perOrder', 'threshold']);
+    const yen = { ...TERMS, perOrder: '2,500', threshold: '1000' };
+    expect(termsProblems(yen, NOW, 'JPY')).toEqual([]);
+    expect(termsBody(yen, 'JPY')).toMatchObject({
+      currency: 'JPY',
+      perOrderLimitMinor: 2500,
+      monthlyLimitMinor: 20_000,
+    });
+    expect(termsProblems(TERMS, NOW, 'A1')).toEqual(['currency']);
+    expect(() => termsBody(TERMS, 'A1')).toThrow('Checked by termsProblems');
   });
 
   it('refuses to send terms not checked first', () => {
@@ -202,6 +229,10 @@ describe('a version to change for a new one', () => {
     expect(termsFrom({ ...version, endsAt: null }).endsAt).toBe('');
   });
 
+  it('fills in amounts by the version’s own currency', () => {
+    expect(termsFrom({ ...version, currency: 'JPY', perOrderLimitMinor: 2500 }).perOrder).toBe('2500');
+  });
+
   it('shows an end in the browser’s own zone, to the minute', () => {
     expect(new Date(localTyped('2099-01-01T06:30:00.000Z')).toISOString()).toBe('2099-01-01T06:30:00.000Z');
   });
@@ -241,6 +272,10 @@ describe('a draft sent with a held key', () => {
     expect(draftFailure(refused(503, 'INTEGRITY_FAILED'), false)).toContain('integrity check');
     expect(draftFailure(refused(409, 'STATEMENT_CHANGED'), true)).toContain('Stop trying first');
     expect(draftFailure(refused(429, 'RATE_LIMITED'), true)).toMatch(/too many tries.*still held/s);
+    // A held draft's body is checked before its key: refused as sent again, the first try may still stand.
+    expect(decidesTheDraft(refused(400, 'BAD_REQUEST'), true)).toBe(true);
+    expect(draftFailure(refused(400, 'BAD_REQUEST'), true)).toContain('the first try may have made it');
+    expect(draftFailure(refused(400, 'BAD_REQUEST'), false)).toContain("couldn't accept what was entered");
   });
 });
 

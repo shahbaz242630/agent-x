@@ -9,6 +9,10 @@
 //   what happens to the pending requests; resume; revoke, which can't be undone.
 // - The over-limit choice on the version in force, in the API's `over_limit`
 //   words, none picked.
+// Each dialog is pinned to the mandate as it was when opened: it shows and
+// sends that alone, and if a re-read finds the mandate changed meanwhile (a
+// draft replaced or accepted, its status or choice moved) it says so and can't
+// be confirmed, so a passkey never signs what the admin didn't read.
 // Only an admin is shown them; the API checks again whatever is pressed.
 import { useState } from 'react';
 
@@ -22,7 +26,6 @@ import {
   type MandateDetails,
   mandateAt,
   mandateRefusal,
-  type MandateVersion,
 } from '../mandates.ts';
 import { useActing } from '../session.tsx';
 import { type Asked, askFirst, byPasskey, changeAt } from '../step-up.ts';
@@ -32,19 +35,28 @@ import { TermsTable } from './mandate-terms.tsx';
 
 type Move = 'suspend' | 'resume' | 'revoke';
 
-type Open =
-  | { readonly kind: 'none' }
-  | { readonly kind: 'accept' }
+/** An action's dialog, with the mandate as it was shown when the dialog opened (`seen`). */
+type Opened =
+  | { readonly kind: 'accept'; readonly seen: MandateDetails }
   | {
       readonly kind: 'plan';
+      readonly seen: MandateDetails;
       readonly asked: Asked;
       readonly plan: readonly Carried[];
       readonly later: number;
       readonly version?: number | undefined;
     }
-  | { readonly kind: 'overLimit' }
-  | { readonly kind: Move };
+  | { readonly kind: 'overLimit'; readonly seen: MandateDetails }
+  | { readonly kind: Move; readonly seen: MandateDetails };
+type Open = { readonly kind: 'none' } | Opened;
 const NONE: Open = { kind: 'none' };
+
+/** What a dialog's words depend on: its status, its version in force and choice, and its waiting draft. */
+const stateOf = (mandate: MandateDetails): string =>
+  [mandate.status, mandate.current?.id, mandate.current?.overLimit, mandate.pending?.id].join('/');
+
+/** Whether the mandate read now is no longer the one a dialog showed. */
+const changedSince = (seen: MandateDetails, now: MandateDetails): boolean => stateOf(seen) !== stateOf(now);
 
 /** The moves each status allows: suspend one in force, resume one suspended, revoke any not ended. */
 function movesOf(mandate: MandateDetails): readonly Move[] {
@@ -82,11 +94,19 @@ function Plan({ plan, later }: { readonly plan: readonly Carried[]; readonly lat
   );
 }
 
-/** The dialog each opened action shows. */
-function Opened({
+/** Said in a dialog whose mandate changed since it opened: it can't be confirmed. */
+function Changed({ changed }: { readonly changed: boolean }) {
+  return changed ? (
+    <p className="notice" role="alert">
+      {t('mandates.changedSince')}
+    </p>
+  ) : null;
+}
+
+/** The dialog each opened action shows, from the mandate as it was when opened. */
+function Dialog({
   open,
-  mandate,
-  pending,
+  changed,
   busy,
   onCancel,
   onAccept,
@@ -94,24 +114,32 @@ function Opened({
   onOverLimit,
   onPlan,
 }: {
-  readonly open: Exclude<Open, { kind: 'none' }>;
-  readonly mandate: MandateDetails;
-  readonly pending: MandateVersion | null;
+  readonly open: Opened;
+  readonly changed: boolean;
   readonly busy: boolean;
   readonly onCancel: () => void;
-  readonly onAccept: (choice: string, version?: number) => void;
-  readonly onMove: (move: Move, choice: string, version?: number) => void;
-  readonly onOverLimit: (choice: string, version?: number) => void;
+  readonly onAccept: (seen: MandateDetails, choice: string, version?: number) => void;
+  readonly onMove: (seen: MandateDetails, move: Move, choice: string, version?: number) => void;
+  readonly onOverLimit: (seen: MandateDetails, choice: string, version?: number) => void;
   readonly onPlan: (asked: Asked, version?: number) => void;
 }) {
-  const common = { busy, onCancel, confirmLabel: t('brakes.passkeyConfirm') };
-  const shown = mandate.current?.overLimit ?? 'not-chosen';
+  const { seen } = open;
+  const common = { busy, onCancel, ready: !changed, confirmLabel: t('brakes.passkeyConfirm') };
+  const notice = <Changed changed={changed} />;
   switch (open.kind) {
     case 'accept': {
-      const words = mandate.current === null ? { text: t('mandates.accept.firstText') } : { statement: 'supersede' };
+      const words = seen.current === null ? { text: t('mandates.accept.firstText') } : { statement: 'supersede' };
       return (
-        <Confirm {...common} {...words} title={t('mandates.accept.title')} onConfirm={onAccept}>
-          <TermsTable current={null} pending={pending} />
+        <Confirm
+          {...common}
+          {...words}
+          title={t('mandates.accept.title')}
+          onConfirm={(choice, version) => {
+            onAccept(seen, choice, version);
+          }}
+        >
+          {notice}
+          <TermsTable current={null} pending={seen.pending} />
         </Confirm>
       );
     }
@@ -125,13 +153,26 @@ function Opened({
             onPlan(open.asked, open.version);
           }}
         >
+          {notice}
           <Plan plan={open.plan} later={open.later} />
         </Confirm>
       );
     case 'overLimit':
       return (
-        <Confirm {...common} statement="over_limit" title={t('mandates.overLimit.title')} onConfirm={onOverLimit}>
-          <p className="muted">{t('mandates.overLimit.now', { choice: t(`mandates.overLimit.${shown}`) })}</p>
+        <Confirm
+          {...common}
+          statement="over_limit"
+          title={t('mandates.overLimit.title')}
+          onConfirm={(choice, version) => {
+            onOverLimit(seen, choice, version);
+          }}
+        >
+          {notice}
+          <p className="muted">
+            {t('mandates.overLimit.now', {
+              choice: t(`mandates.overLimit.${seen.current?.overLimit ?? 'not-chosen'}`),
+            })}
+          </p>
         </Confirm>
       );
     case 'suspend':
@@ -141,9 +182,10 @@ function Opened({
           statement="suspend"
           title={t('mandates.move.suspend.title')}
           onConfirm={(choice, version) => {
-            onMove('suspend', choice, version);
+            onMove(seen, 'suspend', choice, version);
           }}
         >
+          {notice}
           <p>{t('mandates.move.suspend.what')}</p>
         </Confirm>
       );
@@ -155,12 +197,18 @@ function Opened({
           text={t(`mandates.move.${open.kind}.text`)}
           title={t(`mandates.move.${open.kind}.title`)}
           onConfirm={() => {
-            onMove(open.kind, 'confirm');
+            onMove(seen, open.kind, 'confirm');
           }}
-        />
+        >
+          {notice}
+        </Confirm>
       );
   }
 }
+
+/** A change's label, naming the mandate by its purpose as shown. */
+const labelOf = (seen: MandateDetails, key: 'accept' | 'overLimit' | Move) =>
+  t(`mandates.label.${key}`, { purpose: (seen.current ?? seen.pending)?.purpose ?? '' });
 
 /** The mandate's actions for an admin: accept the waiting draft, the over-limit choice, and its moves. */
 export function MandateActions({ mandate }: { readonly mandate: MandateDetails }) {
@@ -175,20 +223,18 @@ export function MandateActions({ mandate }: { readonly mandate: MandateDetails }
   };
   const ended = isEnded(mandate.status);
   const acceptable = pending !== null && !ended;
-  const label = (key: 'accept' | 'overLimit' | Move) =>
-    t(`mandates.label.${key}`, { purpose: (current ?? pending)?.purpose ?? '' });
 
   // The confirm takes no version ID (only the ask does): left out of the confirm's JSON by naming it undefined.
   const stepUp = (asked: Asked, version?: number) =>
     asked.stepUp(undefined, { versionId: undefined, statementVersion: version });
-  const accept = (choice: string, version?: number) => {
-    if (pending === null) return;
-    if (current === null) {
+  // Only the draft shown is ever asked for: the API then binds the passkey to its terms.
+  const accept = (seen: MandateDetails, choice: string, version?: number) => {
+    const shown = seen.pending;
+    if (shown === null) return;
+    const label = labelOf(seen, 'accept');
+    if (seen.current === null) {
       void run(
-        () =>
-          byPasskey(`${at}/accept`, label('accept'), { versionId: pending.id }, organization.id, {
-            versionId: undefined,
-          }),
+        () => byPasskey(`${at}/accept`, label, { versionId: shown.id }, organization.id, { versionId: undefined }),
         { after: close },
       );
       return;
@@ -196,18 +242,13 @@ export function MandateActions({ mandate }: { readonly mandate: MandateDetails }
     void run(
       async () => {
         const asked = await askFirst(
-          changeAt(
-            `${at}/accept`,
-            label('accept'),
-            { versionId: pending.id, pendingRequests: choice },
-            organization.id,
-          ),
+          changeAt(`${at}/accept`, label, { versionId: shown.id, pendingRequests: choice }, organization.id),
         );
         if ('done' in asked) throw new ApiError(200, 'STEP_UP_NOT_ASKED');
         const { plan, later } = carryIn(asked.answer);
         if (choice !== 'carry' || (plan.length === 0 && later === 0)) return stepUp(asked, version);
         // A carry's plan is shown before the passkey: confirming applies exactly it.
-        setOpen({ kind: 'plan', asked, plan, later, version });
+        setOpen({ kind: 'plan', seen, asked, plan, later, version });
         return 'held';
       },
       { after: close },
@@ -215,33 +256,33 @@ export function MandateActions({ mandate }: { readonly mandate: MandateDetails }
   };
   const plan = (asked: Asked, version?: number) =>
     void run(() => Promise.resolve(stepUp(asked, version)), { after: close });
-  const move = (kind: Move, choice: string, version?: number) =>
+  const move = (seen: MandateDetails, kind: Move, choice: string, version?: number) =>
     void run(
       () =>
         byPasskey(
           `${at}/${kind}`,
-          label(kind),
+          labelOf(seen, kind),
           kind === 'suspend' ? { pendingRequests: choice } : {},
           organization.id,
           { statementVersion: version },
         ),
       { after: close },
     );
-  const overLimit = (choice: string, version?: number) =>
+  const overLimit = (seen: MandateDetails, choice: string, version?: number) =>
     void run(
       () =>
-        byPasskey(`${at}/over-limit`, label('overLimit'), { overLimit: choice }, organization.id, {
+        byPasskey(`${at}/over-limit`, labelOf(seen, 'overLimit'), { overLimit: choice }, organization.id, {
           statementVersion: version,
         }),
       { after: close },
     );
-  const opener = (next: Open, words: string, primary = false) => (
+  const opener = (kind: Opened['kind'] & ('accept' | 'overLimit' | Move), words: string, primary = false) => (
     <button
       type="button"
       className={primary ? 'primary' : 'secondary'}
       disabled={busy}
       onClick={() => {
-        setOpen(next);
+        setOpen({ kind, seen: mandate });
       }}
     >
       {words}
@@ -252,18 +293,17 @@ export function MandateActions({ mandate }: { readonly mandate: MandateDetails }
     <section className="stack" aria-labelledby="mandate-actions">
       <h2 id="mandate-actions">{t('mandates.actions')}</h2>
       {acceptable && mandate.status === 'SUSPENDED' && <p className="muted">{t('mandates.accept.resumeFirst')}</p>}
-      {acceptable && mandate.status !== 'SUSPENDED' && opener({ kind: 'accept' }, t('mandates.accept.open'), true)}
-      {current !== null && !ended && opener({ kind: 'overLimit' }, t('mandates.overLimit.open'))}
+      {acceptable && mandate.status !== 'SUSPENDED' && opener('accept', t('mandates.accept.open'), true)}
+      {current !== null && !ended && opener('overLimit', t('mandates.overLimit.open'))}
       {movesOf(mandate).map((kind) => (
-        <span key={kind}>{opener({ kind }, t(`mandates.move.${kind}.open`))}</span>
+        <span key={kind}>{opener(kind, t(`mandates.move.${kind}.open`))}</span>
       ))}
       {ended && <p className="muted">{t('mandates.endedNote')}</p>}
       <Said said={said} />
       {open.kind !== 'none' && (
-        <Opened
+        <Dialog
           open={open}
-          mandate={mandate}
-          pending={pending}
+          changed={changedSince(open.seen, mandate)}
           busy={busy}
           onCancel={close}
           onAccept={accept}

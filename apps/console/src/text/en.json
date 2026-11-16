@@ -828,5 +828,9 @@
   "mandates.refused.RATE_LIMITED": "There have been too many tries just now. Nothing was changed. Wait a moment and try again.",
   "mandates.refused.BAD_REQUEST": "Agent X couldn't accept what was entered, so nothing was changed. Check every term and try again.",
   "mandates.refused.FORBIDDEN": "Your role in this organisation can't do this. Ask an admin.",
-  "mandates.refused.NOT_FOUND": "This mandate, agent or bank account can't be found in this organisation any more. Nothing was changed."
+  "mandates.refused.NOT_FOUND": "This mandate, agent or bank account can't be found in this organisation any more. Nothing was changed.",
+  "mandates.changedSince": "This mandate changed while this was open: its draft was replaced or accepted, or its status or choice moved. Nothing was sent. Cancel and read it again.",
+  "mandates.form.moreAgents": "Show more agents",
+  "mandates.form.broken.currency": "Amounts can't be typed in this bank account's currency here. Choose another account, or call support.",
+  "mandates.held.badRequest": "Agent X couldn't take the draft as it was sent again (its end may have passed since the first try), but the first try may have made it. Check the Mandates list before drafting again."
 }

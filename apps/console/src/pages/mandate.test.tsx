@@ -203,10 +203,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** The query cache of the page last opened: a test reads its data again, as a window's focus would. */
+let queries = createQueries();
+
 function open(path: string) {
   const history = createMemoryHistory({ initialEntries: [path] });
-  render(<App queries={createQueries()} router={createConsoleRouter(history)} />);
+  queries = createQueries();
+  render(<App queries={queries} router={createConsoleRouter(history)} />);
   return history;
+}
+
+/** The mandate read again with `shown` while a dialog is open. */
+async function readAgainAs(shown: Record<string, unknown>) {
+  answer(`GET /v1/mandates/${MANDATE}`, { status: 200, body: shown });
+  await queries.invalidateQueries();
 }
 
 const dialog = () => within(screen.getByRole('dialog'));
@@ -450,6 +460,48 @@ describe('accepting the waiting draft', () => {
     expect(goTo).not.toHaveBeenCalled();
   });
 
+  it('is pinned to the draft shown: one replaced while the dialog is open can’t be accepted', async () => {
+    as('admin', mandate({ pending: DRAFT_VERSION }));
+    answer(`POST /v1/mandates/${MANDATE}/accept`, ASKED);
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Accept the waiting draft' }));
+    await userEvent.click(await dialog().findByRole('radio', { name: 'Pending requests are cancelled.' }));
+    const go = dialog().getByRole('button', { name: 'Continue with passkey' });
+    expect(go).toHaveProperty('disabled', false);
+
+    const replaced = version({ id: '0199a0f0-0000-7000-8000-000000000103', version: 3, perOrderLimitMinor: 900_000 });
+    await readAgainAs(mandate({ pending: replaced }));
+
+    expect(await dialog().findByText(/This mandate changed while this was open/)).toBeDefined();
+    // Still the terms first shown, never the new ones, and nothing can be confirmed.
+    expect(dialog().getByText('AED 3,000.00')).toBeDefined();
+    expect(dialog().queryByText('AED 9,000.00')).toBeNull();
+    expect(go).toHaveProperty('disabled', true);
+    await userEvent.click(go);
+    expect(posted(`/v1/mandates/${MANDATE}/accept`)).toHaveLength(0);
+  });
+
+  it('is pinned to the draft shown: one accepted meanwhile can’t be accepted again', async () => {
+    as('admin', mandate({ status: 'PENDING_ACCEPTANCE', current: null, pending: version() }));
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Accept the waiting draft' }));
+    await readAgainAs(mandate());
+    expect(await dialog().findByText(/This mandate changed while this was open/)).toBeDefined();
+    expect(dialog().getByRole('button', { name: 'Continue with passkey' })).toHaveProperty('disabled', true);
+  });
+
+  it('sends the draft shown, not one read since, when nothing it depends on moved', async () => {
+    as('admin', mandate({ status: 'PENDING_ACCEPTANCE', current: null, pending: version() }));
+    answer(`POST /v1/mandates/${MANDATE}/accept`, ASKED);
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Accept the waiting draft' }));
+    await readAgainAs(
+      mandate({ status: 'PENDING_ACCEPTANCE', current: null, pending: version(), timeZone: 'Asia/Dubai' }),
+    );
+    await userEvent.click(dialog().getByRole('button', { name: 'Continue with passkey' }));
+    expect(posted(`/v1/mandates/${MANDATE}/accept`)[0]?.body).toEqual({ versionId: version().id });
+  });
+
   it('says to resume a suspended mandate first', async () => {
     as('admin', mandate({ status: 'SUSPENDED', pending: DRAFT_VERSION }));
     open(`/more/mandates/${MANDATE}`);
@@ -518,6 +570,19 @@ describe('suspending, resuming, revoking and the over-limit choice', () => {
 
     expect(posted(`/v1/mandates/${MANDATE}/over-limit`)[0]?.body).toEqual({ overLimit: 'approval' });
     expect(kept()?.body).toEqual({ overLimit: 'approval', statementVersion: 1 });
+  });
+
+  it.each([
+    ['Suspend', { status: 'SUSPENDED' }],
+    ['Revoke', { status: 'REVOKED' }],
+    ['Change what happens above the limits', { current: version({ overLimit: 'approval' }) }],
+  ])('a %s dialog says the mandate changed while it was open, and can’t be confirmed', async (button, change) => {
+    as('admin');
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: button }));
+    await readAgainAs(mandate(change));
+    expect(await dialog().findByText(/This mandate changed while this was open/)).toBeDefined();
+    expect(dialog().getByRole('button', { name: 'Continue with passkey' })).toHaveProperty('disabled', true);
   });
 
   it('cancels a dialog without sending anything', async () => {
@@ -686,6 +751,106 @@ describe('drafting a mandate', () => {
     await userEvent.click(dialog().getByRole('button', { name: 'Stop trying' }));
     expect(await screen.findByRole('button', { name: 'Review' })).toBeDefined();
     expect(heldDraft({ user: ME, organization: ORG.id, mandate: null })).toBeUndefined();
+  });
+
+  it('forgets what was said of a held draft once the admin stops trying it', async () => {
+    as('admin');
+    answer('POST /v1/mandates', { status: 0 });
+    open('/more/mandates/new');
+    await fillDraft();
+    await confirmDraft();
+    expect(await screen.findByText(/isn't known yet whether the draft was made/)).toBeDefined();
+    await userEvent.click(screen.getByRole('button', { name: 'Stop trying' }));
+    await userEvent.click(dialog().getByRole('button', { name: 'Stop trying' }));
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeDefined();
+    expect(screen.queryByText(/isn't known yet whether the draft was made/)).toBeNull();
+  });
+
+  it('a held draft refused as sent again says the first try may have made it, and ends the hold', async () => {
+    as('admin');
+    answer('POST /v1/mandates', { status: 0 }, refused(400, 'BAD_REQUEST'));
+    open('/more/mandates/new');
+    await fillDraft();
+    await confirmDraft();
+    await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/the first try may have made it\. Check the Mandates list/)).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeDefined();
+    expect(heldDraft({ user: ME, organization: ORG.id, mandate: null })).toBeUndefined();
+  });
+
+  it('refuses to review amounts in a currency it can’t type them in', async () => {
+    as('admin');
+    answer('GET /v1/funding-sources', {
+      status: 200,
+      body: {
+        sources: [{ ...SOURCE_LISTED, controls: { ...SOURCE_LISTED.controls, currency: 'A1' } }],
+        next: null,
+        unchecked: [],
+      },
+    });
+    open('/more/mandates/new');
+    await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+    expect(screen.getByText(/Amounts can't be typed in this bank account's currency/)).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('pages on through the agents, leaves out suspended ones, and keeps an agent linked to but not listed yet', async () => {
+    const later = '0199a0f0-0000-7000-8000-0000000000a2';
+    const unlisted = '0199a0f0-0000-7000-8000-0000000000a9';
+    as('admin');
+    answer(
+      'GET /v1/agents',
+      {
+        status: 200,
+        body: {
+          agents: [
+            { id: AGENT, name: 'Buyer bot', status: 'ACTIVE' },
+            { id: unlisted.replace('a9', 'a8'), name: 'Stopped bot', status: 'SUSPENDED' },
+          ],
+          next: AGENT,
+          unchecked: [],
+        },
+      },
+      {
+        status: 200,
+        body: { agents: [{ id: later, name: 'Later bot', status: 'ACTIVE' }], next: null, unchecked: [] },
+      },
+    );
+    answer('POST /v1/mandates', { status: 201, body: mandate() });
+    open(`/more/mandates/new?agent=${unlisted}`);
+
+    expect(await screen.findByRole('radio', { name: unlisted })).toHaveProperty('checked', true);
+    expect(await screen.findByRole('radio', { name: `Buyer bot · ${AGENT}` })).toHaveProperty('checked', false);
+    expect(screen.queryByRole('radio', { name: /Stopped bot/ })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Show more agents' }));
+    expect(await screen.findByRole('radio', { name: `Later bot · ${later}` })).toBeDefined();
+
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Time zone its months are counted in' }),
+      'Asia/Dubai',
+    );
+    await userEvent.type(screen.getByRole('textbox', { name: 'Split check window, in hours' }), '24');
+    await userEvent.type(screen.getByRole('textbox', { name: 'What it is for' }), 'Office supplies');
+    await userEvent.type(screen.getByRole('textbox', { name: 'Most for one request, in AED' }), '2500');
+    await userEvent.type(screen.getByRole('textbox', { name: 'Most in a month, in AED' }), '20000');
+    await userEvent.type(screen.getByRole('textbox', { name: 'A person approves above, in AED' }), '1000');
+    await userEvent.click(await screen.findByRole('checkbox', { name: /Gulf Traders/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /Gulf Office LLC \(AE…6026\)/ }));
+    await userEvent.click(screen.getByRole('radio', { name: /^Check them/ }));
+    await userEvent.click(screen.getByRole('radio', { name: /^Strict/ }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Not until it is revoked' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+    // The confirm names the agent always: by its ID while no list read names it.
+    expect(dialog().getByText('Agent')).toBeDefined();
+    expect(dialog().getByText(unlisted)).toBeDefined();
+  });
+
+  it('ignores an agent link that names no agent ID', async () => {
+    as('admin');
+    open('/more/mandates/new?agent=not-an-id');
+    expect(await screen.findByRole('radio', { name: `Buyer bot · ${AGENT}` })).toHaveProperty('checked', false);
+    expect(screen.queryByRole('radio', { name: 'not-an-id' })).toBeNull();
   });
 
   it('says a first send’s refusal and keeps the form', async () => {

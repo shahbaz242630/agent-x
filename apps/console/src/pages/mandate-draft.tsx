@@ -57,7 +57,8 @@ type Body = Terms & { readonly agentId?: string; readonly timeZone?: string; rea
 function Summary({ body, agent }: { readonly body: Body; readonly agent?: string | undefined }) {
   const names = useNames();
   const rows: (readonly [TextKey, string])[] = [];
-  if (agent !== undefined) rows.push(['mandates.agent', agent]);
+  // A new mandate's agent always, by its ID while the Agents list read so far doesn't name it.
+  if (body.agentId !== undefined) rows.push(['mandates.agent', agent ?? body.agentId]);
   if (body.timeZone !== undefined) rows.push(['mandates.timeZone', body.timeZone]);
   if (body.splitWindowHours !== undefined) {
     rows.push(['mandates.splitWindow', t('mandates.hours', { hours: String(body.splitWindowHours) })]);
@@ -79,7 +80,7 @@ function Summary({ body, agent }: { readonly body: Body; readonly agent?: string
 function useDraftSend(whose: DraftWhose, path: string) {
   const { organization } = useActing();
   const navigate = useNavigate();
-  const { busy, said, run } = useChange(mandateRefusal);
+  const { busy, said, run, clear } = useChange(mandateRefusal);
   const [held, setShown] = useState(() => heldDraft(whose) ?? null);
   const hold = (tried: HeldDraft | null) => {
     holdDraft(whose, tried);
@@ -104,7 +105,12 @@ function useDraftSend(whose: DraftWhose, path: string) {
       },
       { ...(after !== undefined && { after }), refusal: (error) => draftFailure(error, retry) },
     );
-  return { busy, said, held, hold, send };
+  /** Stops trying a held draft: it, and what was said of it, are gone. */
+  const stop = () => {
+    hold(null);
+    clear();
+  };
+  return { busy, said, held, stop, send };
 }
 
 /** A draft sent with no answer: only the same request again, or a confirmed stop. */
@@ -180,7 +186,7 @@ function DraftFrame({
   readonly review: () => Body | undefined;
   readonly agent?: string | undefined;
 }) {
-  const { busy, said, held, hold, send } = useDraftSend(whose, path);
+  const { busy, said, held, stop, send } = useDraftSend(whose, path);
   const [confirming, setConfirming] = useState<Body | null>(null);
   const close = () => {
     setConfirming(null);
@@ -208,15 +214,7 @@ function DraftFrame({
           <Said said={said} />
         </>
       ) : (
-        <Held
-          held={held}
-          busy={busy}
-          said={said}
-          onRetry={() => void send(held, true)}
-          onStop={() => {
-            hold(null);
-          }}
-        />
+        <Held held={held} busy={busy} said={said} onRetry={() => void send(held, true)} onStop={stop} />
       )}
       {confirming !== null && (
         <Confirm
@@ -266,19 +264,35 @@ function MandateOwn({
 }) {
   const { organization } = useActing();
   const agents = useBrakeList('agents', organization.id);
-  const active = (agents.data?.pages ?? []).flatMap((page) => page.listed).filter(({ suspended }) => !suspended);
+  const active = (agents.data?.pages ?? [])
+    .flatMap((page) => page.listed)
+    .filter(({ suspended, ended }) => !suspended && !ended);
+  const options = active.map((agent) => [agent.id, `${agent.name} · ${agent.id}`] as const);
+  // One chosen by the agent page's link but not on a page read yet is kept, by its ID, as its bank account is.
+  const chosen = typed.agentId;
+  const unlisted = chosen !== null && !active.some(({ id }) => id === chosen);
   return (
     <>
       <Choices
         legend={t('mandates.form.agent')}
-        options={active.map((agent) => [agent.id, `${agent.name} · ${agent.id}`] as const)}
-        chosen={typed.agentId}
+        options={unlisted ? [...options, [chosen, chosen] as const] : options}
+        chosen={chosen}
         onChoose={(agentId) => {
           set({ agentId });
         }}
         broken={broken('agent')}
       />
-      {agents.isSuccess && active.length === 0 && <p className="muted">{t('mandates.form.noAgents')}</p>}
+      {agents.hasNextPage && (
+        <button
+          type="button"
+          className="secondary"
+          disabled={agents.isFetchingNextPage}
+          onClick={() => void agents.fetchNextPage()}
+        >
+          {t('mandates.form.moreAgents')}
+        </button>
+      )}
+      {agents.isSuccess && options.length === 0 && <p className="muted">{t('mandates.form.noAgents')}</p>}
       <label className="field" htmlFor="mandate-zone">
         {t('mandates.form.timeZone')}
       </label>
@@ -342,7 +356,7 @@ function DraftForm() {
     setProblems([]);
   };
   const review = () => {
-    const found = draftProblems(typed);
+    const found = draftProblems(typed, Date.now(), currency);
     // A source not listed can't be told apart from one the API would refuse: chosen again from the list.
     if (currency === undefined && !found.includes('source')) found.push('source');
     setProblems(found);
@@ -406,7 +420,7 @@ function RedraftForm({ mandate, back }: { readonly mandate: MandateDetails; read
     setProblems([]);
   };
   const review = () => {
-    const found = termsProblems(typed);
+    const found = termsProblems(typed, Date.now(), currency);
     setProblems(found);
     return found.length === 0 && currency !== undefined ? termsBody(typed, currency) : undefined;
   };

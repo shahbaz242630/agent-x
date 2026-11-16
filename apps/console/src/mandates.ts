@@ -10,7 +10,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isRefusal, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
-import { pageQuery } from './requests.ts';
+import { knownMinorDigits, pageQuery } from './requests.ts';
 import type { Role } from './session.tsx';
 import { t } from './text.ts';
 import { isVisibleName } from './visible-name.ts';
@@ -136,31 +136,41 @@ export function useMandate(id: string, organization: string) {
   });
 }
 
-/** The fils in a dirham: the Pilot's one currency, AED. */
-const FILS = 100n;
-/** An amount as typed: whole dirhams (grouped by commas, or not) and at most two decimals. */
-const TYPED_AMOUNT = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?$/;
+/** The minor digits of the Pilot's one currency, AED (fils): what a form checks by before a bank account is chosen. */
+const AED_DIGITS = 2;
+/** Whole units as typed: grouped by commas, or not. */
+const WHOLE = /^(?:\d{1,3}(?:,\d{3})+|\d+)$/;
+const DIGITS = /^\d+$/;
 
 /**
- * An amount typed in dirhams as whole fils, read exactly (never through
- * floating point): `2,500.5` is 250050. None for anything the API wouldn't
- * take: empty, a sign, more than two decimals, below one fils or past 2^53 − 1.
+ * An amount typed in the currency's whole units as its minor units, read
+ * exactly (never through floating point), by its own minor digits (AED: 2,
+ * so `2,500.5` is 250050). None for anything the API wouldn't take: empty, a
+ * sign, more decimals than the currency has, below one minor unit or past
+ * 2^53 − 1.
  */
-export function amountMinor(typed: string): number | undefined {
-  const text = typed.trim();
-  const matched = TYPED_AMOUNT.exec(text);
-  if (matched === null) return undefined;
-  const [whole = '', fraction = ''] = text.replaceAll(',', '').split('.');
-  const minor = BigInt(whole) * FILS + BigInt(fraction.padEnd(2, '0'));
+export function amountMinor(typed: string, digits = AED_DIGITS): number | undefined {
+  const [whole = '', fraction = '', ...more] = typed.trim().split('.');
+  const fractioned = typed.includes('.');
+  if (!WHOLE.test(whole) || more.length > 0) return undefined;
+  if (fractioned && (fraction.length > digits || !DIGITS.test(fraction))) return undefined;
+  const scale = 10n ** BigInt(digits);
+  const minor =
+    BigInt(whole.replaceAll(',', '')) * scale + (fraction === '' ? 0n : BigInt(fraction.padEnd(digits, '0')));
   if (minor < 1n || minor > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
   return Number(minor);
 }
 
-/** Whole fils as a field shows them to change: `2500.00`, never grouped, so it reads back the same. */
-export function amountTyped(minor: number): string {
-  const fils = BigInt(minor);
-  return `${String(fils / FILS)}.${String(fils % FILS).padStart(2, '0')}`;
+/** Minor units as a field shows them to change: `2500.00`, never grouped, so it reads back the same. */
+export function amountTyped(minor: number, digits = AED_DIGITS): string {
+  const scale = 10n ** BigInt(digits);
+  const units = BigInt(minor);
+  const whole = String(units / scale);
+  return digits === 0 ? whole : `${whole}.${String(units % scale).padStart(digits, '0')}`;
 }
+
+/** The minor digits amounts in `currency` are typed with; none for a currency the browser can't read. */
+export const currencyDigits = (currency: string): number | undefined => knownMinorDigits(currency);
 
 /** The most characters a purpose may have (PURPOSE_MOST), the suppliers one names (MOST_ALLOWED_SUPPLIERS). */
 export const PURPOSE_MOST = 200;
@@ -191,6 +201,7 @@ export interface DraftTyped extends TermsTyped {
 }
 
 export type TermsProblem =
+  | 'currency'
   | 'purpose'
   | 'perOrder'
   | 'monthly'
@@ -212,10 +223,10 @@ const endOf = (typed: TermsTyped): number | undefined => {
 };
 
 /** The limits' problems: each one readable, then nested as the API has them (mandateTerms). */
-function limitProblems(typed: TermsTyped): TermsProblem[] {
-  const perOrder = amountMinor(typed.perOrder);
-  const monthly = amountMinor(typed.monthly);
-  const threshold = amountMinor(typed.threshold);
+function limitProblems(typed: TermsTyped, digits: number): TermsProblem[] {
+  const perOrder = amountMinor(typed.perOrder, digits);
+  const monthly = amountMinor(typed.monthly, digits);
+  const threshold = amountMinor(typed.threshold, digits);
   const problems: TermsProblem[] = [];
   if (perOrder === undefined) problems.push('perOrder');
   if (monthly === undefined) problems.push('monthly');
@@ -225,11 +236,17 @@ function limitProblems(typed: TermsTyped): TermsProblem[] {
   return problems;
 }
 
-/** Each part of a version's terms the API would refuse, checked before anything is sent; the API checks again. */
-export function termsProblems(typed: TermsTyped, now = Date.now()): TermsProblem[] {
+/**
+ * Each part of a version's terms the API would refuse, checked before anything
+ * is sent, the amounts by `currency`'s minor digits (the chosen bank
+ * account's; AED's until one is chosen); the API checks again.
+ */
+export function termsProblems(typed: TermsTyped, now = Date.now(), currency?: string): TermsProblem[] {
   const problems: TermsProblem[] = [];
+  const digits = currency === undefined ? AED_DIGITS : currencyDigits(currency);
+  if (digits === undefined) problems.push('currency');
   if (!isVisibleName(typed.purpose, PURPOSE_MOST)) problems.push('purpose');
-  problems.push(...limitProblems(typed));
+  problems.push(...limitProblems(typed, digits ?? AED_DIGITS));
   if (typed.supplierIds.length === 0 || typed.supplierIds.length > SUPPLIERS_MOST) problems.push('suppliers');
   if (typed.fundingSourceId === null) problems.push('source');
   if (typed.splitCheck === null) problems.push('splitCheck');
@@ -252,13 +269,13 @@ function isTimeZone(zone: string): boolean {
 }
 
 /** Each part of a new mandate the API would refuse: its agent, zone and window, then its terms. */
-export function draftProblems(typed: DraftTyped, now = Date.now()): DraftProblem[] {
+export function draftProblems(typed: DraftTyped, now = Date.now(), currency?: string): DraftProblem[] {
   const problems: DraftProblem[] = [];
   if (typed.agentId === null) problems.push('agent');
   if (!isTimeZone(typed.timeZone)) problems.push('timeZone');
   const hours = /^\d{1,3}$/.test(typed.splitWindowHours) ? Number(typed.splitWindowHours) : 0;
   if (hours < WINDOW_HOURS.least || hours > WINDOW_HOURS.most) problems.push('splitWindowHours');
-  return [...problems, ...termsProblems(typed, now)];
+  return [...problems, ...termsProblems(typed, now, currency)];
 }
 
 /** Read only once termsProblems found none: each amount readable, each setting chosen. */
@@ -268,18 +285,21 @@ const known = <T>(value: T | null | undefined): T => {
 };
 
 /** The terms as the API takes them, in `currency` (the source's): the over-limit choice and its words added at the confirm. */
-export const termsBody = (typed: TermsTyped, currency: string) => ({
-  purpose: typed.purpose,
-  currency,
-  perOrderLimitMinor: known(amountMinor(typed.perOrder)),
-  monthlyLimitMinor: known(amountMinor(typed.monthly)),
-  approvalThresholdMinor: known(amountMinor(typed.threshold)),
-  supplierIds: typed.supplierIds,
-  fundingSourceId: known(typed.fundingSourceId),
-  splitCheck: typed.splitCheck === 'on',
-  consentLimits: known(typed.consentLimits),
-  endsAt: typed.ends === 'on' ? new Date(known(endOf(typed))).toISOString() : null,
-});
+export function termsBody(typed: TermsTyped, currency: string) {
+  const digits = known(currencyDigits(currency));
+  return {
+    purpose: typed.purpose,
+    currency,
+    perOrderLimitMinor: known(amountMinor(typed.perOrder, digits)),
+    monthlyLimitMinor: known(amountMinor(typed.monthly, digits)),
+    approvalThresholdMinor: known(amountMinor(typed.threshold, digits)),
+    supplierIds: typed.supplierIds,
+    fundingSourceId: known(typed.fundingSourceId),
+    splitCheck: typed.splitCheck === 'on',
+    consentLimits: known(typed.consentLimits),
+    endsAt: typed.ends === 'on' ? new Date(known(endOf(typed))).toISOString() : null,
+  };
+}
 
 /** A new mandate as the API takes it. */
 export const draftBody = (typed: DraftTyped, currency: string) => ({
@@ -304,18 +324,21 @@ export function localTyped(iso: string): string {
  * and source as they are, every setting left for the admin to choose again
  * (Rule Book §1.9: the page shows what is in force beside each).
  */
-export const termsFrom = (version: MandateVersion): TermsTyped => ({
-  purpose: version.purpose,
-  perOrder: amountTyped(version.perOrderLimitMinor),
-  monthly: amountTyped(version.monthlyLimitMinor),
-  threshold: amountTyped(version.approvalThresholdMinor),
-  supplierIds: version.supplierIds,
-  fundingSourceId: version.fundingSourceId,
-  splitCheck: null,
-  consentLimits: null,
-  ends: null,
-  endsAt: version.endsAt === null ? '' : localTyped(version.endsAt),
-});
+export function termsFrom(version: MandateVersion): TermsTyped {
+  const digits = currencyDigits(version.currency) ?? AED_DIGITS;
+  return {
+    purpose: version.purpose,
+    perOrder: amountTyped(version.perOrderLimitMinor, digits),
+    monthly: amountTyped(version.monthlyLimitMinor, digits),
+    threshold: amountTyped(version.approvalThresholdMinor, digits),
+    supplierIds: version.supplierIds,
+    fundingSourceId: version.fundingSourceId,
+    splitCheck: null,
+    consentLimits: null,
+    ends: null,
+    endsAt: version.endsAt === null ? '' : localTyped(version.endsAt),
+  };
+}
 
 export const NO_TERMS: TermsTyped = {
   purpose: '',
@@ -411,6 +434,8 @@ export function decidesTheDraft(error: unknown, retry: boolean): boolean {
 
 /** What a draft's failure says: a deciding refusal as any; otherwise why it is still held for Try again. */
 export function draftFailure(error: unknown, retry: boolean): string {
+  // A held draft's body is checked (an end passed since the first try) before its key is looked up: the first may stand.
+  if (retry && isRefusal(error) && error.code === 'BAD_REQUEST') return t('mandates.held.badRequest');
   if (decidesTheDraft(error, retry) || isIntegrityFailed(error)) return mandateRefusal(error);
   if (!isRefusal(error)) return t('mandates.held.unanswered');
   if (error.code === 'STATEMENT_CHANGED') return t('mandates.held.wordsChanged');
