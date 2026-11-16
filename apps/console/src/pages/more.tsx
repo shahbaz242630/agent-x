@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
 import { api } from '../api.ts';
+import { dropAllTries } from '../held-tries.ts';
 import { goTo } from '../navigate.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
@@ -29,6 +30,7 @@ export function More() {
       return;
     }
     queries.clear();
+    dropAllTries();
     goTo('/');
   };
   return (

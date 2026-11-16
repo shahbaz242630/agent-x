@@ -12,6 +12,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App, createConsoleRouter, createQueries } from '../app.tsx';
+import { dropAllTries, heldTry } from '../held-tries.ts';
 
 vi.mock('../navigate.ts', () => ({ goTo: vi.fn() }));
 const { goTo } = await import('../navigate.ts');
@@ -111,6 +112,8 @@ beforeEach(() => {
   answers = new Map();
   sent = [];
   sessionStorage.clear();
+  // A try held for Try again lives in the tab's memory, as the module does across these tests: each starts with none.
+  dropAllTries();
   vi.mocked(goTo).mockClear();
   vi.stubGlobal(
     'fetch',
@@ -824,6 +827,100 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(await screen.findByText(/as many bank details today/)).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  /** Sends the details and leaves the try with no answer, held for Try again. */
+  const unansweredTry = async (...after: Answer[]) => {
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, ...after);
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+  };
+  const passThroughs = () => sentTo('POST', `${at}/payee-registrations/pass-through`);
+
+  it.each([
+    ['still being worked on', refused(409, 'IDEMPOTENCY_KEY_BUSY'), /still being worked on/],
+    ['too many tries', refused(429, 'RATE_LIMITED'), /too many tries just now/],
+  ])(
+    'keeps the try held when a retry is answered %s: the same key, locked, Cancel held',
+    async (_what, undecided, said) => {
+      as('admin');
+      await unansweredTry(undecided, { status: 201, body: registration() });
+      await press('Try again');
+      expect(await screen.findByText(said)).toBeDefined();
+      expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
+      expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+      await press('Try again');
+      expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
+      const [first, , third] = passThroughs();
+      expect(third?.key).toBe(first?.key);
+      expect(third?.body).toEqual(first?.body);
+      // Answered, the try is held no longer.
+      expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+    },
+  );
+
+  it('comes back locked with the same key after leaving the page, the IBAN shown masked', async () => {
+    as('admin');
+    await unansweredTry({ status: 201, body: registration() });
+    await userEvent.click(screen.getByRole('link', { name: 'Back to suppliers' }));
+    await userEvent.click(await screen.findByRole('link', { name: 'Gulf Traders' }));
+
+    const iban = await screen.findByLabelText<HTMLInputElement>('IBAN');
+    expect(iban.disabled).toBe(true);
+    expect(iban.value).toBe('AE…3456');
+    expect(screen.getByLabelText<HTMLInputElement>("Account holder's name").value).toBe('Gulf Traders LLC');
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
+    // Stopping still needs its confirm.
+    await press('Stop trying');
+    await inDialog('Cancel');
+    await press('Try again');
+    expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
+    const [first, again] = passThroughs();
+    expect(again?.key).toBe(first?.key);
+    expect(again?.body).toEqual(first?.body);
+  });
+
+  it('keeps the page and the held try when a re-read of the supplier fails, saying so in place', async () => {
+    as('admin');
+    await unansweredTry(refused(409, 'IDEMPOTENCY_KEY_BUSY'));
+    answer(`GET ${at}`, refused(403, 'FORBIDDEN'));
+    // The busy answer is a refusal, so everything shown is read again: this time it fails.
+    await press('Try again');
+    await vi.waitFor(() => {
+      expect(screen.getAllByRole('button', { name: 'Try again' })).toHaveLength(2);
+    });
+    expect(screen.getByRole('heading', { name: 'Gulf Traders' })).toBeDefined();
+    expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
+    expect(heldTry(ORG.id, SUPPLIER)?.key).toBe(passThroughs()[0]?.key);
+  });
+
+  it('drops every held try when the session ends, when signing out and when the page is left', async () => {
+    as('admin');
+    await unansweredTry(refused(401, 'UNAUTHENTICATED'));
+    expect(heldTry(ORG.id, SUPPLIER)).toBeDefined();
+    await press('Try again');
+    expect(await screen.findByText('Your session ended. Sign in again to carry on.')).toBeDefined();
+    expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+    cleanup();
+
+    as('admin');
+    answer('POST /v1/auth/sign-out', { status: 200 });
+    await unansweredTry();
+    await userEvent.click(screen.getByRole('link', { name: /More/ }));
+    await press('Sign out');
+    await vi.waitFor(() => {
+      expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+    });
+    cleanup();
+
+    as('admin');
+    await unansweredTry();
+    window.dispatchEvent(new Event('pagehide'));
+    expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
   });
 
   it('keeps a refusal said once the re-read shows a change waiting and the form gone', async () => {

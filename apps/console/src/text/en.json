@@ -635,5 +635,7 @@
   "suppliers.bank.unanswered": "Agent X or the bank partner didn't answer, so it isn't known yet whether the bank partner has these details. Press Try again: it asks about the same request, and never sends the details twice.",
   "suppliers.bank.stop": "Stop trying",
   "suppliers.bank.stopTitle": "Stop trying to send these bank details?",
-  "suppliers.bank.stopText": "The earlier request may already be with the bank partner. If you start again later, these details could be registered twice. Before you do, check this supplier's page for new bank details waiting, or ask the bank partner."
+  "suppliers.bank.stopText": "The earlier request may already be with the bank partner. If you start again later, these details could be registered twice. Before you do, check this supplier's page for new bank details waiting, or ask the bank partner.",
+  "suppliers.bank.stillWorking": "The first try is still being worked on, so its answer isn't known yet. Try again in a moment: it asks about the same request, and never sends the details twice.",
+  "suppliers.bank.tooMany": "There have been too many tries just now. Wait a moment, then try again: it asks about the same request, and never sends the details twice."
 }

@@ -16,17 +16,20 @@
 // an admin or approver can withdraw them at once instead.
 import { useState } from 'react';
 
-import { api, isIntegrityFailed, isRefusal } from '../api.ts';
+import { api } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
+import { type HeldTry, heldTry, holdTry } from '../held-tries.ts';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { byPasskey } from '../step-up.ts';
 import {
   ADDING,
+  decidesTheTry,
   IBAN_MOST,
   isHolderName,
   isUaeIban,
   NAME_MOST,
+  passThroughFailure,
   type Payee,
   type Registration,
   type Supplier,
@@ -142,11 +145,11 @@ type Told = 'yes' | 'no';
 type Route = 'pass_through' | 'hosted';
 type Broken = 'none' | 'told' | 'calledFirst' | 'route' | 'holder' | 'iban';
 
-/** A pass-through with no answer: sent again whole with the same key, the API asks the partner by it. */
-interface Unanswered {
-  readonly key: string;
-  readonly body: Readonly<Record<string, unknown>>;
-}
+/** An IBAN held for Try again, as the page shows it: its country and last four characters, as the partner's hint. */
+const masked = (iban: string): string => {
+  const plain = iban.normalize('NFKC').replaceAll(/\s/gu, '').toUpperCase();
+  return `${plain.slice(0, 2)}…${plain.slice(-4)}`;
+};
 
 /** What a registration's answer says once the partner has it, or has refused it; none while it waits at the form. */
 function registrationWords(registration: Registration): TextKey | undefined {
@@ -205,14 +208,19 @@ function NewDetails({
 }) {
   const { organization } = useActing();
   const { busy, run } = sending;
-  const [told, setTold] = useState<Told | null>(null);
-  const [calledFirst, setCalledFirst] = useState(false);
-  const [route, setRoute] = useState<Route | null>(null);
-  const [holder, setHolder] = useState('');
-  const [iban, setIban] = useState('');
+  // A try held from before (Back, a failed re-read, the form reopened) starts the form as it was sent, locked.
+  const [unanswered, setHeld] = useState(() => heldTry(organization.id, supplier.id) ?? null);
+  const [told, setTold] = useState<Told | null>(unanswered?.told ?? null);
+  const [calledFirst, setCalledFirst] = useState(unanswered?.told === 'yes');
+  const [route, setRoute] = useState<Route | null>(unanswered === null ? null : 'pass_through');
+  const [holder, setHolder] = useState(unanswered?.body.name ?? '');
+  const [iban, setIban] = useState(unanswered?.body.iban ?? '');
   const [broken, setBroken] = useState<Broken>('none');
   const [confirming, setConfirming] = useState(false);
-  const [unanswered, setUnanswered] = useState<Unanswered | null>(null);
+  const setUnanswered = (tried: HeldTry | null) => {
+    holdTry(organization.id, supplier.id, tried);
+    setHeld(tried);
+  };
   const [stopping, setStopping] = useState(false);
   const [form, setForm] = useState<Registration | null>(null);
   const at = `${supplierAt(supplier.id)}/payee-registrations`;
@@ -226,6 +234,7 @@ function NewDetails({
   // A try with no answer locks the details: only the same request may go again, until the person stops trying.
   const locked = unanswered !== null;
   const answered = (registration: Registration) => {
+    setUnanswered(null);
     const words = registrationWords(registration);
     if (words === undefined) setForm(registration);
     else onDone(t(words));
@@ -233,7 +242,7 @@ function NewDetails({
   const close = () => {
     setConfirming(false);
   };
-  const passThrough = ({ key, body }: Unanswered) =>
+  const passThrough = ({ key, body }: Pick<HeldTry, 'key' | 'body'>) =>
     run(
       async () => {
         try {
@@ -247,15 +256,14 @@ function NewDetails({
         } catch (error) {
           // No answer, or no decision (a 5xx): the partner may have the details, and a fresh key would register them
           // again (the API carries on an open registration for its form alone). The same request asks it by our ID.
-          // A refusal is the API's final word: nothing is left to ask again.
-          setUnanswered(isRefusal(error) ? null : { key, body });
+          // Only a refusal that is the API's final word leaves nothing to ask again (decidesTheTry).
+          setUnanswered(decidesTheTry(error) ? null : { key, body, told: told ?? 'no' });
           throw error;
         }
       },
       {
         after: close,
-        refusal: (error) =>
-          isRefusal(error) || isIntegrityFailed(error) ? supplierRefusal(error) : t('suppliers.bank.unanswered'),
+        refusal: passThroughFailure,
       },
     );
   const start = (body: Readonly<Record<string, unknown>>) =>
@@ -363,7 +371,8 @@ function NewDetails({
             label={t('suppliers.iban')}
             hint={t('suppliers.ibanHint')}
             most={IBAN_MOST}
-            value={iban}
+            // Held for Try again, it shows as the partner's hint would: never the whole number again.
+            value={locked ? masked(iban) : iban}
             onChange={edited(setIban)}
             broken={broken === 'iban' ? t('suppliers.ibanBroken') : undefined}
             disabled={locked}
@@ -436,8 +445,9 @@ function NewDetails({
 export function BankDetails({ supplier }: { readonly supplier: Supplier }) {
   const { organization } = useActing();
   const change = useChange(supplierRefusal);
-  // Open while new details are being given; drawn afresh each time, so nothing typed is kept once closed.
-  const [giving, setGiving] = useState(false);
+  // Open while new details are being given; drawn afresh each time, so nothing typed is kept once closed. Open from
+  // the start while a try is held for Try again (held-tries.ts), so coming back shows it locked, never a blank form.
+  const [giving, setGiving] = useState(() => heldTry(organization.id, supplier.id) !== undefined);
   // What the partner answered a registration, said here as the outcomes of every part are.
   const [answer, setAnswer] = useState<string | null>(null);
   const sending: Sending = {

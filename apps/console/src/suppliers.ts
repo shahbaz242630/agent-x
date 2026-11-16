@@ -7,7 +7,7 @@
 // pressed.
 import { useQuery } from '@tanstack/react-query';
 
-import { api, ApiError, isIntegrityFailed, isUuid } from './api.ts';
+import { api, ApiError, isIntegrityFailed, isRefusal, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
 import type { Role } from './session.tsx';
 import { t, type TextKey } from './text.ts';
@@ -202,4 +202,25 @@ export function supplierRefusal(error: unknown): string {
   if (isIntegrityFailed(error)) return t('suppliers.integrity');
   if (error instanceof ApiError && error.code === 'PARTNER_UNAVAILABLE') return t('suppliers.partnerUnavailable');
   return refusalText(error, REFUSALS, 'suppliers.refused');
+}
+
+/** The 4xx answers that leave a try undecided: the first request still being worked on, or too many tries at once. */
+const UNDECIDED: ReadonlyMap<string, TextKey> = new Map([
+  ['IDEMPOTENCY_KEY_BUSY', 'suppliers.bank.stillWorking'],
+  ['RATE_LIMITED', 'suppliers.bank.tooMany'],
+]);
+
+/**
+ * Whether a pass-through's answer decides it, so its key need not be kept: a
+ * refusal that is the API's final word. No answer, a 5xx, an undecided 4xx,
+ * and a 401 (the session gone, whatever was done) leave it held for Try again.
+ */
+export const decidesTheTry = (error: unknown): boolean =>
+  isRefusal(error) && error.status !== 401 && !UNDECIDED.has(error.code);
+
+/** What a pass-through's failure says: a deciding refusal as any; otherwise why it is held for Try again. */
+export function passThroughFailure(error: unknown): string {
+  if (decidesTheTry(error) || isIntegrityFailed(error)) return supplierRefusal(error);
+  const undecided = error instanceof ApiError ? UNDECIDED.get(error.code) : undefined;
+  return t(undecided ?? 'suppliers.bank.unanswered');
 }

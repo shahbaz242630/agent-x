@@ -11,7 +11,7 @@ import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
 import { useMembers } from '../agents.ts';
-import { isMissing } from '../api.ts';
+import { isIntegrityFailed, isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import { leftWords, timeText, useTicking } from '../requests.ts';
 import { useActing } from '../session.tsx';
@@ -20,7 +20,7 @@ import { ADDING, coolingOff, type Supplier, supplierAt, supplierRefusal, useSupp
 import { t } from '../text.ts';
 import { memberText } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
-import { Loading, NotShown } from './failed.tsx';
+import { Loading, NotShown, Retry } from './failed.tsx';
 import { BankDetails } from './supplier-bank.tsx';
 import { Verify } from './supplier-verify.tsx';
 
@@ -136,6 +136,11 @@ function SupplierShown({ supplier }: { readonly supplier: Supplier }) {
   );
 }
 
+/** A re-read of a supplier already shown that failed: its integrity check as itself, anything else with a retry. */
+function ReadFailed({ error, onRetry }: { readonly error: unknown; readonly onRetry: () => void }) {
+  return isIntegrityFailed(error) ? <p className="notice">{t('suppliers.integrity')}</p> : <Retry onRetry={onRetry} />;
+}
+
 export function SupplierPage({ id }: { readonly id: string }) {
   const { organization } = useActing();
   const shown = useSupplier(id, organization.id);
@@ -145,7 +150,9 @@ export function SupplierPage({ id }: { readonly id: string }) {
     </Link>
   );
   const missing = isMissing(id, shown.error);
-  if (missing || shown.isError) {
+  const supplier = shown.data;
+  // A re-read that fails once the supplier is shown keeps the page (and new bank details being given), said in place.
+  if (missing || (shown.isError && supplier === undefined)) {
     return (
       <NotShown
         back={back}
@@ -157,11 +164,12 @@ export function SupplierPage({ id }: { readonly id: string }) {
       />
     );
   }
-  if (shown.isPending) return <Loading />;
+  if (supplier === undefined) return <Loading />;
   return (
     <section className="stack request">
       {back}
-      <SupplierShown supplier={shown.data} />
+      {shown.isError && <ReadFailed error={shown.error} onRetry={() => void shown.refetch()} />}
+      <SupplierShown supplier={supplier} />
     </section>
   );
 }
