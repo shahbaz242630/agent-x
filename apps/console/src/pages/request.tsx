@@ -322,6 +322,20 @@ function WeighedConfirm({
   );
 }
 
+/** The request's evidence, for an admin (decision 24): every request has it, a denied one too (BR-16). */
+function EvidenceLink({ id }: { readonly id: string }) {
+  const { organization } = useActing();
+  if (organization.role !== 'admin') return null;
+  return (
+    <>
+      <Link to="/approvals/$id/evidence" params={{ id }} className="secondary button">
+        {t('evidence.open')}
+      </Link>
+      <p className="fine">{t('evidence.openFine')}</p>
+    </>
+  );
+}
+
 export function RequestPage({ id }: { readonly id: string }) {
   const { organization } = useActing();
   const request = useRequest(id, organization.id);
@@ -352,6 +366,7 @@ export function RequestPage({ id }: { readonly id: string }) {
       <Facts request={shown} />
       <Decided request={shown} />
       <Actions request={shown} />
+      <EvidenceLink id={shown.id} />
     </section>
   );
 }

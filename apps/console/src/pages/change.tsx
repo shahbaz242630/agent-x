@@ -31,6 +31,7 @@ export function useChange(refusal: (error: unknown) => string) {
       if (sent === 'stepping' || sent === 'held') return;
       after?.();
       if (done !== undefined) setSaid(done);
+      // Everything shown reads again: after a log's download too, which is itself logged, so the audit log shows it.
       await queries.invalidateQueries();
     } catch (error) {
       if (isSignedOut(error)) {
