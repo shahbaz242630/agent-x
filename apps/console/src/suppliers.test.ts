@@ -23,6 +23,8 @@ describe('isUaeIban', () => {
     ['with a wrong check digit', 'AE080331234567890123456', false],
     ['one digit short', 'AE07033123456789012345', false],
     ['another country’s', 'GB82WEST12345698765432', false],
+    ['another country’s, digits only and valid check digits', 'GB590331234567890123456', false],
+    ['one digit short, with valid check digits', 'AE93033123456789012345', false],
     ['a letter among the digits', 'AE07033123456789012345X', false],
     ['nothing', '', false],
   ])('%s', (_what, iban, fine) => {
@@ -38,6 +40,7 @@ describe('isCallNote', () => {
     ['a phone number in it', 'Called 050 123 4567', false],
     ['an account number in it', 'Confirmed 0331234567890', false],
     ['six digits, not a long number', 'Ticket 123456', true],
+    ['seven digits, a long number', 'Ticket 1234567', false],
     ['a space at the end', 'Spoke to Sara ', false],
     ['nothing', '', false],
   ])('%s', (_what, note, fine) => {
@@ -116,6 +119,11 @@ describe('notYetVerifiable', () => {
     ['no payee', { payee: null }, 'suppliers.verify.noPayee'],
     ['no cooling-off begun', { coolingOffUntil: null }, 'suppliers.verify.coolingOff'],
     ['a name that doesn’t match', { payee: { ...PAYEE, nameCheck: 'no_match' } }, 'suppliers.verify.noMatch'],
+    [
+      'no cooling-off begun, before a name that doesn’t match',
+      { coolingOffUntil: null, payee: { ...PAYEE, nameCheck: 'no_match' } },
+      'suppliers.verify.coolingOff',
+    ],
   ] as const)('says why for %s', (_what, change, why) => {
     expect(notYetVerifiable({ ...SUPPLIER, ...change }, ENDS)).toBe(why);
   });
