@@ -91,7 +91,7 @@ export const REASON_CODES = {
   EVIDENCE_CHANGED_WHILE_READING:
     'The spend request or its payment kept changing while its evidence was read, so no evidence was given (the download is still logged). Try again in a moment.',
   EVIDENCE_EXPORTS_SPENT:
-    'You have downloaded spend-request evidence as many times as you may in an hour (5), so this one was not made. Try again later.',
+    'You have downloaded spend-request evidence as many times as you may in an hour (20), so this one was not made. Try again later.',
   EVIDENCE_TOO_LARGE:
     'This spend request has more events than one evidence download may hold (2,000), so nothing was downloaded or logged. Download the audit log instead, filtered to the request and its payment.',
   FAILURE_PROPOSAL_ALONE_LOCKED:

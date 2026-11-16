@@ -6,9 +6,12 @@
 // named, a retry answering the same record; one moment though a hand-off lands
 // between the reads (read again, or EVIDENCE_CHANGED_WHILE_READING); never a
 // secret or a seal (SEC-EVD-04); another organisation's request NOT_FOUND with
-// nothing written; a member not an admin FORBIDDEN; the hourly budget and the
-// events' cap; and a record that can't be believed refusing the bundle, 503
-// INTEGRITY_FAILED, the organisation held.
+// nothing written; a member not an admin FORBIDDEN; the hourly budget (20) and
+// the events' cap; and a record that can't be believed refusing the bundle, 503
+// INTEGRITY_FAILED, the organisation held. 6C2c: the same bundle read on
+// screen, writing nothing (no event, no idempotency key) and never counted
+// against the budget, at one moment too (who may read it is the route's:
+// spend-request-evidence.test.ts, role-matrix.test.ts).
 import { createAuditTrail, type SignedRowRead, signedMoment, withSignedStates } from '@agentx/core/modules/audit';
 import { EVIDENCE_EXPORTED, EVIDENCE_SUBJECT, EXPORT_BATCH } from '@agentx/core/modules/evidence';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
@@ -49,6 +52,8 @@ import {
   createSpendRequestEvidence,
   type Evidence,
   EVIDENCE_OPERATION,
+  type EvidenceRead,
+  type EvidenceView,
   type EvidenceWrite,
   type SpendRequestEvidence,
 } from './spend-request-evidence.ts';
@@ -174,8 +179,34 @@ const bundleOf = (write: EvidenceWrite): Evidence => {
   return write.evidence;
 };
 
+/** The bundle as read on screen (6C2c): nothing written. */
+const viewed = (w: World, requestId: string, using: SpendRequestEvidence = evidence) =>
+  using.read(w.org, requestId, CORRELATION);
+
+const readOf = (view: EvidenceView): EvidenceRead => {
+  if (view.outcome !== 'read') throw new Error(`not read: ${JSON.stringify(view)}`);
+  return view.evidence;
+};
+
 /** Each event's action, in the bundle's order. */
-const actionsOf = (bundle: Evidence) => bundle.events.map(({ action }) => action);
+const actionsOf = (bundle: EvidenceRead) => bundle.events.map(({ action }) => action);
+
+/** What the organisation has written: its audit events and its idempotency keys, counted past the app. */
+async function writtenOf(w: World) {
+  const owner = await database.connect('owner');
+  try {
+    // The tenant wall holds even the owner: in the organisation.
+    await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+    const [counted] = await owner.query(
+      `select (select pg_catalog.count(*)::int from audit.events where org_id = $1) as events,
+              (select pg_catalog.count(*)::int from idempotency.keys where org_id = $1) as keys`,
+      [w.org],
+    );
+    return counted;
+  } finally {
+    await owner.end();
+  }
+}
 
 /** The organisation's evidence downloads, as its log holds them. */
 const downloadsOf = (w: World) =>
@@ -587,13 +618,17 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(await downloadsOf(w)).toHaveLength(1);
   });
 
-  it('refuses an admin’s sixth download in an hour: EVIDENCE_EXPORTS_SPENT, nothing written', async () => {
+  it('refuses an admin’s 21st download in an hour, reads on screen not counted: EVIDENCE_EXPORTS_SPENT, nothing written', async () => {
     const { w, acting } = await ready();
     const denied = await ask(acting, w, { amount: AED(w.maxPayment * 10n) });
-    for (let made = 0; made < 5; made += 1) bundleOf(await exported(w.admin, denied.id));
+    // Six reads first, past the audit log's own budget of 5: none is a download, so all 20 downloads are made.
+    for (let read = 0; read < 6; read += 1) readOf(await viewed(w, denied.id));
+    for (let made = 0; made < 20; made += 1) bundleOf(await exported(w.admin, denied.id));
 
     expect(await exported(w.admin, denied.id)).toEqual(refused(409, 'EVIDENCE_EXPORTS_SPENT'));
-    expect(await downloadsOf(w)).toHaveLength(5);
+    expect(await downloadsOf(w)).toHaveLength(20);
+    // Reading on screen is never capped.
+    expect(readOf(await viewed(w, denied.id)).events).toHaveLength(22);
   });
 
   it('refuses a request with more events than a bundle holds: EVIDENCE_TOO_LARGE, nothing written', async () => {
@@ -771,6 +806,99 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     const later = bundleOf(await exported(w.admin, request.id));
 
     expect(later.supplier.version.verification?.id).toBe(verification?.id);
+  });
+});
+
+describe('a spend request’s evidence read on screen (6C2c, decision 24: a page read, not logged)', () => {
+  it('reads a paid request whole, writing nothing: no event, no idempotency key, no record of its own', async () => {
+    const { w, request, transaction } = await paid();
+    const before = await writtenOf(w);
+
+    const bundle = readOf(await viewed(w, request.id));
+
+    expect(await writtenOf(w)).toEqual(before);
+    expect(bundle).not.toHaveProperty('id');
+    expect(bundle).not.toHaveProperty('recordSeq');
+    expect(bundle.spendRequest).toMatchObject({ id: request.id, status: 'HANDED_OFF' });
+    expect(bundle.payment).toMatchObject({ id: transaction.id, status: 'SUCCEEDED' });
+    expect(actionsOf(bundle)).toEqual(expect.arrayContaining(['spend_request.decided', 'instruction.made']));
+    expect(actionsOf(bundle)).not.toContain(EVIDENCE_EXPORTED);
+    expect(bundle.events.at(-1)?.seq).toBe(bundle.upToSeq);
+  });
+
+  it('is the download’s bundle without its record, held at the newest event about its objects (a download too)', async () => {
+    const { w, request } = await paid();
+    const { id: _id, recordSeq, ...downloaded } = bundleOf(await exported(w.admin, request.id));
+
+    const read = readOf(await viewed(w, request.id));
+
+    // The download's record is newer than every row's signed event, and has no state: the read's moment is it.
+    expect(read.upToSeq).toBe(recordSeq);
+    expect(read).toEqual(downloaded);
+  });
+
+  it('reads a denied request too: its decision, no reservation and no payment', async () => {
+    const { w, acting } = await ready();
+    const denied = await ask(acting, w, { amount: AED(w.maxPayment * 10n) });
+
+    const bundle = readOf(await viewed(w, denied.id));
+
+    expect(bundle.spendRequest).toMatchObject({ id: denied.id, status: 'DENIED' });
+    expect(bundle).toMatchObject({ reservation: null, payment: null });
+    expect(actionsOf(bundle)).toEqual(['spend_request.received', 'spend_request.decided']);
+  });
+
+  it('answers another organisation’s request as NOT_FOUND, writing nothing', async () => {
+    const { request } = await paid();
+    const { w: other } = await ready();
+    const before = await writtenOf(other);
+
+    expect(await viewed(other, request.id)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await writtenOf(other)).toEqual(before);
+  });
+
+  it('refuses a read when the request can’t be believed: INTEGRITY_FAILED, the organisation held', async () => {
+    const { w, request } = await paid();
+    await changedByOwner(w, SPEND_REQUESTS, request.id, ['amount_minor', 1]);
+
+    expect(await viewed(w, request.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await heldOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('reads the rows again when a hand-off lands between them: one moment, handed off with its payment', async () => {
+    const { w, acting } = await ready();
+    const approved = await ask(acting, w, { amount: SMALL() });
+    let between = 0;
+    const handingOff = evidenceWith({
+      betweenReads: async () => {
+        between += 1;
+        if (between === 1) await createHandoff(runner(w)).run();
+      },
+    });
+
+    const bundle = readOf(await viewed(w, approved.id, handingOff));
+
+    expect(between).toBe(2);
+    expect(bundle.spendRequest.status).toBe('HANDED_OFF');
+    expect(bundle.payment).not.toBeNull();
+    expect(actionsOf(bundle)).toEqual(expect.arrayContaining(['instruction.made', 'transaction.opened']));
+    expect(bundle.events.every(({ seq }) => BigInt(seq) <= BigInt(bundle.upToSeq))).toBe(true);
+  });
+
+  it('gives up after its reads when the rows never hold still: EVIDENCE_CHANGED_WHILE_READING, nothing logged', async () => {
+    const { w, acting } = await ready();
+    const approved = await ask(acting, w, { amount: SMALL() });
+    const once = evidenceWith({ mostReads: 1, betweenReads: () => createHandoff(runner(w)).run() });
+
+    expect(await viewed(w, approved.id, once)).toEqual(refused(409, 'EVIDENCE_CHANGED_WHILE_READING'));
+    expect(await downloadsOf(w)).toEqual([]);
+  });
+
+  it('refuses a request with more events than a bundle holds: EVIDENCE_TOO_LARGE', async () => {
+    const { w, acting } = await ready();
+    const denied = await ask(acting, w, { amount: AED(w.maxPayment * 10n) });
+
+    expect(await viewed(w, denied.id, evidenceWith({ mostEvents: 1 }))).toEqual(refused(409, 'EVIDENCE_TOO_LARGE'));
   });
 });
 
