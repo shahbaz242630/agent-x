@@ -10,7 +10,7 @@
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
-import { ApiError, isIntegrityFailed, isMissing } from '../api.ts';
+import { ApiError, isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import {
   downloadHistory,
@@ -28,7 +28,7 @@ import { useActing } from '../session.tsx';
 import { type Asked, ask, askFirst, changeAt, mustStepUp } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
-import { Loading, Retry } from './failed.tsx';
+import { Loading, NotShown } from './failed.tsx';
 import { LineField } from './line-field.tsx';
 
 /** A fact shown only when the API has one (the partner's reference, the bank's word, a reject code). */
@@ -168,13 +168,12 @@ function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
     after: close,
     refusal: (error: unknown) => markRefusal(error, step),
   });
-  // A step's ask only asks: answered with no passkey asked, nothing was proposed, confirmed or withdrawn (mustStepUp).
-  const stepping = mustStepUp;
+  // Each step's ask only asks: answered with no passkey asked, nothing was proposed, confirmed or withdrawn (mustStepUp).
   // The reference and the consequence are asked with; the version of the words shown goes with the confirm (CO3).
   const propose = (statementVersion?: number) =>
     run(
       () =>
-        stepping(
+        mustStepUp(
           ask(change('propose', { evidenceRef: reference.trim(), confirmed: MARK_FAILED_CONFIRMED }), {
             statementVersion,
           }),
@@ -190,7 +189,7 @@ function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
       setOpen({ kind: 'approve', proposal, stepUp: asked.stepUp });
       return 'held';
     }, sending('approve'));
-  const withdraw = () => run(() => stepping(ask(change('withdraw', {}))), sending('withdraw'));
+  const withdraw = () => run(() => mustStepUp(ask(change('withdraw', {}))), sending('withdraw'));
   const proposal = mark.openProposal;
   const markable = Date.now() > new Date(mark.markableFrom).getTime();
 
@@ -309,17 +308,17 @@ export function PaymentPage({ id }: { readonly id: string }) {
       {t('payments.back')}
     </Link>
   );
-  // An address that isn't a payment's ID names none: not found, as the API's 404 is, never a failure to retry.
   const missing = isMissing(id, payment.error);
   if (missing || payment.isError) {
-    let said = <Retry onRetry={() => void payment.refetch()} />;
-    if (missing) said = <p className="notice">{t('payments.notFound')}</p>;
-    else if (isIntegrityFailed(payment.error)) said = <p className="notice">{t('payments.integrity')}</p>;
     return (
-      <section className="stack">
-        {back}
-        {said}
-      </section>
+      <NotShown
+        back={back}
+        missing={missing}
+        error={payment.error}
+        notFound={t('payments.notFound')}
+        integrity={t('payments.integrity')}
+        onRetry={() => void payment.refetch()}
+      />
     );
   }
   if (payment.isPending) return <Loading />;

@@ -85,11 +85,13 @@ function AgentAt(): ReactElement {
 }
 
 /** The Agents tab: the agents with their brake (6B2), and registering one (6D1). */
-const Agents = (): ReactElement => (
-  <BrakeList kind="agents">
-    <RegisterAgent />
-  </BrakeList>
-);
+function Agents(): ReactElement {
+  return (
+    <BrakeList kind="agents">
+      <RegisterAgent />
+    </BrakeList>
+  );
+}
 
 /** One payment's page (6C1): `/payments/<id>`, its organisation in `?org=` as a request's. */
 function Payment(): ReactElement {

@@ -240,19 +240,68 @@ describe('a new key, shown once (6D1)', () => {
     nothingKept(history, queries);
   });
 
-  it('is gone on leaving the page by a link, and doesn’t come back on returning', async () => {
+  it('asks before a link inside the console leaves it behind: kept on staying, gone on leaving, not back on returning', async () => {
     const { history } = backFromStepUp();
     await confirmed();
     await userEvent.click(screen.getByRole('button', { name: 'Show' }));
 
     await userEvent.click(screen.getByRole('link', { name: 'Back to agents' }));
-    expect(screen.queryByText(SECRET)).toBeNull();
-    expect(history.location.pathname).toBe('/agents');
+    expect(await screen.findByText(/Leave without saving the key\?/)).toBeDefined();
+    expect(document.activeElement?.textContent).toBe('Stay and save it');
+    await userEvent.click(screen.getByRole('button', { name: 'Stay and save it' }));
+    expect(screen.queryByText(/Leave without saving the key\?/)).toBeNull();
+    expect(screen.getByText(SECRET)).toBeDefined();
+    expect(history.location.pathname).toBe(`/agents/${AGENT}`);
+    expect(history.location.search).toContain(`stepped=${CHALLENGE}`);
 
+    // A tab is a link too.
+    await userEvent.click(screen.getByRole('link', { name: 'Payments' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Leave without it' }));
+    expect(screen.queryByText(SECRET)).toBeNull();
+    expect(history.location.pathname).toBe('/payments');
+
+    await userEvent.click(screen.getByRole('link', { name: 'Agents' }));
     await userEvent.click(await screen.findByRole('link', { name: 'Invoice agent' }));
     expect(await screen.findByRole('heading', { name: 'Invoice agent' })).toBeDefined();
     expect(screen.queryByRole('heading', { name: "The agent's new key" })).toBeNull();
     expect(screen.queryByText(SECRET)).toBeNull();
+  });
+
+  it('holds switching organisation while the key is on screen, and lets it go after Done', async () => {
+    answers.set('GET /v1/auth/organizations', {
+      status: 200,
+      body: {
+        organizations: [ORG, { ...ORG, id: '0199a0f0-0000-7000-8000-00000000bbbb', name: 'Other' }],
+        unreadable: [],
+      },
+    });
+    localStorage.setItem('agentx.organization', ORG.id);
+    backFromStepUp();
+    await confirmed();
+    const switcher = screen.getByRole('button', { name: 'Switch organisation' });
+    expect(switcher.hasAttribute('disabled')).toBe(true);
+    expect(switcher.getAttribute('title')).toMatch(/press Done before switching/);
+
+    await userEvent.click(screen.getByRole('button', { name: "Done, I've saved it" }));
+    expect(screen.getByRole('button', { name: 'Switch organisation' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('clears the key when the page is hidden (closed, or kept for Back), so returning never shows it', async () => {
+    const { history } = backFromStepUp();
+    await confirmed();
+    await userEvent.click(screen.getByRole('button', { name: 'Show' }));
+
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+
+    // Cleared at once, before the page could be kept: no key in the document.
+    expect(screen.queryByText(SECRET)).toBeNull();
+    expect(document.body.innerHTML).not.toContain(SECRET);
+    expect(screen.queryByRole('heading', { name: "The agent's new key" })).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'Invoice agent' })).toBeDefined();
+    expect(history.location.search).toBe(`?org=${ORG.id}`);
+    expect(screen.queryByText(/Leave without saving the key\?/)).toBeNull();
   });
 
   it('asks before the page is left or reloaded while the key is on screen, and not after Done', async () => {

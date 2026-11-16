@@ -19,20 +19,21 @@ import {
   agentRefusal,
   HANDING_OVER,
   isLive,
+  KEY_CHANGING,
   type Member,
   OWNING,
-  REGISTERING,
+  type Scope,
   useAgent,
   useMembers,
 } from '../agents.ts';
-import { isIntegrityFailed, isMissing } from '../api.ts';
+import { isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { ask, changeAt, mustStepUp } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
-import { Loading, Retry } from './failed.tsx';
+import { Loading, NotShown } from './failed.tsx';
 
 /** A member as the console can name them: the API gives a role and IDs, no name. */
 function memberText(member: Member | undefined, me: string): string {
@@ -41,21 +42,21 @@ function memberText(member: Member | undefined, me: string): string {
   return member.userId.toLowerCase() === me ? `${role} ${t('payments.you')}` : role;
 }
 
-/** What it may do, each scope in plain words. */
-function Scopes({ agent }: { readonly agent: Agent }) {
+/** What an agent may do, each scope in plain words: on its page, and confirming a registration. */
+export function Scopes({ scopes }: { readonly scopes: readonly Scope[] }) {
   return (
     <ul className="plain">
-      {agent.scopes.map((scope) => (
+      {scopes.map((scope) => (
         <li key={scope}>{t(`agents.scope.${scope}`)}</li>
       ))}
     </ul>
   );
 }
 
-function keyState(key: AgentKey): string {
+function keyState(key: AgentKey, live: boolean): string {
   if (key.status === 'REVOKED') return t('agents.key.revoked');
   const at = timeText(key.expiresAt);
-  return isLive(key) ? t('agents.key.until', { time: at }) : t('agents.key.expired', { time: at });
+  return live ? t('agents.key.until', { time: at }) : t('agents.key.expired', { time: at });
 }
 
 type Open =
@@ -83,7 +84,7 @@ function KeyRow({
     <li className="row">
       <span className="row-main">
         <span className="mono">{agentKey.id}</span>
-        <span className="muted">{keyState(agentKey)}</span>
+        <span className="muted">{keyState(agentKey, live)}</span>
         <span className="muted">{agentKey.scopes.map((scope) => t(`agents.scope.${scope}`)).join(' · ')}</span>
       </span>
       {live && (canRotate || canRevoke) && (
@@ -190,7 +191,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
   const owner = listed.find((member) => member.id === agent.owner);
   const role = organization.role;
   // Rotating is an admin's, or the developer's who owns it (agent-key-changes.ts mayRotate); revoking any of either.
-  const canRevoke = REGISTERING.includes(role);
+  const canRevoke = KEY_CHANGING.includes(role);
   const canRotate = role === 'admin' || (canRevoke && owner?.userId.toLowerCase() === me);
   const close = () => {
     setOpen(NONE);
@@ -202,10 +203,8 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
     run(
       () =>
         mustStepUp(
-          ask(
-            changeAt(path, label, body, organization.id),
-            statementVersion === undefined ? undefined : { statementVersion },
-          ),
+          // No version (a revoke, a hand-over: no API words) is left out of the confirm's JSON.
+          ask(changeAt(path, label, body, organization.id), { statementVersion }),
         ),
       { after: close },
     );
@@ -226,7 +225,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
         <dd>{timeText(agent.createdAt)}</dd>
         <dt>{t('agents.mayDo')}</dt>
         <dd>
-          <Scopes agent={agent} />
+          <Scopes scopes={agent.scopes} />
         </dd>
       </dl>
       <section className="stack" aria-labelledby="keys-title">
@@ -309,17 +308,17 @@ export function AgentPage({ id }: { readonly id: string }) {
       {t('agents.back')}
     </Link>
   );
-  // An address that isn't an agent's ID names none: not found, as the API's 404 is, never a failure to retry.
   const missing = isMissing(id, shown.error);
   if (missing || shown.isError) {
-    let said = <Retry onRetry={() => void shown.refetch()} />;
-    if (missing) said = <p className="notice">{t('agents.notFound')}</p>;
-    else if (isIntegrityFailed(shown.error)) said = <p className="notice">{t('agents.integrity')}</p>;
     return (
-      <section className="stack">
-        {back}
-        {said}
-      </section>
+      <NotShown
+        back={back}
+        missing={missing}
+        error={shown.error}
+        notFound={t('agents.notFound')}
+        integrity={t('agents.integrity')}
+        onRetry={() => void shown.refetch()}
+      />
     );
   }
   if (shown.isPending) return <Loading />;

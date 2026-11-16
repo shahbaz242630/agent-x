@@ -11,8 +11,9 @@
 // A confirm that answers with a new agent key (6D1: registering, rotating,
 // handing over) shows it once (key-once.tsx). The key lives only in the
 // confirming view's state, which is drawn afresh for each challenge: it
-// unmounts, and the key with it, once the step-up's query leaves the address
-// (Done, Close, or any link away).
+// unmounts, and the key with it, once the step-up's query leaves the address.
+// Until the person presses Done, any other way away is asked about first
+// (key-once.tsx), and leaving the page clears it.
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
@@ -98,6 +99,7 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
       setSent(refusedAs(error));
     }
   };
+  // Its own branch, not the done one below: only the done words are a live region, so the key is never read out.
   if (sent === 'done' && answered !== undefined) {
     return (
       <section className="stepped">

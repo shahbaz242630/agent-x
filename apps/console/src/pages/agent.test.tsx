@@ -6,7 +6,7 @@
 // another active admin or developer; registering checks the API's rules
 // before sending. Buttons show by role; refusals are said plainly.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -459,6 +459,24 @@ describe('registering an agent (6D1)', () => {
     );
     expect(await screen.findByText(/registered as many agents today/)).toBeDefined();
     expect(goTo).not.toHaveBeenCalled();
+  });
+
+  it('takes a valid name of 100 characters beyond the basic plane, counting characters as the API does', async () => {
+    as('admin');
+    answer('POST /v1/agents', ASKED);
+    open('/agents');
+    const name = String.fromCodePoint(0x1d400).repeat(100);
+    await userEvent.click(await screen.findByRole('button', { name: 'Register an agent' }));
+    const field = screen.getByLabelText('Its name');
+    expect(field.getAttribute('maxLength')).toBe('200');
+    // Pasted in one go: 200 UTF-16 units, within the field's limit.
+    fireEvent.change(field, { target: { value: name } });
+    await userEvent.click(screen.getByLabelText('Ask to pay suppliers'));
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }));
+    await userEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Continue with passkey' }),
+    );
+    expect(sentTo('POST', '/v1/agents')[0]?.body).toEqual({ name, scopes: ['requests:write'] });
   });
 
   it.each(['approver', 'viewer'])('offers an %s no register', async (role) => {

@@ -329,5 +329,9 @@
   "keyOnce.copied": "Key copied.",
   "keyOnce.copyFailed": "The key couldn't be copied here. Press Show and copy it by hand.",
   "keyOnce.done": "Done, I've saved it",
-  "keyOnce.retried": "The key was made on your first try and can't be shown again. If you didn't save it, rotate the key."
+  "keyOnce.retried": "The key was made on your first try and can't be shown again. If you didn't save it, rotate the key.",
+  "keyOnce.leaveQuestion": "Leave without saving the key? Agent X can't show it again: once you leave, the only way to give the agent a working key is to rotate it.",
+  "keyOnce.stay": "Stay and save it",
+  "keyOnce.leave": "Leave without it",
+  "keyOnce.switchHeld": "Save the new key and press Done before switching organisation."
 }

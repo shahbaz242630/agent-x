@@ -84,7 +84,7 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
   const listed = useBrakeList(kind, organization.id);
   const { busy, said, run } = useChange(brakeRefusal);
   const [open, setOpen] = useState<Open>(NONE);
-  const { path, suspending, reactivateChooses, linked } = KINDS[kind];
+  const { path, suspending, reactivateChooses } = KINDS[kind];
   const canSuspend = suspending.includes(organization.role);
   const canReactivate = REACTIVATING.includes(organization.role);
   const pages = listed.data?.pages ?? [];
@@ -125,7 +125,8 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
             <Row
               key={thing.id}
               thing={thing}
-              linked={linked}
+              // An agent has its own page (6D1), its row's name linking there.
+              linked={kind === 'agents'}
               canSuspend={canSuspend}
               canReactivate={canReactivate}
               busy={busy}

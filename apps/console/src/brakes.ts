@@ -55,8 +55,6 @@ interface Kept {
   readonly suspending: readonly Role[];
   /** Reactivating chooses what happens to the held requests (a supplier, decision 9); the others choose nothing. */
   readonly reactivateChooses: boolean;
-  /** Each has its own page (an agent's, 6D1), its row's name linking there. */
-  readonly linked: boolean;
 }
 
 export const KINDS: Readonly<Record<Kind, Kept>> = {
@@ -71,7 +69,6 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
     }),
     suspending: ['admin', 'developer'],
     reactivateChooses: false,
-    linked: true,
   },
   suppliers: {
     path: '/v1/suppliers',
@@ -84,7 +81,6 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
     }),
     suspending: ['admin', 'approver'],
     reactivateChooses: true,
-    linked: false,
   },
   sources: {
     path: '/v1/funding-sources',
@@ -97,7 +93,6 @@ export const KINDS: Readonly<Record<Kind, Kept>> = {
     }),
     suspending: ['admin', 'approver'],
     reactivateChooses: false,
-    linked: false,
   },
 };
 

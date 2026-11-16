@@ -45,8 +45,10 @@ export interface Member {
   readonly status: 'ACTIVE' | 'DEACTIVATED';
 }
 
-/** Who may register an agent (REGISTERING_ROLES) and rotate or revoke its keys (KEY_CHANGING_ROLES). */
+/** Who may register an agent (REGISTERING_ROLES). */
 export const REGISTERING: readonly Role[] = ['admin', 'developer'];
+/** Who may rotate or revoke an agent's keys (KEY_CHANGING_ROLES): the same roles, rotating held to the owner for a developer. */
+export const KEY_CHANGING: readonly Role[] = ['admin', 'developer'];
 /** Who may hand an agent to another owner (HANDING_OVER_ROLES): an admin. */
 export const HANDING_OVER: readonly Role[] = ['admin'];
 /** Who may own an agent (the API's OWNING_ROLES): an active admin or developer. */
@@ -73,10 +75,19 @@ export function useMembers(organization: string) {
   });
 }
 
-/** The most characters an agent's name may have (the API's MAX_NAME, counted in code points). */
-export const NAME_MOST = 100;
-/** What a name may not hold, as the API's visible names (visible-name.ts); joiners are left to the API, which allows some. */
+/** The most characters an agent's name may have (the API's MAX_NAME, counted in code points, as the table does). */
+const NAME_MOST = 100;
+/**
+ * The most UTF-16 units such a name can take, which a field's maxLength counts: two for a character beyond the
+ * basic plane (an emoji), so a valid name of 100 such characters can still be typed; the 100 is checked in code.
+ */
+export const NAME_UNITS_MOST = NAME_MOST * 2;
+// The API's own rules for a visible name, as packages/core/src/shared-kernel/visible-name.ts has them, word for word:
+// what may not show anywhere; a joiner allowed only where a script needs it to shape a word; something readable; no
+// mark first nor five piled up.
 const INVISIBLE = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Script=Braille}]/u;
+const JOINER_IN_A_WORD =
+  /(?<=\p{M})\p{Join_Control}(?=[\p{L}\p{M}])|(?<=[\p{L}\p{M}])\p{Join_Control}(?=\p{M})|(?<=\p{Script=Arabic})\p{Join_Control}(?=\p{Script=Arabic})/gu;
 const JOINERS = /\p{Join_Control}/gu;
 const READABLE = /[\p{L}\p{N}]/u;
 const STACKED = /(?:^\p{M})|\p{M}{5}/u;
@@ -89,14 +100,13 @@ const STACKED = /(?:^\p{M})|\p{M}{5}/u;
 export function isAgentName(name: string): boolean {
   const composed = name.normalize('NFC');
   const length = Array.from(composed).length;
-  const bare = composed.replace(JOINERS, '');
   return (
     length > 0 &&
     length <= NAME_MOST &&
     composed.trim() === composed &&
     READABLE.test(composed) &&
-    !INVISIBLE.test(bare) &&
-    !STACKED.test(bare)
+    !INVISIBLE.test(composed.replace(JOINER_IN_A_WORD, '')) &&
+    !STACKED.test(composed.replace(JOINERS, ''))
   );
 }
 

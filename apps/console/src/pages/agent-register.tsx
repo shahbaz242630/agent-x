@@ -6,11 +6,12 @@
 // comes in the confirm's answer, shown once (stepped-up.tsx, key-once.tsx).
 import { useId, useState } from 'react';
 
-import { agentRefusal, isAgentName, NAME_MOST, REGISTERING, type Scope, SCOPES } from '../agents.ts';
+import { agentRefusal, isAgentName, NAME_UNITS_MOST, REGISTERING, type Scope, SCOPES } from '../agents.ts';
 import { Confirm } from '../confirm.tsx';
 import { useActing } from '../session.tsx';
 import { ask, changeAt, mustStepUp } from '../step-up.ts';
 import { t } from '../text.ts';
+import { Scopes } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
 import { LineField } from './line-field.tsx';
 
@@ -67,7 +68,7 @@ export function RegisterAgent() {
       <LineField
         label={t('agents.name')}
         hint={t('agents.nameHint')}
-        most={NAME_MOST}
+        most={NAME_UNITS_MOST}
         value={name}
         onChange={(value) => {
           setName(value);
@@ -137,11 +138,7 @@ export function RegisterAgent() {
           onConfirm={() => void register()}
         >
           <p className="amount">{name}</p>
-          <ul className="plain">
-            {asked.map((scope) => (
-              <li key={scope}>{t(`agents.scope.${scope}`)}</li>
-            ))}
-          </ul>
+          <Scopes scopes={asked} />
         </Confirm>
       )}
     </section>

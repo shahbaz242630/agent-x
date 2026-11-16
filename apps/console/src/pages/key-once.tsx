@@ -4,9 +4,14 @@
 // view that confirmed: never sessionStorage or localStorage, the address, the
 // query cache, a log or an error report. Masked until "Show"; copied by the
 // Clipboard API, said copied only once the write is done (and said when it
-// fails); gone with "Done, I've saved it", which closes the view, or with
-// leaving the page, which asks first while it is still on screen.
-import { useEffect, useState } from 'react';
+// fails). Until "Done, I've saved it", leaving is asked about first: any link
+// inside the console (the router's blocker), a reload or closing the tab (the
+// browser's own question), and switching organisation waits (KeyHold). Once
+// the page is hidden for good or kept for Back (pagehide, the back/forward
+// cache), the key is cleared, so coming back never shows it again.
+import { useBlocker } from '@tanstack/react-router';
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 
 import { t } from '../text.ts';
 
@@ -23,22 +28,86 @@ export function keyIn(answer: unknown): { readonly key: string | null } | undefi
   return { key: typeof answer.key === 'string' ? answer.key : null };
 }
 
+/** Told while a key is on screen and not yet saved: the shell holds what would drop it without a navigation. */
+const Hold = createContext<(held: boolean) => void>(() => undefined);
+
+export function KeyHold({
+  onHeld,
+  children,
+}: {
+  readonly onHeld: (held: boolean) => void;
+  readonly children: ReactNode;
+}) {
+  return <Hold value={onHeld}>{children}</Hold>;
+}
+
 type Copied = 'not yet' | 'copied' | 'failed';
+
+/** Asked when a link inside the console would leave the key behind: stay (and save it), or leave without it. */
+function LeaveQuestion({ onStay, onLeave }: { readonly onStay: () => void; readonly onLeave: () => void }) {
+  const stay = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    stay.current?.focus();
+  }, []);
+  return (
+    <div className="notice" role="alert">
+      <p>{t('keyOnce.leaveQuestion')}</p>
+      <div className="actions">
+        <button type="button" className="secondary" onClick={onLeave}>
+          {t('keyOnce.leave')}
+        </button>
+        <button ref={stay} type="button" className="primary" onClick={onStay}>
+          {t('keyOnce.stay')}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function KeyOnce({ secret, onDone }: { readonly secret: string | null; readonly onDone: () => void }) {
   const [shown, setShown] = useState(false);
   const [copied, setCopied] = useState<Copied>('not yet');
+  const [gone, setGone] = useState(false);
+  // Set once the person is done with it, or the page is going: the view's own way out is never asked about.
+  const released = useRef(false);
+  const holding = secret !== null && !gone;
+  const leaving = useBlocker({
+    shouldBlockFn: () => !released.current,
+    // A reload or a closed tab is asked about below, by this page's own listener, whichever history the router has.
+    enableBeforeUnload: false,
+    disabled: !holding,
+    withResolver: true,
+  });
+  const hold = useContext(Hold);
+  // The latest way out, for the page-hide listener: the caller's changes each render, which mustn't re-hold.
+  const done = useRef(onDone);
   useEffect(() => {
-    if (secret === null) return undefined;
+    done.current = onDone;
+  });
+  useEffect(() => {
+    if (!holding) return undefined;
+    hold(true);
     // Leaving or reloading the page loses the key for good: the browser asks first.
     const stay = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
+      if (!released.current) event.preventDefault();
+    };
+    // Hidden for good, or kept for Back: cleared now (flushed, so the kept page holds no key), and the view closed.
+    const clear = () => {
+      released.current = true;
+      flushSync(() => {
+        setGone(true);
+      });
+      done.current();
     };
     window.addEventListener('beforeunload', stay);
+    window.addEventListener('pagehide', clear);
     return () => {
+      hold(false);
       window.removeEventListener('beforeunload', stay);
+      window.removeEventListener('pagehide', clear);
     };
-  }, [secret]);
+  }, [holding, hold]);
+  if (gone) return null;
   if (secret === null) {
     return (
       <>
@@ -79,7 +148,14 @@ export function KeyOnce({ secret, onDone }: { readonly secret: string | null; re
         <button type="button" className="secondary" onClick={() => void copy()}>
           {t('keyOnce.copy')}
         </button>
-        <button type="button" className="primary" onClick={onDone}>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            released.current = true;
+            onDone();
+          }}
+        >
           {t('keyOnce.done')}
         </button>
       </div>
@@ -88,6 +164,7 @@ export function KeyOnce({ secret, onDone }: { readonly secret: string | null; re
           {t(copied === 'copied' ? 'keyOnce.copied' : 'keyOnce.copyFailed')}
         </p>
       )}
+      {leaving.status === 'blocked' && <LeaveQuestion onStay={leaving.reset} onLeave={leaving.proceed} />}
     </section>
   );
 }

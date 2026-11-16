@@ -33,7 +33,7 @@ import { useActing } from '../session.tsx';
 import { type Asked, askFirst, changeAt } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
-import { Loading, Retry } from './failed.tsx';
+import { Loading, NotShown } from './failed.tsx';
 import { LineField, NOTE_MOST } from './line-field.tsx';
 
 /** The plain words for a refusal the person can act on; the code for any other. */
@@ -331,14 +331,16 @@ export function RequestPage({ id }: { readonly id: string }) {
       {t('request.back')}
     </Link>
   );
-  // An address that isn't a request's ID names none: not found, as the API's 404 is, never a failure to retry.
   const missing = isMissing(id, request.error);
   if (missing || request.isError) {
     return (
-      <section className="stack">
-        {back}
-        {missing ? <p className="notice">{t('request.notFound')}</p> : <Retry onRetry={() => void request.refetch()} />}
-      </section>
+      <NotShown
+        back={back}
+        missing={missing}
+        error={request.error}
+        notFound={t('request.notFound')}
+        onRetry={() => void request.refetch()}
+      />
     );
   }
   if (request.isPending) return <Loading />;
