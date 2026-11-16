@@ -45,9 +45,10 @@ import {
 import { useActing } from '../session.tsx';
 import { t, type TextKey } from '../text.ts';
 import { Said, useChange } from './change.tsx';
-import { Choices } from './choices.tsx';
+import { Choices, FieldBroken } from './choices.tsx';
 import { Loading, NotShown } from './failed.tsx';
 import { LineField } from './line-field.tsx';
+import { MandateLink } from './mandate.tsx';
 import { type Broken, TermsFields } from './mandate-fields.tsx';
 import { termRows, type Terms, useNames } from './mandate-terms.tsx';
 
@@ -316,11 +317,7 @@ function MandateOwn({
       <p id="mandate-zone-hint" className="fine">
         {t('mandates.form.timeZoneHint')}
       </p>
-      {broken('timeZone') !== undefined && (
-        <p className="notice" role="alert">
-          {broken('timeZone')}
-        </p>
-      )}
+      <FieldBroken said={broken('timeZone')} />
       <LineField
         label={t('mandates.form.splitWindow')}
         hint={t('mandates.form.splitWindowHint', {
@@ -448,11 +445,7 @@ function RedraftForm({ mandate, back }: { readonly mandate: MandateDetails; read
 export function NewVersion({ id }: { readonly id: string }) {
   const { organization } = useActing();
   const shown = useMandate(id, organization.id);
-  const back = (
-    <Link to="/more/mandates/$id" params={{ id }} className="back">
-      {t('mandates.redraft.back')}
-    </Link>
-  );
+  const back = <MandateLink id={id}>{t('mandates.redraft.back')}</MandateLink>;
   const missing = isMissing(id, shown.error);
   if (missing || shown.isError) {
     return (

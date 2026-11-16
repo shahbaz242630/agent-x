@@ -10,11 +10,8 @@ import { useBrakeList } from '../brakes.ts';
 import { amountHint, type Draft, OVER, type Problem, type Rules, WAITS } from '../policies.ts';
 import { amountText } from '../requests.ts';
 import { t } from '../text.ts';
-import { Choices, Tick } from './choices.tsx';
-import { LineField } from './line-field.tsx';
-
-/** The most characters an amount field takes: 2^53 − 1 in fils, grouped, with room. */
-const AMOUNT_MOST = 24;
+import { Choices, FieldBroken, Tick } from './choices.tsx';
+import { AMOUNT_MOST, LineField } from './line-field.tsx';
 
 /** The suppliers' names by ID (lower case), as far as the list has been read: an ID not in it is shown as itself. */
 export function useSupplierNames(organization: string) {
@@ -181,11 +178,7 @@ function SupplierRule({
               {t('policies.edit.moreSuppliers')}
             </button>
           )}
-          {broken('supplierIds') !== undefined && (
-            <p className="notice" role="alert">
-              {broken('supplierIds')}
-            </p>
-          )}
+          <FieldBroken said={broken('supplierIds')} />
         </div>
       )}
     </>

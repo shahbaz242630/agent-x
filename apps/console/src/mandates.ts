@@ -10,7 +10,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isRefusal, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
-import { knownMinorDigits, pageQuery } from './requests.ts';
+import { knownMinorDigits, minorDigits, pageQuery } from './requests.ts';
 import type { Role } from './session.tsx';
 import { t } from './text.ts';
 import { isVisibleName } from './visible-name.ts';
@@ -54,7 +54,7 @@ export interface MandateVersion {
   readonly splitCheckWarning: string | null;
 }
 
-type CapFrom = 'mandate-policy' | 'organization-policy' | 'none' | 'not-set';
+export type CapFrom = 'mandate-policy' | 'organization-policy' | 'none' | 'not-set';
 
 /** A mandate with its version in force and the draft waiting (MandateDetails). */
 export interface MandateDetails extends Omit<MandateListed, 'purpose'> {
@@ -169,9 +169,6 @@ export function amountTyped(minor: number, digits = AED_DIGITS): string {
   return digits === 0 ? whole : `${whole}.${String(units % scale).padStart(digits, '0')}`;
 }
 
-/** The minor digits amounts in `currency` are typed with; none for a currency the browser can't read. */
-export const currencyDigits = (currency: string): number | undefined => knownMinorDigits(currency);
-
 /**
  * How an amount field says what to type: its currency (the chosen bank
  * account's, AED's until one is chosen), an example in that currency's own
@@ -181,7 +178,7 @@ export function amountWords(
   currency: string | undefined,
 ): Readonly<Record<'currency' | 'example' | 'decimals', string>> {
   const shown = currency ?? 'AED';
-  const digits = currencyDigits(shown) ?? AED_DIGITS;
+  const digits = minorDigits(shown);
   return {
     currency: shown,
     example: amountTyped(2500 * 10 ** digits, digits),
@@ -261,7 +258,7 @@ function limitProblems(typed: TermsTyped, digits: number): TermsProblem[] {
  */
 export function termsProblems(typed: TermsTyped, now = Date.now(), currency?: string): TermsProblem[] {
   const problems: TermsProblem[] = [];
-  const digits = currency === undefined ? AED_DIGITS : currencyDigits(currency);
+  const digits = currency === undefined ? AED_DIGITS : knownMinorDigits(currency);
   if (digits === undefined) problems.push('currency');
   if (!isVisibleName(typed.purpose, PURPOSE_MOST)) problems.push('purpose');
   problems.push(...limitProblems(typed, digits ?? AED_DIGITS));
@@ -304,7 +301,7 @@ const known = <T>(value: T | null | undefined): T => {
 
 /** The terms as the API takes them, in `currency` (the source's): the over-limit choice and its words added at the confirm. */
 export function termsBody(typed: TermsTyped, currency: string) {
-  const digits = known(currencyDigits(currency));
+  const digits = known(knownMinorDigits(currency));
   return {
     purpose: typed.purpose,
     currency,
@@ -343,7 +340,7 @@ export function localTyped(iso: string): string {
  * (Rule Book §1.9: the page shows what is in force beside each).
  */
 export function termsFrom(version: MandateVersion): TermsTyped {
-  const digits = currencyDigits(version.currency) ?? AED_DIGITS;
+  const digits = minorDigits(version.currency);
   return {
     purpose: version.purpose,
     perOrder: amountTyped(version.perOrderLimitMinor, digits),

@@ -16,7 +16,7 @@
 // Focus starts on Cancel (on the pop-up itself while every control is
 // disabled), and goes back to what was pressed to open it: React removes the
 // pop-up rather than closing it, so the browser's own return isn't relied on.
-import { useQuery } from '@tanstack/react-query';
+import { queryOptions, useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 
 import { api } from './api.ts';
@@ -27,20 +27,26 @@ interface Words {
   readonly text: string;
 }
 
-interface Statement {
+export interface Statement {
   readonly id: string;
   readonly version: number;
   readonly words: readonly Words[];
 }
 
-/** The words of one change, as the API confirms changes with them now: read again on each opening. */
-function useStatement(id: string | undefined) {
-  return useQuery({
+/** The API's words for changes (GET /v1/statements): never served from cache, read afresh on each showing. */
+export const statementsQuery = (enabled: boolean) =>
+  queryOptions({
     queryKey: ['statements'],
-    enabled: id !== undefined,
+    enabled,
     queryFn: () => api.get<{ readonly statements: readonly Statement[] }>('/v1/statements'),
     staleTime: 0,
     refetchOnMount: 'always',
+  });
+
+/** The words of one change, as the API confirms changes with them now: read again on each opening. */
+function useStatement(id: string | undefined) {
+  return useQuery({
+    ...statementsQuery(id !== undefined),
     select: ({ statements }) => statements.find((statement) => statement.id === id),
   });
 }

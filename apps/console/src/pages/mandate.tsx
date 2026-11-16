@@ -8,6 +8,7 @@
 // over-limit choice here (mandate-actions.tsx). Links to its own rules and the
 // simulator (6D3b).
 import { Link } from '@tanstack/react-router';
+import type { ReactNode } from 'react';
 
 import { useAgent, useMembers } from '../agents.ts';
 import { isMissing } from '../api.ts';
@@ -20,6 +21,15 @@ import { memberText } from './agent.tsx';
 import { Loading, NotShown, Retry } from './failed.tsx';
 import { MandateActions } from './mandate-actions.tsx';
 import { TermsTable } from './mandate-terms.tsx';
+
+/** A link back to a mandate's page (the policy's page, the simulator's, a new version's). */
+export function MandateLink({ id, children }: { readonly id: string; readonly children: ReactNode }) {
+  return (
+    <Link to="/more/mandates/$id" params={{ id }} className="back">
+      {children}
+    </Link>
+  );
+}
 
 /** The agent's monthly cap the organisation's policies hold it to, and where it comes from. */
 function capText({ agentMonthlyCap: cap }: MandateDetails): string {

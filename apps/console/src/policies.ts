@@ -15,6 +15,16 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isUuid } from './api.ts';
+import { statementsQuery, type Statement } from './confirm.tsx';
+import {
+  amountMinor,
+  amountTyped,
+  type CapFrom,
+  isEnded,
+  mandateAt,
+  type MandateDetails,
+  type MandateVersion,
+} from './mandates.ts';
 import { refusalText } from './refusals.ts';
 import { minorDigits } from './requests.ts';
 import type { Role } from './session.tsx';
@@ -82,7 +92,6 @@ export interface WaitingPreview {
 }
 
 type Decision = 'DENY' | 'REQUIRE_NEW_MANDATE' | 'REQUIRE_APPROVAL' | 'ALLOW';
-type CapFrom = 'mandate-policy' | 'organization-policy' | 'none' | 'not-set';
 
 export interface Simulation {
   readonly decision: Decision;
@@ -95,21 +104,10 @@ export interface Simulation {
 }
 
 /** A mandate's terms, the bounds its own policy is held within. */
-export interface MandateTerms {
-  readonly currency: string;
-  readonly perOrderLimitMinor: number;
-  readonly monthlyLimitMinor: number;
-  readonly approvalThresholdMinor: number;
-  readonly supplierIds: readonly string[];
-  readonly fundingSourceId: string;
-}
-
-interface Mandate {
-  readonly id: string;
-  readonly status: string;
-  readonly current: MandateTerms | null;
-  readonly pending: MandateTerms | null;
-}
+export type MandateTerms = Pick<
+  MandateVersion,
+  'currency' | 'perOrderLimitMinor' | 'monthlyLimitMinor' | 'approvalThresholdMinor' | 'supplierIds' | 'fundingSourceId'
+>;
 
 /** The organisation policy's currency: AED, the Pilot's only one (the API refuses another, POLICY_CURRENCY_REFUSED). */
 export const PILOT_CURRENCY = 'AED';
@@ -121,8 +119,6 @@ export const SIMULATING: readonly Role[] = ['admin', 'approver', 'developer'];
 
 /** Which policy: the organisation's own, or one mandate's. */
 export type Target = { readonly kind: 'organization' } | { readonly kind: 'mandate'; readonly mandateId: string };
-
-const mandateAt = (id: string): string => `/v1/mandates/${encodeURIComponent(id)}`;
 
 /** A policy's address in the API: its change is at `/change`, its preview at `/change/preview`. */
 export const policyAt = (target: Target): string =>
@@ -141,15 +137,18 @@ export function usePolicy(target: Target, organization: string) {
   });
 }
 
-/** One mandate, for the terms its policy is held within (in force, else the draft waiting). */
-export function useMandate(id: string, organization: string) {
+/**
+ * One mandate (mandates.ts's useMandate: the same query, read here for its
+ * terms), for the terms its policy is held within (in force, else the draft waiting).
+ */
+export function useMandateTerms(id: string, organization: string) {
   return useQuery({
     queryKey: ['mandates', organization, 'one', id],
     enabled: isUuid(id),
-    queryFn: () => api.get<Mandate>(mandateAt(id), { organization }),
-    select: (mandate) => ({
+    queryFn: () => api.get<MandateDetails>(mandateAt(id), { organization }),
+    select: (mandate): { readonly ended: boolean; readonly terms: MandateTerms | null } => ({
       // Revoked or expired (MANDATE.states): for good, so its rules can't change and nothing is tried under it.
-      ended: mandate.status === 'REVOKED' || mandate.status === 'EXPIRED',
+      ended: isEnded(mandate.status),
       terms: mandate.current ?? mandate.pending,
     }),
   });
@@ -157,24 +156,10 @@ export function useMandate(id: string, organization: string) {
 
 /** An amount field's rule in plain words, with an example in the currency's own minor digits. */
 export const amountHint = (currency: string): string =>
-  t('policies.edit.amountHint', { currency, example: amountField(250_050, minorDigits(currency)) });
-
-interface Statement {
-  readonly id: string;
-  readonly version: number;
-  readonly words: readonly { readonly choice: string; readonly text: string }[];
-}
+  t('policies.edit.amountHint', { currency, example: amountTyped(250_050, minorDigits(currency)) });
 
 /** The API's words for changes, read afresh each time it is shown (as the shared confirm reads them). */
-export function useStatements(enabled: boolean) {
-  return useQuery({
-    queryKey: ['statements'],
-    enabled,
-    queryFn: () => api.get<{ readonly statements: readonly Statement[] }>('/v1/statements'),
-    staleTime: 0,
-    refetchOnMount: 'always',
-  });
-}
+export const useStatements = (enabled: boolean) => useQuery(statementsQuery(enabled));
 
 /** One choice's words in a set and the set's version, or none while they aren't read. */
 export function wordsOf(
@@ -185,36 +170,6 @@ export function wordsOf(
   const statement = read?.statements.find((one) => one.id === id);
   const words = statement?.words.find((one) => one.choice === choice);
   return statement === undefined || words === undefined ? undefined : { version: statement.version, text: words.text };
-}
-
-// Digits only, grouped by commas in threes or not at all, then an optional fraction: no sign, no exponent, no spaces.
-const AMOUNT_TEXT = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/;
-
-/**
- * An amount typed in major units (`2500`, `2,500.50`) as whole minor units,
- * exactly: none for anything else, more decimals than the currency has, zero,
- * or past 2^53 − 1 (the API's AMOUNT).
- */
-export function parseAmount(text: string, digits: number): number | null {
-  const typed = text.trim();
-  if (!AMOUNT_TEXT.test(typed)) return null;
-  const plain = typed.replaceAll(',', '');
-  const point = plain.indexOf('.');
-  const whole = point < 0 ? plain : plain.slice(0, point);
-  const fraction = point < 0 ? '' : plain.slice(point + 1);
-  if (fraction.length > digits) return null;
-  // BigInt('') is 0n: a currency with no minor digits and no fraction typed.
-  const minor = BigInt(whole) * 10n ** BigInt(digits) + BigInt(fraction.padEnd(digits, '0'));
-  if (minor < 1n || minor > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(minor);
-}
-
-/** Whole minor units as an amount field shows them for change (`2500.50`), exactly. */
-export function amountField(minor: number, digits: number): string {
-  const amount = BigInt(minor);
-  const scale = 10n ** BigInt(digits);
-  const whole = String(amount / scale);
-  return digits === 0 ? whole : `${whole}.${String(amount % scale).padStart(digits, '0')}`;
 }
 
 /** A policy's rules as an admin chooses them: each choice null until made, the amounts as typed. */
@@ -238,7 +193,7 @@ export interface Draft {
  */
 export function draftFrom(current: Rules | null, digits: number, suggestedMonthly?: number): Draft {
   const field = (minor: number | null | undefined) =>
-    minor === null || minor === undefined ? '' : amountField(minor, digits);
+    minor === null || minor === undefined ? '' : amountTyped(minor, digits);
   return {
     perOrder: null,
     perOrderAmount: field(current?.perOrderCap?.capMinor),
@@ -283,7 +238,7 @@ function amountRule(
 ): number | null {
   if (choice === null) problems.push(unchosen);
   if (choice === null || choice === 'none') return null;
-  const minor = parseAmount(typed, digits);
+  const minor = amountMinor(typed, digits) ?? null;
   if (minor === null) problems.push(unreadable);
   return minor;
 }

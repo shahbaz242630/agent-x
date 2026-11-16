@@ -5,12 +5,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { ApiError } from './api.ts';
+import { amountMinor, amountTyped } from './mandates.ts';
 import {
-  amountField,
   type Draft,
   draftFrom,
   type MandateTerms,
-  parseAmount,
   policyRefusal,
   rulesFrom,
   waitingOffered,
@@ -37,7 +36,7 @@ describe('reading a typed amount (6D3b)', () => {
     ['0.29', 29],
     ['1.10', 110],
   ])('reads %s as %d fils', (typed, minor) => {
-    expect(parseAmount(typed, 2)).toBe(minor);
+    expect(amountMinor(typed, 2)).toBe(minor);
   });
 
   it.each([
@@ -56,21 +55,21 @@ describe('reading a typed amount (6D3b)', () => {
     ['١٢', 'digits of another script'],
     ['AED 5', 'a currency'],
   ])('refuses %s (%s)', (typed) => {
-    expect(parseAmount(typed, 2)).toBeNull();
+    expect(amountMinor(typed, 2)).toBeUndefined();
   });
 
   it('reads a currency with no minor digits, and refuses a fraction in it', () => {
-    expect(parseAmount('7', 0)).toBe(7);
-    expect(parseAmount('7.5', 0)).toBeNull();
-    expect(parseAmount('7.500', 3)).toBe(7500);
+    expect(amountMinor('7', 0)).toBe(7);
+    expect(amountMinor('7.5', 0)).toBeUndefined();
+    expect(amountMinor('7.500', 3)).toBe(7500);
   });
 
   it('shows whole minor units for change exactly, and reads them back the same', () => {
-    expect(amountField(250_050, 2)).toBe('2500.50');
-    expect(amountField(1, 2)).toBe('0.01');
-    expect(amountField(7, 0)).toBe('7');
-    expect(amountField(Number.MAX_SAFE_INTEGER, 2)).toBe('90071992547409.91');
-    expect(parseAmount(amountField(Number.MAX_SAFE_INTEGER, 2), 2)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(amountTyped(250_050, 2)).toBe('2500.50');
+    expect(amountTyped(1, 2)).toBe('0.01');
+    expect(amountTyped(7, 0)).toBe('7');
+    expect(amountTyped(Number.MAX_SAFE_INTEGER, 2)).toBe('90071992547409.91');
+    expect(amountMinor(amountTyped(Number.MAX_SAFE_INTEGER, 2), 2)).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
 

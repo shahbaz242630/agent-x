@@ -259,26 +259,26 @@ export function MandateActions({ mandate }: { readonly mandate: MandateDetails }
   };
   const plan = (asked: Asked, version?: number) =>
     void run(() => Promise.resolve(stepUp(asked, version)), { after: close });
-  const move = (seen: MandateDetails, kind: Move, choice: string, version?: number) =>
+  // A change made by the passkey alone at `path`, named by the mandate as it was seen when its dialog opened.
+  const passkeyChange = (
+    seen: MandateDetails,
+    key: 'overLimit' | Move,
+    path: string,
+    body: Readonly<Record<string, unknown>>,
+    version?: number,
+  ) =>
     void run(
-      () =>
-        byPasskey(
-          `${at}/${kind}`,
-          labelOf(seen, kind),
-          kind === 'suspend' ? { pendingRequests: choice } : {},
-          organization.id,
-          { statementVersion: version },
-        ),
-      { after: close },
+      () => byPasskey(`${at}/${path}`, labelOf(seen, key), body, organization.id, { statementVersion: version }),
+      {
+        after: close,
+      },
     );
-  const overLimit = (seen: MandateDetails, choice: string, version?: number) =>
-    void run(
-      () =>
-        byPasskey(`${at}/over-limit`, labelOf(seen, 'overLimit'), { overLimit: choice }, organization.id, {
-          statementVersion: version,
-        }),
-      { after: close },
-    );
+  const move = (seen: MandateDetails, kind: Move, choice: string, version?: number) => {
+    passkeyChange(seen, kind, kind, kind === 'suspend' ? { pendingRequests: choice } : {}, version);
+  };
+  const overLimit = (seen: MandateDetails, choice: string, version?: number) => {
+    passkeyChange(seen, 'overLimit', 'over-limit', { overLimit: choice }, version);
+  };
   const opener = (kind: Opened['kind'] & ('accept' | 'overLimit' | Move), words: string, primary = false) => (
     <button
       type="button"

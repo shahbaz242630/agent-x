@@ -22,12 +22,9 @@ import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t, type TextKey } from '../text.ts';
 import { unitsMost } from '../visible-name.ts';
-import { Choices } from './choices.tsx';
-import { LineField } from './line-field.tsx';
+import { Choices, FieldBroken } from './choices.tsx';
+import { AMOUNT_MOST, LineField } from './line-field.tsx';
 import { sourceText } from './mandate-terms.tsx';
-
-/** The longest an amount may be typed: 2^53 − 1 fils in dirhams, grouped, with its decimals. */
-const AMOUNT_MOST = 24;
 
 /** What a field says is wrong, once checked: its own words for each problem it holds. */
 export type Broken = (problem: TermsProblem | 'agent' | 'timeZone' | 'splitWindowHours') => string | undefined;
@@ -87,11 +84,7 @@ function Suppliers({
           </button>
         )}
       </fieldset>
-      {broken !== undefined && (
-        <p className="notice" role="alert">
-          {broken}
-        </p>
-      )}
+      <FieldBroken said={broken} />
     </>
   );
 }
@@ -164,11 +157,7 @@ function Ends({
               set({ endsAt: event.target.value });
             }}
           />
-          {broken('endsAt') !== undefined && (
-            <p className="notice" role="alert">
-              {broken('endsAt')}
-            </p>
-          )}
+          <FieldBroken said={broken('endsAt')} />
         </>
       )}
     </>

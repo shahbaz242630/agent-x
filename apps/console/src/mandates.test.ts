@@ -10,7 +10,6 @@ import {
   amountTyped,
   amountWords,
   carryIn,
-  currencyDigits,
   decidesTheDraft,
   draftBody,
   draftFailure,
@@ -25,6 +24,7 @@ import {
   termsProblems,
   type TermsTyped,
 } from './mandates.ts';
+import { knownMinorDigits } from './requests.ts';
 import { StepUpStorageBlocked } from './step-up.ts';
 
 const SUPPLIER = '0199a0f0-0000-7000-8000-0000000000d1';
@@ -89,13 +89,13 @@ describe('an amount typed in dirhams (6D3a)', () => {
     expect(amountMinor('1.2345', 3)).toBeUndefined();
     expect(amountTyped(2500, 0)).toBe('2500');
     expect(amountTyped(1234, 3)).toBe('1.234');
-    expect(currencyDigits('AED')).toBe(2);
-    expect(currencyDigits('JPY')).toBe(0);
-    expect(currencyDigits('KWD')).toBe(3);
-    expect(currencyDigits('A1')).toBeUndefined();
+    expect(knownMinorDigits('AED')).toBe(2);
+    expect(knownMinorDigits('JPY')).toBe(0);
+    expect(knownMinorDigits('KWD')).toBe(3);
+    expect(knownMinorDigits('A1')).toBeUndefined();
     // Intl formats any well-formed code: one it doesn't list as a currency isn't known.
-    expect(currencyDigits('XYZ')).toBeUndefined();
-    expect(currencyDigits('aed')).toBe(2);
+    expect(knownMinorDigits('XYZ')).toBeUndefined();
+    expect(knownMinorDigits('aed')).toBe(2);
   });
 
   it('says what to type in the account’s currency and digits, AED’s until one is chosen', () => {

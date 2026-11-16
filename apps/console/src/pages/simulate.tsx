@@ -18,7 +18,6 @@ import {
   type Draft,
   draftFrom,
   type MandateTerms,
-  parseAmount,
   PILOT_CURRENCY,
   type Policy,
   policyRefusal,
@@ -28,27 +27,27 @@ import {
   SIMULATING,
   type Simulation,
   simulateAt,
-  useMandate,
+  useMandateTerms,
   usePolicy,
 } from '../policies.ts';
+import { amountMinor } from '../mandates.ts';
 import { amountText, minorDigits } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { isVisibleName } from '../visible-name.ts';
 import { Said, useChange } from './change.tsx';
-import { Choices } from './choices.tsx';
+import { Choices, FieldBroken } from './choices.tsx';
 import { Loading, NotShown } from './failed.tsx';
-import { LineField } from './line-field.tsx';
-import { MandateLink } from './policy.tsx';
+import { AMOUNT_MOST, LineField } from './line-field.tsx';
+import { MandateLink } from './mandate.tsx';
 import { RuleEditor, RulesShown, useSupplierNames } from './policy-rules.tsx';
 
 /** Which rules weigh the test request: those in force, or proposed ones in place of a policy's, or of both. */
 const WEIGHED = ['inForce', 'mandate', 'organization', 'both'] as const;
 type Weighed = (typeof WEIGHED)[number];
 
-/** The most characters an order number may have (ORDER_REFERENCE_MOST), and an amount's field. */
+/** The most characters an order number may have (ORDER_REFERENCE_MOST). */
 const ORDER_REFERENCE_MOST = 100;
-const AMOUNT_MOST = 24;
 
 interface Typed {
   readonly amount: string;
@@ -74,7 +73,7 @@ const weighsMandate = (weighed: Weighed | null) => weighed === 'mandate' || weig
 /** Each field of the test request the API would refuse, checked before anything is sent. */
 function typedProblems(typed: Typed, digits: number): readonly Field[] {
   const problems: Field[] = [];
-  if (parseAmount(typed.amount, digits) === null) problems.push('amount');
+  if (amountMinor(typed.amount, digits) === undefined) problems.push('amount');
   if (!isUuid(typed.supplier)) problems.push('supplier');
   if (!isUuid(typed.source)) problems.push('source');
   if (typed.orderReference !== '' && !isVisibleName(typed.orderReference, ORDER_REFERENCE_MOST)) {
@@ -122,11 +121,7 @@ function Pick({
           </option>
         ))}
       </select>
-      {broken !== undefined && (
-        <p className="notice" role="alert">
-          {broken}
-        </p>
-      )}
+      <FieldBroken said={broken} />
     </>
   );
 }
@@ -273,8 +268,8 @@ function Simulator({ mandateId, terms }: { readonly mandateId: string; readonly 
     setProblems(found);
     setOrgProblems(ruleProblems.organization);
     setMandateProblems(ruleProblems.mandate);
-    const amountMinor = parseAmount(typed.amount, digits);
-    if (found.length > 0 || amountMinor === null) return;
+    const amount = amountMinor(typed.amount, digits);
+    if (found.length > 0 || amount === undefined) return;
     if (ruleProblems.organization.length > 0 || ruleProblems.mandate.length > 0) return;
     const whatIf =
       proposed.organizationPolicy === undefined && proposed.mandatePolicy === undefined ? {} : { whatIf: proposed };
@@ -282,7 +277,7 @@ function Simulator({ mandateId, terms }: { readonly mandateId: string; readonly 
       const simulation = await api.post<Simulation>(simulateAt(mandateId), {
         organization: organization.id,
         body: {
-          amountMinor,
+          amountMinor: amount,
           currency,
           supplierId: typed.supplier,
           fundingSourceId: typed.source,
@@ -421,7 +416,7 @@ function Simulator({ mandateId, terms }: { readonly mandateId: string; readonly 
 
 export function SimulatePage({ mandateId }: { readonly mandateId: string }) {
   const { organization } = useActing();
-  const mandate = useMandate(mandateId, organization.id);
+  const mandate = useMandateTerms(mandateId, organization.id);
   const back = <MandateLink id={mandateId}>{t('policies.backMandate')}</MandateLink>;
   const may = SIMULATING.includes(organization.role);
   const missing = isMissing(mandateId, mandate.error);

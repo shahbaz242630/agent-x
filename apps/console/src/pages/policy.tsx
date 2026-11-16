@@ -13,7 +13,7 @@
 // read and choose afresh; then the passkey, and the change is confirmed back
 // on this page (stepped-up.tsx), sending the versions of the words shown (CO3).
 import { Link } from '@tanstack/react-router';
-import { type ReactNode, useState } from 'react';
+import { useState } from 'react';
 
 import { useMembers } from '../agents.ts';
 import { api, ApiError, isMissing } from '../api.ts';
@@ -34,7 +34,7 @@ import {
   SIMULATING,
   type Target,
   usePolicy,
-  useMandate,
+  useMandateTerms,
   useStatements,
   WAITING,
   WAITING_MOVED,
@@ -52,16 +52,8 @@ import { memberText } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
 import { Choices } from './choices.tsx';
 import { Loading, NotShown, Retry } from './failed.tsx';
+import { MandateLink } from './mandate.tsx';
 import { RuleEditor, RulesShown, SupplierNames, useSupplierNames } from './policy-rules.tsx';
-
-/** A link back to a mandate's page (6D3a's). */
-export function MandateLink({ id, children }: { readonly id: string; readonly children: ReactNode }) {
-  return (
-    <Link to="/more/mandates/$id" params={{ id }} className="back">
-      {children}
-    </Link>
-  );
-}
 
 /** The organisation's monthly cap in plain words where its choice says more than the amount: not chosen, or none. */
 function orgMonthly(policy: Policy): string | undefined {
@@ -469,7 +461,7 @@ export function PolicyPage({ target }: { readonly target: Target }) {
   const { organization } = useActing();
   const shown = usePolicy(target, organization.id);
   const mandateId = target.kind === 'mandate' ? target.mandateId : '';
-  const mandate = useMandate(mandateId, organization.id);
+  const mandate = useMandateTerms(mandateId, organization.id);
   const { names } = useSupplierNames(organization.id);
   const back =
     target.kind === 'organization' ? (
