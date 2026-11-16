@@ -22,8 +22,8 @@ import { LineField } from './line-field.tsx';
 
 const AT = '/v1/members/invitations';
 
-/** The most characters an ID takes: a UUID's 36. */
-const ID_MOST = 36;
+/** The most characters the ID field takes: a UUID's 36, with room for spaces pasted around it (trimmed). */
+const ID_MOST = 40;
 
 type Broken = 'none' | 'email' | 'role';
 

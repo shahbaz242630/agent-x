@@ -32,7 +32,7 @@ export interface Contact {
   readonly counts: boolean;
 }
 
-export type ResetStatus = 'DRAFT' | 'AWAITING_CONTACT' | 'COOLING_OFF' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED';
+type ResetStatus = 'DRAFT' | 'AWAITING_CONTACT' | 'COOLING_OFF' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED';
 
 export interface Reset {
   readonly id: string;
