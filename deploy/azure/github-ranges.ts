@@ -216,8 +216,16 @@ export const rangesText = (ranges: GithubRanges): string => `${JSON.stringify(ra
 
 async function live(ranges: GithubRanges): Promise<LiveRanges> {
   const { resolve4 } = await import('node:dns/promises');
-  const response = await fetch(META, { headers: { accept: 'application/vnd.github+json' } });
-  if (!response.ok) throw new Error(`${META} answered ${String(response.status)}`);
+  // Signed in when the workflow gives a token: an anonymous call shares the runner's address limit (403 on 16 Nov).
+  const token = process.env.GH_TOKEN;
+  const headers: Record<string, string> = { accept: 'application/vnd.github+json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const response = await fetch(META, { headers });
+  if (!response.ok) {
+    throw new Error(
+      `GitHub's list of its own addresses (${META}) answered ${String(response.status)}, so today's ranges check could not run; the file is unchanged. It runs again tomorrow; if it fails twice, check the token and GitHub's status.`,
+    );
+  }
   const meta = (await response.json()) as LiveRanges['meta'];
   const addresses: Record<string, readonly string[]> = {};
   for (const [, group] of groupsOf(ranges)) {
