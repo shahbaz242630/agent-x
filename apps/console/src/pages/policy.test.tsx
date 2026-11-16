@@ -27,6 +27,7 @@ const SUPPLIER_B = '0199a0f0-0000-7000-8000-0000000000d2';
 const SUPPLIER_C = '0199a0f0-0000-7000-8000-0000000000d3';
 const SOURCE = '0199a0f0-0000-7000-8000-0000000000f1';
 const OTHER_SOURCE = '0199a0f0-0000-7000-8000-0000000000f2';
+const ENDED_SOURCE = '0199a0f0-0000-7000-8000-0000000000f3';
 const REQUEST = '0199a0f0-0000-7000-8000-0000000000e1';
 const OTHER_REQUEST = '0199a0f0-0000-7000-8000-0000000000e2';
 const OTHER_MANDATE = '0199a0f0-0000-7000-8000-0000000000c2';
@@ -266,6 +267,13 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(screen.queryByRole('button', { name: 'Change the rules' })).toBeNull();
   });
 
+  it.each(['approver', 'developer'])('offers the %s role no change, only the rules in force', async (role) => {
+    as(role);
+    open('/more/policy');
+    expect(await screen.findByText('Only an admin can change these rules.')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Change the rules' })).toBeNull();
+  });
+
   it('is linked from More', async () => {
     as('viewer');
     const history = open('/more');
@@ -441,6 +449,22 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(sentTo(`${ORG_AT}/change/preview`)[0]?.body).toMatchObject({ supplierIds: [SUPPLIER_C] });
   });
 
+  it('unticks a supplier the rules in force name in capitals', async () => {
+    as('admin');
+    answer(`GET ${ORG_AT}`, ok(orgPolicy({ current: { ...VERSION, supplierIds: [SUPPLIER_A.toUpperCase()] } })));
+    answer(`POST ${ORG_AT}/change/preview`, ok(NO_WAITING));
+    open('/more/policy');
+    await chooseAll();
+    await pick('Only the suppliers I tick');
+    const gulf = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'Gulf Traders' });
+    expect(gulf.checked).toBe(true);
+    await userEvent.click(gulf);
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Creek Paper' }));
+    await press('Check what this changes');
+    await screen.findByText(/No request waiting for approval would be rejected/);
+    expect(sentTo(`${ORG_AT}/change/preview`)[0]?.body).toMatchObject({ supplierIds: [SUPPLIER_C] });
+  });
+
   it('lists the waiting requests it would reject, and asks what happens to them with none picked', async () => {
     as('admin');
     answer(`POST ${ORG_AT}/change/preview`, ok(WAITING_ONE));
@@ -527,18 +551,36 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(goTo).not.toHaveBeenCalled();
   });
 
-  it('asks to check again when the waiting requests moved before the ask', async () => {
+  it('holds when the ask gives no plan of the waiting requests at all, and goes nowhere', async () => {
     as('admin');
     answer(`POST ${ORG_AT}/change/preview`, ok(NO_WAITING));
-    answer(`POST ${ORG_AT}/change`, refused(409, 'WAITING_CHOICE_REQUIRED'));
+    answer(`POST ${ORG_AT}/change`, { status: 202, body: { stepUpChallengeId: CHALLENGE } });
     open('/more/policy');
     await chooseAll();
     await press('Check what this changes');
     await press('Continue with passkey');
     await inDialog('Continue with passkey');
-    expect(await screen.findByText(/Press Check what this changes again/)).toBeDefined();
-    expect(screen.queryByRole('button', { name: 'Continue with passkey' })).toBeNull();
+    expect(await screen.findByText(/changed since you checked. Read the list again/)).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(goTo).not.toHaveBeenCalled();
+    expect(kept()).toBeNull();
   });
+
+  it.each(['WAITING_CHOICE_REQUIRED', 'WAITING_CHOICE_NOT_OFFERED'])(
+    'asks to check again when the ask is refused %s',
+    async (code) => {
+      as('admin');
+      answer(`POST ${ORG_AT}/change/preview`, ok(NO_WAITING));
+      answer(`POST ${ORG_AT}/change`, refused(409, code));
+      open('/more/policy');
+      await chooseAll();
+      await press('Check what this changes');
+      await press('Continue with passkey');
+      await inDialog('Continue with passkey');
+      expect(await screen.findByText(/Press Check what this changes again/)).toBeDefined();
+      expect(screen.queryByRole('button', { name: 'Continue with passkey' })).toBeNull();
+    },
+  );
 
   it('says a preview refused plainly', async () => {
     as('admin');
@@ -852,6 +894,97 @@ describe('the simulator (6D3b)', () => {
     };
     expect(sentTo(SIMULATE_AT)[0]?.body).toMatchObject({ whatIf: { organizationPolicy: none, mandatePolicy: none } });
     expect(screen.getByText('No organisation-wide cap')).toBeDefined();
+  });
+
+  it('holds proposed rules for the mandate within its terms, said before anything is sent', async () => {
+    as('admin');
+    open(page);
+    await fillRequest();
+    await pick("My proposed rules for this mandate's policy");
+    await pick('A cap on each request');
+    await amount(1, '2000.01');
+    await pick('Refused');
+    await pick("No cap of its own: the organisation's applies");
+    await pick('No threshold of its own');
+    await pick('Any supplier the mandate allows');
+    await press('Try it');
+    expect(screen.getByText(/can't be above the mandate's own limit per request/)).toBeDefined();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('tries a request in the mandate’s own currency and decimals, the organisation’s proposed rules in AED', async () => {
+    as('admin');
+    answer(`GET /v1/mandates/${MANDATE}`, ok({ ...MANDATE_READ, current: { ...TERMS, currency: 'KWD' } }));
+    answer(`POST ${SIMULATE_AT}`, ok({ ...SIMULATED, decision: 'ALLOW', reasons: [] }));
+    open(page);
+    // A Kuwaiti dinar has three decimals.
+    await userEvent.type(await screen.findByLabelText('Amount in KWD'), '1.250');
+    await screen.findByRole('option', { name: 'Gulf Traders' });
+    await userEvent.selectOptions(screen.getByLabelText('Supplier to pay'), SUPPLIER_A);
+    await screen.findByRole('option', { name: "Main account · …1234 (this mandate's)" });
+    await userEvent.selectOptions(screen.getByLabelText('Bank account to pay from'), SOURCE);
+    await pick("My proposed rules for the organisation's policy");
+    await pick('No cap on each request');
+    await pick("No organisation-wide cap: each agent is held only to its mandates' own limits");
+    await pick('No threshold of its own');
+    await pick("Any supplier an agent's mandate allows");
+    await press('Try it');
+    expect(await screen.findByText('It would be allowed, with no one asked.')).toBeDefined();
+    expect(sentTo(SIMULATE_AT)[0]?.body).toStrictEqual({
+      amountMinor: 1250,
+      currency: 'KWD',
+      supplierId: SUPPLIER_A,
+      fundingSourceId: SOURCE,
+      whatIf: {
+        organizationPolicy: {
+          currency: 'AED',
+          perOrderCap: null,
+          monthlyCapMinor: null,
+          approvalThresholdMinor: null,
+          supplierIds: null,
+        },
+      },
+    });
+  });
+
+  it('sends the bank account picked, and offers none that has ended', async () => {
+    as('developer');
+    answer(
+      'GET /v1/funding-sources',
+      ok({
+        sources: [
+          { id: SOURCE, holderName: 'Main account', hint: '…1234', status: 'ACTIVE' },
+          { id: OTHER_SOURCE, holderName: 'Spare account', hint: '…5678', status: 'ACTIVE' },
+          { id: ENDED_SOURCE, holderName: 'Closed account', hint: '…9999', status: 'ENDED' },
+        ],
+        next: null,
+        unchecked: [],
+      }),
+    );
+    answer(`POST ${SIMULATE_AT}`, ok(SIMULATED));
+    open(page);
+    await userEvent.type(await screen.findByLabelText('Amount in AED'), '10');
+    await screen.findByRole('option', { name: 'Gulf Traders' });
+    await userEvent.selectOptions(screen.getByLabelText('Supplier to pay'), SUPPLIER_A);
+    await screen.findByRole('option', { name: 'Spare account · …5678' });
+    expect(screen.queryByRole('option', { name: /Closed account/ })).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText('Bank account to pay from'), OTHER_SOURCE);
+    await pick('The rules in force now');
+    await press('Try it');
+    expect(await screen.findByText('It would wait for a person to approve it.')).toBeDefined();
+    expect(sentTo(SIMULATE_AT)[0]?.body).toMatchObject({ amountMinor: 1000, fundingSourceId: OTHER_SOURCE });
+  });
+
+  it('says when the agent has no mandate in force at all', async () => {
+    as('admin');
+    answer(`POST ${SIMULATE_AT}`, ok({ ...SIMULATED, decision: 'DENY', mandateId: null }));
+    open(page);
+    await fillRequest();
+    await pick('The rules in force now');
+    await press('Try it');
+    expect(await screen.findByText('It would be refused.')).toBeDefined();
+    expect(screen.getByText('The agent has no mandate in force, so any request it asks is refused.')).toBeDefined();
+    expect(screen.queryByText(/The agent's mandate in force is another one/)).toBeNull();
   });
 
   it('says an order number the API would refuse, and a refusal plainly', async () => {

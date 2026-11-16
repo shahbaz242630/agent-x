@@ -221,6 +221,10 @@ describe('a draft of a policy’s rules (6D3b)', () => {
     // A supplier the mandate names, in another case, is the same supplier.
     const named = made({ suppliers: 'only', supplierIds: [SUPPLIER_A.toUpperCase()] });
     expect('rules' in rulesFrom(named, { ...AED, within: TERMS })).toBe(true);
+    // And the other way round: a mandate whose terms name it in capitals.
+    const capitals = { ...TERMS, supplierIds: [SUPPLIER_A.toUpperCase()] };
+    const ticked = made({ suppliers: 'only', supplierIds: [SUPPLIER_A] });
+    expect('rules' in rulesFrom(ticked, { ...AED, within: capitals })).toBe(true);
   });
 
   it('holds a mandate’s rules of none within any terms', () => {
@@ -285,6 +289,17 @@ describe('a policy’s refusals (6D3b)', () => {
     [new ApiError(400, 'ORGANIZATION_INVALID'), /which organisation/],
     [new ApiError(409, 'STATEMENT_CHANGED'), /words you confirmed with have changed/],
     [new ApiError(403, 'STEP_UP_FAILED'), /didn't match it/],
+    [new ApiError(400, 'POLICY_CURRENCY_REFUSED'), /aren't in a currency your organisation/],
+    [new ApiError(409, 'POLICY_SUPPLIER_UNKNOWN'), /isn't one of your organisation's any more/],
+    [new ApiError(409, 'MANDATE_ENDED'), /has ended, so its rules can't be changed/],
+    [new ApiError(409, 'MANDATE_NOT_IN_FORCE'), /isn't the agent's mandate in force/],
+    [new ApiError(409, 'CURRENCY_NOT_ALLOWED'), /doesn't use this mandate's currency/],
+    [new ApiError(409, 'WAITING_CHOICE_REQUIRED'), /changed since you checked/],
+    [new ApiError(409, 'WAITING_CHOICE_NOT_OFFERED'), /changed since you checked/],
+    [new ApiError(200, 'STEP_UP_NOT_ASKED'), /without asking for your passkey/],
+    [new ApiError(400, 'BAD_REQUEST'), /couldn't accept these rules/],
+    [new ApiError(403, 'FORBIDDEN'), /Your role in this organisation can't do this/],
+    [new ApiError(404, 'NOT_FOUND'), /can't be found in this organisation any more/],
   ])('says %s plainly', (error, said) => {
     expect(policyRefusal(error)).toMatch(said);
   });
