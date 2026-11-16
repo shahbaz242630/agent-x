@@ -454,16 +454,21 @@ function Changing({
   policy,
   terms,
   termsFailed,
+  ended,
 }: {
   readonly target: Target;
   readonly policy: Policy;
   readonly terms: MandateTerms | null | undefined;
+  /** The mandate couldn't be read at all, with the way to read it again; never for a failed re-read of one shown. */
   readonly termsFailed: (() => void) | undefined;
+  /** The mandate was revoked or expired: its rules can't change (MANDATE_ENDED). */
+  readonly ended: boolean;
 }) {
   if (target.kind === 'organization') {
     return <PolicyChange target={target} policy={policy} currency={PILOT_CURRENCY} within={null} />;
   }
   if (termsFailed !== undefined) return <Retry onRetry={termsFailed} />;
+  if (ended) return <p className="muted">{t('policies.ended')}</p>;
   if (terms === undefined) return <Loading />;
   if (terms === null) return <p className="muted">{t('policies.noTerms')}</p>;
   return <PolicyChange target={target} policy={policy} currency={terms.currency} within={terms} />;
@@ -499,13 +504,14 @@ export function PolicyPage({ target }: { readonly target: Target }) {
   }
   if (policy === undefined) return <Loading />;
   const terms = target.kind === 'mandate' ? mandate.data?.terms : null;
+  const ended = mandate.data?.ended === true;
   return (
     <section className="stack request">
       {back}
       <span className="kicker">{t(`policies.kicker.${target.kind}`)}</span>
       <h1>{t(`policies.title.${target.kind}`)}</h1>
       <p className="muted">{t(`policies.intro.${target.kind}`)}</p>
-      {target.kind === 'mandate' && SIMULATING.includes(organization.role) && (
+      {target.kind === 'mandate' && !ended && SIMULATING.includes(organization.role) && (
         <Link to="/more/mandates/$id/simulate" params={{ id: mandateId }}>
           {t('policies.simulate.open')}
         </Link>
@@ -517,7 +523,9 @@ export function PolicyPage({ target }: { readonly target: Target }) {
           target={target}
           policy={policy}
           terms={terms}
-          termsFailed={mandate.isError ? () => void mandate.refetch() : undefined}
+          // Only a mandate never read: a failed re-read keeps the editor, and the draft in it.
+          termsFailed={mandate.isError && mandate.data === undefined ? () => void mandate.refetch() : undefined}
+          ended={ended}
         />
       ) : (
         <p className="muted">{t('policies.viewOnly')}</p>

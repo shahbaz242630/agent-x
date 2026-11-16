@@ -16,6 +16,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isUuid } from './api.ts';
 import { refusalText } from './refusals.ts';
+import { minorDigits } from './requests.ts';
 import type { Role } from './session.tsx';
 import { t } from './text.ts';
 
@@ -146,9 +147,17 @@ export function useMandate(id: string, organization: string) {
     queryKey: ['mandates', organization, 'one', id],
     enabled: isUuid(id),
     queryFn: () => api.get<Mandate>(mandateAt(id), { organization }),
-    select: (mandate) => ({ status: mandate.status, terms: mandate.current ?? mandate.pending }),
+    select: (mandate) => ({
+      // Revoked or expired (MANDATE.states): for good, so its rules can't change and nothing is tried under it.
+      ended: mandate.status === 'REVOKED' || mandate.status === 'EXPIRED',
+      terms: mandate.current ?? mandate.pending,
+    }),
   });
 }
+
+/** An amount field's rule in plain words, with an example in the currency's own minor digits. */
+export const amountHint = (currency: string): string =>
+  t('policies.edit.amountHint', { currency, example: amountField(250_050, minorDigits(currency)) });
 
 interface Statement {
   readonly id: string;
@@ -368,6 +377,15 @@ const REFUSALS = new Set([
   'BAD_REQUEST',
   'FORBIDDEN',
   'NOT_FOUND',
+  // The gates every person's write passes (rate limit, idempotency, access, the words confirmed, the step-up).
+  'RATE_LIMITED',
+  'IDEMPOTENCY_KEY_BUSY',
+  'IDEMPOTENCY_KEY_REUSED',
+  'PASSKEY_REQUIRED',
+  'SECOND_FACTOR_REMOVED',
+  'ORGANIZATION_INVALID',
+  'STATEMENT_CHANGED',
+  'STEP_UP_FAILED',
 ]);
 
 /** The refusals that mean the waiting requests moved since the preview: checked again before anything else. */

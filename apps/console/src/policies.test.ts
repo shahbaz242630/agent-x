@@ -277,6 +277,14 @@ describe('a policy’s refusals (6D3b)', () => {
     [new ApiError(409, 'SOMETHING_NEW'), /reason SOMETHING_NEW/],
     [new ApiError(502, 'UNREADABLE'), /couldn't be reached/],
     [new StepUpStorageBlocked(), /keeps no site storage/],
+    [new ApiError(429, 'RATE_LIMITED'), /too many tries just now/],
+    [new ApiError(409, 'IDEMPOTENCY_KEY_BUSY'), /still working on your first try/],
+    [new ApiError(409, 'IDEMPOTENCY_KEY_REUSED'), /couldn't tell this try apart/],
+    [new ApiError(403, 'PASSKEY_REQUIRED'), /signed in with your passkey/],
+    [new ApiError(403, 'SECOND_FACTOR_REMOVED'), /removed recently/],
+    [new ApiError(400, 'ORGANIZATION_INVALID'), /which organisation/],
+    [new ApiError(409, 'STATEMENT_CHANGED'), /words you confirmed with have changed/],
+    [new ApiError(403, 'STEP_UP_FAILED'), /didn't match it/],
   ])('says %s plainly', (error, said) => {
     expect(policyRefusal(error)).toMatch(said);
   });

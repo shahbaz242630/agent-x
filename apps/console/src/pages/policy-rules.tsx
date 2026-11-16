@@ -7,7 +7,7 @@
 // the supplier list is any supplier, or the ones ticked. What is wrong is said
 // in place once checked (rulesFrom, on Check).
 import { useBrakeList } from '../brakes.ts';
-import { type Draft, OVER, type Problem, type Rules, WAITS } from '../policies.ts';
+import { amountHint, type Draft, OVER, type Problem, type Rules, WAITS } from '../policies.ts';
 import { amountText } from '../requests.ts';
 import { t } from '../text.ts';
 import { Choices, Tick } from './choices.tsx';
@@ -114,7 +114,7 @@ function AmountRule<T extends string>({
       {chosen === amountChoice && (
         <LineField
           label={t('policies.edit.amount', { currency })}
-          hint={t('policies.edit.amountHint')}
+          hint={amountHint(currency)}
           most={AMOUNT_MOST}
           value={amount}
           onChange={onAmount}

@@ -28,6 +28,8 @@ const SUPPLIER_C = '0199a0f0-0000-7000-8000-0000000000d3';
 const SOURCE = '0199a0f0-0000-7000-8000-0000000000f1';
 const OTHER_SOURCE = '0199a0f0-0000-7000-8000-0000000000f2';
 const REQUEST = '0199a0f0-0000-7000-8000-0000000000e1';
+const OTHER_REQUEST = '0199a0f0-0000-7000-8000-0000000000e2';
+const OTHER_MANDATE = '0199a0f0-0000-7000-8000-0000000000c2';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000c0ffe';
 const PAST = '2026-01-01T00:00:00.000Z';
 const FUTURE = '2099-01-01T00:00:00.000Z';
@@ -353,6 +355,8 @@ describe('the organisation’s policy (6D3b)', () => {
     await press('Change the rules');
     await pick('A cap on each request');
     expect(screen.getByLabelText<HTMLInputElement>('Amount in AED').value).toBe('1000.00');
+    // The rule for an amount, with an example in the currency's own decimals.
+    expect(screen.getByText('Digits only, with no more decimals than AED has, such as 2500.50.')).toBeDefined();
   });
 
   it('says amounts it can’t read and rules out of order in place, before anything is sent', async () => {
@@ -481,6 +485,33 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(await screen.findByRole('link', { name: 'Buyer bot' })).toBeDefined();
     expect(goTo).not.toHaveBeenCalled();
     expect(kept()).toBeNull();
+  });
+
+  it('holds when the ask and the preview each list waiting requests, but not the same ones', async () => {
+    const other = {
+      rejected: [{ ...WAITING_ONE.rejected[0], id: OTHER_REQUEST, amountMinor: 160_000 }],
+      more: false,
+    };
+    as('admin');
+    answer(`POST ${ORG_AT}/change/preview`, ok(WAITING_ONE));
+    answer(`POST ${ORG_AT}/change`, { status: 202, body: { stepUpChallengeId: CHALLENGE, waiting: other } });
+    open('/more/policy');
+    await chooseAll();
+    await press('Check what this changes');
+    await pick('Each request listed is rejected at once.');
+    await press('Continue with passkey');
+    await inDialog('Continue with passkey');
+    expect(await screen.findByText(/changed since you checked. Read the list again/)).toBeDefined();
+    expect(sentTo(`${ORG_AT}/change`)[0]?.body).toMatchObject({ waitingRequests: 'reject' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(goTo).not.toHaveBeenCalled();
+    expect(kept()).toBeNull();
+    // The ask's own list is shown, and the choice made for the old one is gone: the admin chooses again.
+    expect(await screen.findByText('AED 1,600.00')).toBeDefined();
+    expect(screen.queryByText('Others not listed here would be rejected too.')).toBeNull();
+    expect(
+      screen.getByRole<HTMLInputElement>('radio', { name: 'Each request listed is rejected at once.' }).checked,
+    ).toBe(false);
   });
 
   it('refuses a change the API made with no passkey asked, never saying it done', async () => {
@@ -660,6 +691,33 @@ describe('a mandate’s own policy (6D3b)', () => {
     open(page);
     expect(await screen.findByText('This mandate has no terms to hold rules within yet.')).toBeDefined();
   });
+
+  it.each(['REVOKED', 'EXPIRED'])('says a mandate %s has ended, with no editor and no simulator', async (status) => {
+    as('admin');
+    answer(`GET /v1/mandates/${MANDATE}`, ok({ ...MANDATE_READ, status }));
+    open(page);
+    expect(await screen.findByText("This mandate has ended, so its rules can't be changed.")).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Change the rules' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Try a request in the simulator' })).toBeNull();
+  });
+
+  it('keeps the editor and the draft in it when a re-read of the mandate fails', async () => {
+    as('admin');
+    answer(`GET /v1/mandates/${MANDATE}`, ok(MANDATE_READ), refused(403, 'FORBIDDEN'));
+    answer(`POST ${MANDATE_AT}/change/preview`, ok(NO_WAITING));
+    open(page);
+    await chooseMandate();
+    // The check's answer has everything shown read again: the mandate's re-read fails.
+    await press('Check what this changes');
+    expect(await screen.findByText(/No request waiting for approval would be rejected/)).toBeDefined();
+    await vi.waitFor(() => {
+      expect(sent.filter((one) => one.method === 'GET' && one.path === `/v1/mandates/${MANDATE}`)).toHaveLength(2);
+    });
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Refused' }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: 'Gulf Traders' }).checked).toBe(true);
+    expect(screen.getByText(/No request waiting for approval would be rejected/)).toBeDefined();
+  });
 });
 
 describe('the simulator (6D3b)', () => {
@@ -695,7 +753,7 @@ describe('the simulator (6D3b)', () => {
     as('approver');
     open(page);
     await press('Try it');
-    expect(screen.getByText('Enter an amount above zero, with up to 2 decimals.')).toBeDefined();
+    expect(screen.getByText('Enter an amount above zero, with no more decimals than the currency has.')).toBeDefined();
     expect(screen.getByText('Choose a supplier.')).toBeDefined();
     expect(screen.getByText('Choose a bank account.')).toBeDefined();
     expect(screen.getByText('Choose which rules weigh it.')).toBeDefined();
@@ -833,5 +891,34 @@ describe('the simulator (6D3b)', () => {
     answer(`GET /v1/mandates/${MANDATE}`, ok({ ...MANDATE_READ, current: null, pending: null }));
     open(page);
     expect(await screen.findByText('This mandate has no terms to hold rules within yet.')).toBeDefined();
+  });
+
+  it('offers nothing to try under a mandate that has ended, and says why', async () => {
+    as('admin');
+    answer(`GET /v1/mandates/${MANDATE}`, ok({ ...MANDATE_READ, status: 'EXPIRED' }));
+    open(page);
+    expect(await screen.findByText('This mandate has ended, so there is nothing to try under it.')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try it' })).toBeNull();
+  });
+
+  it.each([
+    ['another mandate', OTHER_MANDATE, true],
+    ['this mandate, written in capitals', MANDATE.toUpperCase(), false],
+  ])('says when the agent’s mandate in force weighed is %s', async (_what, weighed, other) => {
+    as('admin');
+    answer(`POST ${SIMULATE_AT}`, ok({ ...SIMULATED, mandateId: weighed, monthlyCapFrom: 'mandate-policy' }));
+    open(page);
+    await fillRequest();
+    await pick('The rules in force now');
+    await press('Try it');
+    expect(await screen.findByText('It would wait for a person to approve it.')).toBeDefined();
+    const notice = screen.queryByText(/The agent's mandate in force is another one/);
+    if (other) {
+      expect(notice).not.toBeNull();
+      expect(screen.getByText("From its mandate's own rules")).toBeDefined();
+    } else {
+      expect(notice).toBeNull();
+      expect(screen.getByText("From this mandate's own rules")).toBeDefined();
+    }
   });
 });

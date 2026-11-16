@@ -13,6 +13,7 @@ import { useState } from 'react';
 import { api, isMissing, isUuid } from '../api.ts';
 import { useBrakeList } from '../brakes.ts';
 import {
+  amountHint,
   type Checked,
   type Draft,
   draftFrom,
@@ -136,14 +137,22 @@ function Answer({
   proposed,
   names,
   currency,
+  mandateId,
 }: {
   readonly simulation: Simulation;
   readonly proposed: Proposed;
   readonly names: ReadonlyMap<string, string>;
   /** The test request's currency, the mandate's: what the agent's month is counted in. */
   readonly currency: string;
+  /** The page's mandate: the agent's mandate in force weighed may be another. */
+  readonly mandateId: string;
 }) {
   const { organizationPolicy, mandatePolicy } = proposed;
+  const other = simulation.mandateId !== null && simulation.mandateId.toLowerCase() !== mandateId.toLowerCase();
+  const capFrom =
+    other && simulation.monthlyCapFrom === 'mandate-policy'
+      ? t('policies.simulate.capFrom.mandate-policy.other')
+      : t(`policies.simulate.capFrom.${simulation.monthlyCapFrom}`);
   return (
     <section className="stack" aria-labelledby="answer-title" role="status">
       <h2 id="answer-title">{t('policies.simulate.answer')}</h2>
@@ -158,7 +167,7 @@ function Answer({
       )}
       <dl className="facts">
         <dt>{t('policies.simulate.capFrom')}</dt>
-        <dd>{t(`policies.simulate.capFrom.${simulation.monthlyCapFrom}`)}</dd>
+        <dd>{capFrom}</dd>
         {simulation.month !== null && (
           <>
             <dt>{t('policies.simulate.month', { month: simulation.month })}</dt>
@@ -167,6 +176,7 @@ function Answer({
         )}
       </dl>
       {simulation.mandateId === null && <p className="notice">{t('policies.simulate.noMandate')}</p>}
+      {other && <p className="notice">{t('policies.simulate.otherMandate')}</p>}
       {organizationPolicy === undefined && mandatePolicy === undefined && (
         <p className="muted">{t('policies.simulate.weighedInForce')}</p>
       )}
@@ -298,7 +308,7 @@ function Simulator({ mandateId, terms }: { readonly mandateId: string; readonly 
       <h2 id="simulate-form-title">{t('policies.simulate.request')}</h2>
       <LineField
         label={t('policies.edit.amount', { currency })}
-        hint={t('policies.edit.amountHint')}
+        hint={amountHint(currency)}
         most={AMOUNT_MOST}
         value={typed.amount}
         onChange={(amount) => {
@@ -397,7 +407,13 @@ function Simulator({ mandateId, terms }: { readonly mandateId: string; readonly 
       <p className="fine">{t('policies.simulate.writesNothing')}</p>
       <Said said={said} />
       {answer !== null && (
-        <Answer simulation={answer.simulation} proposed={answer.proposed} names={names} currency={currency} />
+        <Answer
+          simulation={answer.simulation}
+          proposed={answer.proposed}
+          names={names}
+          currency={currency}
+          mandateId={mandateId}
+        />
       )}
     </section>
   );
@@ -424,6 +440,7 @@ export function SimulatePage({ mandateId }: { readonly mandateId: string }) {
   }
   let shown = <Loading />;
   if (!may) shown = <p className="muted">{t('policies.simulate.viewOnly')}</p>;
+  else if (mandate.data?.ended === true) shown = <p className="muted">{t('policies.simulate.ended')}</p>;
   else if (terms === null) shown = <p className="muted">{t('policies.noTerms')}</p>;
   else if (terms !== undefined) shown = <Simulator mandateId={mandateId} terms={terms} />;
   return (
