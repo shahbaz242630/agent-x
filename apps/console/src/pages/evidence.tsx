@@ -12,7 +12,7 @@ import { isMissing } from '../api.ts';
 import { saveJson } from '../download.ts';
 import { type Evidence, type EvidenceAnswer, type EvidencePayment, evidenceRefusal, useEvidence } from '../evidence.ts';
 import type { LogEvent } from '../logs.ts';
-import { amountText, timeText } from '../requests.ts';
+import { amountText, type Reason, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { Loading } from './failed.tsx';
@@ -37,6 +37,9 @@ function Fact({
 }
 
 const timeOrNone = (at: string | null): string | null => (at === null ? null : timeText(at));
+
+/** The reasons in the API's own words, one after another. */
+const reasonsText = (reasons: readonly Reason[]): string => reasons.map((reason) => reason.message).join(' ');
 
 function Part({ title, children }: { readonly title: string; readonly children: ReactNode }) {
   return (
@@ -89,10 +92,7 @@ function Decision({ evidence }: { readonly evidence: Evidence }) {
     <Part title={t('evidence.decision')}>
       <dl className="facts">
         <Fact label={t('evidence.decided')} value={t(`decision.${asked.decision}`)} />
-        <Fact
-          label={t('request.why')}
-          value={asked.reasons.length === 0 ? null : asked.reasons.map((reason) => reason.message).join(' ')}
-        />
+        <Fact label={t('request.why')} value={asked.reasons.length === 0 ? null : reasonsText(asked.reasons)} />
         <Fact label={t('evidence.decidedAt')} value={timeOrNone(asked.decidedAt)} />
         <Fact label={t('evidence.inputHash')} value={asked.inputHash} mono />
         <Fact label={t('request.agent')} value={evidence.agent.name} />
@@ -135,6 +135,7 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
 /** A person's approval or reject, a void, and the money held: each said as none where it didn't happen. */
 function Outcome({ evidence }: { readonly evidence: Evidence }) {
   const { approval, rejection, voiding, reservation } = evidence;
+  const changeHash = approval?.changeHash ?? null;
   return (
     <Part title={t('evidence.outcome')}>
       <dl className="facts">
@@ -148,9 +149,7 @@ function Outcome({ evidence }: { readonly evidence: Evidence }) {
             )
           }
         />
-        {typeof approval?.changeHash === 'string' && (
-          <Fact label={t('evidence.changeHash')} value={approval.changeHash} mono />
-        )}
+        {changeHash !== null && <Fact label={t('evidence.changeHash')} value={changeHash} mono />}
         <Fact
           label={t('evidence.rejection')}
           value={
@@ -164,7 +163,7 @@ function Outcome({ evidence }: { readonly evidence: Evidence }) {
         <Fact
           label={t('evidence.voiding')}
           value={
-            voiding && `${timeText(voiding.at)} · ${voiding.reasons.map((reason) => reason.message).join(' ')}`.trim()
+            voiding && [timeText(voiding.at), reasonsText(voiding.reasons)].filter((part) => part !== '').join(' · ')
           }
         />
         <Fact

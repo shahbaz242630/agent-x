@@ -6,7 +6,7 @@
 // answer as `evidence-<id>.json`. Only an admin; refusals in plain words, a
 // retry the same download; a 401 ends the session.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -200,9 +200,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function open(path: string, strict = false) {
+function open(path: string, strict = false, queries = createQueries()) {
   const router = createConsoleRouter(createMemoryHistory({ initialEntries: [path] }));
-  const app = <App queries={createQueries()} router={router} />;
+  const app = <App queries={queries} router={router} />;
   render(strict ? <StrictMode>{app}</StrictMode> : app);
   return router;
 }
@@ -282,6 +282,40 @@ describe('a request’s evidence page (6C2)', () => {
     // Read again later (a re-render, another tab back), it is never downloaded twice.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(posts()).toHaveLength(1);
+  });
+
+  it('sends the same key when the page remounts after the shell failed and came back, so it is one download', async () => {
+    signedIn();
+    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    const queries = createQueries();
+    open(`/approvals/${ID}/evidence`, false, queries);
+    await screen.findByRole('heading', { name: 'The request' });
+    // The session read again fails (staging waking): the shell shows its failure, and the page is gone.
+    const session = answers.get('GET /v1/auth/session') ?? [];
+    answer('GET /v1/auth/session', refusal(403, 'FORBIDDEN'), ...session);
+    await act(async () => {
+      await queries.refetchQueries({ queryKey: ['session'] });
+    });
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    expect(screen.queryByRole('heading', { name: 'The request' })).toBeNull();
+    await userEvent.click(retry);
+    expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
+    // Sent again by the remounted page with the visit's own key: the API answers the same record, no second download.
+    expect(posts()).toHaveLength(2);
+    expect(posts()[1]?.key).toBe(posts()[0]?.key);
+  });
+
+  it('makes a new download for a new visit after 10 minutes', async () => {
+    signedIn();
+    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    open(`/approvals/${ID}/evidence`);
+    await screen.findByRole('heading', { name: 'The request' });
+    cleanup();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60_000 + 1);
+    open(`/approvals/${ID}/evidence`);
+    await screen.findByRole('heading', { name: 'The request' });
+    expect(posts()).toHaveLength(2);
+    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
   });
 
   it('shows the bundle in plain sections: request, decision, supplier, approval, money held and payment', async () => {

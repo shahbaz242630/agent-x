@@ -7,7 +7,7 @@
 // What is shown downloads as CSV or NDJSON, itself logged; a range past the
 // instant download's cap is built in the background, a month a gzip file,
 // emailed when ready (decision 31) and downloaded here.
-import { Fragment, useState } from 'react';
+import { Fragment, useId, useState } from 'react';
 
 import { ApiError } from '../api.ts';
 import {
@@ -27,7 +27,7 @@ import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 import { ActorLine } from './log-event.tsx';
-import { AdminsOnly, Download, type Field, FilterForm, FormatField, Pages, useFilters } from './log-parts.tsx';
+import { Download, type Field, FilterForm, FormatField, LogScreen, Pages, useFilters } from './log-parts.tsx';
 
 const FIELDS: readonly Field[] = [{ name: 'actorType', options: ['', 'user', 'agent'] }, { name: 'actorId' }];
 
@@ -72,15 +72,7 @@ function Clues({ row }: { readonly row: ActivityRow }) {
   );
 }
 
-function Row({
-  row,
-  filters,
-  go,
-}: {
-  readonly row: ActivityRow;
-  readonly filters: Filters;
-  readonly go: (filters: Filters) => void;
-}) {
+function Row({ row, narrow }: { readonly row: ActivityRow; readonly narrow: (more: Partial<Filters>) => void }) {
   const said = row.reason === null ? String(row.status) : `${String(row.status)} ${row.reason}`;
   return (
     <li className="row">
@@ -103,7 +95,7 @@ function Row({
         <ActorLine
           actor={row.actor}
           onOnly={() => {
-            go({ ...filters, actorType: row.actor.type, actorId: row.actor.id });
+            narrow({ actorType: row.actor.type, actorId: row.actor.id });
           }}
         />
         <details>
@@ -159,8 +151,9 @@ function Built({ download }: { readonly download: BackgroundDownload }) {
 /** Long ranges: built in the background, a month a file, and the downloads asked for so far. */
 function Background({ filters, format }: { readonly filters: Filters; readonly format: Format }) {
   const { organization } = useActing();
-  const downloads = useBackgroundDownloads(organization.id, true);
+  const downloads = useBackgroundDownloads(organization.id);
   const { busy, said, run } = useChange(logRefusal);
+  const titleId = useId();
   if (downloads.error instanceof ApiError && downloads.error.status === 404) {
     // No download store where this API runs: the feature isn't there, said once, with nothing to press.
     return <p className="muted">{t('logs.background.unavailable')}</p>;
@@ -182,8 +175,8 @@ function Background({ filters, format }: { readonly filters: Filters; readonly f
     );
   }
   return (
-    <section className="stack" aria-labelledby="background-title">
-      <h2 id="background-title">{t('logs.background.title')}</h2>
+    <section className="stack" aria-labelledby={titleId}>
+      <h2 id={titleId}>{t('logs.background.title')}</h2>
       <p className="muted">{t('logs.background.intro')}</p>
       <button
         type="button"
@@ -201,28 +194,28 @@ function Background({ filters, format }: { readonly filters: Filters; readonly f
   );
 }
 
-export function AccessLog() {
+/** What an admin sees: the filters, the download, the requests and the long ranges. */
+function Requests() {
   const { organization } = useActing();
-  const admin = organization.role === 'admin';
-  const { search, filters, go } = useFilters('access');
-  const rows = useAccessLog(filters, organization.id, admin);
+  const { search, filters, go, narrow } = useFilters('access');
   const [format, setFormat] = useState<Format>('csv');
   return (
-    <section className="stack">
-      <h1>{t('logs.access.title')}</h1>
-      <p className="muted">{t('logs.access.intro')}</p>
-      {admin ? (
-        <>
-          {/* Keyed by the address: a person set from a row (only this person) shows in the form at once. */}
-          <FilterForm key={search} filters={filters} fields={FIELDS} onApply={go} />
-          <FormatField format={format} onChange={setFormat} />
-          <Download log="access" filters={filters} format={format} />
-          <Pages pages={rows} row={(row: ActivityRow) => <Row key={row.id} row={row} filters={filters} go={go} />} />
-          <Background filters={filters} format={format} />
-        </>
-      ) : (
-        <AdminsOnly />
-      )}
-    </section>
+    <>
+      {/* Keyed by the address: a person set from a row (only this person) shows in the form at once. */}
+      <FilterForm key={search} filters={filters} fields={FIELDS} onApply={go} />
+      <FormatField format={format} onChange={setFormat} />
+      <Download log="access" filters={filters} format={format} />
+      <Pages
+        pages={useAccessLog(filters, organization.id)}
+        row={(row: ActivityRow) => <Row key={row.id} row={row} narrow={narrow} />}
+      />
+      <Background filters={filters} format={format} />
+    </>
   );
 }
+
+export const AccessLog = () => (
+  <LogScreen title={t('logs.access.title')} intro={t('logs.access.intro')}>
+    <Requests />
+  </LogScreen>
+);

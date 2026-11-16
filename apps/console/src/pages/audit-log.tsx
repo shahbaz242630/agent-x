@@ -11,7 +11,7 @@ import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
 import { ActorLine, Hashes } from './log-event.tsx';
-import { AdminsOnly, Download, type Field, FilterForm, FormatField, Pages, useFilters } from './log-parts.tsx';
+import { Download, type Field, FilterForm, FormatField, LogScreen, Pages, useFilters } from './log-parts.tsx';
 
 const FIELDS: readonly Field[] = [
   { name: 'actions' },
@@ -21,15 +21,7 @@ const FIELDS: readonly Field[] = [
   { name: 'subjectId' },
 ];
 
-function Event({
-  event,
-  filters,
-  go,
-}: {
-  readonly event: LogEvent;
-  readonly filters: Filters;
-  readonly go: (filters: Filters) => void;
-}) {
+function Event({ event, narrow }: { readonly event: LogEvent; readonly narrow: (more: Partial<Filters>) => void }) {
   return (
     <li className="row">
       <span className="row-main">
@@ -40,7 +32,7 @@ function Event({
         <ActorLine
           actor={event.actor}
           onOnly={() => {
-            go({ ...filters, actorType: event.actor.type, actorId: event.actor.id });
+            narrow({ actorType: event.actor.type, actorId: event.actor.id });
           }}
         />
         <span className="muted">
@@ -50,7 +42,7 @@ function Event({
             type="button"
             className="link"
             onClick={() => {
-              go({ ...filters, subjectType: event.subject.type, subjectId: event.subject.id });
+              narrow({ subjectType: event.subject.type, subjectId: event.subject.id });
             }}
           >
             {t('logs.onlyObject')}
@@ -75,30 +67,27 @@ function Event({
   );
 }
 
-export function AuditLog() {
+/** What an admin sees: the filters, the download and the events. */
+function Events() {
   const { organization } = useActing();
-  const admin = organization.role === 'admin';
-  const { search, filters, go } = useFilters('audit');
-  const events = useAuditLog(filters, organization.id, admin);
+  const { search, filters, go, narrow } = useFilters('audit');
   const [format, setFormat] = useState<Format>('csv');
   return (
-    <section className="stack">
-      <h1>{t('logs.audit.title')}</h1>
-      <p className="muted">{t('logs.audit.intro')}</p>
-      {admin ? (
-        <>
-          {/* Keyed by the address: a filter set from an event (only this object) shows in the form at once. */}
-          <FilterForm key={search} filters={filters} fields={FIELDS} onApply={go} />
-          <FormatField format={format} onChange={setFormat} />
-          <Download log="audit" filters={filters} format={format} />
-          <Pages
-            pages={events}
-            row={(event: LogEvent) => <Event key={event.id} event={event} filters={filters} go={go} />}
-          />
-        </>
-      ) : (
-        <AdminsOnly />
-      )}
-    </section>
+    <>
+      {/* Keyed by the address: a filter set from an event (only this object) shows in the form at once. */}
+      <FilterForm key={search} filters={filters} fields={FIELDS} onApply={go} />
+      <FormatField format={format} onChange={setFormat} />
+      <Download log="audit" filters={filters} format={format} />
+      <Pages
+        pages={useAuditLog(filters, organization.id)}
+        row={(event: LogEvent) => <Event key={event.id} event={event} narrow={narrow} />}
+      />
+    </>
   );
 }
+
+export const AuditLog = () => (
+  <LogScreen title={t('logs.audit.title')} intro={t('logs.audit.intro')}>
+    <Events />
+  </LogScreen>
+);

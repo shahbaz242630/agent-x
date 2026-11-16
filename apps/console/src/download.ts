@@ -17,6 +17,6 @@ export function saveFile(name: string, parts: readonly BlobPart[], type: string)
 }
 
 /** Saves `value` as the API answered it, as readable JSON. */
-export const saveJson = (name: string, value: unknown): void => {
+export function saveJson(name: string, value: unknown): void {
   saveFile(name, [JSON.stringify(value, null, 2)], 'application/json');
-};
+}

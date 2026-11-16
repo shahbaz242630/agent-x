@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -322,6 +322,39 @@ describe('the audit log (6C2, CO7)', () => {
     expect(screen.queryByRole('button', { name: 'Show older' })).toBeNull();
   });
 
+  it(
+    'keeps the events shown when an older page fails, saying so beside them, and retries that page',
+    { timeout: 15_000 },
+    async () => {
+      signedIn();
+      const failed = refusal(500, 'INTERNAL');
+      // Read twice more on its own first, as every failure is.
+      answer(
+        'GET /v1/audit-log',
+        events([logEvent('42')], '42'),
+        failed,
+        failed,
+        failed,
+        events([logEvent('7', { action: 'agent.created' })]),
+      );
+      open('/more/audit-log');
+      await userEvent.click(await screen.findByRole('button', { name: 'Show older' }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Try again' }, { timeout: 5000 }));
+      expect(screen.getByText('spend_request.approved')).toBeDefined();
+      expect(await screen.findByText('agent.created')).toBeDefined();
+      expect(sentTo('GET', `/v1/audit-log?${DEFAULT}&before=42`)).toHaveLength(4);
+      expect(sentTo('GET', `/v1/audit-log?${DEFAULT}`)).toHaveLength(1);
+    },
+  );
+
+  it('trims each action of the filter in the page read, as the download does', async () => {
+    signedIn();
+    answer('GET /v1/audit-log', events([]));
+    open('/more/audit-log?actions=a.b,%20c.d%20');
+    await screen.findByText('Nothing in this range matches these filters.');
+    expect(sentTo('GET', `/v1/audit-log?${DEFAULT}&actions=a.b%2Cc.d`)).toHaveLength(1);
+  });
+
   it('downloads what is shown as CSV, the filters sent, saving the file the answer carries', async () => {
     signedIn();
     answer('GET /v1/audit-log', events([]));
@@ -598,6 +631,34 @@ describe('the access log’s background downloads (decision 31)', () => {
     open('/more/access-log');
     await userEvent.click(await screen.findByRole('button', { name: 'Build it in the background' }));
     expect(await screen.findByText(/already being built for this organisation/)).toBeDefined();
+  });
+
+  it('reads the list again every 15 s while a download is being built, and stops once none is', async () => {
+    vi.useFakeTimers({
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      shouldAdvanceTime: true,
+    });
+    vi.setSystemTime(new Date(2026, 10, 16, 10));
+    signedIn();
+    answer('GET /v1/access-log', rows([]));
+    answer(
+      'GET /v1/access-log/background-exports',
+      listing([built({ state: 'building', expiresAt: null })]),
+      listing([built()]),
+    );
+    open('/more/access-log');
+    expect(await screen.findByText('Being built')).toBeDefined();
+    const reads = () => sentTo('GET', '/v1/access-log/background-exports?limit=20').length;
+    expect(reads()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(await screen.findByText(/^Ready · kept until/)).toBeDefined();
+    expect(reads()).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000);
+    });
+    expect(reads()).toBe(2);
   });
 
   it('says plainly where no download store is set up, offering nothing to press', async () => {

@@ -2,11 +2,12 @@
 // admins only): POST /v1/spend-requests/{id}/evidence-exports answers the
 // bundle whole (SpendRequestEvidence, spend-request-evidence.ts in the API),
 // the download recorded in the audit log first. So it is asked for once a
-// visit of its page, never refetched: one press of the idempotency key a
-// visit, sent once even where React runs an effect twice (StrictMode), and a
-// "try again" sends the same key, the same download, again.
+// visit of its page, never refetched: one idempotency key a visit, kept outside
+// the page so a remount (the shell swapped to a failure and back, StrictMode's
+// second effect) sends the same key, which the API answers with the same
+// record; a "try again" is the same download again too.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { api, isIntegrityFailed, isSignedOut, isUuid } from './api.ts';
 import type { LogEvent } from './logs.ts';
@@ -132,6 +133,23 @@ export function evidenceRefusal(error: unknown): string {
   return refusalText(error, REFUSALS, 'evidence.refused');
 }
 
+/** How long a visit's key is kept for a remount: a deliberate visit after it is a new download. */
+const VISIT_MS = 10 * 60_000;
+
+/** Each page visit's idempotency key and when it was made, by organisation and request: a module's own, never stored. */
+const visits = new Map<string, { readonly key: string; readonly at: number }>();
+
+/** The key of this visit of the request's page: the one made within VISIT_MS, else a new one (the old dropped). */
+function visitKey(organization: string, id: string, now: number = Date.now()): string {
+  for (const [name, visit] of visits) if (now - visit.at > VISIT_MS) visits.delete(name);
+  const name = `${organization}:${id}`;
+  const kept = visits.get(name);
+  if (kept !== undefined) return kept.key;
+  const key = crypto.randomUUID();
+  visits.set(name, { key, at: now });
+  return key;
+}
+
 /**
  * The request's evidence, asked for once while `allowed` (an admin, a request's
  * ID): sent once a visit (a ref, kept over StrictMode's second run of the
@@ -140,13 +158,12 @@ export function evidenceRefusal(error: unknown): string {
  */
 export function useEvidence(id: string, organization: string, allowed: boolean) {
   const queries = useQueryClient();
-  const [idempotencyKey] = useState(() => crypto.randomUUID());
   const asked = useMutation({
     mutationFn: () =>
       api.post<EvidenceAnswer>(`/v1/spend-requests/${encodeURIComponent(id)}/evidence-exports`, {
         organization,
         body: {},
-        idempotencyKey,
+        idempotencyKey: visitKey(organization, id),
       }),
     onError: (error) => {
       if (isSignedOut(error)) endSession(queries);

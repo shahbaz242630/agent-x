@@ -67,9 +67,10 @@ const LOGS = {
   audit: {
     path: '/v1/audit-log',
     page: '/more/audit-log',
+    key: 'events',
     filters: ['actions', 'actorType', 'actorId', 'subjectType', 'subjectId'],
   },
-  access: { path: '/v1/access-log', page: '/more/access-log', filters: ['actorType', 'actorId'] },
+  access: { path: '/v1/access-log', page: '/more/access-log', key: 'rows', filters: ['actorType', 'actorId'] },
 } as const;
 export type Log = keyof typeof LOGS;
 
@@ -111,15 +112,24 @@ export function filtersIn(log: Log, search: string, now: Date = new Date()): Fil
   return filters as Filters;
 }
 
+/** A filter as sent: trimmed, and each of the actions too, so a page never refuses what its download takes. */
+const trimmed = (name: string, value: string): string =>
+  name === 'actions'
+    ? value
+        .split(',')
+        .map((action) => action.trim())
+        .join(',')
+    : value.trim();
+
 /** The filters set, trimmed: only those with a value. */
-const setOf = (filters: Filters): [string, string][] =>
+const nonEmpty = (filters: Filters): [string, string][] =>
   Object.entries(filters)
-    .map(([name, value]): [string, string] => [name, value.trim()])
+    .map(([name, value]): [string, string] => [name, trimmed(name, value)])
     .filter(([, value]) => value.length > 0);
 
 /** The log's page's own address for these filters. */
 export const pageAddress = (log: Log, filters: Filters): string =>
-  `${LOGS[log].page}?${new URLSearchParams(setOf(filters)).toString()}`;
+  `${LOGS[log].page}?${new URLSearchParams(nonEmpty(filters)).toString()}`;
 
 /** The range the API takes: from the first day's midnight to the midnight after the last day, as instants. */
 const rangeOf = ({ from, to }: Filters) => ({
@@ -128,9 +138,9 @@ const rangeOf = ({ from, to }: Filters) => ({
 });
 
 /** A page's query: the range as instants, every other filter as typed, after the cursor its last page gave. */
-const pageQuery = (filters: Filters, before: string | undefined): string =>
+const logQuery = (filters: Filters, before: string | undefined): string =>
   new URLSearchParams({
-    ...Object.fromEntries(setOf(filters)),
+    ...Object.fromEntries(nonEmpty(filters)),
     ...rangeOf(filters),
     ...(before !== undefined && { before }),
   }).toString();
@@ -143,17 +153,17 @@ interface Page<T> {
   readonly next: string | null;
 }
 
-/** One log, a page at a time, newest first: read only for an admin, as only an admin may (decision 24). */
-function useLog<T>(log: Log, key: 'events' | 'rows', filters: Filters, organization: string, admin: boolean) {
+/** One log, a page at a time, newest first: mounted only for an admin, as only an admin may read it (decision 24). */
+function useLog<T>(log: Log, filters: Filters, organization: string) {
   return useInfiniteQuery({
-    queryKey: ['logs', organization, log, pageQuery(filters, undefined)],
-    enabled: admin,
+    queryKey: ['logs', organization, log, logQuery(filters, undefined)],
     retry,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last: Page<T>) => last.next ?? undefined,
     queryFn: async ({ pageParam }): Promise<Page<T>> => {
-      const answer = await api.get<Record<typeof key, readonly T[]> & { readonly next: string | null }>(
-        `${LOGS[log].path}?${pageQuery(filters, pageParam)}`,
+      const { key, path } = LOGS[log];
+      const answer = await api.get<Readonly<Record<typeof key, readonly T[]>> & { readonly next: string | null }>(
+        `${path}?${logQuery(filters, pageParam)}`,
         { organization },
       );
       return { items: answer[key], next: answer.next };
@@ -161,11 +171,10 @@ function useLog<T>(log: Log, key: 'events' | 'rows', filters: Filters, organizat
   });
 }
 
-export const useAuditLog = (filters: Filters, organization: string, admin: boolean) =>
-  useLog<LogEvent>('audit', 'events', filters, organization, admin);
+export const useAuditLog = (filters: Filters, organization: string) => useLog<LogEvent>('audit', filters, organization);
 
-export const useAccessLog = (filters: Filters, organization: string, admin: boolean) =>
-  useLog<ActivityRow>('access', 'rows', filters, organization, admin);
+export const useAccessLog = (filters: Filters, organization: string) =>
+  useLog<ActivityRow>('access', filters, organization);
 
 export const FORMATS = ['csv', 'ndjson'] as const;
 export type Format = (typeof FORMATS)[number];
@@ -176,12 +185,12 @@ export type Format = (typeof FORMATS)[number];
  * which half is missing), and the format.
  */
 function exportBody(filters: Filters, format: Format) {
-  const set = Object.fromEntries(setOf(filters));
+  const set = Object.fromEntries(nonEmpty(filters));
   const pair = (type: string | undefined, id: string | undefined) =>
     type === undefined && id === undefined ? undefined : { type: type ?? '', id: id ?? '' };
   return {
     ...rangeOf(filters),
-    actions: set.actions?.split(',').map((action) => action.trim()),
+    actions: set.actions?.split(','),
     actor: pair(set.actorType, set.actorId),
     subject: pair(set.subjectType, set.subjectId),
     format,
@@ -221,12 +230,20 @@ export interface BackgroundDownload {
 
 const BACKGROUND = '/v1/access-log/background-exports';
 
-/** The organisation's background downloads, newest first: a store-less API answers NOT_FOUND, said as none set up. */
-export function useBackgroundDownloads(organization: string, admin: boolean) {
+/** How often the list is read again while a download is still being built: its state moves on its own. */
+const BUILDING_POLL_MS = 15_000;
+
+/**
+ * The organisation's background downloads, newest first, read again every
+ * 15 s while any is still being built (not while the page is hidden, react
+ * query's default): a store-less API answers NOT_FOUND, said as none set up.
+ */
+export function useBackgroundDownloads(organization: string) {
   return useQuery({
     queryKey: ['logs', organization, 'background'],
-    enabled: admin,
     retry,
+    refetchInterval: (query) =>
+      query.state.data?.downloads.some((download) => download.state === 'building') === true ? BUILDING_POLL_MS : false,
     queryFn: () =>
       api.get<{ readonly downloads: readonly BackgroundDownload[] }>(`${BACKGROUND}?limit=20`, { organization }),
   });

@@ -22,15 +22,44 @@ import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
 
-/** The log's filters as the address holds them, the raw query (the router's own reads values as JSON), and a way to set them. */
+/**
+ * The log's filters as the address holds them, the raw query (the router's own
+ * reads values as JSON), a way to set them all, and one to narrow them (a row's
+ * person or object added to what is set).
+ */
 export function useFilters(log: Log) {
   const navigate = useNavigate();
   const search = useRouterState({ select: ({ location }) => location.searchStr });
+  const filters = filtersIn(log, search);
+  const go = (next: Filters) => void navigate({ href: pageAddress(log, next) });
   return {
     search,
-    filters: filtersIn(log, search),
-    go: (next: Filters) => void navigate({ href: pageAddress(log, next) }),
+    filters,
+    go,
+    narrow: (more: Partial<Filters>) => {
+      go({ ...filters, ...more });
+    },
   };
+}
+
+/** A log's screen: its title and intro, and what only an admin may see (decision 24), mounted for an admin alone. */
+export function LogScreen({
+  title,
+  intro,
+  children,
+}: {
+  readonly title: string;
+  readonly intro: string;
+  readonly children: ReactNode;
+}) {
+  const { organization } = useActing();
+  return (
+    <section className="stack">
+      <h1>{title}</h1>
+      <p className="muted">{intro}</p>
+      {organization.role === 'admin' ? children : <p className="notice">{t('logs.adminsOnly')}</p>}
+    </section>
+  );
 }
 
 /** A filter field: free text, or one of `options` ('' for any). */
@@ -106,37 +135,42 @@ export function FilterForm({
   );
 }
 
-/** A log's page for someone who isn't an admin: only an admin may read it (decision 24), so nothing is asked. */
-export const AdminsOnly = () => <p className="notice">{t('logs.adminsOnly')}</p>;
+/** A read that failed: a refusal (filters it can't read) or a record failing its check in words; anything else retried. */
+function Failure({ error, onRetry }: { readonly error: Error; readonly onRetry: () => void }) {
+  return isRefusal(error) || isIntegrityFailed(error) ? (
+    <p className="notice" role="alert">
+      {logRefusal(error)}
+    </p>
+  ) : (
+    <Retry onRetry={onRetry} />
+  );
+}
 
-/** A log's pages read so far: loading, refused or failed in plain words, none in the range, or each shown by `row`. */
+/**
+ * A log's pages read so far: loading, refused or failed, none in the range, or
+ * each shown by `row`. An older page that failed keeps the rows already shown,
+ * its failure said beside them and retried as that page alone.
+ */
 export function Pages<T>({
   pages,
   row,
 }: {
   readonly pages: {
-    readonly isPending: boolean;
     readonly error: Error | null;
     readonly refetch: () => unknown;
     readonly data: { readonly pages: readonly { readonly items: readonly T[] }[] } | undefined;
     readonly hasNextPage: boolean;
     readonly isFetchingNextPage: boolean;
+    readonly isFetchNextPageError: boolean;
     readonly fetchNextPage: () => unknown;
   };
   readonly row: (item: T) => ReactNode;
 }) {
-  if (pages.error !== null) {
-    // A refusal (filters it can't read) or a record failing its check is said in words; anything else is retried.
-    return isRefusal(pages.error) || isIntegrityFailed(pages.error) ? (
-      <p className="notice" role="alert">
-        {logRefusal(pages.error)}
-      </p>
-    ) : (
-      <Retry onRetry={() => void pages.refetch()} />
-    );
+  const { data, error } = pages;
+  if (data === undefined) {
+    return error === null ? <Loading /> : <Failure error={error} onRetry={() => void pages.refetch()} />;
   }
-  if (pages.isPending) return <Loading />;
-  const shown = pages.data?.pages.flatMap((page) => page.items) ?? [];
+  const shown = data.pages.flatMap((page) => page.items);
   return (
     <>
       {shown.length === 0 ? (
@@ -144,7 +178,16 @@ export function Pages<T>({
       ) : (
         <ol className="rows">{shown.map((item) => row(item))}</ol>
       )}
-      {pages.hasNextPage && (
+      {error !== null && (
+        <Failure
+          error={error}
+          onRetry={() => {
+            if (pages.isFetchNextPageError) void pages.fetchNextPage();
+            else void pages.refetch();
+          }}
+        />
+      )}
+      {pages.hasNextPage && error === null && (
         <button
           type="button"
           className="secondary"
