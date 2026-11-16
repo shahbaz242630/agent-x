@@ -1,16 +1,21 @@
-// A spend request's evidence as the console reads it (6C2; BR-16; decision 24:
-// admins only): POST /v1/spend-requests/{id}/evidence-exports answers the
-// bundle whole (SpendRequestEvidence, spend-request-evidence.ts in the API),
-// the download recorded in the audit log first. So it is asked for once a
-// visit of its page, never refetched: one idempotency key a visit, kept outside
-// the page so a remount (the shell swapped to a failure and back, StrictMode's
-// second effect) sends the same key, which the API answers with the same
-// record; a "try again" is the same download again too.
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+// A spend request's evidence as the console reads and downloads it (6C2,
+// 6C2c; BR-16; decision 24: admins only, and reading on screen is a page read,
+// not logged, while a download is logged and capped):
+// - GET /v1/spend-requests/{id}/evidence answers the bundle whole
+//   (SpendRequestEvidenceRead, spend-request-evidence.ts in the API), writing
+//   nothing: a query like any other, safe to ask again on a remount or a
+//   return to the tab.
+// - POST /v1/spend-requests/{id}/evidence-exports is the download, recorded in
+//   the audit log first and capped at 20 an hour: one idempotency key a press,
+//   kept after a failure so pressing again is the same download (the API
+//   answers its record again), a fresh one after a download saved. Its answer
+//   is saved as it came, `evidence-<id>.json`.
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useRef } from 'react';
 
 import { api, isIntegrityFailed, isSignedOut, isUuid } from './api.ts';
-import type { LogEvent } from './logs.ts';
+import { saveJson } from './download.ts';
+import { type LogEvent, readRetry } from './logs.ts';
 import type { PaymentStatus } from './payments.ts';
 import { refusalText } from './refusals.ts';
 import type { Reason, Status } from './requests.ts';
@@ -26,9 +31,8 @@ interface PersonDecision {
   readonly stepUpChallengeId: string | null;
 }
 
+/** The bundle as read on screen: the download's, with no record of its own. */
 export interface Evidence {
-  readonly id: string;
-  readonly recordSeq: string;
   readonly upToSeq: string;
   readonly spendRequest: {
     readonly id: string;
@@ -133,52 +137,47 @@ export function evidenceRefusal(error: unknown): string {
   return refusalText(error, REFUSALS, 'evidence.refused');
 }
 
-/** How long a visit's key is kept for a remount: a deliberate visit after it is a new download. */
-const VISIT_MS = 10 * 60_000;
+/** The request's address in the API. */
+const pathOf = (id: string): string => `/v1/spend-requests/${encodeURIComponent(id)}`;
 
-/** Each page visit's idempotency key and when it was made, by organisation and request: a module's own, never stored. */
-const visits = new Map<string, { readonly key: string; readonly at: number }>();
-
-/** The key of this visit of the request's page: the one made within VISIT_MS, else a new one (the old dropped). */
-function visitKey(organization: string, id: string, now: number = Date.now()): string {
-  for (const [name, visit] of visits) if (now - visit.at > VISIT_MS) visits.delete(name);
-  const name = `${organization}:${id}`;
-  const kept = visits.get(name);
-  if (kept !== undefined) return kept.key;
-  const key = crypto.randomUUID();
-  visits.set(name, { key, at: now });
-  return key;
+/**
+ * The request's evidence, read while `allowed` (an admin) and only by a
+ * request's ID (any other address names none, shown as not found). Nothing is
+ * logged, so it is asked again as any query is; a 401 ends the session (the
+ * console's queries, app.tsx).
+ */
+export function useEvidence(id: string, organization: string, allowed: boolean) {
+  return useQuery({
+    queryKey: ['evidence', organization, id],
+    enabled: allowed && isUuid(id),
+    retry: readRetry,
+    queryFn: () => api.get<EvidenceAnswer>(`${pathOf(id)}/evidence`, { organization }),
+  });
 }
 
 /**
- * The request's evidence, asked for once while `allowed` (an admin, a request's
- * ID): sent once a visit (a ref, kept over StrictMode's second run of the
- * effect), with one idempotency key the visit keeps, so `again` is the same
- * download, never a second one. A 401 ends the session.
+ * The request's evidence downloaded, logged, and saved as it came. `press`
+ * sends it with the press's idempotency key: kept after a failure, so pressing
+ * again is the same download, and dropped once one is saved. A 401 ends the
+ * session.
  */
-export function useEvidence(id: string, organization: string, allowed: boolean) {
+export function useEvidenceDownload(id: string, organization: string) {
   const queries = useQueryClient();
-  // Taken once a mount, so every send of it (a "try again" however late) is the same download; the map only
-  // carries it across a remount within VISIT_MS.
-  const [idempotencyKey] = useState(() => visitKey(organization, id));
-  const asked = useMutation({
-    mutationFn: () =>
-      api.post<EvidenceAnswer>(`/v1/spend-requests/${encodeURIComponent(id)}/evidence-exports`, {
-        organization,
-        body: {},
-        idempotencyKey,
-      }),
+  const pressKey = useRef<string | undefined>(undefined);
+  const download = useMutation({
+    mutationFn: (idempotencyKey: string) =>
+      api.post<unknown>(`${pathOf(id)}/evidence-exports`, { organization, body: {}, idempotencyKey }),
+    onSuccess: (answer) => {
+      pressKey.current = undefined;
+      saveJson(`evidence-${id}.json`, answer);
+    },
     onError: (error) => {
       if (isSignedOut(error)) endSession(queries);
     },
   });
-  const sent = useRef(false);
-  const { mutate } = asked;
-  const wanted = allowed && isUuid(id);
-  useEffect(() => {
-    if (sent.current || !wanted) return;
-    sent.current = true;
-    mutate();
-  }, [wanted, mutate]);
-  return asked;
+  const press = () => {
+    pressKey.current ??= crypto.randomUUID();
+    download.mutate(pressKey.current);
+  };
+  return { press, download };
 }

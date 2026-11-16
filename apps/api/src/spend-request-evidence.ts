@@ -1,11 +1,20 @@
-// A spend request's evidence, downloaded by an admin (Phase 6 C2a; BR-16;
-// PRD §8: evidence is keyed by spend request, exists for every one, a denied
-// one too, and omits financial secrets and unnecessary personal data; decision
-// 24: admins only, as the audit log, since it names every person).
+// A spend request's evidence, read or downloaded by an admin (Phase 6 C2a,
+// 6C2c; BR-16; PRD §8: evidence is keyed by spend request, exists for every
+// one, a denied one too, and omits financial secrets and unnecessary personal
+// data; decision 24: admins only, as the audit log, since it names every
+// person; and as the audit log, reading on screen is a page read, not logged
+// and not capped, while a download is logged and capped).
 //
+// - `GET /v1/spend-requests/{id}/evidence`: the same bundle, read the same way
+//   (below), writing nothing: no record, so no `id` or `recordSeq`. Another
+//   organisation's request is NOT_FOUND. Its moment is the newest of the rows'
+//   signed events and of the events about the request's objects as the moment
+//   is found (one transaction, after the rows are read): so the bundle holds
+//   every event about them up to it, an alert or a download with no state of
+//   its own too, and a row that moved before it is read again, as below.
 // - `POST /v1/spend-requests/{id}/evidence-exports`, with an idempotency key:
 //   the request is read first (another organisation's is NOT_FOUND, with
-//   nothing written); an admin's sixth download in an hour is
+//   nothing written); an admin's 21st download in an hour is
 //   EVIDENCE_EXPORTS_SPENT, and a request whose objects hold more events than
 //   one bundle may (MOST_EVIDENCE_EVENTS) is EVIDENCE_TOO_LARGE, each with
 //   nothing written; then the download is recorded, EVIDENCE_EXPORTED about the
@@ -13,8 +22,9 @@
 //   out is on the log. A retry with its key answers that record again
 //   (`recordSeq`), with the bundle as it stands then.
 // - One moment: the rows are read in two transactions (below), so the bundle
-//   holds at `upToSeq`, the newest of the record's seq and the signed events
-//   the rows were believed by (signedMoment), the log read up to it; a row that
+//   holds at `upToSeq`, the newest of the record's seq (a read's: the newest
+//   event about its objects) and the signed events the rows were believed by
+//   (signedMoment), the log read up to it; a row that
 //   moved while the others were read (a hand-off landing in between) is read
 //   again, at most MOST_READS times, then EVIDENCE_CHANGED_WHILE_READING.
 // - Its answer is the bundle whole, machine-readable, in the contract's own
@@ -112,7 +122,7 @@ import { EXPORTING_ROLES, exportsSpent } from './audit-log-exports.ts';
 import { LOG_EVENT, SEQ } from './audit-log.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { aboutPayment, paymentInOrder, type PaymentReadTables } from './payment-reads.ts';
-import { type Refused, refused } from './refused.ts';
+import type { Refused } from './refused.ts';
 import { REMITTANCE_SUBJECT } from './remittances.ts';
 import { NOTHING, NOTHING_BODY_LIMIT, REASONS, reasonsOf } from './route-schemas.ts';
 import { requestInOrder, type RequestReadTables } from './spend-request-reads.ts';
@@ -122,6 +132,9 @@ export const EVIDENCE_OPERATION = 'spend-requests.evidence-export';
 
 /** The advisory lock an admin's evidence downloads count their hourly budget under (ADR-006 §6, 2b). */
 const EVIDENCE_EXPORTS_LOCK = 'spend-request-evidence-exports';
+
+/** An admin's evidence downloads an hour: more than the audit log's 5, as one bundle holds at most 2,000 events to its 10,000. */
+const MOST_EVIDENCE_EXPORTS_AN_HOUR = 20;
 
 /** The most events one bundle holds: a request with more is downloaded through the audit log, filtered to it. */
 const MOST_EVIDENCE_EVENTS = 2000;
@@ -178,8 +191,13 @@ const personDecisionOf = (logged: LogEvent) => ({
   stepUpChallengeId: textOf(logged, 'stepUpChallengeId'),
 });
 
-/** The request's evidence as the bundle shows it, its events read already. */
-export type Evidence = ReturnType<typeof bundleOf>;
+/** The request's evidence as the bundle shows it, its events read already: as read on screen, with no record. */
+export type EvidenceRead = ReturnType<typeof bundleOf>;
+
+/** The bundle as downloaded: its own record first. */
+export type Evidence = { readonly id: string; readonly recordSeq: string } & EvidenceRead;
+
+export type EvidenceView = { readonly outcome: 'read'; readonly evidence: EvidenceRead } | Refused;
 
 export type EvidenceWrite =
   | { readonly outcome: 'exported'; readonly evidence: Evidence }
@@ -188,6 +206,8 @@ export type EvidenceWrite =
   | Refused;
 
 export interface SpendRequestEvidence {
+  /** The bundle read, nothing written (the route lets only an admin in). */
+  read(orgId: string, requestId: string, correlationId: string): Promise<EvidenceView>;
   export(
     member: Member,
     idempotent: IdempotentRequest,
@@ -196,10 +216,19 @@ export interface SpendRequestEvidence {
   ): Promise<EvidenceWrite>;
 }
 
+/** What a request not there at all is: NOT_FOUND for a read; for a download, which found it first, a tamper. */
+type WhenNone = () => EvidenceRefused;
+
 /** The request, its agent and supplier, the key it came with and what it holds, read in its transaction. */
-async function requestPart(tx: EvidenceTx, states: SignedStates, keys: KeyProvider, orgId: string, requestId: string) {
+async function requestPart(
+  tx: EvidenceTx,
+  states: SignedStates,
+  keys: KeyProvider,
+  { orgId, requestId, whenNone }: { readonly orgId: string; readonly requestId: string; readonly whenNone: WhenNone },
+) {
   const read = await requestInOrder(tx, states, orgId, requestId);
-  // Found before its download was recorded, and requests are never deleted: one not found whole now is tampered with.
+  if (read.outcome === 'none') throw whenNone();
+  // Requests are never deleted, and one there but not believed whole is tampered with.
   if (read.outcome !== 'found') throw integrityFailed();
   // Its reservation and order claim as the holdings check judges them: a mismatch is a tamper (its alarm raised).
   if (!(await requestHoldingsWhole(tx, states, keys, orgId, requestId, paymentHoldsOf))) throw integrityFailed();
@@ -393,12 +422,7 @@ interface LoggedPart {
 
 /** The bundle, from what was read: every part named, those that don't apply null. */
 function bundleOf(
-  record: {
-    readonly id: string;
-    readonly recordSeq: bigint;
-    readonly upToSeq: bigint;
-    readonly mandateVersionId: string | null;
-  },
+  moment: { readonly upToSeq: bigint; readonly mandateVersionId: string | null },
   request: RequestPart,
   { source, version, payment }: FundingAndPayment,
   logged: LoggedPart,
@@ -409,9 +433,7 @@ function bundleOf(
   const approved = lastOf(events, APPROVED);
   const rejected = lastOf(events, REJECTED);
   return {
-    id: record.id,
-    recordSeq: record.recordSeq.toString(),
-    upToSeq: record.upToSeq.toString(),
+    upToSeq: moment.upToSeq.toString(),
     spendRequest: {
       id: asked.id,
       status: asked.status,
@@ -432,7 +454,7 @@ function bundleOf(
     mandate:
       asked.mandateId === null
         ? null
-        : { id: asked.mandateId, versionId: record.mandateVersionId, acceptance: logged.acceptance },
+        : { id: asked.mandateId, versionId: moment.mandateVersionId, acceptance: logged.acceptance },
     policies: {
       organizationPolicyVersionId: fieldOf(state, 'organization_policy_version_id'),
       mandatePolicyVersionId: fieldOf(state, 'mandate_policy_version_id'),
@@ -473,6 +495,16 @@ function bundleOf(
   };
 }
 
+/** Where a bundle is read from: its organisation and request, what a request not there is, and a download's record's seq. */
+interface Reading {
+  readonly orgId: string;
+  readonly requestId: string;
+  readonly whenNone: WhenNone;
+  /** A download's own record's seq; undefined for a read, held at the newest event about its objects instead. */
+  readonly recordSeq: bigint | undefined;
+  readonly correlationId: string;
+}
+
 export function createSpendRequestEvidence({
   database,
   keys,
@@ -500,19 +532,27 @@ export function createSpendRequestEvidence({
 }): SpendRequestEvidence {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: EvidenceRefused });
 
-  /** The rows read as one moment, at least the record's seq; undefined when one moved while the others were read. */
-  const rowsAtOneMoment = async (orgId: string, requestId: string, recordSeq: bigint, correlationId: string) => {
+  /**
+   * The rows read as one moment, at least the record's seq, else the newest
+   * event about the request's objects then (a read's: in the moment's own
+   * transaction, so no event about them before the moment is left out of the
+   * log read up to it); undefined when one moved while the others were read.
+   */
+  const rowsAtOneMoment = async ({ orgId, requestId, whenNone, recordSeq, correlationId }: Reading) => {
     const request = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-      requestPart(tx, states, keys, orgId, requestId),
+      requestPart(tx, states, keys, { orgId, requestId, whenNone }),
     );
     await betweenReads?.();
     const rows = await work.inOrganisation(orgId, correlationId, (tx, states) =>
       fundingAndPayment(tx, states, orgId, request),
     );
-    const moment = await work.inOrganisation(orgId, correlationId, (tx) =>
-      signedMoment(tx, orgId, rowsReadOf(request, rows), recordSeq),
-    );
-    return moment.outcome === 'moved' ? undefined : { request, rows, upToSeq: moment.upToSeq };
+    const payment = rows.payment === null ? undefined : objectsOfPayment(rows.payment);
+    const subjects = subjectsOf(request.shown.request.id, payment);
+    const moment = await work.inOrganisation(orgId, correlationId, async (tx) => {
+      const from = recordSeq ?? (await eventsInRange(tx, orgId, { ...ALL_TIME, subjects })).upToSeq ?? 0n;
+      return signedMoment(tx, orgId, rowsReadOf(request, rows), from);
+    });
+    return moment.outcome === 'moved' ? undefined : { request, rows, subjects, upToSeq: moment.upToSeq };
   };
 
   /**
@@ -583,15 +623,51 @@ export function createSpendRequestEvidence({
     };
   };
 
+  /** The bundle read at one moment, its rows read again while one moves, at most `mostReads` times. */
+  const bundleRead = async (reading: Reading): Promise<EvidenceRead> => {
+    for (let reads = 0; reads < mostReads; reads += 1) {
+      const read = await rowsAtOneMoment(reading);
+      if (read === undefined) continue;
+      const { request, rows, subjects, upToSeq } = read;
+      const { mandateId, supplierId } = request.shown.request;
+      const mandateVersionId = fieldOf(request.state, 'mandate_version_id');
+      const logged = await loggedPart(
+        reading.orgId,
+        upToSeq,
+        subjects,
+        {
+          mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
+          mandateVersionId,
+          supplierId,
+          versionId: rows.version.id,
+        },
+        reading.correlationId,
+      );
+      const events = ownEvents(logged.events, rows.payment);
+      return bundleOf({ upToSeq, mandateVersionId }, request, rows, { ...logged, events });
+    }
+    throw new EvidenceRefused(409, 'EVIDENCE_CHANGED_WHILE_READING');
+  };
+
   return {
+    read: (orgId, requestId, correlationId) =>
+      work.orRefused(async (): Promise<EvidenceView> => {
+        const whenNone = () => new EvidenceRefused(404, 'NOT_FOUND');
+        const evidence = await bundleRead({ orgId, requestId, whenNone, recordSeq: undefined, correlationId });
+        return { outcome: 'read', evidence };
+      }),
+
     async export(member, idempotent, requestId, correlationId) {
       const { orgId } = member;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         // Who may download it is read again for this decision, and the request is found before anything is written.
         await work.memberIn(tx, states, member, EXPORTING_ROLES);
-        if (await exportsSpent(tx, clock, member, { lock: EVIDENCE_EXPORTS_LOCK, actions: [EVIDENCE_EXPORTED] })) {
-          throw new EvidenceRefused(409, 'EVIDENCE_EXPORTS_SPENT');
-        }
+        const budget = {
+          lock: EVIDENCE_EXPORTS_LOCK,
+          actions: [EVIDENCE_EXPORTED],
+          most: MOST_EVIDENCE_EXPORTS_AN_HOUR,
+        };
+        if (await exportsSpent(tx, clock, member, budget)) throw new EvidenceRefused(409, 'EVIDENCE_EXPORTS_SPENT');
         const read = await requestOf(tx, states, { orgId, id: requestId });
         if (read.outcome === 'missing') throw new EvidenceRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw integrityFailed();
@@ -616,32 +692,9 @@ export function createSpendRequestEvidence({
           if (found.outcome !== 'read' || found.event === undefined) throw integrityFailed();
           return found.event.seq;
         });
-        for (let reads = 0; reads < mostReads; reads += 1) {
-          const read = await rowsAtOneMoment(orgId, requestId, recordSeq, correlationId);
-          if (read === undefined) continue;
-          const { request, rows, upToSeq } = read;
-          const { mandateId, supplierId, id: spendRequestId } = request.shown.request;
-          const mandateVersionId = fieldOf(request.state, 'mandate_version_id');
-          const payment = rows.payment === null ? undefined : objectsOfPayment(rows.payment);
-          const logged = await loggedPart(
-            orgId,
-            upToSeq,
-            subjectsOf(spendRequestId, payment),
-            {
-              mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
-              mandateVersionId,
-              supplierId,
-              versionId: rows.version.id,
-            },
-            correlationId,
-          );
-          const events = ownEvents(logged.events, rows.payment);
-          return {
-            outcome: 'exported',
-            evidence: bundleOf({ id, recordSeq, upToSeq, mandateVersionId }, request, rows, { ...logged, events }),
-          };
-        }
-        return refused(409, 'EVIDENCE_CHANGED_WHILE_READING');
+        // Found as the download was recorded, and requests are never deleted: one not there now is tampered with.
+        const evidence = await bundleRead({ orgId, requestId, whenNone: integrityFailed, recordSeq, correlationId });
+        return { outcome: 'exported', evidence: { id, recordSeq: recordSeq.toString(), ...evidence } };
       });
     },
   };
@@ -734,6 +787,102 @@ const PAYMENT_EVIDENCE = z
   .nullable()
   .describe('Its payment once handed off; null for one never handed off (denied, waiting, cancelled, expired).');
 
+/** The bundle's parts after its moment, the same read or downloaded. */
+const BUNDLE = {
+  spendRequest: REQUEST_EVIDENCE,
+  agent: z
+    .object({
+      id: z.uuid().describe('The AI agent that asked, by its ID.'),
+      name: z.string().describe('The name the team gave it.'),
+      keyId: z.uuid().nullable().describe('The agent key it asked with, by its ID (never the key itself).'),
+    })
+    .describe('Who asked.'),
+  mandate: z
+    .object({
+      id: z.uuid().describe('The mandate it was weighed against.'),
+      versionId: z
+        .uuid()
+        .nullable()
+        .describe('The mandate’s version it was weighed against (or carried to while waiting).'),
+      acceptance: basisEvent('The signed acceptance of that version, as the log holds it; null if none is found.'),
+    })
+    .nullable()
+    .describe('The mandate it was weighed against; null when the agent had none in force.'),
+  policies: z
+    .object({
+      organizationPolicyVersionId: z
+        .uuid()
+        .nullable()
+        .describe('The organisation’s policy version it was weighed under.'),
+      mandatePolicyVersionId: z.uuid().nullable().describe('The mandate’s policy version it was weighed under.'),
+    })
+    .describe('The policy versions its decision applied.'),
+  supplier: z
+    .object({
+      id: z.uuid().describe('The supplier to pay.'),
+      name: z.string().describe('The name its current verified details give it.'),
+      version: z
+        .object({
+          id: z.uuid().describe('The supplier’s details it was decided under, by their ID.'),
+          number: z.int().describe('Those details’ version number.'),
+          name: z.string().describe('The name those details gave it.'),
+          verification: basisEvent(
+            'The signed verification of those details, as the log holds it; null if they were never verified as such.',
+          ),
+        })
+        .describe('The supplier’s details it was decided under.'),
+    })
+    .describe('The supplier, never its payee’s reference or account.'),
+  fundingSource: z
+    .object({
+      id: z.uuid().describe('The bank account it pays from, by its ID.'),
+      holderName: z.string().describe('The account holder’s name, as the partner gave it.'),
+      hint: z
+        .string()
+        .describe('The country and the account number’s last four characters, masked, such as `AE…6026`.'),
+      partner: z.string().describe('The payment partner the account is linked through.'),
+    })
+    .describe('The funding source chosen, as the console shows it: never its consent or full account number.'),
+  approval: z
+    .object(PERSON_DECISION)
+    .nullable()
+    .describe('A person’s approval, from its signed event; null if none approved it.'),
+  rejection: z
+    .object({ ...PERSON_DECISION, reason: z.string().describe('Their reason, as they wrote it.') })
+    .nullable()
+    .describe('A person’s reject, from its signed event; null if none rejected it.'),
+  voiding: z
+    .object({
+      eventId: z.uuid().describe('Its signed event in the log (in `events`).'),
+      at: z.iso.datetime().describe('When, as its signed event seals it.'),
+      reasons: REASONS.describe('Why: what it was decided under that stopped.'),
+    })
+    .nullable()
+    .describe('Its void, when what it was decided under stopped before it was paid; else null.'),
+  reservation: z
+    .object({
+      state: z
+        .enum(RESERVATION.states)
+        .describe(
+          'Where the reservation stands: HELD, FINALISED (paid), RELEASED, or BLOCKED_UNKNOWN (outcome unknown).',
+        ),
+      amountMinor: z.number().describe('The amount it holds, in whole minor units.'),
+      currency: z.string().describe('Its currency.'),
+      month: z.string().describe('The agent’s month it counts in.'),
+      reservedAt: z.iso.datetime().describe('When it was taken.'),
+    })
+    .nullable()
+    .describe(
+      'The limit reservation, as the holdings check judges it; null for a request that never held one (denied).',
+    ),
+  payment: PAYMENT_EVIDENCE,
+  events: z
+    .array(LOG_EVENT)
+    .describe(
+      'Every signed event about the request and its objects (its downloads, instruction, payment, the payment’s alerts, remittance and failure proposals), oldest first, with their chain hashes: the platform’s seals left out.',
+    ),
+};
+
 const EVIDENCE = z
   .object({
     id: z.uuid().describe('This download’s own record in the audit log (`spend_request.evidence_exported`).'),
@@ -741,104 +890,32 @@ const EVIDENCE = z
     upToSeq: SEQ.describe(
       'The moment the bundle holds at: every row in it as it stood then, and every event about them up to and including this one. At least `recordSeq`; a retry reads the request as it stands then, so it may be later.',
     ),
-    spendRequest: REQUEST_EVIDENCE,
-    agent: z
-      .object({
-        id: z.uuid().describe('The AI agent that asked, by its ID.'),
-        name: z.string().describe('The name the team gave it.'),
-        keyId: z.uuid().nullable().describe('The agent key it asked with, by its ID (never the key itself).'),
-      })
-      .describe('Who asked.'),
-    mandate: z
-      .object({
-        id: z.uuid().describe('The mandate it was weighed against.'),
-        versionId: z
-          .uuid()
-          .nullable()
-          .describe('The mandate’s version it was weighed against (or carried to while waiting).'),
-        acceptance: basisEvent('The signed acceptance of that version, as the log holds it; null if none is found.'),
-      })
-      .nullable()
-      .describe('The mandate it was weighed against; null when the agent had none in force.'),
-    policies: z
-      .object({
-        organizationPolicyVersionId: z
-          .uuid()
-          .nullable()
-          .describe('The organisation’s policy version it was weighed under.'),
-        mandatePolicyVersionId: z.uuid().nullable().describe('The mandate’s policy version it was weighed under.'),
-      })
-      .describe('The policy versions its decision applied.'),
-    supplier: z
-      .object({
-        id: z.uuid().describe('The supplier to pay.'),
-        name: z.string().describe('The name its current verified details give it.'),
-        version: z
-          .object({
-            id: z.uuid().describe('The supplier’s details it was decided under, by their ID.'),
-            number: z.int().describe('Those details’ version number.'),
-            name: z.string().describe('The name those details gave it.'),
-            verification: basisEvent(
-              'The signed verification of those details, as the log holds it; null if they were never verified as such.',
-            ),
-          })
-          .describe('The supplier’s details it was decided under.'),
-      })
-      .describe('The supplier, never its payee’s reference or account.'),
-    fundingSource: z
-      .object({
-        id: z.uuid().describe('The bank account it pays from, by its ID.'),
-        holderName: z.string().describe('The account holder’s name, as the partner gave it.'),
-        hint: z
-          .string()
-          .describe('The country and the account number’s last four characters, masked, such as `AE…6026`.'),
-        partner: z.string().describe('The payment partner the account is linked through.'),
-      })
-      .describe('The funding source chosen, as the console shows it: never its consent or full account number.'),
-    approval: z
-      .object(PERSON_DECISION)
-      .nullable()
-      .describe('A person’s approval, from its signed event; null if none approved it.'),
-    rejection: z
-      .object({ ...PERSON_DECISION, reason: z.string().describe('Their reason, as they wrote it.') })
-      .nullable()
-      .describe('A person’s reject, from its signed event; null if none rejected it.'),
-    voiding: z
-      .object({
-        eventId: z.uuid().describe('Its signed event in the log (in `events`).'),
-        at: z.iso.datetime().describe('When, as its signed event seals it.'),
-        reasons: REASONS.describe('Why: what it was decided under that stopped.'),
-      })
-      .nullable()
-      .describe('Its void, when what it was decided under stopped before it was paid; else null.'),
-    reservation: z
-      .object({
-        state: z
-          .enum(RESERVATION.states)
-          .describe(
-            'Where the reservation stands: HELD, FINALISED (paid), RELEASED, or BLOCKED_UNKNOWN (outcome unknown).',
-          ),
-        amountMinor: z.number().describe('The amount it holds, in whole minor units.'),
-        currency: z.string().describe('Its currency.'),
-        month: z.string().describe('The agent’s month it counts in.'),
-        reservedAt: z.iso.datetime().describe('When it was taken.'),
-      })
-      .nullable()
-      .describe(
-        'The limit reservation, as the holdings check judges it; null for a request that never held one (denied).',
-      ),
-    payment: PAYMENT_EVIDENCE,
-    events: z
-      .array(LOG_EVENT)
-      .describe(
-        'Every signed event about the request and its objects (its downloads, instruction, payment, the payment’s alerts, remittance and failure proposals), oldest first, with their chain hashes: the platform’s seals left out.',
-      ),
+    ...BUNDLE,
   })
   .register(API_SCHEMAS, {
     id: 'SpendRequestEvidence',
     description:
       'A spend request’s evidence, whole: what was asked, decided and done, and every signed event about it.',
   });
+
+const EVIDENCE_READ = z
+  .object({
+    upToSeq: SEQ.describe(
+      'The moment the bundle holds at: the newest of the signed events its rows were read by and of the events about the request and its objects when read. Every row in it as it stood then, and every event about them up to and including this one.',
+    ),
+    ...BUNDLE,
+  })
+  .register(API_SCHEMAS, {
+    id: 'SpendRequestEvidenceRead',
+    description:
+      'A spend request’s evidence as read on screen: the download’s bundle, with no record of its own, as reading it is not logged.',
+  });
+
+const EVIDENCE_READ_SCHEMA = {
+  summary: 'Read a spend request’s evidence, whole: a page read, not logged (a download is)',
+  params: z.object({ id: z.uuid().describe('The spend request, by its ID.') }),
+  response: { 200: z.object({ evidence: EVIDENCE_READ }).describe('The evidence, as it stands.') },
+};
 
 const EVIDENCE_SCHEMA = {
   summary: 'Download a spend request’s evidence, whole: the download is itself logged',
@@ -855,6 +932,16 @@ export function registerSpendRequestEvidence(
   { evidence }: { evidence: SpendRequestEvidence | undefined },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+
+  routes.get(
+    '/v1/spend-requests/:id/evidence',
+    { schema: EVIDENCE_READ_SCHEMA, config: { access: [...EXPORTING_ROLES] } },
+    async (request, reply) => {
+      const read = await need(evidence).read(memberInSessionOf(request).orgId, request.params.id, request.id);
+      if (read.outcome !== 'read') return answerRefusal(read, request, reply);
+      return { evidence: read.evidence };
+    },
+  );
 
   routes.post(
     '/v1/spend-requests/:id/evidence-exports',

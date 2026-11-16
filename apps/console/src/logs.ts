@@ -146,7 +146,8 @@ const logQuery = (filters: Filters, before: string | undefined): string =>
   }).toString();
 
 /** A failure on the way is read again, twice, as every query is; a refusal or a record failing its check never changes. */
-const retry = (count: number, error: Error): boolean => !isRefusal(error) && !isIntegrityFailed(error) && count < 2;
+export const readRetry = (count: number, error: Error): boolean =>
+  !isRefusal(error) && !isIntegrityFailed(error) && count < 2;
 
 interface Page<T> {
   readonly items: readonly T[];
@@ -157,7 +158,7 @@ interface Page<T> {
 function useLog<T>(log: Log, filters: Filters, organization: string) {
   return useInfiniteQuery({
     queryKey: ['logs', organization, log, logQuery(filters, undefined)],
-    retry,
+    retry: readRetry,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last: Page<T>) => last.next ?? undefined,
     queryFn: async ({ pageParam }): Promise<Page<T>> => {
@@ -241,7 +242,7 @@ const BUILDING_POLL_MS = 15_000;
 export function useBackgroundDownloads(organization: string) {
   return useQuery({
     queryKey: ['logs', organization, 'background'],
-    retry,
+    retry: readRetry,
     refetchInterval: (query) =>
       query.state.data?.downloads.some((download) => download.state === 'building') === true ? BUILDING_POLL_MS : false,
     queryFn: () =>

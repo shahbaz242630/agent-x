@@ -1,10 +1,12 @@
-// 6C2: a request's evidence in the console, against a stand-in API. An admin
-// reaches it from the request's page (every request, a denied one too); the
-// page downloads the bundle once a visit (one POST, one idempotency key, even
-// under StrictMode's double effects), says the download is logged, shows it in
-// plain sections and its events with their hashes, prints, and saves the API's
-// answer as `evidence-<id>.json`. Only an admin; refusals in plain words, a
-// retry the same download; a 401 ends the session.
+// 6C2, 6C2c: a request's evidence in the console, against a stand-in API. An
+// admin reaches it from the request's page (every request, a denied one too);
+// the page reads the bundle with a GET (decision 24: a page read, not logged)
+// and never downloads on opening, a remount or a re-render; it says reading
+// isn't logged and a download is, shows it in plain sections and its events
+// with their hashes, and prints. "Download JSON" is the logged download, one
+// POST a press with its own idempotency key (pressing again after a failure is
+// the same download), saving the API's answer as `evidence-<id>.json`. Only an
+// admin; refusals in plain words; a 401 ends the session.
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -18,6 +20,7 @@ const ME = '0199a0f0-0000-7000-8000-000000000011';
 const ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const RECORD = '0199a0f0-0000-7000-8000-0000000000e1';
 const APPROVED_EVENT = '0199a0f0-0000-7000-8000-0000000000e2';
+const READ = `/v1/spend-requests/${ID}/evidence`;
 const PATH = `/v1/spend-requests/${ID}/evidence-exports`;
 const AT = '2026-10-26T05:00:00.000Z';
 
@@ -36,9 +39,8 @@ const event = (seq: string, id: string, action: string, actor: Record<string, un
 const ADMIN = { type: 'user', id: ME, name: 'Shahbaz Admin', email: 'admin@example.com' };
 const AGENT = { type: 'agent', id: '0199a0f0-0000-7000-8000-0000000000c1', name: 'Phase 4 demo agent' };
 
+/** A request handed off and paid, as read on screen: no record of its own. */
 const handedOff = () => ({
-  id: RECORD,
-  recordSeq: '41',
   upToSeq: '42',
   spendRequest: {
     id: ID,
@@ -151,6 +153,9 @@ const denied = () => ({
   events: [event('7', RECORD, 'spend_request.decided', AGENT)],
 });
 
+/** The same bundle as downloaded: its own record first. */
+const downloaded = () => ({ evidence: { id: RECORD, recordSeq: '43', ...handedOff(), upToSeq: '43' } });
+
 interface Answer {
   readonly status: number;
   readonly body?: unknown;
@@ -208,6 +213,7 @@ function open(path: string, strict = false, queries = createQueries()) {
 }
 
 const posts = () => sent.filter((one) => one.method === 'POST' && one.path === PATH);
+const reads = () => sent.filter((one) => one.method === 'GET' && one.path === READ);
 
 /** The one found, which the test has just looked for. */
 function found<T>(one: T | null | undefined): T {
@@ -222,8 +228,25 @@ function fact(section: string, label: string): string {
   return term.nextElementSibling?.textContent ?? '';
 }
 
+/** Files the page saves, and what each held: jsdom makes no object URLs, so stand-ins keep them. */
+function savedFiles() {
+  const files: { name: string; file: Blob }[] = [];
+  let made: Blob | undefined;
+  vi.stubGlobal('URL', {
+    createObjectURL: vi.fn((file: Blob) => {
+      made = file;
+      return 'blob:evidence';
+    }),
+    revokeObjectURL: vi.fn(),
+  });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
+    if (made !== undefined) files.push({ name: this.download, file: made });
+  });
+  return files;
+}
+
 describe('reaching a request’s evidence (6C2)', () => {
-  it('offers an admin the evidence from the request’s page, saying opening it is logged', async () => {
+  it('offers an admin the evidence from the request’s page, saying reading it isn’t logged', async () => {
     signedIn();
     answer(`GET /v1/spend-requests/${ID}`, {
       status: 200,
@@ -247,16 +270,17 @@ describe('reaching a request’s evidence (6C2)', () => {
         voiding: null,
       },
     });
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: denied() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: denied() } });
     open(`/approvals/${ID}`);
     const link = await screen.findByRole('link', { name: 'Evidence' });
     expect(link.getAttribute('href')).toBe(`/approvals/${ID}/evidence`);
-    expect(screen.getByText(/Opening it records a download in the audit log/)).toBeDefined();
-    // Nothing is downloaded until it is opened.
-    expect(posts()).toHaveLength(0);
+    expect(screen.getByText(/Reading it isn't logged; a download is recorded in the audit log/)).toBeDefined();
+    // Nothing is read until it is opened.
+    expect(reads()).toHaveLength(0);
     await userEvent.click(link);
     expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
-    expect(posts()).toHaveLength(1);
+    expect(reads()).toHaveLength(1);
+    expect(posts()).toHaveLength(0);
   });
 
   it('offers no one but an admin the evidence', async () => {
@@ -268,25 +292,24 @@ describe('reaching a request’s evidence (6C2)', () => {
   });
 });
 
-describe('a request’s evidence page (6C2)', () => {
-  it('downloads it once a visit, even with StrictMode’s second run, and says the download is logged', async () => {
+describe('a request’s evidence page (6C2, 6C2c)', () => {
+  it('reads it with a GET, even under StrictMode, never downloads it, and says reading isn’t logged', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     open(`/approvals/${ID}/evidence`, true);
     expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    expect(screen.getByText(/Reading this page isn't logged/)).toBeDefined();
     expect(screen.getByText(/the audit log records each download with who made it/)).toBeDefined();
-    expect(posts()).toHaveLength(1);
-    expect(posts()[0]?.body).toEqual({});
-    expect(posts()[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
-    expect(sent.find((one) => one.path.startsWith('/v1/spend-requests/') && one.method === 'GET')).toBeUndefined();
-    // Read again later (a re-render, another tab back), it is never downloaded twice.
+    expect(reads().length).toBeGreaterThanOrEqual(1);
+    expect(reads()[0]?.key).toBeNull();
+    // Left open (a re-render, the clock ticking), it is never downloaded.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(posts()).toHaveLength(1);
+    expect(posts()).toHaveLength(0);
   });
 
-  it('sends the same key when the page remounts after the shell failed and came back, so it is one download', async () => {
+  it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     const queries = createQueries();
     open(`/approvals/${ID}/evidence`, false, queries);
     await screen.findByRole('heading', { name: 'The request' });
@@ -300,30 +323,15 @@ describe('a request’s evidence page (6C2)', () => {
     expect(screen.queryByRole('heading', { name: 'The request' })).toBeNull();
     await userEvent.click(retry);
     expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
-    // Sent again by the remounted page with the visit's own key: the API answers the same record, no second download.
-    expect(posts()).toHaveLength(2);
-    expect(posts()[1]?.key).toBe(posts()[0]?.key);
-  });
-
-  it('makes a new download for a new visit after 10 minutes', async () => {
-    signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
-    open(`/approvals/${ID}/evidence`);
-    await screen.findByRole('heading', { name: 'The request' });
-    cleanup();
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60_000 + 1);
-    open(`/approvals/${ID}/evidence`);
-    await screen.findByRole('heading', { name: 'The request' });
-    expect(posts()).toHaveLength(2);
-    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
+    expect(posts()).toHaveLength(0);
   });
 
   it('shows the bundle in plain sections: request, decision, supplier, approval, money held and payment', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     open(`/approvals/${ID}/evidence`);
     await screen.findByRole('heading', { name: 'The request' });
-    expect(screen.getByText(/As it stood at audit event #42. This download is event #41/)).toBeDefined();
+    expect(screen.getByText('As it stood at audit event #42.')).toBeDefined();
     expect(fact('The request', 'Where it stands')).toBe('With the bank');
     expect(fact('The request', 'Invoice or order')).toBe('INV-2026-0042');
     expect(fact('The request', 'The agent wrote')).toBe('Printer toner for the Dubai office');
@@ -352,7 +360,7 @@ describe('a request’s evidence page (6C2)', () => {
 
   it('lists every signed event oldest first, each with who, what, about what and its hashes in mono', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     open(`/approvals/${ID}/evidence`);
     const table = await screen.findByRole('table');
     expect(screen.getByRole('heading', { name: 'Every signed event (2), oldest first' })).toBeDefined();
@@ -368,7 +376,7 @@ describe('a request’s evidence page (6C2)', () => {
 
   it('says a denied request’s parts that never happened, and names a reject from its ID when its event isn’t there', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: denied() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: denied() } });
     open(`/approvals/${ID}/evidence`);
     await screen.findByRole('heading', { name: 'The payment' });
     expect(screen.getByText('Never sent to the bank: there is no payment.')).toBeDefined();
@@ -385,79 +393,146 @@ describe('a request’s evidence page (6C2)', () => {
     expect(screen.queryByText('Approval bound to (hash)')).toBeNull();
   });
 
-  it('prints the page as shown', async () => {
+  it('prints the page as read, downloading nothing', async () => {
     signedIn();
-    answer(`POST ${PATH}`, { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     const print = vi.spyOn(window, 'print').mockImplementation(() => undefined);
     open(`/approvals/${ID}/evidence`);
     await userEvent.click(await screen.findByRole('button', { name: 'Print' }));
     expect(print).toHaveBeenCalledOnce();
-    // Printing reads nothing more, so logs nothing more.
-    expect(posts()).toHaveLength(1);
+    expect(posts()).toHaveLength(0);
   });
 
-  it('saves the API’s answer as it came, named evidence-<id>.json, with no second download', async () => {
+  it('downloads it once a press, each with its own key, saving the API’s answer as evidence-<id>.json', async () => {
     signedIn();
-    const body = { evidence: handedOff() };
-    answer(`POST ${PATH}`, { status: 201, body });
-    const made: Blob[] = [];
-    // jsdom makes no object URLs: stand-ins that keep the file made.
-    vi.stubGlobal('URL', {
-      createObjectURL: vi.fn((file: Blob) => {
-        made.push(file);
-        return 'blob:evidence';
-      }),
-      revokeObjectURL: vi.fn(),
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
+    answer(`POST ${PATH}`, { status: 201, body: downloaded() });
+    const files = savedFiles();
+    open(`/approvals/${ID}/evidence`);
+    const button = await screen.findByRole('button', { name: 'Download JSON' });
+    expect(posts()).toHaveLength(0);
+
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(files).toHaveLength(1);
     });
-    let saved: { href: string; download: string } | undefined;
-    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) {
-      saved = { href: this.href, download: this.download };
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]?.body).toEqual({});
+    expect(posts()[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(files[0]?.name).toBe(`evidence-${ID}.json`);
+    expect(files[0]?.file.type).toBe('application/json');
+    expect(JSON.parse((await files[0]?.file.text()) ?? '')).toEqual(downloaded());
+
+    // A second press is a second download.
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(files).toHaveLength(2);
+    });
+    expect(posts()).toHaveLength(2);
+    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
+  });
+});
+
+describe('a download on its way (6C2c)', () => {
+  it('holds the button while a download is on its way: a second press sends nothing', async () => {
+    signedIn();
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
+    answer(`POST ${PATH}`, { status: 201, body: downloaded() });
+    const files = savedFiles();
+    const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
+    const answering = found(vi.mocked(fetch).getMockImplementation());
+    vi.mocked(fetch).mockImplementation(async (...asked) => {
+      const reply = await answering(...asked);
+      if (asked[1]?.method === 'POST') await held;
+      return reply;
     });
     open(`/approvals/${ID}/evidence`);
-    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }));
-    expect(saved).toEqual({ href: 'blob:evidence', download: `evidence-${ID}.json` });
-    expect(made[0]?.type).toBe('application/json');
-    expect(JSON.parse((await made[0]?.text()) ?? '')).toEqual(body);
+    const button = await screen.findByRole('button', { name: 'Download JSON' });
+
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(button).toHaveProperty('disabled', true);
+    });
+    await userEvent.click(button);
+    expect(posts()).toHaveLength(1);
+
+    release(undefined);
+    await waitFor(() => {
+      expect(files).toHaveLength(1);
+    });
+    expect(button).toHaveProperty('disabled', false);
     expect(posts()).toHaveLength(1);
   });
 });
 
-describe('the evidence refused or failed (6C2)', () => {
-  it('says each refusal in plain words, and a retry is the same download (the same key)', async () => {
+describe('the evidence refused or failed (6C2, 6C2c)', () => {
+  it('says a download refused in plain words beside the button, the evidence still shown; pressing again is the same download', async () => {
     signedIn();
-    answer(`POST ${PATH}`, refusal(409, 'EVIDENCE_EXPORTS_SPENT'), { status: 201, body: { evidence: handedOff() } });
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
+    answer(`POST ${PATH}`, refusal(409, 'EVIDENCE_EXPORTS_SPENT'), { status: 201, body: downloaded() });
+    const files = savedFiles();
     open(`/approvals/${ID}/evidence`);
-    expect(await screen.findByText(/You've downloaded evidence 5 times in the last hour/)).toBeDefined();
-    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
-    expect(posts()).toHaveLength(2);
-    expect(posts()[1]?.key).toBe(posts()[0]?.key);
-  });
+    const button = await screen.findByRole('button', { name: 'Download JSON' });
+    await userEvent.click(button);
+    expect(await screen.findByText(/You've downloaded evidence 20 times in the last hour/)).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'The request' })).toBeDefined();
+    expect(files).toHaveLength(0);
 
-  it('sends the same key on a "try again" made more than 10 minutes after the first send', async () => {
-    signedIn();
-    answer(`POST ${PATH}`, refusal(503, 'INTEGRITY_FAILED'), { status: 201, body: { evidence: handedOff() } });
-    open(`/approvals/${ID}/evidence`);
-    const retry = await screen.findByRole('button', { name: 'Try again' });
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60_000 + 1);
-    await userEvent.click(retry);
-    expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(files).toHaveLength(1);
+    });
+    expect(screen.queryByText(/You've downloaded evidence 20 times/)).toBeNull();
     expect(posts()).toHaveLength(2);
     expect(posts()[1]?.key).toBe(posts()[0]?.key);
   });
 
   it.each([
     ['EVIDENCE_TOO_LARGE', 409, /more than 2,000 events/],
-    ['EVIDENCE_CHANGED_WHILE_READING', 409, /kept changing while Agent X read it/],
-    ['FORBIDDEN', 403, /Only an admin can download a request's evidence/],
-    ['INTEGRITY_FAILED', 503, /failed Agent X's integrity check, so its evidence can't be downloaded/],
-    ['SOMETHING_NEW', 409, /reason SOMETHING_NEW/],
-    ['INTERNAL', 500, /couldn't be reached/],
-  ])('says %s in plain words', async (code, status, words) => {
+    ['INTEGRITY_FAILED', 503, /failed Agent X's integrity check, so its evidence can't be shown or downloaded/],
+  ])('says a download refused %s in plain words', async (code, status, words) => {
     signedIn();
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     answer(`POST ${PATH}`, refusal(status, code));
     open(`/approvals/${ID}/evidence`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }));
     expect(await screen.findByText(words)).toBeDefined();
+  });
+
+  it.each([
+    ['EVIDENCE_TOO_LARGE', 409, /more than 2,000 events/],
+    ['EVIDENCE_CHANGED_WHILE_READING', 409, /kept changing while Agent X read it/],
+    ['FORBIDDEN', 403, /Only an admin can see or download a request's evidence/],
+    ['INTEGRITY_FAILED', 503, /failed Agent X's integrity check, so its evidence can't be shown or downloaded/],
+    ['SOMETHING_NEW', 409, /reason SOMETHING_NEW/],
+    ['INTERNAL', 500, /couldn't be reached/],
+  ])(
+    'says a read refused %s in plain words, downloading nothing',
+    async (code, status, words) => {
+      signedIn();
+      answer(`GET ${READ}`, refusal(status, code));
+      open(`/approvals/${ID}/evidence`);
+      // A failure on the way (500) is read again twice first, as every query is: a few seconds.
+      expect(await screen.findByText(words, {}, { timeout: 6000 })).toBeDefined();
+      expect(posts()).toHaveLength(0);
+    },
+    10_000,
+  );
+
+  it('reads it again on "try again", downloading nothing', async () => {
+    signedIn();
+    answer(`GET ${READ}`, refusal(409, 'EVIDENCE_CHANGED_WHILE_READING'), {
+      status: 200,
+      body: { evidence: handedOff() },
+    });
+    open(`/approvals/${ID}/evidence`);
+    await screen.findByText(/kept changing while Agent X read it/);
+    // A refusal is never read again by itself.
+    expect(reads()).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
+    expect(reads()).toHaveLength(2);
+    expect(posts()).toHaveLength(0);
   });
 
   it('says a request this organisation doesn’t have can’t be found, and asks nothing for an address naming none', async () => {
@@ -468,27 +543,36 @@ describe('the evidence refused or failed (6C2)', () => {
     sent = [];
     open('/approvals/not-a-request/evidence');
     expect(await screen.findByText(/This request can't be found/)).toBeDefined();
-    expect(sent.filter((one) => one.method === 'POST')).toHaveLength(0);
+    expect(sent.filter((one) => one.path.includes('/evidence'))).toHaveLength(0);
   });
 
-  it('downloads nothing for anyone but an admin, and says so', async () => {
+  it('reads nothing for anyone but an admin, and says so', async () => {
     signedIn('viewer');
     open(`/approvals/${ID}/evidence`);
-    expect(await screen.findByText(/Only an admin can download a request's evidence/)).toBeDefined();
+    expect(await screen.findByText(/Only an admin can see or download a request's evidence/)).toBeDefined();
     expect(screen.queryByText(/the audit log records each download with who made it/)).toBeNull();
-    expect(posts()).toHaveLength(0);
+    expect(sent.filter((one) => one.path.includes('/evidence'))).toHaveLength(0);
+  });
+
+  it('goes to sign-in, saying the session ended, when the read is answered 401', async () => {
+    signedIn();
+    answer(`GET ${READ}`, refusal(401, 'UNAUTHENTICATED'));
+    open(`/approvals/${ID}/evidence`);
+    expect(await screen.findByText('Your session ended. Sign in again to carry on.')).toBeDefined();
   });
 
   it('goes to sign-in, saying the session ended, when the download is answered 401', async () => {
     signedIn();
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
     answer(`POST ${PATH}`, refusal(401, 'UNAUTHENTICATED'));
     open(`/approvals/${ID}/evidence`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Download JSON' }));
     expect(await screen.findByText('Your session ended. Sign in again to carry on.')).toBeDefined();
   });
 
   it('goes back to the request', async () => {
     signedIn();
-    answer(`POST ${PATH}`, refusal(409, 'EVIDENCE_TOO_LARGE'));
+    answer(`GET ${READ}`, refusal(409, 'EVIDENCE_TOO_LARGE'));
     answer(`GET /v1/spend-requests/${ID}`, refusal(404, 'NOT_FOUND'));
     const router = open(`/approvals/${ID}/evidence`);
     await userEvent.click(await screen.findByRole('link', { name: 'Back to the request' }));

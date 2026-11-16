@@ -185,13 +185,18 @@ export const exportFile = (
 /**
  * Whether an admin has made as many downloads of a log as they may in the
  * hour, counted under their own lock for that log (ADR-006 §6, 2b), so their
- * other download in flight commits or rolls back before this counts.
+ * other download in flight commits or rolls back before this counts. `most`
+ * is MOST_EXPORTS_AN_HOUR unless that log sets its own.
  */
 export async function exportsSpent(
   tx: Parameters<typeof actorEventsSince>[0],
   clock: Clock,
   member: Member,
-  { lock, actions }: { readonly lock: string; readonly actions: readonly string[] },
+  {
+    lock,
+    actions,
+    most = MOST_EXPORTS_AN_HOUR,
+  }: { readonly lock: string; readonly actions: readonly string[]; readonly most?: number },
 ): Promise<boolean> {
   await holdTransactionLock(tx, lock, member.orgId, member.userId);
   const since = new Date(clock.now().getTime() - HOUR_MS);
@@ -199,7 +204,7 @@ export async function exportsSpent(
   for (const action of actions) {
     made += await actorEventsSince(tx, member.orgId, { type: 'user', id: member.userId }, action, since);
   }
-  return made >= MOST_EXPORTS_AN_HOUR;
+  return made >= most;
 }
 
 export function createAuditLogExports({

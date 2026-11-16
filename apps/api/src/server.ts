@@ -228,7 +228,7 @@ export interface ServerOptions {
   readonly spendRequestRejects?: SpendRequestRejects | undefined;
   /** Approving spend requests waiting for approval (spend-request-approvals.ts); without it, no one reaches those routes. */
   readonly spendRequestApprovals?: SpendRequestApprovals | undefined;
-  /** Downloading a spend request's evidence (spend-request-evidence.ts, BR-16); without it, no one reaches that route. */
+  /** Reading and downloading a spend request's evidence (spend-request-evidence.ts, BR-16); without it, no one reaches those routes. */
   readonly spendRequestEvidence?: SpendRequestEvidence | undefined;
   /** An admin marking an UNKNOWN payment failed (payment-marks.ts, decision 38); without it, no one reaches those routes. */
   readonly paymentMarks?: PaymentMarks | undefined;
