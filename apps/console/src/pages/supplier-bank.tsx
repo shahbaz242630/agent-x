@@ -213,17 +213,18 @@ function NewDetails({
   const [broken, setBroken] = useState<Broken>('none');
   const [confirming, setConfirming] = useState(false);
   const [unanswered, setUnanswered] = useState<Unanswered | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [form, setForm] = useState<Registration | null>(null);
   const at = `${supplierAt(supplier.id)}/payee-registrations`;
   const phone = { phone: supplier.phone };
   const names = { name: supplier.displayName };
   const way = route === 'hosted' ? 'hosted' : 'pass';
-  // Any change to what is typed makes it another request: a key kept for the earlier one is dropped.
   const edited = (set: (value: string) => void) => (value: string) => {
     set(value);
-    setUnanswered(null);
     setBroken('none');
   };
+  // A try with no answer locks the details: only the same request may go again, until the person stops trying.
+  const locked = unanswered !== null;
   const answered = (registration: Registration) => {
     const words = registrationWords(registration);
     if (words === undefined) setForm(registration);
@@ -246,7 +247,8 @@ function NewDetails({
         } catch (error) {
           // No answer, or no decision (a 5xx): the partner may have the details, and a fresh key would register them
           // again (the API carries on an open registration for its form alone). The same request asks it by our ID.
-          if (!isRefusal(error)) setUnanswered({ key, body });
+          // A refusal is the API's final word: nothing is left to ask again.
+          setUnanswered(isRefusal(error) ? null : { key, body });
           throw error;
         }
       },
@@ -284,7 +286,7 @@ function NewDetails({
   };
   const cancel = (
     // Never while sending, nor while a request waits to be asked again: its key would be lost with the form.
-    <button type="button" className="secondary" disabled={busy || unanswered !== null} onClick={onCancel}>
+    <button type="button" className="secondary" disabled={busy || locked} onClick={onCancel}>
       {t('confirm.cancel')}
     </button>
   );
@@ -338,10 +340,10 @@ function NewDetails({
         chosen={route}
         onChoose={(choice) => {
           setRoute(choice);
-          setUnanswered(null);
           setBroken('none');
         }}
         broken={broken === 'route' ? t('suppliers.route.broken') : undefined}
+        disabled={locked}
       />
       {route === 'pass_through' && (
         <>
@@ -353,6 +355,7 @@ function NewDetails({
             value={holder}
             onChange={edited(setHolder)}
             broken={broken === 'holder' ? t('suppliers.holderBroken') : undefined}
+            disabled={locked}
             autoComplete="off"
             spellCheck={false}
           />
@@ -363,6 +366,7 @@ function NewDetails({
             value={iban}
             onChange={edited(setIban)}
             broken={broken === 'iban' ? t('suppliers.ibanBroken') : undefined}
+            disabled={locked}
             autoComplete="off"
             spellCheck={false}
           />
@@ -370,17 +374,43 @@ function NewDetails({
       )}
       <div className="actions">
         {cancel}
-        {/* Unanswered, the same details go again only as the same request: a fresh one waits for something retyped. */}
         {unanswered === null ? (
           <button type="button" className="primary" disabled={busy} onClick={next}>
             {t('suppliers.bank.continue')}
           </button>
         ) : (
-          <button type="button" className="primary" disabled={busy} onClick={() => void passThrough(unanswered)}>
-            {t('suppliers.bank.tryAgain')}
-          </button>
+          <>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy}
+              onClick={() => {
+                setStopping(true);
+              }}
+            >
+              {t('suppliers.bank.stop')}
+            </button>
+            <button type="button" className="primary" disabled={busy} onClick={() => void passThrough(unanswered)}>
+              {t('suppliers.bank.tryAgain')}
+            </button>
+          </>
         )}
       </div>
+      {stopping && (
+        <Confirm
+          text={t('suppliers.bank.stopText')}
+          title={t('suppliers.bank.stopTitle')}
+          confirmLabel={t('suppliers.bank.stop')}
+          onCancel={() => {
+            setStopping(false);
+          }}
+          onConfirm={() => {
+            // Dropped only once the person has read that starting again could register the details twice.
+            setUnanswered(null);
+            setStopping(false);
+          }}
+        />
+      )}
       {confirming && (
         <Confirm
           statement="payee"

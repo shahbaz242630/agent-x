@@ -16,6 +16,7 @@ export function LineField({
   broken,
   autoComplete,
   spellCheck,
+  disabled = false,
 }: {
   readonly label: string;
   /** The API's rule for it, in plain words. */
@@ -28,6 +29,8 @@ export function LineField({
   /** "off" for what the browser must never save or offer back (a supplier's bank details, 6D2). */
   readonly autoComplete?: 'off';
   readonly spellCheck?: false;
+  /** Read-only for now (a pass-through waiting to be asked again, 6D2). */
+  readonly disabled?: boolean;
 }) {
   const id = useId();
   return (
@@ -41,6 +44,7 @@ export function LineField({
         maxLength={most}
         autoComplete={autoComplete}
         spellCheck={spellCheck}
+        disabled={disabled}
         aria-describedby={`${id}-hint`}
         aria-invalid={broken !== undefined}
         value={value}

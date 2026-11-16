@@ -10,6 +10,7 @@ export function Choices<T extends string>({
   chosen,
   onChoose,
   broken,
+  disabled = false,
 }: {
   readonly legend: string;
   /** Each option and its words, in the order offered. */
@@ -17,11 +18,13 @@ export function Choices<T extends string>({
   readonly chosen: T | null;
   readonly onChoose: (choice: T) => void;
   readonly broken?: string | undefined;
+  /** Read-only for now (a pass-through waiting to be asked again, 6D2). */
+  readonly disabled?: boolean;
 }) {
   const name = useId();
   return (
     <>
-      <fieldset className="options" aria-invalid={broken !== undefined}>
+      <fieldset className="options" aria-invalid={broken !== undefined} disabled={disabled}>
         <legend>{legend}</legend>
         {options.map(([value, words]) => (
           <label key={value} className="option">

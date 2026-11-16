@@ -621,7 +621,7 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(sentTo('GET', at).length).toBeGreaterThan(1);
   });
 
-  it('asks the partner again with the same key when its answer was lost, and a new key once anything is retyped', async () => {
+  it('asks the partner again with the same key when its answer was lost, and a new key only once stopped', async () => {
     as('admin');
     answer(
       `POST ${at}/payee-registrations/pass-through`,
@@ -643,9 +643,14 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(again?.key).toBe(first?.key);
     expect(again?.body).toEqual(first?.body);
 
-    // Retyped, it is another request: no try-again with the old key.
-    await userEvent.type(screen.getByLabelText('IBAN'), ' ');
+    // Nothing can be retyped while it waits: only the confirmed Stop trying drops the key.
+    expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
+    await press('Stop trying');
+    expect(within(await screen.findByRole('dialog')).getByText(/could be registered twice/)).toBeDefined();
+    await inDialog('Stop trying');
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(false);
     await press('Continue');
     await userEvent.click(await within(await screen.findByRole('dialog')).findByLabelText('Its requests are held.'));
     await inDialog('Send to the bank partner');
@@ -675,6 +680,21 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(again?.body).toEqual(first?.body);
   });
 
+  it('keeps no key once a retry is refused: the API decided, so nothing is held', async () => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, refused(409, 'ORG_FROZEN'));
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+    await press('Try again');
+    expect(await screen.findByText(/This organisation is frozen/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(false);
+  });
+
   it('holds Cancel and Try again while a pass-through is on its way', async () => {
     as('admin');
     answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, { status: 201, body: registration() });
@@ -702,7 +722,7 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
   });
 
-  it('drops the kept key when the way of giving the details changes', async () => {
+  it('locks the holder, the IBAN and the way of giving them while a try waits, and keeps the key until stopped', async () => {
     as('admin');
     answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, { status: 201, body: registration() });
     open(page);
@@ -711,12 +731,27 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     await inDialog('Send to the bank partner');
     expect(await screen.findByText(UNANSWERED)).toBeDefined();
 
-    await userEvent.click(screen.getByLabelText("On the bank partner's own page"));
-    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
-    await userEvent.click(
-      screen.getByLabelText('Type them here: they go straight to the bank partner, and Agent X never keeps them'),
-    );
-    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    const hosted = screen.getByLabelText<HTMLInputElement>("On the bank partner's own page");
+    // Disabled by its fieldset, as the browser reads it.
+    expect(hosted.matches(':disabled')).toBe(true);
+    await userEvent.click(hosted);
+    expect(hosted.checked).toBe(false);
+    for (const label of ["Account holder's name", 'IBAN']) {
+      const field = screen.getByLabelText<HTMLInputElement>(label);
+      expect(field.disabled).toBe(true);
+      await userEvent.type(field, 'x');
+      expect(field.value).not.toContain('x');
+    }
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+
+    // Stopping needs its confirm: backed out of, the key is still kept.
+    await press('Stop trying');
+    await inDialog('Cancel');
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+
+    await press('Stop trying');
+    await inDialog('Stop trying');
     await press('Continue');
     await userEvent.click(await within(await screen.findByRole('dialog')).findByLabelText('Its requests are held.'));
     await inDialog('Send to the bank partner');

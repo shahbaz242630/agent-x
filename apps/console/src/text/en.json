@@ -632,5 +632,8 @@
   "suppliers.refused.BAD_REQUEST": "Agent X couldn't accept what was entered, so nothing was changed. Check each field and try again.",
   "suppliers.refused.FORBIDDEN": "Your role in this organisation can't do this. Ask an admin.",
   "suppliers.refused.NOT_FOUND": "This supplier can't be found in this organisation any more. Nothing was changed.",
-  "suppliers.bank.unanswered": "Agent X or the bank partner didn't answer, so it isn't known yet whether the bank partner has these details. Press Try again: it asks about the same request, and never sends the details twice."
+  "suppliers.bank.unanswered": "Agent X or the bank partner didn't answer, so it isn't known yet whether the bank partner has these details. Press Try again: it asks about the same request, and never sends the details twice.",
+  "suppliers.bank.stop": "Stop trying",
+  "suppliers.bank.stopTitle": "Stop trying to send these bank details?",
+  "suppliers.bank.stopText": "The earlier request may already be with the bank partner. If you start again later, these details could be registered twice. Before you do, check this supplier's page for new bank details waiting, or ask the bank partner."
 }
