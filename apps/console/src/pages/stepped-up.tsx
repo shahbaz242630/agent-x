@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { isRefusal, isUuid } from '../api.ts';
 import { confirm, forget, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t } from '../text.ts';
-import { KeyOnce, keyIn } from './key-once.tsx';
+import { KeyOnce, keyIn, linkIn } from './key-once.tsx';
 
 type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed';
 
@@ -76,7 +76,8 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   const pending = useMemo(() => pendingFor(challenge), [challenge]);
   const [sent, setSent] = useState<Sent>('ready');
   // A new key from the confirm's answer: this view's memory only, never storage, the query cache or the address.
-  const [answered, setAnswered] = useState<ReturnType<typeof keyIn>>(undefined);
+  // Or an invitation's link (6D4b), held the same way.
+  const [answered, setAnswered] = useState<ReturnType<typeof keyIn> | ReturnType<typeof linkIn>>(undefined);
   const queries = useQueryClient();
   if (pending === undefined) {
     return (
@@ -91,7 +92,8 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   const send = async () => {
     setSent('sending');
     try {
-      setAnswered(keyIn(await confirm(pending)));
+      const answer = await confirm(pending);
+      setAnswered(keyIn(answer) ?? linkIn(answer));
       setSent('done');
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
@@ -104,7 +106,7 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
     return (
       <section className="stepped">
         <p role="status">{t('stepUp.done', { change: pending.label })}</p>
-        <KeyOnce secret={answered.key} onDone={close} />
+        <KeyOnce secret={answered.key} kind={'kind' in answered ? answered.kind : 'key'} onDone={close} />
       </section>
     );
   }

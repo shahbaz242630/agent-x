@@ -17,7 +17,11 @@ export function refusalText(
     | 'agents.refused'
     | 'logs.refused'
     | 'evidence.refused'
-    | 'suppliers.refused',
+    | 'suppliers.refused'
+    | 'members.refused'
+    | 'invitations.refused'
+    | 'contacts.refused'
+    | 'resets.refused',
   ownWords: Readonly<Record<string, TextKey>> = {},
 ): string {
   if (error instanceof StepUpStorageBlocked) return t('request.storageBlocked');

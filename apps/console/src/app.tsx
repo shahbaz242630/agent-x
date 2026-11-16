@@ -21,12 +21,18 @@ import { Approvals } from './pages/approvals.tsx';
 import { AuditLog } from './pages/audit-log.tsx';
 import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
+import { Contacts } from './pages/contacts.tsx';
 import { EvidencePage } from './pages/evidence.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
+import { AcceptInvitation } from './pages/invitation-accept.tsx';
+import { MemberPage } from './pages/member.tsx';
+import { Members } from './pages/members.tsx';
 import { More } from './pages/more.tsx';
 import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
 import { RequestPage } from './pages/request.tsx';
+import { ResetConfirm } from './pages/reset-confirm.tsx';
+import { Resets } from './pages/resets.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
 import { SupplierPage } from './pages/supplier.tsx';
@@ -59,11 +65,20 @@ function SignedIn({ session }: { readonly session: Session }) {
   );
 }
 
+/** The pages a link carrying a token opens (6D4b), before any organisation is chosen: each reads its own fragment. */
+const RESET_CONFIRM = '/factor-resets/confirm';
+const ACCEPT = '/invitations/accept';
+
 function Root() {
   const session = useSession();
   const queries = useQueryClient();
+  const path = useRouterState({ select: ({ location }) => location.pathname });
+  // A registered contact's confirm (CO9): public, signed in or not.
+  if (path === RESET_CONFIRM) return <ResetConfirm />;
   if (session.isPending) return <Loading />;
   if (session.isError) return <Failed onRetry={() => void session.refetch()} />;
+  // An invitation's acceptance: signed in, perhaps a member of no organisation yet.
+  if (path === ACCEPT) return <AcceptInvitation session={session.data} />;
   if (session.data === null) return <SignedOut ended={queries.getQueryData<boolean>(ENDED) === true} />;
   return <SignedIn session={session.data} />;
 }
@@ -113,6 +128,12 @@ function Suppliers(): ReactElement {
   );
 }
 
+/** One member's page (6D4b): `/more/members/<membership ID>`. */
+function MemberAt(): ReactElement {
+  const id = useIdInAddress(3);
+  return <MemberPage key={id} id={id} />;
+}
+
 /** One request's evidence, printable (6C2): `/approvals/<id>/evidence`. */
 function Evidence(): ReactElement {
   const id = useIdInAddress();
@@ -153,6 +174,13 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
+  createRoute({ getParentRoute: () => root, path: '/more/members', component: Members }),
+  createRoute({ getParentRoute: () => root, path: '/more/members/$id', component: MemberAt }),
+  createRoute({ getParentRoute: () => root, path: '/more/contacts', component: Contacts }),
+  createRoute({ getParentRoute: () => root, path: '/more/factor-resets', component: Resets }),
+  // Drawn by Root itself, before the shell (6D4b): named here so the router knows them.
+  createRoute({ getParentRoute: () => root, path: RESET_CONFIRM, component: () => null }),
+  createRoute({ getParentRoute: () => root, path: ACCEPT, component: () => null }),
 ]);
 
 /** The console's queries: a 401 anywhere means the session is gone, so the session reads as none. */

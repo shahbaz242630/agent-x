@@ -44,6 +44,8 @@ export interface Member {
   readonly userId: string;
   readonly role: Role;
   readonly status: 'ACTIVE' | 'DEACTIVATED';
+  /** When they joined the organisation (6D4b). */
+  readonly joinedAt: string;
 }
 
 /** Who may register an agent (REGISTERING_ROLES). */

@@ -37,6 +37,10 @@ export function More() {
     <section className="stack">
       <h1>{t('more.title')}</h1>
       <Freeze />
+      <nav className="stack" aria-label={t('members.people')}>
+        <h2>{t('members.people')}</h2>
+        <Link to="/more/members">{t('members.title')}</Link>
+      </nav>
       <nav className="stack" aria-label={t('more.brakes')}>
         <h2>{t('more.brakes')}</h2>
         <Link to="/more/suppliers">{t('brakes.suppliers.title')}</Link>
