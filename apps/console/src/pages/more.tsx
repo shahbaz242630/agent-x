@@ -7,6 +7,7 @@ import { dropAllTries } from '../held-tries.ts';
 import { dropKept } from '../kept.ts';
 import { goTo } from '../navigate.ts';
 import { useActing } from '../session.tsx';
+import { forgetAll } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Freeze } from './freeze.tsx';
 
@@ -33,6 +34,7 @@ export function More() {
     queries.clear();
     dropAllTries();
     dropKept();
+    forgetAll();
     goTo('/');
   };
   return (

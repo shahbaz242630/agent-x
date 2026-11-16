@@ -8,9 +8,10 @@
 //
 // What to confirm is kept over the round trip in this tab's sessionStorage,
 // by challenge: nothing secret (the challenge is good only for this session,
-// and only after the fresh sign-in), and gone once confirmed or dismissed. The
-// API checks everything again at the confirm whatever the console kept.
+// and only after the fresh sign-in), and gone once confirmed or dismissed, or
+// when the person signs out (forgetAll), never on a 401 alone. The API checks everything again at the confirm whatever the console kept.
 import { api, ApiError, isRefusal, isUuid } from './api.ts';
+import { dropStartingWith } from './kept.ts';
 import { goTo } from './navigate.ts';
 
 /** A change asked and waiting for its step-up: where to confirm it and with what. */
@@ -96,6 +97,16 @@ export function forget(challenge: string): void {
   } catch {
     // Storage blocked: nothing was kept.
   }
+}
+
+/**
+ * Forgets every change kept for a step-up in this tab (each under KEY and its
+ * challenge, the only keys this module writes): the person signed out, and
+ * their changes' labels and bodies go with them. Never on a 401 alone, which a
+ * round trip may meet and must survive.
+ */
+export function forgetAll(): void {
+  dropStartingWith([KEY]);
 }
 
 /** A page's own query (its filter, `?org=`, CO5): its address's, less a step-up's. */

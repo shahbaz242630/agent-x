@@ -461,7 +461,7 @@ describe('what is kept goes with the session (6D4a)', () => {
     sessionStorage.setItem(stepUpKept, '{}');
   };
 
-  it('is forgotten on signing out, a step-up’s kept change left to its own module', async () => {
+  it('is forgotten on signing out, a step-up’s kept change too', async () => {
     as('admin');
     answer('POST /v1/auth/sign-out', { status: 200 });
     keepBoth();
@@ -471,7 +471,7 @@ describe('what is kept goes with the session (6D4a)', () => {
       expect(sessionStorage.getItem(keptAt)).toBeNull();
     });
     expect(sessionStorage.getItem(linkKept)).toBeNull();
-    expect(sessionStorage.getItem(stepUpKept)).toBe('{}');
+    expect(sessionStorage.getItem(stepUpKept)).toBeNull();
   });
 
   it('is forgotten when the session ends while the page is open', async () => {
@@ -482,6 +482,8 @@ describe('what is kept goes with the session (6D4a)', () => {
     expect(await screen.findByText(/session ended/i)).toBeDefined();
     expect(sessionStorage.getItem(keptAt)).toBeNull();
     expect(sessionStorage.getItem(linkKept)).toBeNull();
+    // A step-up's kept change survives a 401: its round trip may meet one.
+    expect(sessionStorage.getItem(stepUpKept)).toBe('{}');
   });
 
   it('forgets nothing, and still ends the session, when storage is blocked', async () => {
