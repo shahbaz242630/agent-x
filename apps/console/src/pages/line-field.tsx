@@ -14,6 +14,8 @@ export function LineField({
   value,
   onChange,
   broken,
+  autoComplete,
+  spellCheck,
 }: {
   readonly label: string;
   /** The API's rule for it, in plain words. */
@@ -23,6 +25,9 @@ export function LineField({
   readonly onChange: (value: string) => void;
   /** What is wrong with what was typed, once said; none while it is fine or not yet checked. */
   readonly broken?: string | undefined;
+  /** "off" for what the browser must never save or offer back (a supplier's bank details, 6D2). */
+  readonly autoComplete?: 'off';
+  readonly spellCheck?: false;
 }) {
   const id = useId();
   return (
@@ -34,6 +39,8 @@ export function LineField({
         id={id}
         type="text"
         maxLength={most}
+        autoComplete={autoComplete}
+        spellCheck={spellCheck}
         aria-describedby={`${id}-hint`}
         aria-invalid={broken !== undefined}
         value={value}

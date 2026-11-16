@@ -12,7 +12,7 @@ import { useState } from 'react';
 
 import { Confirm } from '../confirm.tsx';
 import { useActing } from '../session.tsx';
-import { ask, changeAt, mustStepUp } from '../step-up.ts';
+import { byPasskey } from '../step-up.ts';
 import {
   CALL_NOTE_MOST,
   isCallNote,
@@ -23,10 +23,10 @@ import {
   VERIFYING,
 } from '../suppliers.ts';
 import { t } from '../text.ts';
+import { unitsMost } from '../visible-name.ts';
 import { Said, useChange } from './change.tsx';
 import { Tick } from './choices.tsx';
 import { LineField } from './line-field.tsx';
-import { unitsMost } from '../visible-name.ts';
 
 type Broken = 'none' | 'called' | 'note';
 
@@ -42,25 +42,20 @@ function VerifyForm({ supplier }: { readonly supplier: Supplier }) {
   const written = note.trim();
   const phone = { phone: supplier.phone };
   const names = { name: supplier.displayName };
+  const close = () => {
+    setConfirming(false);
+  };
   const verify = () =>
     run(
       () =>
-        mustStepUp(
-          ask(
-            changeAt(
-              `${supplierAt(supplier.id)}/verify`,
-              t('suppliers.verify.label', names),
-              // An optional note not written is left out: the API keeps none.
-              { calledBack: true, ...(written !== '' && { note: written }) },
-              organization.id,
-            ),
-          ),
+        byPasskey(
+          `${supplierAt(supplier.id)}/verify`,
+          t('suppliers.verify.label', names),
+          // An optional note not written is left out: the API keeps none.
+          { calledBack: true, ...(written !== '' && { note: written }) },
+          organization.id,
         ),
-      {
-        after: () => {
-          setConfirming(false);
-        },
-      },
+      { after: close },
     );
   return (
     <>
@@ -105,9 +100,7 @@ function VerifyForm({ supplier }: { readonly supplier: Supplier }) {
           title={t('suppliers.verify.confirmTitle', names)}
           confirmLabel={t('brakes.passkeyConfirm')}
           busy={busy}
-          onCancel={() => {
-            setConfirming(false);
-          }}
+          onCancel={close}
           onConfirm={() => void verify()}
         >
           <p className="amount">{supplier.displayName}</p>
@@ -123,14 +116,16 @@ export function Verify({ supplier }: { readonly supplier: Supplier }) {
   const { organization } = useActing();
   if (supplier.status !== 'UNVERIFIED') return null;
   const waiting = notYetVerifiable(supplier);
-  let shown = <p className="muted">{t('suppliers.verify.viewOnly')}</p>;
-  if (waiting !== undefined) shown = <p className="muted">{t(waiting)}</p>;
-  else if (VERIFYING.includes(organization.role)) shown = <VerifyForm supplier={supplier} />;
   return (
     <section className="stack" aria-labelledby="verify-title">
       <h2 id="verify-title">{t('suppliers.verify.title')}</h2>
       <p className="muted">{t('suppliers.verify.intro')}</p>
-      {shown}
+      {waiting === undefined && VERIFYING.includes(organization.role) ? (
+        <VerifyForm supplier={supplier} />
+      ) : (
+        // Why not yet, or who may.
+        <p className="muted">{t(waiting ?? 'suppliers.verify.viewOnly')}</p>
+      )}
     </section>
   );
 }

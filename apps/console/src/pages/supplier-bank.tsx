@@ -16,10 +16,11 @@
 // an admin or approver can withdraw them at once instead.
 import { useState } from 'react';
 
-import { api, ApiError } from '../api.ts';
+import { api, isIntegrityFailed, isRefusal } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
+import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
-import { ask, changeAt, mustStepUp } from '../step-up.ts';
+import { byPasskey } from '../step-up.ts';
 import {
   ADDING,
   IBAN_MOST,
@@ -34,7 +35,6 @@ import {
   VERIFYING,
 } from '../suppliers.ts';
 import { t, type TextKey } from '../text.ts';
-import { timeText } from '../requests.ts';
 import { unitsMost } from '../visible-name.ts';
 import { Said, useChange } from './change.tsx';
 import { Choices, Tick } from './choices.tsx';
@@ -53,10 +53,18 @@ function PayeeFacts({ payee }: { readonly payee: Payee }) {
   );
 }
 
+/**
+ * The section's one way to send a change: what each part sends with, its
+ * outcome said by the section itself (BankDetails), so it stays on screen when
+ * the re-read after it removes the part that sent it (new details withdrawn,
+ * or a change found waiting).
+ */
+type Sending = Pick<ReturnType<typeof useChange>, 'busy' | 'run'>;
+
 /** New details waiting: confirmed by passkey by the admin who entered them, or withdrawn at once. */
-function Waiting({ supplier }: { readonly supplier: Supplier }) {
+function Waiting({ supplier, sending }: { readonly supplier: Supplier; readonly sending: Sending }) {
   const { organization } = useActing();
-  const { busy, said, run } = useChange(supplierRefusal);
+  const { busy, run } = sending;
   const [open, setOpen] = useState<'approve' | 'withdraw' | null>(null);
   const pending = supplier.pendingChange;
   if (pending === null) return null;
@@ -66,13 +74,9 @@ function Waiting({ supplier }: { readonly supplier: Supplier }) {
     setOpen(null);
   };
   const approve = () =>
-    run(
-      () =>
-        mustStepUp(
-          ask(changeAt(`${at}/payee-change/approve`, t('suppliers.bank.approveLabel', names), {}, organization.id)),
-        ),
-      { after: close },
-    );
+    run(() => byPasskey(`${at}/payee-change/approve`, t('suppliers.bank.approveLabel', names), {}, organization.id), {
+      after: close,
+    });
   const withdraw = () =>
     run(() => api.post(`${at}/payee-change/withdraw`, { organization: organization.id }), {
       done: t('suppliers.bank.withdrawn'),
@@ -110,7 +114,6 @@ function Waiting({ supplier }: { readonly supplier: Supplier }) {
           </button>
         )}
       </div>
-      <Said said={said} />
       {open === 'approve' && (
         <Confirm
           text={t('suppliers.bank.approveText')}
@@ -139,7 +142,7 @@ type Told = 'yes' | 'no';
 type Route = 'pass_through' | 'hosted';
 type Broken = 'none' | 'told' | 'calledFirst' | 'route' | 'holder' | 'iban';
 
-/** A pass-through the partner didn't answer: sent again whole with the same key, the API asks the partner by it. */
+/** A pass-through with no answer: sent again whole with the same key, the API asks the partner by it. */
 interface Unanswered {
   readonly key: string;
   readonly body: Readonly<Record<string, unknown>>;
@@ -152,10 +155,56 @@ function registrationWords(registration: Registration): TextKey | undefined {
   return undefined;
 }
 
-/** Giving the supplier new bank details: an admin's, while no change waits. */
-function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonly onDone: (said: string) => void }) {
+/** The partner's own page, open for the details, and the check once the person is back. */
+function PartnerForm({
+  registration,
+  page,
+  sending,
+  onAnswered,
+}: {
+  readonly registration: Registration;
+  readonly page: NonNullable<Registration['form']>;
+  readonly sending: Sending;
+  readonly onAnswered: (registration: Registration) => void;
+}) {
   const { organization } = useActing();
-  const { busy, said, run } = useChange(supplierRefusal);
+  const [waiting, setWaiting] = useState(false);
+  const at = `${supplierAt(registration.supplierId)}/payee-registrations/${encodeURIComponent(registration.id)}`;
+  const check = () =>
+    sending.run(async () => {
+      const { status, body } = await api.write<Registration>(`${at}/check`, { organization: organization.id });
+      // 202: the partner doesn't have the details yet, and nothing changed.
+      setWaiting(status === 202);
+      if (status !== 202) onAnswered(body);
+    });
+  return (
+    <>
+      <p>{t('suppliers.bank.formIntro', { time: timeText(page.expiresAt) })}</p>
+      <a className="link" href={page.url} target="_blank" rel="noopener noreferrer">
+        {t('suppliers.bank.formOpen')}
+      </a>
+      <button type="button" className="primary" disabled={sending.busy} onClick={() => void check()}>
+        {t('suppliers.bank.formCheck')}
+      </button>
+      {waiting && <p className="notice">{t('suppliers.bank.formWaiting')}</p>}
+    </>
+  );
+}
+
+/** Giving the supplier new bank details: an admin's, while no change waits. */
+function NewDetails({
+  supplier,
+  sending,
+  onDone,
+  onCancel,
+}: {
+  readonly supplier: Supplier;
+  readonly sending: Sending;
+  readonly onDone: (said: string) => void;
+  readonly onCancel: () => void;
+}) {
+  const { organization } = useActing();
+  const { busy, run } = sending;
   const [told, setTold] = useState<Told | null>(null);
   const [calledFirst, setCalledFirst] = useState(false);
   const [route, setRoute] = useState<Route | null>(null);
@@ -165,10 +214,10 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
   const [confirming, setConfirming] = useState(false);
   const [unanswered, setUnanswered] = useState<Unanswered | null>(null);
   const [form, setForm] = useState<Registration | null>(null);
-  const [formWaiting, setFormWaiting] = useState(false);
   const at = `${supplierAt(supplier.id)}/payee-registrations`;
   const phone = { phone: supplier.phone };
   const names = { name: supplier.displayName };
+  const way = route === 'hosted' ? 'hosted' : 'pass';
   // Any change to what is typed makes it another request: a key kept for the earlier one is dropped.
   const edited = (set: (value: string) => void) => (value: string) => {
     set(value);
@@ -195,12 +244,17 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
             }),
           );
         } catch (error) {
-          // The partner's answer was lost: the same request again, with the same key, asks it by our ID (E2-2d).
-          if (error instanceof ApiError && error.code === 'PARTNER_UNAVAILABLE') setUnanswered({ key, body });
+          // No answer, or no decision (a 5xx): the partner may have the details, and a fresh key would register them
+          // again (the API carries on an open registration for its form alone). The same request asks it by our ID.
+          if (!isRefusal(error)) setUnanswered({ key, body });
           throw error;
         }
       },
-      { after: close },
+      {
+        after: close,
+        refusal: (error) =>
+          isRefusal(error) || isIntegrityFailed(error) ? supplierRefusal(error) : t('suppliers.bank.unanswered'),
+      },
     );
   const start = (body: Readonly<Record<string, unknown>>) =>
     run(
@@ -209,15 +263,6 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
       },
       { after: close },
     );
-  const check = (registration: Registration) =>
-    run(async () => {
-      const { status, body } = await api.write<Registration>(`${at}/${encodeURIComponent(registration.id)}/check`, {
-        organization: organization.id,
-      });
-      // 202: the partner doesn't have the details yet, and nothing changed.
-      setFormWaiting(status === 202);
-      if (status !== 202) answered(body);
-    });
   const send = (pendingRequests: string, statementVersion?: number) => {
     if (route === 'hosted') {
       void start({ pendingRequests, statementVersion });
@@ -237,20 +282,19 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
     else if (route === 'pass_through' && !isUaeIban(iban)) setBroken('iban');
     else setConfirming(true);
   };
+  const cancel = (
+    // Never while sending, nor while a request waits to be asked again: its key would be lost with the form.
+    <button type="button" className="secondary" disabled={busy || unanswered !== null} onClick={onCancel}>
+      {t('confirm.cancel')}
+    </button>
+  );
 
   const page = form?.form ?? null;
   if (form !== null && page !== null) {
     return (
       <>
-        <p>{t('suppliers.bank.formIntro', { time: timeText(page.expiresAt) })}</p>
-        <a className="link" href={page.url} target="_blank" rel="noopener noreferrer">
-          {t('suppliers.bank.formOpen')}
-        </a>
-        <button type="button" className="primary" disabled={busy} onClick={() => void check(form)}>
-          {t('suppliers.bank.formCheck')}
-        </button>
-        {formWaiting && <p className="notice">{t('suppliers.bank.formWaiting')}</p>}
-        <Said said={said} />
+        <PartnerForm registration={form} page={page} sending={sending} onAnswered={answered} />
+        {cancel}
       </>
     );
   }
@@ -301,6 +345,7 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
       />
       {route === 'pass_through' && (
         <>
+          {/* Never saved or offered back by the browser: a supplier's bank details are no one's own to autofill. */}
           <LineField
             label={t('suppliers.holder')}
             hint={t('suppliers.holderHint')}
@@ -308,6 +353,8 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
             value={holder}
             onChange={edited(setHolder)}
             broken={broken === 'holder' ? t('suppliers.holderBroken') : undefined}
+            autoComplete="off"
+            spellCheck={false}
           />
           <LineField
             label={t('suppliers.iban')}
@@ -316,10 +363,13 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
             value={iban}
             onChange={edited(setIban)}
             broken={broken === 'iban' ? t('suppliers.ibanBroken') : undefined}
+            autoComplete="off"
+            spellCheck={false}
           />
         </>
       )}
       <div className="actions">
+        {cancel}
         {/* Unanswered, the same details go again only as the same request: a fresh one waits for something retyped. */}
         {unanswered === null ? (
           <button type="button" className="primary" disabled={busy} onClick={next}>
@@ -331,12 +381,11 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
           </button>
         )}
       </div>
-      <Said said={said} />
       {confirming && (
         <Confirm
           statement="payee"
-          title={t(route === 'hosted' ? 'suppliers.bank.hostedTitle' : 'suppliers.bank.passTitle', names)}
-          confirmLabel={t(route === 'hosted' ? 'suppliers.bank.hostedConfirm' : 'suppliers.bank.passConfirm')}
+          title={t(`suppliers.bank.${way}Title`, names)}
+          confirmLabel={t(`suppliers.bank.${way}Confirm`)}
           busy={busy}
           onCancel={close}
           onConfirm={send}
@@ -356,9 +405,18 @@ function NewDetails({ supplier, onDone }: { readonly supplier: Supplier; readonl
 /** The bank details section: as they stand, any new ones waiting, and an admin's way to give new ones. */
 export function BankDetails({ supplier }: { readonly supplier: Supplier }) {
   const { organization } = useActing();
+  const change = useChange(supplierRefusal);
   // Open while new details are being given; drawn afresh each time, so nothing typed is kept once closed.
   const [giving, setGiving] = useState(false);
-  const [done, setDone] = useState<string | null>(null);
+  // What the partner answered a registration, said here as the outcomes of every part are.
+  const [answer, setAnswer] = useState<string | null>(null);
+  const sending: Sending = {
+    busy: change.busy,
+    run: (send, options) => {
+      setAnswer(null);
+      return change.run(send, options);
+    },
+  };
   const canGive = ADDING.includes(organization.role) && !supplier.changeWaiting;
   return (
     <section className="stack" aria-labelledby="bank-title">
@@ -369,40 +427,34 @@ export function BankDetails({ supplier }: { readonly supplier: Supplier }) {
       ) : (
         <PayeeFacts payee={supplier.payee} />
       )}
-      <Waiting supplier={supplier} />
+      <Waiting supplier={supplier} sending={sending} />
       {canGive && !giving && (
         <button
           type="button"
           className="secondary"
           onClick={() => {
             setGiving(true);
-            setDone(null);
+            setAnswer(null);
           }}
         >
           {t(supplier.payee === null ? 'suppliers.bank.add' : 'suppliers.bank.change')}
         </button>
       )}
       {canGive && giving && (
-        <>
-          <NewDetails
-            supplier={supplier}
-            onDone={(said) => {
-              setGiving(false);
-              setDone(said);
-            }}
-          />
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => {
-              setGiving(false);
-            }}
-          >
-            {t('confirm.cancel')}
-          </button>
-        </>
+        <NewDetails
+          supplier={supplier}
+          sending={sending}
+          onDone={(said) => {
+            setGiving(false);
+            setAnswer(said);
+          }}
+          onCancel={() => {
+            setGiving(false);
+          }}
+        />
       )}
-      <Said said={done} />
+      <Said said={change.said} />
+      <Said said={answer} />
     </section>
   );
 }

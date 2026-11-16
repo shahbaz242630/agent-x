@@ -197,6 +197,18 @@ export async function mustStepUp(asking: Promise<{ readonly done: unknown } | 's
 }
 
 /**
+ * A change asked at `at` that must go by passkey (mustStepUp): asked, its
+ * confirm sending `confirmed` too (the version of the words shown, CO3).
+ */
+export const byPasskey = (
+  at: string,
+  label: string,
+  body: Readonly<Record<string, unknown>>,
+  organization: string,
+  confirmed?: Readonly<Record<string, unknown>>,
+): Promise<'stepping'> => mustStepUp(ask(changeAt(at, label, body, organization), confirmed));
+
+/**
  * Confirms a change once signed in again: the ask's body with its challenge,
  * giving back the confirm's answer (a new agent key arrives in it, for the
  * caller's memory alone). Forgotten once the API has decided it, either way:

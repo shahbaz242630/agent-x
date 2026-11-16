@@ -42,6 +42,7 @@ const EMPTY: NewSupplier = {
 /** The longest an email (254) and a trade licence number (50) may be, as the API takes them. */
 const EMAIL_MOST = 254;
 const LICENCE_MOST = 50;
+/** The longest a phone in international form may be: a plus and 15 digits (E.164). */
 const PHONE_MOST = 16;
 
 /** Each text field: its words' keys, and the most it takes. */
@@ -66,6 +67,9 @@ export function AddSupplier() {
     setProblems([]);
   };
   const broken = (field: keyof NewSupplier, key: TextKey) => (problems.includes(field) ? t(key) : undefined);
+  const close = () => {
+    setConfirming(false);
+  };
   const add = () =>
     run(
       async () => {
@@ -75,11 +79,7 @@ export function AddSupplier() {
         });
         await navigate({ to: '/more/suppliers/$id', params: { id: added.id } });
       },
-      {
-        after: () => {
-          setConfirming(false);
-        },
-      },
+      { after: close },
     );
   if (!opened) {
     return (
@@ -178,9 +178,7 @@ export function AddSupplier() {
           title={t('suppliers.add.confirmTitle', { name: typed.displayName })}
           confirmLabel={t('suppliers.add.confirm')}
           busy={busy}
-          onCancel={() => {
-            setConfirming(false);
-          }}
+          onCancel={close}
           onConfirm={() => void add()}
         >
           <p className="amount">{typed.displayName}</p>

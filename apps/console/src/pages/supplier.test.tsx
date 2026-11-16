@@ -121,6 +121,8 @@ beforeEach(() => {
       const queue = answers.get(`${method} ${path.split('?')[0] ?? path}`);
       const next = queue === undefined ? undefined : queue.length > 1 ? queue.shift() : queue[0];
       const { status, body: reply } = next ?? refused(404, 'NOT_FOUND');
+      // Status 0: no answer at all, as the browser's fetch fails on a dropped connection.
+      if (status === 0) return Promise.reject(new TypeError('Failed to fetch'));
       return Promise.resolve(new Response(JSON.stringify(reply ?? {}), { status }));
     }),
   );
@@ -413,18 +415,39 @@ describe('new bank details waiting (6D2)', () => {
 
   it('lets an approver withdraw them at once, with no passkey, and reads the supplier again', async () => {
     as('approver', WAITING);
+    // Read again after, the details waiting are gone: what was done is still said.
+    answer(`GET ${at}`, { status: 200, body: WAITING }, { status: 200, body: supplier() });
     answer(`POST ${at}/payee-change/withdraw`, { status: 200, body: supplier() });
     open(page);
     expect(await screen.findByRole('button', { name: 'Withdraw new details' })).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Confirm new bank details' })).toBeNull();
     await press('Withdraw new details');
     await inDialog('Withdraw now');
-    expect(await screen.findByText('The new bank details were withdrawn.')).toBeDefined();
+    await vi.waitFor(() => {
+      expect(screen.queryByText('New bank details waiting')).toBeNull();
+    });
+    expect(screen.getByText('The new bank details were withdrawn.')).toBeDefined();
     expect(sentTo('POST', `${at}/payee-change/withdraw`)[0]?.body).toBeUndefined();
     expect(goTo).not.toHaveBeenCalled();
     expect(sentTo('GET', at).length).toBeGreaterThan(1);
   });
+
+  it('keeps a refusal said once the re-read shows no details waiting any more', async () => {
+    as('approver', WAITING);
+    answer(`GET ${at}`, { status: 200, body: WAITING }, { status: 200, body: supplier() });
+    answer(`POST ${at}/payee-change/withdraw`, refused(409, 'SUPPLIER_NO_CHANGE_WAITING'));
+    open(page);
+    await press('Withdraw new details');
+    await inDialog('Withdraw now');
+    await vi.waitFor(() => {
+      expect(screen.queryByText('New bank details waiting')).toBeNull();
+    });
+    expect(screen.getByText(/No new bank details are waiting any more/)).toBeDefined();
+  });
 });
+
+/** What a pass-through with no answer or decision says. */
+const UNANSWERED = /didn't answer, so it isn't known yet/;
 
 /** A check while the partner's form is still being filled in: nothing changed. */
 const ASKED_FORM = { status: 202, body: registration({ route: 'hosted', status: 'STARTED' }) };
@@ -542,12 +565,12 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     await giving('No', 'here');
     await typed();
     await inDialog('Send to the bank partner');
-    expect(await screen.findByText(/The bank partner didn't answer/)).toBeDefined();
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
     // Unanswered, only the same request can go again: no fresh one with a new key.
     expect(screen.queryByRole('button', { name: 'Continue' })).toBeNull();
 
     await press('Try again');
-    expect(await screen.findByText(/The bank partner didn't answer/)).toBeDefined();
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
     const [first, again] = sentTo('POST', `${at}/payee-registrations/pass-through`);
     expect(again?.key).toBe(first?.key);
     expect(again?.body).toEqual(first?.body);
@@ -560,6 +583,63 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     await inDialog('Send to the bank partner');
     expect(await screen.findByText(/couldn't use these bank details/)).toBeDefined();
     expect(sentTo('POST', `${at}/payee-registrations/pass-through`)[2]?.key).not.toBe(first?.key);
+  });
+
+  it.each([
+    ['no answer at all', { status: 0 }],
+    ['a server error', refused(500, 'UNAVAILABLE')],
+    ['a gateway timeout', refused(504, 'UNREADABLE')],
+  ])('keeps the same key for %s, and holds Cancel until it is asked again', async (_what, lost) => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, lost, { status: 201, body: registration() });
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+    // Cancel would drop the key, and a fresh one would register the details again.
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+
+    await press('Try again');
+    expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
+    const [first, again] = sentTo('POST', `${at}/payee-registrations/pass-through`);
+    expect(again?.key).toBe(first?.key);
+    expect(again?.body).toEqual(first?.body);
+  });
+
+  it('keeps no key after a refusal: the API decided, so nothing is asked again', async () => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, refused(409, 'PAYEE_REGISTRATIONS_SPENT'));
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(/as many bank details today/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('keeps a refusal said once the re-read shows a change waiting and the form gone', async () => {
+    as('admin');
+    answer(`GET ${at}`, { status: 200, body: supplier() }, { status: 200, body: WAITING });
+    answer(`POST ${at}/payee-registrations/pass-through`, refused(409, 'SUPPLIER_CHANGE_WAITING'));
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText('New bank details waiting')).toBeDefined();
+    expect(screen.queryByLabelText('IBAN')).toBeNull();
+    expect(screen.getByText(/Another change to this supplier is waiting/)).toBeDefined();
+  });
+
+  it('asks the browser never to save or offer back the holder’s name or the IBAN', async () => {
+    as('admin');
+    open(page);
+    await giving('No', 'here');
+    for (const field of [screen.getByLabelText("Account holder's name"), screen.getByLabelText('IBAN')]) {
+      expect(field.getAttribute('autocomplete')).toBe('off');
+      expect(field.getAttribute('spellcheck')).toBe('false');
+    }
   });
 
   it('sends the person to the partner’s own page, and checks it once they are back', async () => {

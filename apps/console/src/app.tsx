@@ -28,9 +28,9 @@ import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
+import { SignedOut } from './pages/signed-out.tsx';
 import { SupplierPage } from './pages/supplier.tsx';
 import { AddSupplier } from './pages/supplier-add.tsx';
-import { SignedOut } from './pages/signed-out.tsx';
 import {
   ActingProvider,
   ENDED,

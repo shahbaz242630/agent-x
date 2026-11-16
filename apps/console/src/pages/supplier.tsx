@@ -15,7 +15,7 @@ import { isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import { leftWords, timeText, useTicking } from '../requests.ts';
 import { useActing } from '../session.tsx';
-import { ask, changeAt, mustStepUp } from '../step-up.ts';
+import { byPasskey } from '../step-up.ts';
 import { ADDING, coolingOff, type Supplier, supplierAt, supplierRefusal, useSupplier } from '../suppliers.ts';
 import { t } from '../text.ts';
 import { memberText } from './agent.tsx';
@@ -29,8 +29,8 @@ function Remittance({ supplier }: { readonly supplier: Supplier }) {
   const { organization } = useActing();
   const { busy, said, run } = useChange(supplierRefusal);
   const [open, setOpen] = useState(false);
-  const now = supplier.remittanceEmail;
-  const next = now === 'on' ? 'off' : 'on';
+  const current = supplier.remittanceEmail;
+  const next = current === 'on' ? 'off' : 'on';
   const names = { name: supplier.displayName };
   const close = () => {
     setOpen(false);
@@ -38,22 +38,18 @@ function Remittance({ supplier }: { readonly supplier: Supplier }) {
   const change = () =>
     run(
       () =>
-        mustStepUp(
-          ask(
-            changeAt(
-              `${supplierAt(supplier.id)}/remittance-email`,
-              t(`suppliers.remittance.label.${next}`, names),
-              { remittanceEmail: next },
-              organization.id,
-            ),
-          ),
+        byPasskey(
+          `${supplierAt(supplier.id)}/remittance-email`,
+          t(`suppliers.remittance.label.${next}`, names),
+          { remittanceEmail: next },
+          organization.id,
         ),
       { after: close },
     );
   return (
     <section className="stack" aria-labelledby="remittance-title">
       <h2 id="remittance-title">{t('suppliers.remittance.title')}</h2>
-      <p>{t(`suppliers.remittance.${now}`)}</p>
+      <p>{t(`suppliers.remittance.${current}`)}</p>
       {supplier.email === null && <p className="muted">{t('suppliers.remittance.noEmail')}</p>}
       {ADDING.includes(organization.role) && (
         <button

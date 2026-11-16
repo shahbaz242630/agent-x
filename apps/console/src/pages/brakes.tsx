@@ -31,14 +31,14 @@ const PAGES = { agents: '/agents/$id', suppliers: '/more/suppliers/$id', sources
 
 function Row({
   thing,
-  linked,
+  page,
   canSuspend,
   canReactivate,
   busy,
   onOpen,
 }: {
   readonly thing: Braked;
-  readonly linked: (typeof PAGES)[Kind];
+  readonly page: (typeof PAGES)[Kind];
   readonly canSuspend: boolean;
   readonly canReactivate: boolean;
   readonly busy: boolean;
@@ -52,8 +52,8 @@ function Row({
     <li className="row">
       <span className="row-main">
         <span>
-          {linked !== null ? (
-            <Link to={linked} params={{ id: thing.id }}>
+          {page !== null ? (
+            <Link to={page} params={{ id: thing.id }}>
               {thing.name}
             </Link>
           ) : (
@@ -128,7 +128,7 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
             <Row
               key={thing.id}
               thing={thing}
-              linked={PAGES[kind]}
+              page={PAGES[kind]}
               canSuspend={canSuspend}
               canReactivate={canReactivate}
               busy={busy}

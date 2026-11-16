@@ -52,6 +52,7 @@ export interface Supplier {
 /** A registration of a supplier's bank details with the partner, as the API answers it. */
 export interface Registration {
   readonly id: string;
+  readonly supplierId: string;
   readonly status: 'STARTED' | 'REGISTERED' | 'FAILED' | 'UNKNOWN';
   readonly nameCheck: NameCheck | null;
   readonly maskedName: string | null;
