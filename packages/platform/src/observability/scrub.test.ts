@@ -374,6 +374,19 @@ describe('scrub: properties that hold for any text', () => {
     }
   });
 
+  it("leaves an activity export's file name on its own as it is (L7)", () => {
+    // S197: an export ID's groups (`eb78-77b6-a8e8`) read as an IBAN, in CI.
+    const file = '01a1e1a4-eb24-70d7-a8eb-0adfd89f0f23/activity-01a1e1a4-eb78-77b6-a8e8-fa309de7fc13.ndjson';
+    expect(scrub(file)).toBe(file);
+    fc.assert(
+      fc.property(fc.uuid(), fc.uuid(), (org, id) => {
+        expect(scrub(`${org}/activity-${id}.ndjson`)).toBe(`${org}/activity-${id}.ndjson`);
+      }),
+      { ...RUNS, numRuns: 5000 },
+    );
+    expect(scrub(file.replace('activity-', 'other-'))).not.toBe(file.replace('activity-', 'other-'));
+  });
+
   it.each([
     [
       'right after a digit and a dash, as an order number joined to it',
