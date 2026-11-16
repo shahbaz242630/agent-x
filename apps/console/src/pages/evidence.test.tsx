@@ -433,6 +433,38 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
   });
 });
 
+describe('a download on its way (6C2c)', () => {
+  it('holds the button while a download is on its way: a second press sends nothing', async () => {
+    signedIn();
+    answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
+    answer(`POST ${PATH}`, { status: 201, body: downloaded() });
+    const files = savedFiles();
+    const { promise: held, resolve: release } = Promise.withResolvers<undefined>();
+    const answering = found(vi.mocked(fetch).getMockImplementation());
+    vi.mocked(fetch).mockImplementation(async (...asked) => {
+      const reply = await answering(...asked);
+      if (asked[1]?.method === 'POST') await held;
+      return reply;
+    });
+    open(`/approvals/${ID}/evidence`);
+    const button = await screen.findByRole('button', { name: 'Download JSON' });
+
+    await userEvent.click(button);
+    await waitFor(() => {
+      expect(button).toHaveProperty('disabled', true);
+    });
+    await userEvent.click(button);
+    expect(posts()).toHaveLength(1);
+
+    release(undefined);
+    await waitFor(() => {
+      expect(files).toHaveLength(1);
+    });
+    expect(button).toHaveProperty('disabled', false);
+    expect(posts()).toHaveLength(1);
+  });
+});
+
 describe('the evidence refused or failed (6C2, 6C2c)', () => {
   it('says a download refused in plain words beside the button, the evidence still shown; pressing again is the same download', async () => {
     signedIn();

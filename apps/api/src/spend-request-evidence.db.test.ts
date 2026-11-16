@@ -885,6 +885,25 @@ describe('a spend request’s evidence read on screen (6C2c, decision 24: a page
     expect(bundle.events.every(({ seq }) => BigInt(seq) <= BigInt(bundle.upToSeq))).toBe(true);
   });
 
+  it('finds its moment after the rows are read: a download recorded while they are read is in it, at its seq', async () => {
+    const { w, request } = await paid();
+    let between = 0;
+    let other: Evidence | undefined;
+    const reading = evidenceWith({
+      betweenReads: async () => {
+        between += 1;
+        if (between === 1) other = bundleOf(await exported(w.admin, request.id));
+      },
+    });
+
+    const bundle = readOf(await viewed(w, request.id, reading));
+
+    // The download seals no state, so no row moved: found with the moment, after the rows, it is the moment.
+    expect(between).toBe(1);
+    expect(bundle.upToSeq).toBe(other?.recordSeq);
+    expect(bundle.events.filter(({ action }) => action === EVIDENCE_EXPORTED).map(({ id }) => id)).toEqual([other?.id]);
+  });
+
   it('gives up after its reads when the rows never hold still: EVIDENCE_CHANGED_WHILE_READING, nothing logged', async () => {
     const { w, acting } = await ready();
     const approved = await ask(acting, w, { amount: SMALL() });
