@@ -6,6 +6,6 @@
  * its version (db-pg16, db-pg18).
  */
 export const POSTGRES_IMAGES: Readonly<Record<string, string>> = {
-  'db-pg16': 'postgres:16.15-trixie@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657',
-  'db-pg18': 'postgres:18.6-trixie@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42',
+  'db-pg16': 'postgres:16.16-trixie@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f',
+  'db-pg18': 'postgres:18.7-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc',
 };
