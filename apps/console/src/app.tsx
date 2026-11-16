@@ -23,12 +23,15 @@ import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
 import { EvidencePage } from './pages/evidence.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
+import { HoldPage } from './pages/hold.tsx';
 import { More } from './pages/more.tsx';
 import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
+import { SourcePage } from './pages/source.tsx';
+import { LinkSource } from './pages/source-link.tsx';
 import { SupplierPage } from './pages/supplier.tsx';
 import { AddSupplier } from './pages/supplier-add.tsx';
 import {
@@ -113,6 +116,21 @@ function Suppliers(): ReactElement {
   );
 }
 
+/** One bank account's page (6D4a): `/more/sources/<id>`, the ID the address's fourth part. */
+function SourceAt(): ReactElement {
+  const id = useIdInAddress(3);
+  return <SourcePage key={id} id={id} />;
+}
+
+/** The Bank accounts list: each with its brake (6B2), and linking one (6D4a). */
+function Sources(): ReactElement {
+  return (
+    <BrakeList kind="sources">
+      <LinkSource />
+    </BrakeList>
+  );
+}
+
 /** One request's evidence, printable (6C2): `/approvals/<id>/evidence`. */
 function Evidence(): ReactElement {
   const id = useIdInAddress();
@@ -150,7 +168,9 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: Suppliers }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers/$id', component: SupplierAt }),
-  createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
+  createRoute({ getParentRoute: () => root, path: '/more/sources', component: Sources }),
+  createRoute({ getParentRoute: () => root, path: '/more/sources/$id', component: SourceAt }),
+  createRoute({ getParentRoute: () => root, path: '/more/integrity-hold', component: HoldPage }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
 ]);

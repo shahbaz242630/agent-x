@@ -50,6 +50,13 @@ export function More() {
           <Link to="/more/access-log">{t('logs.access.title')}</Link>
         </nav>
       )}
+      {/* The integrity hold is an admin's alone (the API's access): no one else is shown a way to it (6D4a). */}
+      {organization.role === 'admin' && (
+        <nav className="stack" aria-label={t('hold.title')}>
+          <h2>{t('hold.title')}</h2>
+          <Link to="/more/integrity-hold">{t('hold.moreLink')}</Link>
+        </nav>
+      )}
       <h2>{t('more.sessionHeading')}</h2>
       <p className="muted">{t('more.session', { time: UNTIL.format(new Date(session.expiresAt)) })}</p>
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>

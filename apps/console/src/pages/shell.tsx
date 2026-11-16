@@ -3,6 +3,7 @@ import { useState } from 'react';
 
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
+import { HoldBanner } from './hold.tsx';
 import { KeyHold } from './key-once.tsx';
 import { SteppedUp } from './stepped-up.tsx';
 
@@ -13,7 +14,7 @@ const TABS = [
   { to: '/more', label: 'nav.more' },
 ] as const;
 
-/** The signed-in frame: the organisation acted in, the tabs, and a frozen organisation said at the top. */
+/** The signed-in frame: the organisation acted in, the tabs, and a frozen or held organisation said at the top. */
 export function Shell() {
   const { organization, choose, canSwitch } = useActing();
   // A new agent key on screen, not yet saved: switching organisation (no navigation to ask about) waits for Done.
@@ -51,6 +52,7 @@ export function Shell() {
           {t('frozen.banner')}
         </p>
       )}
+      <HoldBanner />
       <main className="body">
         <KeyHold onHeld={setHeld}>
           <SteppedUp />
