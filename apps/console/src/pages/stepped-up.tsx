@@ -23,6 +23,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { isIntegrityFailed, isRefusal, isSignedOut, isUuid } from '../api.ts';
 import { HOLD_PATH, holdRefusal } from '../hold.ts';
+import { endSession } from '../session.tsx';
 import { confirm, forget, isUndecided, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
 import { t, type TextKey } from '../text.ts';
 import { KeyOnce, keyIn } from './key-once.tsx';
@@ -51,10 +52,10 @@ const OWN_WORDS: ReadonlyMap<string, OwnWords> = new Map([
   [`${HOLD_PATH}/clear/confirm`, { refused: holdRefusal, unsure: 'hold.clear.unsure' }],
 ]);
 
-/** A confirm's end in its screen's own words, if it has them; none for a 401, an undecided answer or a failure on the way. */
+/** A confirm's end in its screen's own words, if it has them; none for an undecided answer or a failure on the way. */
 function ownWords(confirmPath: string, error: unknown): Said | undefined {
   const words = OWN_WORDS.get(confirmPath);
-  if (words === undefined || isSignedOut(error) || isUndecided(error)) return undefined;
+  if (words === undefined || isUndecided(error)) return undefined;
   if (isIntegrityFailed(error)) return { said: t(words.unsure), made: null };
   return isRefusal(error) ? { said: words.refused(error), made: false } : undefined;
 }
@@ -131,6 +132,12 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
     } catch (error) {
+      // The session ended: to sign-in, which comes back to this address, `?stepped=` and all, the change still kept
+      // (confirm keeps it for a 401); the API then says whether the challenge still stands.
+      if (isSignedOut(error)) {
+        endSession(queries);
+        return;
+      }
       const own = ownWords(pending.confirmPath, error);
       if (own === undefined) {
         setSent(refusedAs(error));

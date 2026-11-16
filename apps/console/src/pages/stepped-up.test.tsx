@@ -65,6 +65,24 @@ function backFromStepUp(kept = true) {
 }
 
 describe('back from a step-up', () => {
+  it('ends the session on a 401 at the confirm, keeping the change and the address to come back to', async () => {
+    confirmAnswer = () => json(401, { error: { code: 'UNAUTHENTICATED' } });
+    const history = backFromStepUp();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(/Your session ended/)).toBeDefined();
+    expect(screen.queryByText(/refused or ran out/)).toBeNull();
+    expect(history.location.search).toBe(`?stepped=${CHALLENGE}`);
+    expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).not.toBeNull();
+
+    // Signed in again, the sign-in brings them back to the same address: the change is still there to confirm.
+    cleanup();
+    confirmAnswer = () => json(200, { frozen: true });
+    backFromStepUp(false);
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(`Done: ${PENDING.label}`)).toBeDefined();
+  });
+
   it('shows the change to confirm, confirms it, says so and cleans the address', async () => {
     const history = backFromStepUp();
 

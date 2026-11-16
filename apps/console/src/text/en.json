@@ -775,7 +775,7 @@
   "hold.clear.label": "Clear the integrity hold (investigation {reference})",
   "hold.clear.rereading": "Checking the hold is still as shown…",
   "hold.clear.moved": "The hold has changed since this page showed it, so it can't be cleared from here. Cancel, and read it as it is now.",
-  "hold.clear.unsure": "Agent X couldn't confirm the result: some records failed its integrity check. The hold page shows where it stands now.",
+  "hold.clear.unsure": "Agent X couldn't confirm the result: some records failed its integrity check. The hold page shows where it stands now. If the records still fail the check, the hold stays.",
   "hold.clear.unread": "Agent X couldn't check the hold is still as shown, so it can't be cleared now. Cancel and try again.",
   "hold.refused.NOT_ON_HOLD": "This organisation isn't on hold any more. Nothing was changed.",
   "hold.refused.NO_INVESTIGATION": "There is no investigation of the hold as it stands now. Record one first. Nothing was changed.",

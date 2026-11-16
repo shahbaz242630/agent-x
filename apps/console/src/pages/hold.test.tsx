@@ -416,14 +416,19 @@ describe('the clear’s confirm, back from the passkey (6D4a)', () => {
     expect(new Set(posts().map((one) => one.key)).size).toBe(1);
   });
 
-  it('says a 401 at the confirm in the shared words, and keeps the change', async () => {
+  it('ends the session on a 401 at the confirm, the change kept for the same address after signing in', async () => {
     as('admin');
     answer(confirmAt, refused(401, 'UNAUTHENTICATED'));
     back();
     await press('Confirm');
-    expect(await screen.findByText(/Its confirmation was refused or ran out/)).toBeDefined();
-    expect(screen.queryByText(/still fail|hasn't finished/)).toBeNull();
+    expect(await screen.findByText(/Your session ended/)).toBeDefined();
+    expect(screen.queryByText(/still fail|hasn't finished|refused or ran out/)).toBeNull();
     expect(sessionStorage.getItem(keptChange)).not.toBeNull();
+    // Signed in again, back at `?stepped=`: the change is found, to confirm (the API then decides the challenge).
+    cleanup();
+    open(`${page}?stepped=${CHALLENGE}`);
+    expect(await screen.findByText('Clear the integrity hold (investigation INC-2041)')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDefined();
   });
 
   it('keeps the change to try again after a failure on the way', async () => {
