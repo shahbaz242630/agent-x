@@ -168,6 +168,28 @@ describe('accepting an invitation (6D4b)', () => {
     nowhere(INVITED, opened, '');
   });
 
+  it('keeps the page and its token when a background re-read of the session fails', async () => {
+    signedIn();
+    answer('POST /v1/invitations/accept', {
+      status: 200,
+      body: {
+        organizationId: ORG,
+        invitation: { id: INVITATION, role: 'viewer', status: 'ACCEPTED', expiresAt: FUTURE },
+      },
+    });
+    const opened = open(page);
+    expect(await screen.findByText(/Nothing happens until you press Accept/)).toBeDefined();
+    answer('GET /v1/auth/session', refused(403, 'FORBIDDEN'));
+    await opened.queries.refetchQueries({ queryKey: ['session'] });
+    expect(opened.queries.getQueryState(['session'])?.status).toBe('error');
+    // Not the failure page: the acceptance is still there, its token still held.
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    await press('Accept');
+    expect(await screen.findByText("You've joined the organisation as Viewer.")).toBeDefined();
+    expect(posts()).toEqual([{ method: 'POST', path: '/v1/invitations/accept', body: { token: INVITED } }]);
+    nowhere(INVITED, opened, '/v1/invitations/accept');
+  });
+
   it('says to sign in again when the session ended on the press', async () => {
     signedIn();
     open(page);

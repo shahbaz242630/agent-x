@@ -75,10 +75,11 @@ function Root() {
   const path = useRouterState({ select: ({ location }) => location.pathname });
   // A registered contact's confirm (CO9): public, signed in or not.
   if (path === RESET_CONFIRM) return <ResetConfirm />;
+  // An invitation's acceptance: signed in, perhaps a member of no organisation yet. Once the session is read, a
+  // background re-read that fails never replaces it: the page holds the token in its memory alone, lost if unmounted.
+  if (path === ACCEPT && session.data !== undefined) return <AcceptInvitation session={session.data} />;
   if (session.isPending) return <Loading />;
   if (session.isError) return <Failed onRetry={() => void session.refetch()} />;
-  // An invitation's acceptance: signed in, perhaps a member of no organisation yet.
-  if (path === ACCEPT) return <AcceptInvitation session={session.data} />;
   if (session.data === null) return <SignedOut ended={queries.getQueryData<boolean>(ENDED) === true} />;
   return <SignedIn session={session.data} />;
 }
