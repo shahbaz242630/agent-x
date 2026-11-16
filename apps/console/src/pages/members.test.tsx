@@ -626,6 +626,29 @@ describe('a draft confirmed on the way back from the passkey (6D4b)', () => {
     expect(await screen.findByText(/made on your first try and can't be shown again/)).toBeDefined();
   });
 
+  it('says an approval done, never asking about a link: only opening an invitation gives one', async () => {
+    as('admin');
+    const at = `/v1/members/invitations/${INVITATION}/approve/confirm`;
+    const decided = { id: INVITATION, role: 'admin', status: 'ACCEPTED', expiresAt: FUTURE };
+    answer(`POST ${at}`, { status: 200, body: { invitation: decided } });
+    sessionStorage.setItem(
+      `agentx.step-up.${CHALLENGE}`,
+      JSON.stringify({
+        challenge: CHALLENGE,
+        label: `Confirm who accepted invitation ${INVITATION}`,
+        confirmPath: at,
+        body: {},
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-4000-8000-00000000c0de',
+      }),
+    );
+    open(`/more/members?stepped=${CHALLENGE}`);
+    await press('Confirm');
+    expect(sentTo('POST', at)[0]?.body).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(await screen.findByText(`Done: Confirm who accepted invitation ${INVITATION}`)).toBeDefined();
+    expect(screen.queryByText(/can't be shown again/)).toBeNull();
+  });
+
   it('confirms a contact or a reset with nothing in its body, and says it done', async () => {
     as('admin');
     const at = `/v1/registered-contacts/${CONTACT}/confirm`;

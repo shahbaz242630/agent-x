@@ -93,7 +93,8 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
     setSent('sending');
     try {
       const answer = await confirm(pending);
-      setAnswered(keyIn(answer) ?? linkIn(answer));
+      // A link comes only from opening an invitation's draft: an approval's answer names the invitation too, with none.
+      setAnswered(keyIn(answer) ?? (pending.drafted === true ? linkIn(answer) : undefined));
       setSent('done');
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
