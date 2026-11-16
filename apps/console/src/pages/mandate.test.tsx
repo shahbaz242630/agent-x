@@ -517,7 +517,10 @@ describe('suspending, resuming, revoking and the over-limit choice', () => {
     answer(`POST /v1/mandates/${MANDATE}/suspend`, ASKED);
     open(`/more/mandates/${MANDATE}`);
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Suspend' }));
+    const suspend = await screen.findByRole('button', { name: 'Suspend' });
+    // One in force can be suspended or revoked, never resumed.
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
+    await userEvent.click(suspend);
     await screen.findByText('Its requests are held.');
     expect(dialog().getByRole('radio', { name: 'Its requests are held.' })).toHaveProperty('checked', false);
     expect(dialog().getByRole('radio', { name: 'Its requests are cancelled.' })).toHaveProperty('checked', false);
@@ -536,7 +539,9 @@ describe('suspending, resuming, revoking and the over-limit choice', () => {
     as('admin', mandate({ status: 'SUSPENDED' }));
     answer(`POST /v1/mandates/${MANDATE}/resume`, ASKED);
     open(`/more/mandates/${MANDATE}`);
-    await userEvent.click(await screen.findByRole('button', { name: 'Resume' }));
+    const resume = await screen.findByRole('button', { name: 'Resume' });
+    expect(screen.queryByRole('button', { name: 'Suspend' })).toBeNull();
+    await userEvent.click(resume);
     await userEvent.click(dialog().getByRole('button', { name: 'Continue with passkey' }));
     expect(posted(`/v1/mandates/${MANDATE}/resume`)[0]?.body).toEqual({});
     expect(kept()?.confirmPath).toBe(`/v1/mandates/${MANDATE}/resume/confirm`);
@@ -583,6 +588,26 @@ describe('suspending, resuming, revoking and the over-limit choice', () => {
     await readAgainAs(mandate(change));
     expect(await dialog().findByText(/This mandate changed while this was open/)).toBeDefined();
     expect(dialog().getByRole('button', { name: 'Continue with passkey' })).toHaveProperty('disabled', true);
+  });
+
+  it('a dialog says a new version put in force meanwhile, though the status and choice are the same', async () => {
+    as('admin');
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Change what happens above the limits' }));
+    await readAgainAs(mandate({ current: version({ id: '0199a0f0-0000-7000-8000-000000000103', version: 2 }) }));
+    expect(await dialog().findByText(/This mandate changed while this was open/)).toBeDefined();
+    expect(dialog().getByRole('button', { name: 'Continue with passkey' })).toHaveProperty('disabled', true);
+  });
+
+  it('says a suspend answered with no passkey asked as refused, never done', async () => {
+    as('admin');
+    answer(`POST /v1/mandates/${MANDATE}/suspend`, { status: 200, body: {} });
+    open(`/more/mandates/${MANDATE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Suspend' }));
+    await userEvent.click(await dialog().findByRole('radio', { name: 'Its requests are held.' }));
+    await userEvent.click(dialog().getByRole('button', { name: 'Continue with passkey' }));
+    expect(await screen.findByText(/without asking for your passkey/)).toBeDefined();
+    expect(goTo).not.toHaveBeenCalled();
   });
 
   it('cancels a dialog without sending anything', async () => {
@@ -638,7 +663,8 @@ async function confirmDraft() {
   await userEvent.click(dialog().getByRole('button', { name: 'Draft it' }));
 }
 
-describe('drafting a mandate', () => {
+// Filling the whole form (a time zone among ~400, every amount typed) runs near the 5 s default on a busy machine.
+describe('drafting a mandate', { timeout: 20_000 }, () => {
   it('says every field and setting not given, none chosen for the admin', async () => {
     as('admin');
     open('/more/mandates/new');
@@ -864,6 +890,37 @@ describe('drafting a mandate', () => {
     expect(screen.getByRole('button', { name: 'Review' })).toBeDefined();
   });
 
+  it('holds nothing when a first send is refused at a gate: the form stays, to send afresh', async () => {
+    as('admin');
+    answer('POST /v1/mandates', refused(429, 'RATE_LIMITED'));
+    open('/more/mandates/new');
+    await fillDraft();
+    await confirmDraft();
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(heldDraft({ user: ME, organization: ORG.id, mandate: null })).toBeUndefined();
+  });
+
+  it('is offered from an agent’s page only to an admin, and only for an active agent', async () => {
+    as('developer');
+    open(`/agents/${AGENT}`);
+    expect(await screen.findByRole('link', { name: "See your organisation's mandates" })).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Draft a mandate for this agent' })).toBeNull();
+    cleanup();
+
+    as('admin');
+    answer(`GET /v1/agents/${AGENT}`, {
+      status: 200,
+      body: {
+        agent: { id: AGENT, name: 'Buyer bot', owner: MINE, status: 'SUSPENDED', scopes: [], createdAt: PAST },
+        keys: [],
+      },
+    });
+    open(`/agents/${AGENT}`);
+    expect(await screen.findByRole('link', { name: "See your organisation's mandates" })).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Draft a mandate for this agent' })).toBeNull();
+  });
+
   it('starts with the agent the agent page linked from, and is an admin’s alone', async () => {
     as('admin');
     open(`/agents/${AGENT}`);
@@ -878,7 +935,7 @@ describe('drafting a mandate', () => {
   });
 });
 
-describe('drafting a new version', () => {
+describe('drafting a new version', { timeout: 20_000 }, () => {
   it('fills in the terms in force and asks every setting again, none picked, what is in force said beside it', async () => {
     as('admin', mandate({ current: version({ endsAt: FUTURE }) }));
     answer(`POST /v1/mandates/${MANDATE}/supersede`, { status: 200, body: mandate({ pending: DRAFT_VERSION }) });
@@ -958,6 +1015,26 @@ describe('drafting a new version', () => {
     open(`/more/mandates/${MANDATE}/new-version`);
     expect(await screen.findByRole('checkbox', { name: new RegExp(unlisted) })).toHaveProperty('checked', true);
     expect(await screen.findByRole('radio', { name: SOURCE })).toHaveProperty('checked', true);
+    // Reviewed in the version's own currency while its account isn't listed.
+    await userEvent.click(screen.getByRole('radio', { name: /^Check them/ }));
+    await userEvent.click(screen.getByRole('radio', { name: /^Strict/ }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Not until it is revoked' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }));
+    expect(await dialog().findByText('AED 2,500.00')).toBeDefined();
+  });
+
+  it('types the amounts in the chosen account’s currency, not the version’s', async () => {
+    as('admin');
+    answer('GET /v1/funding-sources', {
+      status: 200,
+      body: {
+        sources: [{ ...SOURCE_LISTED, controls: { ...SOURCE_LISTED.controls, currency: 'JPY' } }],
+        next: null,
+        unchecked: [],
+      },
+    });
+    open(`/more/mandates/${MANDATE}/new-version`);
+    expect(await screen.findByRole('textbox', { name: 'Most for one request, in JPY' })).toBeDefined();
   });
 
   it('is offered for no ended mandate, to no one but an admin, and says a mandate not found', async () => {

@@ -55,6 +55,8 @@ describe('an amount typed in dirhams (6D3a)', () => {
     [' 0.01 ', 1],
     ['1,000,000.00', 100_000_000],
     ['90071992547409.91', Number.MAX_SAFE_INTEGER],
+    // Through floating point this reads 9007199254740898: one fils lost.
+    ['90071992547408.99', 9_007_199_254_740_899],
   ])('reads %s as %d fils, exactly', (typed, fils) => {
     expect(amountMinor(typed)).toBe(fils);
   });
@@ -68,6 +70,8 @@ describe('an amount typed in dirhams (6D3a)', () => {
     '1.234',
     '1.',
     '.5',
+    '1.2.3',
+    '1..5',
     '1e3',
     '25,00',
     '2,5000',
@@ -275,7 +279,15 @@ describe('a draft sent with a held key', () => {
 
   it('asked again, is decided only past the gates', () => {
     expect(decidesTheDraft(refused(409, 'MANDATE_OPEN'), true)).toBe(true);
-    for (const code of ['STATEMENT_CHANGED', 'FORBIDDEN', 'RATE_LIMITED', 'IDEMPOTENCY_KEY_BUSY']) {
+    for (const code of [
+      'STATEMENT_CHANGED',
+      'FORBIDDEN',
+      'RATE_LIMITED',
+      'IDEMPOTENCY_KEY_BUSY',
+      'AGENT_BUSY',
+      'ORGANISATION_BUSY',
+      'PLATFORM_BUSY',
+    ]) {
       expect(decidesTheDraft(refused(409, code), true)).toBe(false);
     }
     expect(decidesTheDraft(refused(401, 'UNAUTHENTICATED'), true)).toBe(false);
@@ -299,5 +311,36 @@ describe('a mandate change’s refusal', () => {
     expect(mandateRefusal(new ApiError(409, 'MANDATE_NOT_SUSPENDED'))).toContain("isn't suspended");
     expect(mandateRefusal(new ApiError(409, 'SOMETHING_NEW'))).toContain('SOMETHING_NEW');
     expect(mandateRefusal(new StepUpStorageBlocked())).toContain('storage');
+  });
+
+  it.each([
+    'AGENT_NOT_ACTIVE',
+    'AGENT_ZONE_KEPT',
+    'MANDATE_DRAFTS_SPENT',
+    'MANDATE_DRAFT_EXPIRED',
+    'MANDATE_ENDED',
+    'MANDATE_NOT_ACCEPTED',
+    'MANDATE_NOT_ACTIVE',
+    'MANDATE_NOT_SUSPENDED',
+    'MANDATE_NOT_WAITING',
+    'MANDATE_OPEN',
+    'MANDATE_PAST_CONSENT',
+    'MANDATE_SUSPENDED',
+    'PENDING_CHOICE_NOT_OFFERED',
+    'PENDING_CHOICE_REQUIRED',
+    'PENDING_REQUESTS_CANCELLED',
+    'SOURCE_NOT_USABLE',
+    'SUPPLIER_UNKNOWN',
+    'HISTORY_TOO_LONG',
+    'STATEMENT_CHANGED',
+    'STEP_UP_NOT_ASKED',
+    'IDEMPOTENCY_KEY_BUSY',
+    'IDEMPOTENCY_KEY_REUSED',
+    'RATE_LIMITED',
+    'BAD_REQUEST',
+    'FORBIDDEN',
+    'NOT_FOUND',
+  ])('says %s in its own plain words, never by its code', (code) => {
+    expect(mandateRefusal(new ApiError(409, code))).not.toContain(code);
   });
 });
