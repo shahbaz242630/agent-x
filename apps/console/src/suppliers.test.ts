@@ -3,8 +3,10 @@
 // can't be verified yet in the API's order.
 import { describe, expect, it } from 'vitest';
 
+import { ApiError } from './api.ts';
 import {
   coolingOff,
+  decidesTheTry,
   isCallNote,
   isUaeIban,
   type NewSupplier,
@@ -126,5 +128,22 @@ describe('notYetVerifiable', () => {
     ],
   ] as const)('says why for %s', (_what, change, why) => {
     expect(notYetVerifiable({ ...SUPPLIER, ...change }, ENDS)).toBe(why);
+  });
+});
+
+describe('decidesTheTry', () => {
+  it.each([
+    ['no answer at all', new TypeError('Failed to fetch'), false, false],
+    ['a 5xx', new ApiError(503, 'UNAVAILABLE'), false, false],
+    ['a session that ended', new ApiError(401, 'UNAUTHENTICATED'), false, false],
+    ['the first request still being worked on', new ApiError(409, 'IDEMPOTENCY_KEY_BUSY'), false, false],
+    ['a change waiting', new ApiError(409, 'SUPPLIER_CHANGE_WAITING'), false, false],
+    ['any other refusal', new ApiError(409, 'PAYEE_REGISTRATIONS_SPENT'), false, true],
+    ['a retry: the supplier gone', new ApiError(404, 'NOT_FOUND'), true, true],
+    ['a retry: the payee taken', new ApiError(409, 'SUPPLIER_PAYEE_TAKEN'), true, true],
+    ['a retry: a session that ended', new ApiError(401, 'UNAUTHENTICATED'), true, false],
+    ['a retry: a gate before the stored answer', new ApiError(409, 'STATEMENT_CHANGED'), true, false],
+  ])('%s', (_what, error, retry, decided) => {
+    expect(decidesTheTry(error, retry)).toBe(decided);
   });
 });

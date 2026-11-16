@@ -937,6 +937,27 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(again?.body).toEqual(first?.body);
   });
 
+  it('comes back with how the details came, as said before sending: the warning and the call-back tick', async () => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 });
+    open(page);
+    await giving('Yes, by email, a letter or a message', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+    await userEvent.click(screen.getByRole('link', { name: 'Back to suppliers' }));
+    await userEvent.click(await screen.findByRole('link', { name: 'Gulf Traders' }));
+
+    expect(await screen.findByLabelText('IBAN')).toBeDefined();
+    expect(screen.getByLabelText<HTMLInputElement>('Yes, by email, a letter or a message').checked).toBe(true);
+    expect(screen.getByText(/how most payment fraud starts/)).toBeDefined();
+    expect(
+      screen.getByLabelText<HTMLInputElement>(
+        'I called +971501234567 and the supplier confirmed the new bank details are theirs',
+      ).checked,
+    ).toBe(true);
+  });
+
   it('keeps the page and the held try when a re-read of the supplier fails, saying so in place', async () => {
     as('admin');
     await unansweredTry(refused(409, 'IDEMPOTENCY_KEY_BUSY'));
