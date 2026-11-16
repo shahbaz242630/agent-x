@@ -632,10 +632,12 @@
   "suppliers.refused.BAD_REQUEST": "Agent X couldn't accept what was entered, so nothing was changed. Check each field and try again.",
   "suppliers.refused.FORBIDDEN": "Your role in this organisation can't do this. Ask an admin.",
   "suppliers.refused.NOT_FOUND": "This supplier can't be found in this organisation any more. Nothing was changed.",
-  "suppliers.bank.unanswered": "Agent X or the bank partner didn't answer, so it isn't known yet whether the bank partner has these details. Press Try again: it asks about the same request, and never sends the details twice.",
+  "suppliers.bank.unanswered": "Agent X or the bank partner didn't answer, so it isn't known yet whether the bank partner has these details. Try again asks about the same request, so pressing it can't send the details a second time. Don't open this supplier in another tab or reload this page meanwhile.",
   "suppliers.bank.stop": "Stop trying",
   "suppliers.bank.stopTitle": "Stop trying to send these bank details?",
   "suppliers.bank.stopText": "The earlier request may already be with the bank partner. If you start again later, these details could be registered twice. Before you do, check this supplier's page for new bank details waiting, or ask the bank partner.",
-  "suppliers.bank.stillWorking": "The first try is still being worked on, so its answer isn't known yet. Try again in a moment: it asks about the same request, and never sends the details twice.",
-  "suppliers.bank.tooMany": "There have been too many tries just now. Wait a moment, then try again: it asks about the same request, and never sends the details twice."
+  "suppliers.bank.stillWorking": "The first try is still being worked on, so its answer isn't known yet. Wait a moment. Try again asks about the same request, so pressing it can't send the details a second time. Don't open this supplier in another tab or reload this page meanwhile.",
+  "suppliers.bank.tooMany": "There have been too many tries just now. Wait a moment. Try again asks about the same request, so pressing it can't send the details a second time. Don't open this supplier in another tab or reload this page meanwhile.",
+  "suppliers.bank.heldRefused": "{said} The earlier try is still held, as it may already be with the bank partner: press Try again later, or Stop trying.",
+  "suppliers.bank.heldWordsChanged": "The words for what happens to pending requests have changed since the first try, so it can't be sent again as it was. It is still held, as it may already be with the bank partner. To send the details under the new words, press Stop trying first, knowing the earlier request may already be with the bank partner."
 }

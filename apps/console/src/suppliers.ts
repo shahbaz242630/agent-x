@@ -211,16 +211,38 @@ const UNDECIDED: ReadonlyMap<string, TextKey> = new Map([
 ]);
 
 /**
- * Whether a pass-through's answer decides it, so its key need not be kept: a
- * refusal that is the API's final word. No answer, a 5xx, an undecided 4xx,
- * and a 401 (the session gone, whatever was done) leave it held for Try again.
+ * The pass-through use case's own refusals (supplier-payees.ts), which a held
+ * try asked again may meet once it is past every gate: each ends that try.
+ * Anything else on a retry (a gate before the stored answer: the words' version,
+ * the partner's offer, access, the key) says nothing of the first try, which may
+ * still be at the partner, unknown.
  */
-export const decidesTheTry = (error: unknown): boolean =>
-  isRefusal(error) && error.status !== 401 && !UNDECIDED.has(error.code);
+const ENDS_A_HELD_TRY = new Set([
+  'SUPPLIER_CHANGE_WAITING',
+  'SUPPLIER_PAYEE_TAKEN',
+  'PAYEE_REGISTRATIONS_SPENT',
+  'NOT_FOUND',
+]);
 
-/** What a pass-through's failure says: a deciding refusal as any; otherwise why it is held for Try again. */
-export function passThroughFailure(error: unknown): string {
-  if (decidesTheTry(error) || isIntegrityFailed(error)) return supplierRefusal(error);
+/**
+ * Whether a pass-through's answer decides it, so its key need not be kept. A
+ * first send: a refusal that is the API's final word (no answer, a 5xx, an
+ * undecided 4xx and a 401 leave it held). A held try asked again: only the use
+ * case's own refusals (ENDS_A_HELD_TRY).
+ */
+export const decidesTheTry = (error: unknown, retry: boolean): boolean => {
+  if (!isRefusal(error)) return false;
+  if (retry) return ENDS_A_HELD_TRY.has(error.code);
+  return error.status !== 401 && !UNDECIDED.has(error.code);
+};
+
+/** What a pass-through's failure says: a deciding refusal as any; otherwise why it is still held for Try again. */
+export function passThroughFailure(error: unknown, retry: boolean): string {
+  if (decidesTheTry(error, retry) || isIntegrityFailed(error)) return supplierRefusal(error);
   const undecided = error instanceof ApiError ? UNDECIDED.get(error.code) : undefined;
-  return t(undecided ?? 'suppliers.bank.unanswered');
+  if (undecided !== undefined) return t(undecided);
+  if (!isRefusal(error)) return t('suppliers.bank.unanswered');
+  // A gate refused the retry: the first try is still held, as it may be with the partner.
+  if (error.code === 'STATEMENT_CHANGED') return t('suppliers.bank.heldWordsChanged');
+  return t('suppliers.bank.heldRefused', { said: supplierRefusal(error) });
 }

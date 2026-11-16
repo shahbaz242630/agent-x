@@ -20,6 +20,8 @@ const { goTo } = await import('../navigate.ts');
 const ORG = { id: '0199a0f0-0000-7000-8000-00000000aaaa', name: 'Staging-Test-Org-1', role: 'admin', frozen: false };
 const ME = '0199a0f0-0000-7000-8000-000000000011';
 const SUPPLIER = '0199a0f0-0000-7000-8000-0000000000d1';
+const WHOSE = { user: ME, organization: ORG.id, supplier: SUPPLIER };
+const OTHER = '0199a0f0-0000-7000-8000-000000000099';
 const REGISTRATION = '0199a0f0-0000-7000-8000-0000000000e1';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000c0ffe';
 const MINE = '0199a0f0-0000-7000-8000-0000000000b1';
@@ -683,19 +685,69 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(again?.body).toEqual(first?.body);
   });
 
-  it('keeps no key once a retry is refused: the API decided, so nothing is held', async () => {
+  it.each([
+    ['SUPPLIER_CHANGE_WAITING', /Another change to this supplier is waiting/],
+    ['SUPPLIER_PAYEE_TAKEN', /already paid to this bank account/],
+    ['PAYEE_REGISTRATIONS_SPENT', /as many bank details today/],
+  ])('keeps no key once a retry meets the use case’s own %s: that try is ended', async (code, said) => {
     as('admin');
-    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, refused(409, 'ORG_FROZEN'));
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, refused(409, code));
     open(page);
     await giving('No', 'here');
     await typed();
     await inDialog('Send to the bank partner');
     expect(await screen.findByText(UNANSWERED)).toBeDefined();
     await press('Try again');
-    expect(await screen.findByText(/This organisation is frozen/)).toBeDefined();
+    expect(await screen.findByText(said)).toBeDefined();
+    expect(heldTry(WHOSE)).toBeUndefined();
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(false);
     expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(false);
+  });
+
+  it.each([
+    ['STATEMENT_CHANGED', 409, /words for what happens to pending requests have changed since the first try/],
+    ['FORBIDDEN', 403, /role in this organisation can't do this\. Ask an admin\. The earlier try is still held/],
+    ['PAYEE_ROUTE_NOT_OFFERED', 409, /doesn't take bank details that way\. .* The earlier try is still held/],
+    ['ORG_FROZEN', 409, /frozen.* The earlier try is still held/],
+    ['IDEMPOTENCY_KEY_REUSED', 400, /reason IDEMPOTENCY_KEY_REUSED.* The earlier try is still held/],
+  ])('keeps a held try locked with its key when a gate refuses its retry with %s', async (code, status, said) => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 }, refused(status, code), {
+      status: 201,
+      body: registration(),
+    });
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+    await press('Try again');
+    expect(await screen.findByText(said)).toBeDefined();
+    expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true);
+    await press('Try again');
+    expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
+    const sentKeys = sentTo('POST', `${at}/payee-registrations/pass-through`).map((one) => one.key);
+    expect(new Set(sentKeys).size).toBe(1);
+  });
+
+  it('starts the IBAN empty once a restored try is stopped, never the whole number again', async () => {
+    as('admin');
+    answer(`POST ${at}/payee-registrations/pass-through`, { status: 0 });
+    open(page);
+    await giving('No', 'here');
+    await typed();
+    await inDialog('Send to the bank partner');
+    expect(await screen.findByText(UNANSWERED)).toBeDefined();
+    await userEvent.click(screen.getByRole('link', { name: 'Back to suppliers' }));
+    await userEvent.click(await screen.findByRole('link', { name: 'Gulf Traders' }));
+    await press('Stop trying');
+    await inDialog('Stop trying');
+    const iban = screen.getByLabelText<HTMLInputElement>('IBAN');
+    expect(iban.disabled).toBe(false);
+    expect(iban.value).toBe('');
+    expect(screen.getByLabelText<HTMLInputElement>("Account holder's name").value).toBe('Gulf Traders LLC');
   });
 
   it('holds Cancel and Try again while a pass-through is on its way', async () => {
@@ -858,7 +910,7 @@ describe('giving new bank details (6D2, ADR-012)', () => {
       expect(third?.key).toBe(first?.key);
       expect(third?.body).toEqual(first?.body);
       // Answered, the try is held no longer.
-      expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+      expect(heldTry(WHOSE)).toBeUndefined();
     },
   );
 
@@ -895,7 +947,7 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     });
     expect(screen.getByRole('heading', { name: 'Gulf Traders' })).toBeDefined();
     expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
-    expect(heldTry(ORG.id, SUPPLIER)?.key).toBe(passThroughs()[0]?.key);
+    expect(heldTry(WHOSE)?.key).toBe(passThroughs()[0]?.key);
 
     // The read's own Try again (above the supplier) reads it again and sends nothing to the bank partner.
     const before = posts().length;
@@ -907,7 +959,7 @@ describe('giving new bank details (6D2, ADR-012)', () => {
       expect(screen.getAllByRole('button', { name: 'Try again' })).toHaveLength(1);
     });
     expect(posts()).toHaveLength(before);
-    expect(heldTry(ORG.id, SUPPLIER)?.key).toBe(passThroughs()[0]?.key);
+    expect(heldTry(WHOSE)?.key).toBe(passThroughs()[0]?.key);
   });
 
   it('says a first read that fails, and shows the supplier once Try again reads it', async () => {
@@ -921,29 +973,51 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(await screen.findByRole('heading', { name: 'Gulf Traders' })).toBeDefined();
   });
 
-  it('drops every held try when the session ends, when signing out and when the page is left', async () => {
+  it('keeps a held try through a session that ends, for the same person alone', async () => {
     as('admin');
-    await unansweredTry(refused(401, 'UNAUTHENTICATED'));
-    expect(heldTry(ORG.id, SUPPLIER)).toBeDefined();
+    await unansweredTry(refused(401, 'UNAUTHENTICATED'), { status: 201, body: registration() });
     await press('Try again');
     expect(await screen.findByText('Your session ended. Sign in again to carry on.')).toBeDefined();
-    expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+    const kept = heldTry(WHOSE);
+    expect(kept).toBeDefined();
     cleanup();
 
+    // Someone else signs in on the tab: nothing of the first person's try shows.
+    as('admin');
+    answer('GET /v1/auth/session', {
+      status: 200,
+      body: { userId: OTHER, authenticatedAt: PAST, methods: ['pwd'], idleExpiresAt: FUTURE, expiresAt: FUTURE },
+    });
+    open(page);
+    expect(await screen.findByRole('button', { name: 'Change bank details' })).toBeDefined();
+    expect(screen.queryByLabelText('IBAN')).toBeNull();
+    cleanup();
+
+    // The same person signs in again: the form is back, locked, and goes on with the same key.
+    as('admin');
+    open(page);
+    const iban = await screen.findByLabelText<HTMLInputElement>('IBAN');
+    expect(iban.disabled).toBe(true);
+    await press('Try again');
+    expect(await screen.findByText(/The bank partner has the new bank details/)).toBeDefined();
+    expect(sentTo('POST', `${at}/payee-registrations/pass-through`)[0]?.key).toBe(kept?.key);
+  });
+
+  it('drops every held try when signing out and when the page is left', async () => {
     as('admin');
     answer('POST /v1/auth/sign-out', { status: 200 });
     await unansweredTry();
     await userEvent.click(screen.getByRole('link', { name: /More/ }));
     await press('Sign out');
     await vi.waitFor(() => {
-      expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+      expect(heldTry(WHOSE)).toBeUndefined();
     });
     cleanup();
 
     as('admin');
     await unansweredTry();
     window.dispatchEvent(new Event('pagehide'));
-    expect(heldTry(ORG.id, SUPPLIER)).toBeUndefined();
+    expect(heldTry(WHOSE)).toBeUndefined();
   });
 
   it('keeps a refusal said once the re-read shows a change waiting and the form gone', async () => {

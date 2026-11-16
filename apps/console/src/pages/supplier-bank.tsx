@@ -206,10 +206,13 @@ function NewDetails({
   readonly onDone: (said: string) => void;
   readonly onCancel: () => void;
 }) {
-  const { organization } = useActing();
+  const { organization, session } = useActing();
   const { busy, run } = sending;
   // A try held from before (Back, a failed re-read, the form reopened) starts the form as it was sent, locked.
-  const [unanswered, setHeld] = useState(() => heldTry(organization.id, supplier.id) ?? null);
+  const whose = { user: session.userId, organization: organization.id, supplier: supplier.id };
+  const [unanswered, setHeld] = useState(() => heldTry(whose) ?? null);
+  // Restored from a held try: once stopped, its IBAN isn't put back in the field in full.
+  const [restored] = useState(unanswered !== null);
   const [told, setTold] = useState<Told | null>(unanswered?.told ?? null);
   const [calledFirst, setCalledFirst] = useState(unanswered?.told === 'yes');
   const [route, setRoute] = useState<Route | null>(unanswered === null ? null : 'pass_through');
@@ -218,7 +221,7 @@ function NewDetails({
   const [broken, setBroken] = useState<Broken>('none');
   const [confirming, setConfirming] = useState(false);
   const setUnanswered = (tried: HeldTry | null) => {
-    holdTry(organization.id, supplier.id, tried);
+    holdTry(whose, tried);
     setHeld(tried);
   };
   const [stopping, setStopping] = useState(false);
@@ -242,7 +245,7 @@ function NewDetails({
   const close = () => {
     setConfirming(false);
   };
-  const passThrough = ({ key, body }: Pick<HeldTry, 'key' | 'body'>) =>
+  const passThrough = ({ key, body }: Pick<HeldTry, 'key' | 'body'>, retry: boolean) =>
     run(
       async () => {
         try {
@@ -257,13 +260,13 @@ function NewDetails({
           // No answer, or no decision (a 5xx): the partner may have the details, and a fresh key would register them
           // again (the API carries on an open registration for its form alone). The same request asks it by our ID.
           // Only a refusal that is the API's final word leaves nothing to ask again (decidesTheTry).
-          setUnanswered(decidesTheTry(error) ? null : { key, body, told: told ?? 'no' });
+          setUnanswered(decidesTheTry(error, retry) ? null : { key, body, told: told ?? 'no' });
           throw error;
         }
       },
       {
         after: close,
-        refusal: passThroughFailure,
+        refusal: (error) => passThroughFailure(error, retry),
       },
     );
   const start = (body: Readonly<Record<string, unknown>>) =>
@@ -278,10 +281,13 @@ function NewDetails({
       void start({ pendingRequests, statementVersion });
       return;
     }
-    void passThrough({
-      key: crypto.randomUUID(),
-      body: { name: holder.trim(), iban, pendingRequests, statementVersion },
-    });
+    void passThrough(
+      {
+        key: crypto.randomUUID(),
+        body: { name: holder.trim(), iban, pendingRequests, statementVersion },
+      },
+      false,
+    );
   };
   const next = () => {
     // Checked here before anything is sent: what the API would refuse is said in place.
@@ -399,7 +405,12 @@ function NewDetails({
             >
               {t('suppliers.bank.stop')}
             </button>
-            <button type="button" className="primary" disabled={busy} onClick={() => void passThrough(unanswered)}>
+            <button
+              type="button"
+              className="primary"
+              disabled={busy}
+              onClick={() => void passThrough(unanswered, true)}
+            >
               {t('suppliers.bank.tryAgain')}
             </button>
           </>
@@ -416,6 +427,7 @@ function NewDetails({
           onConfirm={() => {
             // Dropped only once the person has read that starting again could register the details twice.
             setUnanswered(null);
+            if (restored) setIban('');
             setStopping(false);
           }}
         />
@@ -443,11 +455,13 @@ function NewDetails({
 
 /** The bank details section: as they stand, any new ones waiting, and an admin's way to give new ones. */
 export function BankDetails({ supplier }: { readonly supplier: Supplier }) {
-  const { organization } = useActing();
+  const { organization, session } = useActing();
   const change = useChange(supplierRefusal);
   // Open while new details are being given; drawn afresh each time, so nothing typed is kept once closed. Open from
   // the start while a try is held for Try again (held-tries.ts), so coming back shows it locked, never a blank form.
-  const [giving, setGiving] = useState(() => heldTry(organization.id, supplier.id) !== undefined);
+  const [giving, setGiving] = useState(
+    () => heldTry({ user: session.userId, organization: organization.id, supplier: supplier.id }) !== undefined,
+  );
   // What the partner answered a registration, said here as the outcomes of every part are.
   const [answer, setAnswer] = useState<string | null>(null);
   const sending: Sending = {
