@@ -1,16 +1,16 @@
-// A spend request's evidence, printable (6C2; BR-16; decision 24: admins
-// only): `/approvals/<id>/evidence`. Opening it downloads the bundle once
-// (evidence.ts), which the audit log records, as the page says; it is shown in
-// plain sections, from the request as asked to its payment, then every signed
-// event about it with its chain hashes. "Print" prints it without the
-// console's frame (styles.css, @media print); "Download JSON" saves the API's
-// answer as it came, `evidence-<id>.json`, to check outside Agent X.
+// A spend request's evidence, printable (6C2, 6C2c; BR-16; decision 24:
+// admins only): `/approvals/<id>/evidence`. Opening it reads the bundle
+// (evidence.ts), a page read the audit log doesn't record, as the page says;
+// it is shown in plain sections, from the request as asked to its payment,
+// then every signed event about it with its chain hashes. "Print" prints what
+// was read without the console's frame (styles.css, @media print); "Download
+// JSON" is the logged download (capped at 20 an hour), saving the API's answer
+// as it came, `evidence-<id>.json`, to check outside Agent X.
 import { Link } from '@tanstack/react-router';
 import type { ReactNode } from 'react';
 
 import { isMissing } from '../api.ts';
-import { saveJson } from '../download.ts';
-import { type Evidence, type EvidenceAnswer, type EvidencePayment, evidenceRefusal, useEvidence } from '../evidence.ts';
+import { type Evidence, type EvidencePayment, evidenceRefusal, useEvidence, useEvidenceDownload } from '../evidence.ts';
 import type { LogEvent } from '../logs.ts';
 import { amountText, type Reason, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
@@ -221,16 +221,29 @@ function Payment({ payment }: { readonly payment: EvidencePayment | null }) {
   );
 }
 
-function Bundle({ answer }: { readonly answer: EvidenceAnswer }) {
-  const { evidence } = answer;
+/** "Download JSON": the logged download, one a press; its refusal said beside it, pressing again the same download. */
+function Download({ id, organization }: { readonly id: string; readonly organization: string }) {
+  const { press, download } = useEvidenceDownload(id, organization);
+  return (
+    <>
+      <button type="button" className="secondary" disabled={download.isPending} onClick={press}>
+        {t('evidence.downloadJson')}
+      </button>
+      {download.isError && (
+        <p className="notice" role="alert">
+          {evidenceRefusal(download.error)}
+        </p>
+      )}
+    </>
+  );
+}
+
+function Bundle({ evidence, organization }: { readonly evidence: Evidence; readonly organization: string }) {
   const asked = evidence.spendRequest;
   return (
     <>
       <h1 className="amount big">{amountText(asked.amountMinor, asked.currency)}</h1>
-      <p className="muted">
-        {t('evidence.moment', { record: evidence.recordSeq, upTo: evidence.upToSeq })}{' '}
-        <span className="mono">{evidence.id}</span>
-      </p>
+      <p className="muted">{t('evidence.moment', { upTo: evidence.upToSeq })}</p>
       <div className="decide no-print">
         <button
           type="button"
@@ -241,15 +254,7 @@ function Bundle({ answer }: { readonly answer: EvidenceAnswer }) {
         >
           {t('evidence.print')}
         </button>
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => {
-            saveJson(`evidence-${asked.id}.json`, answer);
-          }}
-        >
-          {t('evidence.downloadJson')}
-        </button>
+        <Download id={asked.id} organization={organization} />
       </div>
       <Request evidence={evidence} />
       <Decision evidence={evidence} />
@@ -279,19 +284,19 @@ export function EvidencePage({ id }: { readonly id: string }) {
     shown = (
       <div className="notice" role="alert">
         <p>{evidenceRefusal(evidence.error)}</p>
-        {/* The same idempotency key: the same download asked again, never a second one. */}
+        {/* A read, not logged: asked again as it is. */}
         <button
           type="button"
           className="secondary"
           onClick={() => {
-            evidence.mutate();
+            void evidence.refetch();
           }}
         >
           {t('error.retry')}
         </button>
       </div>
     );
-  } else if (evidence.isSuccess) shown = <Bundle answer={evidence.data} />;
+  } else if (evidence.isSuccess) shown = <Bundle evidence={evidence.data.evidence} organization={organization.id} />;
   else shown = <Loading />;
   return (
     <section className="stack request">
