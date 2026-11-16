@@ -1,7 +1,9 @@
 import { Link, Outlet } from '@tanstack/react-router';
+import { useState } from 'react';
 
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
+import { KeyHold } from './key-once.tsx';
 import { SteppedUp } from './stepped-up.tsx';
 
 const TABS = [
@@ -14,6 +16,8 @@ const TABS = [
 /** The signed-in frame: the organisation acted in, the tabs, and a frozen organisation said at the top. */
 export function Shell() {
   const { organization, choose, canSwitch } = useActing();
+  // A new agent key on screen, not yet saved: switching organisation (no navigation to ask about) waits for Done.
+  const [held, setHeld] = useState(false);
   return (
     <div className="shell">
       <header className="bar">
@@ -22,6 +26,8 @@ export function Shell() {
           <button
             type="button"
             className="org"
+            disabled={held}
+            title={held ? t('keyOnce.switchHeld') : undefined}
             onClick={() => {
               choose(null);
             }}
@@ -46,7 +52,9 @@ export function Shell() {
         </p>
       )}
       <main className="body">
-        <SteppedUp />
+        <KeyHold onHeld={setHeld}>
+          <SteppedUp />
+        </KeyHold>
         <Outlet />
       </main>
     </div>

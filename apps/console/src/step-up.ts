@@ -10,7 +10,7 @@
 // by challenge: nothing secret (the challenge is good only for this session,
 // and only after the fresh sign-in), and gone once confirmed or dismissed. The
 // API checks everything again at the confirm whatever the console kept.
-import { api, isRefusal, isUuid } from './api.ts';
+import { api, ApiError, isRefusal, isUuid } from './api.ts';
 import { goTo } from './navigate.ts';
 
 /** A change asked and waiting for its step-up: where to confirm it and with what. */
@@ -187,19 +187,31 @@ export async function ask(
 }
 
 /**
- * Confirms a change once signed in again: the ask's body with its challenge.
- * Forgotten once the API has decided it, either way: a refused challenge is
- * spent or was never good. Kept after a failure on the way (no answer, a 5xx),
- * so the person can try the confirm again.
+ * A change that must be confirmed by passkey: asked and answered with no
+ * passkey asked, nothing was made (or what the confirm alone gives, an
+ * agent's key, would be lost), so it is refused, never said done.
  */
-export async function confirm(pending: PendingChange): Promise<void> {
+export async function mustStepUp(asking: Promise<{ readonly done: unknown } | 'stepping'>): Promise<'stepping'> {
+  if ((await asking) !== 'stepping') throw new ApiError(200, 'STEP_UP_NOT_ASKED');
+  return 'stepping';
+}
+
+/**
+ * Confirms a change once signed in again: the ask's body with its challenge,
+ * giving back the confirm's answer (a new agent key arrives in it, for the
+ * caller's memory alone). Forgotten once the API has decided it, either way:
+ * a refused challenge is spent or was never good. Kept after a failure on the
+ * way (no answer, a 5xx), so the person can try the confirm again.
+ */
+export async function confirm(pending: PendingChange): Promise<unknown> {
   try {
-    await api.post<unknown>(pending.confirmPath, {
+    const answer = await api.post<unknown>(pending.confirmPath, {
       organization: pending.organization,
       idempotencyKey: pending.idempotencyKey,
       body: { ...pending.body, stepUpChallengeId: pending.challenge },
     });
     forget(pending.challenge);
+    return answer;
   } catch (error) {
     if (isRefusal(error)) forget(pending.challenge);
     throw error;

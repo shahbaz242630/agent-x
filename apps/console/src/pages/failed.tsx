@@ -1,5 +1,7 @@
 import { Link } from '@tanstack/react-router';
+import type { ReactNode } from 'react';
 
+import { isIntegrityFailed } from '../api.ts';
 import { t } from '../text.ts';
 import { Panel } from './panel.tsx';
 
@@ -33,6 +35,37 @@ export function Retry({ onRetry }: { readonly onRetry: () => void }) {
         {t('error.retry')}
       </button>
     </div>
+  );
+}
+
+/**
+ * One thing's page (a request's, a payment's, an agent's) that can't show it: an address that names none, or the
+ * API's 404, is not found, never a failure to retry; a record that failed its integrity check is said as itself
+ * where the page has words for it; anything else offers a retry.
+ */
+export function NotShown({
+  back,
+  missing,
+  error,
+  notFound,
+  integrity,
+  onRetry,
+}: {
+  readonly back: ReactNode;
+  readonly missing: boolean;
+  readonly error: unknown;
+  readonly notFound: string;
+  readonly integrity?: string;
+  readonly onRetry: () => void;
+}) {
+  let said = <Retry onRetry={onRetry} />;
+  if (missing) said = <p className="notice">{notFound}</p>;
+  else if (integrity !== undefined && isIntegrityFailed(error)) said = <p className="notice">{integrity}</p>;
+  return (
+    <section className="stack">
+      {back}
+      {said}
+    </section>
   );
 }
 
