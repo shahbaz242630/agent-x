@@ -896,6 +896,29 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(screen.getByRole('heading', { name: 'Gulf Traders' })).toBeDefined();
     expect(screen.getByLabelText<HTMLInputElement>('IBAN').disabled).toBe(true);
     expect(heldTry(ORG.id, SUPPLIER)?.key).toBe(passThroughs()[0]?.key);
+
+    // The read's own Try again (above the supplier) reads it again and sends nothing to the bank partner.
+    const before = posts().length;
+    answer(`GET ${at}`, { status: 200, body: supplier() });
+    const [readAgain] = screen.getAllByRole('button', { name: 'Try again' });
+    if (readAgain === undefined) throw new Error('the read’s Try again is missing');
+    await userEvent.click(readAgain);
+    await vi.waitFor(() => {
+      expect(screen.getAllByRole('button', { name: 'Try again' })).toHaveLength(1);
+    });
+    expect(posts()).toHaveLength(before);
+    expect(heldTry(ORG.id, SUPPLIER)?.key).toBe(passThroughs()[0]?.key);
+  });
+
+  it('says a first read that fails, and shows the supplier once Try again reads it', async () => {
+    as('admin');
+    answer(`GET ${at}`, refused(403, 'FORBIDDEN'));
+    open(page);
+    await screen.findByRole('button', { name: 'Try again' }, { timeout: 5000 });
+    expect(screen.queryByRole('heading', { name: 'Gulf Traders' })).toBeNull();
+    answer(`GET ${at}`, { status: 200, body: supplier() });
+    await press('Try again');
+    expect(await screen.findByRole('heading', { name: 'Gulf Traders' })).toBeDefined();
   });
 
   it('drops every held try when the session ends, when signing out and when the page is left', async () => {
