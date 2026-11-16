@@ -10,7 +10,7 @@
 // by challenge: nothing secret (the challenge is good only for this session,
 // and only after the fresh sign-in), and gone once confirmed or dismissed, or
 // when the person signs out (forgetAll), never on a 401 alone. The API checks everything again at the confirm whatever the console kept.
-import { api, ApiError, isRefusal, isUuid } from './api.ts';
+import { api, ApiError, isRefusal, isSignedOut, isUuid } from './api.ts';
 import { dropStartingWith } from './kept.ts';
 import { goTo } from './navigate.ts';
 
@@ -219,12 +219,19 @@ export const byPasskey = (
   confirmed?: Readonly<Record<string, unknown>>,
 ): Promise<'stepping'> => mustStepUp(ask(changeAt(at, label, body, organization), confirmed));
 
+/** The 4xx answers that decide nothing: the first try may still be running, or too many tries just now. */
+const UNDECIDED = new Set(['IDEMPOTENCY_KEY_BUSY', 'RATE_LIMITED']);
+
+/** Whether a confirm's answer leaves it undecided: the same confirm, with the same key and challenge, is sent again. */
+export const isUndecided = (error: unknown): boolean => error instanceof ApiError && UNDECIDED.has(error.code);
+
 /**
  * Confirms a change once signed in again: the ask's body with its challenge,
  * giving back the confirm's answer (a new agent key arrives in it, for the
  * caller's memory alone). Forgotten once the API has decided it, either way:
  * a refused challenge is spent or was never good. Kept after a failure on the
- * way (no answer, a 5xx), so the person can try the confirm again.
+ * way (no answer, a 5xx), an undecided answer (isUndecided) or a 401, so the
+ * person can try the confirm again.
  */
 export async function confirm(pending: PendingChange): Promise<unknown> {
   try {
@@ -236,7 +243,9 @@ export async function confirm(pending: PendingChange): Promise<unknown> {
     forget(pending.challenge);
     return answer;
   } catch (error) {
-    if (isRefusal(error)) forget(pending.challenge);
+    // Kept for a 401 (a round trip may meet one) and an undecided answer: the API rolled the claim back, so the
+    // same key and challenge sent again is the same confirm.
+    if (isRefusal(error) && !isSignedOut(error) && !isUndecided(error)) forget(pending.challenge);
     throw error;
   }
 }

@@ -1,10 +1,9 @@
 // What a screen keeps in this tab's sessionStorage for the person signed in
 // (6D4a): a bank link started and waiting at the bank (sources.ts), and the
 // hold's investigations recorded here (hold.ts). Nothing secret, but it is
-// the person's own work, so it goes when their session does: signing out, or
-// a session that ends while the page is open (endSession). A step-up's kept
-// changes (step-up.ts) go on signing out alone (forgetAll): one may meet a
-// 401 on its round trip, and must survive it.
+// the person's own work, so it goes when they sign out (More), as a step-up's
+// kept changes do (forgetAll). Never on a 401 alone (endSession): each is kept
+// by person, and a link waiting at the bank must survive signing in again.
 
 /** Where a started bank link is kept, by person and organisation. */
 export const SOURCE_LINK_KEY = 'agentx.source-link.';

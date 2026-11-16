@@ -371,7 +371,6 @@ describe('the clear’s confirm, back from the passkey (6D4a)', () => {
     ['history not yet checked', refused(409, 'HISTORY_UNCHECKED'), /hasn't finished checking every request/],
     ['the hold changed meanwhile', refused(409, 'HOLD_CHANGED'), /The hold changed while this was being done/],
     ['a step-up for another hold', refused(403, 'STEP_UP_FAILED'), /wasn't for this hold as it stands now/],
-    ['records still failing their check', refused(503, 'INTEGRITY_FAILED'), /still fail Agent X's integrity check/],
   ])('says %s in the hold’s words, and ends it', async (_what, given, said) => {
     as('admin');
     answer(confirmAt, given);
@@ -382,6 +381,49 @@ describe('the clear’s confirm, back from the passkey (6D4a)', () => {
     expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
     expect(sessionStorage.getItem(keptChange)).toBeNull();
     expect(screen.queryByText(/couldn't be reached/)).toBeNull();
+  });
+
+  it('says a record failing its check as a result unknown, never as not made, and reads the hold again', async () => {
+    as('admin');
+    answer(confirmAt, refused(503, 'INTEGRITY_FAILED'));
+    back();
+    expect(await screen.findByText('On hold')).toBeDefined();
+    const before = holdReads().length;
+    await press('Confirm');
+    expect(await screen.findByText(/couldn't confirm the result/)).toBeDefined();
+    expect(screen.queryByText(/didn't make this change/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+    expect(sessionStorage.getItem(keptChange)).toBeNull();
+    await vi.waitFor(() => {
+      expect(holdReads().length).toBeGreaterThan(before);
+    });
+  });
+
+  it('keeps Confirm and the change while the first try is busy, then confirms with the same key', async () => {
+    as('admin');
+    answer(confirmAt, refused(409, 'IDEMPOTENCY_KEY_BUSY'), refused(429, 'RATE_LIMITED'), { status: 200, body: CLEAR });
+    back();
+    await press('Confirm');
+    expect(await screen.findByText(/still working on this, or there were too many tries/)).toBeDefined();
+    expect(screen.queryByText(/didn't make this change/)).toBeNull();
+    expect(sessionStorage.getItem(keptChange)).not.toBeNull();
+    await press('Confirm');
+    await vi.waitFor(() => {
+      expect(posts()).toHaveLength(2);
+    });
+    await press('Confirm');
+    expect(await screen.findByText(/^Done: Clear the integrity hold/)).toBeDefined();
+    expect(new Set(posts().map((one) => one.key)).size).toBe(1);
+  });
+
+  it('says a 401 at the confirm in the shared words, and keeps the change', async () => {
+    as('admin');
+    answer(confirmAt, refused(401, 'UNAUTHENTICATED'));
+    back();
+    await press('Confirm');
+    expect(await screen.findByText(/Its confirmation was refused or ran out/)).toBeDefined();
+    expect(screen.queryByText(/still fail|hasn't finished/)).toBeNull();
+    expect(sessionStorage.getItem(keptChange)).not.toBeNull();
   });
 
   it('keeps the change to try again after a failure on the way', async () => {
@@ -474,28 +516,29 @@ describe('what is kept goes with the session (6D4a)', () => {
     expect(sessionStorage.getItem(stepUpKept)).toBeNull();
   });
 
-  it('is forgotten when the session ends while the page is open', async () => {
+  it('is all kept when the session ends while the page is open (a 401), for signing in again', async () => {
     as('admin');
     answer('GET /v1/integrity-hold', refused(401, 'UNAUTHENTICATED'));
     keepBoth();
     open(page);
     expect(await screen.findByText(/session ended/i)).toBeDefined();
-    expect(sessionStorage.getItem(keptAt)).toBeNull();
-    expect(sessionStorage.getItem(linkKept)).toBeNull();
-    // A step-up's kept change survives a 401: its round trip may meet one.
+    expect(sessionStorage.getItem(keptAt)).not.toBeNull();
+    expect(sessionStorage.getItem(linkKept)).not.toBeNull();
     expect(sessionStorage.getItem(stepUpKept)).toBe('{}');
   });
 
-  it('forgets nothing, and still ends the session, when storage is blocked', async () => {
+  it('still signs out when storage is blocked', async () => {
     as('admin');
-    answer('GET /v1/integrity-hold', refused(401, 'UNAUTHENTICATED'));
+    answer('POST /v1/auth/sign-out', { status: 200 });
     const key = vi.spyOn(Storage.prototype, 'key').mockImplementation(() => {
       throw new Error('blocked');
     });
     try {
-      keepBoth();
-      open(page);
-      expect(await screen.findByText(/session ended/i)).toBeDefined();
+      open('/more');
+      await press('Sign out');
+      await vi.waitFor(() => {
+        expect(goTo).toHaveBeenCalledWith('/');
+      });
     } finally {
       key.mockRestore();
     }

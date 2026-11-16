@@ -23,27 +23,46 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { isIntegrityFailed, isRefusal, isSignedOut, isUuid } from '../api.ts';
 import { HOLD_PATH, holdRefusal } from '../hold.ts';
-import { confirm, forget, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
-import { t } from '../text.ts';
+import { confirm, forget, isUndecided, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
+import { t, type TextKey } from '../text.ts';
 import { KeyOnce, keyIn } from './key-once.tsx';
 
-type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed' | { readonly said: string };
-
-/** The confirms whose refusals their screen words itself, by confirm address. */
-const OWN_WORDS: ReadonlyMap<string, (error: unknown) => string> = new Map([
-  [`${HOLD_PATH}/clear/confirm`, holdRefusal],
-]);
-
-/** A confirm's refusal or integrity failure in its screen's own words, if it has them; none for a 401 or a failure on the way. */
-function ownWords(confirmPath: string, error: unknown): string | undefined {
-  const words = OWN_WORDS.get(confirmPath);
-  if (words === undefined || isSignedOut(error) || !(isRefusal(error) || isIntegrityFailed(error))) return undefined;
-  return words(error);
+/** How a confirm ended in its screen's own words: refused (`made: false`), or its result unknown (`made: null`). */
+interface Said {
+  readonly said: string;
+  readonly made: false | null;
 }
 
-/** What a confirm's refusal says: the words changed since read (CO3), or refused otherwise. */
+type Sent = 'ready' | 'sending' | 'done' | 'refused' | 'wordsChanged' | 'failed' | 'busy' | Said;
+
+/** A screen's own words for its confirm: a refusal's, and a record failing its integrity check, after which its result is unknown. */
+interface OwnWords {
+  readonly refused: (error: unknown) => string;
+  readonly unsure: TextKey;
+}
+
+/**
+ * The confirms whose refusals their screen words itself, by confirm address.
+ * The hold's clear may fail its integrity check after the clear committed
+ * (hold-clearing.ts, the hold read again as signed), so that says only that
+ * the result isn't known, and the hold page shows where it stands.
+ */
+const OWN_WORDS: ReadonlyMap<string, OwnWords> = new Map([
+  [`${HOLD_PATH}/clear/confirm`, { refused: holdRefusal, unsure: 'hold.clear.unsure' }],
+]);
+
+/** A confirm's end in its screen's own words, if it has them; none for a 401, an undecided answer or a failure on the way. */
+function ownWords(confirmPath: string, error: unknown): Said | undefined {
+  const words = OWN_WORDS.get(confirmPath);
+  if (words === undefined || isSignedOut(error) || isUndecided(error)) return undefined;
+  if (isIntegrityFailed(error)) return { said: t(words.unsure), made: null };
+  return isRefusal(error) ? { said: words.refused(error), made: false } : undefined;
+}
+
+/** What a confirm's refusal says: undecided (try again), the words changed since read (CO3), or refused otherwise. */
 const refusedAs = (error: unknown): Sent => {
   if (!isRefusal(error)) return 'failed';
+  if (isUndecided(error)) return 'busy';
   return error.code === 'STATEMENT_CHANGED' ? 'wordsChanged' : 'refused';
 };
 
@@ -112,14 +131,16 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
       // Whatever the change touched reads again.
       await queries.invalidateQueries();
     } catch (error) {
-      const said = ownWords(pending.confirmPath, error);
-      if (said === undefined) {
+      const own = ownWords(pending.confirmPath, error);
+      if (own === undefined) {
         setSent(refusedAs(error));
         return;
       }
-      // Ended: a refusal was forgotten by confirm; a record failing its check is, here.
+      // Ended: a refusal was forgotten by confirm; a record failing its check is, here. What it touched reads again
+      // at once, so its page shows where it truly stands.
       forget(pending.challenge);
-      setSent({ said });
+      setSent(own);
+      await queries.invalidateQueries();
     }
   };
   // Its own branch, not the done one below: only the done words are a live region, so the key is never read out.
@@ -134,7 +155,7 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   if (typeof sent === 'object') {
     return (
       <section className="notice stepped" role="status">
-        <p>{t('stepUp.notMade', { change: pending.label })}</p>
+        {sent.made === false && <p>{t('stepUp.notMade', { change: pending.label })}</p>}
         <p>{sent.said}</p>
         <button type="button" className="secondary" onClick={close}>
           {t('stepUp.close')}
@@ -156,9 +177,9 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
     <section className="stepped" aria-labelledby="stepped-title">
       <h2 id="stepped-title">{t('stepUp.title')}</h2>
       <p>{pending.label}</p>
-      {sent === 'failed' && (
+      {(sent === 'failed' || sent === 'busy') && (
         <p className="notice" role="alert">
-          {t('stepUp.failed')}
+          {t(sent === 'busy' ? 'stepUp.busy' : 'stepUp.failed')}
         </p>
       )}
       <div className="actions">
