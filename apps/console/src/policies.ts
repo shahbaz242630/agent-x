@@ -80,8 +80,8 @@ export interface WaitingPreview {
   readonly more: boolean;
 }
 
-export type Decision = 'DENY' | 'REQUIRE_NEW_MANDATE' | 'REQUIRE_APPROVAL' | 'ALLOW';
-export type CapFrom = 'mandate-policy' | 'organization-policy' | 'none' | 'not-set';
+type Decision = 'DENY' | 'REQUIRE_NEW_MANDATE' | 'REQUIRE_APPROVAL' | 'ALLOW';
+type CapFrom = 'mandate-policy' | 'organization-policy' | 'none' | 'not-set';
 
 export interface Simulation {
   readonly decision: Decision;
@@ -130,7 +130,7 @@ export const policyAt = (target: Target): string =>
 export const simulateAt = (mandateId: string): string => `${mandateAt(mandateId)}/policy/simulate`;
 
 /** Whether the address names a policy at all: a mandate's only by a UUID, as any other names none. */
-export const isNamed = (target: Target): boolean => target.kind === 'organization' || isUuid(target.mandateId);
+const isNamed = (target: Target): boolean => target.kind === 'organization' || isUuid(target.mandateId);
 
 export function usePolicy(target: Target, organization: string) {
   return useQuery({
@@ -189,9 +189,13 @@ const AMOUNT_TEXT = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/;
 export function parseAmount(text: string, digits: number): number | null {
   const typed = text.trim();
   if (!AMOUNT_TEXT.test(typed)) return null;
-  const [whole = '', fraction = ''] = typed.replaceAll(',', '').split('.');
+  const plain = typed.replaceAll(',', '');
+  const point = plain.indexOf('.');
+  const whole = point < 0 ? plain : plain.slice(0, point);
+  const fraction = point < 0 ? '' : plain.slice(point + 1);
   if (fraction.length > digits) return null;
-  const minor = BigInt(whole) * 10n ** BigInt(digits) + BigInt(fraction.padEnd(digits, '0') || '0');
+  // BigInt('') is 0n: a currency with no minor digits and no fraction typed.
+  const minor = BigInt(whole) * 10n ** BigInt(digits) + BigInt(fraction.padEnd(digits, '0'));
   if (minor < 1n || minor > BigInt(Number.MAX_SAFE_INTEGER)) return null;
   return Number(minor);
 }

@@ -303,7 +303,10 @@ function PolicyChange({
   };
   const toConfirm = () => {
     setWaitingBroken(offered && waiting === null);
-    if (!offered || waiting !== null) setConfirming(true);
+    if (offered && waiting === null) return;
+    // The words are read afresh as the confirm opens (as the shared confirm reads them): it waits for them.
+    void statements.refetch();
+    setConfirming(true);
   };
   const send = (sent: Checked) =>
     run(
