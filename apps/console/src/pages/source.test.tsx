@@ -436,6 +436,22 @@ describe('linking a bank account (6D4a)', () => {
     expect(await screen.findByRole('button', { name: 'Start linking' })).toBeDefined();
   });
 
+  it('forgets a kept link once its time at the bank has passed', async () => {
+    as('admin');
+    sessionStorage.setItem(linkKey, JSON.stringify({ link: link({ expiresAt: PAST }), authoriseUrl: BANK_PAGE }));
+    open('/more/sources');
+    expect(await screen.findByRole('button', { name: 'Start linking' })).toBeDefined();
+    expect(sessionStorage.getItem(linkKey)).toBeNull();
+  });
+
+  it('says a key used before plainly', async () => {
+    as('admin');
+    answer(start, refused(409, 'IDEMPOTENCY_KEY_REUSED'));
+    open('/more/sources');
+    await press('Start linking');
+    expect(await screen.findByText(/already used for an earlier request/)).toBeDefined();
+  });
+
   it('asks again with the same key after no answer, and a fresh one once decided', async () => {
     as('admin');
     answer(start, { status: 0 }, refused(429, 'RATE_LIMITED'), refused(409, 'LINK_STARTS_SPENT'), started);

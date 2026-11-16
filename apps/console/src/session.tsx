@@ -7,6 +7,7 @@ import { type QueryClient, useQuery } from '@tanstack/react-query';
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, isSignedOut } from './api.ts';
+import { dropKept } from './kept.ts';
 
 export interface Session {
   readonly userId: string;
@@ -33,8 +34,13 @@ export interface Organizations {
 /** Set once a request on this page was answered 401: the session ended while in use, which the sign-in page says. */
 export const ENDED = ['session-ended'];
 
-/** The session ended while the page was open (a request answered 401): the sign-in page shows, saying so. */
+/**
+ * The session ended while the page was open (a request answered 401): the
+ * sign-in page shows, saying so, and what was kept in this tab for the person
+ * goes (kept.ts).
+ */
 export function endSession(queries: QueryClient): void {
+  dropKept();
   queries.setQueryData(ENDED, true);
   queries.setQueryData(['session'], null);
 }

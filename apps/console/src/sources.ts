@@ -7,6 +7,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { api, ApiError, isIntegrityFailed, isRefusal, isUuid } from './api.ts';
+import { SOURCE_LINK_KEY } from './kept.ts';
 import { refusalText } from './refusals.ts';
 import type { Role } from './session.tsx';
 import { t } from './text.ts';
@@ -96,8 +97,7 @@ export interface Started {
   readonly authoriseUrl: string;
 }
 
-const KEY = 'agentx.source-link.';
-const keyOf = (user: string, organization: string) => `${KEY}${user.toLowerCase()}/${organization}`;
+const keyOf = (user: string, organization: string) => `${SOURCE_LINK_KEY}${user.toLowerCase()}/${organization}`;
 
 const isStarted = (value: unknown): value is Started =>
   typeof value === 'object' &&
@@ -113,11 +113,18 @@ const isStarted = (value: unknown): value is Started =>
   'expiresAt' in value.link &&
   typeof value.link.expiresAt === 'string';
 
-/** The link this person started in this organisation and tab, or none (storage cleared or blocked). */
-export function startedLink(user: string, organization: string): Started | undefined {
+/**
+ * The link this person started in this organisation and tab, or none (storage
+ * cleared or blocked). One past its time at the bank is forgotten: the
+ * partner has stopped waiting, so nothing can come of it.
+ */
+export function startedLink(user: string, organization: string, now = Date.now()): Started | undefined {
   try {
     const kept: unknown = JSON.parse(sessionStorage.getItem(keyOf(user, organization)) ?? 'null');
-    return isStarted(kept) ? kept : undefined;
+    if (!isStarted(kept)) return undefined;
+    if (Date.parse(kept.link.expiresAt) > now) return kept;
+    sessionStorage.removeItem(keyOf(user, organization));
+    return undefined;
   } catch {
     return undefined;
   }

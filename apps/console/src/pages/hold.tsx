@@ -66,8 +66,19 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
   const [reference, setReference] = useState('');
   const [checked, setChecked] = useState(false);
   const [open, setOpen] = useState(false);
-  // The record's key while it has no answer: Try again records the same one, never a second.
+  // What a record's answer said, beside a refusal's words (`said`): recorded, or recorded against a newer hold.
+  const [told, setTold] = useState<string | null>(null);
+  // The record's key while it has no answer: Try again records the same one, never a second. Changing what is
+  // recorded drops it: a different record is a different write.
   const recordKey = useRef<string | null>(null);
+  const chooseConclusion = (chosen: Conclusion) => {
+    recordKey.current = null;
+    setConclusion(chosen);
+  };
+  const typeReference = (typedNow: string) => {
+    recordKey.current = null;
+    setReference(typedNow);
+  };
   const typed = reference.trim();
   const referenceBroken = isReference(typed) ? undefined : t('hold.investigate.referenceBroken');
   const close = () => {
@@ -76,6 +87,7 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
   const record = (chosen: Conclusion) =>
     run(
       async () => {
+        setTold(null);
         const idempotencyKey = recordKey.current ?? crypto.randomUUID();
         recordKey.current = idempotencyKey;
         try {
@@ -84,7 +96,14 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
             { organization: organization.id, idempotencyKey, body: { conclusion: chosen, reference: typed } },
           );
           recordKey.current = null;
+          // The API records it against the hold HELD now: one set again since this page read it isn't the one
+          // shown, so it is neither kept nor offered to clear with.
+          if (investigation.holdVersion !== hold.version) {
+            setTold(t('hold.investigate.newerHold'));
+            return;
+          }
           keepInvestigation(session.userId, organization.id, investigation);
+          setTold(t('hold.investigate.done'));
           setConclusion(null);
           setReference('');
           setChecked(false);
@@ -94,7 +113,7 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
           throw error;
         }
       },
-      { done: t('hold.investigate.done'), after: close },
+      { after: close },
     );
   return (
     <section className="stack" aria-labelledby="investigate-title">
@@ -104,7 +123,7 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
         legend={t('hold.investigate.conclusion')}
         options={CONCLUSIONS.map((each) => [each, t(`hold.conclusion.${each}`)] as const)}
         chosen={conclusion}
-        onChoose={setConclusion}
+        onChoose={chooseConclusion}
         broken={checked && conclusion === null ? t('hold.investigate.chooseOne') : undefined}
         disabled={busy}
       />
@@ -113,7 +132,7 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
         hint={t('hold.investigate.referenceHint')}
         most={REFERENCE_MOST}
         value={reference}
-        onChange={setReference}
+        onChange={typeReference}
         broken={checked ? referenceBroken : undefined}
         autoComplete="off"
         spellCheck={false}
@@ -130,6 +149,7 @@ function Investigate({ hold, onRecorded }: { readonly hold: Hold; readonly onRec
       >
         {t('hold.investigate.button')}
       </button>
+      <Said said={told} />
       <Said said={said} />
       {open && conclusion !== null && (
         <Confirm

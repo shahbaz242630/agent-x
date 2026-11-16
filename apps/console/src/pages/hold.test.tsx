@@ -348,3 +348,154 @@ describe('clearing the hold (6D4a)', () => {
     expect(goTo).not.toHaveBeenCalled();
   });
 });
+
+describe('the clear’s confirm, back from the passkey (6D4a)', () => {
+  const confirmAt = 'POST /v1/integrity-hold/clear/confirm';
+  const keptChange = `agentx.step-up.${CHALLENGE}`;
+  const back = () => {
+    sessionStorage.setItem(
+      keptChange,
+      JSON.stringify({
+        challenge: CHALLENGE,
+        label: 'Clear the integrity hold (investigation INC-2041)',
+        confirmPath: '/v1/integrity-hold/clear/confirm',
+        body: { investigationId: INVESTIGATION },
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-7000-8000-0000000000c1',
+      }),
+    );
+    open(`${page}?stepped=${CHALLENGE}`);
+  };
+
+  it.each([
+    ['history not yet checked', refused(409, 'HISTORY_UNCHECKED'), /hasn't finished checking every request/],
+    ['the hold changed meanwhile', refused(409, 'HOLD_CHANGED'), /The hold changed while this was being done/],
+    ['a step-up for another hold', refused(403, 'STEP_UP_FAILED'), /wasn't for this hold as it stands now/],
+    ['records still failing their check', refused(503, 'INTEGRITY_FAILED'), /still fail Agent X's integrity check/],
+  ])('says %s in the hold’s words, and ends it', async (_what, given, said) => {
+    as('admin');
+    answer(confirmAt, given);
+    back();
+    await press('Confirm');
+    expect((await screen.findAllByText(said)).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Agent X didn't make this change: Clear the integrity hold/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+    expect(sessionStorage.getItem(keptChange)).toBeNull();
+    expect(screen.queryByText(/couldn't be reached/)).toBeNull();
+  });
+
+  it('keeps the change to try again after a failure on the way', async () => {
+    as('admin');
+    answer(confirmAt, { status: 0 }, { status: 200, body: CLEAR });
+    back();
+    await press('Confirm');
+    expect(await screen.findByText(/couldn't be reached, so the change isn't made yet/)).toBeDefined();
+    expect(sessionStorage.getItem(keptChange)).not.toBeNull();
+    await press('Confirm');
+    expect(await screen.findByText(/^Done: Clear the integrity hold/)).toBeDefined();
+  });
+});
+
+describe('what an investigation’s answer and its key keep (6D4a)', () => {
+  const fill = async (reference: string) => {
+    await userEvent.click(await screen.findByRole('radio', { name: /no tampering/ }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Incident reference' }), reference);
+  };
+  const record = async () => {
+    await press('Record it');
+    await inDialog('Record now');
+  };
+
+  it('says one recorded against a newer hold plainly, and neither keeps nor offers it', async () => {
+    as('admin');
+    answer('POST /v1/integrity-hold/investigations', {
+      status: 201,
+      body: { investigation: investigation({ holdVersion: 5 }) },
+    });
+    open(page);
+    await fill('INC-9');
+    await record();
+    expect(await screen.findByText(/against a newer hold than this page showed/)).toBeDefined();
+    expect(screen.queryByText('The investigation is recorded.')).toBeNull();
+    expect(sessionStorage.getItem(keptAt)).toBeNull();
+    expect(screen.queryByRole('radio', { name: /INC-2041/ })).toBeNull();
+  });
+
+  it('records with a fresh key once the reference changes after no answer', async () => {
+    as('admin');
+    answer('POST /v1/integrity-hold/investigations', { status: 0 }, refused(409, 'IDEMPOTENCY_KEY_REUSED'));
+    open(page);
+    await fill('INC-1');
+    await record();
+    expect(await screen.findByText(/couldn't be reached/)).toBeDefined();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Incident reference' }), '2');
+    await record();
+    expect(await screen.findByText(/already used for an earlier request/)).toBeDefined();
+    const keys = posts().map((one) => one.key);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(posts()[1]?.body).toEqual({ conclusion: 'NO_TAMPERING', reference: 'INC-12' });
+  });
+
+  it('records with a fresh key once the conclusion changes after no answer', async () => {
+    as('admin');
+    answer('POST /v1/integrity-hold/investigations', { status: 0 });
+    open(page);
+    await fill('INC-1');
+    await record();
+    expect(await screen.findByText(/couldn't be reached/)).toBeDefined();
+    await userEvent.click(screen.getByRole('radio', { name: /cause was found and removed/ }));
+    await record();
+    await vi.waitFor(() => {
+      expect(posts()).toHaveLength(2);
+    });
+    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
+  });
+});
+
+describe('what is kept goes with the session (6D4a)', () => {
+  const linkKept = `agentx.source-link.${ME}/${ORG.id}`;
+  const stepUpKept = `agentx.step-up.${CHALLENGE}`;
+  const keepBoth = () => {
+    keep(investigation());
+    sessionStorage.setItem(linkKept, JSON.stringify({ link: { id: OLDER, expiresAt: FUTURE }, authoriseUrl: 'x' }));
+    sessionStorage.setItem(stepUpKept, '{}');
+  };
+
+  it('is forgotten on signing out, a step-up’s kept change left to its own module', async () => {
+    as('admin');
+    answer('POST /v1/auth/sign-out', { status: 200 });
+    keepBoth();
+    open('/more');
+    await press('Sign out');
+    await vi.waitFor(() => {
+      expect(sessionStorage.getItem(keptAt)).toBeNull();
+    });
+    expect(sessionStorage.getItem(linkKept)).toBeNull();
+    expect(sessionStorage.getItem(stepUpKept)).toBe('{}');
+  });
+
+  it('is forgotten when the session ends while the page is open', async () => {
+    as('admin');
+    answer('GET /v1/integrity-hold', refused(401, 'UNAUTHENTICATED'));
+    keepBoth();
+    open(page);
+    expect(await screen.findByText(/session ended/i)).toBeDefined();
+    expect(sessionStorage.getItem(keptAt)).toBeNull();
+    expect(sessionStorage.getItem(linkKept)).toBeNull();
+  });
+
+  it('forgets nothing, and still ends the session, when storage is blocked', async () => {
+    as('admin');
+    answer('GET /v1/integrity-hold', refused(401, 'UNAUTHENTICATED'));
+    const key = vi.spyOn(Storage.prototype, 'key').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    try {
+      keepBoth();
+      open(page);
+      expect(await screen.findByText(/session ended/i)).toBeDefined();
+    } finally {
+      key.mockRestore();
+    }
+  });
+});

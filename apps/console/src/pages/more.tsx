@@ -4,6 +4,7 @@ import { useState } from 'react';
 
 import { api } from '../api.ts';
 import { dropAllTries } from '../held-tries.ts';
+import { dropKept } from '../kept.ts';
 import { goTo } from '../navigate.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
@@ -31,6 +32,7 @@ export function More() {
     }
     queries.clear();
     dropAllTries();
+    dropKept();
     goTo('/');
   };
   return (

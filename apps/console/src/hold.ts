@@ -9,6 +9,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { api, isIntegrityFailed, isUuid } from './api.ts';
+import { HOLD_INVESTIGATIONS_KEY } from './kept.ts';
 import { refusalText } from './refusals.ts';
 import type { Role } from './session.tsx';
 import { t, type TextKey } from './text.ts';
@@ -83,8 +84,7 @@ export const reasonText = (reason: string | null): string => {
 export const foundOnText = (foundOn: string | null): string =>
   foundOn === null ? t('hold.reason.none') : foundOn.replaceAll('_', ' ');
 
-const KEY = 'agentx.hold-investigations.';
-const keyOf = (user: string, organization: string) => `${KEY}${user.toLowerCase()}/${organization}`;
+const keyOf = (user: string, organization: string) => `${HOLD_INVESTIGATIONS_KEY}${user.toLowerCase()}/${organization}`;
 
 const isInvestigation = (value: unknown): value is Investigation =>
   typeof value === 'object' &&
@@ -137,6 +137,7 @@ const REFUSALS = new Set([
   'STEP_UP_FAILED',
   'STEP_UP_NOT_ASKED',
   'IDEMPOTENCY_KEY_BUSY',
+  'IDEMPOTENCY_KEY_REUSED',
   'RATE_LIMITED',
   'BAD_REQUEST',
   'FORBIDDEN',
