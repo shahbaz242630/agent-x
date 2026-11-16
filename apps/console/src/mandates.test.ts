@@ -8,6 +8,7 @@ import { ApiError } from './api.ts';
 import {
   amountMinor,
   amountTyped,
+  amountWords,
   carryIn,
   currencyDigits,
   decidesTheDraft,
@@ -88,6 +89,20 @@ describe('an amount typed in dirhams (6D3a)', () => {
     expect(currencyDigits('JPY')).toBe(0);
     expect(currencyDigits('KWD')).toBe(3);
     expect(currencyDigits('A1')).toBeUndefined();
+    // Intl formats any well-formed code: one it doesn't list as a currency isn't known.
+    expect(currencyDigits('XYZ')).toBeUndefined();
+    expect(currencyDigits('aed')).toBe(2);
+  });
+
+  it('says what to type in the account’s currency and digits, AED’s until one is chosen', () => {
+    expect(amountWords(undefined)).toEqual({
+      currency: 'AED',
+      example: '2500.00',
+      decimals: 'with at most 2 decimals',
+    });
+    expect(amountWords('JPY')).toEqual({ currency: 'JPY', example: '2500', decimals: 'with no decimals' });
+    expect(amountWords('KWD')).toMatchObject({ example: '2500.000', decimals: 'with at most 3 decimals' });
+    expect(amountWords('XYZ')).toMatchObject({ currency: 'XYZ', example: '2500.00' });
   });
 
   it('shows whole fils to change as they read back, never grouped', () => {

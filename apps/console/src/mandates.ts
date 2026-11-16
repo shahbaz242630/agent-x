@@ -172,6 +172,24 @@ export function amountTyped(minor: number, digits = AED_DIGITS): string {
 /** The minor digits amounts in `currency` are typed with; none for a currency the browser can't read. */
 export const currencyDigits = (currency: string): number | undefined => knownMinorDigits(currency);
 
+/**
+ * How an amount field says what to type: its currency (the chosen bank
+ * account's, AED's until one is chosen), an example in that currency's own
+ * digits, and how many decimals it takes.
+ */
+export function amountWords(
+  currency: string | undefined,
+): Readonly<Record<'currency' | 'example' | 'decimals', string>> {
+  const shown = currency ?? 'AED';
+  const digits = currencyDigits(shown) ?? AED_DIGITS;
+  return {
+    currency: shown,
+    example: amountTyped(2500 * 10 ** digits, digits),
+    decimals:
+      digits === 0 ? t('mandates.form.decimals.none') : t('mandates.form.decimals.some', { digits: String(digits) }),
+  };
+}
+
 /** The most characters a purpose may have (PURPOSE_MOST), the suppliers one names (MOST_ALLOWED_SUPPLIERS). */
 export const PURPOSE_MOST = 200;
 export const SUPPLIERS_MOST = 100;

@@ -123,6 +123,13 @@ export const isCancellable = (status: Status): boolean =>
 
 /** A currency's minor digits as Intl knows them (AED: 2); none for a code it can't read (6D3a types amounts by them). */
 export function knownMinorDigits(currency: string): number | undefined {
+  // Intl formats any well-formed code (`XYZ` too, as 2 digits): only one it lists as a currency is known.
+  if (
+    typeof Intl.supportedValuesOf === 'function' &&
+    !Intl.supportedValuesOf('currency').includes(currency.toUpperCase())
+  ) {
+    return undefined;
+  }
   try {
     return new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
   } catch {

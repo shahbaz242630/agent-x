@@ -9,10 +9,13 @@
 //   what happens to the pending requests; resume; revoke, which can't be undone.
 // - The over-limit choice on the version in force, in the API's `over_limit`
 //   words, none picked.
-// Each dialog is pinned to the mandate as it was when opened: it shows and
-// sends that alone, and if a re-read finds the mandate changed meanwhile (a
-// draft replaced or accepted, its status or choice moved) it says so and can't
-// be confirmed, so a passkey never signs what the admin didn't read.
+// The client pins what it shows: each dialog keeps the mandate as it was when
+// opened, shows and sends that alone, and if a re-read finds it changed
+// meanwhile (a draft replaced or accepted, its status or choice moved) it says
+// so and can't be confirmed. The server binds the rest: an acceptance by the
+// `versionId` it names; a suspend, resume, revoke or over-limit choice by the
+// API's challenge, bound at the ask to the mandate's latest signed event
+// (mandate-moves.ts).
 // Only an admin is shown them; the API checks again whatever is pressed.
 import { useState } from 'react';
 

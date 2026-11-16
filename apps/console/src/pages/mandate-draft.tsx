@@ -21,6 +21,7 @@ import { useBrakeList } from '../brakes.ts';
 import { Confirm } from '../confirm.tsx';
 import { type DraftWhose, type HeldDraft, heldDraft, holdDraft } from '../held-tries.ts';
 import {
+  amountWords,
   decidesTheDraft,
   draftBody,
   draftFailure,
@@ -237,9 +238,9 @@ function DraftFrame({
 
 /** What each problem says, in place. */
 const brokenBy =
-  (problems: readonly DraftProblem[]): Broken =>
+  (problems: readonly DraftProblem[], currency: string | undefined): Broken =>
   (problem) =>
-    problems.includes(problem) ? t(`mandates.form.broken.${problem}`) : undefined;
+    problems.includes(problem) ? t(`mandates.form.broken.${problem}`, amountWords(currency)) : undefined;
 
 /** The currency of the chosen bank account, as the API takes the mandate's: the version's own while it isn't listed. */
 function useCurrency(source: string | null, fallback: string | undefined): string | undefined {
@@ -362,7 +363,7 @@ function DraftForm() {
     setProblems(found);
     return found.length === 0 && currency !== undefined ? draftBody(typed, currency) : undefined;
   };
-  const broken = brokenBy(problems);
+  const broken = brokenBy(problems, currency);
   return (
     <DraftFrame
       whose={{ user: session.userId, organization: organization.id, mandate: null }}
@@ -377,7 +378,7 @@ function DraftForm() {
       agent={agent?.name}
     >
       <MandateOwn typed={typed} set={set} broken={broken} />
-      <TermsFields typed={typed} set={set} broken={broken} inForce={null} />
+      <TermsFields typed={typed} set={set} broken={broken} inForce={null} currency={currency} />
     </DraftFrame>
   );
 }
@@ -433,7 +434,13 @@ function RedraftForm({ mandate, back }: { readonly mandate: MandateDetails; read
       review={review}
     >
       <p className="muted">{t('mandates.redraft.intro')}</p>
-      <TermsFields typed={typed} set={set} broken={brokenBy(problems)} inForce={mandate.current} />
+      <TermsFields
+        typed={typed}
+        set={set}
+        broken={brokenBy(problems, currency)}
+        inForce={mandate.current}
+        currency={currency}
+      />
     </DraftFrame>
   );
 }

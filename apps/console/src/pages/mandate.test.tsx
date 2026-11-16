@@ -670,7 +670,8 @@ describe('drafting a mandate', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Review' }));
 
     expect(screen.getByText("The most for one request can't be above the most in a month.")).toBeDefined();
-    expect(screen.getByText(/Type an amount above zero, such as 1000/)).toBeDefined();
+    expect(screen.getByText('Type an amount above zero, such as 2500.00, with at most 2 decimals.')).toBeDefined();
+    expect(screen.getByText('Such as 2500.00, with at most 2 decimals.')).toBeDefined();
     expect(screen.getByText('Choose a date and time in the future.')).toBeDefined();
   });
 

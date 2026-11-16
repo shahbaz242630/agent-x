@@ -15,6 +15,7 @@ import {
   SUPPLIERS_MOST,
   type TermsProblem,
   type TermsTyped,
+  amountWords,
   useSourceList,
 } from '../mandates.ts';
 import { amountText, timeText } from '../requests.ts';
@@ -193,13 +194,17 @@ export function TermsFields({
   set,
   broken,
   inForce,
+  currency,
 }: {
   readonly typed: TermsTyped;
   readonly set: (part: Partial<TermsTyped>) => void;
   readonly broken: Broken;
   /** The version in force, for a new version: what it holds is said beside each setting. */
   readonly inForce: MandateVersion | null;
+  /** The chosen bank account's currency, which the amounts are typed in; none until one is chosen. */
+  readonly currency: string | undefined;
 }) {
+  const amounts = amountWords(currency);
   const sources = useSourceOptions(typed.fundingSourceId);
   const was = <T,>(read: (version: MandateVersion) => T, words: (value: T) => string) =>
     inForce === null ? undefined : words(read(inForce));
@@ -218,8 +223,8 @@ export function TermsFields({
       {LIMITS.map(([field, words]) => (
         <LineField
           key={field}
-          label={t(words)}
-          hint={t(`${words}Hint`)}
+          label={t(words, amounts)}
+          hint={t(`${words}Hint`, amounts)}
           most={AMOUNT_MOST}
           value={typed[field]}
           onChange={(value) => {
