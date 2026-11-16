@@ -122,7 +122,7 @@ export const isCancellable = (status: Status): boolean =>
   status === 'APPROVAL_REQUIRED' || status === 'APPROVED' || status === 'INSTRUCTION_READY';
 
 /** A currency's minor digits as Intl knows them (AED: 2); 2 for a code it doesn't. */
-function minorDigits(currency: string): number {
+export function minorDigits(currency: string): number {
   try {
     return new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
   } catch {
