@@ -7,7 +7,7 @@
 // second effect) sends the same key, which the API answers with the same
 // record; a "try again" is the same download again too.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api, isIntegrityFailed, isSignedOut, isUuid } from './api.ts';
 import type { LogEvent } from './logs.ts';
@@ -158,12 +158,15 @@ function visitKey(organization: string, id: string, now: number = Date.now()): s
  */
 export function useEvidence(id: string, organization: string, allowed: boolean) {
   const queries = useQueryClient();
+  // Taken once a mount, so every send of it (a "try again" however late) is the same download; the map only
+  // carries it across a remount within VISIT_MS.
+  const [idempotencyKey] = useState(() => visitKey(organization, id));
   const asked = useMutation({
     mutationFn: () =>
       api.post<EvidenceAnswer>(`/v1/spend-requests/${encodeURIComponent(id)}/evidence-exports`, {
         organization,
         body: {},
-        idempotencyKey: visitKey(organization, id),
+        idempotencyKey,
       }),
     onError: (error) => {
       if (isSignedOut(error)) endSession(queries);

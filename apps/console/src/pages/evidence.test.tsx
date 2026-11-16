@@ -434,6 +434,18 @@ describe('the evidence refused or failed (6C2)', () => {
     expect(posts()[1]?.key).toBe(posts()[0]?.key);
   });
 
+  it('sends the same key on a "try again" made more than 10 minutes after the first send', async () => {
+    signedIn();
+    answer(`POST ${PATH}`, refusal(503, 'INTEGRITY_FAILED'), { status: 201, body: { evidence: handedOff() } });
+    open(`/approvals/${ID}/evidence`);
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60_000 + 1);
+    await userEvent.click(retry);
+    expect(await screen.findByRole('heading', { name: 'The request' })).toBeDefined();
+    expect(posts()).toHaveLength(2);
+    expect(posts()[1]?.key).toBe(posts()[0]?.key);
+  });
+
   it.each([
     ['EVIDENCE_TOO_LARGE', 409, /more than 2,000 events/],
     ['EVIDENCE_CHANGED_WHILE_READING', 409, /kept changing while Agent X read it/],
