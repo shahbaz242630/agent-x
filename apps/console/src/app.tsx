@@ -14,6 +14,8 @@ import {
 } from '@tanstack/react-router';
 import type { ReactElement } from 'react';
 import { isRefusal, isSignedOut } from './api.ts';
+import { AgentPage } from './pages/agent.tsx';
+import { RegisterAgent } from './pages/agent-register.tsx';
 import { Approvals } from './pages/approvals.tsx';
 import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
@@ -76,6 +78,19 @@ function Request(): ReactElement {
   return <RequestPage key={id} id={id} />;
 }
 
+/** One agent's page (6D1): `/agents/<id>`, with its keys. */
+function AgentAt(): ReactElement {
+  const id = useIdInAddress();
+  return <AgentPage key={id} id={id} />;
+}
+
+/** The Agents tab: the agents with their brake (6B2), and registering one (6D1). */
+const Agents = (): ReactElement => (
+  <BrakeList kind="agents">
+    <RegisterAgent />
+  </BrakeList>
+);
+
 /** One payment's page (6C1): `/payments/<id>`, its organisation in `?org=` as a request's. */
 function Payment(): ReactElement {
   const id = useIdInAddress();
@@ -101,7 +116,8 @@ const routes = root.addChildren([
     component: () => <Payments list="exceptions" />,
   }),
   createRoute({ getParentRoute: () => root, path: '/payments/$id', component: Payment }),
-  createRoute({ getParentRoute: () => root, path: '/agents', component: () => <BrakeList kind="agents" /> }),
+  createRoute({ getParentRoute: () => root, path: '/agents', component: Agents }),
+  createRoute({ getParentRoute: () => root, path: '/agents/$id', component: AgentAt }),
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: () => <BrakeList kind="suppliers" /> }),
   createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),

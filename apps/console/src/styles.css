@@ -508,3 +508,30 @@ select {
   background: var(--paper);
   color: var(--ink);
 }
+
+/* An agent's page (6D1): a plain list inside the facts, and a new key shown once. */
+.plain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.key-once {
+  display: grid;
+  gap: 10px;
+}
+
+.key-once h2 {
+  margin: 0;
+  font-size: 1.0781rem;
+}
+
+/* The key itself: wraps anywhere, so a long key never scrolls the page sideways. */
+.secret {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}

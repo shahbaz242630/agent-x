@@ -8,7 +8,8 @@
 // bank account, after choosing what happens to the held requests for a
 // supplier (decision 9, the `reactivate` words). The buttons show by role only;
 // the API checks again whatever is pressed. Look A "Statement": nothing shouts.
-import { useState } from 'react';
+import { Link } from '@tanstack/react-router';
+import { type ReactNode, useState } from 'react';
 
 import { atOnce, type Braked, brakeRefusal, type Kind, KINDS, REACTIVATING, useBrakeList } from '../brakes.ts';
 import { Confirm } from '../confirm.tsx';
@@ -27,12 +28,14 @@ const NONE: Open = { kind: 'none' };
 
 function Row({
   thing,
+  linked,
   canSuspend,
   canReactivate,
   busy,
   onOpen,
 }: {
   readonly thing: Braked;
+  readonly linked: boolean;
   readonly canSuspend: boolean;
   readonly canReactivate: boolean;
   readonly busy: boolean;
@@ -46,7 +49,13 @@ function Row({
     <li className="row">
       <span className="row-main">
         <span>
-          {thing.name}
+          {linked ? (
+            <Link to="/agents/$id" params={{ id: thing.id }}>
+              {thing.name}
+            </Link>
+          ) : (
+            thing.name
+          )}
           {thing.suspended && <span className="tag warn">{t('brakes.suspended')}</span>}
           {thing.ended && <span className="tag">{t('brakes.ended')}</span>}
         </span>
@@ -69,13 +78,13 @@ function Row({
   );
 }
 
-/** One kind's list, each with its brake. */
-export function BrakeList({ kind }: { readonly kind: Kind }) {
+/** One kind's list, each with its brake; `children` what else the tab offers (registering an agent, 6D1). */
+export function BrakeList({ kind, children }: { readonly kind: Kind; readonly children?: ReactNode }) {
   const { organization } = useActing();
   const listed = useBrakeList(kind, organization.id);
   const { busy, said, run } = useChange(brakeRefusal);
   const [open, setOpen] = useState<Open>(NONE);
-  const { path, suspending, reactivateChooses } = KINDS[kind];
+  const { path, suspending, reactivateChooses, linked } = KINDS[kind];
   const canSuspend = suspending.includes(organization.role);
   const canReactivate = REACTIVATING.includes(organization.role);
   const pages = listed.data?.pages ?? [];
@@ -106,6 +115,7 @@ export function BrakeList({ kind }: { readonly kind: Kind }) {
       <h1>{t(`brakes.${kind}.title`)}</h1>
       <p className="muted">{t(`brakes.${kind}.intro`)}</p>
       {!canSuspend && <p className="muted">{t(`brakes.${kind}.viewOnly`)}</p>}
+      {children}
       {listed.isPending && <Loading />}
       {listed.isError && <Retry onRetry={() => void listed.refetch()} />}
       {listed.isSuccess && shown.length === 0 && <p className="muted">{t(`brakes.${kind}.none`)}</p>}
@@ -115,6 +125,7 @@ export function BrakeList({ kind }: { readonly kind: Kind }) {
             <Row
               key={thing.id}
               thing={thing}
+              linked={linked}
               canSuspend={canSuspend}
               canReactivate={canReactivate}
               busy={busy}

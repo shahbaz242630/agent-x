@@ -25,7 +25,7 @@ import {
 } from '../payments.ts';
 import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
-import { type Asked, ask, askFirst, changeAt } from '../step-up.ts';
+import { type Asked, ask, askFirst, changeAt, mustStepUp } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, Retry } from './failed.tsx';
@@ -168,15 +168,8 @@ function MarkFailed({ payment }: { readonly payment: PaymentDetails }) {
     after: close,
     refusal: (error: unknown) => markRefusal(error, step),
   });
-  /**
-   * A step's ask only asks: answered with no passkey asked, nothing was
-   * proposed, confirmed or withdrawn (as a brake's atOnce the other way
-   * round), so it is refused, never said done, and the payment read again.
-   */
-  const stepping = async (asking: Promise<{ readonly done: unknown } | 'stepping'>) => {
-    if ((await asking) !== 'stepping') throw new ApiError(200, 'STEP_UP_NOT_ASKED');
-    return 'stepping';
-  };
+  // A step's ask only asks: answered with no passkey asked, nothing was proposed, confirmed or withdrawn (mustStepUp).
+  const stepping = mustStepUp;
   // The reference and the consequence are asked with; the version of the words shown goes with the confirm (CO3).
   const propose = (statementVersion?: number) =>
     run(

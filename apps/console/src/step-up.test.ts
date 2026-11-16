@@ -5,7 +5,16 @@
 // it once the API has decided, but not after a failure on the way.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ask, askFirst, confirm, forget, pendingFor, stepUpAddress, StepUpStorageBlocked } from './step-up.ts';
+import {
+  ask,
+  askFirst,
+  confirm,
+  forget,
+  mustStepUp,
+  pendingFor,
+  stepUpAddress,
+  StepUpStorageBlocked,
+} from './step-up.ts';
 
 vi.mock('./navigate.ts', () => ({ goTo: vi.fn() }));
 const { goTo } = await import('./navigate.ts');
@@ -167,7 +176,8 @@ describe('confirm', () => {
   it('sends the ask’s body with the challenge, in its organisation, and forgets it once done', async () => {
     answer = () => json(200, { frozen: true });
 
-    await confirm(pending);
+    // Its answer goes back to the caller (an agent's new key arrives in it, 6D1).
+    expect(await confirm(pending)).toEqual({ frozen: true });
     expect(sent[0]?.path).toBe('/v1/organization/freeze/confirm');
     expect(JSON.parse(sent[0]?.init.body as string)).toEqual({
       pendingRequests: 'pause',
@@ -197,5 +207,15 @@ describe('confirm', () => {
     await confirm(pending);
     // The same write again: had the first reached the API, this replays its answer.
     expect(keyOf(1)).toBe(keyOf(0));
+  });
+});
+
+describe('mustStepUp', () => {
+  it('passes a change that left to sign in again, and refuses one answered with no passkey asked', async () => {
+    await expect(mustStepUp(Promise.resolve('stepping'))).resolves.toBe('stepping');
+    await expect(mustStepUp(Promise.resolve({ done: {} }))).rejects.toMatchObject({
+      status: 200,
+      code: 'STEP_UP_NOT_ASKED',
+    });
   });
 });
