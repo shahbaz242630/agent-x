@@ -16,6 +16,8 @@ describe('isAgentName', () => {
     // A mathematical bold A: a letter beyond the basic plane, two UTF-16 units each.
     ['100 letters beyond the basic plane (200 UTF-16 units)', String.fromCodePoint(0x1d400).repeat(100), true],
     ['101 letters beyond the basic plane', String.fromCodePoint(0x1d400).repeat(101), false],
+    // e + a combining acute (two code points) composes to é (one), as the API counts it.
+    ['100 accented letters typed decomposed, counted composed', 'é'.repeat(100), true],
     ['emoji alone, with no letter or digit', '😀'.repeat(3), false],
     ['a joiner after a mark, inside a word', 'क्\u200Dष', true],
     ['a joiner between two Latin letters, which shows nothing', 'ab\u200Dcd', false],

@@ -150,6 +150,8 @@ function nothingKept(history: ReturnType<typeof createMemoryHistory>, queries: R
     ),
   ).not.toContain(SECRET);
   expect(history.location.href).not.toContain(SECRET);
+  // The browser's own address too, which the router's history (here a memory one) never shows.
+  expect(window.location.href).not.toContain(SECRET);
   expect(JSON.stringify(sent.map((one) => [one.path, one.body]))).not.toContain(SECRET);
   for (const level of logged) expect(JSON.stringify(level.mock.calls)).not.toContain(SECRET);
 }
@@ -317,6 +319,16 @@ describe('a new key, shown once (6D1)', () => {
     expect(later.defaultPrevented).toBe(false);
   });
 
+  it('asks nothing when the tab is closed straight after Done, before the view has gone', async () => {
+    backFromStepUp();
+    await confirmed();
+    // Pressed and left in the same moment: the router hasn't yet moved off the step-up's address.
+    fireEvent.click(screen.getByRole('button', { name: "Done, I've saved it" }));
+    const leaving = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
+  });
+
   it('says a key made on an earlier try can’t be shown again (a retry answers it null)', async () => {
     answers.set(`POST ${ROTATE}`, { status: 201, body: { ...agentRead, key: null, oldKey: 'end_now' } });
     const { history } = backFromStepUp();
@@ -335,5 +347,33 @@ describe('a new key, shown once (6D1)', () => {
     expect(await screen.findByText(`Done: ${LABEL}`)).toBeDefined();
     expect(screen.queryByRole('heading', { name: "The agent's new key" })).toBeNull();
     expect(sent.find((one) => one.path === REVOKE)?.body).toEqual({ stepUpChallengeId: CHALLENGE });
+  });
+
+  it('starts afresh for another challenge: one change’s answer is never shown as another’s', async () => {
+    const { history } = backFromStepUp(REVOKE, {});
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(`Done: ${LABEL}`)).toBeDefined();
+
+    // Back at another step-up's address (Back or Forward to it) without closing the first.
+    const other = '0199a0f0-0000-7000-8000-0000000c0fff';
+    sessionStorage.setItem(
+      `agentx.step-up.${other}`,
+      JSON.stringify({
+        challenge: other,
+        label: 'Rotate another key',
+        confirmPath: ROTATE,
+        body: { oldKey: 'overlap', statementVersion: 1 },
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-4000-8000-00000000c0df',
+      }),
+    );
+    act(() => {
+      history.push(`/agents/${AGENT}?org=${ORG.id}&stepped=${other}`);
+    });
+
+    expect(await screen.findByText('Rotate another key')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDefined();
+    expect(screen.queryByText(/^Done:/)).toBeNull();
+    expect(sent.filter((one) => one.path === ROTATE)).toHaveLength(0);
   });
 });

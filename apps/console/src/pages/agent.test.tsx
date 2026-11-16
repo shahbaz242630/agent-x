@@ -312,7 +312,10 @@ describe('rotating and revoking a key (6D1)', () => {
     as('developer', { owner: DEVELOPER });
     open(page);
     expect(await screen.findByRole('button', { name: `Revoke key ${LIVE}` })).toBeDefined();
+    // The members read in (the owner named by role), so a hand-over would be drawn by now.
+    expect(await screen.findByText('Developer')).toBeDefined();
     expect(screen.queryByRole('button', { name: /^Rotate key/ })).toBeNull();
+    expect(screen.queryByLabelText('Hand it to')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Hand over' })).toBeNull();
     cleanup();
 
