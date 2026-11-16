@@ -217,23 +217,27 @@ const UNDECIDED: ReadonlyMap<string, TextKey> = new Map([
  * the partner's offer, access, the key) says nothing of the first try, which may
  * still be at the partner, unknown.
  */
-const ENDS_A_HELD_TRY = new Set([
-  'SUPPLIER_CHANGE_WAITING',
-  'SUPPLIER_PAYEE_TAKEN',
-  'PAYEE_REGISTRATIONS_SPENT',
-  'NOT_FOUND',
-]);
+const ENDS_A_HELD_TRY = new Set(['SUPPLIER_PAYEE_TAKEN', 'PAYEE_REGISTRATIONS_SPENT', 'NOT_FOUND']);
+
+/**
+ * SUPPLIER_CHANGE_WAITING never ends a try: the API also says it from the
+ * pass-through's Tx 2, after the partner registered the payee, leaving that
+ * registration open for the same key (supplier-payees.ts). Held, Try again
+ * finishes it once the other change ends; from Tx 1 nothing started, so the
+ * same key later starts it cleanly.
+ */
+const KEEPS_A_TRY = 'SUPPLIER_CHANGE_WAITING';
 
 /**
  * Whether a pass-through's answer decides it, so its key need not be kept. A
  * first send: a refusal that is the API's final word (no answer, a 5xx, an
- * undecided 4xx and a 401 leave it held). A held try asked again: only the use
- * case's own refusals (ENDS_A_HELD_TRY).
+ * undecided 4xx, a 401 and KEEPS_A_TRY leave it held). A held try asked again:
+ * only the use case's own refusals (ENDS_A_HELD_TRY).
  */
 export const decidesTheTry = (error: unknown, retry: boolean): boolean => {
   if (!isRefusal(error)) return false;
   if (retry) return ENDS_A_HELD_TRY.has(error.code);
-  return error.status !== 401 && !UNDECIDED.has(error.code);
+  return error.status !== 401 && !UNDECIDED.has(error.code) && error.code !== KEEPS_A_TRY;
 };
 
 /** What a pass-through's failure says: a deciding refusal as any; otherwise why it is still held for Try again. */

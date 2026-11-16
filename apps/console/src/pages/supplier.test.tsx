@@ -686,7 +686,6 @@ describe('giving new bank details (6D2, ADR-012)', () => {
   });
 
   it.each([
-    ['SUPPLIER_CHANGE_WAITING', /Another change to this supplier is waiting/],
     ['SUPPLIER_PAYEE_TAKEN', /already paid to this bank account/],
     ['PAYEE_REGISTRATIONS_SPENT', /as many bank details today/],
   ])('keeps no key once a retry meets the use case’s own %s: that try is ended', async (code, said) => {
@@ -710,6 +709,8 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     ['FORBIDDEN', 403, /role in this organisation can't do this\. Ask an admin\. The earlier try is still held/],
     ['PAYEE_ROUTE_NOT_OFFERED', 409, /doesn't take bank details that way\. .* The earlier try is still held/],
     ['ORG_FROZEN', 409, /frozen.* The earlier try is still held/],
+    // Also said from the pass-through's Tx 2, its registration left open at the partner for this key.
+    ['SUPPLIER_CHANGE_WAITING', 409, /Another change to this supplier is waiting.* The earlier try is still held/],
     ['IDEMPOTENCY_KEY_REUSED', 400, /reason IDEMPOTENCY_KEY_REUSED.* The earlier try is still held/],
   ])('keeps a held try locked with its key when a gate refuses its retry with %s', async (code, status, said) => {
     as('admin');
@@ -1031,6 +1032,8 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(await screen.findByText('New bank details waiting')).toBeDefined();
     expect(screen.queryByLabelText('IBAN')).toBeNull();
     expect(screen.getByText(/Another change to this supplier is waiting/)).toBeDefined();
+    // Kept: the API may have said it after the partner registered the payee, so the same key must finish it.
+    expect(heldTry(WHOSE)).toBeDefined();
   });
 
   it('asks the browser never to save or offer back the holder’s name or the IBAN', async () => {
