@@ -42,6 +42,10 @@ export function More() {
         <Link to="/more/suppliers">{t('brakes.suppliers.title')}</Link>
         <Link to="/more/sources">{t('brakes.sources.title')}</Link>
       </nav>
+      <nav className="stack" aria-label={t('mandates.title')}>
+        <h2>{t('mandates.title')}</h2>
+        <Link to="/more/mandates">{t('mandates.title')}</Link>
+      </nav>
       {/* The logs are an admin's alone (decisions 24, 26): no one else is shown a way to them. */}
       {organization.role === 'admin' && (
         <nav className="stack" aria-label={t('more.records')}>

@@ -23,6 +23,9 @@ import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
 import { EvidencePage } from './pages/evidence.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
+import { MandatePage } from './pages/mandate.tsx';
+import { DraftMandate, NewVersion } from './pages/mandate-draft.tsx';
+import { MandateList } from './pages/mandates.tsx';
 import { More } from './pages/more.tsx';
 import { PaymentPage } from './pages/payment.tsx';
 import { Payments } from './pages/payments.tsx';
@@ -113,6 +116,18 @@ function Suppliers(): ReactElement {
   );
 }
 
+/** One mandate's page (6D3a): `/more/mandates/<id>`, the ID the address's fourth part. */
+function MandateAt(): ReactElement {
+  const id = useIdInAddress(3);
+  return <MandatePage key={id} id={id} />;
+}
+
+/** A new version of a mandate (6D3a): `/more/mandates/<id>/new-version`. */
+function NewVersionAt(): ReactElement {
+  const id = useIdInAddress(3);
+  return <NewVersion key={id} id={id} />;
+}
+
 /** One request's evidence, printable (6C2): `/approvals/<id>/evidence`. */
 function Evidence(): ReactElement {
   const id = useIdInAddress();
@@ -151,6 +166,10 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: Suppliers }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers/$id', component: SupplierAt }),
   createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates', component: MandateList }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates/new', component: DraftMandate }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates/$id', component: MandateAt }),
+  createRoute({ getParentRoute: () => root, path: '/more/mandates/$id/new-version', component: NewVersionAt }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
 ]);
