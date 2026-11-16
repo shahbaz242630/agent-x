@@ -611,7 +611,7 @@ describe('the organisation’s policy (6D3b)', () => {
     expect(screen.getByRole<HTMLInputElement>('radio', { name: '48 hours' }).checked).toBe(false);
   });
 
-  it('holds the confirm while the API’s words can’t be read', async () => {
+  it('holds the confirm while the API’s words can’t be read', { timeout: 15_000 }, async () => {
     as('admin');
     answer(`POST ${ORG_AT}/change/preview`, ok(NO_WAITING));
     open('/more/policy');

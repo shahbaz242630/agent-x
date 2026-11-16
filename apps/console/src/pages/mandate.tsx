@@ -5,12 +5,14 @@
 // where it comes from, and the terms: the version in force, the waiting draft,
 // or both side by side with what the draft changes marked. An admin accepts
 // the draft, drafts a new version, and suspends, resumes, revokes or makes the
-// over-limit choice here (mandate-actions.tsx).
+// over-limit choice here (mandate-actions.tsx). Links to its own rules and the
+// simulator (6D3b).
 import { Link } from '@tanstack/react-router';
 
 import { useAgent, useMembers } from '../agents.ts';
 import { isMissing } from '../api.ts';
 import { isEnded, MANAGING, type MandateDetails, useMandate } from '../mandates.ts';
+import { SIMULATING } from '../policies.ts';
 import { amountText, timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { t } from '../text.ts';
@@ -75,6 +77,19 @@ function MandateShown({ mandate }: { readonly mandate: MandateDetails }) {
           {t('mandates.redraft.open')}
         </Link>
       )}
+      <p>
+        <Link to="/more/mandates/$id/policy" params={{ id: mandate.id }}>
+          {t('mandates.policy.open')}
+        </Link>
+        {!isEnded(mandate.status) && SIMULATING.includes(organization.role) && (
+          <>
+            {' · '}
+            <Link to="/more/mandates/$id/simulate" params={{ id: mandate.id }}>
+              {t('policies.simulate.open')}
+            </Link>
+          </>
+        )}
+      </p>
       <MandateActions mandate={mandate} />
     </>
   );

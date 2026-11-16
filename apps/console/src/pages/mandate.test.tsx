@@ -339,6 +339,23 @@ describe('a mandate’s page', () => {
     expect(await screen.findByText(/This mandate has ended/)).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Revoke' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Change what happens above the limits' })).toBeNull();
+    expect(screen.getByRole('link', { name: "This mandate's own rules" })).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Try a request in the simulator' })).toBeNull();
+  });
+
+  it('links to its own rules for everyone, and to the simulator for those who may use it', async () => {
+    as('developer');
+    open(`/more/mandates/${MANDATE}`);
+    const rules = await screen.findByRole('link', { name: "This mandate's own rules" });
+    expect(rules.getAttribute('href')).toBe(`/more/mandates/${MANDATE}/policy`);
+    const simulator = screen.getByRole('link', { name: 'Try a request in the simulator' });
+    expect(simulator.getAttribute('href')).toBe(`/more/mandates/${MANDATE}/simulate`);
+    cleanup();
+
+    as('viewer');
+    open(`/more/mandates/${MANDATE}`);
+    expect(await screen.findByRole('link', { name: "This mandate's own rules" })).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Try a request in the simulator' })).toBeNull();
   });
 });
 

@@ -12,7 +12,7 @@
 // waiting requests must be the one the admin read, or it is shown again to
 // read and choose afresh; then the passkey, and the change is confirmed back
 // on this page (stepped-up.tsx), sending the versions of the words shown (CO3).
-import { Link, useNavigate } from '@tanstack/react-router';
+import { Link } from '@tanstack/react-router';
 import { type ReactNode, useState } from 'react';
 
 import { useMembers } from '../agents.ts';
@@ -54,21 +54,12 @@ import { Choices } from './choices.tsx';
 import { Loading, NotShown, Retry } from './failed.tsx';
 import { RuleEditor, RulesShown, SupplierNames, useSupplierNames } from './policy-rules.tsx';
 
-/** A link back to a mandate's page, by its address (6D3a's), kept within the console. */
+/** A link back to a mandate's page (6D3a's). */
 export function MandateLink({ id, children }: { readonly id: string; readonly children: ReactNode }) {
-  const navigate = useNavigate();
-  const href = `/more/mandates/${encodeURIComponent(id)}`;
   return (
-    <a
-      className="back"
-      href={href}
-      onClick={(event) => {
-        event.preventDefault();
-        void navigate({ href });
-      }}
-    >
+    <Link to="/more/mandates/$id" params={{ id }} className="back">
       {children}
-    </a>
+    </Link>
   );
 }
 

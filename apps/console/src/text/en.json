@@ -835,6 +835,7 @@
   "mandates.held.badRequest": "Agent X couldn't take the draft as it was sent again (its end may have passed since the first try), but the first try may have made it. Check the Mandates list before drafting again.",
   "mandates.form.decimals.some": "with at most {digits} decimals",
   "mandates.form.decimals.none": "with no decimals",
+  "mandates.policy.open": "This mandate's own rules",
   "policies.more": "Rules for agents",
   "policies.title.organization": "Organisation policy",
   "policies.title.mandate": "This mandate's own policy",
