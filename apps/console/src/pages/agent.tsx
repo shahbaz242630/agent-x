@@ -30,13 +30,13 @@ import { isMissing } from '../api.ts';
 import { Confirm } from '../confirm.tsx';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
-import { ask, changeAt, mustStepUp } from '../step-up.ts';
+import { byPasskey } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Said, useChange } from './change.tsx';
 import { Loading, NotShown } from './failed.tsx';
 
 /** A member as the console can name them: the API gives a role and IDs, no name. */
-function memberText(member: Member | undefined, me: string): string {
+export function memberText(member: Member | undefined, me: string): string {
   if (member === undefined) return t('agents.memberUnknown');
   const role = t(`choose.role.${member.role}`);
   return member.userId.toLowerCase() === me ? `${role} ${t('payments.you')}` : role;
@@ -201,11 +201,8 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
   // Each is done on its way back from the passkey (stepped-up.tsx), the new key shown there: none said here.
   const send = (label: string, path: string, body: Readonly<Record<string, unknown>>, statementVersion?: number) =>
     run(
-      () =>
-        mustStepUp(
-          // No version (a revoke, a hand-over: no API words) is left out of the confirm's JSON.
-          ask(changeAt(path, label, body, organization.id), { statementVersion }),
-        ),
+      // No version (a revoke, a hand-over: no API words) is left out of the confirm's JSON.
+      () => byPasskey(path, label, body, organization.id, { statementVersion }),
       { after: close },
     );
   const names = (key: AgentKey) => ({ key: key.id, name: agent.name });

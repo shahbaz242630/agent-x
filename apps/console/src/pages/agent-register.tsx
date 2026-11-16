@@ -9,7 +9,7 @@ import { useId, useState } from 'react';
 import { agentRefusal, isAgentName, NAME_UNITS_MOST, REGISTERING, type Scope, SCOPES } from '../agents.ts';
 import { Confirm } from '../confirm.tsx';
 import { useActing } from '../session.tsx';
-import { ask, changeAt, mustStepUp } from '../step-up.ts';
+import { byPasskey } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Scopes } from './agent.tsx';
 import { Said, useChange } from './change.tsx';
@@ -50,17 +50,11 @@ export function RegisterAgent() {
   // Sent in the API's own order, so the same ticks always send the same body.
   const asked = SCOPES.filter((scope) => scopes.includes(scope));
   const register = () =>
-    run(
-      () =>
-        mustStepUp(
-          ask(changeAt('/v1/agents', t('agents.registerLabel', { name }), { name, scopes: asked }, organization.id)),
-        ),
-      {
-        after: () => {
-          setConfirming(false);
-        },
+    run(() => byPasskey('/v1/agents', t('agents.registerLabel', { name }), { name, scopes: asked }, organization.id), {
+      after: () => {
+        setConfirming(false);
       },
-    );
+    });
   return (
     <section className="stack" aria-labelledby="register-title">
       <h2 id="register-title">{t('agents.registerTitle')}</h2>

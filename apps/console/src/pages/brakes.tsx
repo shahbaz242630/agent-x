@@ -26,16 +26,19 @@ interface Opened {
 type Open = { readonly kind: 'none' } | Opened;
 const NONE: Open = { kind: 'none' };
 
+/** Where a row's name links: an agent's page (6D1), a supplier's (6D2); a bank account has none. */
+const PAGES = { agents: '/agents/$id', suppliers: '/more/suppliers/$id', sources: null } as const;
+
 function Row({
   thing,
-  linked,
+  page,
   canSuspend,
   canReactivate,
   busy,
   onOpen,
 }: {
   readonly thing: Braked;
-  readonly linked: boolean;
+  readonly page: (typeof PAGES)[Kind];
   readonly canSuspend: boolean;
   readonly canReactivate: boolean;
   readonly busy: boolean;
@@ -49,8 +52,8 @@ function Row({
     <li className="row">
       <span className="row-main">
         <span>
-          {linked ? (
-            <Link to="/agents/$id" params={{ id: thing.id }}>
+          {page !== null ? (
+            <Link to={page} params={{ id: thing.id }}>
               {thing.name}
             </Link>
           ) : (
@@ -125,8 +128,7 @@ export function BrakeList({ kind, children }: { readonly kind: Kind; readonly ch
             <Row
               key={thing.id}
               thing={thing}
-              // An agent has its own page (6D1), its row's name linking there.
-              linked={kind === 'agents'}
+              page={PAGES[kind]}
               canSuspend={canSuspend}
               canReactivate={canReactivate}
               busy={busy}

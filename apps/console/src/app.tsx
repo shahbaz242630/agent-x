@@ -29,6 +29,8 @@ import { Payments } from './pages/payments.tsx';
 import { RequestPage } from './pages/request.tsx';
 import { Shell } from './pages/shell.tsx';
 import { SignedOut } from './pages/signed-out.tsx';
+import { SupplierPage } from './pages/supplier.tsx';
+import { AddSupplier } from './pages/supplier-add.tsx';
 import {
   ActingProvider,
   ENDED,
@@ -72,8 +74,8 @@ const root = createRootRoute({ component: Root, notFoundComponent: NotFound });
  * The ID an address such as `/approvals/<id>` names, from the address this route matched: the route's own typed
  * read would refer to the route tree it is part of, and read as untyped.
  */
-const useIdInAddress = (): string =>
-  useRouterState({ select: ({ location }) => location.pathname.split('/')[2] ?? '' });
+const useIdInAddress = (at = 2): string =>
+  useRouterState({ select: ({ location }) => location.pathname.split('/')[at] ?? '' });
 
 /** One request's page, the approver's email's link (6B1): `/approvals/<id>`, its organisation in `?org=`. */
 function Request(): ReactElement {
@@ -92,6 +94,21 @@ function Agents(): ReactElement {
   return (
     <BrakeList kind="agents">
       <RegisterAgent />
+    </BrakeList>
+  );
+}
+
+/** One supplier's page (6D2): `/more/suppliers/<id>`, the ID the address's fourth part. */
+function SupplierAt(): ReactElement {
+  const id = useIdInAddress(3);
+  return <SupplierPage key={id} id={id} />;
+}
+
+/** The Suppliers list: each with its brake (6B2), and adding one (6D2). */
+function Suppliers(): ReactElement {
+  return (
+    <BrakeList kind="suppliers">
+      <AddSupplier />
     </BrakeList>
   );
 }
@@ -131,7 +148,8 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/agents', component: Agents }),
   createRoute({ getParentRoute: () => root, path: '/agents/$id', component: AgentAt }),
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
-  createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: () => <BrakeList kind="suppliers" /> }),
+  createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: Suppliers }),
+  createRoute({ getParentRoute: () => root, path: '/more/suppliers/$id', component: SupplierAt }),
   createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
