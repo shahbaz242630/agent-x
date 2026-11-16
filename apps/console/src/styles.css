@@ -499,6 +499,7 @@ button:disabled {
 }
 
 input[type='text'],
+input[type='date'],
 select {
   font: inherit;
   width: 100%;
@@ -534,4 +535,104 @@ select {
   border-radius: 4px;
   overflow-wrap: anywhere;
   user-select: all;
+}
+
+/* The logs and a request's evidence (6C2): the filters in a grid a phone holds, buttons that read as links, hashes
+   whole in mono, and the evidence's events in a table that scrolls on its own, never the page. */
+.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+  gap: 10px 16px;
+  align-items: end;
+}
+
+.filter {
+  display: grid;
+  gap: 4px;
+}
+
+.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  text-decoration: underline;
+  font-size: inherit;
+  justify-self: start;
+  text-align: left;
+}
+
+a.button {
+  text-decoration: none;
+  text-align: center;
+}
+
+.hashes {
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+details > summary {
+  cursor: pointer;
+  font-size: 0.7875rem;
+  color: var(--ink-soft);
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.events {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.7875rem;
+}
+
+.events th,
+.events td {
+  text-align: left;
+  vertical-align: top;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.events td {
+  min-width: 8ch;
+  overflow-wrap: anywhere;
+}
+
+.events .hashes {
+  display: block;
+  min-width: 24ch;
+}
+
+/* Printed evidence: the record alone, ink on white, none of the console's frame or buttons. */
+@media print {
+  .bar,
+  .tabs,
+  .banner,
+  .no-print {
+    display: none;
+  }
+
+  html,
+  body,
+  .shell {
+    background: #fff;
+    color: #000;
+    border: 0;
+  }
+
+  .shell {
+    max-width: none;
+  }
+
+  .evidence-part {
+    break-inside: avoid-page;
+  }
+
+  .events tr {
+    break-inside: avoid;
+  }
 }

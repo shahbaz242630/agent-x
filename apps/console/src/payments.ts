@@ -13,7 +13,7 @@ import { refusalText } from './refusals.ts';
 import { pageQuery } from './requests.ts';
 import { t } from './text.ts';
 
-type PaymentStatus =
+export type PaymentStatus =
   'SUBMISSION_PENDING' | 'SUBMITTED' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | 'REVERSED';
 
 /** The groups a list may be filtered to, as the API's `status` takes them, in the order the filter offers them. */
@@ -143,22 +143,4 @@ const PROPOSE_WORDS = { BAD_REQUEST: 'payments.refused.badReference' } as const;
 export function markRefusal(error: unknown, step: 'propose' | 'approve' | 'withdraw'): string {
   if (isIntegrityFailed(error)) return t('payments.integrity');
   return refusalText(error, REFUSALS, 'payments.refused', step === 'propose' ? PROPOSE_WORDS : {});
-}
-
-/**
- * Saves the payment and its history as the API answered them, as a JSON file
- * named by the payment's ID (CO6: the trail downloadable): made in the
- * browser, so nothing more is asked of the API.
- */
-export function downloadHistory(payment: PaymentDetails): void {
-  const file = new Blob([JSON.stringify(payment, null, 2)], { type: 'application/json' });
-  const address = URL.createObjectURL(file);
-  const link = document.createElement('a');
-  link.href = address;
-  link.download = `payment-${payment.id}.json`;
-  link.click();
-  // Freed once the click has been handled: some browsers (older Safari, Firefox) cancel a download freed at once.
-  setTimeout(() => {
-    URL.revokeObjectURL(address);
-  }, 0);
 }

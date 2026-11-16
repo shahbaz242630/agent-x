@@ -16,9 +16,12 @@ import type { ReactElement } from 'react';
 import { isRefusal, isSignedOut } from './api.ts';
 import { AgentPage } from './pages/agent.tsx';
 import { RegisterAgent } from './pages/agent-register.tsx';
+import { AccessLog } from './pages/access-log.tsx';
 import { Approvals } from './pages/approvals.tsx';
+import { AuditLog } from './pages/audit-log.tsx';
 import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
+import { EvidencePage } from './pages/evidence.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
 import { More } from './pages/more.tsx';
 import { PaymentPage } from './pages/payment.tsx';
@@ -93,6 +96,12 @@ function Agents(): ReactElement {
   );
 }
 
+/** One request's evidence, printable (6C2): `/approvals/<id>/evidence`. */
+function Evidence(): ReactElement {
+  const id = useIdInAddress();
+  return <EvidencePage key={id} id={id} />;
+}
+
 /** One payment's page (6C1): `/payments/<id>`, its organisation in `?org=` as a request's. */
 function Payment(): ReactElement {
   const id = useIdInAddress();
@@ -111,6 +120,7 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/approvals', component: () => <Approvals list="waiting" /> }),
   createRoute({ getParentRoute: () => root, path: '/approvals/all', component: () => <Approvals list="all" /> }),
   createRoute({ getParentRoute: () => root, path: '/approvals/$id', component: Request }),
+  createRoute({ getParentRoute: () => root, path: '/approvals/$id/evidence', component: Evidence }),
   createRoute({ getParentRoute: () => root, path: '/payments', component: () => <Payments list="all" /> }),
   createRoute({
     getParentRoute: () => root,
@@ -123,6 +133,8 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more', component: More }),
   createRoute({ getParentRoute: () => root, path: '/more/suppliers', component: () => <BrakeList kind="suppliers" /> }),
   createRoute({ getParentRoute: () => root, path: '/more/sources', component: () => <BrakeList kind="sources" /> }),
+  createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
+  createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
 ]);
 
 /** The console's queries: a 401 anywhere means the session is gone, so the session reads as none. */

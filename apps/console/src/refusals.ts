@@ -10,7 +10,8 @@ import { t, type TextKey } from './text.ts';
 export function refusalText(
   error: unknown,
   known: ReadonlySet<string>,
-  prefix: 'request.refused' | 'brakes.refused' | 'payments.refused' | 'agents.refused',
+  prefix:
+    'request.refused' | 'brakes.refused' | 'payments.refused' | 'agents.refused' | 'logs.refused' | 'evidence.refused',
   ownWords: Readonly<Record<string, TextKey>> = {},
 ): string {
   if (error instanceof StepUpStorageBlocked) return t('request.storageBlocked');
