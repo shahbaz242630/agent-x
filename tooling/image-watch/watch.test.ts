@@ -10,6 +10,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ACCEPTED_FILE,
   compareVersions,
   escapeCommand,
   flattenAdvisories,
@@ -18,10 +19,12 @@ import {
   judgeGrype,
   main,
   parameterValue,
+  parseAccepted,
   parseVersion,
   serviceImage,
   watchedImages,
   zitadelVersion,
+  type Accepted,
   type GrypeMatch,
   type GrypeReport,
   type WatchedImage,
@@ -133,13 +136,14 @@ describe('DT5: Grype reports', () => {
     );
     expect(verdict.errors).toEqual([
       `nginx (${nginx.image}), which the local stack runs as its front door (staging uses Azure's own), has 2 ` +
-        'high or critical known vulnerabilities with a fix available: CVE-1 (critical) in libssl3 3.5.8-r0, fixed ' +
+        'high or critical known vulnerabilities with a fix available that tooling/image-watch/accepted.json does not accept: CVE-1 (critical) in libssl3 3.5.8-r0, fixed ' +
         'in 3.5.9-r0; CVE-2 (high) in libssl3 3.5.8-r0, fixed in 3.5.9-r0. ' +
         "The local stack's front door may be at risk. Move the image to a release that carries the fixes " +
-        "(Dependabot's weekly bump, or by hand per ADR-003), then run the hand deploy where staging runs it. " +
+        "(Dependabot's weekly bump, or by hand per ADR-003), then run the hand deploy where staging runs it; or, " +
+        'when no vendor image has the fix yet, accept it there with a reason and a review date. ' +
         "The full list is in this run's summary.",
     ]);
-    expect(verdict.summary).toContain('2 red, 5 report only');
+    expect(verdict.summary).toContain('2 red, 0 accepted, 5 report only');
     expect(verdict.summary).toContain('| report only | high | CVE-4 | libssl3 3.5.8-r0 | no fix yet |');
     expect(verdict.summary).toContain('| report only | unknown | an unnamed finding | ? ? | no fix yet |');
   });
@@ -168,6 +172,109 @@ describe('DT5: Grype reports', () => {
   it('goes red, never green, on a report that is not Grype’s on this image', () => {
     expect(judgeGrype(report([], 'nginx:other'), nginx).errors[0]).toMatch(/is not Grype's report on nginx:/);
     expect(judgeGrype({}, nginx).errors).toHaveLength(1);
+  });
+});
+
+describe('DT5: accepted findings (lead, S201)', () => {
+  const NOW = new Date('2026-11-17T12:00:00Z');
+  const KEYS = IMAGES.map((each) => each.key);
+  const nginx = byKey('nginx');
+  const entry = (overrides: Partial<Accepted> = {}): Accepted => ({
+    image: 'nginx',
+    id: 'CVE-1',
+    package: 'libssl3',
+    reason: 'fixed upstream in libssl3 3.5.9-r0, no vendor image with it yet',
+    reviewBy: '2026-12-01',
+    ...overrides,
+  });
+  const scan = (...ids: string[]): GrypeReport => ({
+    descriptor: { name: 'grype' },
+    source: { target: { userInput: nginx.image } },
+    matches: ids.map((id) => ({
+      vulnerability: { id, severity: 'High', fix: { state: 'fixed', versions: ['3.5.9-r0'] } },
+      artifact: { name: 'libssl3', version: '3.5.8-r0' },
+    })),
+  });
+
+  it('keeps a new finding red beside an accepted one', () => {
+    const verdict = judgeGrype(scan('CVE-1', 'CVE-2'), nginx, [entry()], NOW);
+    expect(verdict.errors).toHaveLength(1);
+    expect(verdict.errors[0]).toContain('has 1 high or critical known vulnerability');
+    expect(verdict.errors[0]).toContain('CVE-2 (high)');
+    expect(verdict.errors[0]).not.toContain('CVE-1 ');
+    expect(verdict.summary).toContain('1 red, 1 accepted, 0 report only');
+    expect(verdict.summary).toContain('| accepted until 2026-12-01 | high | CVE-1 |');
+  });
+
+  it('is green when every red finding is accepted, and only for its own image and package', () => {
+    expect(judgeGrype(scan('CVE-1'), nginx, [entry()], NOW).errors).toEqual([]);
+    expect(judgeGrype(scan('CVE-1'), nginx, [entry({ image: 'postgres' })], NOW).errors).toHaveLength(1);
+    expect(judgeGrype(scan('CVE-1'), nginx, [entry({ package: 'libcrypto3' })], NOW).errors).toHaveLength(1);
+    // The review day itself still counts.
+    expect(judgeGrype(scan('CVE-1'), nginx, [entry({ reviewBy: '2026-11-17' })], NOW).errors).toEqual([]);
+  });
+
+  it('goes red again once an entry passes its review date', () => {
+    const late = entry({ reviewBy: '2026-11-16' });
+    expect(judgeGrype(scan('CVE-1'), nginx, [late], NOW).errors).toHaveLength(1);
+    const checked = parseAccepted({ accepted: [late] }, KEYS, NOW);
+    expect(checked.entries).toEqual([late]);
+    expect(checked.errors).toEqual([
+      'The accepted finding CVE-1 (libssl3) on nginx passed its review date 2026-11-16, so it is red again. Check ' +
+        'whether the vendor shipped a fixed image, then move the pin, or renew the entry in ' +
+        'tooling/image-watch/accepted.json with a reason and a new date.',
+    ]);
+  });
+
+  it('lists an entry matching no finding as stale, so the file shrinks', () => {
+    const verdict = judgeGrype(scan('CVE-1'), nginx, [entry(), entry({ id: 'CVE-gone' })], NOW);
+    expect(verdict.errors).toEqual([]);
+    expect(verdict.summary).toContain('Stale: these accepted entries match no finding any more');
+    expect(verdict.summary).toContain('- CVE-gone in libssl3');
+    expect(judgeGrype(scan('CVE-1'), nginx, [entry()], NOW).summary).not.toContain('Stale');
+  });
+
+  it('goes red on a malformed entry, which accepts nothing', () => {
+    const checked = parseAccepted(
+      {
+        accepted: [
+          entry(),
+          'CVE-1',
+          entry({ reason: ' ' }),
+          { image: 'nginx' },
+          entry({ image: 'redis' }),
+          entry({ reviewBy: '17/12/2026' }),
+          entry({ reviewBy: '2026-02-30x' }),
+          entry({ reviewBy: '2026-12-18' }),
+        ],
+      },
+      KEYS,
+      NOW,
+    );
+    expect(checked.entries).toEqual([entry()]);
+    expect(checked.errors.map((error) => error.split(', so it accepts')[0])).toEqual([
+      'Entry 2 of tooling/image-watch/accepted.json is not an object',
+      'Entry 3 of tooling/image-watch/accepted.json has no reason',
+      'Entry 4 of tooling/image-watch/accepted.json has no id, package, reason, reviewBy',
+      'Entry 5 of tooling/image-watch/accepted.json names redis, which is not one of the watched images (zitadel, zitadel-login, postgres, nginx)',
+      'Entry 6 of tooling/image-watch/accepted.json has the review date 17/12/2026, which is not a date (YYYY-MM-DD)',
+      'Entry 7 of tooling/image-watch/accepted.json has the review date 2026-02-30x, which is not a date (YYYY-MM-DD)',
+      'Entry 8 of tooling/image-watch/accepted.json has the review date 2026-12-18, more than 30 days ahead',
+    ]);
+    expect(checked.summary).toContain('1 accepted, 7 needing a person');
+    expect(parseAccepted({}, KEYS, NOW).errors[0]).toMatch(/has no "accepted" list/);
+    expect(parseAccepted(null, KEYS, NOW).errors).toHaveLength(1);
+    expect(parseAccepted({ accepted: [] }, KEYS, NOW).errors).toEqual([]);
+  });
+
+  it('keeps the committed file well formed: every entry for a watched image, with a reason', () => {
+    const committed = JSON.parse(readRepo(ACCEPTED_FILE)) as { accepted: Accepted[] };
+    // Its dates are checked against the day it runs only by the workflow; here, against the day each was written.
+    const written = new Date(
+      Date.parse(`${committed.accepted[0]?.reviewBy ?? '2026-12-17'}T00:00:00Z`) - 30 * 86_400_000,
+    );
+    expect(parseAccepted(committed, KEYS, written).errors).toEqual([]);
+    for (const each of committed.accepted) expect(each.reason.length).toBeGreaterThan(40);
   });
 });
 
@@ -390,6 +497,17 @@ describe('DT5: the command line', () => {
     write.mockClear();
     expect(main(['advisories', 'advisories.json', 'v99.0.0'], read)).toBe(0);
     expect(out()).toBe('Nothing needs a person today.\n');
+  });
+
+  it('checks the accepted file, red on an expired entry', () => {
+    files[ACCEPTED_FILE] = JSON.stringify({
+      accepted: [{ image: 'nginx', id: 'CVE-1', package: 'p', reason: 'r', reviewBy: '2026-11-01' }],
+    });
+    expect(main(['accepted'], read, new Date('2026-11-17T00:00:00Z'))).toBe(1);
+    expect(out()).toContain('::error::The accepted finding CVE-1 (p) on nginx passed its review date 2026-11-01');
+    write.mockClear();
+    files[ACCEPTED_FILE] = JSON.stringify({ accepted: [] });
+    expect(main(['accepted'], read)).toBe(0);
   });
 
   it('says how to call it', () => {

@@ -5,7 +5,8 @@
 // Node builtins only: the workflow runs it on CI's bare Node.
 //
 //   node tooling/image-watch/watch.ts images                prints the images to scan, as a job matrix
-//   node tooling/image-watch/watch.ts grype FILE LABEL      judges Grype's JSON report on one of them
+//   node tooling/image-watch/watch.ts accepted              checks the accepted findings (accepted.json)
+//   node tooling/image-watch/watch.ts grype FILE KEY        judges Grype's JSON report on one of them
 //   node tooling/image-watch/watch.ts advisories FILE [V]   judges Zitadel's advisories against its pinned
 //                                                           version, or V (the positive control)
 //
@@ -13,9 +14,10 @@
 // login pages from staging's parameters (what staging runs;
 // tooling/checks/images.test.ts keeps the compose stack's equal), Postgres
 // and nginx from the compose stack (staging runs Azure's managed Postgres and
-// no nginx). Red is a high or critical finding with a fix to move to; the
-// rest goes to the job summary only, as the weekly image scan reports
-// Debian's unfixed highs without blocking anything.
+// no nginx). Red is a high or critical finding with a fix to move to (for
+// Grype's, unless accepted.json accepts it until a review date); the rest goes
+// to the job summary only, as the weekly image scan reports Debian's unfixed
+// highs without blocking anything.
 import { appendFileSync, readFileSync } from 'node:fs';
 
 const STAGING_PARAMETERS = 'deploy/azure/staging.apps.bicepparam';
@@ -147,6 +149,89 @@ const BLOCKING = new Set(['critical', 'high']);
 /** How many red findings an image's one error line names. */
 const NAMED_FINDINGS = 5;
 
+// --- Accepted findings (tooling/image-watch/accepted.json) ------------------
+//
+// A vendor can take weeks to ship an image carrying an upstream fix, and a
+// watch left red for weeks gets ignored (lead, S201). So a high or critical
+// finding with a fix may be accepted, by image, finding and package, with a
+// plain reason and a date (at most MOST_REVIEW_DAYS ahead) by which a person
+// looks again. Zitadel's own advisories are never accepted here.
+
+export const ACCEPTED_FILE = 'tooling/image-watch/accepted.json';
+/** How far ahead an acceptance's review date may be. */
+export const MOST_REVIEW_DAYS = 30;
+const DAY_MS = 86_400_000;
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** One accepted finding. */
+export interface Accepted {
+  image: string;
+  id: string;
+  package: string;
+  reason: string;
+  reviewBy: string;
+}
+
+const today = (now: Date): string => now.toISOString().slice(0, 10);
+const expired = (entry: Accepted, now: Date): boolean => entry.reviewBy < today(now);
+const findingKey = (id: string, name: string): string => `${id}\u0000${name}`;
+
+/** Why one entry is not acceptable, or undefined when it is. */
+function entryProblem(entry: unknown, keys: readonly string[], now: Date): string | undefined {
+  if (typeof entry !== 'object' || entry === null) return 'is not an object';
+  const fields = entry as Record<string, unknown>;
+  const missing = ['image', 'id', 'package', 'reason', 'reviewBy'].filter((field) => {
+    const value = fields[field];
+    return typeof value !== 'string' || value.trim() === '';
+  });
+  if (missing.length > 0) return `has no ${missing.join(', ')}`;
+  const { image, reviewBy } = entry as Accepted;
+  if (!keys.includes(image)) return `names ${image}, which is not one of the watched images (${keys.join(', ')})`;
+  if (!DATE.test(reviewBy) || Number.isNaN(Date.parse(`${reviewBy}T00:00:00Z`))) {
+    return `has the review date ${reviewBy}, which is not a date (YYYY-MM-DD)`;
+  }
+  const latest = today(new Date(now.getTime() + MOST_REVIEW_DAYS * DAY_MS));
+  if (reviewBy > latest) return `has the review date ${reviewBy}, more than ${String(MOST_REVIEW_DAYS)} days ahead`;
+  return undefined;
+}
+
+/** The accepted file read: its usable entries, and what is wrong with it, in plain words. */
+export function parseAccepted(data: unknown, keys: readonly string[], now: Date): Verdict & { entries: Accepted[] } {
+  const list = (data as { accepted?: unknown } | null)?.accepted;
+  if (!Array.isArray(list)) {
+    const error =
+      `${ACCEPTED_FILE} has no "accepted" list, so no finding can be accepted and every high or critical one with ` +
+      `a fix is red. Put the list back (it may be empty).`;
+    return { entries: [], errors: [error], summary: `## Accepted findings\n\nNot readable.\n` };
+  }
+  const entries: Accepted[] = [];
+  const errors: string[] = [];
+  list.forEach((entry: unknown, index) => {
+    const problem = entryProblem(entry, keys, now);
+    if (problem !== undefined) {
+      errors.push(
+        `Entry ${String(index + 1)} of ${ACCEPTED_FILE} ${problem}, so it accepts nothing and its finding stays red. ` +
+          `Correct it: an image key, the finding's ID, its package, a plain reason, and a review date at most ` +
+          `${String(MOST_REVIEW_DAYS)} days ahead.`,
+      );
+      return;
+    }
+    const accepted = entry as Accepted;
+    entries.push(accepted);
+    if (expired(accepted, now)) {
+      errors.push(
+        `The accepted finding ${accepted.id} (${accepted.package}) on ${accepted.image} passed its review date ` +
+          `${accepted.reviewBy}, so it is red again. Check whether the vendor shipped a fixed image, then move the ` +
+          `pin, or renew the entry in ${ACCEPTED_FILE} with a reason and a new date.`,
+      );
+    }
+  });
+  const summary =
+    `## Accepted findings\n\n${String(entries.length)} accepted, ${String(errors.length)} needing a person ` +
+    `(${ACCEPTED_FILE}).\n`;
+  return { entries, errors, summary };
+}
+
 // --- Grype -----------------------------------------------------------------
 
 export interface GrypeMatch {
@@ -160,8 +245,17 @@ export interface GrypeReport {
   descriptor?: { name?: string };
 }
 
-/** Grype's report on one image, judged: red on a high or critical finding with a fix. */
-export function judgeGrype(report: GrypeReport, image: WatchedImage): Verdict {
+/**
+ * Grype's report on one image, judged: red on a high or critical finding with
+ * a fix that no in-date accepted entry covers. Accepted entries that match no
+ * finding any more are listed as stale, so the file shrinks.
+ */
+export function judgeGrype(
+  report: GrypeReport,
+  image: WatchedImage,
+  accepted: readonly Accepted[] = [],
+  now: Date = new Date(),
+): Verdict {
   if (report.descriptor?.name !== 'grype' || report.source?.target?.userInput !== image.image) {
     return {
       errors: [
@@ -171,19 +265,28 @@ export function judgeGrype(report: GrypeReport, image: WatchedImage): Verdict {
       summary: `## ${image.label}\n\nNo usable scan report.\n`,
     };
   }
+  const mine = accepted.filter((entry) => entry.image === image.key);
+  const covering = new Map(
+    mine.filter((entry) => !expired(entry, now)).map((entry) => [findingKey(entry.id, entry.package), entry]),
+  );
   const rows = (report.matches ?? []).map((match) => {
     const severity = (match.vulnerability?.severity ?? 'Unknown').toLowerCase();
     const fixes = match.vulnerability?.fix?.state === 'fixed' ? (match.vulnerability.fix.versions ?? []) : [];
+    const id = match.vulnerability?.id ?? 'an unnamed finding';
+    const name = match.artifact?.name ?? '?';
+    const serious = BLOCKING.has(severity) && fixes.length > 0;
+    const acceptedUntil = serious ? covering.get(findingKey(id, name))?.reviewBy : undefined;
     return {
-      id: match.vulnerability?.id ?? 'an unnamed finding',
+      key: findingKey(id, name),
+      id,
       severity,
-      what: `${match.artifact?.name ?? '?'} ${match.artifact?.version ?? '?'}`,
+      what: `${name} ${match.artifact?.version ?? '?'}`,
       fixes,
-      blocking: BLOCKING.has(severity) && fixes.length > 0,
+      verdict: serious ? (acceptedUntil === undefined ? 'red' : `accepted until ${acceptedUntil}`) : 'report only',
     };
   });
   // One line an image (GitHub shows only ten annotations a step); the full list is in the summary.
-  const blocking = rows.filter((row) => row.blocking);
+  const blocking = rows.filter((row) => row.verdict === 'red');
   const named = blocking
     .slice(0, NAMED_FINDINGS)
     .map((row) => `${row.id} (${row.severity}) in ${row.what}, fixed in ${row.fixes.join(', ')}`);
@@ -193,22 +296,35 @@ export function judgeGrype(report: GrypeReport, image: WatchedImage): Verdict {
       ? []
       : [
           `${image.label} (${image.image}), which ${image.runs}, has ${String(blocking.length)} high or critical ` +
-            `known ${blocking.length === 1 ? 'vulnerability' : 'vulnerabilities'} with a fix available: ` +
-            `${named.join('; ')}${more}. ${image.risk} Move the image to a release that carries the fixes ` +
-            `(Dependabot's weekly bump, or by hand per ADR-003), then run the hand deploy where staging runs it. ` +
-            `The full list is in this run's summary.`,
+            `known ${blocking.length === 1 ? 'vulnerability' : 'vulnerabilities'} with a fix available that ` +
+            `${ACCEPTED_FILE} does not accept: ${named.join('; ')}${more}. ${image.risk} Move the image to a ` +
+            `release that carries the fixes (Dependabot's weekly bump, or by hand per ADR-003), then run the hand ` +
+            `deploy where staging runs it; or, when no vendor image has the fix yet, accept it there with a ` +
+            `reason and a review date. The full list is in this run's summary.`,
         ];
   const table = rows.map(
     (row) =>
-      `| ${row.blocking ? 'red' : 'report only'} | ${cell(row.severity)} | ${cell(row.id)} | ${cell(row.what)} | ` +
+      `| ${row.verdict} | ${cell(row.severity)} | ${cell(row.id)} | ${cell(row.what)} | ` +
       `${row.fixes.length > 0 ? cell(row.fixes.join(', ')) : 'no fix yet'} |`,
   );
-  const head = `## ${image.label}\n\n\`${image.image}\`: ${String(blocking.length)} red, ${String(rows.length - blocking.length)} report only.\n`;
+  const found = new Set(rows.map((row) => row.key));
+  const stale = mine
+    .filter((entry) => !found.has(findingKey(entry.id, entry.package)))
+    .map((entry) => `- ${cell(entry.id)} in ${cell(entry.package)}`);
+  const acceptedCount = rows.filter((row) => row.verdict.startsWith('accepted')).length;
+  const head =
+    `## ${image.label}\n\n\`${image.image}\`: ${String(blocking.length)} red, ${String(acceptedCount)} accepted, ` +
+    `${String(rows.length - blocking.length - acceptedCount)} report only.\n`;
   const body =
     rows.length === 0
       ? '\nNo known vulnerabilities.\n'
       : `\n| Verdict | Severity | Finding | Package | Fixed in |\n| --- | --- | --- | --- | --- |\n${table.join('\n')}\n`;
-  return { errors, summary: head + body };
+  const staleText =
+    stale.length === 0
+      ? ''
+      : `\nStale: these accepted entries match no finding any more; remove them from ${ACCEPTED_FILE}:\n\n` +
+        `${stale.join('\n')}\n`;
+  return { errors, summary: head + body + staleText };
 }
 
 // --- Zitadel's advisories ---------------------------------------------------
@@ -412,17 +528,24 @@ function report(verdict: Verdict): number {
   return verdict.errors.length === 0 ? 0 : 1;
 }
 
-export function main(args: readonly string[], read: (file: string) => string): number {
+export function main(args: readonly string[], read: (file: string) => string, now: Date = new Date()): number {
   const [command, file = '', extra = ''] = args;
   const images = watchedImages(read);
   if (command === 'images') {
     process.stdout.write(JSON.stringify({ include: images.map(({ key, image }) => ({ key, image })) }));
     return 0;
   }
+  const accepted = (): ReturnType<typeof parseAccepted> =>
+    parseAccepted(
+      JSON.parse(read(ACCEPTED_FILE)),
+      images.map((each) => each.key),
+      now,
+    );
+  if (command === 'accepted') return report(accepted());
   if (command === 'grype') {
     const image = images.find((each) => each.key === extra);
     if (image === undefined) throw new Error(`${extra} is not one of the watched images`);
-    return report(judgeGrype(JSON.parse(read(file)) as GrypeReport, image));
+    return report(judgeGrype(JSON.parse(read(file)) as GrypeReport, image, accepted().entries, now));
   }
   if (command === 'advisories') {
     const advisories = flattenAdvisories(JSON.parse(read(file)));
@@ -430,7 +553,9 @@ export function main(args: readonly string[], read: (file: string) => string): n
       judgeAdvisories(advisories, extra === '' ? zitadelVersion(images) : extra.replace(/^v/, ''), extra !== ''),
     );
   }
-  process.stderr.write('usage: watch.ts images | grype <report.json> <key> | advisories <advisories.json> [version]\n');
+  process.stderr.write(
+    'usage: watch.ts images | accepted | grype <report.json> <key> | advisories <advisories.json> [version]\n',
+  );
   return 2;
 }
 

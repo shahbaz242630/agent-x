@@ -10,7 +10,11 @@
 #   3. checks Zitadel's own published security advisories against its pinned
 #      version.
 # Red, in plain words, on a high or critical finding with a fix to move to; the
-# rest is in the job summary only. A failed run is emailed to the repository's
+# rest is in the job summary only. A Grype finding no vendor image fixes yet may
+# be accepted in tooling/image-watch/accepted.json with a reason and a review
+# date at most 30 days ahead (lead, S201: a watch red for weeks gets ignored);
+# a past date, or a malformed entry, is red. Zitadel's advisories are never
+# accepted. A failed run is emailed to the repository's
 # owner. Positive control (a silent watch proves nothing): run it by hand with
 # `zitadel_version` set to one before the S190 fix (4.19.4), and the advisory
 # check must go red; watch.test.ts holds the same with fixture advisories.
@@ -56,6 +60,23 @@ jobs:
           matrix=$(node tooling/image-watch/watch.ts images)
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
           echo "Watching: ${matrix}"
+
+  accepted:
+    name: Check the accepted findings
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Every entry well formed and before its review date
+        run: node tooling/image-watch/watch.ts accepted
 
   scan:
     name: Scan ${{ matrix.key }} (Grype)
