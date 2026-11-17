@@ -31,8 +31,8 @@ import { Download, type Field, FilterForm, FormatField, LogScreen, Pages, useFil
 
 const FIELDS: readonly Field[] = [{ name: 'actorType', options: ['', 'user', 'agent'] }, { name: 'actorId' }];
 
-/** Its client's clues, each only where the API has one. */
-function Clues({ row }: { readonly row: ActivityRow }) {
+/** Its client's clues, each only where the API has one: an organisation's row's and a person's own alike (6E1a). */
+export function Clues({ row }: { readonly row: Pick<ActivityRow, 'client' | 'correlationId' | 'pathIds'> }) {
   const { ip, place, timeZone } = row.client;
   return (
     <dl className="facts">

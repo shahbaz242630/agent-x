@@ -110,6 +110,64 @@ const ID_LATE_MS = 6 * 60 * 60_000;
 /** The instant a UUIDv7 was made, in milliseconds. */
 const msOfId = (id: string): number => Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
 
+/** A row's time as the digest reads it: to the microsecond, in UTC, as text, so a tampered microsecond shows. */
+export const SEALED_AT = sql<string>`pg_catalog.to_char(recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+/**
+ * Which log a seal digests (6E1a): an organisation's rows of `access.requests`, or the person log,
+ * `access.person_requests`, every person's rows together.
+ */
+export type SealedLog = { readonly orgId: string } | 'person';
+
+/** The log's table and the condition that keeps a read to it: an organisation's own rows alone. */
+const scopeOf = (log: SealedLog) =>
+  log === 'person'
+    ? { table: sql.table('access.person_requests'), own: sql<boolean>`true` }
+    : { table: sql.table('access.requests'), own: sql<boolean>`org_id = ${log.orgId}::uuid` };
+
+/** What the digest needs of a row: its ID, its time as SEALED_AT reads it, and its duration. */
+export interface DigestedRow {
+  readonly id: string;
+  readonly at: string;
+  readonly duration_ms: number;
+}
+
+/** Whether the row's ID was made where its time and duration say it was answered, give or take the bounds above. */
+const dated = (row: DigestedRow): boolean => {
+  const answered = Date.parse(row.at) + row.duration_ms;
+  const made = msOfId(row.id);
+  return made >= answered - ID_EARLY_MS && made <= answered + ID_LATE_MS;
+};
+
+/**
+ * A day's digest over the rows `read` gives, `batch` at a time by ID after the last read (undefined first), each row's
+ * line the JSON of what `line` makes of it and a newline: an organisation's log's and the person log's alike.
+ */
+export async function digestRows<Row extends DigestedRow>(
+  day: string,
+  batch: number,
+  read: (after: string | undefined, limit: number) => Promise<readonly Row[]>,
+  line: (row: Row) => readonly unknown[],
+): Promise<DayDigest> {
+  const hash = createHash('sha256');
+  let requests = 0;
+  let idFrom: string | null = null;
+  let idTo: string | null = null;
+  let misdated: string | null = null;
+  for (;;) {
+    const rows = await read(idTo ?? undefined, batch);
+    for (const row of rows) {
+      hash.update(`${JSON.stringify(line(row))}\n`);
+      if (misdated === null && !dated(row)) misdated = row.id;
+    }
+    requests += rows.length;
+    idFrom ??= rows[0]?.id ?? null;
+    idTo = rows.at(-1)?.id ?? idTo;
+    if (rows.length < batch) break;
+  }
+  return { day, requests, digest: hash.digest('hex'), idFrom, idTo, misdated };
+}
+
 /** The sealed columns of a batch of the day's rows, by ID, after `after` when named. */
 const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | undefined, limit: number) => {
   const { from, to } = idsOfDay(day);
@@ -117,7 +175,7 @@ const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | unde
     .selectFrom('access.requests')
     .select([
       'id',
-      sql<string>`pg_catalog.to_char(recorded_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as('at'),
+      SEALED_AT.as('at'),
       'actor_type',
       'actor_id',
       'method',
@@ -139,116 +197,94 @@ const sealedRows = (tx: SealTx, orgId: string, day: string, after: string | unde
 
 type SealedRow = Awaited<ReturnType<typeof sealedRows>>[number];
 
-/** Whether the row's ID was made where its time and duration say it was answered, give or take the bounds above. */
-const dated = (row: SealedRow): boolean => {
-  const answered = Date.parse(row.at) + row.duration_ms;
-  const made = msOfId(row.id);
-  return made >= answered - ID_EARLY_MS && made <= answered + ID_LATE_MS;
-};
-
 /** One row's line in the digest. */
-const lineOf = (row: SealedRow): string =>
-  `${JSON.stringify([
-    row.id,
-    row.at,
-    row.actor_type,
-    row.actor_id,
-    row.method,
-    row.route,
-    row.path_ids,
-    row.status,
-    row.reason,
-    row.correlation_id,
-    row.duration_ms,
-    ...(row.agent_key_id === null ? [] : [row.agent_key_id]),
-  ])}\n`;
+const lineOf = (row: SealedRow): readonly unknown[] => [
+  row.id,
+  row.at,
+  row.actor_type,
+  row.actor_id,
+  row.method,
+  row.route,
+  row.path_ids,
+  row.status,
+  row.reason,
+  row.correlation_id,
+  row.duration_ms,
+  ...(row.agent_key_id === null ? [] : [row.agent_key_id]),
+];
 
 /**
  * The day's digest, read `batch` rows at a time, each batch in a transaction
  * `inOrg` opens for the organisation.
  */
-export async function digestOfDay(
+export function digestOfDay(
   inOrg: <T>(work: (tx: SealTx) => Promise<T>) => Promise<T>,
   orgId: string,
   day: string,
   batch: number,
 ): Promise<DayDigest> {
-  const hash = createHash('sha256');
-  let requests = 0;
-  let idFrom: string | null = null;
-  let idTo: string | null = null;
-  let misdated: string | null = null;
-  for (;;) {
-    const after: string | undefined = idTo ?? undefined;
-    const rows: SealedRow[] = await inOrg((tx) => sealedRows(tx, orgId, day, after, batch));
-    for (const row of rows) {
-      hash.update(lineOf(row));
-      if (misdated === null && !dated(row)) misdated = row.id;
-    }
-    requests += rows.length;
-    idFrom ??= rows[0]?.id ?? null;
-    idTo = rows.at(-1)?.id ?? idTo;
-    if (rows.length < batch) break;
-  }
-  return { day, requests, digest: hash.digest('hex'), idFrom, idTo, misdated };
+  return digestRows(day, batch, (after, limit) => inOrg((tx) => sealedRows(tx, orgId, day, after, limit)), lineOf);
 }
 
-/** The day's count and last ID, read in one statement, to check a digest still stands before it is sealed. */
-export async function dayCount(
+/** The log's day's count and last ID, read in one statement, to check a digest still stands before it is sealed. */
+export async function countOfDay(
   tx: SealTx,
-  orgId: string,
+  log: SealedLog,
   day: string,
 ): Promise<{ readonly requests: number; readonly idTo: string | null }> {
   const { from, to } = idsOfDay(day);
-  const counted = await tx
-    .selectFrom('access.requests')
-    .select([
-      sql<number>`pg_catalog.count(*)::int`.as('requests'),
-      // A UUID's text in lower case sorts as the UUID does; Postgres has no max() of uuid itself.
-      sql<string | null>`pg_catalog.max(id::text)`.as('id_to'),
-    ])
-    .where('org_id', '=', orgId)
-    .where(sql<boolean>`id >= ${from}::uuid and id < ${to}::uuid`)
-    .executeTakeFirstOrThrow();
-  return { requests: counted.requests, idTo: counted.id_to };
+  const { table, own } = scopeOf(log);
+  // A UUID's text in lower case sorts as the UUID does; Postgres has no max() of uuid itself.
+  const { rows } = await sql<{ requests: number; id_to: string | null }>`
+    select pg_catalog.count(*)::int as requests, pg_catalog.max(id::text) as id_to from ${table}
+    where ${own} and id >= ${from}::uuid and id < ${to}::uuid
+  `.execute(tx);
+  return { requests: rows[0]?.requests ?? 0, idTo: rows[0]?.id_to ?? null };
 }
 
-/** The day the organisation's first row was written, or undefined for an organisation with none. */
-export async function firstDayOf(tx: SealTx, orgId: string): Promise<string | undefined> {
-  const first = await tx
-    .selectFrom('access.requests')
-    .select('id')
-    .where('org_id', '=', orgId)
-    .orderBy('id')
-    .limit(1)
-    .executeTakeFirst();
+/** The organisation's day's count and last ID (countOfDay). */
+export const dayCount = (tx: SealTx, orgId: string, day: string) => countOfDay(tx, { orgId }, day);
+
+/** The day the log's first row was written, or undefined for a log with none. */
+export async function firstDayIn(tx: SealTx, log: SealedLog): Promise<string | undefined> {
+  const { table, own } = scopeOf(log);
+  const { rows } = await sql<{ id: string }>`select id from ${table} where ${own} order by id limit 1`.execute(tx);
+  const first = rows[0];
   return first === undefined ? undefined : dayOfId(first.id);
 }
 
+/** The day the organisation's first row was written, or undefined for an organisation with none. */
+export const firstDayOf = (tx: SealTx, orgId: string) => firstDayIn(tx, { orgId });
+
 /**
  * Whether a seal's details hold the day's digest as it is read now: its day,
- * count, digest, first and last IDs and form. Anything else, a row changed,
+ * count, digest, first and last IDs and form (an organisation's unless named;
+ * a person's log has its own, person-seal.ts). Anything else, a row changed,
  * deleted or slipped in since, or a seal rewritten, is a mismatch.
  */
-export function sealHolds(digest: DayDigest, details: Readonly<Record<string, unknown>>): boolean {
+export function sealHolds(
+  digest: DayDigest,
+  details: Readonly<Record<string, unknown>>,
+  form: number = SEAL_FORM,
+): boolean {
   return (
     details.day === digest.day &&
     details.requests === digest.requests &&
     details.digest === digest.digest &&
     details.idFrom === digest.idFrom &&
     details.idTo === digest.idTo &&
-    details.form === SEAL_FORM
+    details.form === form
   );
 }
 
-/** Whether any row of the organisation's was written before `day`: one no seal from that day on holds. */
-export async function writtenBefore(tx: SealTx, orgId: string, day: string): Promise<boolean> {
-  const found = await tx
-    .selectFrom('access.requests')
-    .select('id')
-    .where('org_id', '=', orgId)
-    .where(sql<boolean>`id < ${idsOfDay(day).from}::uuid`)
-    .limit(1)
-    .executeTakeFirst();
-  return found !== undefined;
+/** Whether any row of the log was written before `day`: one no seal from that day on holds. */
+export async function writtenBeforeIn(tx: SealTx, log: SealedLog, day: string): Promise<boolean> {
+  const { table, own } = scopeOf(log);
+  const { rows } = await sql`
+    select id from ${table} where ${own} and id < ${idsOfDay(day).from}::uuid limit 1
+  `.execute(tx);
+  return rows.length > 0;
 }
+
+/** Whether any row of the organisation's was written before `day`. */
+export const writtenBefore = (tx: SealTx, orgId: string, day: string) => writtenBeforeIn(tx, { orgId }, day);

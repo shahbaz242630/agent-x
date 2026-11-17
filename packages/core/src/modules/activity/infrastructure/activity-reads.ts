@@ -68,7 +68,7 @@ export interface ActivityRow {
 type ActivityTx = Transaction<ActivityTables>;
 
 /** `value` as one of `known`, or RangeError: 0052 checks each, so another is a bug. */
-const oneOf = <Known extends string>(known: readonly Known[], value: string, what: string): Known => {
+export const oneOf = <Known extends string>(known: readonly Known[], value: string, what: string): Known => {
   const found = known.find((each) => each === value);
   if (found === undefined) throw new RangeError(`an activity log row has ${what} it doesn't know: ${value}`);
   return found;

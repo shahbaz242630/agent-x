@@ -73,6 +73,11 @@ export function More() {
           <Link to="/more/integrity-hold">{t('hold.moreLink')}</Link>
         </nav>
       )}
+      {/* Everyone's own activity, whatever their role (decision 26's L8). */}
+      <nav className="stack" aria-label={t('myActivity.title')}>
+        <h2>{t('myActivity.title')}</h2>
+        <Link to="/more/my-activity">{t('myActivity.link')}</Link>
+      </nav>
       <h2>{t('more.sessionHeading')}</h2>
       <p className="muted">{t('more.session', { time: UNTIL.format(new Date(session.expiresAt)) })}</p>
       <button type="button" className="secondary" disabled={leaving} onClick={() => void signOut()}>
