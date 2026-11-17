@@ -7,7 +7,7 @@
 // over-limit choice, each by passkey. Buttons show by role; refusals are said
 // plainly.
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -324,6 +324,17 @@ describe('a mandate’s page', () => {
     open(`/more/mandates/${MANDATE}`);
     await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('heading', { name: 'Office supplies', level: 1 })).toBeDefined();
+  });
+
+  it('keeps a shown mandate on screen when reading it again fails, and offers to try again', async () => {
+    as('admin');
+    open(`/more/mandates/${MANDATE}`);
+    expect(await screen.findByRole('heading', { name: 'Office supplies', level: 1 })).toBeDefined();
+    answer(`GET /v1/mandates/${MANDATE}`, refused(403, 'FORBIDDEN'), { status: 200, body: mandate() });
+    await queries.invalidateQueries();
+    await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull());
+    expect(screen.getByRole('heading', { name: 'Office supplies', level: 1 })).toBeDefined();
   });
 
   it('says a mandate failing its integrity check as itself, once read again', { timeout: 15_000 }, async () => {
