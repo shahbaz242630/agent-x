@@ -7,45 +7,6 @@
   },
   "components": {
     "schemas": {
-      "McpMessageInput": {
-        "type": "object",
-        "properties": {
-          "jsonrpc": {
-            "type": "string",
-            "const": "2.0"
-          },
-          "id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 128
-              },
-              {
-                "type": "integer",
-                "minimum": -9007199254740991,
-                "maximum": 9007199254740991
-              }
-            ]
-          },
-          "method": {
-            "type": "string",
-            "maxLength": 128
-          },
-          "params": {
-            "type": "object",
-            "propertyNames": {
-              "type": "string"
-            },
-            "additionalProperties": {}
-          }
-        },
-        "required": [
-          "jsonrpc",
-          "method"
-        ],
-        "additionalProperties": false,
-        "description": "One MCP message, as JSON-RPC 2.0 writes it."
-      },
       "Error": {
         "type": "object",
         "properties": {
@@ -27025,7 +26986,44 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/McpMessageInput"
+                "type": "object",
+                "properties": {
+                  "jsonrpc": {
+                    "type": "string",
+                    "enum": [
+                      "2.0"
+                    ]
+                  },
+                  "id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      }
+                    ]
+                  },
+                  "method": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "params": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "jsonrpc",
+                  "method"
+                ],
+                "additionalProperties": false
               }
             }
           }

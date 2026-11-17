@@ -64,6 +64,9 @@ const OTHER_SCRIPTS = {
   duplicates: 'jscpd',
   // The load test of the money paths (Phase 4 D2), run by hand: it needs Docker and takes minutes.
   load: 'node tooling/load/run.ts',
+  // The official MCP conformance suite's command line (6E2), to run it by hand; CI runs it through
+  // tooling/checks/mcp-conformance.test.ts. Naming it here is also how knip sees the pinned dev dependency.
+  'mcp:conformance': 'conformance',
 };
 
 /** Scripts pnpm runs by itself during an install. */

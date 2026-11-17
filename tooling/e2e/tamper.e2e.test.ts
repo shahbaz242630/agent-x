@@ -1331,7 +1331,9 @@ async function credentials(op: Operation, body: unknown, forged: string): Promis
     await refused(op, { authorization: `Bearer ${own.key.text}` }, 'FORBIDDEN', body);
     await refused(op, { authorization: `Bearer ${own.key.text}`, ...cookieHeader(people.admin) }, 'FORBIDDEN', body);
   } else {
-    await refused(op, cookieHeader(realCookie), 'FORBIDDEN', body);
+    // A session on an agent's route is no agent: FORBIDDEN, but the MCP endpoint answers any request without a key with
+    // the key's own 401, so an MCP client learns it needs one (MCP-Guide M4).
+    await refused(op, cookieHeader(realCookie), op.route === '/v1/mcp' ? 'UNAUTHENTICATED' : 'FORBIDDEN', body);
     // An agent's key fixes its tenant; a stray organisation header grants
     // nothing. Reads still return its own data, checked for leaks by send().
     if (op.method === 'GET' || op.method === 'HEAD') {

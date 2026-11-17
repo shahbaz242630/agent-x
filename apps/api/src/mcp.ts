@@ -115,7 +115,8 @@ const MESSAGE = z
     method: z.string().max(128).describe('The MCP method: server/discover, initialize, tools/list, tools/call, …'),
     params: z.record(z.string(), z.unknown()).optional(),
   })
-  .register(API_SCHEMAS, { id: 'McpMessage', description: 'One MCP message, as JSON-RPC 2.0 writes it.' });
+  // Inline, not a named component: a request body is read alone (the tamper e2e builds each operation's from it).
+  .describe('One MCP message, as JSON-RPC 2.0 writes it.');
 
 /** The answer, as the document shows it: the JSON-RPC envelope, whose result the SDK writes (contract.ts's exception). */
 const ANSWER = z

@@ -112,6 +112,18 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     await expect(`${JSON.stringify(app.swagger(), null, 2)}\n`).toMatchFileSnapshot('../openapi.json');
   });
 
+  it('writes every request body inline, so each operation can be read alone (the tamper e2e builds its bodies so)', () => {
+    const document = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as {
+      paths: Record<string, Record<string, { requestBody?: unknown }>>;
+    };
+    const referring = Object.entries(document.paths).flatMap(([path, item]) =>
+      Object.entries(item)
+        .filter(([, operation]) => JSON.stringify(operation.requestBody ?? {}).includes('"$ref"'))
+        .map(([method]) => `${method.toUpperCase()} ${path}`),
+    );
+    expect(referring).toEqual([]);
+  });
+
   it('holds every stop the error answer names to an operation of the API: a name gone stale answers a 500', () => {
     const document = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as {
       paths: Record<string, Record<string, { operationId?: string }>>;
@@ -1368,7 +1380,6 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'MandateSuspensionAsked',
       'MandateVersion',
       'McpAnswer',
-      'McpMessageInput',
       'Member',
       'MemberChangeAsked',
       'MemberChanged',
