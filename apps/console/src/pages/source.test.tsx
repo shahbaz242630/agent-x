@@ -429,11 +429,47 @@ describe('linking a bank account (6D4a)', () => {
     expect(sessionStorage.getItem(linkKey)).toBeNull();
   });
 
+  it.each(['http://bank.fake-partner.invalid/authorise/abc123', 'data:text/html,hi', 'not a page'])(
+    'never opens a partner page by an address that isn’t HTTPS: %s',
+    async (authoriseUrl) => {
+      as('admin');
+      sessionStorage.setItem(linkKey, JSON.stringify({ link: link(), authoriseUrl }));
+      open('/more/sources');
+      expect(await screen.findByText(/a page address Agent X won't open/)).toBeDefined();
+      expect(screen.queryByRole('link', { name: /Open your bank's page/ })).toBeNull();
+    },
+  );
+
   it('ignores a kept link that isn’t one', async () => {
     as('admin');
     sessionStorage.setItem(linkKey, JSON.stringify({ link: { id: 'nope' }, authoriseUrl: BANK_PAGE }));
     open('/more/sources');
     expect(await screen.findByRole('button', { name: 'Start linking' })).toBeDefined();
+  });
+
+  it('finds the kept link for the person whatever case their ID comes in', async () => {
+    as('admin');
+    answer('GET /v1/auth/session', {
+      status: 200,
+      body: {
+        userId: ME.toUpperCase(),
+        authenticatedAt: PAST,
+        methods: ['pwd'],
+        idleExpiresAt: FUTURE,
+        expiresAt: FUTURE,
+      },
+    });
+    sessionStorage.setItem(linkKey, JSON.stringify({ link: link(), authoriseUrl: BANK_PAGE }));
+    open('/more/sources');
+    expect(await screen.findByRole('button', { name: "I'm back from my bank" })).toBeDefined();
+  });
+
+  it('ignores a kept link whose ID isn’t one, however whole the rest', async () => {
+    as('admin');
+    sessionStorage.setItem(linkKey, JSON.stringify({ link: link({ id: '../not-an-id' }), authoriseUrl: BANK_PAGE }));
+    open('/more/sources');
+    expect(await screen.findByRole('button', { name: 'Start linking' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: "I'm back from my bank" })).toBeNull();
   });
 
   it('forgets a kept link once its time at the bank has passed', async () => {
@@ -468,6 +504,36 @@ describe('linking a bank account (6D4a)', () => {
     expect(keys[1]).toBe(keys[0]);
     expect(keys[2]).toBe(keys[0]);
     expect(keys[3]).not.toBe(keys[0]);
+  });
+
+  it.each([
+    ['while the first start is still being worked on', refused(409, 'IDEMPOTENCY_KEY_BUSY')],
+    ['after the partner didn’t answer (a 5xx decides nothing)', refused(503, 'PARTNER_UNAVAILABLE')],
+  ])('asks again with the same key %s', async (_what, first) => {
+    as('admin');
+    answer(start, first, started);
+    open('/more/sources');
+    await press('Start linking');
+    await vi.waitFor(() => {
+      expect(posts()).toHaveLength(1);
+    });
+    await press('Start linking');
+    expect(await screen.findByRole('link', { name: "Open your bank's page (new tab)" })).toBeDefined();
+    const keys = posts().map((one) => one.key);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('starts a new link with a fresh key once one was answered and forgotten', async () => {
+    as('admin');
+    answer(start, started);
+    open('/more/sources');
+    await press('Start linking');
+    await press('Forget this link');
+    await press('Start linking');
+    await vi.waitFor(() => {
+      expect(posts()).toHaveLength(2);
+    });
+    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
   });
 
   it('keeps nothing when storage is blocked, and still goes on', async () => {

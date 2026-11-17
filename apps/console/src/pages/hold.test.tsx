@@ -188,6 +188,30 @@ describe('recording the investigation (6D4a)', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('opens nothing on choosing a conclusion after Record it was pressed without one', async () => {
+    as('admin');
+    open(page);
+    await userEvent.type(await screen.findByRole('textbox', { name: 'Incident reference' }), 'INC-1');
+    await press('Record it');
+    expect(await screen.findByText('Choose what the investigation found.')).toBeDefined();
+    await userEvent.click(screen.getByRole('radio', { name: /no tampering/ }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it.each(['-INC-1', '.INC-1', '_INC-1'])(
+    'refuses a reference that doesn’t start with a letter or digit: %s',
+    async (typed) => {
+      as('admin');
+      open(page);
+      await userEvent.click(await screen.findByRole('radio', { name: /no tampering/ }));
+      await userEvent.type(screen.getByRole('textbox', { name: 'Incident reference' }), typed);
+      await press('Record it');
+      expect(await screen.findByText(/Enter the incident's reference/)).toBeDefined();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(posts()).toHaveLength(0);
+    },
+  );
+
   it('confirms in plain words, records it, and offers it to clear with', async () => {
     as('admin');
     answer('POST /v1/integrity-hold/investigations', { status: 201, body: { investigation: investigation() } });
@@ -210,6 +234,19 @@ describe('recording the investigation (6D4a)', () => {
     ]);
     expect(await screen.findByText(/Admin \(you\)/)).toBeDefined();
     expect(screen.getByRole('radio', { name: /INC-2041/ })).toBeDefined();
+  });
+
+  it('keeps the one recorded and drops any kept for an older hold', async () => {
+    as('admin');
+    keep(investigation({ id: OLDER, reference: 'OLD-1', holdVersion: 2 }));
+    answer('POST /v1/integrity-hold/investigations', { status: 201, body: { investigation: investigation() } });
+    open(page);
+    await userEvent.click(await screen.findByRole('radio', { name: /cause was found and removed/ }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Incident reference' }), 'INC-2041');
+    await press('Record it');
+    await inDialog('Record now');
+    expect(await screen.findByText('The investigation is recorded.')).toBeDefined();
+    expect(JSON.parse(sessionStorage.getItem(keptAt) ?? 'null')).toEqual([investigation()]);
   });
 
   it('records again with the same key after no answer', async () => {
@@ -242,6 +279,7 @@ describe('clearing the hold (6D4a)', () => {
     keep(
       investigation({ id: OLDER, reference: 'OLD-1', holdVersion: 2 }),
       { id: 'not-one' },
+      investigation({ id: '../not-an-id', reference: 'BAD-1' }),
       investigation(),
       investigation({ id: OLDER, reference: 'INC-2042', conclusion: 'NO_TAMPERING' }),
     );
@@ -252,6 +290,24 @@ describe('clearing the hold (6D4a)', () => {
       expect.stringContaining('INC-2041'),
     ]);
     expect(screen.queryByText(/OLD-1/)).toBeNull();
+    expect(screen.queryByText(/BAD-1/)).toBeNull();
+  });
+
+  it('finds what was kept for the person whatever case their ID comes in', async () => {
+    as('admin');
+    answer('GET /v1/auth/session', {
+      status: 200,
+      body: {
+        userId: ME.toUpperCase(),
+        authenticatedAt: PAST,
+        methods: ['pwd'],
+        idleExpiresAt: FUTURE,
+        expiresAt: FUTURE,
+      },
+    });
+    keep(investigation());
+    open(page);
+    expect(await screen.findByRole('radio', { name: /INC-2041/ })).toBeDefined();
   });
 
   it('waits for an investigation to be chosen, says what clearing means, re-reads the hold, then goes by passkey', async () => {
@@ -304,6 +360,35 @@ describe('clearing the hold (6D4a)', () => {
     // What was shown stays in the dialog: the hold as it was when opened.
     expect(within(dialog).getAllByText(/2026/).length).toBeGreaterThan(0);
     expect(posts()).toHaveLength(0);
+  });
+
+  it('can’t be confirmed while the re-read is still on its way', async () => {
+    as('admin');
+    keep(investigation());
+    open(page);
+    await userEvent.click(await screen.findByRole('radio', { name: /INC-2041/ }));
+    // The re-read the dialog makes as it opens never answers.
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>(() => undefined));
+    await press('Clear the hold');
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Checking the hold is still as shown/)).toBeDefined();
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Continue with passkey' }).disabled).toBe(
+      true,
+    );
+  });
+
+  it('can’t be confirmed when the re-read finds a newer hold set at the same moment', async () => {
+    as('admin');
+    keep(investigation());
+    answer('GET /v1/integrity-hold', { status: 200, body: held() }, { status: 200, body: held({ version: 5 }) });
+    open(page);
+    await userEvent.click(await screen.findByRole('radio', { name: /INC-2041/ }));
+    await press('Clear the hold');
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText(/The hold has changed since this page showed it/)).toBeDefined();
+    expect(within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Continue with passkey' }).disabled).toBe(
+      true,
+    );
   });
 
   it('can’t be confirmed when the re-read fails', { timeout: 10_000 }, async () => {
@@ -466,6 +551,23 @@ describe('what an investigation’s answer and its key keep (6D4a)', () => {
     expect(screen.queryByText('The investigation is recorded.')).toBeNull();
     expect(sessionStorage.getItem(keptAt)).toBeNull();
     expect(screen.queryByRole('radio', { name: /INC-2041/ })).toBeNull();
+  });
+
+  it('records again with a fresh key once an answer came, even one against a newer hold', async () => {
+    as('admin');
+    answer('POST /v1/integrity-hold/investigations', {
+      status: 201,
+      body: { investigation: investigation({ holdVersion: 5 }) },
+    });
+    open(page);
+    await fill('INC-9');
+    await record();
+    expect(await screen.findByText(/against a newer hold than this page showed/)).toBeDefined();
+    await record();
+    await vi.waitFor(() => {
+      expect(posts()).toHaveLength(2);
+    });
+    expect(posts()[1]?.key).not.toBe(posts()[0]?.key);
   });
 
   it('records with a fresh key once the reference changes after no answer', async () => {
