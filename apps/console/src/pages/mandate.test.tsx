@@ -333,7 +333,9 @@ describe('a mandate’s page', () => {
     answer(`GET /v1/mandates/${MANDATE}`, refused(403, 'FORBIDDEN'), { status: 200, body: mandate() });
     await queries.invalidateQueries();
     await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull());
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    });
     expect(screen.getByRole('heading', { name: 'Office supplies', level: 1 })).toBeDefined();
   });
 
