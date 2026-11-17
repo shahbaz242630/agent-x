@@ -1,5 +1,6 @@
 // What the operator's exports for a case share (Phase 3 E10c's audit log,
-// L7's activity log; ADR-005 §6's second exception): the request, the steps
+// L7's activity log, CO8b's one person's own activity log, whose run alone it
+// shares; ADR-005 §6's second exception): the request, the steps
 // of the record and of the run, and how each ends in the run's log. Each
 // export says what it records, reads and writes; this says the order, and
 // the rules on a request run again.
@@ -50,7 +51,7 @@ export class CaseExportRefused extends Error {
 }
 
 /** Refused for an export ID that names any other record or export. */
-const ANOTHER_RECORD = 'the export ID names another record: write a new request';
+export const ANOTHER_RECORD = 'the export ID names another record: write a new request';
 
 /** The one ID the export's record takes: the request's. */
 export const theExportId = (exportId: string): IdGenerator => ({ next: () => exportId });
@@ -96,7 +97,7 @@ export interface CaseExportSteps<Recorded> {
   /** Its command, as the run's failure names it. */
   readonly command: string;
   /** The line a written export ends with. */
-  readonly done: 'operator.audit_exported' | 'operator.activity_exported';
+  readonly done: 'operator.audit_exported' | 'operator.activity_exported' | 'operator.person_activity_exported';
   /** Where its file goes in the store. */
   readonly file: string;
   readonly record: () => Promise<Recorded & { readonly recordedBefore: boolean }>;
@@ -108,7 +109,8 @@ export interface CaseExportSteps<Recorded> {
 /** Runs the export: the exit code, 0 once its file is in the store. */
 export async function runCaseExport<Recorded>(
   store: EvidenceStore,
-  request: CaseExportRequest,
+  // An organisation's export or a person's (person-activity-export.ts): the run's lines name the export alone.
+  request: Pick<CaseExportRequest, 'exportId'>,
   log: Logger,
   steps: CaseExportSteps<Recorded>,
 ): Promise<number> {

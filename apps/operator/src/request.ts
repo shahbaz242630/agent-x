@@ -16,6 +16,9 @@ export const REQUEST_USAGE = 'create-organization --name <name> --id <new ID>';
 /** A UUIDv7 in lower case, as the product makes every ID (ADR-007). */
 export const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/** A user's ID as the product keeps it (identity.users): a UUID, in lower case. */
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /** Why a run holding the job's `[]` is refused, which deploy/azure/operator.ts looks for in the run's log. */
 export const NO_REQUEST_PROBLEM = 'no request was written for this run: the job holds none until a person writes one';
 
@@ -225,14 +228,29 @@ const DAY = 86_400_000;
  * repeated in no problem.
  */
 export function auditExportOf(
-  { orgId, from: fromText, to: toText, caseRef, id }: AuditExportWords,
+  { orgId, ...words }: AuditExportWords,
   mostDays: number,
 ): AuditExportAsked | { readonly problems: readonly string[] } {
+  const subjectProblems = UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"];
+  const asked = caseRangeOf(words, mostDays, subjectProblems);
+  return 'problems' in asked ? asked : { orgId: String(orgId), ...asked };
+}
+
+/**
+ * What every export for a case holds to beside its subject, after the subject's own problems: the export's ID, the
+ * times (`mostDays` at most apart) and the case reference, each read, or every problem. The reference is repeated in
+ * no problem.
+ */
+function caseRangeOf(
+  { from: fromText, to: toText, caseRef, id }: Omit<AuditExportWords, 'orgId'>,
+  mostDays: number,
+  subjectProblems: readonly string[],
+): Omit<AuditExportAsked, 'orgId'> | { readonly problems: readonly string[] } {
   const from = requestTime(fromText);
   const to = requestTime(toText);
   const span = (to?.getTime() ?? Number.NaN) - (from?.getTime() ?? Number.NaN);
   const problems = [
-    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...subjectProblems,
     ...(UUID_V7.test(id) ? [] : ["the export's ID must be a UUIDv7, in lower case"]),
     ...(from === undefined || to === undefined
       ? ['--from and --to must each be a UTC time, such as 2026-10-01T00:00:00Z']
@@ -243,8 +261,56 @@ export function auditExportOf(
     ...(CASE_REFERENCE.test(String(caseRef)) ? [] : [CASE_REFERENCE_PROBLEM]),
   ];
   if (problems.length > 0 || from === undefined || to === undefined) return { problems };
-  return { orgId: String(orgId), from, to, caseRef: String(caseRef), id };
+  return { from, to, caseRef: String(caseRef), id };
 }
+
+/** The command word that exports one person's own activity log for a case (CO8b; decision 26's L8, D2): only ever a file. */
+export const PERSON_ACTIVITY_EXPORT = 'person-activity-export';
+
+/** What a request file holds to export one person's own activity log for a case: as an organisation's, by the person. */
+export const PERSON_ACTIVITY_EXPORT_USAGE = `${PERSON_ACTIVITY_EXPORT} --user <the person's user ID> --from <time> --to <time> --reason <case reference> --id <new export ID>`;
+
+/** One person's activity log export asked for: the person, the range, the case, and the export's ID. */
+export interface PersonActivityExportAsked extends Omit<AuditExportAsked, 'orgId'> {
+  readonly userId: string;
+}
+
+/**
+ * The person's activity log export these words ask for, or the problems, by the rules an organisation's export holds
+ * to (the same range, at most `mostDays` days, and case reference), the person's user ID in place of the
+ * organisation's. Both sides hold it: the operator's command reading its file (main.ts), and deploy/azure/operator.ts
+ * before it writes one. The case reference is repeated in no problem.
+ */
+export function personActivityExportOf(
+  { userId, ...words }: Omit<AuditExportWords, 'orgId'> & { readonly userId: string | undefined },
+  mostDays: number,
+): PersonActivityExportAsked | { readonly problems: readonly string[] } {
+  const subjectProblems = USER_ID.test(String(userId)) ? [] : ["the person's user ID must be a UUID, in lower case"];
+  const asked = caseRangeOf(words, mostDays, subjectProblems);
+  return 'problems' in asked ? asked : { userId: String(userId), ...asked };
+}
+
+/** The request to export one person's own activity log for a case, as its file holds it (CO8b). */
+export const personActivityExportRequest = (
+  userId: string,
+  from: string,
+  to: string,
+  caseRef: string,
+  id: string,
+): string =>
+  JSON.stringify([
+    PERSON_ACTIVITY_EXPORT,
+    '--user',
+    userId,
+    '--from',
+    from,
+    '--to',
+    to,
+    '--reason',
+    caseRef,
+    '--id',
+    id,
+  ]);
 
 /** The request to export an organisation's audit log for a case, as its file holds it. */
 export const auditExportRequest = (orgId: string, from: string, to: string, caseRef: string, id: string): string =>
@@ -316,9 +382,6 @@ export interface FactorResetNoticeAsked {
   /** Its record's ID on the organisation's chain, made where the request was written. */
   readonly id: string;
 }
-
-/** A user's ID as the product keeps it (identity.users): a UUID, in lower case. */
-const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * The reset's notice these words ask for, or the problems, by the rules both

@@ -33,6 +33,9 @@ import {
   handoffRequest,
   handoffUsage,
   NO_ANCHORS_PROBLEM,
+  PERSON_ACTIVITY_EXPORT,
+  PERSON_ACTIVITY_EXPORT_USAGE,
+  personActivityExportRequest,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -675,6 +678,93 @@ describe('E10c an audit export for a case, only ever from a file', () => {
     );
 
     expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+  });
+});
+
+describe("CO8b one person's own activity log export for a case, only ever from a file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-person-export-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const FROM = '2026-10-01T00:00:00Z';
+  const TO = '2026-11-01T00:00:00Z';
+  const CASE = 'DSP-2026/0419';
+  /** A person's user ID, as identity.users keeps one. */
+  const USER = '0199a0f0-0000-7000-8000-00000000a0a0';
+  const EXPORTING = { ...ENV, AGENTX_EVIDENCE_DIR: folder };
+  const asked = (overrides: Partial<Record<'user' | 'from' | 'to' | 'reason' | 'id', string>> = {}) =>
+    requestFile(
+      personActivityExportRequest(
+        overrides.user ?? USER,
+        overrides.from ?? FROM,
+        overrides.to ?? TO,
+        overrides.reason ?? CASE,
+        overrides.id ?? NEW_ID,
+      ),
+    );
+
+  it('reads a well-formed request, then connects, never repeating the case reference', async () => {
+    const { events, line, text } = await run(['--request', asked()], EXPORTING);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: PERSON_ACTIVITY_EXPORT });
+    expect(text).not.toContain(CASE);
+  });
+
+  it('refuses it typed, and with no store set for its file', async () => {
+    const typed = await run(JSON.parse(personActivityExportRequest(USER, FROM, TO, CASE, NEW_ID)) as string[]);
+    const storeless = await run(['--request', asked()]);
+
+    expect(typed.line('operator.refused')?.problems).toEqual([
+      `${PERSON_ACTIVITY_EXPORT} runs only from a request file: ${PERSON_ACTIVITY_EXPORT_USAGE}`,
+    ]);
+    expect(storeless.events).toEqual(['operator.starting', 'operator.refused']);
+    expect(typed.text + storeless.text).not.toContain(CASE);
+  });
+
+  it.each([
+    ['an organisation in place of the person', JSON.parse(activityExportRequest(USER, FROM, TO, CASE, NEW_ID))],
+    ['a word more', [...(JSON.parse(personActivityExportRequest(USER, FROM, TO, CASE, NEW_ID)) as string[]), 'x']],
+  ])('refuses %s, naming the shape', async (_what, words: string[]) => {
+    const { events, line } = await run(
+      ['--request', requestFile(JSON.stringify(words.with(0, PERSON_ACTIVITY_EXPORT)))],
+      EXPORTING,
+    );
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `the request file holds ${PERSON_ACTIVITY_EXPORT_USAGE} as a JSON list, and nothing else`,
+    ]);
+  });
+
+  it('names the person, the export and the case that aren’t ones, never repeating the reference', async () => {
+    const reason = 'a note about the case';
+    const { line, text } = await run(
+      ['--request', asked({ user: USER.toUpperCase(), id: 'not-an-id', reason })],
+      EXPORTING,
+    );
+
+    expect(line('operator.refused')?.problems).toEqual([
+      "the person's user ID must be a UUID, in lower case",
+      "the export's ID must be a UUIDv7, in lower case",
+      'the case reference must be 3 to 64 letters, digits and . _ / -, starting with a letter or digit',
+    ]);
+    expect(text).not.toContain(reason);
+  });
+
+  it('holds the range to a person’s own download: 366 days, and not a millisecond more', async () => {
+    const most = await run(
+      ['--request', asked({ from: '2025-01-01T00:00:00.000Z', to: '2026-01-02T00:00:00.000Z' })],
+      EXPORTING,
+    );
+    const past = await run(
+      ['--request', asked({ from: '2025-01-01T00:00:00Z', to: '2026-01-02T00:00:00.001Z' })],
+      EXPORTING,
+    );
+
+    expect(most.events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(past.line('operator.refused')?.problems).toEqual(['the range starts before it ends, 366 days at most']);
   });
 });
 
