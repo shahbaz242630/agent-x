@@ -193,6 +193,18 @@ describe('a member’s page (6D4b)', () => {
     expect(screen.getByRole('button', { name: `Cancel reset ${RESET}` })).toBeDefined();
   });
 
+  it('shows on a member’s page only their own resets', async () => {
+    as('admin');
+    const theirs = '0199a0f0-0000-7000-8000-0000000000f2';
+    answer('GET /v1/factor-resets', {
+      status: 200,
+      body: { resets: [reset(), reset({ id: theirs, person: GONE, status: 'DRAFT' })] },
+    });
+    open(page);
+    expect(await screen.findByRole('button', { name: `Cancel reset ${RESET}` })).toBeDefined();
+    expect(screen.queryByRole('button', { name: `Cancel reset ${theirs}` })).toBeNull();
+  });
+
   it('changes a role chosen among the other three, none picked, by passkey', async () => {
     as('admin');
     answer(`POST ${at}/role`, ASKED);
@@ -245,6 +257,7 @@ describe('a member’s page (6D4b)', () => {
       confirmPath: `/v1/factor-resets/${RESET}/confirm`,
       body: {},
       drafted: true,
+      organization: ORG.id,
     });
   });
 
@@ -265,12 +278,26 @@ describe('a member’s page (6D4b)', () => {
 
   it('refuses a reset answered with no step-up or no draft, as nothing was sent to the contacts', async () => {
     as('admin');
-    answer(`POST ${at}/factor-reset`, { status: 202, body: { reset: reset({ status: 'AWAITING_CONTACT' }) } });
+    // A step-up asked, but no draft to name: its confirm address is unknown.
+    answer(`POST ${at}/factor-reset`, {
+      status: 202,
+      body: { reset: reset({ status: 'AWAITING_CONTACT' }), stepUpChallengeId: CHALLENGE },
+    });
     open(page);
     await press('Ask a reset');
     await inDialog('Continue with passkey');
     expect(await screen.findByText(/answered without asking for your passkey/)).toBeDefined();
     expect(kept()).toBeNull();
+    // A draft with no step-up asked for: refused the same, nothing kept and no passkey asked.
+    cleanup();
+    as('admin');
+    answer(`POST ${at}/factor-reset`, { status: 200, body: { reset: reset({ status: 'DRAFT' }) } });
+    open(page);
+    await press('Ask a reset');
+    await inDialog('Continue with passkey');
+    expect(await screen.findByText(/answered without asking for your passkey/)).toBeDefined();
+    expect(sessionStorage).toHaveLength(0);
+    expect(goTo).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -307,12 +334,43 @@ describe('a member’s page (6D4b)', () => {
     expect(within(await dialog()).getByText('From Approver to Developer')).toBeDefined();
   });
 
+  it('holds the dialog when the member was deactivated since, their role the same', async () => {
+    as('admin');
+    const { queries } = open(page);
+    await press('Deactivate');
+    expect((await confirmButton()).disabled).toBe(false);
+    answer('GET /v1/members', {
+      status: 200,
+      body: {
+        members: [
+          MEMBERS[0],
+          member(OTHER, '0199a0f0-0000-7000-8000-000000000033', 'approver', 'DEACTIVATED'),
+          MEMBERS[2],
+        ],
+      },
+    });
+    await queries.invalidateQueries();
+    expect(await within(await dialog()).findByText(/has changed since you opened this/)).toBeDefined();
+    expect((await confirmButton()).disabled).toBe(true);
+  });
+
   it('offers nothing on your own membership, and says another admin changes it', async () => {
     as('admin');
     open(`/more/members/${MINE}`);
     expect(await screen.findByText(/This is you. Another admin changes your role/)).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Change role' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Deactivate' })).toBeNull();
+  });
+
+  it('knows your own membership whatever the case of its user ID', async () => {
+    as('admin');
+    answer('GET /v1/members', {
+      status: 200,
+      body: { members: [member(MINE, ME.toUpperCase(), 'admin'), MEMBERS[1], MEMBERS[2]] },
+    });
+    open(`/more/members/${MINE}`);
+    expect(await screen.findByText(/This is you. Another admin changes your role/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Change role' })).toBeNull();
   });
 
   it('offers nothing on a deactivated member', async () => {
@@ -449,6 +507,8 @@ describe('the registered contacts (6D4b)', () => {
       body: {},
       drafted: true,
     });
+    // Nothing of the ask goes again: the draft holds it (toMatchObject takes {} as any object).
+    expect(kept()).toHaveProperty('body', {});
   });
 
   it('says an add refused plainly', async () => {
@@ -477,6 +537,20 @@ describe('the registered contacts (6D4b)', () => {
     await press('Remove owner@company.example');
     answer('GET /v1/registered-contacts', { status: 200, body: { contacts: [] } });
     await again.queries.invalidateQueries();
+    expect(await within(await dialog()).findByText(/has changed since you opened this/)).toBeDefined();
+    expect((await confirmButton()).disabled).toBe(true);
+  });
+
+  it.each([
+    ['its status', { status: 'REMOVED' }],
+    ['when it counts from', { countsFrom: FUTURE, counts: false }],
+  ])('holds a removal when the contact changed in %s since', async (_what, change) => {
+    as('admin');
+    const { queries } = open('/more/contacts');
+    await press('Remove owner@company.example');
+    expect((await confirmButton()).disabled).toBe(false);
+    answer('GET /v1/registered-contacts', { status: 200, body: { contacts: [contact(change)] } });
+    await queries.invalidateQueries();
     expect(await within(await dialog()).findByText(/has changed since you opened this/)).toBeDefined();
     expect((await confirmButton()).disabled).toBe(true);
   });
@@ -510,10 +584,19 @@ describe('invitations (6D4b)', () => {
       },
     });
     open('/more/members');
-    const invite = within(await screen.findByRole('region', { name: 'Invite someone' }));
+    let invite = within(await screen.findByRole('region', { name: 'Invite someone' }));
     expect(invite.getAllByRole<HTMLInputElement>('radio').some((one) => one.checked)).toBe(false);
     await userEvent.click(invite.getByRole('button', { name: 'Invite' }));
     expect(await invite.findByText(/Enter an email address/)).toBeDefined();
+    // Not an address the API would take: said in place too, with a role chosen, nothing sent.
+    await userEvent.click(invite.getByLabelText(/^Viewer:/));
+    await userEvent.type(invite.getByLabelText('Their email address'), 'not an address');
+    await userEvent.click(invite.getByRole('button', { name: 'Invite' }));
+    expect(await invite.findByText(/Enter an email address/)).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    cleanup();
+    open('/more/members');
+    invite = within(await screen.findByRole('region', { name: 'Invite someone' }));
     await userEvent.type(invite.getByLabelText('Their email address'), 'dev@company.example');
     await userEvent.click(invite.getByRole('button', { name: 'Invite' }));
     expect(await invite.findByText('Choose their role.')).toBeDefined();
@@ -532,7 +615,10 @@ describe('invitations (6D4b)', () => {
       confirmPath: `/v1/members/invitations/${INVITATION}/confirm`,
       body: {},
       drafted: true,
+      organization: ORG.id,
     });
+    // Nothing of the ask goes again: the draft holds it (toMatchObject takes {} as any object).
+    expect(kept()).toHaveProperty('body', {});
   });
 
   it('confirms who accepted by the invitation’s ID, by passkey', async () => {
@@ -598,6 +684,7 @@ describe('a draft confirmed on the way back from the passkey (6D4b)', () => {
     await press('Confirm');
     expect(sentTo('POST', confirmAt)[0]?.body).toEqual({});
     expect(await screen.findByRole('heading', { name: 'The invitation link' })).toBeDefined();
+    expect(screen.getByText(/only time Agent X shows this link: it keeps no copy, and sends no email/)).toBeDefined();
     expect(screen.queryByText(LINK)).toBeNull();
     await press('Show');
     expect(screen.getByText(LINK)).toBeDefined();
@@ -623,7 +710,7 @@ describe('a draft confirmed on the way back from the passkey (6D4b)', () => {
     answer(`POST ${confirmAt}`, { status: 200, body: { invitation: opened } });
     back(confirmAt, 'Invite dev@company.example as Developer');
     await press('Confirm');
-    expect(await screen.findByText(/made on your first try and can't be shown again/)).toBeDefined();
+    expect(await screen.findByText(/The link was made on your first try and can't be shown again/)).toBeDefined();
   });
 
   it('says an approval done, never asking about a link: only opening an invitation gives one', async () => {
@@ -657,6 +744,9 @@ describe('a draft confirmed on the way back from the passkey (6D4b)', () => {
     await press('Confirm');
     expect(sentTo('POST', at)[0]?.body).toEqual({});
     expect(await screen.findByText('Done: Add the registered contact director@company.example')).toBeDefined();
+    // No invitation in the answer: nothing said about a link.
+    expect(screen.queryByText(/can't be shown again/)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'The invitation link' })).toBeNull();
   });
 });
 
@@ -667,6 +757,7 @@ describe('the people rules (6D4b)', () => {
     ['.name@company.ae', false],
     ['name@company', false],
     ['name company@company.ae', false],
+    ['name@company.ae>', false],
     [`${'a'.repeat(250)}@b.ae`, false],
   ])('checks %s as an email the API would take: %s', (typed, taken) => {
     expect(isEmail(typed)).toBe(taken);

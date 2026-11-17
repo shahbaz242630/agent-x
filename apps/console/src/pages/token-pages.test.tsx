@@ -123,6 +123,8 @@ describe('accepting an invitation (6D4b)', () => {
     const opened = open(page);
     expect(await screen.findByText(/Nothing happens until you press Accept/)).toBeDefined();
     expect(opened.history.location.hash).toBe('');
+    // Cleaned in place, never pushed: Back never returns to the address that held it.
+    expect(opened.history.canGoBack()).toBe(false);
     expect(posts()).toHaveLength(0);
     await press('Accept');
     expect(await screen.findByText("You've joined the organisation as Developer.")).toBeDefined();
@@ -202,6 +204,7 @@ describe('accepting an invitation (6D4b)', () => {
   it.each([
     ['no link at all', '/invitations/accept', /needs the invitation link/],
     ['a token of the wrong form', '/invitations/accept#token=short', /incomplete or broken/],
+    ['a token one character too long', `/invitations/accept#token=${INVITED}A`, /incomplete or broken/],
   ])('says %s plainly, sending nothing', async (_what, path, said) => {
     signedIn();
     open(path);
@@ -246,6 +249,7 @@ describe('a registered contact confirming a reset (CO9)', () => {
     ['NOT_FOUND', 404, /isn't one Agent X sent, or it no longer works/],
     ['CONTACT_NOT_ACTIVE', 409, /no longer a registered contact/],
     ['RESET_CLOSED', 409, /already sent, ended or ran out/],
+    ['BAD_REQUEST', 400, /incomplete or broken/],
     ['RATE_LIMITED', 429, /Too many tries/],
     ['UNAVAILABLE', 0, /couldn't be reached/],
   ])('says a confirm refused with %s plainly, and can be pressed again', async (code, status, said) => {
@@ -260,6 +264,7 @@ describe('a registered contact confirming a reset (CO9)', () => {
   it.each([
     ['no link at all', '/factor-resets/confirm', /needs the link from your email/],
     ['a token of the wrong form', '/factor-resets/confirm#token=has%20a%20space', /incomplete or broken/],
+    ['a token past the 256 the API takes', `/factor-resets/confirm#token=${'a'.repeat(257)}`, /incomplete or broken/],
   ])('says %s plainly, sending nothing', async (_what, path, said) => {
     open(path);
     expect(await screen.findByText(said)).toBeDefined();
