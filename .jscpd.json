@@ -1,7 +1,7 @@
 {
   "path": ["packages", "apps", "tooling", "deploy"],
-  "format": ["typescript"],
-  "ignore": ["**/node_modules/**", "**/gate-proofs/fixtures/**", "**/*.test.ts"],
+  "format": ["typescript", "tsx"],
+  "ignore": ["**/node_modules/**", "**/gate-proofs/fixtures/**", "**/*.test.ts", "**/*.test.tsx"],
   "reporters": ["consoleFull"],
   "absolute": false,
   "gitignore": true,
