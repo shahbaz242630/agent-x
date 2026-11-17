@@ -27,7 +27,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import type { AgentMandates, AgentMandateShown } from './agent-mandate.ts';
 import type { LogSample } from './log-sample.ts';
 import { MCP_PATH, PROTOCOL_HEADER, PROTOCOLS } from './mcp.ts';
-import { MCP_TOOLS, MOST_TEXT, plainText, plainTexts, type TwinnedTool, twinned } from './mcp-tools.ts';
+import { checkedInput, MCP_TOOLS, MOST_TEXT, plainText, plainTexts, type TwinnedTool, twinned } from './mcp-tools.ts';
 import { recordTwins, twinOf } from './mcp-twins.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { registerAgentSelf } from './agent-self.ts';
@@ -67,9 +67,13 @@ const accepted = (scopes: readonly Scope[]): AcceptedKey => ({
   scopes,
   expiresAt: new Date('2099-12-28T09:00:00.000Z'),
 });
-const KEYS: ReadonlyMap<string, AcceptedKey> = new Map(
-  SCOPE_SETS.map((scopes, index) => [keyText(index), accepted(scopes)]),
-);
+/** Another agent of the organisation, with every scope: its calls must never be served as the first's. */
+const OTHER_AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a2';
+const OTHER = keyText(10);
+const KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
+  ...SCOPE_SETS.map((scopes, index) => [keyText(index), accepted(scopes)] as const),
+  [OTHER, { ...accepted(SCOPE_SETS.at(-1) ?? []), agentId: OTHER_AGENT_ID }],
+]);
 /** The key holding every scope. */
 const ALL = keyText(SCOPE_SETS.length - 1);
 
@@ -432,6 +436,55 @@ beforeAll(async () => {
   await closeServers();
 }, 60_000);
 
+/**
+ * A server whose lines are captured, with this per-agent limit, line sample and use cases' mode; `before` adds
+ * a test's own hook before it is ready.
+ */
+async function logged({
+  perAgent = 100,
+  logSample,
+  mode = 'refuse',
+  before,
+}: {
+  readonly perAgent?: number;
+  readonly logSample?: LogSample;
+  readonly mode?: Mode;
+  readonly before?: (app: FastifyInstance) => void;
+} = {}) {
+  const capture = new LogCapture();
+  const config = {
+    http: {
+      host: '127.0.0.1',
+      port: 0,
+      publicOrigin: PUBLIC_ORIGIN,
+      trustedProxies: [],
+      rateLimitPerMinute: 1000,
+      rateLimitPerUserPerMinute: 1000,
+      rateLimitPerAgentPerMinute: perAgent,
+      rateLimitPerOrganisationPerMinute: 1000,
+      webCopies: 1,
+    },
+    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
+  };
+  const stubs: Stubs = { mode, supplierName: 'n', idempotent: [], asked: [] };
+  const app = await buildServer({
+    config,
+    logger: createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', ...config },
+      destination: capture,
+    }),
+    ids: new SequentialIds(),
+    healthChecks: [],
+    checkAgentKey,
+    logSample,
+    ...useCases(stubs),
+  });
+  before?.(app);
+  await app.ready();
+  return { app, capture, stubs };
+}
+
 describe('SEC-MCP-01 the MCP tool list is the allowlist (6E2, BR-20)', () => {
   it('lists exactly the allowed tools, in order, each with its input schema and hints', async () => {
     const { app } = await server();
@@ -607,6 +660,48 @@ describe('SEC-MCP-02 each MCP tool is authorised as its REST twin is', () => {
     expect(await refusedWith('get_agent', { orgId: ORG })).toMatchObject({ code: 'BAD_REQUEST' });
     expect(stubs.idempotent).toEqual([]);
     expect(stubs.asked).toEqual([]);
+  });
+
+  it('serves two agents at once each as itself, in both eras, even under one correlation ID', async () => {
+    // Each pair of calls is held before its route until both have arrived, so both are being served at once.
+    let waiting: (() => void)[] = [];
+    const together = (app: FastifyInstance) => {
+      app.addHook('preHandler', async (request) => {
+        if (request.routeOptions.url !== MCP_PATH) return;
+        await new Promise<void>((resolve) => {
+          waiting.push(resolve);
+          if (waiting.length === 2) {
+            for (const release of waiting) release();
+            waiting = [];
+          }
+        });
+      });
+    };
+    const { app, stubs } = await logged({ mode: 'answer', before: together });
+    // A client may name its own correlation ID: two callers sharing one must still never share a call's context.
+    const shared = { 'x-correlation-id': '0199a0f0-0000-7000-8000-00000000cccc' };
+    for (const era of ['legacy', 'modern'] as const) {
+      stubs.asked.length = 0;
+      const ask = (key: string) =>
+        app.inject(
+          era === 'legacy'
+            ? mcp(message('tools/call', { name: 'get_mandate', arguments: {} }), { key, headers: shared })
+            : modern('tools/call', { name: 'get_mandate', arguments: {} }, 'get_mandate', key),
+        );
+      const asSelf = (key: string) =>
+        era === 'legacy'
+          ? app.inject(mcp(message('tools/call', { name: 'get_agent', arguments: {} }), { key, headers: shared }))
+          : app.inject({ ...modern('tools/call', { name: 'get_agent', arguments: {} }, 'get_agent', key) });
+      const [first, second] = await Promise.all([ask(ALL), ask(OTHER)]);
+      const [firstSelf, secondSelf] = await Promise.all([asSelf(ALL), asSelf(OTHER)]);
+      expect([first.statusCode, second.statusCode]).toEqual([200, 200]);
+      expect([...stubs.asked].sort()).toEqual(
+        [`inForce ${ORG} ${AGENT_ID}`, `inForce ${ORG} ${OTHER_AGENT_ID}`].sort(),
+      );
+      const agentOfAnswer = (response: typeof firstSelf) =>
+        z.object({ agentId: z.string() }).parse(CALL_RESULT.parse(answerOf(response)).result.structuredContent).agentId;
+      expect([agentOfAnswer(firstSelf), agentOfAnswer(secondSelf)], era).toEqual([AGENT_ID, OTHER_AGENT_ID]);
+    }
   });
 
   it('answers an agent alone: no key, a refused key and a signed-in person are refused, as at every twin', async () => {
@@ -866,44 +961,9 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
     expect(rows.map((row) => row.actor)).toEqual(Array.from({ length: 5 }, () => actor));
   });
 
-  /** A server whose lines are captured, its use cases refusing, with this per-agent limit and line sample. */
-  async function logged(perAgent: number, logSample?: LogSample) {
-    const capture = new LogCapture();
-    const config = {
-      http: {
-        host: '127.0.0.1',
-        port: 0,
-        publicOrigin: PUBLIC_ORIGIN,
-        trustedProxies: [],
-        rateLimitPerMinute: 1000,
-        rateLimitPerUserPerMinute: 1000,
-        rateLimitPerAgentPerMinute: perAgent,
-        rateLimitPerOrganisationPerMinute: 1000,
-        webCopies: 1,
-      },
-      log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-    };
-    const stubs: Stubs = { mode: 'refuse', supplierName: 'n', idempotent: [], asked: [] };
-    const app = await buildServer({
-      config,
-      logger: createLogger({
-        service: 'api',
-        config: { environment: 'test', release: 'r-1', ...config },
-        destination: capture,
-      }),
-      ids: new SequentialIds(),
-      healthChecks: [],
-      checkAgentKey,
-      logSample,
-      ...useCases(stubs),
-    });
-    await app.ready();
-    return { app, capture };
-  }
-
   it("writes the SDK's own refusals through the logger, in plain words, and never a raw console line", async () => {
     const raw = vi.spyOn(console, 'warn');
-    const { app, capture } = await logged(100);
+    const { app, capture } = await logged();
     try {
       expect(raw).not.toHaveBeenCalled();
       const unspoken = await app.inject(
@@ -929,7 +989,7 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
 
   it('keeps the line of a refused tool call in both eras, however few answered lines are kept', async () => {
     const keepsNone: LogSample = { oneIn: 1_000_000, keeps: () => false };
-    const { app, capture } = await logged(100, keepsNone);
+    const { app, capture } = await logged({ logSample: keepsNone });
     try {
       for (const era of ['legacy', 'modern'] as const) {
         await callTool(app, 'get_spend_request', { id: REQUEST_ID }, ALL, era);
@@ -945,7 +1005,7 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
   });
 
   it("counts each call once against its agent's limit; its line names the tool, the client and its protocol", async () => {
-    const { app, capture } = await logged(4);
+    const { app, capture } = await logged({ perAgent: 4 });
     try {
       const hostile = `hermes${String.fromCharCode(27)}${'x'.repeat(200)}`;
       const initialized = await app.inject(
@@ -1017,6 +1077,20 @@ describe('an MCP tool stands only with its REST twin as it was registered (SEC-M
     expect(
       twinOf(route({ access: ['agent'], agentScopes: ['requests:read'] }, { 200: z.object({}) }, ['GET', 'HEAD'])),
     ).toMatchObject({ method: 'GET,HEAD', scopes: ['requests:read'], status: 200 });
+  });
+
+  it('asks a key for every scope its twin names, never just one of them (a twin of two scopes)', () => {
+    if (getAgent === undefined) throw new Error('no tools');
+    const twin = twinOf(route({ access: ['agent'], agentScopes: ['requests:read', 'sources:read'] }));
+    if ('problems' in twin) throw new Error('no twin');
+    const tool = twinned(getAgent, () => twin);
+    if ('problems' in tool) throw new Error('no tool');
+    expect(checkedInput(tool, accepted(['requests:read']), {})).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'INSUFFICIENT_SCOPE',
+    });
+    expect(checkedInput(tool, accepted(['requests:read', 'sources:read']), {})).toMatchObject({ outcome: 'checked' });
   });
 
   it('refuses a tool whose twin is missing, reads its input with other schemas, or names a field twice', () => {
@@ -1107,6 +1181,49 @@ describe('the MCP tools apart from any transport: definitions and results (6E2, 
     expect(JSON.stringify(mandate)).not.toContain('approvalThreshold');
     // Inline and flat (MCP-Guide §8): no client has to follow a reference.
     expect(JSON.stringify(definitions)).not.toMatch(/[$](?:ref|defs)/);
+  });
+
+  it("writes a tool's answer through its twin's answer schema: a field the twin doesn't name never leaves", async () => {
+    const getAgent = (await twinnedTools()).find(({ tool }) => tool.name === 'get_agent');
+    if (getAgent === undefined) throw new Error('missing tool');
+    // An operation that one day answers more than its twin names (SEC-AG-05): the schema still cuts it away.
+    const leaky: TwinnedTool = {
+      ...getAgent,
+      tool: {
+        ...getAgent.tool,
+        answer: () =>
+          Promise.resolve({
+            outcome: 'answered',
+            body: {
+              agentId: AGENT_ID,
+              organizationId: ORG,
+              keyId: KEY_ID,
+              scopes: [],
+              keyExpiresAt: '2099-12-28T09:00:00.000Z',
+              keyHash: 'not for agents',
+            },
+            summary: 'summary',
+          }),
+      },
+    };
+    const { result } = await callToolCore(
+      leaky,
+      {},
+      {
+        agent: accepted([]),
+        correlationId: AFTER,
+        useCases: {
+          mandates: undefined,
+          decisions: undefined,
+          cancels: undefined,
+          reads: undefined,
+          registry: undefined,
+        },
+        logFailure: () => undefined,
+      },
+    );
+    expect(result.structuredContent).not.toHaveProperty('keyHash');
+    expect(JSON.stringify(result.content)).not.toContain('not for agents');
   });
 
   it('answers with a summary, then the structured content as JSON text, and refuses with the reason code alike', async () => {
