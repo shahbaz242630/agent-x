@@ -196,6 +196,22 @@ describe('confirm', () => {
   });
 
   it.each([
+    ['the first try still being worked on', 409, 'IDEMPOTENCY_KEY_BUSY'],
+    ['too many tries just now', 429, 'RATE_LIMITED'],
+    ['a session that ended (a round trip may meet one)', 401, 'UNAUTHENTICATED'],
+  ])('keeps the change after an answer that decides nothing: %s', async (_what, status, code) => {
+    answer = () => json(status, { error: { code } });
+
+    await expect(confirm(pending)).rejects.toMatchObject({ status, code });
+    expect(pendingFor(CHALLENGE)).toEqual(pending);
+    answer = () => json(200, { frozen: true });
+    await confirm(pending);
+    // The same key and challenge again: the API rolled the first try's claim back.
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(pendingFor(CHALLENGE)).toBeUndefined();
+  });
+
+  it.each([
     ['a failure on our side', () => json(503, { error: { code: 'UNAVAILABLE' } })],
     ['no answer at all', () => Promise.reject(new TypeError('Failed to fetch'))],
   ])('keeps the change after %s, to be confirmed again', async (_what, failing) => {

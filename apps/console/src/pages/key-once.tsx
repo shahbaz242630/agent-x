@@ -13,7 +13,7 @@ import { useBlocker } from '@tanstack/react-router';
 import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 
-import { t } from '../text.ts';
+import { t, type TextKey } from '../text.ts';
 
 /** What stands for the key while it is hidden: never its length or any of it. */
 const MASK = '•'.repeat(24);
@@ -27,6 +27,37 @@ export function keyIn(answer: unknown): { readonly key: string | null } | undefi
   if (typeof answer !== 'object' || answer === null || !('key' in answer)) return undefined;
   return { key: typeof answer.key === 'string' ? answer.key : null };
 }
+
+/**
+ * An invitation's link a confirm answered with (6D4b), shown once the same
+ * way: none for any other answer; null for a retry, answered without it.
+ */
+export function linkIn(answer: unknown): { readonly key: string | null; readonly kind: 'link' } | undefined {
+  if (typeof answer !== 'object' || answer === null || !('invitation' in answer)) return undefined;
+  return { key: 'link' in answer && typeof answer.link === 'string' ? answer.link : null, kind: 'link' };
+}
+
+/** The words for what is shown once: an agent's key (6D1), or an invitation's link (6D4b). */
+const WORDS = {
+  key: {
+    title: 'keyOnce.title',
+    warning: 'keyOnce.warning',
+    hidden: 'keyOnce.hiddenLabel',
+    shown: 'keyOnce.shownLabel',
+    copied: 'keyOnce.copied',
+    retried: 'keyOnce.retried',
+    leave: 'keyOnce.leaveQuestion',
+  },
+  link: {
+    title: 'invitations.link.title',
+    warning: 'invitations.link.warning',
+    hidden: 'invitations.link.hiddenLabel',
+    shown: 'invitations.link.shownLabel',
+    copied: 'invitations.link.copied',
+    retried: 'invitations.link.retried',
+    leave: 'invitations.link.leaveQuestion',
+  },
+} as const satisfies Record<string, Record<string, TextKey>>;
 
 /** Told while a key is on screen and not yet saved: the shell holds what would drop it without a navigation. */
 const Hold = createContext<(held: boolean) => void>(() => undefined);
@@ -44,14 +75,22 @@ export function KeyHold({
 type Copied = 'not yet' | 'copied' | 'failed';
 
 /** Asked when a link inside the console would leave the key behind: stay (and save it), or leave without it. */
-function LeaveQuestion({ onStay, onLeave }: { readonly onStay: () => void; readonly onLeave: () => void }) {
+function LeaveQuestion({
+  question,
+  onStay,
+  onLeave,
+}: {
+  readonly question: TextKey;
+  readonly onStay: () => void;
+  readonly onLeave: () => void;
+}) {
   const stay = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     stay.current?.focus();
   }, []);
   return (
     <div className="notice" role="alert">
-      <p>{t('keyOnce.leaveQuestion')}</p>
+      <p>{t(question)}</p>
       <div className="actions">
         <button type="button" className="secondary" onClick={onLeave}>
           {t('keyOnce.leave')}
@@ -64,7 +103,16 @@ function LeaveQuestion({ onStay, onLeave }: { readonly onStay: () => void; reado
   );
 }
 
-export function KeyOnce({ secret, onDone }: { readonly secret: string | null; readonly onDone: () => void }) {
+export function KeyOnce({
+  secret,
+  onDone,
+  kind = 'key',
+}: {
+  readonly secret: string | null;
+  readonly onDone: () => void;
+  readonly kind?: keyof typeof WORDS;
+}) {
+  const words = WORDS[kind];
   const [shown, setShown] = useState(false);
   const [copied, setCopied] = useState<Copied>('not yet');
   const [gone, setGone] = useState(false);
@@ -111,7 +159,7 @@ export function KeyOnce({ secret, onDone }: { readonly secret: string | null; re
   if (secret === null) {
     return (
       <>
-        <p className="notice">{t('keyOnce.retried')}</p>
+        <p className="notice">{t(words.retried)}</p>
         <button type="button" className="secondary" onClick={onDone}>
           {t('stepUp.close')}
         </button>
@@ -129,9 +177,9 @@ export function KeyOnce({ secret, onDone }: { readonly secret: string | null; re
   };
   return (
     <section className="key-once" aria-labelledby="key-once-title">
-      <h2 id="key-once-title">{t('keyOnce.title')}</h2>
-      <p className="notice">{t('keyOnce.warning')}</p>
-      <code className="secret mono" aria-label={shown ? t('keyOnce.shownLabel') : t('keyOnce.hiddenLabel')}>
+      <h2 id="key-once-title">{t(words.title)}</h2>
+      <p className="notice">{t(words.warning)}</p>
+      <code className="secret mono" aria-label={t(shown ? words.shown : words.hidden)}>
         {shown ? secret : MASK}
       </code>
       <div className="actions">
@@ -161,10 +209,12 @@ export function KeyOnce({ secret, onDone }: { readonly secret: string | null; re
       </div>
       {copied !== 'not yet' && (
         <p className={copied === 'failed' ? 'notice' : 'fine'} role="status">
-          {t(copied === 'copied' ? 'keyOnce.copied' : 'keyOnce.copyFailed')}
+          {copied === 'copied' ? t(words.copied) : t('keyOnce.copyFailed')}
         </p>
       )}
-      {leaving.status === 'blocked' && <LeaveQuestion onStay={leaving.reset} onLeave={leaving.proceed} />}
+      {leaving.status === 'blocked' && (
+        <LeaveQuestion question={words.leave} onStay={leaving.reset} onLeave={leaving.proceed} />
+      )}
     </section>
   );
 }

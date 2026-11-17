@@ -18,6 +18,12 @@ export function refusalText(
     | 'logs.refused'
     | 'evidence.refused'
     | 'suppliers.refused'
+    | 'sources.refused'
+    | 'hold.refused'
+    | 'members.refused'
+    | 'invitations.refused'
+    | 'contacts.refused'
+    | 'resets.refused'
     | 'mandates.refused'
     | 'policies.refused',
   ownWords: Readonly<Record<string, TextKey>> = {},

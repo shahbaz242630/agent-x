@@ -26,8 +26,8 @@ interface Opened {
 type Open = { readonly kind: 'none' } | Opened;
 const NONE: Open = { kind: 'none' };
 
-/** Where a row's name links: an agent's page (6D1), a supplier's (6D2); a bank account has none. */
-const PAGES = { agents: '/agents/$id', suppliers: '/more/suppliers/$id', sources: null } as const;
+/** Where a row's name links: an agent's page (6D1), a supplier's (6D2), a bank account's (6D4a). */
+const PAGES = { agents: '/agents/$id', suppliers: '/more/suppliers/$id', sources: '/more/sources/$id' } as const;
 
 function Row({
   thing,
@@ -52,13 +52,9 @@ function Row({
     <li className="row">
       <span className="row-main">
         <span>
-          {page !== null ? (
-            <Link to={page} params={{ id: thing.id }}>
-              {thing.name}
-            </Link>
-          ) : (
-            thing.name
-          )}
+          <Link to={page} params={{ id: thing.id }}>
+            {thing.name}
+          </Link>
           {thing.suspended && <span className="tag warn">{t('brakes.suspended')}</span>}
           {thing.ended && <span className="tag">{t('brakes.ended')}</span>}
         </span>

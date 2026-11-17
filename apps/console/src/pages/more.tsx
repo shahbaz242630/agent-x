@@ -4,8 +4,10 @@ import { useState } from 'react';
 
 import { api } from '../api.ts';
 import { dropAllTries } from '../held-tries.ts';
+import { dropKept } from '../kept.ts';
 import { goTo } from '../navigate.ts';
 import { useActing } from '../session.tsx';
+import { forgetAll } from '../step-up.ts';
 import { t } from '../text.ts';
 import { Freeze } from './freeze.tsx';
 
@@ -31,12 +33,18 @@ export function More() {
     }
     queries.clear();
     dropAllTries();
+    dropKept();
+    forgetAll();
     goTo('/');
   };
   return (
     <section className="stack">
       <h1>{t('more.title')}</h1>
       <Freeze />
+      <nav className="stack" aria-label={t('members.people')}>
+        <h2>{t('members.people')}</h2>
+        <Link to="/more/members">{t('members.title')}</Link>
+      </nav>
       <nav className="stack" aria-label={t('policies.more')}>
         <h2>{t('policies.more')}</h2>
         <Link to="/more/policy">{t('policies.title.organization')}</Link>
@@ -56,6 +64,13 @@ export function More() {
           <h2>{t('more.records')}</h2>
           <Link to="/more/audit-log">{t('logs.audit.title')}</Link>
           <Link to="/more/access-log">{t('logs.access.title')}</Link>
+        </nav>
+      )}
+      {/* The integrity hold is an admin's alone (the API's access): no one else is shown a way to it (6D4a). */}
+      {organization.role === 'admin' && (
+        <nav className="stack" aria-label={t('hold.title')}>
+          <h2>{t('hold.title')}</h2>
+          <Link to="/more/integrity-hold">{t('hold.moreLink')}</Link>
         </nav>
       )}
       <h2>{t('more.sessionHeading')}</h2>

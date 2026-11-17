@@ -33,7 +33,12 @@ export interface Organizations {
 /** Set once a request on this page was answered 401: the session ended while in use, which the sign-in page says. */
 export const ENDED = ['session-ended'];
 
-/** The session ended while the page was open (a request answered 401): the sign-in page shows, saying so. */
+/**
+ * The session ended while the page was open (a request answered 401): the
+ * sign-in page shows, saying so. What was kept in this tab for the person
+ * (kept.ts, a step-up's change) stays for when they sign in again: it goes on
+ * signing out alone.
+ */
 export function endSession(queries: QueryClient): void {
   queries.setQueryData(ENDED, true);
   queries.setQueryData(['session'], null);
