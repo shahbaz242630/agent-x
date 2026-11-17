@@ -10269,6 +10269,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10289,7 +10292,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation’s security events: its people’s and agents’ rate-limit hits and failed step-ups",
@@ -10390,6 +10401,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10410,7 +10424,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/exports": {
@@ -27000,7 +27022,7 @@
     },
     {
       "name": "Logs",
-      "description": "The organisation's audit log and access log, to read and export."
+      "description": "The organisation's audit log, access log and security events, to read and export."
     },
     {
       "name": "Sign-in",
