@@ -10325,6 +10325,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10345,7 +10348,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your own activity log: every request you made outside an organisation, newest first",
@@ -10443,6 +10454,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10463,7 +10477,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/auth/activity/exports": {
@@ -10514,7 +10536,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           }
         ],
         "x-access": [
@@ -10541,6 +10563,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10561,7 +10586,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/background-exports": {
