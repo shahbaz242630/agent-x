@@ -223,6 +223,26 @@ describe('a bank account’s page (6D4a)', () => {
     expect((await screen.findAllByText(/records failed Agent X's integrity check/)).length).toBeGreaterThan(0);
     expect(screen.getByRole('heading', { name: 'Staging Test Org 1 LLC' })).toBeDefined();
   });
+
+  it('keeps the account shown when a re-read fails otherwise, and offers to try again', async () => {
+    as('admin');
+    answer(`GET ${at}`, { status: 200, body: source() }, refused(403, 'FORBIDDEN'), { status: 200, body: source() });
+    const queries = createQueries();
+    render(<App queries={queries} router={createConsoleRouter(createMemoryHistory({ initialEntries: [page] }))} />);
+    await screen.findByRole('heading', { name: 'Staging Test Org 1 LLC' });
+    await queries.invalidateQueries();
+    await press('Try again');
+    expect(await screen.findByRole('heading', { name: 'Staging Test Org 1 LLC' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
+  it('offers to read again an account that couldn’t be read', async () => {
+    as('admin');
+    answer(`GET ${at}`, refused(403, 'FORBIDDEN'), { status: 200, body: source() });
+    open(page);
+    await press('Try again');
+    expect(await screen.findByRole('heading', { name: 'Staging Test Org 1 LLC' })).toBeDefined();
+  });
 });
 
 describe('checking an account with the bank (6D4a)', () => {
