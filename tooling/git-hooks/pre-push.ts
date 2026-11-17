@@ -2,7 +2,10 @@
 // scans the commits being pushed with gitleaks, the pinned binary run as CI
 // runs it, then type-checks and lints. A flagged commit costs a fresh PR once
 // it reaches GitHub (S4, S10), so this is where to catch it. The type check
-// and lint read the working tree; CI checks the commit itself.
+// and lint read the working tree; CI checks the commit itself. The lint reads
+// only the files the branch changes (S200: the whole repository took ~45 min
+// and ~6 GB on the partner's laptop), the whole when the lint's own setup
+// changed or git can't say what changed; CI still lints the whole.
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -72,18 +75,64 @@ export const gitleaksArgs = (range: string): string[] => [
   '.',
 ];
 
-/** A package script through Corepack; on Windows Corepack is a .cmd shim, which only a shell runs (fixed text). */
-function packageScript(name: 'typecheck' | 'lint'): SpawnSyncReturns<Buffer> {
+/** The type check through Corepack; on Windows Corepack is a .cmd shim, which only a shell runs (fixed text). */
+function typecheckScript(): SpawnSyncReturns<Buffer> {
   return process.platform === 'win32'
-    ? spawnSync(`corepack pnpm ${name}`, { shell: true, stdio: 'inherit', windowsHide: true })
-    : spawnSync('corepack', ['pnpm', name], { stdio: 'inherit' });
+    ? spawnSync('corepack pnpm typecheck', { shell: true, stdio: 'inherit', windowsHide: true })
+    : spawnSync('corepack', ['pnpm', 'typecheck'], { stdio: 'inherit' });
+}
+
+/** Paths whose change can alter what the lint finds anywhere: the whole is linted then. */
+const WHOLE_LINT = [
+  /^eslint(\.[a-z]+)?\.config\.js$/,
+  /^tooling\/quality\//,
+  /(^|\/)package\.json$/,
+  /^pnpm-lock\.yaml$/,
+  /(^|\/)tsconfig[^/]*\.json$/,
+];
+
+const LINTED = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+
+/**
+ * What the lint reads: 'all' when git couldn't say what changed or the lint's
+ * own setup changed; otherwise the changed files it lints (none skips it).
+ */
+export function lintTargets(changed: readonly string[] | undefined): readonly string[] | 'all' {
+  if (changed === undefined) return 'all';
+  if (changed.some((path) => WHOLE_LINT.some((pattern) => pattern.test(path)))) return 'all';
+  return changed.filter((path) => LINTED.test(path));
+}
+
+/**
+ * The files changed since the branch left the default branch: committed,
+ * staged, unstaged and untracked (the lint reads the working tree), deleted
+ * ones left out. Undefined when git can't find where the branch left it.
+ */
+export function changedFiles(base = 'origin/main'): readonly string[] | undefined {
+  try {
+    const from = runGit(['merge-base', 'HEAD', base]).trim();
+    const lines = (text: string) => text.split('\n').filter((line) => line !== '');
+    const tracked = lines(runGit(['diff', '--name-only', '--diff-filter=d', from]));
+    const untracked = lines(runGit(['ls-files', '--others', '--exclude-standard']));
+    return [...new Set([...tracked, ...untracked])].sort();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The lint, run by node itself (no shell: a long file list would pass cmd.exe's line limit). */
+function lintFiles(files: readonly string[] | 'all'): SpawnSyncReturns<Buffer> {
+  const args = ['--max-old-space-size=6144', 'tooling/quality/lint.ts', ...(files === 'all' ? [] : files)];
+  return spawnSync(process.execPath, args, { stdio: 'inherit', windowsHide: true });
 }
 
 export interface Steps {
   readonly known: (sha: string) => boolean;
   readonly commits: (range: string) => number;
   readonly gitleaks: (range: string) => Promise<number>;
-  readonly script: (name: 'typecheck' | 'lint') => number;
+  readonly typecheck: () => number;
+  readonly changed: () => readonly string[] | undefined;
+  readonly lint: (files: readonly string[] | 'all') => number;
 }
 
 const realSteps: Steps = {
@@ -93,7 +142,9 @@ const realSteps: Steps = {
     const binary = await ensureGitleaks();
     return spawnSync(binary, gitleaksArgs(range), { stdio: 'inherit', windowsHide: true }).status ?? 1;
   },
-  script: (name) => packageScript(name).status ?? 1,
+  typecheck: () => typecheckScript().status ?? 1,
+  changed: () => changedFiles(),
+  lint: (files) => lintFiles(files).status ?? 1,
 };
 
 /** The hook: returns the exit code. Stops at the first failing step. */
@@ -126,8 +177,15 @@ export async function prePush(
     }
     if (status !== 0) return refuse('gitleaks found something in the commits being pushed');
   }
-  if (steps.script('typecheck') !== 0) return refuse('the type check failed');
-  if (steps.script('lint') !== 0) return refuse('lint failed');
+  if (steps.typecheck() !== 0) return refuse('the type check failed');
+  const targets = lintTargets(steps.changed());
+  if (targets === 'all')
+    log('Linting the whole repository (the lint setup changed, or git could not say what changed).');
+  else if (targets.length === 0) {
+    log('No changed files to lint; CI lints the whole repository.');
+    return 0;
+  } else log(`Linting the ${targets.length} changed file(s); CI lints the whole repository.`);
+  if (steps.lint(targets) !== 0) return refuse('lint failed');
   return 0;
 }
 

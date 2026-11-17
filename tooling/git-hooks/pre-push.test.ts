@@ -2,7 +2,17 @@ import { execFileSync } from 'node:child_process';
 
 import { describe, expect, it } from 'vitest';
 
-import { commitCount, gitleaksArgs, knownCommit, logRanges, parseRefs, prePush, type Steps } from './pre-push.ts';
+import {
+  changedFiles,
+  commitCount,
+  gitleaksArgs,
+  knownCommit,
+  lintTargets,
+  logRanges,
+  parseRefs,
+  prePush,
+  type Steps,
+} from './pre-push.ts';
 
 const NONE = '0'.repeat(40);
 const A = 'a'.repeat(40);
@@ -76,21 +86,30 @@ describe('the hook', () => {
   const steps = (
     fail: Partial<Record<'gitleaks' | 'typecheck' | 'lint', number | Error>> = {},
     commits: (range: string) => number = () => 1,
+    changed: () => readonly string[] | undefined = () => ['a.ts'],
   ): Steps & { ran: string[] } => {
     const ran: string[] = [];
+    const outcome = (name: 'typecheck' | 'lint') => {
+      const set = fail[name];
+      return typeof set === 'number' ? set : 0;
+    };
     return {
       ran,
       known: () => true,
       commits,
       gitleaks: (range) => {
         ran.push(`gitleaks ${range}`);
-        const outcome = fail.gitleaks;
-        return outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome ?? 0);
+        const set = fail.gitleaks;
+        return set instanceof Error ? Promise.reject(set) : Promise.resolve(set ?? 0);
       },
-      script: (name) => {
-        ran.push(name);
-        const outcome = fail[name];
-        return typeof outcome === 'number' ? outcome : 0;
+      typecheck: () => {
+        ran.push('typecheck');
+        return outcome('typecheck');
+      },
+      changed,
+      lint: (files) => {
+        ran.push(files === 'all' ? 'lint all' : `lint ${files.join(' ')}`);
+        return outcome('lint');
       },
     };
   };
@@ -98,7 +117,7 @@ describe('the hook', () => {
   it('scans, then type-checks, then lints, and lets a clean push through', async () => {
     const run = steps();
     expect(await prePush(push, 'origin', run, () => undefined)).toBe(0);
-    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint']);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint a.ts']);
   });
 
   it('does nothing for a push that only deletes', async () => {
@@ -110,21 +129,21 @@ describe('the hook', () => {
   it.each([
     ['gitleaks', 'gitleaks found something in the commits being pushed', [`gitleaks ${B}..${A}`]],
     ['typecheck', 'the type check failed', [`gitleaks ${B}..${A}`, 'typecheck']],
-    ['lint', 'lint failed', [`gitleaks ${B}..${A}`, 'typecheck', 'lint']],
+    ['lint', 'lint failed', [`gitleaks ${B}..${A}`, 'typecheck', 'lint a.ts']],
   ] as const)('refuses when %s fails, and stops there', async (step, reason, ran) => {
     const run = steps({ [step]: 1 });
     const said: string[] = [];
     expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(1);
     expect(run.ran).toEqual(ran);
-    expect(said).toEqual([
+    expect(said.at(-1)).toBe(
       `Push refused by the pre-push hook: ${reason}. CI would refuse it too; never skip this with --no-verify.`,
-    ]);
+    );
   });
 
   it('skips the scan for a push that adds no commits, and still type-checks and lints', async () => {
     const run = steps({}, () => 0);
     expect(await prePush(push, 'origin', run, () => undefined)).toBe(0);
-    expect(run.ran).toEqual(['typecheck', 'lint']);
+    expect(run.ran).toEqual(['typecheck', 'lint a.ts']);
   });
 
   it('refuses a push whose commits git cannot read, rather than pass it unscanned', async () => {
@@ -144,5 +163,84 @@ describe('the hook', () => {
     const run = steps({ gitleaks: new Error('offline') });
     expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(1);
     expect(said[0]).toContain('gitleaks could not run (offline); run corepack pnpm hooks');
+  });
+
+  it('lints the whole repository when git cannot say what changed', async () => {
+    const said: string[] = [];
+    const run = steps(
+      {},
+      () => 1,
+      () => undefined,
+    );
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(0);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint all']);
+    expect(said).toEqual(['Linting the whole repository (the lint setup changed, or git could not say what changed).']);
+  });
+
+  it('skips the lint when no changed file is one it reads, and says CI lints the whole', async () => {
+    const said: string[] = [];
+    const run = steps(
+      {},
+      () => 1,
+      () => ['README.md'],
+    );
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(0);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck']);
+    expect(said).toEqual(['No changed files to lint; CI lints the whole repository.']);
+  });
+
+  it('says how many changed files it lints', async () => {
+    const said: string[] = [];
+    const run = steps(
+      {},
+      () => 1,
+      () => ['a.ts', 'b.tsx'],
+    );
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(0);
+    expect(said).toEqual(['Linting the 2 changed file(s); CI lints the whole repository.']);
+  });
+});
+
+describe('what the lint reads', () => {
+  it('is the whole repository when git could not say what changed', () => {
+    expect(lintTargets(undefined)).toBe('all');
+  });
+
+  it.each([
+    'eslint.config.js',
+    'eslint.quality.config.js',
+    'tooling/quality/lint.ts',
+    'package.json',
+    'apps/console/package.json',
+    'pnpm-lock.yaml',
+    'tsconfig.json',
+    'apps/console/tsconfig.app.json',
+  ])('is the whole repository when %s changed', (path) => {
+    expect(lintTargets(['a.ts', path])).toBe('all');
+  });
+
+  it('is the changed script files alone otherwise', () => {
+    expect(
+      lintTargets(['a.ts', 'b.tsx', 'c.js', 'd.mjs', 'e.cjs', 'f.jsx', 'g.mts', 'README.md', 'x.css', 'y.sql']),
+    ).toEqual(['a.ts', 'b.tsx', 'c.js', 'd.mjs', 'e.cjs', 'f.jsx', 'g.mts']);
+  });
+
+  it('keeps a near name that is not the lint setup', () => {
+    expect(lintTargets(['docs/eslint.config.js.md', 'apps/x/eslint.config.ts', 'tooling/qualityx/a.ts'])).toEqual([
+      'apps/x/eslint.config.ts',
+      'tooling/qualityx/a.ts',
+    ]);
+  });
+});
+
+describe('the changed files', () => {
+  it('is undefined when git cannot find where the branch left the base', () => {
+    expect(changedFiles('refs/heads/no-such-branch-s200')).toBeUndefined();
+  });
+
+  it('lists the working tree against a commit git has, sorted and without repeats', () => {
+    const files = changedFiles('HEAD');
+    expect(files).toBeDefined();
+    expect(files).toEqual([...new Set(files)].sort());
   });
 });
