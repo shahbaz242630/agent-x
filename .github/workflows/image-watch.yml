@@ -1,0 +1,143 @@
+# DT5 (partner S201): a daily watch for security notices on the third-party
+# images we run. Dependabot moves their versions weekly, and the weekly sweep
+# scans only our own image, so in S190 six Zitadel account-takeover advisories
+# were seen only at a manual weekly read. Every day (Mondays included, so the
+# weekly sweep's day too) this:
+#   1. reads the images from where they are pinned (tooling/image-watch/watch.ts:
+#      Zitadel and its login pages from staging's parameters, Postgres and
+#      nginx from the compose stack), never a second copy of their digests;
+#   2. scans each with Grype, the same version the weekly image scan runs;
+#   3. checks Zitadel's own published security advisories against its pinned
+#      version.
+# Red, in plain words, on a high or critical finding with a fix to move to; the
+# rest is in the job summary only. A Grype finding no vendor image fixes yet may
+# be accepted in tooling/image-watch/accepted.json with a reason and a review
+# date at most 30 days ahead (lead, S201: a watch red for weeks gets ignored);
+# a past date, or a malformed entry, is red. Zitadel's advisories are never
+# accepted. A failed run is emailed to the repository's
+# owner. Positive control (a silent watch proves nothing): run it by hand with
+# `zitadel_version` set to one before the S190 fix (4.19.4), and the advisory
+# check must go red; watch.test.ts holds the same with fixture advisories.
+name: Image watch (daily)
+
+on:
+  schedule:
+    - cron: '7 4 * * *' # every day, 04:07 UTC
+  workflow_dispatch:
+    inputs:
+      zitadel_version:
+        description: 'Positive control: judge this Zitadel version (e.g. 4.19.4) instead of the pinned one; it must go red'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-watch
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: Read the pinned images
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Read them from the files that pin them
+        id: read
+        run: |
+          matrix=$(node tooling/image-watch/watch.ts images)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "Watching: ${matrix}"
+
+  accepted:
+    name: Check the accepted findings
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Every entry well formed and before its review date
+        run: node tooling/image-watch/watch.ts accepted
+
+  scan:
+    name: Scan ${{ matrix.key }} (Grype)
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.images.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      # Public images, pulled by digest with no registry login. The scan never
+      # fails the step itself: watch.ts judges its report, in plain words.
+      - name: Scan the image (Grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ${{ matrix.image }}
+          grype-version: v0.119.0
+          fail-build: false
+          output-format: json
+
+      - name: Judge what the scan found
+        env:
+          REPORT: ${{ steps.scan.outputs.json }}
+          KEY: ${{ matrix.key }}
+        run: node tooling/image-watch/watch.ts grype "${REPORT}" "${KEY}"
+
+  advisories:
+    name: Check Zitadel's security advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CONTROL_VERSION: ${{ inputs.zitadel_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      # Zitadel's own repository advisories: they name Zitadel's release
+      # versions, which the image tags follow.
+      - name: Read Zitadel's published advisories
+        run: |
+          if ! gh api --paginate --slurp 'repos/zitadel/zitadel/security-advisories?state=published&per_page=100' > advisories.json; then
+            echo "::error::GitHub's list of Zitadel's security advisories could not be read, so Zitadel went unchecked today. Look at this step's log (GitHub's API may be down), then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Judge them against the version we run
+        run: node tooling/image-watch/watch.ts advisories advisories.json "${CONTROL_VERSION}"

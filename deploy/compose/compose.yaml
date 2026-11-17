@@ -368,7 +368,7 @@ services:
   # network that reaches anything. nginx starts as root, hands its cache to
   # its worker user and drops to it: the three rights that takes, no more.
   edge:
-    image: nginx:1.31.5-alpine-slim@sha256:3b171d7224b669faa3cc2137fea0a65301791df1ec1f271ebd2a2b7461f7fade
+    image: nginx:1.31.8-alpine-slim@sha256:4c734d33ee731135dc9f2349914a34551c920f4451fca8bb05bf5880eb9079e8
     volumes:
       - ./edge/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
