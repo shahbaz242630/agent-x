@@ -14,6 +14,14 @@
 //   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
 //   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
 //   node deploy/azure/operator.ts counting-contacts --org <organisation ID>
+//   node deploy/azure/operator.ts person-activity-export --user <user ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
+//
+// person-activity-export (CO8b, D2) exports one person's own activity log
+// for a case, as activity-export does an organisation's: recorded on the
+// platform chain, which the person's My activity page lists, then each sealed
+// day of the range held to its seal (a day that doesn't is the alarm, and no
+// file), then the file to the write-once store, once. It says which days
+// aren't sealed yet. Its --id repeats an earlier run's export, as theirs does.
 //
 // counting-contacts (OR2b, playbook K) lists an organisation's registered
 // contacts that count now, read-only: each one's ID, its address masked
@@ -124,6 +132,9 @@ import {
   handoffRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
+  PERSON_ACTIVITY_EXPORT,
+  personActivityExportOf,
+  personActivityExportRequest,
   REQUEST_LIMIT_BYTES,
   RESTORE_CHECK,
   chainRebaseRequest,
@@ -258,6 +269,7 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
   node deploy/azure/operator.ts factor-reset-notice --org <organisation ID> --user <user ID> --reason <incident reference> [--id <ID>]
   node deploy/azure/operator.ts counting-contacts --org <organisation ID>
+  node deploy/azure/operator.ts person-activity-export --user <user ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, invitation, export, pause or resume. An export's times are UTC, such as 2026-10-01T00:00:00Z, ${String(MOST_EXPORT_DAYS)} days at most; its case reference, and a pause's or resume's, is the dispute's, the incident's or the regulator's: 3 to 64 letters, digits and . _ / -.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -335,37 +347,70 @@ export interface AuditExportArguments {
   readonly id: string | undefined;
 }
 
+/** One person's own activity log export the partner asked for (CO8b): as an organisation's, by the person's user ID. */
+export interface PersonActivityExportArguments extends Omit<AuditExportArguments, 'orgId'> {
+  readonly userId: string;
+}
+
+/** An export's words beside its subject, as typed, the ID an earlier try's if one is given. */
+type CaseExportWords = Omit<AuditExportArguments, 'orgId'>;
+
 /**
- * What was asked for, or a UsageError saying why it can't be done, by the
- * operator's own rules (request.ts `auditExportOf`), so a request it would
- * refuse is never written. The case reference is never repeated in one.
+ * An export for a case's words, its subject (`--org` or `--user`, by its kind) apart, or a UsageError saying why it
+ * can't be done, by the operator's own rules (`checked`, request.ts's), so a request it would refuse is never
+ * written. The case reference is never repeated in one.
  */
-export function parseAuditExport(argv: readonly string[], kind: CaseExportKind = 'audit-export'): AuditExportArguments {
-  const [command, orgFlag, orgId, fromFlag, from, toFlag, to, reasonFlag, caseRef, ...rest] = argv;
+function caseExportWords(
+  argv: readonly string[],
+  kind: CaseExportKind,
+  checked: (subject: string, words: CaseExportWords & { readonly id: string }) => object,
+): CaseExportWords & { readonly subject: string } {
+  const [command, subjectFlag, subject, fromFlag, from, toFlag, to, reasonFlag, caseRef, ...rest] = argv;
   const [idFlag, id, ...more] = rest;
   const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
+  const { flag, named } = CASE_EXPORTS[kind];
   if (
     command !== kind ||
-    orgFlag !== '--org' ||
+    subjectFlag !== flag ||
     fromFlag !== '--from' ||
     toFlag !== '--to' ||
     reasonFlag !== '--reason' ||
-    orgId === undefined ||
+    subject === undefined ||
     from === undefined ||
     to === undefined ||
     caseRef === undefined ||
     !ided
   ) {
     throw new UsageError(
-      `say ${kind} --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else`,
+      `say ${kind} ${flag} ${named} --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else`,
     );
   }
   if (id !== undefined && !UUID_V7.test(id)) {
     throw new UsageError('--id takes the ID an earlier run gave: a UUIDv7, in lower case');
   }
-  const asked = auditExportOf({ orgId, from, to, caseRef, id: id ?? SOME_ID }, MOST_EXPORT_DAYS);
-  if ('problems' in asked) throw new UsageError(asked.problems.join('; '));
-  return { orgId, from, to, caseRef, id };
+  const asked = checked(subject, { from, to, caseRef, id: id ?? SOME_ID });
+  if ('problems' in asked && Array.isArray(asked.problems)) throw new UsageError(asked.problems.join('; '));
+  return { subject, from, to, caseRef, id };
+}
+
+/**
+ * What was asked for, or a UsageError saying why it can't be done, by the
+ * operator's own rules (request.ts `auditExportOf`), so a request it would
+ * refuse is never written. The case reference is never repeated in one.
+ */
+export function parseAuditExport(argv: readonly string[], kind: OrgExportKind = 'audit-export'): AuditExportArguments {
+  const { subject, ...words } = caseExportWords(argv, kind, (orgId, asked) =>
+    auditExportOf({ orgId, ...asked }, MOST_EXPORT_DAYS),
+  );
+  return { orgId: subject, ...words };
+}
+
+/** One person's own activity log export (CO8b), or a UsageError, by request.ts `personActivityExportOf`. */
+export function parsePersonActivityExport(argv: readonly string[]): PersonActivityExportArguments {
+  const { subject, ...words } = caseExportWords(argv, PERSON_ACTIVITY_EXPORT, (userId, asked) =>
+    personActivityExportOf({ userId, ...asked }, MOST_EXPORT_DAYS),
+  );
+  return { userId: subject, ...words };
 }
 
 /** The pause or resume of every hand-off the partner asked for (Phase 4 B1). */
@@ -776,12 +821,12 @@ function auditExportOutcome(
   const said = commandLines(lines);
   const about = (event: string): Readonly<Record<string, unknown>> | undefined =>
     said.find((line) => line.event === event && line.exportId === id);
-  const { done, counted } = CASE_EXPORTS[kind];
+  const { done, counted, told, recorded } = CASE_EXPORTS[kind];
   const exported = about(done);
   if (exported !== undefined) {
     steps.say(
       exported.write === 'written'
-        ? `Exported ${String(exported[counted])} ${counted} for the case to the store as ${String(exported.file)} (${String(exported.bytes)} bytes, SHA-256 ${String(exported.sha256)}). It is recorded on both chains, and the organisation's admins were told.`
+        ? `Exported ${String(exported[counted])} ${counted} for the case to the store as ${String(exported.file)} (${String(exported.bytes)} bytes, SHA-256 ${String(exported.sha256)}). ${told}${sealsSaid(about('operator.person_log_seals'))}`
         : `Already done: ${String(exported.file)} is in the store from an earlier run of this export, and nothing was written again.`,
     );
     return 0;
@@ -791,7 +836,7 @@ function auditExportOutcome(
     const problems = problemsSaid(unwritten);
     const why = problems === undefined ? '' : ': ' + problems;
     steps.say(
-      `The export ${id} is recorded on both chains and the organisation's admins were told, but its file wasn't written${why}. Run the same command again with --id ${id}: it records nothing twice, and writes the file once.`,
+      `The export ${id} is ${recorded}, but its file wasn't written${why}. Run the same command again with --id ${id}: it records nothing twice, and writes the file once.`,
     );
     return 1;
   }
@@ -818,23 +863,79 @@ function auditExportOutcome(
   return 1;
 }
 
-/** The exports for a case the job runs: the line a written one ends with, what it counts, and its request. */
+/** What a person's export (CO8b) says of its seals, from its run's line: the days not yet sealed, marked so. */
+function sealsSaid(line: Readonly<Record<string, unknown>> | undefined): string {
+  if (line === undefined) return '';
+  if (line.sealedThrough === null) {
+    return ' No day of the person log is sealed yet, so every request in the file is marked unsealed.';
+  }
+  return typeof line.unsealedFrom === 'string'
+    ? ` Each sealed day held to its seal; from ${line.unsealedFrom} the days aren't sealed yet, and their requests are marked unsealed.`
+    : ' Every day of the range is sealed, and each held to its seal.';
+}
+
+/** What an organisation's export records and tells. */
+const ORG_TOLD = {
+  told: "It is recorded on both chains, and the organisation's admins were told.",
+  recorded: "recorded on both chains and the organisation's admins were told",
+} as const;
+
+/**
+ * The exports for a case the job runs: how its subject is named, the line a written one ends with, what it counts,
+ * its request, and what it records and tells.
+ */
 const CASE_EXPORTS = {
-  'audit-export': { done: 'operator.audit_exported', counted: 'events', request: auditExportRequest },
-  'activity-export': { done: 'operator.activity_exported', counted: 'requests', request: activityExportRequest },
+  'audit-export': {
+    flag: '--org',
+    named: '<organisation ID>',
+    done: 'operator.audit_exported',
+    counted: 'events',
+    request: auditExportRequest,
+    ...ORG_TOLD,
+  },
+  'activity-export': {
+    flag: '--org',
+    named: '<organisation ID>',
+    done: 'operator.activity_exported',
+    counted: 'requests',
+    request: activityExportRequest,
+    ...ORG_TOLD,
+  },
+  [PERSON_ACTIVITY_EXPORT]: {
+    flag: '--user',
+    named: '<user ID>',
+    done: 'operator.person_activity_exported',
+    counted: 'requests',
+    request: personActivityExportRequest,
+    told: "It is recorded on the platform chain, and the person's My activity page lists it.",
+    recorded: "recorded on the platform chain and listed on the person's My activity page",
+  },
 } as const;
 
 type CaseExportKind = keyof typeof CASE_EXPORTS;
+
+/** The exports of an organisation's logs. */
+type OrgExportKind = Exclude<CaseExportKind, typeof PERSON_ACTIVITY_EXPORT>;
 
 /** Exports an organisation's audit log (E10c) or activity log (L7) for a case on the job: 0 once its file is in the store. */
 export function auditExport(
   request: AuditExportArguments,
   steps: JobSteps,
-  kind: CaseExportKind = 'audit-export',
+  kind: OrgExportKind = 'audit-export',
 ): Promise<number> {
+  return caseExport(request.orgId, request, steps, kind);
+}
+
+/** Exports one person's own activity log for a case on the job (CO8b): 0 once its file is in the store. */
+export function personActivityExport(request: PersonActivityExportArguments, steps: JobSteps): Promise<number> {
+  return caseExport(request.userId, request, steps, PERSON_ACTIVITY_EXPORT);
+}
+
+/** Runs an export for a case of `subject` (an organisation or a person, by its kind) on the job. */
+function caseExport(subject: string, request: CaseExportWords, steps: JobSteps, kind: CaseExportKind): Promise<number> {
   const id = request.id ?? uuidV7Ids.next();
   return runRequest(steps, () => ({
-    text: CASE_EXPORTS[kind].request(request.orgId, request.from, request.to, request.caseRef, id),
+    text: CASE_EXPORTS[kind].request(subject, request.from, request.to, request.caseRef, id),
     intro: `The export's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it records nothing twice, and it takes the request off the job at its end.`,
     tryAgain: `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the file is in the store, that run ends "Already done"; nothing is recorded twice.`,
     mayStillHold: mayStillHold(id, 'export'),
@@ -1614,6 +1715,10 @@ export function main(
         const kind = argv[0];
         const request = parseAuditExport(argv, kind);
         return (steps) => auditExport(request, steps, kind);
+      }
+      if (argv[0] === PERSON_ACTIVITY_EXPORT) {
+        const request = parsePersonActivityExport(argv);
+        return (steps) => personActivityExport(request, steps);
       }
       if (argv[0] === 'handoff-pause' || argv[0] === 'handoff-resume') {
         const request = parseHandoff(argv);

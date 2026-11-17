@@ -61,6 +61,8 @@ export interface PersonLogEvent {
   readonly seq: bigint;
   readonly id: string;
   readonly action: string;
+  /** Who recorded it, as the chain sealed it: `system:operator` for our exports. */
+  readonly actor: { readonly type: string; readonly id: string };
   readonly recordedAt: Date;
   readonly details: Readonly<Record<string, unknown>>;
 }
@@ -74,6 +76,7 @@ const believed = (keys: KeyProvider, rows: readonly SignedRow[]): readonly Perso
     seq: row.seq,
     id: row.id,
     action: row.action,
+    actor: { type: row.actor_type, id: row.actor_id },
     recordedAt: row.recorded_at,
     // Read only once believed: the chain sealed them as an event's details, canonical JSON of an object.
     details: JSON.parse(row.details) as Readonly<Record<string, unknown>>,

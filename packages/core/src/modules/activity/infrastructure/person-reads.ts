@@ -100,6 +100,31 @@ export async function personPage(
   };
 }
 
+/**
+ * Every one of the person's rows in the range written up to `writtenUpTo` (none for null), newest first, read `batch`
+ * at a time, each batch in a transaction `read` opens: their own download's file and our export's for a case alike.
+ */
+export async function personRowsWritten(
+  read: <T>(work: (tx: PersonTx) => Promise<T>) => Promise<T>,
+  userId: string,
+  { from, to }: PersonRange,
+  writtenUpTo: string | null,
+  batch: number,
+): Promise<readonly PersonActivityRow[]> {
+  const rows: PersonActivityRow[] = [];
+  // undefined: the first batch, from the newest; null: none left.
+  let before: ActivityCursor | null | undefined = writtenUpTo === null ? null : undefined;
+  while (before !== null && writtenUpTo !== null) {
+    const start: ActivityCursor | undefined = before;
+    const page: Awaited<ReturnType<typeof personPage>> = await read((tx) =>
+      personPage(tx, userId, { from, to, before: start, writtenUpTo, limit: batch }),
+    );
+    rows.push(...page.rows);
+    before = page.next;
+  }
+  return rows;
+}
+
 /** How many of the person's rows a range holds, and the ID of the last written (null for none), in one statement. */
 export async function personInRange(
   tx: PersonTx,

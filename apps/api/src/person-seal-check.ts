@@ -19,15 +19,20 @@
 // never throws: a failure is logged.
 import { randomInt } from 'node:crypto';
 
-import { PERSON_SEAL_FORM, personDigestOfDay, writtenBeforeIn } from '@agentx/core/modules/activity';
+import {
+  brokenSealIn,
+  PERSON_SEAL_FORM,
+  personDigestOfDay,
+  personLogAlarm,
+  writtenBeforeIn,
+} from '@agentx/core/modules/activity';
 import { type PersonLogEvent, personSealsPage } from '@agentx/core/modules/evidence';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { personLogAlarm, type PersonSealTables } from './person-seal.ts';
-import { brokenSealIn } from './seal-days.ts';
+import type { PersonSealTables } from './person-seal.ts';
 
 /** How often a run checks the person log's seals, once the last run has ended. */
 export const PERSON_SEAL_CHECK_EVERY_MS = 30 * 60_000;
@@ -66,7 +71,7 @@ export function createPersonSealCheck({
 }): PersonSealCheck {
   const inTx = <T>(work: (tx: CheckTx) => Promise<T>): Promise<T> => limitedTransaction(database, work);
 
-  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined (seal-days.ts). */
+  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined (core's seal-check.ts). */
   const checkPage = (events: readonly PersonLogEvent[], oldestReached: boolean) =>
     brokenSealIn(
       events.map(({ details }) => details),

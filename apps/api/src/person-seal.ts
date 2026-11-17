@@ -26,6 +26,7 @@ import {
   firstDayIn,
   nextDay,
   personDigestOfDay,
+  personLogAlarm,
   PERSON_SEAL_FORM,
   PERSON_SEALED,
 } from '@agentx/core/modules/activity';
@@ -36,7 +37,7 @@ import { type Database, type DatabaseTransaction, holdTransactionLock, limitedTr
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type DaySealing, type SealBroken, sealDay, sealDaysFrom } from './seal-days.ts';
+import { type DaySealing, sealDay, sealDaysFrom } from './seal-days.ts';
 
 /** How often a run seals the person log's closed days, once the last run has ended. */
 export const PERSON_SEAL_EVERY_MS = 15 * 60_000;
@@ -51,20 +52,6 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 
 export type PersonSealTables = ActivityTables & PlatformControlsTables;
 type SealTx = DatabaseTransaction<PersonSealTables>;
-
-/** Why the person log's seal can't be believed: a seal or record, a day's digest, a row misdated, a seal missing, a row before the first. */
-export type PersonLogBroken = 'unsealed' | SealBroken;
-
-/** Raises the alarm for the person log (decision D3: no hold, there is no organisation to hold). */
-export const personLogAlarm = (logger: Logger, reason: PersonLogBroken, day: string | null): void => {
-  logger.error('audit.integrity_failed', {
-    chain: 'platform',
-    check: 'person_log',
-    subjectType: 'person_log',
-    reason,
-    day,
-  });
-};
 
 /** The person log's newest sealed day (`day` null for none), believed; `tampered` (its alarm raised) for one that isn't. */
 async function newestPersonDay(

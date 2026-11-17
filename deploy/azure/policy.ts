@@ -753,7 +753,7 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
  * Zitadel's most copies, by environment (SA3a). None of its state is one copy's, read from the pinned image itself
  * (v4.17.3): its memory cache is off and the caches it uses are in Postgres, each projection takes a Postgres advisory
  * lock and its `current_states` row before it writes, its queue is River's in Postgres, and every copy mounts the one
- * master key from the vault (all unchanged in v4.19.5, S190). Staging keeps one: its server's 35 user connections hold
+ * master key from the vault (all unchanged in v4.19.5, S190, and v4.20.3, S201). Staging keeps one: its server's 35 user connections hold
  * no second pool. Production runs up to four, each one's pool counted against its server (`connections`), and keeps
  * two running, so sign-in never hangs on one copy there. Each copy needs its own 16-bit machine ID for the IDs it makes
  * (two sharing one make the same IDs in the same 10 ms, SA3d): Zitadel asks the API for one at start, which hands them
@@ -772,8 +772,9 @@ export const ZITADEL_COPIES: Readonly<Record<Expectations['environment'], MostRe
 /**
  * The login pages' most copies, by environment (SA3c). None of their state is one copy's, read from the pinned image
  * itself (v4.17.3; v4.19.5 signs each `sessions` entry with a key every copy derives alike from the one mounted login
- * key file, as no ZITADEL_SESSION_COOKIE_SECRET is set): a sign-in's sessions travel in the browser's own cookies
- * (`sessions`, `fingerprintId`, `verificationCheck`) and its request in the address (`requestId`), Next's key for server actions is the one built
+ * key file, as no ZITADEL_SESSION_COOKIE_SECRET is set; v4.20.3 signs its IdP flow proofs with the same key and binds
+ * them to a `bindingId` cookie): a sign-in's sessions travel in the browser's own cookies
+ * (`sessions`, `fingerprintId`, `verificationCheck`, `bindingId`) and its request in the address (`requestId`), Next's key for server actions is the one built
  * into the image, the system user's key is the one mounted file, and its settings cache (on by default, 15 minutes)
  * only lets each copy be as stale as one would be. Staging keeps one; production two to four, as Zitadel's.
  */
@@ -806,7 +807,7 @@ const AZURE_RESERVED_CONNECTIONS = 15;
 
 /**
  * Zitadel's pool where it sets none: ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS's default, 10, read from the pinned
- * image's own binary (v4.17.3, 4D2e D12; the same in v4.19.5's defaults), not from its documentation.
+ * image's own binary (v4.17.3, 4D2e D12; the same in v4.19.5 and v4.20.3 defaults), not from its documentation.
  */
 const ZITADEL_POOL = { setting: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', unset: 10 } as const;
 
@@ -839,7 +840,7 @@ const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
       '/ui/console',
       '/ui/login',
       '/assets/v1/',
-      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3, unchanged in v4.19.5).
+      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3, unchanged in v4.19.5 and v4.20.3).
       '/zitadel.admin.v1.AdminService/',
       '/zitadel.management.v1.ManagementService/',
       '/zitadel.auth.v1.AuthService/',

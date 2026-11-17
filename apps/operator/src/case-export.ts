@@ -1,5 +1,6 @@
 // What the operator's exports for a case share (Phase 3 E10c's audit log,
-// L7's activity log; ADR-005 §6's second exception): the request, the steps
+// L7's activity log, CO8b's one person's own activity log, whose run alone it
+// shares; ADR-005 §6's second exception): the request, the steps
 // of the record and of the run, and how each ends in the run's log. Each
 // export says what it records, reads and writes; this says the order, and
 // the rules on a request run again.
@@ -16,6 +17,7 @@
 import { createHash } from 'node:crypto';
 
 import type { ReadEvent, SignedStates } from '@agentx/core/modules/audit';
+import { OPERATOR_PERSON_LOG_EXPORTED } from '@agentx/core/modules/evidence';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { platformEventWith } from '@agentx/core/modules/platform-controls';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -50,7 +52,30 @@ export class CaseExportRefused extends Error {
 }
 
 /** Refused for an export ID that names any other record or export. */
-const ANOTHER_RECORD = 'the export ID names another record: write a new request';
+export const ANOTHER_RECORD = 'the export ID names another record: write a new request';
+
+/** The platform's record of an organisation's audit log export (E10c), naming the organisation and the export. */
+export const AUDIT_PLATFORM_EXPORTED = 'operator.audit_log_exported';
+
+/** The platform's record of an organisation's activity log export (L7), naming the organisation and the export. */
+export const ACTIVITY_PLATFORM_EXPORTED = 'operator.access_log_exported';
+
+/**
+ * Every platform record of an export for a case, of whatever kind, each naming its export's ID (`exportId`): an
+ * organisation's audit log or activity log, or one person's own activity log (CO8b).
+ */
+const PLATFORM_EXPORTS = [AUDIT_PLATFORM_EXPORTED, ACTIVITY_PLATFORM_EXPORTED, OPERATOR_PERSON_LOG_EXPORTED] as const;
+
+/**
+ * Whether the platform chain records an export of any kind with this ID: one export ID names one export, so an ID an
+ * organisation's export took is never a person's, nor the other way round (CO8b review).
+ */
+export async function exportIdTaken(db: Parameters<typeof platformEventWith>[0], exportId: string): Promise<boolean> {
+  for (const action of PLATFORM_EXPORTS) {
+    if (await platformEventWith(db, action, { exportId })) return true;
+  }
+  return false;
+}
 
 /** The one ID the export's record takes: the request's. */
 export const theExportId = (exportId: string): IdGenerator => ({ next: () => exportId });
@@ -65,7 +90,7 @@ export async function earlierRecord(
   tx: DatabaseTransaction<OperatorTables>,
   states: SignedStates,
   request: CaseExportRequest,
-  { action, platformAction }: { readonly action: string; readonly platformAction: string },
+  action: string,
 ): Promise<ReadEvent['event']['details'] | undefined> {
   const { orgId, exportId } = request;
   const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
@@ -86,8 +111,8 @@ export async function earlierRecord(
     if (!same) throw new CaseExportRefused(ANOTHER_RECORD);
     return event.details;
   }
-  // Another organisation's export of this ID: one export ID names one export.
-  if (await platformEventWith(tx, platformAction, { exportId })) throw new CaseExportRefused(ANOTHER_RECORD);
+  // Another organisation's export of this ID, or a person's: one export ID names one export.
+  if (await exportIdTaken(tx, exportId)) throw new CaseExportRefused(ANOTHER_RECORD);
   return undefined;
 }
 
@@ -96,7 +121,7 @@ export interface CaseExportSteps<Recorded> {
   /** Its command, as the run's failure names it. */
   readonly command: string;
   /** The line a written export ends with. */
-  readonly done: 'operator.audit_exported' | 'operator.activity_exported';
+  readonly done: 'operator.audit_exported' | 'operator.activity_exported' | 'operator.person_activity_exported';
   /** Where its file goes in the store. */
   readonly file: string;
   readonly record: () => Promise<Recorded & { readonly recordedBefore: boolean }>;
@@ -108,7 +133,8 @@ export interface CaseExportSteps<Recorded> {
 /** Runs the export: the exit code, 0 once its file is in the store. */
 export async function runCaseExport<Recorded>(
   store: EvidenceStore,
-  request: CaseExportRequest,
+  // An organisation's export or a person's (person-activity-export.ts): the run's lines name the export alone.
+  request: Pick<CaseExportRequest, 'exportId'>,
   log: Logger,
   steps: CaseExportSteps<Recorded>,
 ): Promise<number> {

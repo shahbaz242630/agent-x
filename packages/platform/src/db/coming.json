@@ -1,5 +1,5 @@
 {
   "triggers": [],
   "bodies": [],
-  "operatorRights": ["SELECT on access.person_requests"]
+  "operatorRights": []
 }
