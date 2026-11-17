@@ -53,7 +53,14 @@ import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type CaseExportRequest, CaseExportRefused, earlierRecord, runCaseExport, theExportId } from './case-export.ts';
+import {
+  ACTIVITY_PLATFORM_EXPORTED,
+  type CaseExportRequest,
+  CaseExportRefused,
+  earlierRecord,
+  runCaseExport,
+  theExportId,
+} from './case-export.ts';
 import { OPERATOR, type OperatorTables } from './create-organization.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 
@@ -61,9 +68,6 @@ import type { EvidenceStore } from './evidence-store.ts';
 export type ActivityExportTables = OperatorTables & ActivityReadTables & ActivityTables & NotificationsTables;
 
 type ExportTx = DatabaseTransaction<ActivityExportTables>;
-
-/** The platform's own record of an export, naming the organisation and the export. */
-const PLATFORM_EXPORTED = 'operator.access_log_exported';
 
 /** How many seals one read of the log takes, checking a range's. */
 const SEALS_A_PAGE = 100;
@@ -93,10 +97,7 @@ function record(
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   return withSignedStates(database, orgId, services, async (tx, states) => {
-    const before = await earlierRecord(tx, states, request, {
-      action: ACTIVITY_LOG_EXPORTED,
-      platformAction: PLATFORM_EXPORTED,
-    });
+    const before = await earlierRecord(tx, states, request, ACTIVITY_LOG_EXPORTED);
     if (before !== undefined) {
       const { requests, writtenUpTo } = before;
       return {
@@ -130,7 +131,7 @@ function record(
     ]);
     await platform.record(tx, {
       actor: OPERATOR,
-      action: PLATFORM_EXPORTED,
+      action: ACTIVITY_PLATFORM_EXPORTED,
       details: { orgId, exportId, caseRef, ...shown, requests: range.rows, release, run },
     });
     return { requests: range.rows, writtenUpTo: range.writtenUpTo, recordedBefore: false };
