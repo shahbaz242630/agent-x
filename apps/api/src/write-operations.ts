@@ -15,6 +15,10 @@
 // record would be the one thing it wrote (SEC-AG-09). Its own tests prove it
 // writes nothing.
 //
+// 6E2: the MCP endpoint (mcp.ts) names none either (`config.toolCalls`): its
+// writes are its tools', each keyed as its REST twin is, by the twin's
+// operation and an idempotency key in the tool's arguments.
+//
 // B2b-2: a request to a route with an operation must carry an
 // `Idempotency-Key` header, 1 to 255 visible ASCII characters (the
 // idempotency module's own rule). Without one, or with a malformed one, it is
@@ -54,7 +58,9 @@ export function operationProblems(
   methods: readonly string[],
   access: unknown,
   writesNothing?: unknown,
+  toolCalls?: unknown,
 ): string[] {
+  if (toolCalls !== undefined) return toolCallProblems(operation, methods, access, writesNothing, toolCalls);
   if (writesNothing !== undefined) {
     if (writesNothing !== true || methods.length !== 1 || methods[0] !== 'POST') {
       return ['only a POST may say it writes nothing (config.writesNothing: true)'];
@@ -75,6 +81,21 @@ export function operationProblems(
     return ['its operation is not lower-case words joined by . or -, at most 64 characters'];
   }
   return [];
+}
+
+/** Why the MCP endpoint's `toolCalls` can't stand, if it can't: an agents' POST alone, naming no operation of its own. */
+function toolCallProblems(
+  operation: unknown,
+  methods: readonly string[],
+  access: unknown,
+  writesNothing: unknown,
+  toolCalls: unknown,
+): string[] {
+  const agentsAlone = Array.isArray(access) && access.length === 1 && access[0] === 'agent';
+  if (toolCalls !== true || writesNothing !== undefined || !agentsAlone || methods.join() !== 'POST') {
+    return ["only an agents' POST may say its writes are its tools' (config.toolCalls: true)"];
+  }
+  return operation === undefined ? [] : ["it names an operation, but its tools' twins name their own"];
 }
 
 /** The header a write's key comes in, as Node names it. */

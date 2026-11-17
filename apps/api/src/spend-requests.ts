@@ -53,6 +53,7 @@
 // now, so it learns of an approval, a reject, a cancel or an expiry. One a
 // person rejected shows the one reason APPROVAL_REJECTED, never their words;
 // one voided shows REQUEST_VOIDED, then each cause (C2b).
+import type { AcceptedKey } from '@agentx/core/modules/agents';
 import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
   askedText,
@@ -67,7 +68,7 @@ import {
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
 import { moneyFromJson } from '@agentx/core/shared-kernel';
-import { isUnwritten } from '@agentx/platform/db';
+import { type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -76,6 +77,7 @@ import { agentOf, EVERY_MEMBER, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import type { RuleDenial } from './approval-rejections.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { type AgentAnswer, answered } from './refused.ts';
 import {
   AMOUNT,
   CHALLENGE_BODY_LIMIT,
@@ -126,7 +128,8 @@ import {
  */
 const REQUEST_BODY_LIMIT = 16_384;
 
-const ASKED = z
+/** The payment an agent asks for: its MCP tool takes it too (mcp-tools.ts). */
+export const ASKED = z
   .strictObject({
     amountMinor: AMOUNT.describe('The amount to pay, in whole minor units (fils for AED).'),
     currency: z.string().describe('The amount’s currency: your mandate’s, AED in the Pilot. Never converted.'),
@@ -184,7 +187,7 @@ const ASK_SCHEMA = {
   },
 };
 
-const SPEND_REQUEST_ID = z.object({ id: z.uuid().describe('The spend request, by its ID.') });
+export const SPEND_REQUEST_ID = z.object({ id: z.uuid().describe('The spend request, by its ID.') });
 
 const CANCELLED = SPEND_REQUEST_SHOWN.describe(
   'The request as it now stands: CANCELLED, its reservation and order claim released (or cancelled already).',
@@ -468,6 +471,59 @@ const APPROVE_CONFIRM_SCHEMA = {
   },
 };
 
+/** The body `POST /v1/spend-requests` takes, as its schema has checked it. */
+export type SpendAsked = z.output<typeof ASKED>;
+
+/**
+ * `POST /v1/spend-requests`: decides the agent's request and holds its capacity (its route and its MCP tool). The
+ * body stays the JSON it came as, its money read here (S89: the key's fingerprint has no form for bigints).
+ */
+export async function askToSpend(
+  decisions: SpendRequestDecisions,
+  { orgId, agentId, keyId }: AcceptedKey,
+  idempotent: IdempotentRequest,
+  body: SpendAsked,
+  correlationId: string,
+): Promise<AgentAnswer<ReturnType<typeof shown>>> {
+  const asked = {
+    // The schema has checked both.
+    amount: moneyFromJson(body.amountMinor, body.currency),
+    supplierId: body.supplierId,
+    fundingSourceId: body.fundingSourceId,
+    ...askedText(body),
+  };
+  const decided = await decisions.decideAndReserve({ orgId, agentId, keyId }, idempotent, asked, correlationId);
+  return isUnwritten(decided) ? decided : answered(shown(decided.request, 'agent'));
+}
+
+/** `GET /v1/agent/spend-requests/{id}`: one of the agent's own, as it stands now (its route and its MCP tool). */
+export async function agentSpendRequest(
+  reads: SpendRequestReads,
+  { orgId, agentId }: AcceptedKey,
+  requestId: string,
+  correlationId: string,
+) {
+  const found = await reads.ofAgent(orgId, agentId, requestId, correlationId);
+  if (found.outcome === 'refused') return found;
+  const shownToAgent = shown(found.request, 'agent');
+  // Ended by a person or a brake: the reasons the decision gave no longer explain where it stands.
+  return answered(
+    found.endedBecause === null ? shownToAgent : { ...shownToAgent, reasons: reasonsOf(found.endedBecause) },
+  );
+}
+
+/** `POST /v1/agent/spend-requests/{id}/cancel`: the agent cancels its own before hand-off (its route and its MCP tool). */
+export async function agentCancel(
+  cancels: SpendRequestCancels,
+  { orgId, agentId, keyId }: AcceptedKey,
+  idempotent: IdempotentRequest,
+  requestId: string,
+  correlationId: string,
+): Promise<AgentAnswer<ReturnType<typeof shown>>> {
+  const cancelled = await cancels.byAgent({ orgId, agentId, keyId }, idempotent, requestId, correlationId);
+  return isUnwritten(cancelled) ? cancelled : answered(shown(cancelled.request, 'agent'));
+}
+
 export function registerSpendRequests(
   app: FastifyInstance,
   {
@@ -536,23 +592,16 @@ export function registerSpendRequests(
       config: { access: ['agent'], agentScopes: ['requests:write'], operation: DECIDE_OPERATION },
     },
     async (request, reply) => {
-      const { orgId, agentId, keyId } = agentOf(request);
-      const { body } = request;
-      const asked = {
-        // The schema has checked both.
-        amount: moneyFromJson(body.amountMinor, body.currency),
-        supplierId: body.supplierId,
-        fundingSourceId: body.fundingSourceId,
-        ...askedText(body),
-      };
-      const decided = await need(decisions).decideAndReserve(
-        { orgId, agentId, keyId },
-        idempotentRequest(request, orgId),
-        asked,
+      const agent = agentOf(request);
+      const answer = await askToSpend(
+        need(decisions),
+        agent,
+        idempotentRequest(request, agent.orgId),
+        request.body,
         request.id,
       );
-      if (isUnwritten(decided)) return answerRefusal(decided, request, reply);
-      return reply.code(201).send(shown(decided.request, 'agent'));
+      if (answer.outcome !== 'answered') return answerRefusal(answer, request, reply);
+      return reply.code(201).send(answer.body);
     },
   );
 
@@ -670,12 +719,8 @@ export function registerSpendRequests(
     '/v1/agent/spend-requests/:id',
     { schema: AGENT_SHOW_SCHEMA, config: { access: ['agent'], agentScopes: ['requests:read'] } },
     async (request, reply) => {
-      const { orgId, agentId } = agentOf(request);
-      const found = await need(reads).ofAgent(orgId, agentId, request.params.id, request.id);
-      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
-      const shownToAgent = shown(found.request, 'agent');
-      // Ended by a person or a brake: the reasons the decision gave no longer explain where it stands.
-      return found.endedBecause === null ? shownToAgent : { ...shownToAgent, reasons: reasonsOf(found.endedBecause) };
+      const answer = await agentSpendRequest(need(reads), agentOf(request), request.params.id, request.id);
+      return answer.outcome === 'refused' ? answerRefusal(answer, request, reply) : answer.body;
     },
   );
 
@@ -687,15 +732,16 @@ export function registerSpendRequests(
       config: { access: ['agent'], agentScopes: ['requests:write'], operation: AGENT_CANCEL_OPERATION },
     },
     async (request, reply) => {
-      const { orgId, agentId, keyId } = agentOf(request);
-      const cancelled = await need(cancels).byAgent(
-        { orgId, agentId, keyId },
-        idempotentRequest(request, orgId),
+      const agent = agentOf(request);
+      const answer = await agentCancel(
+        need(cancels),
+        agent,
+        idempotentRequest(request, agent.orgId),
         request.params.id,
         request.id,
       );
-      if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
-      return reply.code(200).send(shown(cancelled.request, 'agent'));
+      if (answer.outcome !== 'answered') return answerRefusal(answer, request, reply);
+      return reply.code(200).send(answer.body);
     },
   );
 }

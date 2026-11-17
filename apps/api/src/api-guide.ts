@@ -69,6 +69,12 @@ export const TAGS: readonly {
     prefixes: ['/v1/agent'],
   },
   {
+    name: 'MCP',
+    description:
+      "The Agent API as an MCP server, for an AI agent's own client: each tool one of the agent's own operations, with the same key, scopes, checks and answers.",
+    prefixes: ['/v1/mcp'],
+  },
+  {
     name: 'Spend requests',
     description:
       "Spend requests and their decisions. An agent creates one (POST /v1/spend-requests); the organisation's people read, approve, reject and cancel them.",

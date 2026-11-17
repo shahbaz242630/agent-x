@@ -61,10 +61,12 @@ import { answerClientError } from './client-errors.ts';
 import { type ConsoleFiles, putConsoleInFront } from './console-files.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
-import { BUSY_RETRY_SECONDS, responseFor, sendErrorBody, troubleOf } from './errors.ts';
+import { BUSY_RETRY_SECONDS, type LogFailure, responseFor, sendErrorBody, troubleOf } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { loginHostCheck } from './login-host.ts';
+import { MCP_PATH, registerMcp } from './mcp.ts';
+import { recordTwins } from './mcp-twins.ts';
 import { type MachineIds, registerMachineIds } from './machine-ids.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import {
@@ -297,6 +299,19 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     securityEvents.note({ kind: 'rate_limited', reason: 'per_address', ip });
   });
 
+  /** A failure's lines, once its answer is decided: the error path's own, and an MCP tool's whose twin failed. */
+  const logFailure: LogFailure = (error, { correlationId, status, operation, orgId }) => {
+    if (status === 500) logger.child({ correlationId }).error(REQUEST_FAILED, { err: error });
+    // The share's own refusal logs itself, naming the organisation; this one's lock is the line to look for. An agent's
+    // names its organisation too, so one organisation's stuck rows are told apart from the others' (PL-63, S178);
+    // so does a decision in trouble, whose own advice is to look at that organisation's rows (S179).
+    const named = { correlationId, ...(orgId === undefined ? {} : { orgId }) };
+    if (isLockWaitRunOut(error)) logger.child(named).warn('api.lock_wait_ran_out');
+    const trouble = troubleOf(error, operation);
+    if (trouble === 'stop') logger.child({ correlationId }).error('api.stop_in_trouble', { err: error });
+    if (trouble === 'decision') logger.child(named).warn('api.decision_in_trouble', { err: error });
+  };
+
   /** Sends the error's plain response, then logs a failure on our side with its detail. */
   const sendError = (error: unknown, request: FastifyRequest, reply: FastifyReply): FastifyReply => {
     const { operation } = request.routeOptions.config;
@@ -309,16 +324,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     }
     void sendErrorBody(reply, status, code, request.id);
     // After sending, so a failure to log can't stop the plain answer going out.
-    if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });
-    // The share's own refusal logs itself, naming the organisation; this one's lock is the line to look for. An agent's
-    // names its organisation too, so one organisation's stuck rows are told apart from the others' (PL-63, S178);
-    // so does a decision in trouble, whose own advice is to look at that organisation's rows (S179).
-    const orgId = request.agent?.orgId;
-    const named = { correlationId: request.id, ...(orgId === undefined ? {} : { orgId }) };
-    if (isLockWaitRunOut(error)) logger.child(named).warn('api.lock_wait_ran_out');
-    const trouble = troubleOf(error, operation);
-    if (trouble === 'stop') logger.child({ correlationId: request.id }).error('api.stop_in_trouble', { err: error });
-    if (trouble === 'decision') logger.child(named).warn('api.decision_in_trouble', { err: error });
+    logFailure(error, { correlationId: request.id, status, operation, orgId: request.agent?.orgId });
     return reply;
   };
 
@@ -386,6 +392,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   // First, so no route escapes it.
   await registerContract(app);
+  // Right after it, so every route is recorded as the contract left it: each MCP tool reads its twin there (6E2).
+  const findTwin = recordTwins(app);
   // Each limit is this copy's share of it across every `web` copy (rate-limit.ts).
   const share = (limit: number): number => shareOfCopies(limit, config.http.webCopies);
   await registerRateLimit(app, share(config.http.rateLimitPerMinute), trust);
@@ -477,7 +485,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   app.setErrorHandler(sendError);
-  app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
+  app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => {
+    // The MCP endpoint takes POST alone: it opens no stream (GET) and keeps no session to end (DELETE). MCP asks for 405.
+    if (request.url.split('?', 1)[0] === MCP_PATH) {
+      return sendErrorBody(reply.header('allow', 'POST'), 405, 'METHOD_NOT_ALLOWED', request.id);
+    }
+    return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  });
 
   registerHealth(app, options.healthChecks, logger);
   registerMachineIds(app, options.machineIds, logger);
@@ -556,6 +570,19 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     acceptance: options.invitationAcceptance,
     confirmations: options.acceptanceConfirmations,
     publicOrigin: config.http.publicOrigin,
+  });
+  // Last: its tools read their twins, every one added by now (mcp.ts, 6E2).
+  registerMcp(app, {
+    useCases: {
+      mandates: options.agentMandates,
+      decisions: options.spendRequestDecisions,
+      cancels: options.spendRequestCancels,
+      reads: options.spendRequestReads,
+      registry: options.supplierRegistry,
+    },
+    findTwin,
+    publicOrigin: config.http.publicOrigin,
+    logFailure,
   });
   return app;
 }

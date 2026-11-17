@@ -127,7 +127,7 @@ const isSuccessStatus = (status: string): boolean => /^[1-3](?:[0-9][0-9]|xx)$/i
 const BYPASSES = ['attachValidation', 'validatorCompiler', 'serializerCompiler', 'errorHandler'] as const;
 
 /** The query a write that names none takes: none at all. */
-const NO_QUERY = z.strictObject({});
+export const NO_QUERY = z.strictObject({});
 
 /** A route as its onRoute hook sees it. */
 type AddedRoute = RouteOptions & { readonly routePath: string; readonly prefix: string };
@@ -509,7 +509,15 @@ function limitAndAccessProblems(route: RouteOptions, keys: ReadonlyMap<string, u
 function operationHeaderProblems(route: RouteOptions, keys: ReadonlyMap<string, unknown>, written: boolean): string[] {
   const problems: string[] = [];
   const operation = route.config?.operation;
-  problems.push(...operationProblems(operation, methodsOf(route), route.config?.access, route.config?.writesNothing));
+  problems.push(
+    ...operationProblems(
+      operation,
+      methodsOf(route),
+      route.config?.access,
+      route.config?.writesNothing,
+      route.config?.toolCalls,
+    ),
+  );
   // One method, so the document shows the name on one operation, as OpenAPI requires.
   if (operation !== undefined && methodsOf(route).length !== 1) {
     problems.push('it names an operation but serves more than one method: make a route for each');

@@ -17,6 +17,10 @@
 //   browser's time zone; else, on an organisation's row, the organisation's
 //   (Asia/Dubai, as every lineage's default). An agent is no browser: its row
 //   always takes the organisation's zone.
+// - An MCP tool's call (6E2, mcp.ts): the endpoint's pattern with the tool's
+//   name after it (`/v1/mcp/create_spend_request`), the UUIDs its twin's path
+//   would have named, and the status and reason code its twin would have
+//   answered, so a refused call is a refusal here too.
 // - When: in `onResponse`, one row a request, awaited, never batched. The
 //   contract lets no hook run between an answer's check and its leaving
 //   (onSend), so this is the nearest point: only a crash in the milliseconds
@@ -116,8 +120,24 @@ function factsOf(request: FastifyRequest, reply: FastifyReply) {
   const route = request.routeOptions.url;
   if (route === undefined || !isMethod(request.method)) return undefined;
   const durationMs = Math.max(0, Math.round(reply.elapsedTime));
+  const at = new Date(Date.now() - durationMs);
+  // An MCP tool answered within a request that succeeded: the row says what the tool's twin would have.
+  const called = reply.statusCode < 400 ? request.toolCalled : null;
+  if (called !== null) {
+    const { tool, pathIds, status, reason } = called;
+    return {
+      at,
+      method: request.method,
+      route: `${route}/${tool}`,
+      pathIds: [...pathIds],
+      status,
+      reason,
+      correlationId: request.id,
+      durationMs,
+    };
+  }
   return {
-    at: new Date(Date.now() - durationMs),
+    at,
     method: request.method,
     route,
     pathIds: pathIdsOf(request.params),
