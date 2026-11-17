@@ -6,7 +6,8 @@
         "eslint.quality.config.js",
         "vitest.load.config.ts",
         "tooling/load/money-paths.k6.js",
-        "tooling/load/stage-g.k6.js"
+        "tooling/load/stage-g.k6.js",
+        "tooling/chain-check/check-audit-chain.mjs"
       ],
       "project": ["**/*.{js,mjs,ts,tsx}", "!tooling/gate-proofs/fixtures/**"]
     }
