@@ -2,7 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Agent X API",
-    "version": "1"
+    "version": "1",
+    "description": "Agent X turns an AI agent's request to pay a supplier into a policy-approved payment intent. The licensed partner validates consent and authentication, then initiates and executes the payment. The guide for agent builders: https://github.com/shahbaz242630/agent-x/blob/main/docs/api/README.md.\n\n## Versioning\n\nEvery address of the API's own starts with `/v1`, its major version (the service's health and internal addresses aside). Within v1, changes are additive only: new addresses, new optional request fields, new answer fields and new reason codes. Ignore answer fields you don't know, and treat a reason code you don't know by its HTTP status. A breaking change comes only under `/v2`, with notice.\n\n## Authentication\n\nEach operation's `security` shows who may call it, as does its `x-access`:\n\n- **People** sign in through the console. Their session is the `__Host-agentx-session` cookie (scheme `session`).\n- **AI agents** send their key as `Authorization: Bearer axk_<keyId>_<secret>` (scheme `agentKey`). A key expires 90 days after it is made. An operation names the scopes the key must hold; an agent may call only operations naming agents.\n- **The licensed partner** signs each message it sends over its raw body (scheme `partnerSignature`).\n\nA missing or refused credential is 401 `UNAUTHENTICATED`; a caller the operation doesn't name is 403 `FORBIDDEN`; a key without every scope the operation needs is 403 `INSUFFICIENT_SCOPE`. An admin's or approver's powers need a session signed in with a passkey (403 `PASSKEY_REQUIRED`), and for a while after a second factor is removed a person keeps only what a developer or viewer may do (403 `SECOND_FACTOR_REMOVED`).\n\n## Organisation header\n\nA person's call on an operation naming roles names the organisation it acts in, by its ID, in the `AgentX-Organization` header (`agentx-organization`); without one, or with something other than an ID, it is 400 `ORGANIZATION_INVALID`. An agent never sends it: its key's organisation is the one.\n\n## Idempotency\n\nA write that changes something requires an `Idempotency-Key` header (`idempotency-key`), shown as a required header on its operation: 1 to 255 visible ASCII characters, new for each change, the same to retry it. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request it is 409 `IDEMPOTENCY_KEY_REUSED`; while the first is still being done it is 409 `IDEMPOTENCY_KEY_BUSY` with Retry-After. A key is kept for at least 30 days: don't reuse one, even after that. The operation's `operationId` names what the key is for.\n\n## Errors\n\nEvery refusal and failure has the one `Error` body: `{ \"error\": { \"code\", \"message\", \"correlationId\" } }`. Act on `code`, never on `message`, which is the code's public description and may be reworded. The codes and their meanings are the `code` schema in this document.\n\n## Rate limits\n\nRequests are counted per minute: per client address, per signed-in person, per agent and per organisation. Over a limit the answer is 429 `RATE_LIMITED`, with `Retry-After` in seconds and the `X-RateLimit-*` headers. Wait that long, then send the same request again, with the same Idempotency-Key. A 503 that says the organisation or platform is busy carries Retry-After too.\n\n## Correlation IDs\n\nEvery answer carries an `X-Correlation-Id` header (`x-correlation-id`), and every error body its `correlationId`. Send your own UUID in the header to have it used. Quote it when you contact support."
   },
   "components": {
     "schemas": {
@@ -6983,6 +6984,77 @@
         "additionalProperties": false,
         "description": "Changing a mandate’s policy, waiting for the admin to sign in again."
       }
+    },
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-agentx-session",
+        "description": "A person's session, set when they sign in through the console."
+      },
+      "agentKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An AI agent's key, `axk_<keyId>_<secret>`, shown once in the console when the agent is registered or its key is rotated."
+      },
+      "partnerSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-fake-signature",
+        "description": "The licensed partner's signature over the message's raw body, with the time it was signed. A message whose signature doesn't hold is refused. Until a real partner is connected, this is the stand-in partner's header; the real partner's adapter names its own."
+      }
+    },
+    "headers": {
+      "x-ratelimit-limit": {
+        "description": "The most requests the limit that refused this one allows in a minute.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "x-ratelimit-remaining": {
+        "description": "How many of them are left in this minute: none, on a 429.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "x-ratelimit-reset": {
+        "description": "Seconds until the minute ends and the count starts again.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "retry-after": {
+        "description": "Seconds to wait before sending the request again (RFC 9110 §10.2.3).",
+        "schema": {
+          "type": "integer"
+        }
+      }
+    },
+    "responses": {
+      "RateLimited": {
+        "description": "Over a rate limit (RATE_LIMITED). Wait the Retry-After seconds, then send the same request again.",
+        "headers": {
+          "x-ratelimit-limit": {
+            "$ref": "#/components/headers/x-ratelimit-limit"
+          },
+          "x-ratelimit-remaining": {
+            "$ref": "#/components/headers/x-ratelimit-remaining"
+          },
+          "x-ratelimit-reset": {
+            "$ref": "#/components/headers/x-ratelimit-reset"
+          },
+          "retry-after": {
+            "$ref": "#/components/headers/retry-after"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
     }
   },
   "paths": {
@@ -7016,6 +7088,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "503": {
             "description": "A check failed. The log says which; this answer never does.",
             "content": {
@@ -7059,7 +7134,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Service"
+        ],
+        "security": []
       },
       "head": {
         "summary": "Whether the API is up",
@@ -7090,6 +7169,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "503": {
             "description": "A check failed. The log says which; this answer never does.",
             "content": {
@@ -7133,7 +7215,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Service"
+        ],
+        "security": []
       }
     },
     "/internal/zitadel-machine-id": {
@@ -7163,6 +7249,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7183,7 +7272,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Service"
+        ],
+        "security": []
       },
       "head": {
         "summary": "A Zitadel process's machine ID",
@@ -7211,6 +7304,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7231,7 +7327,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Service"
+        ],
+        "security": []
       }
     },
     "/v1/auth/sign-in": {
@@ -7266,6 +7366,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7286,7 +7389,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
       },
       "head": {
         "summary": "Start a sign-in",
@@ -7319,6 +7426,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7339,7 +7449,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
       }
     },
     "/v1/auth/callback": {
@@ -7391,6 +7505,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7411,7 +7528,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
       },
       "head": {
         "summary": "Where the login service sends the browser back",
@@ -7461,6 +7582,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7481,7 +7605,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
       }
     },
     "/v1/auth/step-up": {
@@ -7526,6 +7654,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7546,7 +7677,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Sign in again to confirm a change",
@@ -7589,6 +7728,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7609,7 +7751,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/auth/session": {
@@ -7629,6 +7779,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7649,7 +7802,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your own session",
@@ -7667,6 +7828,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7687,7 +7851,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/auth/sign-out": {
@@ -7711,6 +7883,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7731,7 +7906,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": []
       }
     },
     "/v1/auth/organizations": {
@@ -7751,6 +7930,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7771,7 +7953,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisations",
@@ -7789,6 +7979,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7809,7 +8002,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/statements": {
@@ -7876,6 +8077,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7896,7 +8100,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The words each choice and change is confirmed with",
@@ -7961,6 +8173,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -7981,7 +8196,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/client-errors": {
@@ -8050,6 +8273,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8070,7 +8296,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Service"
+        ],
+        "security": []
       }
     },
     "/v1/members": {
@@ -8106,6 +8336,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8126,7 +8359,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's members",
@@ -8160,6 +8401,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8180,7 +8424,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/{id}/role": {
@@ -8231,7 +8483,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8260,6 +8512,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8280,7 +8535,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/{id}/role/confirm": {
@@ -8337,7 +8600,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8366,6 +8629,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8386,7 +8652,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/{id}/deactivate": {
@@ -8431,7 +8705,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8460,6 +8734,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8480,7 +8757,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/{id}/deactivate/confirm": {
@@ -8527,7 +8812,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8556,6 +8841,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8576,7 +8864,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/integrity-hold": {
@@ -8618,6 +8914,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8638,7 +8937,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's integrity hold",
@@ -8678,6 +8985,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8698,7 +9008,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/integrity-hold/investigations": {
@@ -8742,7 +9060,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8780,6 +9098,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8800,7 +9121,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/integrity-hold/clear": {
@@ -8837,7 +9166,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8866,6 +9195,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8886,7 +9218,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/integrity-hold/clear/confirm": {
@@ -8929,7 +9269,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -8967,6 +9307,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -8987,7 +9330,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/audit-log": {
@@ -9131,6 +9482,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -9151,7 +9505,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation’s audit log: every signed event, newest first",
@@ -9293,6 +9655,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -9313,7 +9678,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/audit-log/exports": {
@@ -9412,7 +9785,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -9450,6 +9823,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -9470,7 +9846,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log": {
@@ -9596,6 +9980,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -9616,7 +10003,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation’s activity log: every request its people and agents made, newest first",
@@ -9740,6 +10135,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -9760,7 +10158,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/security-events": {
@@ -10077,7 +10483,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -10115,6 +10521,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10135,7 +10544,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/auth/activity": {
@@ -10235,6 +10652,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10255,7 +10675,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your own activity log: every request you made outside an organisation, newest first",
@@ -10353,6 +10781,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10373,7 +10804,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/auth/activity/exports": {
@@ -10424,7 +10863,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           }
         ],
         "x-access": [
@@ -10451,6 +10890,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10471,7 +10913,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Sign-in"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/background-exports": {
@@ -10544,7 +10994,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -10582,6 +11032,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10602,7 +11055,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "get": {
         "summary": "Your organisation’s background downloads of the activity log, newest first",
@@ -10678,6 +11139,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10698,7 +11162,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation’s background downloads of the activity log, newest first",
@@ -10774,6 +11246,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10794,7 +11269,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/background-exports/{id}": {
@@ -10846,6 +11329,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10866,7 +11352,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One background download of your organisation’s activity log, with its files",
@@ -10916,6 +11410,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -10936,7 +11433,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/background-exports/{id}/files/{month}/downloads": {
@@ -10990,7 +11495,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11028,6 +11533,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11048,7 +11556,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/access-log/background-exports/{id}/downloads/{downloadId}/parts/{index}": {
@@ -11135,6 +11651,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11155,7 +11674,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One part of a file downloaded, as base64",
@@ -11240,6 +11767,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11260,7 +11790,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Logs"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/organization/freeze": {
@@ -11312,7 +11850,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11351,6 +11889,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11371,7 +11912,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/organization/unfreeze": {
@@ -11415,7 +11964,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11444,6 +11993,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11464,7 +12016,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/organization/unfreeze/confirm": {
@@ -11520,7 +12080,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11558,6 +12118,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11578,7 +12141,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/registered-contacts": {
@@ -11611,6 +12182,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11631,7 +12205,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's registered contacts",
@@ -11662,6 +12244,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11682,7 +12267,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "post": {
         "operationId": "contacts.add",
@@ -11718,7 +12311,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11747,6 +12340,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11767,7 +12363,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/registered-contacts/{id}/confirm": {
@@ -11812,7 +12416,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11841,6 +12445,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11861,7 +12468,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/registered-contacts/{id}/remove": {
@@ -11906,7 +12521,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -11935,6 +12550,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -11955,7 +12573,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/registered-contacts/{id}/remove/confirm": {
@@ -12002,7 +12628,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -12031,6 +12657,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12051,7 +12680,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Organisation"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/factor-resets/confirm": {
@@ -12093,6 +12730,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12113,7 +12753,11 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": []
       }
     },
     "/v1/factor-resets": {
@@ -12146,6 +12790,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12166,7 +12813,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's resets of lost second factors",
@@ -12197,6 +12852,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12217,7 +12875,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/{id}/factor-reset": {
@@ -12262,7 +12928,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -12291,6 +12957,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12311,7 +12980,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/factor-resets/{id}/confirm": {
@@ -12356,7 +13033,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -12385,6 +13062,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12405,7 +13085,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/factor-resets/{id}/cancel": {
@@ -12450,7 +13138,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -12479,6 +13167,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12499,7 +13190,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agent": {
@@ -12520,6 +13219,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12540,7 +13242,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": []
+          }
+        ]
       },
       "head": {
         "summary": "The agent your key is",
@@ -12559,6 +13269,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12579,7 +13292,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": []
+          }
+        ]
       }
     },
     "/v1/agent/mandate": {
@@ -12602,6 +13323,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12622,7 +13346,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:write"
+            ]
+          }
+        ]
       },
       "head": {
         "summary": "The mandate you act under",
@@ -12643,6 +13377,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12663,7 +13400,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:write"
+            ]
+          }
+        ]
       }
     },
     "/v1/agent/funding-sources": {
@@ -12733,6 +13480,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12753,7 +13503,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "sources:read"
+            ]
+          }
+        ]
       },
       "head": {
         "summary": "The bank accounts your mandate lets you pay from now",
@@ -12821,6 +13581,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12841,7 +13604,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "sources:read"
+            ]
+          }
+        ]
       }
     },
     "/v1/spend-requests": {
@@ -12931,6 +13704,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -12951,7 +13727,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The organisation's spend requests, newest first",
@@ -13039,6 +13823,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13059,7 +13846,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "post": {
         "operationId": "spend-requests.create",
@@ -13116,7 +13911,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           }
         ],
         "x-access": [
@@ -13136,6 +13931,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "4XX": {
             "description": "Refused. The reason code says why.",
@@ -13157,7 +13955,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:write"
+            ]
+          }
+        ]
       }
     },
     "/v1/approvals": {
@@ -13247,6 +14055,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13267,7 +14078,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The spend requests waiting for approval, oldest first: the soonest to expire at the top",
@@ -13355,6 +14174,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13375,7 +14197,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}": {
@@ -13421,6 +14251,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13441,7 +14274,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One spend request in full",
@@ -13485,6 +14326,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13505,7 +14349,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/cancel": {
@@ -13550,7 +14402,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -13580,6 +14432,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13600,7 +14455,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/reject": {
@@ -13646,7 +14509,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -13676,6 +14539,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13696,7 +14562,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/reject/confirm": {
@@ -13748,7 +14622,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -13778,6 +14652,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13798,7 +14675,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/approve": {
@@ -13850,7 +14735,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -13880,6 +14765,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -13900,7 +14788,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/approve/confirm": {
@@ -13958,7 +14854,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -13988,6 +14884,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14008,7 +14907,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agent/spend-requests/{id}": {
@@ -14043,6 +14950,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14063,7 +14973,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:read"
+            ]
+          }
+        ]
       },
       "head": {
         "summary": "One of your own spend requests, as it stands now",
@@ -14096,6 +15016,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14116,7 +15039,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:read"
+            ]
+          }
+        ]
       }
     },
     "/v1/agent/spend-requests/{id}/cancel": {
@@ -14161,7 +15094,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           }
         ],
         "x-access": [
@@ -14181,6 +15114,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "4XX": {
             "description": "Refused. The reason code says why.",
@@ -14202,7 +15138,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "requests:write"
+            ]
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/evidence": {
@@ -14254,6 +15200,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14274,7 +15223,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Read a spend request’s evidence, whole: a page read, not logged (a download is)",
@@ -14324,6 +15281,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14344,7 +15304,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/spend-requests/{id}/evidence-exports": {
@@ -14389,7 +15357,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -14427,6 +15395,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14447,7 +15418,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Spend requests"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments": {
@@ -14553,6 +15532,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14573,7 +15555,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The organisation's payments, newest first",
@@ -14677,6 +15667,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14697,7 +15690,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/exceptions": {
@@ -14787,6 +15788,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14807,7 +15811,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The payments to follow up with your bank, newest first: every UNKNOWN one, and every settled one the bank now contradicts",
@@ -14895,6 +15907,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14915,7 +15930,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}": {
@@ -14961,6 +15984,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -14981,7 +16007,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One payment in full, with its history",
@@ -15025,6 +16059,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15045,7 +16082,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal": {
@@ -15098,7 +16143,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15127,6 +16172,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15147,7 +16195,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal/confirm": {
@@ -15212,7 +16268,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15241,6 +16297,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15261,7 +16320,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal/approve": {
@@ -15309,7 +16376,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15338,6 +16405,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15358,7 +16428,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal/approve/confirm": {
@@ -15418,7 +16496,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15447,6 +16525,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15467,7 +16548,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal/withdraw": {
@@ -15512,7 +16601,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15541,6 +16630,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15561,7 +16653,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/payments/{id}/failure-proposal/withdraw/confirm": {
@@ -15608,7 +16708,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15637,6 +16737,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15657,7 +16760,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Payments"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents": {
@@ -15747,6 +16858,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15767,7 +16881,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's agents",
@@ -15855,6 +16977,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15875,7 +17000,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "post": {
         "operationId": "agents.register",
@@ -15923,7 +17056,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -15953,6 +17086,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -15973,7 +17109,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}": {
@@ -16035,6 +17179,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16055,7 +17202,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "An agent, with its keys",
@@ -16115,6 +17270,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16135,7 +17293,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/confirm": {
@@ -16191,7 +17357,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16244,6 +17410,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16264,7 +17433,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/suspend": {
@@ -16319,7 +17496,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16365,6 +17542,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16385,7 +17565,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/reactivate": {
@@ -16430,7 +17618,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16459,6 +17647,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16479,7 +17670,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/reactivate/confirm": {
@@ -16526,7 +17725,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16571,6 +17770,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16591,7 +17793,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/owner": {
@@ -16638,7 +17848,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16667,6 +17877,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16687,7 +17900,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/owner/confirm": {
@@ -16740,7 +17961,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16792,6 +18013,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16812,7 +18036,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/keys/{keyId}/rotate": {
@@ -16871,7 +18103,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -16901,6 +18133,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -16921,7 +18156,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/keys/{keyId}/rotate/confirm": {
@@ -16992,7 +18235,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17053,6 +18296,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17073,7 +18319,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/keys/{keyId}/revoke": {
@@ -17128,7 +18382,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17158,6 +18412,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17178,7 +18435,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agents/{id}/keys/{keyId}/revoke/confirm": {
@@ -17235,7 +18500,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17281,6 +18546,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17301,7 +18569,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agents"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/link-sessions": {
@@ -17336,7 +18612,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17379,6 +18655,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17399,7 +18678,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/link-sessions/{linkId}/confirm": {
@@ -17454,7 +18741,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17533,6 +18820,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17553,7 +18843,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources": {
@@ -17643,6 +18941,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17663,7 +18964,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's bank accounts",
@@ -17751,6 +19060,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17771,7 +19083,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}": {
@@ -17817,6 +19137,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17837,7 +19160,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One of your organisation’s bank accounts",
@@ -17881,6 +19212,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17901,7 +19235,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}/refresh": {
@@ -17946,7 +19288,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -17975,6 +19317,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -17995,7 +19340,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}/suspend": {
@@ -18050,7 +19403,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18080,6 +19433,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18100,7 +19456,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}/consent-expiry": {
@@ -18155,7 +19519,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18184,6 +19548,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18204,7 +19571,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}/reactivate": {
@@ -18249,7 +19624,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18278,6 +19653,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18298,7 +19676,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/funding-sources/{id}/reactivate/confirm": {
@@ -18345,7 +19731,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18374,6 +19760,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18394,7 +19783,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Bank accounts"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers": {
@@ -18474,7 +19871,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18503,6 +19900,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18523,7 +19923,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "get": {
         "summary": "Your organisation's suppliers",
@@ -18611,6 +20019,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18631,7 +20042,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's suppliers",
@@ -18719,6 +20138,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18739,7 +20161,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}": {
@@ -18785,6 +20215,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18805,7 +20238,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One of your organisation’s suppliers, with its details",
@@ -18849,6 +20290,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18869,7 +20313,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/suspend": {
@@ -18924,7 +20376,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -18954,6 +20406,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -18974,7 +20429,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/remittance-email": {
@@ -19023,7 +20486,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19052,6 +20515,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19072,7 +20538,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/remittance-email/confirm": {
@@ -19127,7 +20601,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19156,6 +20630,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19176,7 +20653,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/details": {
@@ -19266,7 +20751,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19295,6 +20780,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19315,7 +20803,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/details/confirm": {
@@ -19417,7 +20913,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19446,6 +20942,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19466,7 +20965,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/reactivate": {
@@ -19515,7 +21022,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19544,6 +21051,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19564,7 +21074,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/reactivate/confirm": {
@@ -19625,7 +21143,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19654,6 +21172,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19674,7 +21195,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-registrations": {
@@ -19729,7 +21258,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19758,6 +21287,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19778,7 +21310,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-registrations/pass-through": {
@@ -19842,7 +21382,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19871,6 +21411,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -19891,7 +21434,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-registrations/{registrationId}/check": {
@@ -19946,7 +21497,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -19985,6 +21536,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20005,7 +21559,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-change/approve": {
@@ -20050,7 +21612,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20079,6 +21641,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20099,7 +21664,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-change/approve/confirm": {
@@ -20146,7 +21719,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20175,6 +21748,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20195,7 +21771,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/verify": {
@@ -20247,7 +21831,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20277,6 +21861,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20297,7 +21884,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/verify/confirm": {
@@ -20355,7 +21950,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20385,6 +21980,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20405,7 +22003,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/suppliers/{id}/payee-change/withdraw": {
@@ -20450,7 +22056,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20480,6 +22086,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20500,7 +22109,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Suppliers"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/agent/suppliers": {
@@ -20570,6 +22187,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20590,7 +22210,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "suppliers:read"
+            ]
+          }
+        ]
       },
       "head": {
         "summary": "The verified suppliers your organisation may pay",
@@ -20658,6 +22288,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20678,7 +22311,17 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Agent API"
+        ],
+        "security": [
+          {
+            "agentKey": [
+              "suppliers:read"
+            ]
+          }
+        ]
       }
     },
     "/v1/mandates": {
@@ -20802,7 +22445,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -20831,6 +22474,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20851,7 +22497,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "get": {
         "summary": "Your organisation's mandates",
@@ -20939,6 +22593,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -20959,7 +22616,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation's mandates",
@@ -21047,6 +22712,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21067,7 +22735,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/supersede": {
@@ -21184,7 +22860,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21213,6 +22889,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21233,7 +22912,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/accept": {
@@ -21287,7 +22974,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21316,6 +23003,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21336,7 +23026,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/accept/confirm": {
@@ -21395,7 +23093,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21424,6 +23122,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21444,7 +23145,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/suspend": {
@@ -21493,7 +23202,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21522,6 +23231,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21542,7 +23254,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/suspend/confirm": {
@@ -21603,7 +23323,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21632,6 +23352,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21652,7 +23375,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/resume": {
@@ -21697,7 +23428,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21726,6 +23457,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21746,7 +23480,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/resume/confirm": {
@@ -21793,7 +23535,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21822,6 +23564,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21842,7 +23587,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/revoke": {
@@ -21887,7 +23640,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -21916,6 +23669,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -21936,7 +23692,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/revoke/confirm": {
@@ -21983,7 +23747,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -22012,6 +23776,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22032,7 +23799,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/over-limit": {
@@ -22081,7 +23856,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -22110,6 +23885,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22130,7 +23908,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/over-limit/confirm": {
@@ -22191,7 +23977,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -22220,6 +24006,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22240,7 +24029,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}": {
@@ -22286,6 +24083,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22306,7 +24106,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "One of your organisation’s mandates, with its versions",
@@ -22350,6 +24158,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22370,7 +24181,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/policy/simulate": {
@@ -22598,6 +24417,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22618,7 +24440,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/policies/organization": {
@@ -22654,6 +24484,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22674,7 +24507,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "Your organisation’s own policy: every agent’s defaults",
@@ -22708,6 +24549,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22728,7 +24572,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/policies/organization/change": {
@@ -22844,7 +24696,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -22873,6 +24725,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -22893,7 +24748,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/policies/organization/change/preview": {
@@ -23020,6 +24883,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23040,7 +24906,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/policies/organization/change/confirm": {
@@ -23179,7 +25053,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -23208,6 +25082,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23228,7 +25105,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/policy": {
@@ -23274,6 +25159,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23294,7 +25182,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "A mandate’s own policy, narrowing it for its agent",
@@ -23338,6 +25234,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23358,7 +25257,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/policy/change": {
@@ -23467,7 +25374,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -23496,6 +25403,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23516,7 +25426,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/policy/change/preview": {
@@ -23636,6 +25554,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23656,7 +25577,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/mandates/{id}/policy/change/confirm": {
@@ -23776,7 +25705,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -23805,6 +25734,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23825,7 +25757,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Mandates and policy"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/fake-bank/accounts": {
@@ -23870,6 +25810,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23890,7 +25833,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "head": {
         "summary": "The accounts the fake partner’s bank offers (staging only)",
@@ -23933,6 +25884,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -23953,7 +25907,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/fake-bank/sessions/{sessionRef}/approve": {
@@ -24001,7 +25963,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24042,6 +26004,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24062,7 +26027,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/fake-bank/sessions/{sessionRef}/reject": {
@@ -24106,7 +26079,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24147,6 +26120,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24167,7 +26143,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/fake-bank/payee-forms": {
@@ -24215,7 +26199,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24256,6 +26240,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24276,7 +26263,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/invitations": {
@@ -24324,7 +26319,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24353,6 +26348,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24373,7 +26371,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/invitations/{id}/confirm": {
@@ -24418,7 +26424,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24447,6 +26453,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24467,7 +26476,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/invitations/accept": {
@@ -24503,7 +26520,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           }
         ],
         "x-access": [
@@ -24520,6 +26537,9 @@
                 }
               }
             }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           },
           "4XX": {
             "description": "Refused. The reason code says why.",
@@ -24541,7 +26561,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/invitations/{id}/approve": {
@@ -24586,7 +26614,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24615,6 +26643,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24635,7 +26666,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/invitations/{id}/approve/confirm": {
@@ -24682,7 +26721,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24711,6 +26750,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24731,7 +26773,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/members/invitations/{id}/decline": {
@@ -24776,7 +26826,7 @@
             "in": "header",
             "name": "idempotency-key",
             "required": true,
-            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
           },
           {
             "schema": {
@@ -24805,6 +26855,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24825,7 +26878,15 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Members"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/partner/events": {
@@ -24835,6 +26896,7 @@
         "x-access": [
           "public"
         ],
+        "x-partner-signed": true,
         "x-body-limit": 65536,
         "responses": {
           "202": {
@@ -24860,6 +26922,9 @@
               }
             }
           },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -24880,8 +26945,74 @@
               }
             }
           }
-        }
+        },
+        "tags": [
+          "Partner"
+        ],
+        "security": [
+          {
+            "partnerSignature": []
+          }
+        ]
       }
     }
-  }
+  },
+  "externalDocs": {
+    "description": "The guide for agent builders",
+    "url": "https://github.com/shahbaz242630/agent-x/blob/main/docs/api/README.md"
+  },
+  "tags": [
+    {
+      "name": "Agent API",
+      "description": "What an AI agent calls with its key: who it is, its mandate, the bank accounts and suppliers it may name, and its own spend requests. It creates a spend request under 'Spend requests'."
+    },
+    {
+      "name": "Spend requests",
+      "description": "Spend requests and their decisions. An agent creates one (POST /v1/spend-requests); the organisation's people read, approve, reject and cancel them."
+    },
+    {
+      "name": "Agents",
+      "description": "The organisation's AI agents, registered by its people: their keys, scopes, owners and suspensions."
+    },
+    {
+      "name": "Mandates and policy",
+      "description": "Each agent's mandate, and the organisation's and each mandate's spending rules."
+    },
+    {
+      "name": "Suppliers",
+      "description": "The suppliers an organisation pays, their bank details, and how each was verified."
+    },
+    {
+      "name": "Bank accounts",
+      "description": "The organisation's bank accounts, linked through the licensed partner with the bank's consent."
+    },
+    {
+      "name": "Payments",
+      "description": "Payments the licensed partner initiated from approved spend requests, as it reports them, and the exceptions to follow up with the bank."
+    },
+    {
+      "name": "Organisation",
+      "description": "The organisation as a whole: freezing it, its integrity hold, and its registered contacts."
+    },
+    {
+      "name": "Members",
+      "description": "The people in an organisation: roles, invitations, deactivations and second-factor resets."
+    },
+    {
+      "name": "Logs",
+      "description": "The organisation's audit log and access log, to read and export."
+    },
+    {
+      "name": "Sign-in",
+      "description": "A person's sign-in to the console, their session and organisations, and the words each choice is confirmed with."
+    },
+    {
+      "name": "Partner",
+      "description": "The licensed partner's messages about its payments, and the stand-in partner used for testing (staging only)."
+    },
+    {
+      "name": "Service",
+      "description": "The service's own health, and the console's error reports."
+    }
+  ]
 }

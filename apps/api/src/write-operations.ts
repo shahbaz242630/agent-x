@@ -80,6 +80,9 @@ export function operationProblems(
 /** The header a write's key comes in, as Node names it. */
 export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
 
+/** What a key may be, in words: the guides say it as the schema below checks it. */
+export const IDEMPOTENCY_KEY_RULE = '1 to 255 visible ASCII characters';
+
 /**
  * The header as the document shows it on each write. The hook below checks it
  * before the body is read, so the route's own check of it never refuses.
@@ -88,8 +91,7 @@ export const IDEMPOTENCY_KEY_SCHEMA = z
   .string()
   .regex(/^[!-~]{1,255}$/)
   .register(API_SCHEMAS, {
-    description:
-      'Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused.',
+    description: `Makes the write safe to retry: ${IDEMPOTENCY_KEY_RULE}, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused.`,
   });
 
 /**
