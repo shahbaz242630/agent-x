@@ -1122,15 +1122,13 @@ export const PLAIN_WORDS = {
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
   'security.org_events_sweep_crashed': {
-    happened:
-      "The daily clean-up of organisations' own security events past their keeping time hit an unexpected error.",
-    broke: 'Some events with internet addresses may be kept a little past their keeping time until the next clean-up.',
+    happened: "The daily clean-up of organisations' old security events hit an unexpected error.",
+    broke: 'Some events with internet addresses may be kept a little past their keeping time.',
     next: 'The next clean-up runs about an hour later. If it repeats, a developer should look at it.',
   },
   'security.org_events_sweep_failed': {
-    happened:
-      "The daily clean-up of organisations' own security events past their keeping time failed for one organisation or for all.",
-    broke: 'Those events, with their internet addresses, were not deleted this time and are kept a little longer.',
+    happened: "The daily clean-up of organisations' old security events failed for one organisation or for all.",
+    broke: 'Those events, with their internet addresses, are kept a little longer.',
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
   'security.events_refused': {
@@ -1141,7 +1139,7 @@ export const PLAIN_WORDS = {
   'security.events_unaddressed': {
     happened: 'More addresses than the API can track sent failed sign-ins or too many requests in a short time.',
     broke:
-      "Some were counted without their address, person, agent or organisation, so those counts never show on that organisation's security events page.",
+      "Some were counted without their address, person, agent or organisation, so they never show on an organisation's security page.",
     next: 'This may be an attack: check the security records and the traffic.',
   },
   'security.events_unwritten': {
