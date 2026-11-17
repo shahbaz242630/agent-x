@@ -169,11 +169,25 @@ describe('the smoke workflow', () => {
     expect(job?.steps?.filter((step) => step.run !== undefined).at(-1)?.run).toBe('node tooling/smoke/smoke.ts');
   });
 
-  it('is the only workflow that holds the smoke key', () => {
+  it('is the only workflow that holds the smoke key, but the MCP canaries (6E4), each step that reads it alone', () => {
     const holding = readdirSync('.github/workflows').filter((file) =>
       readFileSync(`.github/workflows/${file}`, 'utf8').includes('STAGING_SMOKE_AGENT_KEY'),
     );
-    expect(holding).toEqual(['smoke.yml']);
+    expect(holding).toEqual(['mcp-watch.yml', 'smoke.yml']);
+    // The canaries: only main's runs, never a job's env, never an action or the install; only our own canary tools.
+    const canaries = parse(readFileSync('.github/workflows/mcp-watch.yml', 'utf8')) as typeof workflow;
+    for (const [name, each] of Object.entries(canaries.jobs)) {
+      const steps = (each.steps ?? []) as { run?: string; uses?: string }[];
+      const readers = steps.filter((step) => JSON.stringify(step).includes('STAGING_SMOKE_AGENT_KEY'));
+      if (readers.length === 0) continue;
+      expect(each.if, name).toBe("github.ref == 'refs/heads/main'");
+      expect(JSON.stringify(each.env ?? {}), name).not.toContain('STAGING_SMOKE_AGENT_KEY');
+      for (const step of readers) {
+        expect(step.uses, name).toBeUndefined();
+        expect(step.run, name).toMatch(/^(node tooling\/mcp-watch\/canary(-judge)?\.ts |for canary in )/);
+        expect(step.run, name).not.toMatch(/\b(pnpm|pip|npm|npx)\b/);
+      }
+    }
     // Only the step that reads holds it: the actions before it never see it.
     const holders = (job?.steps ?? []).filter((step) => JSON.stringify(step).includes('STAGING_SMOKE_AGENT_KEY'));
     expect(holders.map((step) => step.run)).toEqual(['node tooling/smoke/smoke.ts']);

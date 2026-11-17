@@ -1,0 +1,198 @@
+# 6E4 (MCP-Guide §7, partner S201): early warning for the MCP door. Most of
+# our customers will reach Agent X through an agent's MCP client, so we learn
+# of a breaking change before their agents do. Every day:
+#   1. real clients, pinned, connect to staging's MCP endpoint with the smoke
+#      agent's key (two read scopes alone, smoke.yml), list the tools and call
+#      get_agent: the official TypeScript SDK in both protocol eras, the
+#      mcp-remote bridge, Vercel's AI SDK (tooling/mcp-watch/canary.ts), the
+#      official Python SDK in both of its modes and OpenAI's Agents SDK
+#      (canary.py), each judged by canary-judge.ts. No model is called;
+#   2. the release watch (tooling/mcp-watch/releases.ts): MCP's specification,
+#      the TypeScript SDK and its security advisories, the conformance suite and
+#      the main agents' clients against tooling/mcp-watch/seen.json.
+# Red, in plain words, on what needs a person: a canary that can't list or
+# call; a release newer than seen.json (until a person reads it and moves the
+# file, with a note); an SDK advisory covering the version the API runs. A
+# failed run is emailed to the repository's owner. Staging scales to zero, so
+# each canary job wakes it first. The address and the key are repository
+# secrets, never variables, and the key reaches the canary steps alone.
+# Positive controls (a silent watch proves nothing): run it by hand with
+# control_unseen, and every source goes red; with server_version 2.2.0, the
+# advisory check goes red. The unit tests hold the same with fixtures, and
+# canary.test.ts turns every TS canary red with a wrong key.
+name: MCP watch (daily)
+
+on:
+  schedule:
+    - cron: '37 4 * * *' # every day, 04:37 UTC, after the image watch
+  workflow_dispatch:
+    inputs:
+      control_unseen:
+        description: 'Positive control: judge every source as if nothing were seen; it must go red'
+        type: boolean
+        required: false
+        default: false
+      server_version:
+        description: "Positive control: judge the SDK's advisories against this version (e.g. 2.2.0); it must go red"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-watch
+  cancel-in-progress: false
+
+jobs:
+  canaries-ts:
+    name: Canaries (TypeScript clients)
+    # Staging's key is used from main alone.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # The install, the wake (up to ~3 min) and four clients, each up to a minute a step.
+    timeout-minutes: 20
+    env:
+      # Corepack must not read a .corepack.env file from the repository.
+      COREPACK_ENV_FILE: '0'
+      AGENTX_MCP_ORIGIN: ${{ secrets.STAGING_APP_ORIGIN }}
+    steps:
+      - name: Keep the staging address out of the log
+        run: |
+          if [ -z "$AGENTX_MCP_ORIGIN" ]; then echo '::error::The repository secret STAGING_APP_ORIGIN is not set, so no canary can reach staging. Set it (smoke.yml uses it too).'; exit 1; fi
+          echo "::add-mask::$AGENTX_MCP_ORIGIN"
+          host="${AGENTX_MCP_ORIGIN#https://}"
+          echo "::add-mask::${host%/}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          # The newest Node 24, so it always meets package.json engines (>=24.19.0).
+          check-latest: true
+          package-manager-cache: false
+
+      - name: Enable pnpm through Corepack
+        run: corepack enable pnpm
+
+      # The clients are dev dependencies, pinned in the lockfile; the image installs production ones alone.
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Wake staging
+        id: wake
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary-judge.ts wake
+
+      # Each canary runs whatever another's verdict, so one red names every client it applies to.
+      - name: Official TypeScript SDK, 2025 handshake
+        if: ${{ !cancelled() && steps.wake.outcome == 'success' }}
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary.ts ts-legacy
+
+      - name: Official TypeScript SDK, 2026-07-28 revision
+        if: ${{ !cancelled() && steps.wake.outcome == 'success' }}
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary.ts ts-modern
+
+      - name: mcp-remote bridge, over stdio
+        if: ${{ !cancelled() && steps.wake.outcome == 'success' }}
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary.ts mcp-remote
+
+      - name: Vercel AI SDK
+        if: ${{ !cancelled() && steps.wake.outcome == 'success' }}
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary.ts ai-sdk
+
+  canaries-python:
+    name: Canaries (Python clients)
+    if: github.ref == 'refs/heads/main'
+    # Its Python is 3.12, the one requirements.txt is compiled for (a newer runner would refuse the wheels, in the log).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      AGENTX_MCP_ORIGIN: ${{ secrets.STAGING_APP_ORIGIN }}
+      # No traces sent anywhere: the Agents SDK would otherwise try OpenAI's, with no key.
+      OPENAI_AGENTS_DISABLE_TRACING: '1'
+    steps:
+      - name: Keep the staging address out of the log
+        run: |
+          if [ -z "$AGENTX_MCP_ORIGIN" ]; then echo '::error::The repository secret STAGING_APP_ORIGIN is not set, so no canary can reach staging. Set it (smoke.yml uses it too).'; exit 1; fi
+          echo "::add-mask::$AGENTX_MCP_ORIGIN"
+          host="${AGENTX_MCP_ORIGIN#https://}"
+          echo "::add-mask::${host%/}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The judge runs on bare Node: nothing installed.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      # Every package by its hash, wheels only (no build step runs), into a virtual environment of its own.
+      - name: Install the Python clients (hash-pinned)
+        run: |
+          python3 --version
+          python3 -m venv "$RUNNER_TEMP/canary-venv"
+          if ! "$RUNNER_TEMP/canary-venv/bin/pip" install --disable-pip-version-check --require-hashes --no-deps --only-binary :all: -r tooling/mcp-watch/requirements.txt; then
+            echo "::error::The Python canaries' clients could not be installed from tooling/mcp-watch/requirements.txt (a hash, a wheel for this runner's Python, or PyPI), so no Python canary ran. Read this step's log; if the runner's Python moved, compile the file again for it (its header has the command)."
+            exit 1
+          fi
+
+      - name: Wake staging
+        id: wake
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/mcp-watch/canary-judge.ts wake
+
+      - name: Official Python SDK (2025 handshake and its own negotiation), OpenAI Agents SDK
+        if: ${{ steps.wake.outcome == 'success' }}
+        env:
+          AGENTX_MCP_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: |
+          for canary in python-legacy python-auto openai-agents; do
+            "$RUNNER_TEMP/canary-venv/bin/python" -I tooling/mcp-watch/canary.py "$canary" "$RUNNER_TEMP/$canary.json"
+          done
+
+      - name: Judge them
+        if: ${{ !cancelled() && steps.wake.outcome == 'success' }}
+        run: |
+          node tooling/mcp-watch/canary-judge.ts judge \
+            "$RUNNER_TEMP/python-legacy.json" "$RUNNER_TEMP/python-auto.json" "$RUNNER_TEMP/openai-agents.json"
+
+  releases:
+    name: Watch MCP releases and the SDK's advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CONTROL_UNSEEN: ${{ inputs.control_unseen }}
+      SERVER_VERSION: ${{ inputs.server_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Newer than seen.json, and advisories covering our pin
+        run: |
+          args=()
+          if [ "$CONTROL_UNSEEN" = 'true' ]; then args+=(--control-unseen); fi
+          if [ -n "$SERVER_VERSION" ]; then args+=(--server-version "$SERVER_VERSION"); fi
+          node tooling/mcp-watch/releases.ts "${args[@]}"
