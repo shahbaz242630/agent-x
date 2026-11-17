@@ -586,6 +586,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     findTwin,
     publicOrigin: config.http.publicOrigin,
     logFailure,
+    logger,
   });
   return app;
 }

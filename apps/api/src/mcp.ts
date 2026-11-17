@@ -38,6 +38,7 @@ import {
   type McpRequestContext,
   type StandardSchemaWithJSON,
 } from '@modelcontextprotocol/server';
+import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -209,9 +210,19 @@ function webRequest(request: FastifyRequest): Request {
   return new Request(`http://agent-x${MCP_PATH}`, { method: 'POST', headers });
 }
 
-/** The SDK's answer, passed on as it wrote it: its status, its type and its text, marked as the contract's own. */
-async function sendAnswer(reply: FastifyReply, answer: Response): Promise<FastifyReply> {
+/**
+ * The SDK's answer, passed on as it wrote it: its status, its type and its text, marked as the contract's own. Read
+ * whole first: a 2025-era answer is a stream the SDK returns before its tool has run, so what the tool did is known
+ * only once the stream ends, and the request's activity row and line, written after the answer, need it.
+ */
+async function sendAnswer(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  answer: Response,
+  call: CallContext,
+): Promise<FastifyReply> {
   const text = await answer.text();
+  request.toolCalled = call.called;
   void reply.code(answer.status);
   if (text === '') return reply.send();
   markWritten(reply, text);
@@ -229,10 +240,13 @@ export function registerMcp(
     findTwin,
     publicOrigin,
     logFailure,
+    logger,
   }: {
     readonly useCases: AgentUseCases;
     readonly findTwin: FindTwin;
     readonly publicOrigin: string;
+    /** Where the SDK's own refusals and failures are written: never its raw console lines. */
+    readonly logger: Logger;
     /** The error path's own lines for a failure on our side (server.ts), for a tool's twin failing. */
     readonly logFailure: LogFailure;
   },
@@ -290,10 +304,15 @@ export function registerMcp(
   };
 
   // Created once: it holds nothing between requests but the SDK's own listen bus, which no tool of ours uses.
+  // `auto`, not `json`: no tool of ours sends anything before its result, so every 2026 answer is one JSON body
+  // either way, and `json` makes the SDK print a raw warning at every start (MCP-Guide §7: lines only through ours).
   const handler = createMcpHandler(serverFor, {
     legacy: 'stateless',
-    responseMode: 'json',
+    responseMode: 'auto',
     maxRequestBodySize: bodyLimit,
+    onerror: (error) => {
+      logger.warn('mcp.protocol_refused', { err: error });
+    },
   });
   app.addHook('onClose', () => handler.close());
 
@@ -323,8 +342,8 @@ export function registerMcp(
       // A key of our own, never the correlation ID: a client may send its own, and two callers could share one.
       const callKey = randomUUID();
       calls.set(callKey, call);
-      const answer = await handler
-        .fetch(webRequest(request), {
+      try {
+        const answer = await handler.fetch(webRequest(request), {
           parsedBody: request.body,
           // The key's ID, never the key: the SDK only passes it on.
           authInfo: {
@@ -333,10 +352,11 @@ export function registerMcp(
             scopes: [...agent.scopes],
             extra: { callKey },
           },
-        })
-        .finally(() => calls.delete(callKey));
-      request.toolCalled = call.called;
-      return sendAnswer(reply, answer);
+        });
+        return await sendAnswer(request, reply, answer, call);
+      } finally {
+        calls.delete(callKey);
+      }
     },
   );
 }

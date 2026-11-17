@@ -28,6 +28,11 @@ export const PLAIN_WORDS = {
     broke: 'A page before signing in, such as the sign-in page, may not have worked; the server is fine.',
     next: 'If many come, a developer should read them. Anyone can send these, so they may be forged.',
   },
+  'mcp.protocol_refused': {
+    happened: "The MCP protocol layer refused an agent's MCP request, or failed outside a tool's call.",
+    broke: 'That one MCP request got a protocol error, not an answer; nothing was changed and other calls are fine.',
+    next: 'Nothing for one. If many come from one client, read its version on its request lines and tell its builder.',
+  },
   'load.stageg_refused': {
     happened: 'A load test job refused to start, before it changed anything.',
     broke:

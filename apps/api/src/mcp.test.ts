@@ -20,11 +20,12 @@ import type { IdempotentRequest } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AgentMandates, AgentMandateShown } from './agent-mandate.ts';
+import type { LogSample } from './log-sample.ts';
 import { MCP_PATH, PROTOCOL_HEADER, PROTOCOLS } from './mcp.ts';
 import { MCP_TOOLS, MOST_TEXT, plainText, plainTexts, type TwinnedTool, twinned } from './mcp-tools.ts';
 import { recordTwins, twinOf } from './mcp-twins.ts';
@@ -175,7 +176,8 @@ interface Stubs {
 }
 
 function useCases(stubs: Stubs) {
-  const settle = <T>(
+  // A real event-loop turn before each answer, as a database's: a 2025-era answer streams while its tool still runs.
+  const settle = async <T>(
     answer: T,
     writes = false,
   ): Promise<
@@ -183,11 +185,11 @@ function useCases(stubs: Stubs) {
     | { readonly outcome: 'refused'; readonly status: 404; readonly code: 'NOT_FOUND' }
     | { readonly outcome: 'conflict' | 'busy' }
   > => {
-    if (stubs.mode === 'fail') return Promise.reject(new Error('the stub failed'));
-    if (stubs.mode === 'refuse')
-      return Promise.resolve({ outcome: 'refused', status: 404, code: 'NOT_FOUND' } as const);
-    if (writes && (stubs.mode === 'conflict' || stubs.mode === 'busy')) return Promise.resolve({ outcome: stubs.mode });
-    return Promise.resolve(answer);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (stubs.mode === 'fail') throw new Error('the stub failed');
+    if (stubs.mode === 'refuse') return { outcome: 'refused', status: 404, code: 'NOT_FOUND' } as const;
+    if (writes && (stubs.mode === 'conflict' || stubs.mode === 'busy')) return { outcome: stubs.mode };
+    return answer;
   };
   const reads = (answer: unknown) => settle(answer) as Promise<never>;
   const mandates: AgentMandates = {
@@ -784,7 +786,13 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
       modern('tools/call', { name: 'execute_payment', arguments: {} }, 'execute_payment'),
     ]) {
       const unknownTool = await app.inject(options);
-      expect(unknownTool.body).toMatch(/execute_payment|-32602|isError/);
+      // A protocol fault in either era, never a tool result: no tool by that name exists to refuse it.
+      expect(unknownTool.statusCode).toBe(200);
+      expect(answerOf(unknownTool)).toEqual({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: -32_602, message: 'Tool execute_payment not found' },
+      });
     }
     expect(stubs.asked).toEqual([]);
   });
@@ -840,19 +848,26 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
     const { app } = await server('refuse', {
       activity: { forOrganisation: write, forPerson: () => Promise.resolve() },
     });
-    await callTool(app, 'get_spend_request', { id: REQUEST_ID });
-    await callTool(app, 'get_agent', {}, ALL, 'modern');
+    for (const era of ['legacy', 'modern'] as const) {
+      await callTool(app, 'get_spend_request', { id: REQUEST_ID }, ALL, era);
+      await callTool(app, 'get_agent', {}, ALL, era);
+    }
     await app.inject(mcp(message('tools/list')));
     const actor = { type: 'agent', id: AGENT_ID, keyId: KEY_ID };
-    expect(rows.map(({ route, status, reason, pathIds }) => ({ route, status, reason, pathIds, actor }))).toEqual([
-      { route: '/v1/mcp/get_spend_request', status: 404, reason: 'NOT_FOUND', pathIds: [REQUEST_ID], actor },
-      { route: '/v1/mcp/get_agent', status: 200, reason: undefined, pathIds: [], actor },
-      { route: '/v1/mcp', status: 200, reason: undefined, pathIds: [], actor },
+    const refused = { route: '/v1/mcp/get_spend_request', status: 404, reason: 'NOT_FOUND', pathIds: [REQUEST_ID] };
+    const answered = { route: '/v1/mcp/get_agent', status: 200, reason: undefined, pathIds: [] };
+    expect(rows.map(({ route, status, reason, pathIds }) => ({ route, status, reason, pathIds }))).toEqual([
+      refused,
+      answered,
+      refused,
+      answered,
+      { route: '/v1/mcp', status: 200, reason: undefined, pathIds: [] },
     ]);
-    expect(rows.map((row) => row.actor)).toEqual([actor, actor, actor]);
+    expect(rows.map((row) => row.actor)).toEqual(Array.from({ length: 5 }, () => actor));
   });
 
-  it("counts each call once against its agent's limit; its line names the tool, the client and its protocol", async () => {
+  /** A server whose lines are captured, its use cases refusing, with this per-agent limit and line sample. */
+  async function logged(perAgent: number, logSample?: LogSample) {
     const capture = new LogCapture();
     const config = {
       http: {
@@ -862,7 +877,7 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
         trustedProxies: [],
         rateLimitPerMinute: 1000,
         rateLimitPerUserPerMinute: 1000,
-        rateLimitPerAgentPerMinute: 3,
+        rateLimitPerAgentPerMinute: perAgent,
         rateLimitPerOrganisationPerMinute: 1000,
         webCopies: 1,
       },
@@ -879,10 +894,59 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
       ids: new SequentialIds(),
       healthChecks: [],
       checkAgentKey,
+      logSample,
       ...useCases(stubs),
     });
+    await app.ready();
+    return { app, capture };
+  }
+
+  it("writes the SDK's own refusals through the logger, in plain words, and never a raw console line", async () => {
+    const raw = vi.spyOn(console, 'warn');
+    const { app, capture } = await logged(100);
     try {
-      await app.ready();
+      expect(raw).not.toHaveBeenCalled();
+      const unspoken = await app.inject(
+        mcp(
+          message('tools/list', { _meta: { ...MODERN_META, 'io.modelcontextprotocol/protocolVersion': '2099-01-01' } }),
+          {
+            headers: { [PROTOCOL_HEADER]: '2099-01-01', 'mcp-method': 'tools/list' },
+          },
+        ),
+      );
+      expect(unspoken.statusCode).toBe(400);
+      const refused = capture.lines().find((entry) => entry.event === 'mcp.protocol_refused');
+      expect(refused).toMatchObject({
+        level: 'warn',
+        says: expect.stringContaining('MCP protocol layer refused') as unknown,
+      });
+      expect(raw).not.toHaveBeenCalled();
+    } finally {
+      raw.mockRestore();
+      await app.close();
+    }
+  });
+
+  it('keeps the line of a refused tool call in both eras, however few answered lines are kept', async () => {
+    const keepsNone: LogSample = { oneIn: 1_000_000, keeps: () => false };
+    const { app, capture } = await logged(100, keepsNone);
+    try {
+      for (const era of ['legacy', 'modern'] as const) {
+        await callTool(app, 'get_spend_request', { id: REQUEST_ID }, ALL, era);
+      }
+      const tools = capture.lines().filter((entry) => entry.route === MCP_PATH);
+      expect(tools.map(({ tool, toolStatus, mcpEra }) => ({ tool, toolStatus, mcpEra }))).toEqual([
+        { tool: 'get_spend_request', toolStatus: 404, mcpEra: 'legacy' },
+        { tool: 'get_spend_request', toolStatus: 404, mcpEra: 'modern' },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("counts each call once against its agent's limit; its line names the tool, the client and its protocol", async () => {
+    const { app, capture } = await logged(4);
+    try {
       const hostile = `hermes${String.fromCharCode(27)}${'x'.repeat(200)}`;
       const initialized = await app.inject(
         mcp(
@@ -897,6 +961,7 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
       expect(
         (await app.inject(modern('tools/call', { name: 'get_mandate', arguments: {} }, 'get_mandate'))).statusCode,
       ).toBe(200);
+      expect((await app.inject(mcp(message('tools/call', { name: 'get_agent', arguments: {} })))).statusCode).toBe(200);
       expect((await app.inject(mcp(message('tools/list')))).statusCode).toBe(200);
       expect((await app.inject(mcp(message('tools/list')))).statusCode).toBe(429);
       const lines = capture.lines().filter((entry) => entry.route === MCP_PATH && entry.status === 200);
@@ -914,8 +979,10 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
         mcpClient: 'agent-x-tests',
         agentId: AGENT_ID,
       });
-      expect(lines[2]).toMatchObject({ mcpEra: 'legacy', mcpProtocol: '2025-03-26' });
-      expect(lines[2]).not.toHaveProperty('mcpClient');
+      expect(lines[2]).toMatchObject({ tool: 'get_agent', toolStatus: 200, mcpEra: 'legacy' });
+      expect(lines[3]).toMatchObject({ mcpEra: 'legacy', mcpProtocol: '2025-03-26' });
+      expect(lines[3]).not.toHaveProperty('mcpClient');
+      expect(lines[3]).not.toHaveProperty('tool');
     } finally {
       await app.close();
     }
