@@ -387,6 +387,26 @@ describe('scrub: properties that hold for any text', () => {
     expect(scrub(file.replace('activity-', 'other-'))).not.toBe(file.replace('activity-', 'other-'));
   });
 
+  it("leaves a person's activity export's file name on its own as it is, and only that shape (6E1a)", () => {
+    const file = 'persons/01a1e1a4-eb24-70d7-a8eb-0adfd89f0f23/activity-01a1e1a4-eb78-77b6-a8e8-fa309de7fc13.ndjson';
+    expect(scrub(file)).toBe(file);
+    fc.assert(
+      fc.property(fc.uuid(), fc.uuid(), (user, id) => {
+        expect(scrub(`persons/${user}/activity-${id}.ndjson`)).toBe(`persons/${user}/activity-${id}.ndjson`);
+      }),
+      { ...RUNS, numRuns: 5000 },
+    );
+    for (const other of [
+      file.replace('persons/', 'people/'),
+      file.replace('01a1e1a4-eb24-70d7-a8eb-0adfd89f0f23', 'ana@example.com'),
+      file.replace('/activity-', '/'),
+      `x${file}`,
+      file.replace('.ndjson', '.json'),
+    ]) {
+      expect(scrub(other)).not.toBe(other);
+    }
+  });
+
   it.each([
     [
       'right after a digit and a dash, as an order number joined to it',

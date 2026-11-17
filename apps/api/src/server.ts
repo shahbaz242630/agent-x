@@ -126,6 +126,7 @@ import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
+import { type MyActivity, registerMyActivity } from './my-activity.ts';
 import { type ListMyOrganizations, registerMyOrganizations } from './my-organizations.ts';
 import { registerStatements } from './statements.ts';
 import { registerBrowserErrors } from './browser-errors.ts';
@@ -181,6 +182,8 @@ export interface ServerOptions {
   readonly activityPages?: ActivityPages | undefined;
   /** Downloading the organisation's activity log (activity-log-exports.ts, L5); without it, no one reaches the route. */
   readonly activityLogExports?: ActivityLogExports | undefined;
+  /** A person's own activity log, read and downloaded (my-activity.ts, 6E1a); without it, no one reaches the routes. */
+  readonly myActivity?: MyActivity | undefined;
   /** The activity log's background downloads (activity-background-exports.ts, L5c); without them, the routes answer NOT_FOUND. */
   readonly backgroundExports?: BackgroundExports | undefined;
   /** Downloading a background download's files (activity-download-files.ts, L5c); without it, the routes answer NOT_FOUND. */
@@ -476,6 +479,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerAuditLogExports(app, { exports: options.auditLogExports });
   registerActivityPages(app, { log: options.activityPages });
   registerActivityLogExports(app, { exports: options.activityLogExports });
+  registerMyActivity(app, { activity: options.myActivity });
   registerBackgroundExports(app, { downloads: options.backgroundExports });
   registerDownloadFiles(app, { files: options.downloadFiles });
   registerOrganization(app, { changes: options.organizationChanges });

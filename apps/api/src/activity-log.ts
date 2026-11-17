@@ -123,19 +123,47 @@ export function createActivityPages({
 }
 
 /** Where a page starts before, as `next` names it: a row's time and ID, `2026-10-19T13:39:12.123Z_<uuid>`. */
-const CURSOR =
+export const CURSOR =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
-const cursorText = ({ at, id }: ActivityCursor): string => `${at.toISOString()}_${id}`;
+export const cursorText = ({ at, id }: ActivityCursor): string => `${at.toISOString()}_${id}`;
 
 /** A cursor's time and ID, or undefined for text that isn't one. */
-const cursorOf = (text: string): ActivityCursor | undefined => {
+export const cursorOf = (text: string): ActivityCursor | undefined => {
   const [, at, id] = CURSOR.exec(text) ?? [];
   if (at === undefined || id === undefined) return undefined;
   const time = new Date(at);
   // A day or hour that doesn't exist reads as another, or as none.
   return Number.isNaN(time.getTime()) || time.toISOString() !== at ? undefined : { at: time, id: id.toLowerCase() };
 };
+
+/** What a request says of where its client may be, an organisation's log's row and a person's alike. */
+export const CLIENT_CLUES = z
+  .object({
+    ip: z.string().nullable().describe('The IP address it came from; null when it couldn’t be read.'),
+    place: z
+      .object({
+        country: z.string().describe('The country, by its ISO 3166 code.'),
+        city: z.string().nullable().describe('The city; null when none is known.'),
+        approximate: z
+          .literal(true)
+          .describe('Always: a VPN or a company network shows somewhere else than the person is.'),
+        by: z.literal(PLACES_BY.by).describe('Where the place comes from (CC BY 4.0).'),
+        link: z.literal(PLACES_BY.link).describe('Its source.'),
+      })
+      .nullable()
+      .describe('The approximate place the address is registered to; null when none is known.'),
+    timeZone: z
+      .object({
+        name: z.string().describe('The time zone, such as `Asia/Dubai`.'),
+        from: z
+          .enum(TIME_ZONE_SOURCES)
+          .describe('`browser`: the browser reported it; `organisation`: the organisation’s own, as none was.'),
+      })
+      .nullable()
+      .describe('The time zone the request was made in; null when none is known.'),
+  })
+  .describe('What the request says of where its client may be: clues, never proof.');
 
 const ACTIVITY_ROW = z
   .object({
@@ -174,32 +202,7 @@ const ACTIVITY_ROW = z
       .describe(
         'Whether its day is sealed on the audit chain: written on or before `sealedThrough` (a day is the UTC day a row was written).',
       ),
-    client: z
-      .object({
-        ip: z.string().nullable().describe('The IP address it came from; null when it couldn’t be read.'),
-        place: z
-          .object({
-            country: z.string().describe('The country, by its ISO 3166 code.'),
-            city: z.string().nullable().describe('The city; null when none is known.'),
-            approximate: z
-              .literal(true)
-              .describe('Always: a VPN or a company network shows somewhere else than the person is.'),
-            by: z.literal(PLACES_BY.by).describe('Where the place comes from (CC BY 4.0).'),
-            link: z.literal(PLACES_BY.link).describe('Its source.'),
-          })
-          .nullable()
-          .describe('The approximate place the address is registered to; null when none is known.'),
-        timeZone: z
-          .object({
-            name: z.string().describe('The time zone, such as `Asia/Dubai`.'),
-            from: z
-              .enum(TIME_ZONE_SOURCES)
-              .describe('`browser`: the browser reported it; `organisation`: the organisation’s own, as none was.'),
-          })
-          .nullable()
-          .describe('The time zone the request was made in; null when none is known.'),
-      })
-      .describe('What the request says of where its client may be: clues, never proof.'),
+    client: CLIENT_CLUES,
   })
   .register(API_SCHEMAS, { id: 'ActivityLogRow', description: 'One request in the organisation’s activity log.' });
 

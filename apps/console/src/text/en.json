@@ -1317,5 +1317,21 @@
   "policies.refused.SECOND_FACTOR_REMOVED": "A sign-in method of yours was removed recently, so for 7 days you can't do this. Nothing was changed. Ask another admin.",
   "policies.refused.ORGANIZATION_INVALID": "Agent X couldn't tell which organisation this was for, so nothing was changed. Reload the page and try again.",
   "policies.refused.STATEMENT_CHANGED": "The words you confirmed with have changed since you read them. Nothing was changed. Press again to read them as they are now.",
-  "policies.refused.STEP_UP_FAILED": "Signing in again for this change didn't match it, so nothing was changed. Ask for it again."
+  "policies.refused.STEP_UP_FAILED": "Signing in again for this change didn't match it, so nothing was changed. Ask for it again.",
+  "myActivity.title": "My activity",
+  "myActivity.link": "My activity",
+  "myActivity.intro": "Every request you made to Agent X outside an organisation, newest first: your profile, your session, invitations, reads and refusals too. Where a request came from is a clue, never proof.",
+  "myActivity.organisations": "What you did inside an organisation is in that organisation's own access log, which its admins keep.",
+  "myActivity.yourClock": "your clock {time}",
+  "myActivity.claimed": "You named an organisation you weren't a verified member of:",
+  "myActivity.downloaded": "Downloaded. Your download is recorded.",
+  "myActivity.downloadLogged": "Every download of your activity is recorded, with what it held. You can make 5 an hour, up to 12 months and 50,000 requests each.",
+  "myActivity.exports.title": "Exports by Agent X",
+  "myActivity.exports.intro": "Agent X exports your activity only for a case, such as a dispute or a regulator's request, and every time it does you see it here.",
+  "myActivity.exports.none": "Agent X has never exported your activity.",
+  "myActivity.exports.at": "Exported {time}",
+  "myActivity.exports.range": "{from} to {to}, {count} requests",
+  "myActivity.exports.case": "case {ref}",
+  "myActivity.tooLarge": "This range holds more than 50,000 requests, too many for one download. Pick a shorter range and download it in parts.",
+  "myActivity.spent": "You've made 5 downloads of your activity in the last hour. Try again later."
 }
