@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The type check's second API database tests part: those named n to z, with the test database's vitest context (inject).",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "apps/api/src/n*.db.test.ts",
+    "apps/api/src/o*.db.test.ts",
+    "apps/api/src/p*.db.test.ts",
+    "apps/api/src/q*.db.test.ts",
+    "apps/api/src/r*.db.test.ts",
+    "apps/api/src/s*.db.test.ts",
+    "apps/api/src/t*.db.test.ts",
+    "apps/api/src/u*.db.test.ts",
+    "apps/api/src/v*.db.test.ts",
+    "apps/api/src/w*.db.test.ts",
+    "apps/api/src/x*.db.test.ts",
+    "apps/api/src/y*.db.test.ts",
+    "apps/api/src/z*.db.test.ts"
+  ],
+  "files": ["tooling/test-db/global-setup.ts"],
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
+}

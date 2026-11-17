@@ -18,8 +18,14 @@ const CHECKS = {
   // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222);
   // with a 6 GB heap: the whole repository in one process passed Node's 4 GB default on CI's runner (S141, #453).
   lint: 'node --max-old-space-size=6144 tooling/quality/lint.ts',
-  // The server's code against Node alone, then the console's against the browser's (Phase 6 6A1: DOM and JSX).
-  typecheck: 'tsc --project tsconfig.json && tsc --project apps/console/tsconfig.json',
+  // The server's code against Node alone, in parts each with room under Node's 4 GB heap (one program for all passed it,
+  // S201; typecheck-parts.test.ts holds the parts to tsconfig.json), then the console's against the browser's (6A1).
+  typecheck: [
+    ...['product', 'api-tests', 'api-db-tests-a-m', 'api-db-tests-n-z', 'other-tests', 'tooling'].map(
+      (part) => `tsc --project tsconfig.check-${part}.json`,
+    ),
+    'tsc --project apps/console/tsconfig.json',
+  ].join(' && '),
   boundaries: `depcruise ${['apps', 'packages'].filter((folder) => existsSync(folder)).join(' ')}`,
   knip: 'knip',
   'test:coverage': 'vitest run --coverage',

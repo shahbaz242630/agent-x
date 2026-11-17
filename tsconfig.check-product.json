@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The type check's product part: packages and apps without their tests, and the root configs.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["packages/*/src", "apps/*/src", "*.config.ts"],
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console", "**/*.test.ts", "**/*.test.tsx"]
+}
