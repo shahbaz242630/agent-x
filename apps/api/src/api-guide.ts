@@ -216,11 +216,13 @@ function guided(path: string, value: unknown): unknown {
   const parsed = OPERATION.safeParse(value);
   if (!parsed.success) return value;
   const operation = parsed.data;
+  // Spread from the operation itself, not zod's copy: its x-agent-scopes stays the frozen list the route was added with.
+  const original = value as typeof operation;
   return {
-    ...operation,
+    ...original,
     tags: tagsOf(path),
     security: securityOf(operation['x-access'], operation['x-agent-scopes'], operation['x-partner-signed'] === true),
-    responses: { ...operation.responses, 429: { $ref: `#/components/responses/${RATE_LIMITED_RESPONSE}` } },
+    responses: { ...original.responses, 429: { $ref: `#/components/responses/${RATE_LIMITED_RESPONSE}` } },
   };
 }
 
