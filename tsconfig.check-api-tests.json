@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The type check's API tests part: the API's own tests that need no database.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["apps/api/src/**/*.test.ts"],
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console", "apps/api/src/**/*.db.test.ts"]
+}

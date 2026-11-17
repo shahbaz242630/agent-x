@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The type check's other tests part: the packages' and the other apps' tests, with the test database's vitest context (inject).",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "packages/*/src/**/*.test.ts",
+    "apps/db-setup/src/**/*.test.ts",
+    "apps/migrate/src/**/*.test.ts",
+    "apps/operator/src/**/*.test.ts"
+  ],
+  "files": ["tooling/test-db/global-setup.ts"],
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The type check's tooling part: the repository's tooling and deployment code, and their tests.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["tooling/**/*.ts", "deploy/**/*.ts"],
+  "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
+}
