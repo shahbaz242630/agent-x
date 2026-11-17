@@ -14,8 +14,8 @@
       "note": "S201 6E4 seed: the newest GitHub release; we pin npm's 0.2.0-alpha.12, which runs ahead of it"
     },
     "claude-code": {
-      "version": "v2.1.326",
-      "note": "S201 6E4 seed: newest at the build; its connect line in docs/api/README.md §9 checked in 6E2"
+      "version": "v2.1.327",
+      "note": "S201 6E4: read; MCP lines are its own CLI (mcp add-json from stdin, .mcp.json edits, /mcp screens) and remote servers retried after an outage: nothing changes how it connects to us"
     },
     "codex": {
       "version": "rust-v0.169.1",

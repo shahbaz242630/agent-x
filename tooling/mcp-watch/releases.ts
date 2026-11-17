@@ -2,7 +2,8 @@
 // customers' agents before they notice: MCP's specification, the official
 // TypeScript SDK our server is built on (its releases and its security
 // advisories), the conformance suite, and the main agents' clients that publish
-// on GitHub. .github/workflows/mcp-watch.yml runs it every day; it fails red, in
+// on GitHub. .github/workflows/mcp-releases.yml runs it every day, apart from
+// the canaries (mcp-watch.yml) so its red never hides theirs; it fails red, in
 // plain words, on what needs a person. Node builtins only.
 //
 //   node tooling/mcp-watch/releases.ts                          the watch
@@ -11,11 +12,12 @@
 //                                                               against this version, not our pin; red
 //
 // What was last seen is tooling/mcp-watch/seen.json, one entry a source, each
-// with a note of what the person who moved it checked. A newer release than
-// seen is red (for the busiest clients, only when its notes name MCP; for VS
-// Code, whose notes are a link, only a new minor) until a person reads it and
-// moves seen.json, with a note; every newer release is listed in the job
-// summary either way. An SDK advisory that covers the version the API runs is
+// with a note of what the person who moved it checked. A newer release of the
+// specification, the SDK or the conformance suite is red until a person reads
+// it and moves seen.json, with a note; a client's only when a line of its notes
+// names MCP together with a word that can break a client (CLIENT_BREAKING), as
+// they ship most days, mostly about other things. Every newer release is listed
+// in the job summary either way. An SDK advisory that covers the version the API runs is
 // red whatever seen.json says, until the pin moves past it. A source that can't
 // be read, or whose releases this watch can't read any more, is red too: a
 // silent watch proves nothing.
@@ -33,10 +35,8 @@ type Version = NonNullable<ReturnType<typeof parseVersion>>;
 type RedWhen =
   /** Any newer release: the specification, the SDK and the conformance suite move rarely, and each matters. */
   | 'every'
-  /** A newer release whose notes name MCP: the busy clients ship most days, mostly about other things. */
-  | 'mcp-notes'
-  /** A newer major or minor release: VS Code's release notes are a link, and its patches fix its own bugs. */
-  | 'minor';
+  /** A newer release with a note line naming MCP and a word that can break a client (CLIENT_BREAKING). */
+  | 'client';
 
 /** One thing watched: a repository's releases, which of its tags are the line we follow, and why it matters. */
 export interface Source {
@@ -54,6 +54,10 @@ export interface Source {
 
 const SEMVER = String.raw`\d+\.\d+\.\d+`;
 
+const CLIENT_CHECK =
+  'A note line names MCP with a word that can break a client: check that nothing changes how it connects, lists ' +
+  'or calls (docs/api/README.md §9)';
+
 export const SOURCES: readonly Source[] = [
   {
     key: 'spec',
@@ -70,7 +74,9 @@ export const SOURCES: readonly Source[] = [
     key: 'typescript-sdk',
     label: 'the official TypeScript SDK',
     repo: 'modelcontextprotocol/typescript-sdk',
-    tag: new RegExp(`^v(?<version>${SEMVER})$`),
+    // Its umbrella tags (v2.4.0), and the production packages' own (@modelcontextprotocol/server@2.1.0): the
+    // monorepo releases a package alone, without an umbrella tag.
+    tag: new RegExp(`^(?:v|@modelcontextprotocol/(?:server|core)@)(?<version>${SEMVER})$`),
     prereleases: false,
     red: 'every',
     check:
@@ -92,8 +98,8 @@ export const SOURCES: readonly Source[] = [
     repo: 'anthropics/claude-code',
     tag: new RegExp(`^v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'mcp-notes',
-    check: 'Its notes name MCP: check that nothing changes how it connects, lists or calls (docs/api/README.md §9)',
+    red: 'client',
+    check: CLIENT_CHECK,
   },
   {
     key: 'codex',
@@ -101,8 +107,8 @@ export const SOURCES: readonly Source[] = [
     repo: 'openai/codex',
     tag: new RegExp(`^rust-v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'mcp-notes',
-    check: 'Its notes name MCP: check that nothing changes how it connects, lists or calls (docs/api/README.md §9)',
+    red: 'client',
+    check: CLIENT_CHECK,
   },
   {
     key: 'vscode',
@@ -110,10 +116,9 @@ export const SOURCES: readonly Source[] = [
     repo: 'microsoft/vscode',
     tag: new RegExp(`^(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'minor',
-    check:
-      "A new VS Code release: read its release notes' MCP section (code.visualstudio.com/updates) for changes to " +
-      'how Copilot connects (docs/api/README.md §9)',
+    // Its GitHub notes are a link: its MCP news is in code.visualstudio.com/updates, read when it is listed.
+    red: 'client',
+    check: `${CLIENT_CHECK}; its full notes are at code.visualstudio.com/updates`,
   },
   {
     key: 'gemini-cli',
@@ -121,8 +126,8 @@ export const SOURCES: readonly Source[] = [
     repo: 'google-gemini/gemini-cli',
     tag: new RegExp(`^v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'mcp-notes',
-    check: 'Its notes name MCP: check that nothing changes how it connects, lists or calls (docs/api/README.md §9)',
+    red: 'client',
+    check: CLIENT_CHECK,
   },
   {
     key: 'hermes-agent',
@@ -131,8 +136,8 @@ export const SOURCES: readonly Source[] = [
     // Its 0.x line: the calendar tags (v2026.9.x) are from before it, and would read as newer.
     tag: /^v(?<version>(?:0|[1-9]\d{0,2})\.\d+\.\d+)$/,
     prereleases: false,
-    red: 'mcp-notes',
-    check: "Its notes name MCP: check MCP-Guide.md §8's Hermes column still holds (legacy initialize, its auth)",
+    red: 'client',
+    check: `${CLIENT_CHECK}, and that MCP-Guide.md §8's Hermes column still holds (legacy initialize, its auth)`,
   },
   {
     key: 'openclaw',
@@ -140,8 +145,8 @@ export const SOURCES: readonly Source[] = [
     repo: 'openclaw/openclaw',
     tag: /^v(?<version>\d{4}\.\d+\.\d+)$/,
     prereleases: false,
-    red: 'mcp-notes',
-    check: "Its notes name MCP: check MCP-Guide.md §8's OpenClaw column still holds (its transport, legacy initialize)",
+    red: 'client',
+    check: `${CLIENT_CHECK}, and that MCP-Guide.md §8's OpenClaw column still holds (its transport, legacy initialize)`,
   },
 ];
 
@@ -220,21 +225,29 @@ const cell = (text: string): string =>
 /** How many of a release's lines naming MCP the summary shows, and how long each may be. */
 const MCP_LINES = 3;
 const MCP_LINE_CHARACTERS = 160;
-const MCP_WORD = /\bMCP\b/i;
+/** A note line about MCP: its name, written out, or the config key and Rust crate the clients name it by. */
+const MCP_WORD = /\bMCP\b|model context protocol|\bmcp_servers\b|\brmcp\b/i;
 
-/** The lines of a release's notes that name MCP, cut short, for the summary. */
+/**
+ * A word that, beside MCP, can mean a change in how a client reaches us (lead, S201): how it connects, signs in,
+ * names its version or session, or something taken away. `http` alone, not a link's `https`.
+ */
+const CLIENT_BREAKING =
+  /\b(?:transport|streamable|sse|http|oauth|auth\w*|header|token|protocol|version|initiali[sz]e|discover\w*|session|breaking|remove\w*|deprecat\w*)\b/i;
+
+/** Whether a note line names MCP with a word that can break a client. */
+export const breaksClients = (line: string): boolean => MCP_WORD.test(line) && CLIENT_BREAKING.test(line);
+
+/** The lines of a release's notes that name MCP, those that can break a client first, cut short, for the summary. */
 export function mcpLines(body: string | null | undefined): string[] {
-  return (body ?? '')
-    .split(/\r?\n/)
-    .filter((line) => MCP_WORD.test(line))
+  const lines = (body ?? '').split(/\r?\n/).filter((line) => MCP_WORD.test(line));
+  return [...lines.filter(breaksClients), ...lines.filter((line) => !breaksClients(line))]
     .slice(0, MCP_LINES)
     .map((line) => {
       const trimmed = line.replace(/^[\s*#-]+/, '').trim();
       return trimmed.length > MCP_LINE_CHARACTERS ? `${trimmed.slice(0, MCP_LINE_CHARACTERS)}…` : trimmed;
     });
 }
-
-const minorMoved = (a: Version, b: Version): boolean => a.numbers[0] !== b.numbers[0] || a.numbers[1] !== b.numbers[1];
 
 /** The positive control's floor: every real release is newer than it. */
 const NOTHING_SEEN = parseVersion('0.0.0');
@@ -274,11 +287,9 @@ export function judgeSource(
     .sort((a, b) => compareVersions(b.version, a.version));
   const newest = newer[0];
   if (newest === undefined) return { errors: [], summary: `${heading}\nNothing newer.\n` };
-  const reds = newer.filter(({ release, version }) => {
-    if (source.red === 'every') return true;
-    if (source.red === 'minor') return minorMoved(version, seenVersion);
-    return mcpLines(release.body).length > 0;
-  });
+  const reds = newer.filter(
+    ({ release }) => source.red === 'every' || (release.body ?? '').split(/\r?\n/).some(breaksClients),
+  );
   const rows = newer.map(({ release }) => {
     const lines = mcpLines(release.body).map(cell).join('<br>');
     return (
@@ -347,7 +358,8 @@ export function judgeSdkAdvisories(
   control: boolean,
 ): { errors: string[]; summary: string } {
   const pins = [...installed.entries()].flatMap(([name, versions]) => versions.map((version) => ({ name, version })));
-  if (pins.length < PRODUCTION_PACKAGES.length) {
+  // Each production package locked at some version: two of one can't stand in for none of another.
+  if (PRODUCTION_PACKAGES.some((name) => (installed.get(name) ?? []).length === 0)) {
     return {
       errors: [
         `The lockfile names no version of ${PRODUCTION_PACKAGES.join(' or ')}, so the SDK's advisories went ` +

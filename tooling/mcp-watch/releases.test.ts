@@ -63,8 +63,11 @@ describe('the MCP release watch (6E4)', () => {
     expect(on('spec', '2026-07-28')).toEqual([2026, 7, 28]);
     expect(versionOf(source('spec'), '2026-07-28-RC')?.pre).toEqual(['rc']);
     expect(on('typescript-sdk', 'v2.4.0')).toEqual([2, 4, 0]);
-    // Its per-package tags and its 1.x line are not the release line.
-    expect(on('typescript-sdk', '@modelcontextprotocol/server@2.5.0')).toBeUndefined();
+    // The production packages' own tags are on its line (a package ships alone); the others and its 1.x line not.
+    expect(on('typescript-sdk', '@modelcontextprotocol/server@2.5.0')).toEqual([2, 5, 0]);
+    expect(on('typescript-sdk', '@modelcontextprotocol/core@2.5.0')).toEqual([2, 5, 0]);
+    expect(on('typescript-sdk', '@modelcontextprotocol/node@2.5.0')).toBeUndefined();
+    expect(on('typescript-sdk', '@modelcontextprotocol/client@2.5.0')).toBeUndefined();
     expect(on('typescript-sdk', '1.32.2')).toBeUndefined();
     expect(on('codex', 'rust-v0.169.1')).toEqual([0, 169, 1]);
     expect(on('codex', 'rusty-v8-v152.2.0')).toBeUndefined();
@@ -89,7 +92,8 @@ describe('the MCP release watch (6E4)', () => {
         release('v2.5.0'),
         release('v2.4.1'),
         release('v2.4.0'),
-        release('@modelcontextprotocol/server@2.6.0'),
+        release('@modelcontextprotocol/server@2.4.0'),
+        release('@modelcontextprotocol/node@2.6.0'),
       ]);
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatch(
@@ -99,6 +103,15 @@ describe('the MCP release watch (6E4)', () => {
       expect(errors[0]).toContain(`move "typescript-sdk" in ${SEEN_FILE} to v2.5.0, with a note`);
       expect(summary).toContain('| red | [v2.5.0]');
       expect(summary).not.toContain('2.6.0');
+    });
+
+    it('goes red on a release of the server package alone, with no umbrella tag', () => {
+      const { errors } = judgeSource(source('typescript-sdk'), seenOf('typescript-sdk'), [
+        release('@modelcontextprotocol/server@2.4.1'),
+        release('v2.4.0'),
+      ]);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('up to @modelcontextprotocol/server@2.4.1');
     });
 
     it('goes red on a new dated revision of the specification, and on its candidate first', () => {
@@ -127,26 +140,47 @@ describe('the MCP release watch (6E4)', () => {
       );
     });
 
-    it('turns a busy client red only when a newer release names MCP, listing every newer one either way', () => {
+    it.each([
+      ['- claude mcp add-json now validates its JSON', false],
+      ['- Improved MCP server list display', false],
+      ['- MCP: OAuth now uses CIMD', true],
+      ['- Model Context Protocol transport now retries', true],
+      ['- `mcp_servers` entries accept a bearer token', true],
+      ['- rmcp: bumped protocol version to 2026-07-28', true],
+      ['- Removed the deprecated MCP SSE fallback', true],
+      ['- Docs: see https://example.com/mcp', false],
+      ['- New OAuth flow for plugins', false],
+    ])('a client note line %j is red: %s', (line, red) => {
+      const { errors } = judgeSource(source('claude-code'), seenOf('claude-code'), [
+        release('v2.1.400', { body: `Changes:\n${line}\n- Other` }),
+      ]);
+      expect(errors).toHaveLength(red ? 1 : 0);
+    });
+
+    it('turns a busy client red only when a newer release names MCP with a word that breaks clients, listing every newer one either way', () => {
       const quiet = judgeSource(source('claude-code'), seenOf('claude-code'), [
-        release('v2.1.327', { body: 'Faster startup.\nFixed a crash.' }),
+        release('v2.1.400', { body: 'Faster startup.\nFixed a crash.' }),
       ]);
       expect(quiet.errors).toEqual([]);
-      expect(quiet.summary).toContain('| report only | [v2.1.327]');
+      expect(quiet.summary).toContain('| report only | [v2.1.400]');
       const loud = judgeSource(source('claude-code'), seenOf('claude-code'), [
-        release('v2.1.328', { body: '- Fixed MCP OAuth refresh | on <b>Windows</b>\n- Other' }),
-        release('v2.1.327', { body: 'Nothing here.' }),
+        release('v2.1.401', { body: '- Fixed MCP OAuth refresh | on <b>Windows</b>\n- Other' }),
+        release('v2.1.400', { body: 'Nothing here.' }),
       ]);
       expect(loud.errors).toHaveLength(1);
       expect(loud.summary).toContain('Fixed MCP OAuth refresh \\| on &lt;b&gt;Windows&lt;/b&gt;');
-      expect(loud.summary).toContain('| report only | [v2.1.327]');
+      expect(loud.summary).toContain('| report only | [v2.1.400]');
     });
 
-    it('turns VS Code red on a new minor alone', () => {
-      const patch = judgeSource(source('vscode'), seenOf('vscode'), [release('1.146.1')]);
-      expect(patch.errors).toEqual([]);
-      expect(judgeSource(source('vscode'), seenOf('vscode'), [release('1.147.0')]).errors).toHaveLength(1);
-      expect(judgeSource(source('vscode'), seenOf('vscode'), [release('2.0.0')]).errors).toHaveLength(1);
+    it('lists VS Code, whose GitHub notes are a link, red only on a note line as any client', () => {
+      const link = { body: 'Read the full release notes at https://code.visualstudio.com/updates/v1_147' };
+      const quiet = judgeSource(source('vscode'), seenOf('vscode'), [release('1.147.0', link)]);
+      expect(quiet.errors).toEqual([]);
+      expect(quiet.summary).toContain('| report only | [1.147.0]');
+      const loud = judgeSource(source('vscode'), seenOf('vscode'), [
+        release('1.147.0', { body: 'MCP: HTTP auth changed' }),
+      ]);
+      expect(loud.errors[0]).toContain('code.visualstudio.com/updates');
     });
 
     it("goes red when none of a repository's releases is on the followed line: its tags may have changed", () => {
@@ -164,7 +198,7 @@ describe('the MCP release watch (6E4)', () => {
       const { errors, summary } = judgeSource(
         source('openclaw'),
         seenOf('openclaw'),
-        [release('v2026.11.5', { body: 'MCP' })],
+        [release('v2026.11.5', { body: 'MCP transport' })],
         true,
       );
       expect(errors[0]).toContain('than nothing seen (the positive control)');
@@ -285,6 +319,9 @@ describe('the MCP release watch (6E4)', () => {
         "gives an affected range this watch can't read",
       );
       expect(judgeSdkAdvisories([], new Map(), false).errors[0]).toContain('The lockfile names no version');
+      // Two versions of the core don't stand in for no server.
+      const coreOnly = new Map([['@modelcontextprotocol/core', ['2.4.0', '2.4.1']]]);
+      expect(judgeSdkAdvisories([], coreOnly, false).errors[0]).toContain('The lockfile names no version');
     });
   });
 
@@ -336,8 +373,8 @@ describe('the MCP release watch (6E4)', () => {
         "The TypeScript SDK's security advisories could not be read today (GitHub answered 403)",
       );
       const unseen = await watch({ read: readRepo, fetcher: github(), token: 't', unseen: true });
-      // Every source with a release on its line (the clients whose notes don't name MCP are listed, not red).
-      expect(unseen.errors.length).toBeGreaterThanOrEqual(4);
+      // The specification, the SDK and the conformance suite; the clients, whose fixture notes name no MCP, are listed.
+      expect(unseen.errors).toHaveLength(3);
       const advisory = [
         {
           ghsa_id: 'GHSA-x',
