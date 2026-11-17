@@ -135,7 +135,7 @@ export const TAGS: readonly {
 ];
 
 /** The tags whose prefixes hold an address. */
-export const tagsOf = (path: string): string[] =>
+const tagsOf = (path: string): string[] =>
   TAGS.filter(({ prefixes }) => prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))).map(
     ({ name }) => name,
   );
