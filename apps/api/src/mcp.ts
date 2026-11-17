@@ -185,6 +185,24 @@ function clientSaid(body: { readonly method: string; readonly params?: unknown }
   };
 }
 
+/** The protocol faults the SDK reports, in our own words: JSON-RPC's codes and MCP's. */
+const PROTOCOL_FAULTS: ReadonlyMap<number | undefined, string> = new Map([
+  [-32_700, 'a body that is not JSON'],
+  [-32_600, 'not a JSON-RPC request'],
+  [-32_601, 'a method this server does not have'],
+  [-32_602, 'params it cannot read, or a tool it does not have'],
+  [-32_603, 'a failure inside the protocol layer'],
+  [-32_020, 'MCP headers that disagree with the body'],
+  [-32_021, 'a capability the client did not declare'],
+  [-32_022, 'a protocol version this server does not speak'],
+]);
+
+/** A fault's JSON-RPC code, if it carries one: a number, never the text beside it. */
+const faultCodeOf = (error: unknown): number | undefined => {
+  const code: unknown = isRecord(error) ? error.code : undefined;
+  return typeof code === 'number' && Number.isSafeInteger(code) ? code : undefined;
+};
+
 /** A request refused before the SDK sees it, if it is: what no agent's MCP call carries. */
 function transportRefusal(request: FastifyRequest, publicOrigin: string): Refused | undefined {
   const { headers } = request;
@@ -310,8 +328,10 @@ export function registerMcp(
     legacy: 'stateless',
     responseMode: 'auto',
     maxRequestBodySize: bodyLimit,
+    // Its code and our words for it alone: the SDK's message repeats what the client sent (headers, names, versions).
     onerror: (error) => {
-      logger.warn('mcp.protocol_refused', { err: error });
+      const code = faultCodeOf(error);
+      logger.warn('mcp.protocol_refused', { code, reason: PROTOCOL_FAULTS.get(code) ?? 'another protocol fault' });
     },
   });
   app.addHook('onClose', () => handler.close());

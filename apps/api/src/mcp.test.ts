@@ -978,8 +978,13 @@ describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Gui
       const refused = capture.lines().find((entry) => entry.event === 'mcp.protocol_refused');
       expect(refused).toMatchObject({
         level: 'warn',
+        code: -32_022,
+        reason: 'a protocol version this server does not speak',
         says: expect.stringContaining('MCP protocol layer refused') as unknown,
       });
+      // Never what the client sent: not its version, not its header values.
+      expect(JSON.stringify(refused)).not.toContain('2099-01-01');
+      expect(refused).not.toHaveProperty('err');
       expect(raw).not.toHaveBeenCalled();
     } finally {
       raw.mockRestore();
