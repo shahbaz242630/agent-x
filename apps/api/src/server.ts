@@ -50,6 +50,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
 import { type ActivitySink, registerActivityLog } from './activity-recorder.ts';
 import { type ActivityPages, registerActivityPages } from './activity-log.ts';
+import { registerSecurityEvents, type SecurityEventPages } from './security-events.ts';
 import { type BackgroundExports, registerBackgroundExports } from './activity-background-exports.ts';
 import { type DownloadFiles, registerDownloadFiles } from './activity-download-files.ts';
 import { type ActivityLogExports, registerActivityLogExports } from './activity-log-exports.ts';
@@ -179,6 +180,8 @@ export interface ServerOptions {
   readonly auditLogExports?: AuditLogExports | undefined;
   /** Reading the organisation's activity log (activity-log.ts, L5); without it, no one reaches the route. */
   readonly activityPages?: ActivityPages | undefined;
+  /** Reading the organisation's security events (security-events.ts, 6E1b); without it, no one reaches the route. */
+  readonly securityEventPages?: SecurityEventPages | undefined;
   /** Downloading the organisation's activity log (activity-log-exports.ts, L5); without it, no one reaches the route. */
   readonly activityLogExports?: ActivityLogExports | undefined;
   /** The activity log's background downloads (activity-background-exports.ts, L5c); without them, the routes answer NOT_FOUND. */
@@ -418,13 +421,24 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
-  const personCounter = createPersonCounter(app, share(config.http.rateLimitPerUserPerMinute), trust, (ip, userId) => {
-    securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
-  });
-  // The security events keep people, not agents: the refused request's line names the agent (request-log.ts).
-  const agentCounter = createAgentCounter(app, share(config.http.rateLimitPerAgentPerMinute), trust, (ip) => {
-    securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip });
-  });
+  // A security event is tied to an organisation only as the API verified it (6E1b, CO7b): a person's once their
+  // membership there was found active for this request, an agent's by its accepted key. Its admins see it.
+  const personCounter = createPersonCounter(
+    app,
+    share(config.http.rateLimitPerUserPerMinute),
+    trust,
+    (ip, userId, orgId) => {
+      securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId, orgId });
+    },
+  );
+  const agentCounter = createAgentCounter(
+    app,
+    share(config.http.rateLimitPerAgentPerMinute),
+    trust,
+    (ip, { agentId, orgId }) => {
+      securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip, agentId, orgId });
+    },
+  );
   registerAccess(app, {
     findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
     findMembership: options.findMembership,
@@ -440,9 +454,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // Once it has, so an agent past its own limit doesn't use its organisation's (PL-63).
   app.addHook(
     'onRequest',
-    createOrganisationCounter(app, share(config.http.rateLimitPerOrganisationPerMinute), trust, (ip) => {
-      securityEvents.note({ kind: 'rate_limited', reason: 'per_organisation', ip });
-    }),
+    createOrganisationCounter(
+      app,
+      share(config.http.rateLimitPerOrganisationPerMinute),
+      trust,
+      (ip, { agentId, orgId }) => {
+        securityEvents.note({ kind: 'rate_limited', reason: 'per_organisation', ip, agentId, orgId });
+      },
+    ),
   );
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
@@ -475,6 +494,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerAuditLog(app, { log: options.auditLog });
   registerAuditLogExports(app, { exports: options.auditLogExports });
   registerActivityPages(app, { log: options.activityPages });
+  registerSecurityEvents(app, { pages: options.securityEventPages });
   registerActivityLogExports(app, { exports: options.activityLogExports });
   registerBackgroundExports(app, { downloads: options.backgroundExports });
   registerDownloadFiles(app, { files: options.downloadFiles });

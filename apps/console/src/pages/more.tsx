@@ -64,6 +64,7 @@ export function More() {
           <h2>{t('more.records')}</h2>
           <Link to="/more/audit-log">{t('logs.audit.title')}</Link>
           <Link to="/more/access-log">{t('logs.access.title')}</Link>
+          <Link to="/more/security-events">{t('securityEvents.title')}</Link>
         </nav>
       )}
       {/* The integrity hold is an admin's alone (the API's access): no one else is shown a way to it (6D4a). */}

@@ -122,14 +122,17 @@ export function createActivityPages({
   };
 }
 
-/** Where a page starts before, as `next` names it: a row's time and ID, `2026-10-19T13:39:12.123Z_<uuid>`. */
+/**
+ * Where a page starts before, as `next` names it: a row's time and ID, `2026-10-19T13:39:12.123Z_<uuid>`. The
+ * security events' page (security-events.ts) names its rows the same way.
+ */
 const CURSOR =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
-const cursorText = ({ at, id }: ActivityCursor): string => `${at.toISOString()}_${id}`;
+export const cursorText = ({ at, id }: ActivityCursor): string => `${at.toISOString()}_${id}`;
 
 /** A cursor's time and ID, or undefined for text that isn't one. */
-const cursorOf = (text: string): ActivityCursor | undefined => {
+export const cursorOf = (text: string): ActivityCursor | undefined => {
   const [, at, id] = CURSOR.exec(text) ?? [];
   if (at === undefined || id === undefined) return undefined;
   const time = new Date(at);

@@ -75,7 +75,7 @@ import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRequestVoids, REQUEST_VOIDS_EVERY_MS, requestVoidsDue } from './request-voids.ts';
-import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
+import { createRetentionSweep, scheduleRetentionSweep, SECURITY_ORG_EVENT_LINES } from './retention-sweep.ts';
 import { createRoundTripTiming, ROUND_TRIP_EVERY_MS, ROUND_TRIPS_A_RUN } from './round-trip-timing.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createWaitingRequests } from './waiting-requests.ts';
@@ -115,7 +115,7 @@ const SEAL_CHECK_SLOTS = 12;
  * decision 2), each listing every one at its first run and visiting again next run any it didn't finish
  * (org-passes.ts): the holdings check those with marks each run and every one hourly; the seal check a twelfth a run,
  * each once in 6 hours; the activity seal every one once a UTC day from when yesterday can be sealed; the idempotency
- * sweep every one once a UTC day.
+ * sweep every one once a UTC day, and the sweep of each one's own security events (6E1b) too.
  */
 export function integrityPasses({
   all,
@@ -139,6 +139,7 @@ export function integrityPasses({
     sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
     seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
     sweep: owedPasses(eachDay({ all, clock })),
+    securitySweep: owedPasses(eachDay({ all, clock })),
   };
 }
 
@@ -430,6 +431,20 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most)),
     // The security events past the retention the config names (B2-5a).
     sweepRows('security.event', (most) => securityEvents.sweep(database, most)),
+    // Each organisation's own security events past the same retention, inside its own transaction (6E1b, CO7b).
+    job(
+      'security_org_event_sweep',
+      createRetentionSweep({
+        ...passes.securitySweep,
+        sweep: (orgId, most) => securityEvents.sweepOrganisation(database, orgId, most),
+        logger,
+        deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+        ...SWEEP,
+        lines: SECURITY_ORG_EVENT_LINES,
+      }),
+      SWEEP_EVERY_MS,
+      LONG_MS,
+    ),
     // The partner's messages and the refused ones kept as evidence, past the same retention (E1b).
     sweepRows('provider_events.message', (most) => providerEvents.sweep(database, most)),
     // Notices sent or given up, past their retention (B5-1b).

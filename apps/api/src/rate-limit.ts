@@ -148,7 +148,8 @@ export function createPersonCounter(
   app: FastifyInstance,
   perMinute: number,
   trust: ProxyTrust,
-  limited: (ip: string | undefined, userId: string) => void,
+  /** `orgId`: the organisation their membership was found active in for this request (6E1b); null for none. */
+  limited: (ip: string | undefined, userId: string, orgId: string | null) => void,
 ): CountRequest {
   // Only called for a request with a person: the hook below looks first.
   const limiter = counterOf(app, perMinute, (request) => request.person?.userId ?? UNREADABLE_ADDRESS);
@@ -156,7 +157,7 @@ export function createPersonCounter(
     const person = request.person;
     if (person === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
-      limited(rawClientIp(request, trust), person.userId);
+      limited(rawClientIp(request, trust), person.userId, request.verifiedOrg);
       throw new RateLimited('rate limit exceeded');
     }
   };
@@ -176,7 +177,7 @@ export function createAgentCounter(
   app: FastifyInstance,
   perMinute: number,
   trust: ProxyTrust,
-  limited: (ip: string | undefined, agentId: string) => void,
+  limited: (ip: string | undefined, agent: { readonly agentId: string; readonly orgId: string }) => void,
 ): CountRequest {
   // Only called for a request with an agent: the hook below looks first.
   const limiter = counterOf(app, perMinute, (request) => request.agent?.agentId ?? UNREADABLE_ADDRESS);
@@ -184,7 +185,7 @@ export function createAgentCounter(
     const agent = request.agent;
     if (agent === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
-      limited(rawClientIp(request, trust), agent.agentId);
+      limited(rawClientIp(request, trust), agent);
       throw new RateLimited('rate limit exceeded');
     }
   };
@@ -203,14 +204,15 @@ export function createOrganisationCounter(
   app: FastifyInstance,
   perMinute: number,
   trust: ProxyTrust,
-  limited: (ip: string | undefined) => void,
+  limited: (ip: string | undefined, agent: { readonly agentId: string; readonly orgId: string }) => void,
 ): CountRequest {
   // Only called for a request with an agent: the hook below looks first.
   const limiter = counterOf(app, perMinute, (request) => request.agent?.orgId ?? UNREADABLE_ADDRESS);
   return async (request, reply) => {
-    if (request.agent === null) return;
+    const agent = request.agent;
+    if (agent === null) return;
     if (await overLimit(limiter, request, reply, 'when-refused')) {
-      limited(rawClientIp(request, trust));
+      limited(rawClientIp(request, trust), agent);
       throw new RateLimited('rate limit exceeded');
     }
   };

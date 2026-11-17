@@ -1,7 +1,12 @@
 import { LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createRetentionSweep, type RetentionSweepOptions, scheduleRetentionSweep } from './retention-sweep.ts';
+import {
+  createRetentionSweep,
+  type RetentionSweepOptions,
+  scheduleRetentionSweep,
+  SECURITY_ORG_EVENT_LINES,
+} from './retention-sweep.ts';
 
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
@@ -61,6 +66,43 @@ const done = (organizations: number, keys: number, failed = 0) => ({
   organizations,
   keys,
   failed,
+});
+
+describe("each organisation's own security events' sweep: the same sweep under lines of its own (6E1b)", () => {
+  it('says what it swept, failed or finished as security events, counting events', async () => {
+    const { sweep, capture } = sweeping(
+      [ORG, OTHER_ORG],
+      { [ORG]: [3], [OTHER_ORG]: [new Error('gone')] },
+      {
+        lines: SECURITY_ORG_EVENT_LINES,
+      },
+    );
+    await sweep.run();
+
+    const own = capture.lines().filter((line) => String(line.event).startsWith('security.org_events'));
+    expect(own).toMatchObject([
+      { level: 'info', event: 'security.org_events_swept', orgId: ORG, events: 3 },
+      { level: 'warn', event: 'security.org_events_sweep_failed', orgId: OTHER_ORG },
+      { level: 'info', event: 'security.org_events_sweep_done', organizations: 2, events: 3, failed: 1 },
+    ]);
+    expect(capture.lines().filter((line) => String(line.event).startsWith('idempotency.'))).toEqual([]);
+  });
+
+  it('says a crash as its own', async () => {
+    // A list that isn't one: the run crashes past its own checks.
+    const { sweep, capture } = sweeping(
+      () => Promise.resolve(null as unknown as readonly string[]),
+      {},
+      {
+        lines: SECURITY_ORG_EVENT_LINES,
+      },
+    );
+    await sweep.run();
+
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'error', event: 'security.org_events_sweep_crashed' }),
+    );
+  });
 });
 
 describe("the idempotency keys' retention sweep (B1e-3)", () => {

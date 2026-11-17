@@ -2,14 +2,22 @@
 // sign-ins and rate-limit hits with the client's IP address, in a global
 // table (0012), kept in-country for the retention period the config names.
 // B2-5b gathers them from the API; B2-5a holds the table, the writes and the
-// retention sweep.
+// retention sweep. 6E1b (CO7b) keeps those tied to an organisation in its own
+// walled table (0091), and reads them for its admins.
 export {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
   MOST_EVENTS_A_BATCH,
+  ORG_EVENT_KINDS,
   SECURITY_EVENT_KINDS,
   type SecurityEvent,
   type SecurityEventKind,
   type SecurityEvents,
 } from './infrastructure/security-events.ts';
+export {
+  type OrgEventCursor,
+  type OrgEventsToRead,
+  orgSecurityEventsPage,
+  type OrgSecurityEvent,
+} from './infrastructure/org-events.ts';
 export type { SecurityEventsTables } from './infrastructure/tables.ts';

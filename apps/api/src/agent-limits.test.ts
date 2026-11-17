@@ -140,7 +140,7 @@ describe("each organisation's own rate limit, beside its agents' (PL-63)", () =>
     url: '/test/supplier',
   });
 
-  it('refuses an organisation past its limit, whichever of its agents asks, and notes it', async () => {
+  it('refuses an organisation past its limit, whichever of its agents asks, and notes it as its own (CO7b)', async () => {
     const { app, noted } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 3 });
     for (const letter of ['a', 'a', 'd']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
     const refused = await app.inject(ask('d', '203.0.113.9'));
@@ -148,14 +148,22 @@ describe("each organisation's own rate limit, beside its agents' (PL-63)", () =>
     expect(refused.json()).toEqual(errorBody('RATE_LIMITED', refused.headers['x-correlation-id'] as string));
     expect(refused.headers['x-ratelimit-limit']).toBe('3');
     expect(refused.headers['retry-after']).toBeDefined();
-    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_organisation', ip: '203.0.113.9' }]);
+    expect(noted).toEqual([
+      { kind: 'rate_limited', reason: 'per_organisation', ip: '203.0.113.9', agentId: OTHER_AGENT, orgId: ORG },
+    ]);
   });
 
-  it('never refuses another organisation', async () => {
-    const { app } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 2 });
+  it('never refuses another organisation, nor notes its refusal as the other’s', async () => {
+    const { app, noted } = await server({ perAddress: 1000, perAgent: 1000, perOrganisation: 2 });
     for (const letter of ['a', 'a']) expect((await app.inject(ask(letter))).statusCode).toBe(200);
     expect((await app.inject(ask('a'))).statusCode).toBe(429);
     expect((await app.inject(ask('k'))).statusCode).toBe(200);
+    expect((await app.inject(ask('k'))).statusCode).toBe(200);
+    expect((await app.inject(ask('k'))).statusCode).toBe(429);
+    expect(noted.map(({ orgId, agentId }) => ({ orgId, agentId }))).toEqual([
+      { orgId: ORG, agentId: AGENT_ID },
+      { orgId: OTHER_ORG, agentId: '0199a0f0-0000-7000-8000-0000000000a3' },
+    ]);
   });
 
   it('never counts or refuses anyone but an agent', async () => {
@@ -237,14 +245,16 @@ describe("SEC-AG-06 C2-2 each agent's own rate limit, beside its address's", () 
     expect(first.headers).not.toHaveProperty('retry-after');
   });
 
-  it('notes each refusal as a security event with the address, and names the agent on its line', async () => {
+  it('notes each refusal as a security event with the address, the agent and its organisation, and names the agent on its line', async () => {
     const { app, noted, lines } = await server();
     for (let i = 0; i < 10; i += 1) await app.inject(asAgent('a'));
     expect(noted).toEqual([]);
 
     await app.inject(asAgent('a', '203.0.113.9'));
 
-    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_agent', ip: '203.0.113.9' }]);
+    expect(noted).toEqual([
+      { kind: 'rate_limited', reason: 'per_agent', ip: '203.0.113.9', agentId: AGENT_ID, orgId: ORG },
+    ]);
     expect(lines().filter((line) => line.event === REQUEST_RATE_LIMITED)).toEqual([
       expect.objectContaining({ status: 429, agentId: AGENT_ID, agentKeyId: '0199a0f0-0000-7000-8000-0000000000b1' }),
     ]);

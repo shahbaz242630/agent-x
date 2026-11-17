@@ -67,6 +67,12 @@ export const EXCEPTIONS: readonly DangerException[] = [
       'tenant_isolation made with audit.operator_signatures and operator_signing_starts, the tables it walls, in the migration that builds them (PL-57)',
   },
   {
+    migration: '0091',
+    rule: 'guarded-policy',
+    reason:
+      "tenant_isolation made with security.org_events, the table it walls, in the migration that builds it (6E1b, CO7b): an organisation's own security events",
+  },
+  {
     migration: '0054',
     rule: 'row-security-off',
     reason:

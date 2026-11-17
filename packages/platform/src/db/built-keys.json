@@ -75,6 +75,7 @@
   {"table":"provider_events.inbox","name":"inbox_pkey","definition":"PRIMARY KEY (id)"},
   {"table":"provider_events.inbox","name":"one_a_message","definition":"UNIQUE (partner, dedupe_key)"},
   {"table":"security.events","name":"events_pkey","definition":"PRIMARY KEY (id)"},
+  {"table":"security.org_events","name":"org_events_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"security.partner_event_evidence","name":"partner_event_evidence_pkey","definition":"PRIMARY KEY (id)"},
   {"table":"spend_requests.order_claims","name":"one_claim_a_request","definition":"UNIQUE (org_id, request_id)"},
   {"table":"spend_requests.order_claims","name":"order_claims_pkey","definition":"PRIMARY KEY (org_id, id)"},

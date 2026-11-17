@@ -9,6 +9,11 @@
 // in the background, a month a file (decision 31), and read here a part at a
 // time. The shapes are the contract's (audit-log.ts, activity-log.ts and their
 // exports in the API); the console only shows them.
+//
+// The organisation's security events (GET /v1/security-events; 6E1b, CO7b)
+// are read the same way, a page at a time, filtered by date and kind: its
+// people's and agents' rate-limit hits and failed step-ups, nothing to
+// download.
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { api, ApiError, isIntegrityFailed, isRefusal } from './api.ts';
@@ -62,7 +67,21 @@ export interface ActivityRow {
   };
 }
 
-/** Which log: the audit log's filters are its actions, actor and object; the access log's its actor alone. */
+/** One count of the organisation's security events (SecurityEventRow): its address a clue, never proof. */
+export interface SecurityEventRow {
+  readonly id: string;
+  readonly kind: 'rate_limited' | 'sign_in_failed';
+  readonly reason: string;
+  readonly ip: string | null;
+  readonly actor: { readonly type: 'user' | 'agent'; readonly id: string; readonly name: string | null } | null;
+  readonly windowStart: string;
+  readonly count: number;
+}
+
+/**
+ * Which log: the audit log's filters are its actions, actor and object; the access log's its actor alone; the
+ * security events' their kind.
+ */
 const LOGS = {
   audit: {
     path: '/v1/audit-log',
@@ -71,6 +90,7 @@ const LOGS = {
     filters: ['actions', 'actorType', 'actorId', 'subjectType', 'subjectId'],
   },
   access: { path: '/v1/access-log', page: '/more/access-log', key: 'rows', filters: ['actorType', 'actorId'] },
+  security: { path: '/v1/security-events', page: '/more/security-events', key: 'rows', filters: ['kind'] },
 } as const;
 export type Log = keyof typeof LOGS;
 
@@ -176,6 +196,9 @@ export const useAuditLog = (filters: Filters, organization: string) => useLog<Lo
 
 export const useAccessLog = (filters: Filters, organization: string) =>
   useLog<ActivityRow>('access', filters, organization);
+
+export const useSecurityEvents = (filters: Filters, organization: string) =>
+  useLog<SecurityEventRow>('security', filters, organization);
 
 export const FORMATS = ['csv', 'ndjson'] as const;
 export type Format = (typeof FORMATS)[number];

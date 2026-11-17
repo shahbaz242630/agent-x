@@ -37,3 +37,9 @@ export {
   type LogReadTables,
   ndjsonLine,
 } from './infrastructure/log-shown.ts';
+export {
+  heldSecurityEventsPage,
+  securityEventActorsOf,
+  type SecurityEventsReadTables,
+  securityEventShown,
+} from './infrastructure/security-events-shown.ts';

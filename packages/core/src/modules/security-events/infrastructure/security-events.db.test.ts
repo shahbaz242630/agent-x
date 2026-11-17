@@ -1,7 +1,7 @@
 // B2-5a: security events (0012) on the real migrated schema, as the app role:
 // written a batch at a time, refused whole when anything in the batch is
 // malformed, and swept once past the retention period, oldest first.
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -12,6 +12,7 @@ import {
   MOST_EVENTS_A_BATCH,
   type SecurityEvent,
 } from './security-events.ts';
+import { type OrgEventsToRead, orgSecurityEventsPage } from './org-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -238,5 +239,174 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     await expect(app.updateTable('security.events').set({ count: 1000 }).execute()).rejects.toMatchObject({
       code: '42501',
     });
+  });
+});
+
+describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${server.version})`, () => {
+  const ORG_A = '0199a0f0-0000-7000-8000-00000000abcd';
+  const ORG_B = '0199a0f0-0000-7000-8000-00000000abce';
+  const PERSON = '0199a0f0-0000-7000-8000-0000000b25a1';
+  const AGENT = '0199a0f0-0000-7000-8000-00000000a9e1';
+  const RANGE = { from: new Date(START.getTime() - DAY_MS), to: new Date(START.getTime() + DAY_MS), limit: 100 };
+  const limited = (reason: string, change: Partial<SecurityEvent> = {}) =>
+    event({ kind: 'rate_limited', reason, ...change });
+
+  /** One organisation's page, read inside its own transaction as the admins' route reads it. */
+  const pageOf = (orgId: string, asked: Partial<OrgEventsToRead> = {}) =>
+    withTenant(app, orgId, (tx) => orgSecurityEventsPage(tx, orgId, { ...RANGE, ...asked }));
+
+  /** Each test starts with no organisation's events: each organisation's sweep far in the future takes them all. */
+  async function emptyOrgs(): Promise<void> {
+    await empty();
+    for (const orgId of [ORG_A, ORG_B]) {
+      await at(START.getTime() + 10_000 * DAY_MS).sweepOrganisation(app, orgId, 1_000_000);
+    }
+  }
+
+  it('writes each kind an organisation can have to its own table, never the global one', async () => {
+    await emptyOrgs();
+    await at(START.getTime()).record(app, [
+      limited('per_user', { userId: PERSON, orgId: ORG_A.toUpperCase() }),
+      limited('per_agent', { agentId: AGENT, orgId: ORG_A }),
+      limited('per_organisation', { agentId: AGENT, orgId: ORG_A }),
+      event({ reason: 'step_up_challenge_missing', userId: PERSON, orgId: ORG_A }),
+    ]);
+
+    expect(await all()).toEqual([]);
+    const { rows } = await pageOf(ORG_A);
+    expect(
+      rows
+        .map(({ kind, reason, ip, actor, count }) => ({ kind, reason, ip, actor, count }))
+        .toSorted((a, b) => (a.reason < b.reason ? -1 : 1)),
+    ).toEqual([
+      { kind: 'rate_limited', reason: 'per_agent', ip: '203.0.113.7', actor: { type: 'agent', id: AGENT }, count: 1 },
+      {
+        kind: 'rate_limited',
+        reason: 'per_organisation',
+        ip: '203.0.113.7',
+        actor: { type: 'agent', id: AGENT },
+        count: 1,
+      },
+      { kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.7', actor: { type: 'user', id: PERSON }, count: 1 },
+      {
+        kind: 'sign_in_failed',
+        reason: 'step_up_challenge_missing',
+        ip: '203.0.113.7',
+        actor: { type: 'user', id: PERSON },
+        count: 1,
+      },
+    ]);
+  });
+
+  it("shows organisation A its own events alone: never B's, never those tied to no one", async () => {
+    await emptyOrgs();
+    await at(START.getTime()).record(app, [limited('per_user', { userId: PERSON, orgId: ORG_A })]);
+    await at(START.getTime()).record(app, [limited('per_agent', { agentId: AGENT, orgId: ORG_B })]);
+    await at(START.getTime()).record(app, [limited('per_address')]);
+
+    expect((await pageOf(ORG_A)).rows.map(({ reason }) => reason)).toEqual(['per_user']);
+    expect((await pageOf(ORG_B)).rows.map(({ reason }) => reason)).toEqual(['per_agent']);
+    // B's own ID asked inside A's transaction: the wall is the database's, not the query's.
+    expect((await withTenant(app, ORG_A, (tx) => orgSecurityEventsPage(tx, ORG_B, RANGE))).rows).toEqual([]);
+  });
+
+  it('reaches no row with no organisation set, and refuses a row written for another or a change', async () => {
+    await emptyOrgs();
+    await at(START.getTime()).record(app, [limited('per_user', { userId: PERSON, orgId: ORG_A })]);
+
+    expect(await app.selectFrom('security.org_events').selectAll().execute()).toEqual([]);
+    await expect(
+      withTenant(app, ORG_A, (tx) =>
+        tx
+          .insertInto('security.org_events')
+          .values({
+            org_id: ORG_B,
+            id: ids.next(),
+            kind: 'rate_limited',
+            reason: 'per_user',
+            ip: null,
+            user_id: null,
+            agent_id: null,
+            window_start: START,
+            count: 1,
+            created_at: START,
+          })
+          .execute(),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      withTenant(app, ORG_A, (tx) => tx.updateTable('security.org_events').set({ count: 1000 }).execute()),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('refuses a batch of two organisations, an agent with none, a person beside an agent, or a partner’s message', async () => {
+    await emptyOrgs();
+    const writer = at(START.getTime());
+    for (const batch of [
+      [limited('per_user', { orgId: ORG_A }), limited('per_user', { orgId: ORG_B })],
+      [limited('per_user', { orgId: ORG_A }), limited('per_address')],
+      [limited('per_agent', { agentId: AGENT })],
+      [limited('per_agent', { userId: PERSON, agentId: AGENT, orgId: ORG_A })],
+      [event({ kind: 'partner_event_refused', reason: 'signature', orgId: ORG_A })],
+      [limited('per_user', { orgId: 'acme' })],
+      [limited('per_agent', { agentId: 'agent-1', orgId: ORG_A })],
+    ]) {
+      await expect(writer.record(app, batch)).rejects.toThrow(RangeError);
+    }
+    expect((await pageOf(ORG_A)).rows).toEqual([]);
+    expect(await all()).toEqual([]);
+  });
+
+  it('pages newest first by minute, of one kind when named, from where the last page ended', async () => {
+    await emptyOrgs();
+    const minute = (n: number) => new Date(START.getTime() - n * 60_000);
+    await at(START.getTime()).record(app, [
+      limited('per_user', { userId: PERSON, orgId: ORG_A, windowStart: minute(1) }),
+      limited('per_agent', { agentId: AGENT, orgId: ORG_A, windowStart: minute(2) }),
+      event({ reason: 'step_up_code_rejected', userId: PERSON, orgId: ORG_A, windowStart: minute(3) }),
+    ]);
+
+    const first = await pageOf(ORG_A, { limit: 2 });
+    expect(first.rows.map(({ reason }) => reason)).toEqual(['per_user', 'per_agent']);
+    expect(first.next).toEqual({ at: minute(2), id: first.rows[1]?.id });
+    const second = await pageOf(ORG_A, { limit: 2, before: first.next ?? undefined });
+    expect(second.rows.map(({ reason }) => reason)).toEqual(['step_up_code_rejected']);
+    expect(second.next).toBeNull();
+    expect((await pageOf(ORG_A, { kind: 'sign_in_failed' })).rows.map(({ reason }) => reason)).toEqual([
+      'step_up_code_rejected',
+    ]);
+    expect((await pageOf(ORG_A, { from: minute(2), to: minute(1) })).rows.map(({ reason }) => reason)).toEqual([
+      'per_agent',
+    ]);
+  });
+
+  it(`keeps an organisation's own events at least ${String(LEAST_RETENTION_DAYS)} whole days`, async () => {
+    await emptyOrgs();
+    await at(START.getTime()).record(app, [limited('per_user', { userId: PERSON, orgId: ORG_A })]);
+    const wide = { from: new Date(0), to: new Date(START.getTime() + 20_000 * DAY_MS) };
+
+    // No sweep can be made to keep them less: the floor is refused before any organisation's sweep.
+    for (const days of [LEAST_RETENTION_DAYS - 1, 0, -1, 30.5, Number.NaN]) {
+      expect(() => at(START.getTime(), days)).toThrow(RangeError);
+    }
+    // At the floor, a millisecond short of it keeps them; at it, they go.
+    const floor = (ms: number) => at(ms, LEAST_RETENTION_DAYS).sweepOrganisation(app, ORG_A, 10);
+    expect(await floor(START.getTime() + LEAST_RETENTION_DAYS * DAY_MS - 1)).toBe(0);
+    expect((await pageOf(ORG_A, wide)).rows).toHaveLength(1);
+    expect(await floor(START.getTime() + LEAST_RETENTION_DAYS * DAY_MS)).toBe(1);
+  });
+
+  it("sweeps one organisation's own events past their retention, and none of another's", async () => {
+    await emptyOrgs();
+    await at(START.getTime()).record(app, [limited('per_user', { userId: PERSON, orgId: ORG_A })]);
+    await at(START.getTime()).record(app, [limited('per_user', { userId: PERSON, orgId: ORG_B })]);
+    const wide = { from: new Date(0), to: new Date(START.getTime() + 20_000 * DAY_MS) };
+
+    // A millisecond short of its retention: kept.
+    expect(await at(START.getTime() + RETENTION * DAY_MS - 1).sweepOrganisation(app, ORG_A, 10)).toBe(0);
+    expect(await at(START.getTime() + RETENTION * DAY_MS).sweepOrganisation(app, ORG_A, 10)).toBe(1);
+    expect((await pageOf(ORG_A, wide)).rows).toEqual([]);
+    expect((await pageOf(ORG_B, wide)).rows).toHaveLength(1);
+    await expect(at(START.getTime()).sweepOrganisation(app, ORG_A, 0)).rejects.toThrow(RangeError);
   });
 });

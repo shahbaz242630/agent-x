@@ -199,6 +199,103 @@ describe('SEC-AV-09 a flood from many addresses cannot fill the memory', () => {
   });
 });
 
+describe("CO7b an organisation's events are its own, batch by batch", () => {
+  const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
+  const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000abce';
+  const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
+  const limited = (reason: string, change: Partial<SecurityEventNote> = {}): SecurityEventNote => ({
+    kind: 'rate_limited',
+    reason,
+    ip: '203.0.113.9',
+    ...change,
+  });
+
+  it('counts each organisation and agent apart, and writes one organisation’s, or none’s, a batch', async () => {
+    const { recorder, written } = setUp();
+    recorder.note(limited('per_user', { userId: USER_ID, orgId: ORG.toUpperCase() }));
+    recorder.note(limited('per_user', { userId: USER_ID, orgId: ORG }));
+    recorder.note(limited('per_user', { userId: USER_ID, orgId: null }));
+    recorder.note(limited('per_agent', { agentId: AGENT_ID, orgId: ORG }));
+    recorder.note(limited('per_organisation', { agentId: AGENT_ID, orgId: OTHER_ORG }));
+    recorder.note(failedSignIn('203.0.113.9'));
+
+    await recorder.flush(Number.POSITIVE_INFINITY);
+
+    expect(
+      written.map((batch) =>
+        batch.map(({ reason, userId, orgId, agentId, count }) => [reason, userId, orgId, agentId, count]),
+      ),
+    ).toEqual([
+      [
+        ['per_user', USER_ID, ORG, undefined, 2],
+        ['per_agent', undefined, ORG, AGENT_ID, 1],
+      ],
+      [
+        ['per_user', USER_ID, undefined, undefined, 1],
+        ['code_rejected', undefined, undefined, undefined, 1],
+      ],
+      [['per_organisation', undefined, OTHER_ORG, AGENT_ID, 1]],
+    ]);
+  });
+
+  it('counts two agents of one organisation apart, from the same address in the same minute', async () => {
+    const { recorder, written } = setUp();
+    const OTHER_AGENT = '0199a0f0-0000-7000-8000-0000000000a2';
+    recorder.note(limited('per_organisation', { agentId: AGENT_ID, orgId: ORG }));
+    recorder.note(limited('per_organisation', { agentId: OTHER_AGENT, orgId: ORG }));
+    recorder.note(limited('per_organisation', { agentId: AGENT_ID, orgId: ORG }));
+
+    await recorder.flush(Number.POSITIVE_INFINITY);
+
+    expect(written.map((batch) => batch.map(({ agentId, count }) => [agentId, count]))).toEqual([
+      [
+        [AGENT_ID, 2],
+        [OTHER_AGENT, 1],
+      ],
+    ]);
+  });
+
+  it('splits one organisation past MOST_EVENTS_A_BATCH into whole batches of its own', async () => {
+    const { recorder, written } = setUp();
+    for (let i = 0; i < MOST_EVENTS_A_BATCH + 1; i += 1)
+      recorder.note(limited('per_agent', { ip: `10.0.${String(i >> 8)}.${String(i & 255)}`, orgId: ORG }));
+    recorder.note(failedSignIn('203.0.113.9'));
+
+    await recorder.flush(Number.POSITIVE_INFINITY);
+
+    expect(written.map((batch) => [batch.length, new Set(batch.map(({ orgId }) => orgId)).size])).toEqual([
+      [MOST_EVENTS_A_BATCH, 1],
+      [1, 1],
+      [1, 1],
+    ]);
+  });
+
+  it('puts back only the organisation’s batch that failed and those after it, never one written', async () => {
+    const { recorder, written, at } = setUp({ answers: [undefined, new Error('the database is away')] });
+    recorder.note(limited('per_user', { userId: USER_ID, orgId: ORG }));
+    recorder.note(limited('per_organisation', { agentId: AGENT_ID, orgId: OTHER_ORG }));
+    at(TEN + MINUTE);
+    await recorder.run();
+    expect(written).toHaveLength(2);
+
+    await recorder.run();
+    expect(written.slice(2)).toMatchObject([[{ orgId: OTHER_ORG, count: 1 }]]);
+  });
+
+  it('past the most counts, ties a new count to no organisation, as to no address', async () => {
+    const { recorder, written } = setUp({ mostCounts: 1 });
+    recorder.note(failedSignIn('203.0.113.1'));
+    recorder.note(limited('per_agent', { agentId: AGENT_ID, orgId: ORG }));
+
+    await recorder.flush(Number.POSITIVE_INFINITY);
+
+    expect(written.flat().map(({ ip, orgId, agentId }) => [ip, orgId, agentId])).toEqual([
+      ['203.0.113.1', undefined, undefined],
+      [undefined, undefined, undefined],
+    ]);
+  });
+});
+
 describe('SEC-AV-07 a failed write loses no count, and a malformed one is never retried', () => {
   it('puts the counts back when the database is away, and writes them at the next run', async () => {
     const { recorder, written, at, events } = setUp({ answers: [new Error('the database is away')] });
@@ -360,6 +457,50 @@ describe('MO4 a crash says the counts it loses', () => {
 
     expect(capture.lines().filter((line) => line.event === 'security.events_unwritten')).toMatchObject([
       { events: 0, count: 0, inFlightEvents: 1, inFlightCount: 2 },
+    ]);
+    release();
+    await writing;
+  });
+
+  it('counts as in flight only the batch under way at the crash and those after it, never one already written', async () => {
+    let release: () => void = () => undefined;
+    let writes = 0;
+    const capture = new LogCapture();
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: capture,
+    });
+    const recorder = createSecurityRecorder({
+      // The first organisation's batch is written; the second's hangs until the crash.
+      write: () => {
+        writes += 1;
+        if (writes === 1) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      now: () => START,
+      logger,
+    });
+    const limited = (orgId: string, ip: string): SecurityEventNote => ({
+      kind: 'rate_limited',
+      reason: 'per_user',
+      ip,
+      userId: USER_ID,
+      orgId,
+    });
+    recorder.note(limited('0199a0f0-0000-7000-8000-00000000abcd', '203.0.113.1'));
+    recorder.note(limited('0199a0f0-0000-7000-8000-00000000abcd', '203.0.113.2'));
+    recorder.note(limited('0199a0f0-0000-7000-8000-00000000abce', '203.0.113.3'));
+    const writing = recorder.flush(Number.POSITIVE_INFINITY);
+    for (let i = 0; i < 10 && writes < 2; i += 1) await Promise.resolve();
+    expect(writes).toBe(2);
+
+    recorder.drop();
+
+    expect(capture.lines().filter((line) => line.event === 'security.events_unwritten')).toMatchObject([
+      { events: 0, count: 0, inFlightEvents: 1, inFlightCount: 1 },
     ]);
     release();
     await writing;

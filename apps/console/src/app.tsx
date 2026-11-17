@@ -19,6 +19,7 @@ import { RegisterAgent } from './pages/agent-register.tsx';
 import { AccessLog } from './pages/access-log.tsx';
 import { Approvals } from './pages/approvals.tsx';
 import { AuditLog } from './pages/audit-log.tsx';
+import { SecurityEvents } from './pages/security-events.tsx';
 import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
 import { Contacts } from './pages/contacts.tsx';
@@ -224,6 +225,7 @@ const routes = root.addChildren([
   createRoute({ getParentRoute: () => root, path: '/more/integrity-hold', component: HoldPage }),
   createRoute({ getParentRoute: () => root, path: '/more/audit-log', component: AuditLog }),
   createRoute({ getParentRoute: () => root, path: '/more/access-log', component: AccessLog }),
+  createRoute({ getParentRoute: () => root, path: '/more/security-events', component: SecurityEvents }),
   createRoute({ getParentRoute: () => root, path: '/more/members', component: Members }),
   createRoute({ getParentRoute: () => root, path: '/more/members/$id', component: MemberAt }),
   createRoute({ getParentRoute: () => root, path: '/more/contacts', component: Contacts }),

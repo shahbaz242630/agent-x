@@ -53,6 +53,7 @@
   "platform_controls.operator_signing",
   "provider_events.inbox",
   "security.events",
+  "security.org_events",
   "security.partner_event_evidence",
   "spend_requests.order_claims",
   "spend_requests.requests",

@@ -13,10 +13,15 @@
 //   B2-5a; the API strips a port or brackets first, as the rate limit does).
 // - `sweep` deletes up to a batch of rows past the retention period, oldest
 //   first (hourly, from the API).
+// - An event tied to one organisation (6E1b, CO7b: a verified member's or an
+//   agent's) is written to that organisation's own table (0091) inside its
+//   transaction, never to the global one: a batch is one organisation's
+//   events or none's, so each write is whole. `sweepOrganisation` deletes one
+//   organisation's past their retention, inside its transaction too.
 //
 // Each runs in a transaction of its own whose statements give up after 10
 // seconds, a wait for a lock included.
-import { limitStatements } from '@agentx/platform/db';
+import { limitStatements, withTenant } from '@agentx/platform/db';
 import { type Kysely } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
@@ -24,6 +29,9 @@ import type { SecurityEventsTables } from './tables.ts';
 
 export const SECURITY_EVENT_KINDS = ['sign_in_failed', 'rate_limited', 'partner_event_refused'] as const;
 export type SecurityEventKind = (typeof SECURITY_EVENT_KINDS)[number];
+
+/** The kinds an organisation's own events can be (0091): a partner's refused message is never one. */
+export const ORG_EVENT_KINDS = ['sign_in_failed', 'rate_limited'] as const satisfies readonly SecurityEventKind[];
 
 /** The least time a security event is kept: AGENTX_SECURITY_EVENT_RETENTION_DAYS's minimum. */
 export const LEAST_RETENTION_DAYS = 30;
@@ -39,6 +47,10 @@ export interface SecurityEvent {
   readonly ip: string | undefined;
   /** The person, when the event is about a signed-in one. */
   readonly userId: string | undefined;
+  /** The organisation it is tied to, when the API verified one (6E1b); none for an event no organisation may see. */
+  readonly orgId?: string | undefined;
+  /** The agent refused, with its organisation; never beside a person. */
+  readonly agentId?: string | undefined;
   /** When the window these events were counted in began. */
   readonly windowStart: Date;
   /** How many there were: a whole number from 1. */
@@ -50,15 +62,30 @@ export interface SecurityEvents {
   record(db: Kysely<SecurityEventsTables>, events: readonly SecurityEvent[]): Promise<void>;
   /** Deletes up to `most` events past the retention period, oldest first, and says how many. */
   sweep(db: Kysely<SecurityEventsTables>, most: number): Promise<number>;
+  /** Deletes up to `most` of one organisation's own events past the retention period, oldest first, and says how many. */
+  sweepOrganisation(db: Kysely<SecurityEventsTables>, orgId: string, most: number): Promise<number>;
 }
 
 const REASON = /^[a-z][a-z_]{0,63}$/;
+
+/** Why who an event names can't be written, if it can't: its person, organisation and agent. */
+function ownerProblem(event: SecurityEvent): string | undefined {
+  if (event.userId !== undefined && !UUID.test(event.userId)) return 'its person is not a UUID';
+  if (event.orgId !== undefined && !UUID.test(event.orgId)) return 'its organisation is not a UUID';
+  if (event.agentId !== undefined && !UUID.test(event.agentId)) return 'its agent is not a UUID';
+  if (event.agentId !== undefined && event.orgId === undefined) return 'its agent has no organisation';
+  if (event.agentId !== undefined && event.userId !== undefined) return 'it names both a person and an agent';
+  if (event.orgId !== undefined && !(ORG_EVENT_KINDS as readonly string[]).includes(event.kind))
+    return "its kind is never an organisation's";
+  return undefined;
+}
 
 /** Why an event can't be written, if it can't. */
 function problemWith(event: SecurityEvent, now: Date): string | undefined {
   if (!SECURITY_EVENT_KINDS.includes(event.kind)) return 'its kind is not one we record';
   if (typeof event.reason !== 'string' || !REASON.test(event.reason)) return 'its reason is not a short lowercase name';
-  if (event.userId !== undefined && !UUID.test(event.userId)) return 'its person is not a UUID';
+  const owner = ownerProblem(event);
+  if (owner !== undefined) return owner;
   if (!(event.windowStart instanceof Date) || Number.isNaN(event.windowStart.getTime()))
     return 'its window has no start';
   if (event.windowStart > now) return 'its window starts in the future';
@@ -98,6 +125,37 @@ export function createSecurityEvents({
         const problem = problemWith(event, now);
         if (problem !== undefined) throw new RangeError(`a security event can't be written: ${problem}`);
       }
+      const orgId = events[0]?.orgId;
+      if (events.some((event) => event.orgId?.toLowerCase() !== orgId?.toLowerCase())) {
+        throw new RangeError("a batch of security events is one organisation's, or none's");
+      }
+      if (orgId !== undefined) {
+        // Inside the organisation's own transaction: its wall is the database's, on the write too.
+        await withTenant(
+          db,
+          orgId,
+          (tx) =>
+            tx
+              .insertInto('security.org_events')
+              .values(
+                events.map((event) => ({
+                  org_id: orgId.toLowerCase(),
+                  id: ids.next(),
+                  kind: event.kind,
+                  reason: event.reason,
+                  ip: event.ip !== undefined && isIpAddress(event.ip) ? event.ip : null,
+                  user_id: event.userId ?? null,
+                  agent_id: event.agentId ?? null,
+                  window_start: event.windowStart,
+                  count: event.count,
+                  created_at: now,
+                })),
+              )
+              .execute(),
+          { limited: true },
+        );
+        return;
+      }
       await limited(db, (tx) =>
         tx
           .insertInto('security.events')
@@ -131,6 +189,35 @@ export function createSecurityEvents({
         const rows = await tx.deleteFrom('security.events').where('id', 'in', oldest).returning('id').execute();
         return rows.length;
       });
+    },
+
+    async sweepOrganisation(db, orgId, most) {
+      if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one event at a time');
+      const past = new Date(clock.now().getTime() - retentionDays * DAY_MS);
+      return withTenant(
+        db,
+        orgId,
+        async (tx) => {
+          const oldest = tx
+            .selectFrom('security.org_events')
+            .select('id')
+            .where('org_id', '=', orgId.toLowerCase())
+            // Its window starts no later than it was written: the index finds them, the time written keeps each its days.
+            .where('window_start', '<=', past)
+            .where('created_at', '<=', past)
+            .orderBy('window_start')
+            .limit(most);
+          // An event is never changed, so the rows found are still past their retention when deleted.
+          const rows = await tx
+            .deleteFrom('security.org_events')
+            .where('org_id', '=', orgId.toLowerCase())
+            .where('id', 'in', oldest)
+            .returning('id')
+            .execute();
+          return rows.length;
+        },
+        { limited: true },
+      );
     },
   };
 }
