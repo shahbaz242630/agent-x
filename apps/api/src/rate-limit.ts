@@ -46,7 +46,12 @@ const IPV6_PREFIX = 64;
 export const UNREADABLE_ADDRESS = 'unreadable-address';
 
 /** The headers the counter sets, which an error response keeps. */
-export const RATE_LIMIT_HEADERS = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'retry-after'];
+export const RATE_LIMIT_HEADERS = [
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+  'retry-after',
+] as const;
 
 const ipAddress = z.union([z.ipv4(), z.ipv6()]);
 

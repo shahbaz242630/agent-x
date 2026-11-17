@@ -26,6 +26,9 @@
 //   run. Then the routes served are compared with the document: a route
 //   missing from it (hidden, or for any other reason), or served twice,
 //   stops the API starting.
+// - The document says how to call the API at all (api-guide.ts): versioning,
+//   sign-in, idempotency, errors, rate limits; each operation's security and
+//   tag come from its access and address.
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
@@ -46,6 +49,7 @@ import {
 import { z } from 'zod';
 
 import { accessProblems, agentScopeProblems, namesRole, ORGANIZATION_HEADER, ORGANIZATION_SCHEMA } from './access.ts';
+import { withGuide } from './api-guide.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
 import {
@@ -66,6 +70,9 @@ const ACCESS_KEY = 'x-access';
 
 /** Where each operation agents may call shows the scopes their keys need. */
 const AGENT_SCOPES_KEY = 'x-agent-scopes';
+
+/** Where the partner's own route shows that its signature is its only key (partner-events.ts). */
+const PARTNER_SIGNED_KEY = 'x-partner-signed';
 
 /** Where a write's operation shows the name its idempotency keys go by (OpenAPI holds it unique). */
 const OPERATION_ID_KEY = 'operationId';
@@ -487,6 +494,10 @@ function limitAndAccessProblems(route: RouteOptions, keys: ReadonlyMap<string, u
   if ((written || keys.has(ACCESS_KEY)) && keys.get(ACCESS_KEY) !== route.config?.access) {
     problems.push('the access its document shows is not its own (x-access)');
   }
+  // As with its access: a route can't show itself signed, or unsigned, other than as it is.
+  if ((written || keys.has(PARTNER_SIGNED_KEY)) && keys.get(PARTNER_SIGNED_KEY) !== route.config?.partnerSigned) {
+    problems.push("the partner's signature its document shows is not its own (x-partner-signed)");
+  }
   problems.push(...agentScopeProblems(route.config?.access, route.config?.agentScopes));
   if ((written || keys.has(AGENT_SCOPES_KEY)) && keys.get(AGENT_SCOPES_KEY) !== route.config?.agentScopes) {
     problems.push('the agent scopes its document shows are not its own (x-agent-scopes)');
@@ -650,6 +661,7 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         ...route.schema,
         [ACCESS_KEY]: access,
         ...(agentScopes !== undefined && { [AGENT_SCOPES_KEY]: agentScopes }),
+        ...(route.config.partnerSigned === true && { [PARTNER_SIGNED_KEY]: true }),
         ...(route.config.operation !== undefined && { [OPERATION_ID_KEY]: route.config.operation }),
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
@@ -685,7 +697,8 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     // Fastify answers HEAD on every GET route, so the document lists those too.
     exposeHeadRoutes: true,
     transform: createJsonSchemaTransform({ schemaRegistry: API_SCHEMAS, skipList: [], zodToJsonConfig: ZOD_TO_JSON }),
-    transformObject: (document) => withoutUnusedSchemas(transformObject(document)),
+    // What an integrator reads first, from what each operation shows (api-guide.ts, BR-19).
+    transformObject: (document) => withGuide(withoutUnusedSchemas(transformObject(document))),
   });
 
   // After the document's own ready hook, which collects what it needs first.

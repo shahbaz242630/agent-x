@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 
+import { FAKE_SIGNATURE_HEADER } from '@agentx/core/modules/providers';
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
@@ -11,11 +12,25 @@ import { z } from 'zod';
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import { BUSY_UNDER_TROUBLE } from './errors.ts';
 import './route-server.helper.test.ts';
+import { ORGANIZATION_HEADER } from './access.ts';
+import {
+  AGENT_KEY_SCHEME,
+  GUIDE_URL,
+  PARTNER_SIGNATURE_SCHEME,
+  securityOf,
+  SESSION_SCHEME,
+  TAGS,
+  withGuide,
+} from './api-guide.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ContractBroken, NOT_FOUND_CHECKS, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
+import { CORRELATION_HEADER } from './correlation.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
+import { RATE_LIMIT_HEADERS } from './rate-limit.ts';
 import { REQUEST_FAILED } from './request-log.ts';
 import { buildServer } from './server.ts';
+import { SESSION_COOKIE } from './sign-in.ts';
+import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
 
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
 /** A marker value that must never come out. Plain words, so secret scanners ignore it. */
@@ -612,6 +627,11 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
       'a body limit of its own in its document',
       { ...OPEN, schema: { ...OPEN.schema, 'x-body-limit': 10 } as FastifySchema },
       'the body limit its document shows is not its own (x-body-limit)',
+    ],
+    [
+      "the partner's signature in its document, though it isn't the partner's route",
+      { ...OPEN, schema: { ...OPEN.schema, 'x-partner-signed': true } as FastifySchema },
+      "the partner's signature its document shows is not its own (x-partner-signed)",
     ],
   ])('refuses a write with %s as it is added', async (_what, options, problem) => {
     const { app } = await server();
@@ -1461,5 +1481,141 @@ describe('every route checks and answers through its own zod schemas', () => {
       expect.objectContaining({ err: expect.objectContaining({ code: 'FST_ERR_RESPONSE_SERIALIZATION' }) as unknown }),
     ]);
     expect(findLeaks(capture.text, [PLANTED])).toEqual([]);
+  });
+});
+
+/** The document as the repository holds it: the first test above holds it to the server's. */
+const KEPT_DOCUMENT_PARTS = z.object({
+  info: z.object({ title: z.string(), version: z.string(), description: z.string() }),
+  externalDocs: z.object({ url: z.string() }),
+  tags: z.array(z.object({ name: z.string(), description: z.string().min(1) })),
+  components: z.object({
+    securitySchemes: z.record(z.string(), z.record(z.string(), z.string())),
+    responses: z.record(z.string(), z.object({ headers: z.record(z.string(), z.object({ $ref: z.string() })) })),
+    headers: z.record(z.string(), z.object({ description: z.string().min(1) })),
+  }),
+  paths: z.record(
+    z.string(),
+    z.record(
+      z.string(),
+      z.object({
+        summary: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+        security: z.array(z.record(z.string(), z.array(z.string()))).optional(),
+        'x-access': z.array(z.string()),
+        'x-agent-scopes': z.array(z.string()).optional(),
+        'x-partner-signed': z.literal(true).optional(),
+        responses: z.record(z.string(), z.unknown()),
+      }),
+    ),
+  ),
+});
+
+/** Read in each test, not as the file loads, so `-u` can write the document before these read it. */
+function kept() {
+  const document = KEPT_DOCUMENT_PARTS.parse(
+    JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')),
+  );
+  /** Every operation, with its "METHOD /path". */
+  const operations = Object.entries(document.paths).flatMap(([path, item]) =>
+    Object.entries(item).map(([method, operation]) => ({ at: `${method.toUpperCase()} ${path}`, operation })),
+  );
+  return { document, operations };
+}
+
+describe('BR-19 the document says how to call the API, before any one operation', () => {
+  it('names each section an integrator reads first, with the real names of the cookie and headers', () => {
+    const { document } = kept();
+    const { description } = document.info;
+    expect([...description.matchAll(/^## (.+)$/gm)].map((match) => match[1])).toEqual([
+      'Versioning',
+      'Authentication',
+      'Organisation header',
+      'Idempotency',
+      'Errors',
+      'Rate limits',
+      'Correlation IDs',
+    ]);
+    for (const name of [SESSION_COOKIE, ORGANIZATION_HEADER, IDEMPOTENCY_KEY_HEADER, CORRELATION_HEADER]) {
+      expect(description).toContain(name);
+    }
+    expect(document.externalDocs.url).toBe(GUIDE_URL);
+  });
+
+  it('gives every operation a summary and exactly one of the tags it declares, and declares none it never uses', () => {
+    const { document, operations: keptOperations } = kept();
+    const declared = document.tags.map(({ name }) => name);
+    expect(declared).toEqual(TAGS.map(({ name }) => name));
+    const wrong = keptOperations
+      .filter(({ operation }) => (operation.summary ?? '').trim() === '' || operation.tags?.length !== 1)
+      .map(({ at }) => at);
+    expect(wrong).toEqual([]);
+    const undeclared = keptOperations.filter(({ operation }) => !declared.includes(operation.tags?.[0] ?? ''));
+    expect(undeclared.map(({ at }) => at)).toEqual([]);
+    const used = new Set(keptOperations.map(({ operation }) => operation.tags?.[0]));
+    expect(declared.filter((name) => !used.has(name))).toEqual([]);
+  });
+
+  it("shows each operation's security as its access says: the partner's signature, anyone, an agent's key with its scopes, or a person's session", () => {
+    const { document, operations: keptOperations } = kept();
+    const wrong = keptOperations
+      .filter(({ operation }) => {
+        const access = operation['x-access'];
+        const expected =
+          operation['x-partner-signed'] === true
+            ? [{ [PARTNER_SIGNATURE_SCHEME]: [] }]
+            : access.includes('public')
+              ? []
+              : access.includes('agent')
+                ? [{ [AGENT_KEY_SCHEME]: operation['x-agent-scopes'] }]
+                : [{ [SESSION_SCHEME]: [] }];
+        return JSON.stringify(operation.security) !== JSON.stringify(expected);
+      })
+      .map(({ at }) => at);
+    expect(wrong).toEqual([]);
+    // The partner's route is protected by its signature alone: never shown open to anyone.
+    const signed = keptOperations.filter(({ operation }) => operation['x-partner-signed'] === true);
+    expect(signed.map(({ at, operation }) => [at, operation.security])).toEqual([
+      ['POST /v1/partner/events', [{ [PARTNER_SIGNATURE_SCHEME]: [] }]],
+    ]);
+    expect(document.components.securitySchemes).toEqual({
+      [SESSION_SCHEME]: expect.objectContaining({ type: 'apiKey', in: 'cookie', name: SESSION_COOKIE }) as unknown,
+      [AGENT_KEY_SCHEME]: expect.objectContaining({ type: 'http', scheme: 'bearer' }) as unknown,
+      [PARTNER_SIGNATURE_SCHEME]: expect.objectContaining({
+        type: 'apiKey',
+        in: 'header',
+        name: FAKE_SIGNATURE_HEADER,
+      }) as unknown,
+    });
+  });
+
+  it('answers a 429 on every operation, with every header the rate limit sets', () => {
+    const { document, operations: keptOperations } = kept();
+    const rateLimited = JSON.stringify({ $ref: '#/components/responses/RateLimited' });
+    const without = keptOperations.filter(
+      ({ operation }) => JSON.stringify(operation.responses['429']) !== rateLimited,
+    );
+    expect(without.map(({ at }) => at)).toEqual([]);
+    expect(Object.keys(document.components.headers)).toEqual(RATE_LIMIT_HEADERS);
+    expect(Object.keys(document.components.responses.RateLimited?.headers ?? {})).toEqual(RATE_LIMIT_HEADERS);
+  });
+
+  it("refuses to show an operator's operation as open, and shows an agent's key without scopes as needing none", () => {
+    expect(() => securityOf(['operator'], undefined, false)).toThrow("an operator's operation can't be documented");
+    expect(securityOf(['agent'], undefined, false)).toEqual([{ [AGENT_KEY_SCHEME]: [] }]);
+  });
+
+  it('leaves an address no tag holds untagged, for the test above to catch, and a document without paths as it is', () => {
+    const operation = { 'x-access': ['public'], responses: {} };
+    const guided = withGuide({ paths: { '/elsewhere': { get: operation }, '/nothing': undefined } });
+    expect(guided.paths).toEqual({
+      '/elsewhere': { get: expect.objectContaining({ tags: [], security: [] }) as unknown },
+      '/nothing': {},
+    });
+    expect(withGuide({}).tags).toHaveLength(TAGS.length);
+    // Without its access, as a hook that rebuilt the route's schema leaves it: the contract names it.
+    expect(withGuide({ paths: { '/v1/agent': { get: { responses: {} } } } }).paths).toEqual({
+      '/v1/agent': { get: { responses: {} } },
+    });
   });
 });
