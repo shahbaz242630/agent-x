@@ -2,7 +2,8 @@
 // every request a known caller made, one row each, reads and refusals too,
 // in the append-only `access` schema (0052). L3 writes the rows, L4 their
 // client's clues; L5 reads them for an organisation's admins, L7 for a case;
-// L5c builds a long range of them in the background (0053).
+// L5c builds a long range of them in the background (0053). 6E1a (L8) reads
+// one person's own rows and seals the person log daily on the platform chain.
 export {
   ACTIVITY_METHODS,
   type ActivityLog,
@@ -23,15 +24,22 @@ export {
   type DayDigest,
   dayOfId,
   digestOfDay,
+  countOfDay,
+  type DigestedRow,
+  digestRows,
+  firstDayIn,
   firstDayOf,
   idsOfDay,
   nextDay,
   SEAL_FORM,
   SEAL_GRACE_MS,
+  SEALED_AT,
+  type SealedLog,
   sealable,
   sealHolds,
   v7Floor,
   writtenBefore,
+  writtenBeforeIn,
 } from './infrastructure/activity-seal.ts';
 export {
   ACTIVITY_ACTOR_TYPES,
@@ -43,6 +51,14 @@ export {
   type ActivityRange,
   type ActivityRow,
 } from './infrastructure/activity-reads.ts';
+export {
+  type PersonActivityRow,
+  personInRange,
+  personPage,
+  type PersonPageToRead,
+  type PersonRange,
+} from './infrastructure/person-reads.ts';
+export { personDigestOfDay, PERSON_SEAL_FORM, PERSON_SEALED } from './infrastructure/person-seal.ts';
 export {
   addBackgroundExport,
   type BackgroundExport,

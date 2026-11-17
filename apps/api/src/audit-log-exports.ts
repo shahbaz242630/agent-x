@@ -168,7 +168,7 @@ const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
 
 /** A download's file of `lines` (each log's own), named for its log and range, a CSV header first. */
 export const exportFile = (
-  log: 'audit' | 'activity',
+  log: 'audit' | 'activity' | 'my-activity',
   asked: { readonly from: Date; readonly to: Date; readonly format: ExportFormat },
   csvHeader: readonly string[],
   lines: string[],

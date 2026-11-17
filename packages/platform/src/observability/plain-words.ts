@@ -133,6 +133,23 @@ export const PLAIN_WORDS = {
     broke: 'Days waiting to be sealed stay unsealed until the next run, 15 minutes later.',
     next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
   },
+  'person_log_seal.failed': {
+    happened: "A run of the daily seal of people's own activity log stopped early on an error.",
+    broke: 'Days waiting to be sealed stay unsealed until the next run, 15 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, check the platform audit chain and the database.',
+  },
+  'person_log_seal.moved': {
+    happened: "A day of people's own activity log changed while it was being sealed.",
+    broke:
+      'That day and every later one stay unsealed. A closed day never changes: a server clock is far off, or this is tampering.',
+    next: "Check the servers' clocks and the database for changes made outside the app.",
+  },
+  'person_log_seal_check.failed': {
+    happened: "The seals of people's own activity log could not be checked this run.",
+    broke:
+      'A change to its sealed days would not be caught until the next run, 30 minutes later; nothing else is affected.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database and the platform audit chain.',
+  },
   'access_log.export_build_failed': {
     happened: "One month of an admin's background activity log download could not be made this time.",
     broke: 'That download is not ready yet; nothing else is affected.',

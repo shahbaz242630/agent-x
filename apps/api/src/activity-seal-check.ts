@@ -33,8 +33,7 @@ import {
   ACTIVITY_SEALED,
   type ActivityTables,
   digestOfDay,
-  nextDay,
-  sealHolds,
+  SEAL_FORM,
   writtenBefore,
 } from '@agentx/core/modules/activity';
 import { type AuditTables, type LogEvent, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
@@ -42,6 +41,8 @@ import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+
+import { brokenSealIn, type SealBroken } from './seal-days.ts';
 
 /** How often a run checks the seals of those it lists, once the last run has ended. */
 export const ACTIVITY_SEAL_CHECK_EVERY_MS = 30 * 60_000;
@@ -62,9 +63,6 @@ export interface ActivitySealCheck {
   /** Checks a few seals of each listed organisation, until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
-
-/** Why a seal doesn't hold: its day's digest, a row in it written past the app (F1, G3), a seal missing before it, or a row written before the first seal. */
-type Broken = 'digest' | 'misdated' | 'gap' | 'before';
 
 export function createActivitySealCheck({
   list,
@@ -109,7 +107,7 @@ export function createActivitySealCheck({
   };
 
   /** Raises the alarm for the organisation's activity log, and holds it. */
-  const broken = async (orgId: string, correlationId: string, day: string, why: Broken) => {
+  const broken = async (orgId: string, correlationId: string, day: string, why: SealBroken) => {
     logger.child({ correlationId, orgId }).info('access_log_seal_check.broken', { day, why });
     await inOrg(orgId, correlationId, (_tx, states) => {
       states.mismatch('access_log', { orgId, id: orgId });
@@ -117,32 +115,17 @@ export function createActivitySealCheck({
     });
   };
 
-  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined. */
-  const checkPage = async (
-    orgId: string,
-    correlationId: string,
-    events: readonly LogEvent[],
-    oldestReached: boolean,
-  ): Promise<{ readonly day: string; readonly why: Broken } | undefined> => {
-    let newerDay: string | undefined;
-    for (const { event } of events) {
-      const { day } = event.details;
-      if (typeof day !== 'string') return { day: 'unnamed', why: 'gap' };
-      if (newerDay !== undefined && nextDay(day) !== newerDay) return { day, why: 'gap' };
-      const digest = await digestOfDay((work) => inOrg(orgId, correlationId, (tx) => work(tx)), orgId, day, batch);
-      if (!sealHolds(digest, event.details)) return { day, why: 'digest' };
-      if (digest.misdated !== null) return { day, why: 'misdated' };
-      newerDay = day;
-    }
-    if (
-      oldestReached &&
-      newerDay !== undefined &&
-      (await inOrg(orgId, correlationId, (tx) => writtenBefore(tx, orgId, newerDay)))
-    ) {
-      return { day: newerDay, why: 'before' };
-    }
-    return undefined;
-  };
+  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined (seal-days.ts). */
+  const checkPage = (orgId: string, correlationId: string, events: readonly LogEvent[], oldestReached: boolean) =>
+    brokenSealIn(
+      events.map(({ event }) => event.details),
+      oldestReached,
+      {
+        digest: (day) => digestOfDay((work) => inOrg(orgId, correlationId, (tx) => work(tx)), orgId, day, batch),
+        form: SEAL_FORM,
+        writtenBefore: (day) => inOrg(orgId, correlationId, (tx) => writtenBefore(tx, orgId, day)),
+      },
+    );
 
   /** Checks the organisation's newest seal, then a few older ones from a point picked at random. */
   const checkFor = async (orgId: string): Promise<void> => {

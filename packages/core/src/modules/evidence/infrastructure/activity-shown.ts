@@ -20,6 +20,7 @@ import {
   type ActivityPageToRead,
   type ActivityRow,
   type ActivityTables,
+  type ClientClues,
   idsOfDay,
 } from '../../activity/index.ts';
 import type { SignedStates } from '../../audit/index.ts';
@@ -80,12 +81,22 @@ export function localTimeOf(at: Date, timeZone: string): string | null {
  * seal's day reads sealed though no seal holds it, until the seal check's next
  * run finds it and holds the organisation (L6c-1, `why: before`).
  */
-const sealedRow = (id: string, sealedDay: string | null): boolean =>
+export const sealedRow = (id: string, sealedDay: string | null): boolean =>
   sealedDay !== null && id.toLowerCase() < idsOfDay(sealedDay).to;
+
+/** A row's client's clues as shown: the place marked approximate and credited (CC BY 4.0), null for each unknown. */
+export const clientShown = ({ ip, place, timeZone }: ClientClues) => ({
+  ip: ip ?? null,
+  place:
+    place === undefined
+      ? null
+      : { country: place.country, city: place.city ?? null, approximate: true as const, ...PLACES_BY },
+  timeZone: timeZone ?? null,
+});
 
 /** A row as an organisation is shown it, page or download, its actor named, sealed or not by `sealedDay`. */
 export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, ActorName>, sealedDay: string | null) => {
-  const { ip, place, timeZone } = row.client;
+  const { timeZone } = row.client;
   return {
     id: row.id,
     recordedAt: row.recordedAt.toISOString(),
@@ -100,14 +111,7 @@ export const activityShown = (row: ActivityRow, names: ReadonlyMap<string, Actor
     correlationId: row.correlationId,
     durationMs: row.durationMs,
     sealed: sealedRow(row.id, sealedDay),
-    client: {
-      ip: ip ?? null,
-      place:
-        place === undefined
-          ? null
-          : { country: place.country, city: place.city ?? null, approximate: true as const, ...PLACES_BY },
-      timeZone: timeZone ?? null,
-    },
+    client: clientShown(row.client),
   };
 };
 

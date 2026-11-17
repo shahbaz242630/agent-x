@@ -66,6 +66,7 @@ import { activitySinkOf } from './activity-recorder.ts';
 import { loadPlaces } from './client-clues.ts';
 import { loadConsoleFiles } from './console-files.ts';
 import { loginSessionsFrom } from './login-sessions.ts';
+import { createMyActivity } from './my-activity.ts';
 import { createMyOrganizations } from './my-organizations.ts';
 import { createLogSample } from './log-sample.ts';
 import { buildServer } from './server.ts';
@@ -234,6 +235,7 @@ export async function startWeb(
       logger,
       directory,
     }),
+    myActivity: createMyActivity({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     holdClearings: createHoldClearings({
       database,
       keys,

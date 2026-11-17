@@ -140,6 +140,34 @@ export const cursorOf = (text: string): ActivityCursor | undefined => {
   return Number.isNaN(time.getTime()) || time.toISOString() !== at ? undefined : { at: time, id: id.toLowerCase() };
 };
 
+/** What a request says of where its client may be, an organisation's log's row and a person's alike. */
+export const CLIENT_CLUES = z
+  .object({
+    ip: z.string().nullable().describe('The IP address it came from; null when it couldn’t be read.'),
+    place: z
+      .object({
+        country: z.string().describe('The country, by its ISO 3166 code.'),
+        city: z.string().nullable().describe('The city; null when none is known.'),
+        approximate: z
+          .literal(true)
+          .describe('Always: a VPN or a company network shows somewhere else than the person is.'),
+        by: z.literal(PLACES_BY.by).describe('Where the place comes from (CC BY 4.0).'),
+        link: z.literal(PLACES_BY.link).describe('Its source.'),
+      })
+      .nullable()
+      .describe('The approximate place the address is registered to; null when none is known.'),
+    timeZone: z
+      .object({
+        name: z.string().describe('The time zone, such as `Asia/Dubai`.'),
+        from: z
+          .enum(TIME_ZONE_SOURCES)
+          .describe('`browser`: the browser reported it; `organisation`: the organisation’s own, as none was.'),
+      })
+      .nullable()
+      .describe('The time zone the request was made in; null when none is known.'),
+  })
+  .describe('What the request says of where its client may be: clues, never proof.');
+
 const ACTIVITY_ROW = z
   .object({
     id: z.uuid().describe('The row, by its ID.'),
@@ -177,32 +205,7 @@ const ACTIVITY_ROW = z
       .describe(
         'Whether its day is sealed on the audit chain: written on or before `sealedThrough` (a day is the UTC day a row was written).',
       ),
-    client: z
-      .object({
-        ip: z.string().nullable().describe('The IP address it came from; null when it couldn’t be read.'),
-        place: z
-          .object({
-            country: z.string().describe('The country, by its ISO 3166 code.'),
-            city: z.string().nullable().describe('The city; null when none is known.'),
-            approximate: z
-              .literal(true)
-              .describe('Always: a VPN or a company network shows somewhere else than the person is.'),
-            by: z.literal(PLACES_BY.by).describe('Where the place comes from (CC BY 4.0).'),
-            link: z.literal(PLACES_BY.link).describe('Its source.'),
-          })
-          .nullable()
-          .describe('The approximate place the address is registered to; null when none is known.'),
-        timeZone: z
-          .object({
-            name: z.string().describe('The time zone, such as `Asia/Dubai`.'),
-            from: z
-              .enum(TIME_ZONE_SOURCES)
-              .describe('`browser`: the browser reported it; `organisation`: the organisation’s own, as none was.'),
-          })
-          .nullable()
-          .describe('The time zone the request was made in; null when none is known.'),
-      })
-      .describe('What the request says of where its client may be: clues, never proof.'),
+    client: CLIENT_CLUES,
   })
   .register(API_SCHEMAS, { id: 'ActivityLogRow', description: 'One request in the organisation’s activity log.' });
 

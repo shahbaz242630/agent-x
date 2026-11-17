@@ -37,7 +37,6 @@ import {
   firstDayOf,
   nextDay,
   SEAL_FORM,
-  sealable,
 } from '@agentx/core/modules/activity';
 import { type AuditTables, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { newestSealedDay } from '@agentx/core/modules/evidence';
@@ -46,11 +45,10 @@ import { type Database, type DatabaseTransaction, holdTransactionLock } from '@a
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { type DaySealing, sealDay, sealDaysFrom } from './seal-days.ts';
+
 /** How often a run seals the closed days of those it lists, once the last run has ended. */
 export const ACTIVITY_SEAL_EVERY_MS = 15 * 60_000;
-
-/** The most days one run seals an organisation, so one asleep for long doesn't hold up the rest. */
-const MOST_DAYS_A_RUN = 31;
 
 /** How many rows one read of a day's digest takes. */
 const SEAL_BATCH = 5_000;
@@ -62,6 +60,10 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 
 type SealTables = AuditTables & ActivityTables;
 type SealTx = DatabaseTransaction<SealTables>;
+interface Held {
+  readonly tx: SealTx;
+  readonly states: SignedStates;
+}
 
 export interface ActivitySeal {
   /** Seals the listed organisations' closed days, up to MOST_DAYS_A_RUN each, until the signal is aborted. Never throws. */
@@ -99,64 +101,49 @@ export function createActivitySeal({
       return newest.day === null ? firstDayOf(tx, orgId) : nextDay(newest.day);
     });
 
-  /** Seals `day` if nothing moved meanwhile: whether it was sealed (or found sealed already). */
-  const seal = async (orgId: string, day: string, correlationId: string): Promise<boolean> => {
+  /** The organisation's seal, its steps on its own chain under its own lock (seal-days.ts). */
+  const sealingOf = (orgId: string, correlationId: string): DaySealing<Held> => {
     const inOrg = <T>(work: (tx: SealTx, states: SignedStates) => Promise<T>) =>
       withSignedStates(database, orgId, { keys, ids, logger, correlationId }, work);
-    const digest = await digestOfDay((work) => inOrg((tx) => work(tx)), orgId, day, batch);
-    const log = logger.child({ correlationId, orgId });
-    if (digest.misdated !== null) {
+    const trail = createAuditTrail({ keys, ids, correlationId });
+    return {
+      digest: (day) => digestOfDay((work) => inOrg((tx) => work(tx)), orgId, day, batch),
       // A row written past the app (F1, G3): the day is never sealed with it; the alarm raised and the hold set.
-      await inOrg((_tx, states) => {
-        states.mismatch('access_log', { orgId, id: orgId });
-        return Promise.resolve();
-      });
-      return false;
-    }
-    return inOrg(async (tx, states) => {
-      await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, orgId);
-      const newest = await newestSealedDay(tx, states, orgId);
-      // The alarm raised and the hold set already.
-      if (newest === 'tampered') return false;
-      const trail = createAuditTrail({ keys, ids, correlationId });
-      // Sealed by another server meanwhile.
-      if (newest.day !== null && newest.day >= day) return true;
-      const now = await dayCount(tx, orgId, day);
-      if (now.requests !== digest.requests || now.idTo !== digest.idTo) {
-        log.error('access_log_seal.moved', { day, digested: digest.requests, counted: now.requests });
-        return false;
-      }
-      await trail.record(tx, orgId, {
-        actor: ACTOR,
-        action: ACTIVITY_SEALED,
-        subject: { type: 'access_log', id: orgId, version: 1 },
-        details: {
-          day,
-          requests: digest.requests,
-          digest: digest.digest,
-          idFrom: digest.idFrom,
-          idTo: digest.idTo,
-          form: SEAL_FORM,
-        },
-      });
-      log.info('access_log.sealed', { day, requests: digest.requests });
-      return true;
-    });
+      misdated: () =>
+        inOrg((_tx, states) => {
+          states.mismatch('access_log', { orgId, id: orgId });
+          return Promise.resolve();
+        }),
+      locked: (work) =>
+        inOrg(async (tx, states) => {
+          await holdTransactionLock(tx, ACTIVITY_SEAL_LOCK, orgId);
+          return work({ tx, states });
+        }),
+      // The alarm raised and the hold set already, when tampered.
+      newest: ({ tx, states }) => newestSealedDay(tx, states, orgId),
+      count: ({ tx }, day) => dayCount(tx, orgId, day),
+      record: async ({ tx }, details) => {
+        await trail.record(tx, orgId, {
+          actor: ACTOR,
+          action: ACTIVITY_SEALED,
+          subject: { type: 'access_log', id: orgId, version: 1 },
+          details,
+        });
+      },
+      form: SEAL_FORM,
+      log: logger.child({ correlationId, orgId }),
+      lines: { moved: 'access_log_seal.moved', sealed: 'access_log.sealed' },
+    };
   };
 
   /** Seals the organisation's closed days, oldest first, up to MOST_DAYS_A_RUN: whether it is finished. */
   const sealFor = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const correlationId = ids.next();
-    let day = await firstToSeal(orgId, correlationId);
+    const first = await firstToSeal(orgId, correlationId);
     // The alarm raised and the hold set already.
-    if (day === 'tampered') return true;
-    for (let sealed = 0; day !== undefined && sealed < MOST_DAYS_A_RUN; sealed += 1) {
-      if (signal?.aborted === true) return false;
-      if (!sealable(day, clock.now())) return true;
-      if (!(await seal(orgId, day, correlationId))) return false;
-      day = nextDay(day);
-    }
-    return day === undefined;
+    if (first === 'tampered') return true;
+    const sealing = sealingOf(orgId, correlationId);
+    return sealDaysFrom(first, (day) => sealDay(sealing, day), clock, signal);
   };
 
   return {
