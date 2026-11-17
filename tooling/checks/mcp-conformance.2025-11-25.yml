@@ -1,0 +1,37 @@
+# What revision 2025-11-25's requirement set checks that Agent X's MCP server
+# deliberately doesn't do (6E2, MCP-Guide M6/M9), check by check, so every
+# other check in the same scenario still has to pass. Read with
+# mcp-conformance.test.ts. An entry that starts passing fails the run: remove it.
+server:
+  # The suite's own fixture tools (test_*): our tools are the agent's operations alone (SEC-MCP-01).
+  - tools-call-simple-text:tools-call-simple-text
+  - tools-call-image:tools-call-image
+  - tools-call-audio:tools-call-audio
+  - tools-call-embedded-resource:tools-call-embedded-resource
+  - tools-call-mixed-content:tools-call-mixed-content
+  - tools-call-error:tools-call-error
+  - tools-call-with-progress:tools-call-with-progress
+  # No logging, prompts, resources or completions: tools only (M9).
+  - logging-set-level:logging-set-level
+  - tools-call-with-logging:tools-call-with-logging
+  - completion-complete:completion-complete
+  - prompts-list:prompts-list
+  - prompts-get-simple:prompts-get-simple
+  - prompts-get-with-args:prompts-get-with-args
+  - prompts-get-embedded-resource:prompts-get-embedded-resource
+  - prompts-get-with-image:prompts-get-with-image
+  - resources-list:resources-list
+  - resources-read-text:resources-read-text
+  - resources-read-binary:resources-read-binary
+  - resources-templates-read:resources-templates-read
+  - resources-subscribe:resources-subscribe
+  - resources-unsubscribe:resources-unsubscribe
+  # No elicitation or sampling (M9): a person approves in the console, never through the agent's client.
+  - tools-call-sampling:tools-call-sampling
+  - tools-call-elicitation:tools-call-elicitation
+  - elicitation-sep1034-defaults:elicitation-sep1034-general
+  - elicitation-sep1330-enums:elicitation-sep1330-general
+  # No sessions and no SSE streams to resume (M3): each request stands alone.
+  - server-sse-multiple-streams:server-sse-multiple-streams-session
+  # Stricter than the suite: a browser origin other than our console's is refused, localhost's too (MCP-Guide §4).
+  - dns-rebinding-protection:localhost-host-valid-accepted

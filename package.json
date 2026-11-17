@@ -21,11 +21,13 @@
     "load": "node tooling/load/run.ts",
     "hooks": "node tooling/git-hooks/install.ts",
     "tools": "node tooling/bicep/install.ts",
-    "tools:cosign": "node tooling/cosign/install.ts"
+    "tools:cosign": "node tooling/cosign/install.ts",
+    "mcp:conformance": "conformance"
   },
   "devDependencies": {
     "@eslint-community/eslint-plugin-eslint-comments": "4.8.1",
     "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/conformance": "0.2.0-alpha.12",
     "@types/node": "24.13.4",
     "@vitest/coverage-v8": "5.1.0",
     "dependency-cruiser": "18.7.2",

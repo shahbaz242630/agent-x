@@ -379,6 +379,12 @@ export function registerAccess(
       count(request, reply).then(refuse, failed);
     };
     const { authorization } = request.headers;
+    // The MCP endpoint (6E2) answers an agent's key alone: none sent is the key's own 401, so an MCP client
+    // learns it needs one (MCP-Guide M4), never the session's challenge, whatever cookie came with it.
+    if (authorization === undefined && request.routeOptions.config.toolCalls === true) {
+      void keyRefused(request, reply);
+      return;
+    }
     if (authorization !== undefined) {
       // An agent's request, never a person's: the cookie isn't read.
       if (!access.includes('agent')) {

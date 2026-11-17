@@ -20,7 +20,7 @@ import type { IdempotentRequest } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { ORGANIZATION_HEADER } from './access.ts';
@@ -262,9 +262,48 @@ const mcp = (
 ): InjectOptions => ({
   method: 'POST',
   url: MCP_PATH,
-  headers: { ...(key === null ? {} : { authorization: `Bearer ${key}` }), ...headers },
+  headers: { accept: ACCEPT, ...(key === null ? {} : { authorization: `Bearer ${key}` }), ...headers },
   payload: body as Record<string, unknown>,
 });
+
+/** What an MCP client accepts (Streamable HTTP): JSON, or a stream of events. */
+const ACCEPT = 'application/json, text/event-stream';
+
+/** An MCP answer's JSON: as sent, or the one server-sent event a 2025-era answer comes as. */
+function answerOf(response: { readonly headers: Record<string, unknown>; readonly body: string }): unknown {
+  const type = typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '';
+  if (!type.startsWith('text/event-stream')) return JSON.parse(response.body);
+  const data = response.body
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice('data:'.length).trim());
+  return JSON.parse(data.join(''));
+}
+
+/** The modern era's envelope: every request names its version, its client and its capabilities in `_meta`. */
+const MODERN_META = {
+  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+  'io.modelcontextprotocol/clientInfo': { name: 'agent-x-tests', version: '1.0.0' },
+  'io.modelcontextprotocol/clientCapabilities': {},
+};
+
+/** A 2026-07-28 request: its envelope in `_meta`, and the headers that must agree with its body. */
+const modern = (
+  method: string,
+  params: Record<string, unknown> = {},
+  name?: string,
+  key: string | null = ALL,
+): InjectOptions =>
+  mcp(message(method, { ...params, _meta: MODERN_META }), {
+    key,
+    headers: {
+      [PROTOCOL_HEADER]: '2026-07-28',
+      'mcp-method': method,
+      ...(name === undefined ? {} : { 'mcp-name': name }),
+    },
+  });
+
+type Era = 'legacy' | 'modern';
 
 const CALL_RESULT = z.object({
   jsonrpc: z.literal('2.0'),
@@ -285,10 +324,20 @@ const REFUSAL = z.object({
   }),
 });
 
-async function callTool(app: FastifyInstance, name: string, args: Record<string, unknown>, key: string = ALL) {
-  const response = await app.inject(mcp(message('tools/call', { name, arguments: args }), { key }));
-  expect(response.statusCode).toBe(200);
-  return CALL_RESULT.parse(response.json()).result;
+async function callTool(
+  app: FastifyInstance,
+  name: string,
+  args: Record<string, unknown>,
+  key: string = ALL,
+  era: Era = 'legacy',
+) {
+  const response = await app.inject(
+    era === 'legacy'
+      ? mcp(message('tools/call', { name, arguments: args }), { key })
+      : modern('tools/call', { name, arguments: args }, name, key),
+  );
+  expect(response.statusCode, response.body).toBe(200);
+  return CALL_RESULT.parse(answerOf(response)).result;
 }
 
 /** Each tool beside its twin's request: the same input, over each wire. */
@@ -328,9 +377,14 @@ const CASES: readonly {
 ];
 
 /** What each wire answered, side by side: a body at a status, or a reason code at a status. */
-async function bothWires(app: FastifyInstance, { tool, rest, args }: (typeof CASES)[number], key: string) {
+async function bothWires(
+  app: FastifyInstance,
+  { tool, rest, args }: (typeof CASES)[number],
+  key: string,
+  era: Era = 'legacy',
+) {
   const restAnswer = await app.inject({ ...rest, headers: { ...rest.headers, authorization: `Bearer ${key}` } });
-  const result = await callTool(app, tool, args, key);
+  const result = await callTool(app, tool, args, key, era);
   const viaRest =
     restAnswer.statusCode < 400
       ? { status: restAnswer.statusCode, body: restAnswer.json<unknown>() }
@@ -367,6 +421,15 @@ const DOCUMENT = z
 /** A route's pattern as the document writes it. */
 const documented = (url: string) => url.replace(/:(\w+)/g, '{$1}');
 
+// The SDK's first answer builds its schemas and validators, cold: seconds on a busy machine. Paid here, under a
+// limit of its own, as route-server.helper.test.ts pays for the server's.
+beforeAll(async () => {
+  const { app } = await server();
+  await app.inject(mcp(message('tools/list')));
+  await app.inject(modern('tools/list'));
+  await closeServers();
+}, 60_000);
+
 describe('SEC-MCP-01 the MCP tool list is the allowlist (6E2, BR-20)', () => {
   it('lists exactly the allowed tools, in order, each with its input schema and hints', async () => {
     const { app } = await server();
@@ -383,7 +446,7 @@ describe('SEC-MCP-01 the MCP tool list is the allowlist (6E2, BR-20)', () => {
           ),
         }),
       })
-      .parse(response.json()).result;
+      .parse(answerOf(response)).result;
     expect(tools.map(({ name }) => name)).toEqual([
       'get_agent',
       'get_mandate',
@@ -440,7 +503,7 @@ describe('SEC-MCP-02 each MCP tool is authorised as its REST twin is', () => {
     const response = await app.inject(mcp(message('tools/list')));
     const listed = z
       .object({ result: z.object({ tools: z.array(z.object({ name: z.string(), description: z.string() })) }) })
-      .parse(response.json()).result.tools;
+      .parse(answerOf(response)).result.tools;
     for (const { name, twin } of MCP_TOOLS) {
       const operation = DOCUMENT.paths[documented(twin.url)]?.[twin.method.toLowerCase()];
       expect(operation?.['x-access'], name).toEqual(['agent']);
@@ -452,20 +515,25 @@ describe('SEC-MCP-02 each MCP tool is authorised as its REST twin is', () => {
     }
   });
 
-  it.each(CASES)('$tool answers every key, by its scopes, as its twin does', async (twinCase) => {
-    const { app } = await server();
-    for (const [index, scopes] of SCOPE_SETS.entries()) {
-      const { viaRest, viaMcp } = await bothWires(app, twinCase, keyText(index));
-      expect(viaMcp, `${twinCase.tool} with ${scopes.join(',') || 'no scope'}`).toEqual(viaRest);
-    }
-  });
+  it.each(CASES)(
+    '$tool answers every key, by its scopes, as its twin does, in both protocol eras',
+    async (twinCase) => {
+      const { app } = await server();
+      for (const era of ['legacy', 'modern'] as const) {
+        for (const [index, scopes] of SCOPE_SETS.entries()) {
+          const { viaRest, viaMcp } = await bothWires(app, twinCase, keyText(index), era);
+          expect(viaMcp, `${twinCase.tool} (${era}) with ${scopes.join(',') || 'no scope'}`).toEqual(viaRest);
+        }
+      }
+    },
+  );
 
   it.each(['refuse', 'fail'] as const)(
     'every tool refuses as its twin does when its use case would %s',
     async (mode) => {
       const { app } = await server(mode);
       for (const twinCase of CASES) {
-        const { viaRest, viaMcp } = await bothWires(app, twinCase, ALL);
+        const { viaRest, viaMcp } = await bothWires(app, twinCase, ALL, 'modern');
         expect(viaMcp, twinCase.tool).toEqual(viaRest);
         // get_agent reads nothing: it answers whatever the use cases do.
         if (twinCase.tool !== 'get_agent') expect(viaRest.status, twinCase.tool).toBeGreaterThanOrEqual(400);
@@ -546,7 +614,7 @@ describe('SEC-MCP-02 each MCP tool is authorised as its REST twin is', () => {
     // From the console's own origin, so it is the key that is asked for, not the origin refused.
     const noKey = await app.inject(mcp(message('tools/list'), { key: null, headers: { origin: PUBLIC_ORIGIN } }));
     expect(noKey.statusCode).toBe(401);
-    expect(noKey.headers['www-authenticate']).toBe('Bearer realm="Agent X"');
+    expect(noKey.headers['www-authenticate']).toBe('Bearer realm="Agent X", error="invalid_token"');
     const badKey = await app.inject(mcp(message('tools/list'), { key: keyText(20) }));
     expect(badKey.statusCode).toBe(401);
     const person = await app.inject(
@@ -555,8 +623,9 @@ describe('SEC-MCP-02 each MCP tool is authorised as its REST twin is', () => {
         headers: { cookie: `${SESSION_COOKIE}=${COOKIE}`, origin: PUBLIC_ORIGIN },
       }),
     );
-    expect(person.statusCode).toBe(403);
-    expect(person.json()).toMatchObject({ error: { code: 'FORBIDDEN' } });
+    // No key is no key, whatever session comes with it: the key's own 401, so a client knows to send one (M4).
+    expect(person.statusCode).toBe(401);
+    expect(person.headers['www-authenticate']).toBe('Bearer realm="Agent X", error="invalid_token"');
   });
 });
 
@@ -620,96 +689,145 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
   });
 });
 
-describe('MCP over Streamable HTTP: stateless JSON-RPC (6E2)', () => {
-  it('agrees to a version it speaks, else its newest, and keeps no session', async () => {
+describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Guide M3)', () => {
+  const ANSWERED = z.object({
+    jsonrpc: z.literal('2.0'),
+    id: z.union([z.string(), z.number()]),
+    result: z.record(z.string(), z.unknown()),
+  });
+  const FAULT = z.object({ error: z.object({ code: z.number(), message: z.string(), data: z.unknown().optional() }) });
+
+  it('serves the 2025 era statelessly: initialize, initialized, then calls naming its version, never a session', async () => {
     const { app } = await server();
     for (const [asked, agreed] of [
+      ['2025-03-26', '2025-03-26'],
       ['2025-06-18', '2025-06-18'],
       ['2025-11-25', '2025-11-25'],
-      ['2024-11-05', PROTOCOLS[0]],
+      ['2024-11-05', '2025-11-25'],
     ] as const) {
       const response = await app.inject(
         mcp(
-          message('initialize', { protocolVersion: asked, capabilities: {}, clientInfo: { name: 't', version: '1' } }),
+          message('initialize', {
+            protocolVersion: asked,
+            capabilities: {},
+            clientInfo: { name: 'hermes', version: '0.23.2' },
+          }),
         ),
       );
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({
-        jsonrpc: '2.0',
-        id: 1,
-        result: {
-          protocolVersion: agreed,
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'agent-x' },
-        },
-      });
+      expect(response.statusCode, response.body).toBe(200);
       expect(response.headers['mcp-session-id']).toBeUndefined();
+      const { result } = ANSWERED.parse(answerOf(response));
+      expect(result).toMatchObject({
+        protocolVersion: agreed,
+        capabilities: { tools: {} },
+        serverInfo: { name: 'agent-x' },
+      });
+      expect(String(result.instructions).length).toBeLessThan(2000);
     }
-    const unread = await app.inject(mcp(message('initialize', {}, 'a')));
-    expect(unread.json()).toEqual({
-      jsonrpc: '2.0',
-      id: 'a',
-      error: { code: -32_602, message: 'initialize needs a protocolVersion' },
-    });
+    const initialized = await app.inject(
+      mcp(message('notifications/initialized', undefined, null), { headers: { [PROTOCOL_HEADER]: '2025-06-18' } }),
+    );
+    expect(initialized.statusCode).toBe(202);
+    expect(initialized.body).toBe('');
+    // A legacy call names no Mcp-Method or Mcp-Name (Hermes sends neither), and needs no initialize first.
+    const listed = await app.inject(mcp(message('tools/list'), { headers: { [PROTOCOL_HEADER]: '2025-06-18' } }));
+    expect(ANSWERED.parse(answerOf(listed)).result.tools).toHaveLength(MCP_TOOLS.length);
   });
 
-  it('takes a notification with 202 and nothing, answers ping, and faults an unknown method or tool', async () => {
+  it('serves the 2026-07-28 era: server/discover, then calls each carrying its envelope, the list cached privately', async () => {
     const { app } = await server();
-    const notified = await app.inject(mcp(message('notifications/initialized', undefined, null)));
-    expect(notified.statusCode).toBe(202);
-    expect(notified.body).toBe('');
-    expect((await app.inject(mcp(message('ping')))).json()).toEqual({ jsonrpc: '2.0', id: 1, result: {} });
-    expect((await app.inject(mcp(message('resources/list')))).json()).toMatchObject({ error: { code: -32_601 } });
-    expect((await app.inject(mcp(message('toString')))).json()).toMatchObject({ error: { code: -32_601 } });
-    const unknown = await app.inject(mcp(message('tools/call', { name: 'execute_payment', arguments: {} })));
-    expect(unknown.json()).toMatchObject({ error: { code: -32_602 } });
-    expect((await app.inject(mcp(message('tools/call', { arguments: {} })))).json()).toMatchObject({
-      error: { code: -32_602 },
+    const discovered = await app.inject(modern('server/discover'));
+    expect(discovered.statusCode, discovered.body).toBe(200);
+    const { result } = ANSWERED.parse(answerOf(discovered));
+    expect(JSON.stringify(result)).toContain('2026-07-28');
+    expect(result).toMatchObject({ resultType: 'complete' });
+    const listed = await app.inject(modern('tools/list'));
+    expect(listed.statusCode, listed.body).toBe(200);
+    expect(ANSWERED.parse(answerOf(listed)).result).toMatchObject({
+      resultType: 'complete',
+      ttlMs: 300_000,
+      cacheScope: 'private',
     });
+    expect(listed.headers['mcp-session-id']).toBeUndefined();
+    const self = await callTool(app, 'get_agent', {}, ALL, 'modern');
+    expect(self.isError).toBe(false);
   });
 
-  it('refuses a batch, a malformed message, a version it doesn’t speak, a cookie, the organisation’s header and a foreign origin', async () => {
+  it('refuses a version it doesn’t speak with -32022 naming those it does, and a header that disagrees with -32020', async () => {
+    const { app } = await server();
+    const unspoken = await app.inject(
+      mcp(
+        message('tools/list', { _meta: { ...MODERN_META, 'io.modelcontextprotocol/protocolVersion': '2099-01-01' } }),
+        {
+          headers: { [PROTOCOL_HEADER]: '2099-01-01', 'mcp-method': 'tools/list' },
+        },
+      ),
+    );
+    expect(unspoken.statusCode).toBe(400);
+    const fault = FAULT.parse(answerOf(unspoken)).error;
+    expect(fault.code).toBe(-32_022);
+    // It names the 2026 revision it serves (a 2025 one is reached through initialize, never named here).
+    expect(JSON.stringify(fault.data)).toContain(PROTOCOLS[0]);
+    const mismatched = await app.inject({
+      ...modern('tools/call', { name: 'get_agent', arguments: {} }, 'get_mandate'),
+    });
+    expect(mismatched.statusCode).toBe(400);
+    expect(FAULT.parse(answerOf(mismatched)).error.code).toBe(-32_020);
+  });
+
+  it('faults an unknown method; an unknown tool is never run', async () => {
+    const { app, stubs } = await server();
+    const unknownMethod = await app.inject(mcp(message('resources/templates/flood')));
+    expect(FAULT.parse(answerOf(unknownMethod)).error.code).toBe(-32_601);
+    for (const options of [
+      mcp(message('tools/call', { name: 'execute_payment', arguments: {} })),
+      modern('tools/call', { name: 'execute_payment', arguments: {} }, 'execute_payment'),
+    ]) {
+      const unknownTool = await app.inject(options);
+      expect(unknownTool.body).toMatch(/execute_payment|-32602|isError/);
+    }
+    expect(stubs.asked).toEqual([]);
+  });
+
+  it('refuses before the SDK: a batch, a malformed message, a cookie, the organisation’s header and a foreign origin', async () => {
     const { app } = await server();
     const refused = async (options: InjectOptions) => {
       const response = await app.inject(options);
       return { status: response.statusCode, code: REFUSAL.parse(response.json()).error.code };
     };
-    expect(await refused(mcp([message('ping')]))).toEqual({ status: 400, code: 'BAD_REQUEST' });
-    expect(await refused(mcp({ ...message('ping'), jsonrpc: '1.0' }))).toEqual({ status: 400, code: 'BAD_REQUEST' });
-    expect(await refused(mcp(message('ping'), { headers: { [PROTOCOL_HEADER]: '2024-11-05' } }))).toEqual({
+    expect(await refused(mcp([message('tools/list')]))).toEqual({ status: 400, code: 'BAD_REQUEST' });
+    expect(await refused(mcp({ ...message('tools/list'), jsonrpc: '1.0' }))).toEqual({
       status: 400,
       code: 'BAD_REQUEST',
     });
-    expect(await refused(mcp(message('ping'), { headers: { cookie: `${SESSION_COOKIE}=${COOKIE}` } }))).toEqual({
+    expect(await refused(mcp(message('tools/list'), { headers: { cookie: `${SESSION_COOKIE}=${COOKIE}` } }))).toEqual({
       status: 400,
       code: 'BAD_REQUEST',
     });
-    expect(await refused(mcp(message('ping'), { headers: { [ORGANIZATION_HEADER]: ORG } }))).toEqual({
+    expect(await refused(mcp(message('tools/list'), { headers: { [ORGANIZATION_HEADER]: ORG } }))).toEqual({
       status: 400,
       code: 'BAD_REQUEST',
     });
-    expect(await refused(mcp(message('ping'), { headers: { origin: 'https://evil.example' } }))).toEqual({
+    expect(await refused(mcp(message('tools/list'), { headers: { origin: 'https://evil.example' } }))).toEqual({
       status: 403,
       code: 'ORIGIN_REFUSED',
     });
-    const spoken = await app.inject(
-      mcp(message('ping'), { headers: { [PROTOCOL_HEADER]: '2025-06-18', origin: PUBLIC_ORIGIN } }),
-    );
-    expect(spoken.statusCode).toBe(200);
+    const ours = await app.inject(mcp(message('tools/list'), { headers: { origin: PUBLIC_ORIGIN } }));
+    expect(ours.statusCode).toBe(200);
   });
 
-  it('answers GET and DELETE with 405, naming POST: no stream is opened and no session kept', async () => {
+  it('answers GET, HEAD and DELETE with 405, naming POST and Streamable HTTP: never a page or a stream', async () => {
     const { app } = await server();
-    for (const method of ['GET', 'DELETE'] as const) {
-      const response = await app.inject({
-        method,
-        url: `${MCP_PATH}?x=1`,
-        // A DELETE is a write: from another origin, the origin check refuses it first, as any write.
-        headers: { authorization: `Bearer ${ALL}`, origin: PUBLIC_ORIGIN },
-      });
-      expect(response.statusCode).toBe(405);
+    for (const method of ['GET', 'HEAD', 'DELETE'] as const) {
+      const response = await app.inject({ method, url: `${MCP_PATH}?x=1`, headers: { origin: PUBLIC_ORIGIN } });
+      expect(response.statusCode, method).toBe(405);
       expect(response.headers.allow).toBe('POST');
-      expect(response.json()).toMatchObject({ error: { code: 'METHOD_NOT_ALLOWED' } });
+      expect(response.headers['content-type']).toMatch(/^application\/json/);
+      if (method !== 'HEAD') {
+        expect(response.json()).toMatchObject({
+          error: { code: 'METHOD_NOT_ALLOWED', message: expect.stringContaining('streamable-http') as unknown },
+        });
+      }
     }
   });
 
@@ -723,36 +841,18 @@ describe('MCP over Streamable HTTP: stateless JSON-RPC (6E2)', () => {
       activity: { forOrganisation: write, forPerson: () => Promise.resolve() },
     });
     await callTool(app, 'get_spend_request', { id: REQUEST_ID });
-    await callTool(app, 'get_agent', {});
-    await app.inject(mcp(message('ping')));
-    expect(
-      rows.map(({ route, status, reason, pathIds, actor }) => ({ route, status, reason, pathIds, actor })),
-    ).toEqual([
-      {
-        route: '/v1/mcp/get_spend_request',
-        status: 404,
-        reason: 'NOT_FOUND',
-        pathIds: [REQUEST_ID],
-        actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ID },
-      },
-      {
-        route: '/v1/mcp/get_agent',
-        status: 200,
-        reason: undefined,
-        pathIds: [],
-        actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ID },
-      },
-      {
-        route: '/v1/mcp',
-        status: 200,
-        reason: undefined,
-        pathIds: [],
-        actor: { type: 'agent', id: AGENT_ID, keyId: KEY_ID },
-      },
+    await callTool(app, 'get_agent', {}, ALL, 'modern');
+    await app.inject(mcp(message('tools/list')));
+    const actor = { type: 'agent', id: AGENT_ID, keyId: KEY_ID };
+    expect(rows.map(({ route, status, reason, pathIds }) => ({ route, status, reason, pathIds, actor }))).toEqual([
+      { route: '/v1/mcp/get_spend_request', status: 404, reason: 'NOT_FOUND', pathIds: [REQUEST_ID], actor },
+      { route: '/v1/mcp/get_agent', status: 200, reason: undefined, pathIds: [], actor },
+      { route: '/v1/mcp', status: 200, reason: undefined, pathIds: [], actor },
     ]);
+    expect(rows.map((row) => row.actor)).toEqual([actor, actor, actor]);
   });
 
-  it("counts each call once against its agent's limit, and its line names the tool", async () => {
+  it("counts each call once against its agent's limit; its line names the tool, the client and its protocol", async () => {
     const capture = new LogCapture();
     const config = {
       http: {
@@ -762,7 +862,7 @@ describe('MCP over Streamable HTTP: stateless JSON-RPC (6E2)', () => {
         trustedProxies: [],
         rateLimitPerMinute: 1000,
         rateLimitPerUserPerMinute: 1000,
-        rateLimitPerAgentPerMinute: 2,
+        rateLimitPerAgentPerMinute: 3,
         rateLimitPerOrganisationPerMinute: 1000,
         webCopies: 1,
       },
@@ -783,19 +883,39 @@ describe('MCP over Streamable HTTP: stateless JSON-RPC (6E2)', () => {
     });
     try {
       await app.ready();
-      expect((await app.inject(mcp(message('tools/call', { name: 'get_mandate', arguments: {} })))).statusCode).toBe(
-        200,
+      const hostile = `hermes${String.fromCharCode(27)}${'x'.repeat(200)}`;
+      const initialized = await app.inject(
+        mcp(
+          message('initialize', {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: hostile, version: '0.23.2' },
+          }),
+        ),
       );
-      expect((await app.inject(mcp(message('ping')))).statusCode).toBe(200);
-      expect((await app.inject(mcp(message('ping')))).statusCode).toBe(429);
-      const line = capture.lines().find((entry) => entry.tool === 'get_mandate');
-      expect(line).toMatchObject({
-        event: 'http.request_completed',
-        route: MCP_PATH,
-        status: 200,
+      expect(initialized.statusCode).toBe(200);
+      expect(
+        (await app.inject(modern('tools/call', { name: 'get_mandate', arguments: {} }, 'get_mandate'))).statusCode,
+      ).toBe(200);
+      expect((await app.inject(mcp(message('tools/list')))).statusCode).toBe(200);
+      expect((await app.inject(mcp(message('tools/list')))).statusCode).toBe(429);
+      const lines = capture.lines().filter((entry) => entry.route === MCP_PATH && entry.status === 200);
+      expect(lines[0]).toMatchObject({
+        mcpEra: 'legacy',
+        mcpProtocol: '2025-06-18',
+        mcpClient: `hermes${'x'.repeat(58)}`,
+        mcpClientVersion: '0.23.2',
+      });
+      expect(lines[1]).toMatchObject({
+        tool: 'get_mandate',
         toolStatus: 404,
+        mcpEra: 'modern',
+        mcpProtocol: '2026-07-28',
+        mcpClient: 'agent-x-tests',
         agentId: AGENT_ID,
       });
+      expect(lines[2]).toMatchObject({ mcpEra: 'legacy', mcpProtocol: '2025-03-26' });
+      expect(lines[2]).not.toHaveProperty('mcpClient');
     } finally {
       await app.close();
     }
@@ -909,7 +1029,7 @@ describe('the MCP tools apart from any transport: definitions and results (6E2, 
       get_mandate: [true, false],
       list_funding_sources: [true, false],
       list_suppliers: [true, false],
-      create_spend_request: [false, false],
+      create_spend_request: [false, true],
       get_spend_request: [true, false],
       cancel_spend_request: [false, true],
     });
@@ -918,6 +1038,8 @@ describe('the MCP tools apart from any transport: definitions and results (6E2, 
       expect.arrayContaining(['mandateId', 'perOrderLimitMinor', 'supplierIds']) as unknown,
     );
     expect(JSON.stringify(mandate)).not.toContain('approvalThreshold');
+    // Inline and flat (MCP-Guide §8): no client has to follow a reference.
+    expect(JSON.stringify(definitions)).not.toMatch(/[$](?:ref|defs)/);
   });
 
   it('answers with a summary, then the structured content as JSON text, and refuses with the reason code alike', async () => {

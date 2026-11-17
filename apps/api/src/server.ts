@@ -419,10 +419,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
-    const { access = [], partnerSigned } = request.routeOptions.config;
+    const { access = [], partnerSigned, toolCalls } = request.routeOptions.config;
+    // The MCP endpoint checks a browser's origin itself (mcp.ts): a CLI client sends none, and must reach the key's 401.
     if (
       !isAgentsRequest(request.headers.authorization, access) &&
       partnerSigned !== true &&
+      toolCalls !== true &&
       isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)
     ) {
       void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
@@ -486,7 +488,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => {
-    // The MCP endpoint takes POST alone: it opens no stream (GET) and keeps no session to end (DELETE). MCP asks for 405.
+    // The MCP endpoint takes POST alone: it opens no stream (GET; HEAD, a client's preflight) and keeps no session to
+    // end (DELETE). MCP asks for 405; a client that tried SSE is told to use Streamable HTTP (MCP-Guide §8).
     if (request.url.split('?', 1)[0] === MCP_PATH) {
       return sendErrorBody(reply.header('allow', 'POST'), 405, 'METHOD_NOT_ALLOWED', request.id);
     }

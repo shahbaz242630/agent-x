@@ -209,7 +209,8 @@ export const MCP_TOOLS: readonly McpTool[] = [
       'payment you mean, and the same one again to retry it. The same as POST /v1/spend-requests.',
     twin: { method: 'POST', url: '/v1/spend-requests' },
     inputs: { querystring: NO_QUERY, body: ASKED },
-    hints: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    // Destructive: an allowed request can become a payment, so a client that asks a person first asks here (M7).
+    hints: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     run: ({ decisions }, call) =>
       askToSpend(need(decisions), call.agent, keyed(call), ASKED.parse(call.body), call.correlationId),
     summary: requestSummary,
@@ -243,7 +244,7 @@ export const MCP_TOOLS: readonly McpTool[] = [
 ];
 
 /** The argument a write tool takes its idempotency key in: the header its twin takes it in, as an argument. */
-export const IDEMPOTENCY_KEY_ARGUMENT = 'idempotencyKey';
+const IDEMPOTENCY_KEY_ARGUMENT = 'idempotencyKey';
 
 /** The parts of a twin's input, in the order its route reads them. */
 const PARTS = ['params', 'querystring', 'body'] as const;

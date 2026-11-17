@@ -1,6 +1,6 @@
 // 6E2 (BR-20; AG3): listing and calling the MCP tools (mcp-tools.ts), apart
 // from the wire that carries them and from how the caller was let in. The
-// transport (mcp.ts: JSON-RPC over Streamable HTTP) hands a call here with the
+// transport (mcp.ts: the official SDK, both protocol eras) hands a call here with the
 // agent the API already accepted; what comes back is MCP's own tool result,
 // the same over any transport or sign-in the endpoint may later take.
 //
@@ -15,11 +15,9 @@
 //   and logged with the error path's own lines.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import { REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
-import { z } from 'zod';
 
 import { pathIdsOf } from './activity-recorder.ts';
-import { API_SCHEMAS } from './api-schemas.ts';
-import { BUSY_RETRY_SECONDS, ERROR_BODY, type LogFailure, responseFor } from './errors.ts';
+import { BUSY_RETRY_SECONDS, type LogFailure, responseFor } from './errors.ts';
 import { SEND_AGAIN_CODES } from './idempotent-writes.ts';
 import {
   type AgentUseCases,
@@ -40,60 +38,6 @@ export interface ToolCalled {
   readonly reason: ReasonCode | undefined;
   /** The UUIDs its twin's path would have named. */
   readonly pathIds: readonly string[];
-}
-
-/** One argument of a tool's input schema, as tools/list shows it: JSON Schema's words for the twin's own checks. */
-const ARGUMENT = z.strictObject({
-  type: z.enum(['string', 'number', 'integer']),
-  description: z.string().optional(),
-  format: z.string().optional(),
-  pattern: z.string().optional(),
-  minimum: z.number().optional(),
-  maximum: z.number().optional(),
-});
-
-/** A refused tool's result, beside its words: its twin's error body, with the status its twin would answer. */
-const TOOL_REFUSAL = z
-  .strictObject({
-    error: ERROR_BODY.shape.error.extend({
-      status: z.int().describe('The HTTP status the same request to its REST twin would have answered.'),
-      retryAfterSeconds: z.int().optional().describe('For a busy refusal: wait this long, then send the same again.'),
-    }),
-  })
-  .register(API_SCHEMAS, { id: 'McpToolRefusal', description: 'A tool refused, as its REST twin would refuse it.' });
-
-/** The schemas of tools/list's and tools/call's results, written from the tools' own twins. */
-export function toolSchemas(tools: readonly TwinnedTool[]) {
-  const names = [...new Set(tools.flatMap(({ args }) => Object.keys(args.shape)))];
-  const [first, ...rest] = names;
-  const listed = z.strictObject({
-    tools: z.array(
-      z.strictObject({
-        name: z.string(),
-        title: z.string(),
-        description: z.string(),
-        inputSchema: z.strictObject({
-          type: z.literal('object'),
-          properties: z.strictObject(Object.fromEntries(names.map((name) => [name, ARGUMENT.optional()]))),
-          required: z.array(first === undefined ? z.never() : z.enum([first, ...rest])).optional(),
-          additionalProperties: z.literal(false),
-        }),
-        annotations: z.strictObject({
-          title: z.string(),
-          readOnlyHint: z.boolean(),
-          destructiveHint: z.boolean(),
-          idempotentHint: z.boolean(),
-          openWorldHint: z.boolean(),
-        }),
-      }),
-    ),
-  });
-  const called = z.strictObject({
-    content: z.array(z.strictObject({ type: z.literal('text'), text: z.string() })),
-    structuredContent: z.union([TOOL_REFUSAL, ...tools.map(({ twin }) => twin.answer)]),
-    isError: z.boolean(),
-  });
-  return { listed, called };
 }
 
 /**

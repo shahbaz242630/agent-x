@@ -26,6 +26,13 @@
 //   run. Then the routes served are compared with the document: a route
 //   missing from it (hidden, or for any other reason), or served twice,
 //   stops the API starting.
+// - One deliberate exception (6E2, S201): the MCP endpoint (`config.toolCalls`,
+//   mcp.ts) answers what the official MCP SDK writes, JSON-RPC whose results
+//   carry JSON Schemas and tool results no zod object can name field by
+//   field. Its answer is declared as the JSON-RPC envelope, not walked for
+//   unnamed parts, and written as text the route marks as the contract's.
+//   What its tools answer is still allowlisted: each through its REST twin's
+//   own answer schema (mcp-calls.ts).
 // - The document says how to call the API at all (api-guide.ts): versioning,
 //   sign-in, idempotency, errors, rate limits; each operation's security and
 //   tag come from its access and address.
@@ -394,7 +401,7 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
     ...inputSchemaProblems(schema),
     ...responseProblems(route),
     ...hookProblems(route, declared, written),
-    ...answerProblems(declared),
+    ...answerProblems(declared, route.config?.toolCalls === true),
     ...limitAndAccessProblems(route, keys, written),
     ...operationHeaderProblems(route, keys, written),
     ...bypassProblems(route, instance),
@@ -456,7 +463,7 @@ function hookProblems(route: RouteOptions, declared: ReadonlyMap<string, unknown
 }
 
 /** A route's own answers that could let through what they don't name, or no answer for success. */
-function answerProblems(declared: ReadonlyMap<string, unknown>): string[] {
+function answerProblems(declared: ReadonlyMap<string, unknown>, sdkWritten: boolean): string[] {
   const problems: string[] = [];
   // Allowlisted answers: every answer a route declares, but the one error body, names all it
   // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
@@ -469,6 +476,8 @@ function answerProblems(declared: ReadonlyMap<string, unknown>): string[] {
       problems.push(`its ${status} answer is not an object with named fields, declared as its schema itself`);
       continue;
     }
+    // The MCP endpoint's envelope alone: the SDK writes what is inside it (the exception above).
+    if (sdkWritten) continue;
     const unnamed = unnamedParts(response, 'answer', new Set());
     if (unnamed.length > 0)
       problems.push(`its ${status} answer lets through what it doesn't name: ${unnamed.join(', ')}`);

@@ -165,7 +165,7 @@ export const REASON_CODES = {
   MEMBER_ELSEWHERE:
     "This member also belongs to another organisation, and their login signs in to each of them, so one organisation can't reset their second factor. Contact Agent X support, who follow the runbook.",
   METHOD_NOT_ALLOWED:
-    'This address takes another method, named in the Allow header: the MCP endpoint takes POST alone, as it opens no stream and keeps no session.',
+    'Streamable HTTP only: the MCP endpoint takes POST alone, as the Allow header says. Set your client’s transport to streamable-http; there is no SSE stream and no session.',
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   NOT_ON_HOLD:
     "The organisation isn't on its integrity hold, so there is no hold to investigate or clear. Nothing was changed.",
