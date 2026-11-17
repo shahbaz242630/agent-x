@@ -11,6 +11,8 @@ export {
   AgentNameRefused,
   isAgentName,
   isLiveKey,
+  KEY_DAYS,
+  KEY_PREFIX,
   KEY_SECRET_BYTES,
   keyExpiresAt,
   keySecretMessage,
