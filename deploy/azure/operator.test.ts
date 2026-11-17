@@ -18,6 +18,7 @@ import {
   handoffRequest,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
+  personActivityExportRequest,
   REQUEST_LIMIT_BYTES,
   chainRebaseRequest,
   chainRecoveryRequest,
@@ -42,12 +43,14 @@ import {
   main,
   NO_REQUEST,
   OPERATOR_JOB,
+  personActivityExport,
   parseArguments,
   parseAuditExport,
   parseCountingContacts,
   parseFirstAdmin,
   parseFactorResetNotice,
   parseHandoff,
+  parsePersonActivityExport,
   parseRebase,
   parseRecoveryPlan,
   parseRestore,
@@ -266,10 +269,31 @@ type Ending =
   | 'contacts-listed'
   | 'contacts-none'
   | 'contacts-refused'
-  | 'contacts-other';
+  | 'contacts-other'
+  | 'person-exported'
+  | 'person-exported-sealed'
+  | 'person-exported-unsealed';
 
 /** The organisation an audit export is for. */
 const EXPORT_ORG = '0199a1b2-c3d4-7e5f-8a6b-00000000000e';
+
+/** The person whose own activity log is exported (CO8b). */
+const EXPORT_USER = '0199a0f0-0000-7000-8000-00000000a0a0';
+
+/** A person's export's lines (CO8b): the seals it found, then its file written. */
+const personExported = (id: string, sealedThrough: string | null, unsealedFrom: string | null): readonly Row[] => [
+  said({ event: 'operator.person_log_seals', exportId: id, sealedThrough, unsealedFrom }),
+  said({
+    event: 'operator.person_activity_exported',
+    exportId: id,
+    requests: 3,
+    file: `persons/${EXPORT_USER}/activity-${id}.ndjson`,
+    write: 'written',
+    bytes: 640,
+    sha256: 'ef'.repeat(32),
+  }),
+  TERMINATED,
+];
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
@@ -406,6 +430,10 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.audit_exported', exportId: OTHER_ID, write: 'written', file: 'x' }),
     TERMINATED,
   ],
+  // A person's export (CO8b): its file under the person's folder, and what it found of the seals.
+  'person-exported': (id) => personExported(id, '2026-10-19', '2026-10-20'),
+  'person-exported-sealed': (id) => personExported(id, '2026-10-31', null),
+  'person-exported-unsealed': (id) => personExported(id, null, '2026-10-01'),
   'export-unwritten': (id) => [
     said({
       event: 'operator.export_unwritten',
@@ -772,6 +800,9 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
 const SUCCEEDS: ReadonlySet<Ending> = new Set([
   'created',
+  'person-exported',
+  'person-exported-sealed',
+  'person-exported-unsealed',
   'created-other',
   'silent',
   'invited',
@@ -1058,6 +1089,7 @@ class FakeAzure implements Az {
         'invite-first-admin': 6,
         'audit-export': 10,
         'activity-export': 10,
+        'person-activity-export': 10,
         'chain-restore': 8,
         'state-restore': 8,
         'chain-rebase': 12,
@@ -2127,6 +2159,104 @@ describe('an audit export for a case (E10c)', () => {
     expect(lines).toEqual([
       `say audit-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else\n${USAGE}`,
     ]);
+  });
+});
+
+describe("CO8b one person's own activity log export for a case", () => {
+  const FROM = '2026-10-01T00:00:00Z';
+  const TO = '2026-11-01T00:00:00Z';
+  /** A case reference no test line repeats in a problem. */
+  const CASE = 'DISPUTE-2026/0043';
+  const asked = ['person-activity-export', '--user', EXPORT_USER, '--from', FROM, '--to', TO, '--reason', CASE];
+  const shape =
+    'say person-activity-export --user <user ID> --from <time> --to <time> --reason <case reference> [--id <ID>], and nothing else';
+
+  async function exportRun(script: Script = {}, id?: string) {
+    const az = new FakeAzure({ ending: 'person-exported', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await personActivityExport(
+      { userId: EXPORT_USER, from: FROM, to: TO, caseRef: CASE, id },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status, az, said: lines, id: String(words[10]) };
+  }
+
+  it('reads the person, the range, the case, and an earlier ID when one is given', () => {
+    expect(parsePersonActivityExport(asked)).toEqual({
+      userId: EXPORT_USER,
+      from: FROM,
+      to: TO,
+      caseRef: CASE,
+      id: undefined,
+    });
+    expect(parsePersonActivityExport([...asked, '--id', EARLIER_ID]).id).toBe(EARLIER_ID);
+  });
+
+  it("refuses what the operator's command would, before writing anything, never repeating the case", () => {
+    for (const argv of [asked.with(1, '--org'), asked.slice(0, -1), [...asked, '--id', EARLIER_ID, 'more']]) {
+      expect(() => parsePersonActivityExport(argv)).toThrow(shape);
+    }
+    expect(() => parsePersonActivityExport(asked.with(2, EXPORT_USER.toUpperCase()))).toThrow(
+      "the person's user ID must be a UUID, in lower case",
+    );
+    expect(() => parsePersonActivityExport(asked.with(6, '2027-10-03T00:00:00Z'))).toThrow(
+      'the range starts before it ends, 366 days at most',
+    );
+    // An organisation's export is never read as a person's, nor the other way round.
+    expect(() => parseAuditExport(asked.with(0, 'activity-export'), 'activity-export')).toThrow(UsageError);
+  });
+
+  it("writes the operator's request, and says the file written and the days not sealed yet", async () => {
+    const done = await exportRun();
+
+    expect(done.status).toBe(0);
+    expect(done.id).toMatch(UUID_V7);
+    expect(done.az.heldAtStart).toBe(personActivityExportRequest(EXPORT_USER, FROM, TO, CASE, done.id));
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.at(-1)).toBe(
+      `Exported 3 requests for the case to the store as persons/${EXPORT_USER}/activity-${done.id}.ndjson (640 bytes, SHA-256 ${'ef'.repeat(32)}). It is recorded on the platform chain, and the person's My activity page lists it. Each sealed day held to its seal; from 2026-10-20 the days aren't sealed yet, and their requests are marked unsealed.`,
+    );
+  });
+
+  it('says a range sealed whole, and a log with no seal yet', async () => {
+    const whole = await exportRun({ ending: 'person-exported-sealed' });
+    const none = await exportRun({ ending: 'person-exported-unsealed' });
+
+    expect(whole.said.at(-1)).toMatch(/ Every day of the range is sealed, and each held to its seal\.$/);
+    expect(none.said.at(-1)).toMatch(
+      / No day of the person log is sealed yet, so every request in the file is marked unsealed\.$/,
+    );
+  });
+
+  it('says an export recorded but not written, as told to the person, and how the same ID finishes it', async () => {
+    const done = await exportRun({ ending: 'export-unwritten', states: ['Failed'] }, EARLIER_ID);
+
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      `The export ${EARLIER_ID} is recorded on the platform chain and listed on the person's My activity page, but its file wasn't written: the blob service answered 503 (ServerBusy). Run the same command again with --id ${EARLIER_ID}: it records nothing twice, and writes the file once.`,
+    );
+  });
+
+  it('is read by main as its own command, saying how to use it, and ending 2, when asked it wrongly', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['person-activity-export', '--user', EXPORT_USER],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`${shape}\n${USAGE}`]);
   });
 });
 

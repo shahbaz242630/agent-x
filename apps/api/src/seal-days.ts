@@ -11,7 +11,9 @@
 //   the app (`misdated`) is never sealed: its alarm raised instead.
 // - A run seals the days from its first, in order, each only once closed past
 //   its grace, at most MOST_DAYS_A_RUN, stopping at the first not sealed.
-import { type DayDigest, nextDay, sealable, sealHolds } from '@agentx/core/modules/activity';
+//
+// Checking sealed days again is core's (activity seal-check.ts's brokenSealIn), as the operator's export checks them too.
+import { type DayDigest, nextDay, sealable } from '@agentx/core/modules/activity';
 import type { Clock } from '@agentx/core/shared-kernel';
 import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
@@ -84,40 +86,4 @@ export async function sealDaysFrom(
     day = nextDay(day);
   }
   return day === undefined;
-}
-
-/** Why a seal doesn't hold: its day's digest, a row in it written past the app (F1, G3), a seal missing before it, or a row written before the first seal. */
-export type SealBroken = 'digest' | 'misdated' | 'gap' | 'before';
-
-/**
- * Checks a page of a log's seals, newest first (each its details): each seal's day the one before the next newer
- * seal's, its day digested again and held to it; and, on a page that reaches the oldest seal, no row written before
- * its day. Why the first that doesn't hold doesn't, or undefined. An organisation's check and the person log's alike.
- */
-export async function brokenSealIn(
-  seals: readonly Readonly<Record<string, unknown>>[],
-  oldestReached: boolean,
-  {
-    digest,
-    form,
-    writtenBefore,
-  }: {
-    readonly digest: (day: string) => Promise<DayDigest>;
-    readonly form: number;
-    readonly writtenBefore: (day: string) => Promise<boolean>;
-  },
-): Promise<{ readonly day: string; readonly why: SealBroken } | undefined> {
-  let newerDay: string | undefined;
-  for (const details of seals) {
-    const { day } = details;
-    if (typeof day !== 'string') return { day: 'unnamed', why: 'gap' };
-    if (newerDay !== undefined && nextDay(day) !== newerDay) return { day, why: 'gap' };
-    const digested = await digest(day);
-    if (!sealHolds(digested, details, form)) return { day, why: 'digest' };
-    if (digested.misdated !== null) return { day, why: 'misdated' };
-    newerDay = day;
-  }
-  if (oldestReached && newerDay !== undefined && (await writtenBefore(newerDay)))
-    return { day: newerDay, why: 'before' };
-  return undefined;
 }

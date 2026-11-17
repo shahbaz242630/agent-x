@@ -57,8 +57,10 @@ export {
   personPage,
   type PersonPageToRead,
   type PersonRange,
+  personRowsWritten,
 } from './infrastructure/person-reads.ts';
-export { personDigestOfDay, PERSON_SEAL_FORM, PERSON_SEALED } from './infrastructure/person-seal.ts';
+export { personDigestOfDay, personLogAlarm, PERSON_SEAL_FORM, PERSON_SEALED } from './infrastructure/person-seal.ts';
+export { brokenSealIn, type SealBroken } from './infrastructure/seal-check.ts';
 export {
   addBackgroundExport,
   type BackgroundExport,

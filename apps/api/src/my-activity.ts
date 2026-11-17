@@ -27,7 +27,14 @@
 //   alarm (`audit.integrity_failed`, check `person_log`) and is 503
 //   INTEGRITY_FAILED; nothing is held (D3).
 // Reading the page is itself a row of the person log (the activity recorder).
-import { type ActivityCursor, type PersonActivityRow, personInRange, personPage } from '@agentx/core/modules/activity';
+import {
+  type ActivityCursor,
+  type PersonActivityRow,
+  personInRange,
+  personLogAlarm,
+  personPage,
+  personRowsWritten,
+} from '@agentx/core/modules/activity';
 import {
   EXPORT_BATCH,
   MOST_EXPORT_DAYS,
@@ -72,7 +79,7 @@ import {
   type ExportFormat,
 } from './audit-log-exports.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import { personLogAlarm, type PersonSealTables } from './person-seal.ts';
+import type { PersonSealTables } from './person-seal.ts';
 import { type Refused, refused } from './refused.ts';
 import { UseCaseRefused } from './use-case-work.ts';
 
@@ -290,20 +297,17 @@ export function createMyActivity({
     writtenUpTo: string | null,
     correlationId: string,
   ): Promise<MyExportWrite> => {
-    const lines: string[] = [];
     // Every row marked against one seal, read once: one landing mid-file would show a day half sealed.
     const sealedDay = await read(correlationId, sealedDayOf);
     if (typeof sealedDay === 'object' && sealedDay !== null) return sealedDay;
-    // undefined: the first batch, from the newest; null: none left.
-    let before: ActivityCursor | null | undefined = writtenUpTo === null ? null : undefined;
-    while (before !== null && writtenUpTo !== null) {
-      const start: ActivityCursor | undefined = before;
-      const page: Awaited<ReturnType<typeof personPage>> = await limitedTransaction(database, (tx) =>
-        personPage(tx, userId, { ...asked, before: start, writtenUpTo, limit: EXPORT_BATCH }),
-      );
-      for (const row of page.rows) lines.push(myActivityLineOf(asked.format, row, sealedDay));
-      before = page.next;
-    }
+    const rows = await personRowsWritten(
+      (work) => limitedTransaction(database, work),
+      userId,
+      asked,
+      writtenUpTo,
+      EXPORT_BATCH,
+    );
+    const lines = rows.map((row) => myActivityLineOf(asked.format, row, sealedDay));
     // Counted before exportFile puts a CSV's header in front of the lines.
     const requests = lines.length;
     const file = { id, ...exportFile('my-activity', asked, MY_ACTIVITY_CSV_HEADER, lines), requests };

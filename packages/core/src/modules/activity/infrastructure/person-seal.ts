@@ -19,13 +19,33 @@
 // The table is global (0052): no tenant holds the read, and none is needed.
 import { sql, type Transaction } from 'kysely';
 
+import type { Logger } from '@agentx/platform/observability';
+
 import { type DayDigest, digestRows, idsOfDay, SEALED_AT } from './activity-seal.ts';
+import type { SealBroken } from './seal-check.ts';
 import type { ActivityTables } from './tables.ts';
 
 type SealTx = Transaction<ActivityTables>;
 
 /** The action the person log's daily seal records on the platform chain. */
 export const PERSON_SEALED = 'access_log.person_sealed';
+
+/** Why the person log's seal can't be believed: a seal or record, a day's digest, a row misdated, a seal missing, a row before the first. */
+type PersonLogBroken = 'unsealed' | SealBroken;
+
+/**
+ * Raises the alarm for the person log (decision D3: no hold, there is no organisation to hold): the API's seal and
+ * check, a person's own page and download, and the operator's export for a case alike.
+ */
+export const personLogAlarm = (logger: Logger, reason: PersonLogBroken, day: string | null): void => {
+  logger.error('audit.integrity_failed', {
+    chain: 'platform',
+    check: 'person_log',
+    subjectType: 'person_log',
+    reason,
+    day,
+  });
+};
 
 /** The form of the person seal's lines, recorded with each seal so a later form can't be confused with this one. */
 export const PERSON_SEAL_FORM = 1;

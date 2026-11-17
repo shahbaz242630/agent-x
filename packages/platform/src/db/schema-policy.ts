@@ -616,6 +616,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'INSERT on platform_controls.audit_events',
     'INSERT on platform_controls.audit_head',
     'INSERT on platform_controls.operator_signatures',
+    // 0092 (CO8b): person-activity-export's read; a sealed day's digest reads every person's rows of that day.
+    'SELECT on access.person_requests',
     'SELECT on access.requests',
     'SELECT on audit.events',
     'SELECT on audit.heads',

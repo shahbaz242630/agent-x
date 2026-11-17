@@ -49,15 +49,19 @@ import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type CaseExportRequest, CaseExportRefused, earlierRecord, runCaseExport, theExportId } from './case-export.ts';
+import {
+  AUDIT_PLATFORM_EXPORTED,
+  type CaseExportRequest,
+  CaseExportRefused,
+  earlierRecord,
+  runCaseExport,
+  theExportId,
+} from './case-export.ts';
 import { OPERATOR, type OperatorTables } from './create-organization.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 
 /** Every table the export reaches: both chains, the names of the log's actors, and the admins' notice. */
 export type AuditExportTables = OperatorTables & LogReadTables & NotificationsTables;
-
-/** The platform's own record of an export, naming the organisation and the export. */
-const PLATFORM_EXPORTED = 'operator.audit_log_exported';
 
 /** An export of the audit log for a case, as its request asks it. */
 export type AuditExportRequest = CaseExportRequest;
@@ -93,10 +97,7 @@ function record(
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   return withSignedStates(database, orgId, services, async (tx, states) => {
-    const before = await earlierRecord(tx, states, request, {
-      action: AUDIT_LOG_EXPORTED,
-      platformAction: PLATFORM_EXPORTED,
-    });
+    const before = await earlierRecord(tx, states, request, AUDIT_LOG_EXPORTED);
     if (before !== undefined) {
       const { events, upToSeq } = before;
       return {
@@ -123,7 +124,7 @@ function record(
     ]);
     await platform.record(tx, {
       actor: OPERATOR,
-      action: PLATFORM_EXPORTED,
+      action: AUDIT_PLATFORM_EXPORTED,
       details: { orgId, exportId, caseRef, from: details.from, to: details.to, events: range.events, release, run },
     });
     return { events: range.events, upToSeq: range.upToSeq, recordedBefore: false };

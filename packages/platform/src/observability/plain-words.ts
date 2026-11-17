@@ -1044,8 +1044,8 @@ export const PLAIN_WORDS = {
     next: "Nothing to fix. The earlier run's own lines say how it ended. Don't leave the finished request on the job.",
   },
   'operator.export_unwritten': {
-    happened: 'An export of an audit or activity log for a case was recorded, but its file was not saved to storage.',
-    broke: "It is on record and the organisation's admins are told, but there is no file yet.",
+    happened: "An export of an organisation's or a person's log for a case was recorded, but its file was not saved.",
+    broke: 'It is on record and its admins or the person can see it, but there is no file yet.',
     next: "Run the job again with the same request file. If records can't be verified again, treat it as a security issue.",
   },
   'operator.failed': {
