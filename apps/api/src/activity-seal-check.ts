@@ -32,8 +32,10 @@ import { randomInt } from 'node:crypto';
 import {
   ACTIVITY_SEALED,
   type ActivityTables,
+  brokenSealIn,
   digestOfDay,
   SEAL_FORM,
+  type SealBroken,
   writtenBefore,
 } from '@agentx/core/modules/activity';
 import { type AuditTables, type LogEvent, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
@@ -41,8 +43,6 @@ import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-
-import { brokenSealIn, type SealBroken } from './seal-days.ts';
 
 /** How often a run checks the seals of those it lists, once the last run has ended. */
 export const ACTIVITY_SEAL_CHECK_EVERY_MS = 30 * 60_000;
@@ -115,7 +115,7 @@ export function createActivitySealCheck({
     });
   };
 
-  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined (seal-days.ts). */
+  /** Checks a page of seals, newest first: why the first that doesn't hold doesn't, or undefined (core's seal-check.ts). */
   const checkPage = (orgId: string, correlationId: string, events: readonly LogEvent[], oldestReached: boolean) =>
     brokenSealIn(
       events.map(({ event }) => event.details),

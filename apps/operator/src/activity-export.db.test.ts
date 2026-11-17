@@ -11,6 +11,8 @@ import path from 'node:path';
 
 import { ACTIVITY_SEALED, type ActivityTables, digestOfDay, SEAL_FORM, v7Floor } from '@agentx/core/modules/activity';
 import { createAuditTrail } from '@agentx/core/modules/audit';
+import { OPERATOR_PERSON_LOG_EXPORTED } from '@agentx/core/modules/evidence';
+import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
@@ -18,8 +20,9 @@ import { createTestDatabase, LogCapture, type TestDatabase, testLogger, writeTes
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type ActivityExportTables, exportActivityLog } from './activity-export.ts';
-import type { CaseExportRequest } from './case-export.ts';
-import { createOrganizationAsOperator } from './create-organization.ts';
+import { exportAuditLog } from './audit-export.ts';
+import { ANOTHER_RECORD, type CaseExportRequest } from './case-export.ts';
+import { createOrganizationAsOperator, OPERATOR } from './create-organization.ts';
 import { folderStore } from './evidence-store.ts';
 
 const server = inject('postgres');
@@ -345,6 +348,35 @@ describe('L7 the operator exports an activity log for a case (ADR-005 §6)', () 
       problems: ['the range holds more than 1 requests: export it in parts, each its own request'],
     });
     expect(missing.line('operator.refused')).toMatchObject({ problems: ['no organisation has this ID'] });
+    expect(await eventsOf(orgId, 'access_log.exported')).toEqual([]);
+  });
+
+  it("CO8b refuses an ID another kind of export took: a person's own log's, or another organisation's audit log's", async () => {
+    const orgId = await organization();
+    const elsewhere = await organization();
+    await requested(orgId, '2026-10-19T09:00:00.000Z');
+    const personsId = uuidV7Ids.next();
+    await createPlatformChain({ keys, ids: uuidV7Ids }).recordAlone(operator, {
+      actor: OPERATOR,
+      action: OPERATOR_PERSON_LOG_EXPORTED,
+      details: { person: PERSON, exportId: personsId },
+    });
+    const audits = requestFor(elsewhere);
+    const audited = await exportAuditLog(
+      operator,
+      { keys, ids: uuidV7Ids, logger: testLogger() },
+      folderStore(folder),
+      audits,
+    );
+
+    const onPersons = await exported(requestFor(orgId, { exportId: personsId }));
+    const onAudits = await exported(requestFor(orgId, { exportId: audits.exportId }));
+
+    expect(audited).toBe(0);
+    for (const run of [onPersons, onAudits]) {
+      expect(run.code).toBe(1);
+      expect(run.line('operator.refused')).toMatchObject({ problems: [ANOTHER_RECORD] });
+    }
     expect(await eventsOf(orgId, 'access_log.exported')).toEqual([]);
   });
 });

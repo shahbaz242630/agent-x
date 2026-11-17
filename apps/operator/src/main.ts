@@ -31,6 +31,11 @@
 //
 //   node apps/operator/src/main.ts counting-contacts --org <organisation ID>
 //
+// Or export one person's own activity log for a case (CO8b, D2,
+// person-activity-export.ts): only from a file, as an organisation's export,
+// recorded on the platform chain for their My activity page to list, each
+// sealed day checked first, its case reference never logged.
+//
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
 // the person starting the run (deploy/azure/operator.ts), since a run started
@@ -106,6 +111,7 @@ import { type EvidenceStore, folderStore } from './evidence-store.ts';
 import { type FactorResetNoticeTables, noticeFactorReset } from './factor-reset-notice.ts';
 import { changeHandoffPauseAsOperator, type HandoffPauseTables } from './handoff-pause.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
+import { exportPersonActivityLog, type PersonActivityExportTables } from './person-activity-export.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   AUDIT_EXPORT_USAGE,
@@ -127,6 +133,9 @@ import {
   NO_ANCHORS_PROBLEM,
   NO_REQUEST_PROBLEM,
   NO_STORE_PROBLEM,
+  PERSON_ACTIVITY_EXPORT,
+  PERSON_ACTIVITY_EXPORT_USAGE,
+  personActivityExportOf,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
   RESTORE_CHECK,
@@ -143,7 +152,8 @@ type CommandTables = FirstAdminTables &
   HandoffPauseTables &
   RebaseTables &
   FactorResetNoticeTables &
-  CountingContactsTables;
+  CountingContactsTables &
+  PersonActivityExportTables;
 
 const SERVICE = 'operator';
 
@@ -229,6 +239,17 @@ type Request =
       /** Sealed on both chains; never logged, nor repeated in a problem. */
       readonly caseRef: string;
       /** The export's ID: its record's on the organisation's chain. */
+      readonly id: string;
+    }
+  | {
+      readonly command: typeof PERSON_ACTIVITY_EXPORT;
+      /** The person whose own activity log is exported. */
+      readonly userId: string;
+      readonly from: Date;
+      readonly to: Date;
+      /** Sealed on the platform chain, shown to the person; never logged, nor repeated in a problem. */
+      readonly caseRef: string;
+      /** The export's ID: its record's on the platform chain. */
       readonly id: string;
     }
   | HandoffRequest
@@ -350,6 +371,10 @@ const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boole
   ['invite-first-admin', firstAdminRequest],
   ['audit-export', (words, fromFile) => caseExportAsked('audit-export', AUDIT_EXPORT_USAGE, words, fromFile)],
   ['activity-export', (words, fromFile) => caseExportAsked('activity-export', ACTIVITY_EXPORT_USAGE, words, fromFile)],
+  [
+    PERSON_ACTIVITY_EXPORT,
+    (words, fromFile) => caseExportAsked(PERSON_ACTIVITY_EXPORT, PERSON_ACTIVITY_EXPORT_USAGE, words, fromFile),
+  ],
   ['handoff-pause', (words, fromFile) => handoffAsked('handoff-pause', words, fromFile)],
   ['handoff-resume', (words, fromFile) => handoffAsked('handoff-resume', words, fromFile)],
   [FACTOR_RESET_NOTICE, factorResetNoticeAsked],
@@ -493,20 +518,22 @@ function firstAdminRequest(words: readonly string[], fromFile: boolean): Request
 }
 
 /**
- * The export for a case a request file asks for, of the audit log (Phase 3
- * E10c) or the activity log (L7), or the problems; never typed. The case
- * reference is repeated in no problem.
+ * The export for a case a request file asks for, of an organisation's audit
+ * log (Phase 3 E10c) or activity log (L7), or of one person's own activity log
+ * (CO8b, named by `--user` in place of `--org`), or the problems; never typed.
+ * The case reference is repeated in no problem.
  */
 function caseExportAsked(
-  command: 'audit-export' | 'activity-export',
+  command: 'audit-export' | 'activity-export' | typeof PERSON_ACTIVITY_EXPORT,
   usage: string,
   words: readonly string[],
   fromFile: boolean,
 ): Request | Problems {
-  const [, orgFlag, orgId, fromFlag, from, toFlag, to, reasonFlag, caseRef, idFlag, id, ...more] = words;
+  const [, subjectFlag, subject, fromFlag, from, toFlag, to, reasonFlag, caseRef, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`${command} runs only from a request file: ${usage}`);
+  const person = command === PERSON_ACTIVITY_EXPORT;
   const shaped =
-    orgFlag === '--org' &&
+    subjectFlag === (person ? '--user' : '--org') &&
     fromFlag === '--from' &&
     toFlag === '--to' &&
     reasonFlag === '--reason' &&
@@ -514,8 +541,13 @@ function caseExportAsked(
     id !== undefined &&
     more.length === 0;
   if (!shaped) return problem(`the request file holds ${usage} as a JSON list, and nothing else`);
-  // As an admin's download: the same days, the same rule (audit-log-exports.ts).
-  const asked = auditExportOf({ orgId, from, to, caseRef, id }, MOST_EXPORT_DAYS);
+  // As an admin's or a person's own download: the same days, the same rule (audit-log-exports.ts, my-activity.ts).
+  const range = { from, to, caseRef, id };
+  if (person) {
+    const asked = personActivityExportOf({ userId: subject, ...range }, MOST_EXPORT_DAYS);
+    return 'problems' in asked ? asked : { command, ...asked };
+  }
+  const asked = auditExportOf({ orgId: subject, ...range }, MOST_EXPORT_DAYS);
   return 'problems' in asked ? asked : { command, ...asked };
 }
 
@@ -628,7 +660,11 @@ async function run(
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
   if (request.command === CHAIN_RECOVERY) return chainRecovery(config, keys, request, logger);
   if (request.command === CHAIN_REBASE) return chainRebase(config, keys, request, logger);
-  if (request.command === 'audit-export' || request.command === 'activity-export') {
+  if (
+    request.command === 'audit-export' ||
+    request.command === 'activity-export' ||
+    request.command === PERSON_ACTIVITY_EXPORT
+  ) {
     return caseExport(config, keys, request, logger);
   }
   const database = await connect(config, logger);
@@ -672,11 +708,17 @@ async function run(
   }
 }
 
-/** An export for a case (E10c, L7), once its store is set and the database reached: the exit code. */
+/** The exports for a case: an organisation's audit or activity log, or one person's own activity log. */
+type CaseExportRequest = Extract<
+  Request,
+  { command: 'audit-export' | 'activity-export' | typeof PERSON_ACTIVITY_EXPORT }
+>;
+
+/** An export for a case (E10c, L7, CO8b), once its store is set and the database reached: the exit code. */
 async function caseExport(
   config: OperatorConfig,
   keys: KeyProvider,
-  request: Extract<Request, { command: 'audit-export' | 'activity-export' }>,
+  request: CaseExportRequest,
   logger: Logger,
 ): Promise<number> {
   const store = evidenceStoreOf(config);
@@ -802,18 +844,25 @@ export function evidenceStoreOf({ evidence: { directory, container } }: Operator
   return directory === null ? undefined : folderStore(directory);
 }
 
-/** Exports an organisation's audit log (Phase 3 E10c) or its activity log (L7) for a case: the exit code. */
+/**
+ * Exports an organisation's audit log (Phase 3 E10c) or its activity log (L7), or one person's own activity log
+ * (CO8b), for a case: the exit code.
+ */
 async function auditExport(
   config: OperatorConfig,
   keys: KeyProvider,
-  request: Extract<Request, { command: 'audit-export' | 'activity-export' }>,
+  request: CaseExportRequest,
   store: EvidenceStore,
   database: Database<CommandTables>,
   logger: Logger,
 ): Promise<number> {
   try {
     if (!(await schemaSoundAtStart({ database, appRole: APP_ROLE, logger }))) return 1;
-    const asked = { ...request, exportId: request.id, release: config.release, run: config.run };
+    const made = { exportId: request.id, release: config.release, run: config.run };
+    if (request.command === PERSON_ACTIVITY_EXPORT) {
+      return await exportPersonActivityLog(database, { keys, logger }, store, { ...request, ...made });
+    }
+    const asked = { ...request, ...made };
     const services = { keys, ids: uuidV7Ids, logger };
     return request.command === 'audit-export'
       ? await exportAuditLog(database, services, store, asked)
