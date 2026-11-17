@@ -67,7 +67,7 @@ export const personLogAlarm = (logger: Logger, reason: PersonLogBroken, day: str
 };
 
 /** The person log's newest sealed day (`day` null for none), believed; `tampered` (its alarm raised) for one that isn't. */
-export async function newestPersonDay(
+async function newestPersonDay(
   tx: SealTx,
   keys: KeyProvider,
   log: Logger,

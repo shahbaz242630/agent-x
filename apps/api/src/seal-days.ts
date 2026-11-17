@@ -16,7 +16,7 @@ import type { Clock } from '@agentx/core/shared-kernel';
 import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
 /** The most days one run seals a log, so one asleep for long doesn't hold up the rest. */
-export const MOST_DAYS_A_RUN = 31;
+const MOST_DAYS_A_RUN = 31;
 
 /** One log's seal: how it is digested, locked, read, counted and recorded, and what it logs. */
 export interface DaySealing<Held> {

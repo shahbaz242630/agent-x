@@ -214,7 +214,7 @@ export function createBuildGate(
 }
 
 /** A CSV download's header: one column a field of a request as shown. */
-export const MY_ACTIVITY_CSV_HEADER = [
+const MY_ACTIVITY_CSV_HEADER = [
   'id',
   'recordedAt',
   'localTime',
