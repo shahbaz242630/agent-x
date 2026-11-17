@@ -246,6 +246,21 @@ export interface GrypeReport {
 }
 
 /**
+ * Zitadel's own Go module in its server image (lead, S201): Grype reads the
+ * binary's module as a pseudo-version (v1.80.0-v2.20.0-...), so it matches
+ * advisories Zitadel fixed long ago and never clears. Zitadel's real version is
+ * judged against its advisories by the advisory job, so these findings are
+ * listed, not judged: in that image and that package only.
+ */
+const OWN_MODULE = { image: 'zitadel', package: 'github.com/zitadel/zitadel' } as const;
+const COVERED = 'covered by the advisory check';
+
+const verdictOf = (serious: boolean, acceptedUntil: string | undefined): string => {
+  if (!serious) return 'report only';
+  return acceptedUntil === undefined ? 'red' : `accepted until ${acceptedUntil}`;
+};
+
+/**
  * Grype's report on one image, judged: red on a high or critical finding with
  * a fix that no in-date accepted entry covers. Accepted entries that match no
  * finding any more are listed as stale, so the file shrinks.
@@ -276,13 +291,14 @@ export function judgeGrype(
     const name = match.artifact?.name ?? '?';
     const serious = BLOCKING.has(severity) && fixes.length > 0;
     const acceptedUntil = serious ? covering.get(findingKey(id, name))?.reviewBy : undefined;
+    const ownModule = image.key === OWN_MODULE.image && name === OWN_MODULE.package;
     return {
       key: findingKey(id, name),
       id,
       severity,
       what: `${name} ${match.artifact?.version ?? '?'}`,
       fixes,
-      verdict: serious ? (acceptedUntil === undefined ? 'red' : `accepted until ${acceptedUntil}`) : 'report only',
+      verdict: ownModule ? COVERED : verdictOf(serious, acceptedUntil),
     };
   });
   // One line an image (GitHub shows only ten annotations a step); the full list is in the summary.
@@ -312,9 +328,11 @@ export function judgeGrype(
     .filter((entry) => !found.has(findingKey(entry.id, entry.package)))
     .map((entry) => `- ${cell(entry.id)} in ${cell(entry.package)}`);
   const acceptedCount = rows.filter((row) => row.verdict.startsWith('accepted')).length;
+  const coveredCount = rows.filter((row) => row.verdict === COVERED).length;
   const head =
     `## ${image.label}\n\n\`${image.image}\`: ${String(blocking.length)} red, ${String(acceptedCount)} accepted, ` +
-    `${String(rows.length - blocking.length - acceptedCount)} report only.\n`;
+    `${String(coveredCount)} covered by the advisory check, ` +
+    `${String(rows.length - blocking.length - acceptedCount - coveredCount)} report only.\n`;
   const body =
     rows.length === 0
       ? '\nNo known vulnerabilities.\n'

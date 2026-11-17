@@ -143,7 +143,7 @@ describe('DT5: Grype reports', () => {
         'when no vendor image has the fix yet, accept it there with a reason and a review date. ' +
         "The full list is in this run's summary.",
     ]);
-    expect(verdict.summary).toContain('2 red, 0 accepted, 5 report only');
+    expect(verdict.summary).toContain('2 red, 0 accepted, 0 covered by the advisory check, 5 report only');
     expect(verdict.summary).toContain('| report only | high | CVE-4 | libssl3 3.5.8-r0 | no fix yet |');
     expect(verdict.summary).toContain('| report only | unknown | an unnamed finding | ? ? | no fix yet |');
   });
@@ -202,7 +202,7 @@ describe('DT5: accepted findings (lead, S201)', () => {
     expect(verdict.errors[0]).toContain('has 1 high or critical known vulnerability');
     expect(verdict.errors[0]).toContain('CVE-2 (high)');
     expect(verdict.errors[0]).not.toContain('CVE-1 ');
-    expect(verdict.summary).toContain('1 red, 1 accepted, 0 report only');
+    expect(verdict.summary).toContain('1 red, 1 accepted, 0 covered by the advisory check, 0 report only');
     expect(verdict.summary).toContain('| accepted until 2026-12-01 | high | CVE-1 |');
   });
 
@@ -224,6 +224,44 @@ describe('DT5: accepted findings (lead, S201)', () => {
         'whether the vendor shipped a fixed image, then move the pin, or renew the entry in ' +
         'tooling/image-watch/accepted.json with a reason and a new date.',
     ]);
+  });
+
+  it("lists Zitadel's own module in its server image as covered by the advisory check, and judges it anywhere else", () => {
+    const zitadel = byKey('zitadel');
+    const finding = (name: string): GrypeMatch[] => [
+      {
+        vulnerability: { id: 'GHSA-old', severity: 'Critical', fix: { state: 'fixed', versions: ['2.38.3'] } },
+        artifact: { name, version: 'v1.80.0-v2.20.0.20261117133830-384bb9ec96b5' },
+      },
+    ];
+    const own = judgeGrype(
+      { ...scan(), source: { target: { userInput: zitadel.image } }, matches: finding('github.com/zitadel/zitadel') },
+      zitadel,
+      [],
+      NOW,
+    );
+    expect(own.errors).toEqual([]);
+    expect(own.summary).toContain('0 red, 0 accepted, 1 covered by the advisory check, 0 report only');
+    expect(own.summary).toContain(
+      '| covered by the advisory check | critical | GHSA-old | github.com/zitadel/zitadel ',
+    );
+    // Another package in the zitadel image is judged.
+    const other = judgeGrype(
+      { ...scan(), source: { target: { userInput: zitadel.image } }, matches: finding('stdlib') },
+      zitadel,
+      [],
+      NOW,
+    );
+    expect(other.errors).toHaveLength(1);
+    // The same package in another image is judged.
+    const login = byKey('zitadel-login');
+    const elsewhere = judgeGrype(
+      { ...scan(), source: { target: { userInput: login.image } }, matches: finding('github.com/zitadel/zitadel') },
+      login,
+      [],
+      NOW,
+    );
+    expect(elsewhere.errors).toHaveLength(1);
   });
 
   it('lists an entry matching no finding as stale, so the file shrinks', () => {
