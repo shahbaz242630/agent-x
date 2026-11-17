@@ -24,6 +24,8 @@ export interface PendingChange {
   readonly organization?: string | undefined;
   /** The confirm's idempotency key, made once: a retry after no answer replays the first try's answer. */
   readonly idempotencyKey: string;
+  /** A draft's confirm (6D4b): the draft names its own step-up, so the confirm sends its body alone. */
+  readonly drafted?: true;
 }
 
 /** What the person asks: the ask's address and body, its confirm's address, and the organisation it acts in. */
@@ -226,6 +228,29 @@ const UNDECIDED = new Set(['IDEMPOTENCY_KEY_BUSY', 'RATE_LIMITED']);
 export const isUndecided = (error: unknown): boolean => error instanceof ApiError && UNDECIDED.has(error.code);
 
 /**
+ * A change its ask keeps as a draft (an invitation, a registered contact, a
+ * factor reset; 6D4b), which must go by passkey: the ask answers the draft and
+ * its step-up, and the draft's own confirm address, named by `confirmPathOf`
+ * from that answer, takes nothing (the draft names its step-up). Answered with
+ * no step-up, or no draft to name, it is refused as mustStepUp's.
+ */
+export async function byPasskeyDraft(
+  at: string,
+  label: string,
+  body: Readonly<Record<string, unknown>>,
+  organization: string,
+  confirmPathOf: (answer: unknown) => string | undefined,
+): Promise<'stepping'> {
+  const answered = await api.write<unknown>(at, { organization, body });
+  const challenge = challengeIn(answered.status, answered.body);
+  const confirmPath = confirmPathOf(answered.body);
+  if (challenge === undefined || confirmPath === undefined) throw new ApiError(200, 'STEP_UP_NOT_ASKED');
+  keep({ challenge, label, confirmPath, body: {}, organization, idempotencyKey: crypto.randomUUID(), drafted: true });
+  goTo(stepUpAddress(challenge, window.location.pathname, window.location.search));
+  return 'stepping';
+}
+
+/**
  * Confirms a change once signed in again: the ask's body with its challenge,
  * giving back the confirm's answer (a new agent key arrives in it, for the
  * caller's memory alone). Forgotten once the API has decided it, either way:
@@ -238,7 +263,7 @@ export async function confirm(pending: PendingChange): Promise<unknown> {
     const answer = await api.post<unknown>(pending.confirmPath, {
       organization: pending.organization,
       idempotencyKey: pending.idempotencyKey,
-      body: { ...pending.body, stepUpChallengeId: pending.challenge },
+      body: pending.drafted === true ? pending.body : { ...pending.body, stepUpChallengeId: pending.challenge },
     });
     forget(pending.challenge);
     return answer;
