@@ -121,14 +121,24 @@ export function useRequest(id: string, organization: string) {
 export const isCancellable = (status: Status): boolean =>
   status === 'APPROVAL_REQUIRED' || status === 'APPROVED' || status === 'INSTRUCTION_READY';
 
-/** A currency's minor digits as Intl knows them (AED: 2); 2 for a code it doesn't. */
-function minorDigits(currency: string): number {
+/** A currency's minor digits as Intl knows them (AED: 2); none for a code it can't read (6D3a types amounts by them). */
+export function knownMinorDigits(currency: string): number | undefined {
+  // Intl formats any well-formed code (`XYZ` too, as 2 digits): only one it lists as a currency is known.
+  if (
+    typeof Intl.supportedValuesOf === 'function' &&
+    !Intl.supportedValuesOf('currency').includes(currency.toUpperCase())
+  ) {
+    return undefined;
+  }
   try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
+    return new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
   } catch {
-    return 2;
+    return undefined;
   }
 }
+
+/** A currency's minor digits as Intl knows them (AED: 2); 2 for a code it doesn't. */
+export const minorDigits = (currency: string): number => knownMinorDigits(currency) ?? 2;
 
 /**
  * An amount as a statement shows it: `AED 2,500.00`. Built from the whole

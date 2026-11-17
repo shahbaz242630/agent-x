@@ -41,13 +41,13 @@ export function Choices<T extends string>({
           </label>
         ))}
       </fieldset>
-      <Broken said={broken} />
+      <FieldBroken said={broken} />
     </>
   );
 }
 
 /** What is wrong with a field, said in place once checked. */
-function Broken({ said }: { readonly said: string | undefined }) {
+export function FieldBroken({ said }: { readonly said: string | undefined }) {
   return said === undefined ? null : (
     <p className="notice" role="alert">
       {said}
@@ -80,7 +80,7 @@ export function Tick({
         />
         <span>{label}</span>
       </label>
-      <Broken said={broken} />
+      <FieldBroken said={broken} />
     </>
   );
 }
