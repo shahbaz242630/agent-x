@@ -399,7 +399,8 @@ function parseClause(text: string): Clause | undefined {
   }
   const [, operator = '=', bound = text] = /^(>=|>|<=|<|=)\s*(\S+)$/.exec(text) ?? [];
   const version = parseVersion(bound);
-  if (version === undefined) return undefined;
+  // A pre-release holding another version (`4.0.0-rc.1-4.7.0`) is a range written without spaces: unread.
+  if (version === undefined || /\d+\.\d+\.\d+/.test(version.pre.join('.'))) return undefined;
   if (operator === '=') return { kind: 'exact', version };
   return { kind: operator.startsWith('>') ? 'lower' : 'upper', version, inclusive: operator.endsWith('=') };
 }
@@ -410,13 +411,29 @@ const before = (version: Version, bound: Version, inclusive: boolean): boolean =
   inclusive ? compareVersions(version, bound) <= 0 : compareVersions(version, bound) < 0;
 
 /**
+ * A list of `< X` fixes, one per release line (`<2.63.8, <2.64.5, <2.66.11`),
+ * judged closed: a version on a listed line is affected below that line's fix;
+ * on a line not listed it is affected when any fix is above it (2.65.0 sits
+ * below 2.66.11), and clear only when it is past every fix.
+ */
+function belowFixes(version: Version, fixes: readonly { version: Version; inclusive: boolean }[]): boolean {
+  const own = fixes.find((fix) => sameLine(version, fix.version));
+  if (own !== undefined) return before(version, own.version, own.inclusive);
+  return fixes.some((fix) => compareVersions(version, fix.version) < 0);
+}
+
+/**
  * Whether a version is in an advisory's affected range, or undefined when the
  * range can't be read. Zitadel writes its ranges by hand, in several forms
- * (all published ones are in watch.test.ts): `A - B` (both ends included),
- * `>= A, <= B` (a lower bound with the upper one after it, both applying), and
- * lists of `< X` fixes, one per release line (`<2.54.9, <2.55.7`), where each
- * bound applies to its own line; a lone lower bound in such a list stays in
- * its own major version.
+ * (every one published by S201 is in watch.test.ts), read so that a doubtful
+ * reading leans to affected, never to clear:
+ * - `A - B`: both ends included; `A` alone: that version;
+ * - `>= A, <= B`: a lower bound with an upper one right after it, both applying;
+ * - one bare `< X` (or `<=`): every version below it;
+ * - two or more bare `< X`: fixes one per release line (belowFixes);
+ * - a lone `>= A` (no upper bound right after it): with bare fixes in the same
+ *   list it starts them (`< 2.41.6, < 2.40.10, >=2.39.0`: from 2.39.0, below
+ *   the fixes); with none, every version from A on.
  */
 export function inRange(range: string, version: Version): boolean | undefined {
   const clauses = range
@@ -426,30 +443,28 @@ export function inRange(range: string, version: Version): boolean | undefined {
     .map(parseClause);
   if (clauses.length === 0 || clauses.some((clause) => clause === undefined)) return undefined;
   const parsed = clauses as Clause[];
-  const several = parsed.length > 1;
-  const bareUppers = parsed.filter((clause, index) => clause.kind === 'upper' && parsed[index - 1]?.kind !== 'lower');
+  const paired = (index: number): boolean => parsed[index - 1]?.kind === 'lower' && parsed[index]?.kind === 'upper';
+  const fixes = parsed.flatMap((clause, index) => (clause.kind === 'upper' && !paired(index) ? [clause] : []));
+  const underFixes =
+    fixes.length > 1 ? belowFixes(version, fixes) : fixes.some((fix) => before(version, fix.version, fix.inclusive));
+  const loneLowers = parsed.flatMap((clause, index) => (clause.kind === 'lower' && !paired(index + 1) ? [clause] : []));
+  if (fixes.length > 0 && loneLowers.length > 0) {
+    // The lone lower bounds start the list of fixes.
+    if (loneLowers.some((low) => after(version, low.version, low.inclusive)) && underFixes) return true;
+  } else if (underFixes || loneLowers.some((low) => after(version, low.version, low.inclusive))) {
+    return true;
+  }
   return parsed.some((clause, index) => {
+    if (clause.kind === 'between') return before(version, clause.high, true) && after(version, clause.low, true);
+    if (clause.kind === 'exact') return compareVersions(version, clause.version) === 0;
     const next = parsed[index + 1];
-    switch (clause.kind) {
-      case 'between':
-        return before(version, clause.high, true) && after(version, clause.low, true);
-      case 'exact':
-        return compareVersions(version, clause.version) === 0;
-      case 'lower':
-        if (next?.kind === 'upper') {
-          return after(version, clause.version, clause.inclusive) && before(version, next.version, next.inclusive);
-        }
-        return (
-          after(version, clause.version, clause.inclusive) &&
-          (!several || version.numbers[0] === clause.version.numbers[0])
-        );
-      case 'upper':
-        if (parsed[index - 1]?.kind === 'lower') return false;
-        return (
-          before(version, clause.version, clause.inclusive) &&
-          (bareUppers.length < 2 || sameLine(version, clause.version))
-        );
-    }
+    return (
+      clause.kind === 'lower' &&
+      next?.kind === 'upper' &&
+      paired(index + 1) &&
+      after(version, clause.version, clause.inclusive) &&
+      before(version, next.version, next.inclusive)
+    );
   });
 }
 
@@ -496,7 +511,11 @@ export function judgeAdvisories(advisories: readonly Advisory[], versionText: st
         hit: inRange(each.vulnerable_version_range ?? '', version),
       }));
       const hit = verdicts.find((each) => each.hit === true);
-      const unread = verdicts.find((each) => each.hit === undefined);
+      // An advisory naming no affected versions at all can't be cleared either.
+      const unread =
+        verdicts.length === 0
+          ? { range: '(no affected versions given)', patched: '' }
+          : verdicts.find((each) => each.hit === undefined);
       const found = hit ?? unread;
       if (found === undefined) return [];
       const severity = (advisory.severity ?? 'unknown').toLowerCase();
