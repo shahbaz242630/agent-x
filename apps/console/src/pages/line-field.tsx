@@ -6,6 +6,8 @@ import { useId } from 'react';
 
 /** The most characters a note kept for good may have, as the API takes it (keptNote): a reject's reason, an unfreeze's. */
 export const NOTE_MOST = 200;
+/** The longest an amount may be typed: 2^53 − 1 in minor units, grouped, with its decimals. */
+export const AMOUNT_MOST = 24;
 
 export function LineField({
   label,

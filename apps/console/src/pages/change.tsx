@@ -45,7 +45,11 @@ export function useChange(refusal: (error: unknown) => string) {
       setBusy(false);
     }
   };
-  return { busy, said, run };
+  /** Forgets what was said: what it was about is gone (a held draft stopped, 6D3a). */
+  const clear = () => {
+    setSaid(null);
+  };
+  return { busy, said, run, clear };
 }
 
 /** What a page says after a change: done, refused or failed. */

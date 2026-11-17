@@ -44,9 +44,39 @@ export function holdTry(whose: Whose, tried: HeldTry | null): void {
   else held.set(at(whose), tried);
 }
 
+/**
+ * A mandate's draft sent with no answer (6D3a), held the same way, by person,
+ * organisation and mandate (none for a new one): asked again whole with the
+ * same key, a draft the first try made is answered as made, never made twice.
+ */
+export interface HeldDraft {
+  readonly key: string;
+  readonly body: Readonly<Record<string, unknown>>;
+}
+
+/** Whose draft: the person signed in, the organisation they act in, and the mandate (null: a new one). */
+export interface DraftWhose {
+  readonly user: string;
+  readonly organization: string;
+  readonly mandate: string | null;
+}
+
+const drafts = new Map<string, HeldDraft>();
+const draftAt = ({ user, organization, mandate }: DraftWhose) =>
+  [user.toLowerCase(), organization, mandate ?? 'new'].join('/');
+
+export const heldDraft = (whose: DraftWhose): HeldDraft | undefined => drafts.get(draftAt(whose));
+
+/** Holds a draft, or drops it with null. */
+export function holdDraft(whose: DraftWhose, tried: HeldDraft | null): void {
+  if (tried === null) drafts.delete(draftAt(whose));
+  else drafts.set(draftAt(whose), tried);
+}
+
 /** Drops every try held: the person signed out, or the page is left. */
 export function dropAllTries(): void {
   held.clear();
+  drafts.clear();
 }
 
 globalThis.addEventListener('pagehide', dropAllTries);

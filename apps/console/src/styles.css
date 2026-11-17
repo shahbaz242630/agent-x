@@ -500,6 +500,7 @@ button:disabled {
 
 input[type='text'],
 input[type='date'],
+input[type='datetime-local'],
 select {
   font: inherit;
   width: 100%;

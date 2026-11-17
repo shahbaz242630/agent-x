@@ -27,6 +27,7 @@ import {
   useMembers,
 } from '../agents.ts';
 import { isMissing } from '../api.ts';
+import { MANAGING } from '../mandates.ts';
 import { Confirm } from '../confirm.tsx';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
@@ -244,6 +245,16 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
               />
             ))}
           </ul>
+        )}
+      </section>
+      <section className="stack" aria-labelledby="agent-mandates">
+        <h2 id="agent-mandates">{t('mandates.title')}</h2>
+        <p className="muted">{t('mandates.agentIntro')}</p>
+        <Link to="/more/mandates">{t('mandates.agentList')}</Link>
+        {MANAGING.includes(role) && agent.status === 'ACTIVE' && (
+          <Link to="/more/mandates/new" search={{ agent: agent.id }}>
+            {t('mandates.agentDraft')}
+          </Link>
         )}
       </section>
       {HANDING_OVER.includes(role) && members.isSuccess && (
