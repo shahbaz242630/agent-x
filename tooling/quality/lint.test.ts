@@ -2,7 +2,7 @@
 // and parse errors always fail the run; a SonarJS rule only once it blocks.
 import { describe, expect, it } from 'vitest';
 
-import { BLOCKING, lintWith, reportByRule, reportedOnly, split } from './lint.ts';
+import { BLOCKING, lintPatterns, lintWith, reportByRule, reportedOnly, split } from './lint.ts';
 
 describe('`pnpm lint` end to end, with the real config (#222’s review)', () => {
   const lint = async (code: string) =>
@@ -161,5 +161,24 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
 
     expect(run.fails).toBe(false);
     expect(run.reported).toEqual([]);
+  });
+});
+
+describe('what the lint reads', () => {
+  const ignoring =
+    (...names: string[]) =>
+    (file: string) =>
+      Promise.resolve(names.includes(file));
+
+  it('is the whole repository when no file is named', async () => {
+    expect(await lintPatterns([], ignoring())).toEqual(['.']);
+  });
+
+  it('is the files named, less those the config ignores', async () => {
+    expect(await lintPatterns(['a.ts', 'dist/b.js', 'c.tsx'], ignoring('dist/b.js'))).toEqual(['a.ts', 'c.tsx']);
+  });
+
+  it('is nothing when every file named is ignored', async () => {
+    expect(await lintPatterns(['dist/b.js'], ignoring('dist/b.js'))).toEqual([]);
   });
 });

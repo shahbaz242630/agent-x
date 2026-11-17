@@ -1,4 +1,5 @@
-// `pnpm lint` (Rule Book §5): ESLint once over the repository, with
+// `pnpm lint` (Rule Book §5): ESLint once over the repository (or over the
+// files named, as the pre-push hook names a branch's changed ones), with
 // eslint.quality.config.js. Every finding of the repository's own rules
 // fails the run, as `eslint --max-warnings 0` did. A SonarJS finding fails it
 // only once its rule is in BLOCKING; until then it is reported, counted by
@@ -71,9 +72,26 @@ export function split(results: readonly ESLint.LintResult[]) {
   return { failing, reported, fails: failing.some((result) => result.messages.length > 0) };
 }
 
-async function main(): Promise<number> {
+/**
+ * What to lint: the whole repository, or the files named (the pre-push hook
+ * names a branch's changed files), less those the config ignores, which
+ * ESLint would otherwise warn about and so fail the run.
+ */
+export async function lintPatterns(
+  files: readonly string[],
+  ignored: (file: string) => Promise<boolean>,
+): Promise<readonly string[]> {
+  if (files.length === 0) return ['.'];
+  const kept: string[] = [];
+  for (const file of files) if (!(await ignored(file))) kept.push(file);
+  return kept;
+}
+
+async function main(files: readonly string[]): Promise<number> {
   const eslint = lintWith();
-  const { failing, reported, fails } = split(await eslint.lintFiles(['.']));
+  const patterns = await lintPatterns(files, (file) => eslint.isPathIgnored(file));
+  if (patterns.length === 0) return 0;
+  const { failing, reported, fails } = split(await eslint.lintFiles([...patterns]));
   if (reported.length > 0) {
     console.log('Garbage-code report (SonarJS, not yet blocking):');
     for (const [rule, count] of reported) console.log(`${String(count).padStart(6)}  ${rule}`);
@@ -83,4 +101,4 @@ async function main(): Promise<number> {
   return fails ? 1 : 0;
 }
 
-if (import.meta.main) process.exitCode = await main();
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
