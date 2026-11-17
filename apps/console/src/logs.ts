@@ -71,6 +71,8 @@ const LOGS = {
     filters: ['actions', 'actorType', 'actorId', 'subjectType', 'subjectId'],
   },
   access: { path: '/v1/access-log', page: '/more/access-log', key: 'rows', filters: ['actorType', 'actorId'] },
+  // A person's own activity log (6E1a, decision 26's L8): theirs alone, by the session, no organisation named.
+  mine: { path: '/v1/auth/activity', page: '/more/my-activity', key: 'rows', filters: [] },
 } as const;
 export type Log = keyof typeof LOGS;
 
@@ -149,25 +151,42 @@ const logQuery = (filters: Filters, before: string | undefined): string =>
 export const readRetry = (count: number, error: Error): boolean =>
   !isRefusal(error) && !isIntegrityFailed(error) && count < 2;
 
+/** One of Agent X's exports of a person's own log for a case (MyActivityExportByAgentX): they are always told. */
+export interface ExportByAgentX {
+  readonly id: string;
+  readonly at: string;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly requests: number | null;
+  readonly caseRef: string | null;
+}
+
 interface Page<T> {
   readonly items: readonly T[];
   readonly next: string | null;
+  /** A person's own log's page alone: Agent X's exports of it. */
+  readonly exportsByAgentX?: readonly ExportByAgentX[] | undefined;
 }
 
-/** One log, a page at a time, newest first: mounted only for an admin, as only an admin may read it (decision 24). */
-function useLog<T>(log: Log, filters: Filters, organization: string) {
+/**
+ * One log, a page at a time, newest first: an organisation's mounted only for an admin, as only an admin may read it
+ * (decision 24); a person's own with no organisation named.
+ */
+function useLog<T>(log: Log, filters: Filters, organization: string | undefined) {
   return useInfiniteQuery({
-    queryKey: ['logs', organization, log, logQuery(filters, undefined)],
+    queryKey: ['logs', organization ?? 'mine', log, logQuery(filters, undefined)],
     retry: readRetry,
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last: Page<T>) => last.next ?? undefined,
     queryFn: async ({ pageParam }): Promise<Page<T>> => {
       const { key, path } = LOGS[log];
-      const answer = await api.get<Readonly<Record<typeof key, readonly T[]>> & { readonly next: string | null }>(
-        `${path}?${logQuery(filters, pageParam)}`,
-        { organization },
-      );
-      return { items: answer[key], next: answer.next };
+      const answer = await api.get<
+        Readonly<Record<typeof key, readonly T[]>> & {
+          readonly next: string | null;
+          readonly exportsByAgentX?: readonly ExportByAgentX[];
+        }
+      >(`${path}?${logQuery(filters, pageParam)}`, { organization });
+      return { items: answer[key], next: answer.next, exportsByAgentX: answer.exportsByAgentX };
     },
   });
 }
@@ -176,6 +195,12 @@ export const useAuditLog = (filters: Filters, organization: string) => useLog<Lo
 
 export const useAccessLog = (filters: Filters, organization: string) =>
   useLog<ActivityRow>('access', filters, organization);
+
+/** One request of a person's own log (MyActivityRow): no actor, it is theirs; the organisation they named, if any. */
+export type MyActivityRow = Omit<ActivityRow, 'actor'> & { readonly claimedOrganizationId: string | null };
+
+/** The signed-in person's own activity log, no organisation named. */
+export const useMyActivity = (filters: Filters) => useLog<MyActivityRow>('mine', filters, undefined);
 
 export const FORMATS = ['csv', 'ndjson'] as const;
 export type Format = (typeof FORMATS)[number];
@@ -204,8 +229,16 @@ interface ExportFile {
   readonly content: string;
 }
 
-/** Downloads the log as filtered, in `format`, and saves the file its answer carries: the download is itself logged. */
-export async function downloadLog(log: Log, filters: Filters, format: Format, organization: string): Promise<void> {
+/**
+ * Downloads the log as filtered, in `format`, and saves the file its answer carries: the download is itself logged.
+ * A person's own names no organisation.
+ */
+export async function downloadLog(
+  log: Log,
+  filters: Filters,
+  format: Format,
+  organization: string | undefined,
+): Promise<void> {
   const { export: file } = await api.post<{ readonly export: ExportFile }>(`${LOGS[log].path}/exports`, {
     organization,
     body: exportBody(filters, format),

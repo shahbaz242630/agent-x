@@ -21,6 +21,8 @@ export {
   createPlatformChain,
   HEAD_WAIT_SECONDS,
   type PlatformChain,
+  platformEventSealed,
+  platformEventsSigned,
   type PlatformTransaction,
   type RecordedPlatformEvent,
 } from './infrastructure/platform-chain.ts';

@@ -60,6 +60,7 @@ import { contactFillFrom } from './kept-names.ts';
 import { CARRY_REST_EVERY_MS, carryRestDue, createCarryRest } from './mandate-carry-rest.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { PULSE_EVERY_MS, type JobWatch, type WatchedWork, type Work } from './job-watch.ts';
+import { PERSON_KEYS_TENANT } from './my-activity.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import {
   createOrgWorkRediscovery,
@@ -70,6 +71,8 @@ import {
   withWholePasses,
 } from './org-work.ts';
 import { eachDay, owedPasses, rotation } from './org-passes.ts';
+import { createPersonSealCheck, PERSON_SEAL_CHECK_EVERY_MS } from './person-seal-check.ts';
+import { createPersonSeal, PERSON_SEAL_EVERY_MS } from './person-seal.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
@@ -363,6 +366,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The one allowlisted fetch the notices, the login service's events and the resets send with.
   const outboundFetch = createOutboundFetch(config.outbound.allowedOrigins);
   const logged = { keys, ids: uuidV7Ids, logger };
+  const personLog = { ...logged, database, clock: systemClock };
   const removals = resetRemovalsFrom({
     list: withWholePasses(resetMarks, {
       job: 'factor_resets',
@@ -412,6 +416,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       'idempotency_sweep',
       createRetentionSweep({
         ...passes.sweep,
+        // The organisations' keys, and a person's own writes' (my-activity.ts) every run: one short statement.
+        list: async () => [...(await passes.sweep.list()), PERSON_KEYS_TENANT],
         sweep: (orgId, most) => sweepExpiredKeys(database, orgId, most),
         logger,
         deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
@@ -577,6 +583,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       ACTIVITY_SEAL_CHECK_EVERY_MS,
       LONG_MS,
     ),
+    // Each closed day of the person log sealed on the platform chain, and the seals checked again (6E1a, L8).
+    job('person_seal', createPersonSeal(personLog), PERSON_SEAL_EVERY_MS, LONG_MS),
+    job('person_seal_check', createPersonSealCheck(personLog), PERSON_SEAL_CHECK_EVERY_MS, LONG_MS),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).
     job(
       'org_work_rediscovery',

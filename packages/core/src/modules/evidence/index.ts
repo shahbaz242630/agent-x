@@ -1,5 +1,6 @@
-// The evidence module (ADR-004; Phase 3 E10, L5): the audit log and the
-// activity log as an organisation is shown them, their actors named, for the
+// The evidence module (ADR-004; Phase 3 E10, L5; Phase 6 6E1a): the audit log
+// and the activity log as an organisation is shown them, their actors named,
+// and one person's own activity log as they are shown it, for the
 // API's pages and downloads and the operator's export for a case (ADR-005 §6). It only
 // reports: it reads other modules' public queries, and no module imports it.
 export {
@@ -7,6 +8,7 @@ export {
   activityNdjsonLine,
   type ActivityReadTables,
   activityShown,
+  clientShown,
   heldActivityPage,
   type HeldActivityPage,
   localTimeOf,
@@ -28,6 +30,18 @@ export {
   MOST_EXPORTED_EVENTS,
 } from './domain/exports.ts';
 export { type ActorName, createActorNamer, SHOWN_FROM } from './infrastructure/actor-names.ts';
+export {
+  newestPersonSeal,
+  OPERATOR_PERSON_LOG_EXPORTED,
+  operatorExportsOf,
+  personActivityShown,
+  PERSON_LOG_EXPORTED,
+  personExportsSince,
+  type PersonLogEvent,
+  personLogEventOf,
+  personNdjsonLine,
+  personSealsPage,
+} from './infrastructure/person-log.ts';
 export {
   actorsOf,
   eventShown,

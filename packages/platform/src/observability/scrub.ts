@@ -187,10 +187,11 @@ const WHOLE_UUID = new RegExp(`^${UUID}$`);
  * An export's file name on its own, as the operator logs it: an audit export's
  * `<organisation ID>/<export ID>.ndjson` (E10c) or an activity log's
  * `<organisation ID>/activity-<export ID>.ndjson` (L7; S197, a random ID's
- * groups read as an IBAN): IDs and nothing else, let through as one ID is, so
- * the name it says is the name in the store.
+ * groups read as an IBAN), or a person's own activity log's
+ * `persons/<user ID>/activity-<export ID>.ndjson` (6E1a): IDs and nothing
+ * else, let through as one ID is, so the name it says is the name in the store.
  */
-const WHOLE_EXPORT_FILE = new RegExp(String.raw`^${UUID}/(?:activity-)?${UUID}\.ndjson$`);
+const WHOLE_EXPORT_FILE = new RegExp(String.raw`^(?:${UUID}/(?:activity-)?|persons/${UUID}/activity-)${UUID}\.ndjson$`);
 
 function trailingPunctuation(text: string): number {
   let length = 0;
