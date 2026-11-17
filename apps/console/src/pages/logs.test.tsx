@@ -771,3 +771,103 @@ describe('the access log’s background downloads (decision 31)', () => {
     expect(await screen.findByText(words)).toBeDefined();
   });
 });
+
+describe('the security events (6E1b, CO7b)', () => {
+  const securityEvent = (overrides: Record<string, unknown> = {}) => ({
+    id: '0199a0f0-0000-7000-8000-0000000000e1',
+    kind: 'rate_limited',
+    reason: 'per_agent',
+    ip: '203.0.113.7',
+    actor: { type: 'agent', id: AGENT, name: 'Phase 4 demo agent' },
+    windowStart: AT,
+    count: 12,
+    ...overrides,
+  });
+  const page = (list: readonly unknown[], next: string | null = null): Answer => ({
+    status: 200,
+    body: { rows: list, next },
+  });
+
+  it('is reached from More by an admin, and shows no one else a way to it, reading nothing for them', async () => {
+    signedIn();
+    answer('GET /v1/security-events', page([]));
+    open('/more');
+    await userEvent.click(await screen.findByRole('link', { name: 'Security events' }));
+    expect(await screen.findByRole('heading', { name: 'Security events' })).toBeDefined();
+    expect(await screen.findByText('Nothing in this range matches these filters.')).toBeDefined();
+    expect(sentTo('GET', `/v1/security-events?${DEFAULT}`)).toHaveLength(1);
+    cleanup();
+    sent = [];
+    signedIn('approver');
+    open('/more');
+    expect(await screen.findByRole('heading', { name: 'More' })).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Security events' })).toBeNull();
+    cleanup();
+    open('/more/security-events');
+    expect(await screen.findByText(/Only an admin can see this organisation's logs/)).toBeDefined();
+    expect(sent.filter((one) => one.path.startsWith('/v1/security-events'))).toHaveLength(0);
+  });
+
+  it('shows each count: what happened, the minute, how many, who, and its address folded away as a clue', async () => {
+    signedIn();
+    answer('GET /v1/security-events', page([securityEvent()]));
+    open('/more/security-events');
+    const item = found((await screen.findByText('per_agent')).closest('li'));
+    expect(within(item).getByText(/Refused for asking too often/)).toBeDefined();
+    expect(within(item).getByText(/12 times in this minute/)).toBeDefined();
+    expect(within(item).getByText(/Phase 4 demo agent/)).toBeDefined();
+    const clues = found(within(item).getByText('Where it came from').closest('details'));
+    expect(clues.open).toBe(false);
+    expect(within(clues).getByText('203.0.113.7')).toBeDefined();
+    expect(screen.getByText(/a clue, never proof/)).toBeDefined();
+  });
+
+  it('names someone with no name by what they are, one about no one as such, and an address not known', async () => {
+    signedIn();
+    answer(
+      'GET /v1/security-events',
+      page([
+        securityEvent({
+          kind: 'sign_in_failed',
+          reason: 'step_up_code_rejected',
+          actor: { type: 'user', id: ME, name: null },
+        }),
+        securityEvent({ id: '0199a0f0-0000-7000-8000-0000000000e2', reason: 'per_user', ip: null, actor: null }),
+      ]),
+    );
+    open('/more/security-events');
+    const failed = found((await screen.findByText('step_up_code_rejected')).closest('li'));
+    expect(within(failed).getByText(/Passkey check failed/)).toBeDefined();
+    expect(within(failed).getByText(/A person/)).toBeDefined();
+    const nobody = found(screen.getByText('per_user').closest('li'));
+    expect(within(nobody).getByText('No one in particular')).toBeDefined();
+    expect(within(nobody).getByText('Not known')).toBeDefined();
+  });
+
+  it('filters by kind into the address, and pages older by its cursor', async () => {
+    signedIn();
+    const cursor = `2026-11-15T05:00:00.000Z_${REQUEST}`;
+    answer('GET /v1/security-events', page([securityEvent()], cursor), page([]));
+    const router = open('/more/security-events');
+    await userEvent.click(await screen.findByRole('button', { name: 'Show older' }));
+    await waitFor(() => {
+      expect(sentTo('GET', `/v1/security-events?${DEFAULT}&before=${encodeURIComponent(cursor)}`)).toHaveLength(1);
+    });
+    expect(screen.getByLabelText('What happened').querySelectorAll('option')).toHaveLength(3);
+    await userEvent.selectOptions(screen.getByLabelText('What happened'), 'sign_in_failed');
+    await userEvent.click(screen.getByRole('button', { name: 'Show' }));
+    await waitFor(() => {
+      expect(router.state.location.searchStr).toBe('?from=2026-11-09&to=2026-11-16&kind=sign_in_failed');
+    });
+    await waitFor(() => {
+      expect(sentTo('GET', `/v1/security-events?${DEFAULT}&kind=sign_in_failed`)).toHaveLength(1);
+    });
+  });
+
+  it('says a page failing its check in words', async () => {
+    signedIn();
+    answer('GET /v1/security-events', refusal(503, 'INTEGRITY_FAILED'));
+    open('/more/security-events');
+    expect(await screen.findByText(/failed Agent X's integrity check/)).toBeDefined();
+  });
+});

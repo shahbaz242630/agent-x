@@ -139,12 +139,21 @@ describe('the integrity passes as the jobs side wires them, each bound (4D2e D11
     expect(await listedOnce(passes.seal)).toEqual([]);
   });
 
-  it('the idempotency sweep: every organisation once a UTC day, from midnight', async () => {
-    const { clock, passes } = passesAt('2026-11-04T23:59:00.000Z');
+  it.each(['sweep', 'securitySweep'] as const)(
+    'the %s (idempotency keys; each organisation’s own security events, 6E1b): every organisation once a UTC day, from midnight',
+    async (which) => {
+      const { clock, passes } = passesAt('2026-11-04T23:59:00.000Z');
+      expect(await listedOnce(passes[which])).toEqual(ALL);
+      clock.advanceBy(MINUTE - 1);
+      expect(await listedOnce(passes[which])).toEqual([]);
+      clock.advanceBy(1);
+      expect(await listedOnce(passes[which])).toEqual(ALL);
+    },
+  );
+
+  it('owes the security events’ sweep apart from the idempotency sweep: one finished leaves the other owed', async () => {
+    const { passes } = passesAt('2026-11-04T10:00:00.000Z');
     expect(await listedOnce(passes.sweep)).toEqual(ALL);
-    clock.advanceBy(MINUTE - 1);
-    expect(await listedOnce(passes.sweep)).toEqual([]);
-    clock.advanceBy(1);
-    expect(await listedOnce(passes.sweep)).toEqual(ALL);
+    expect(await passes.securitySweep.list()).toEqual(ALL);
   });
 });

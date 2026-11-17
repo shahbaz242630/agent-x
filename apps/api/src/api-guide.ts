@@ -112,8 +112,8 @@ export const TAGS: readonly {
   },
   {
     name: 'Logs',
-    description: "The organisation's audit log and access log, to read and export.",
-    prefixes: ['/v1/audit-log', '/v1/access-log'],
+    description: "The organisation's audit log, access log and security events, to read and export.",
+    prefixes: ['/v1/audit-log', '/v1/access-log', '/v1/security-events'],
   },
   {
     name: 'Sign-in',

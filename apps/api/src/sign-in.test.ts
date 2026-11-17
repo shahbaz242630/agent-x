@@ -19,7 +19,7 @@ import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
-import { SESSION_CHALLENGE } from './access.ts';
+import { type FindMembership, ORGANIZATION_HEADER, SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
 import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
@@ -114,7 +114,12 @@ afterEach(async () => {
 
 async function server(
   signIn: SignIn | undefined,
-  options: { perAddress?: number; perUser?: number; loginSessions?: LoginSessions } = {},
+  options: {
+    perAddress?: number;
+    perUser?: number;
+    loginSessions?: LoginSessions;
+    findMembership?: FindMembership;
+  } = {},
 ) {
   const config = {
     http: {
@@ -147,6 +152,7 @@ async function server(
         ? undefined
         : { service: signIn, sessionSeconds: SESSION_SECONDS, loginSessions: options.loginSessions },
     securityEvents: { note: (event) => noted.push(event) },
+    findMembership: options.findMembership,
   });
   servers.push(app);
   return { app, capture, noted };
@@ -705,7 +711,60 @@ describe("SEC-AV-07 B2-5c each signed-in person's own rate limit, beside their a
 
     await app.inject(fromAddress(SESSION_ID, '203.0.113.9'));
 
-    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.9', userId: USER_ID }]);
+    expect(noted).toEqual([
+      { kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.9', userId: USER_ID, orgId: null },
+    ]);
+  });
+
+  describe("ties a refusal to an organisation only once the person's membership there is found active (CO7b)", () => {
+    const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
+    const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000abce';
+    /** An admin's route, naming an organisation: the person is an active member of ORG alone, a deactivated one of OTHER_ORG. */
+    async function member() {
+      const standIn = new StandIn();
+      standIn.live.set(SESSION_ID, LIVE);
+      return server(standIn, {
+        perAddress: 100,
+        perUser: 2,
+        findMembership: (orgId) =>
+          Promise.resolve(
+            orgId.toLowerCase() === ORG
+              ? { outcome: 'active', id: '0199a0f0-0000-7000-8000-0000000000c1', role: 'admin' }
+              : orgId.toLowerCase() === OTHER_ORG
+                ? { outcome: 'deactivated', id: '0199a0f0-0000-7000-8000-0000000000c2' }
+                : { outcome: 'none' },
+          ),
+      });
+    }
+    const asking = (orgId: string, url = '/v1/access-log') => ({
+      url,
+      headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}`, [ORGANIZATION_HEADER]: orgId.toUpperCase() },
+      remoteAddress: '203.0.113.9',
+    });
+
+    it.each([
+      ['an organisation they are an active member of, by its ID in lower case', ORG, ORG],
+      ['an organisation they are not active in: none', OTHER_ORG, null],
+      ['an organisation they are not in at all: none', '0199a0f0-0000-7000-8000-00000000abcf', null],
+    ])('on %s', async (_what, orgId, tied) => {
+      const { app, noted } = await member();
+      for (let i = 0; i < 2; i += 1) await app.inject(asking(orgId));
+      const refused = await app.inject(asking(orgId));
+
+      expect(refused.statusCode).toBe(429);
+      expect(noted).toEqual([
+        { kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.9', userId: USER_ID, orgId: tied },
+      ]);
+    });
+
+    it("on a person's own route, though the request names an organisation: none", async () => {
+      const { app, noted } = await member();
+      for (let i = 0; i < 3; i += 1) await app.inject(asking(ORG, '/v1/auth/session'));
+
+      expect(noted).toEqual([
+        { kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.9', userId: USER_ID, orgId: null },
+      ]);
+    });
   });
 
   it('counts no one who is not signed in, whose requests are refused as they were', async () => {
@@ -806,6 +865,25 @@ describe('B3-3a stepping up: signing in again to confirm a change', () => {
     expect(capture.lines()).toContainEqual(
       expect.objectContaining({ event: 'auth.step_up_failed', failure: 'challenge_missing', userId: USER_ID }),
     );
+  });
+
+  it('notes a failed step-up tied to no organisation, though the request names one the person is active in (CO7b)', async () => {
+    const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new StepUpFailed('challenge_missing', 'test');
+    const { app, noted } = await server(standIn, {
+      findMembership: () =>
+        Promise.resolve({ outcome: 'active', id: '0199a0f0-0000-7000-8000-0000000000c1', role: 'admin' }),
+    });
+    const request = starting(`?challenge=${CHALLENGE}`);
+
+    const response = await app.inject({ ...request, headers: { ...request.headers, [ORGANIZATION_HEADER]: ORG } });
+
+    expect(response.statusCode).toBe(403);
+    expect(noted).toEqual([
+      { kind: 'sign_in_failed', reason: 'step_up_challenge_missing', ip: '127.0.0.1', userId: USER_ID },
+    ]);
   });
 
   it('answers a login service that cannot be reached as SIGN_IN_UNAVAILABLE, noting nothing', async () => {

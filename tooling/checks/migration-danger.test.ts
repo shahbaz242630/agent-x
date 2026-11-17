@@ -48,6 +48,7 @@ describe("the repository's migrations", () => {
       '0067_order_key_full_fold.sql row-security-off',
       '0079_operator_role.sql guarded-policy',
       '0079_operator_role.sql row-security-off',
+      '0091_security_org_events.sql guarded-policy',
     ]);
   });
 });

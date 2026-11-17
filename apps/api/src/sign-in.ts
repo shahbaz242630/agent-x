@@ -261,6 +261,7 @@ export function registerSignIn(
     logger
       .child({ correlationId: request.id })
       .warn('auth.step_up_failed', userId === undefined ? { failure } : { failure, userId });
+    // Tied to no organisation: the step-up routes are a person's own, and verify none (6E1b).
     securityEvents.note({
       kind: 'sign_in_failed',
       reason: `step_up_${failure}`,

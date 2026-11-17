@@ -60,9 +60,19 @@ export const eventShown = (
   prevHash,
 });
 
-/** An event as an NDJSON download holds it: one line, its facts as an object and its chain hashes, to check outside Agent X. */
-export const ndjsonLine = (logged: LogEvent, names: ReadonlyMap<string, ActorName>): string =>
-  JSON.stringify({ ...eventShown(logged, names), details: Object.fromEntries(factsShown(logged.event.details)) });
+/**
+ * An event as an NDJSON download holds it: one line, its facts as an object and its chain hashes, to check outside
+ * Agent X (tooling/chain-check). `sealOmitted` says a signed state's seal was taken out of its facts, so an outside
+ * check knows it can't recompute that event's hash, rather than taking it for an edited one (6E1b, CO7b).
+ */
+export const ndjsonLine = (logged: LogEvent, names: ReadonlyMap<string, ActorName>): string => {
+  const facts = factsShown(logged.event.details);
+  return JSON.stringify({
+    ...eventShown(logged, names),
+    details: Object.fromEntries(facts),
+    sealOmitted: facts.length !== Object.keys(logged.event.details).length,
+  });
+};
 
 /** Who acted in each of `events`, for a namer. */
 export const actorsOf = (events: readonly LogEvent[]) => events.map(({ event }) => event.actor);

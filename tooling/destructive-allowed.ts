@@ -302,6 +302,16 @@ export const ALLOWED: readonly Allowed[] = [
     why: 'security events past their retention, never under 30 days',
   },
   {
+    file: 'packages/core/src/modules/security-events/infrastructure/security-events.ts',
+    match: ".deleteFrom('security.org_events')",
+    guard: 'retentionDays < LEAST_RETENTION_DAYS',
+    proof: {
+      file: 'packages/core/src/modules/security-events/infrastructure/security-events.db.test.ts',
+      title: "keeps an organisation's own events at least",
+    },
+    why: "one organisation's own security events past their retention, inside its transaction, never under 30 days",
+  },
+  {
     file: 'packages/platform/src/db/idempotency.ts',
     match: 'delete from idempotency.keys',
     guard: 'IDEMPOTENCY_RETENTION_DAYS',

@@ -68,9 +68,12 @@ export interface Field {
   readonly options?: readonly string[];
 }
 
-/** What a select's option says: '' is anyone; an actor type its kind. */
-const optionText = (option: string): string =>
-  option === '' ? t('logs.anyone') : t(`logs.actor.${option as 'user' | 'agent' | 'system'}`);
+/** What a select's option says: '' is anyone (any kind, for a kind); an actor type its kind; a security event's kind its name. */
+function optionText(name: FilterName, option: string): string {
+  if (name === 'kind')
+    return t(`securityEvents.kind.${(option || 'any') as 'any' | 'rate_limited' | 'sign_in_failed'}`);
+  return option === '' ? t('logs.anyone') : t(`logs.actor.${option as 'user' | 'agent' | 'system'}`);
+}
 
 /** The filters to set, applied together: kept as typed while typed, sent to the address on Apply. */
 export function FilterForm({
@@ -121,7 +124,7 @@ export function FilterForm({
             <select {...bound(name)}>
               {options.map((option) => (
                 <option key={option} value={option}>
-                  {optionText(option)}
+                  {optionText(name, option)}
                 </option>
               ))}
             </select>

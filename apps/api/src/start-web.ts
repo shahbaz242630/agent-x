@@ -38,6 +38,7 @@ import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createActivityPages } from './activity-log.ts';
+import { createSecurityEventPages } from './security-events.ts';
 import { createActivityLogExports } from './activity-log-exports.ts';
 import { createAuditLog } from './audit-log.ts';
 import { createAuditLogExports } from './audit-log-exports.ts';
@@ -223,6 +224,7 @@ export async function startWeb(
     auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
     auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     activityPages: createActivityPages({ database, keys, ids: uuidV7Ids, logger, directory }),
+    securityEventPages: createSecurityEventPages({ database, keys, ids: uuidV7Ids, logger, directory }),
     backgroundExports: downloads.exports,
     downloadFiles: downloads.files,
     activityLogExports: createActivityLogExports({

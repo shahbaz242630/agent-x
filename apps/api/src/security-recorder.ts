@@ -3,14 +3,19 @@
 // `security.events` (B2-5a) a batch at a time, so a flood is a count, not a
 // row per request.
 //
-// - `note` counts one event under its kind, reason, address, person and
-//   minute. It never throws and never waits: it runs inside requests, the
+// - `note` counts one event under its kind, reason, address, person, agent,
+//   organisation and minute. It never throws and never waits: it runs inside requests, the
 //   rate limit's refusals included.
 // - The address is the client's full address, a port or brackets taken off as
 //   the rate limit does (`clientAddress`), never the rate limit's /64 key.
 // - At most `mostCounts` counts are held. Past that, a new address's events
 //   are counted without their address or person, so a flood from many
-//   addresses still shows, and memory stays bounded.
+//   addresses still shows, and memory stays bounded. Such a count is tied to
+//   no organisation either (6E1b): it goes to the global table.
+// - The organisation (6E1b, CO7b) is one the API verified: a member's once
+//   their membership was found active, an agent's by its accepted key. A
+//   batch is one organisation's counts or none's: it is written in that one
+//   organisation's tenant transaction, whose wall refuses any other's row.
 // - `run` writes every count whose minute has ended (the API runs it each
 //   minute); `flush` writes them all (the API runs it as it stops, once the
 //   last request has been answered). The run begins no batch once the API is
@@ -47,6 +52,10 @@ export interface SecurityEventNote {
   readonly ip: string | undefined;
   /** The person, when the event is about a signed-in one. */
   readonly userId?: string | undefined;
+  /** The organisation the API verified the person or agent in (6E1b); none and no organisation ever sees it. */
+  readonly orgId?: string | null | undefined;
+  /** The agent refused, with its organisation. */
+  readonly agentId?: string | undefined;
 }
 
 /** Where the API's routes and hooks note security events. */
@@ -90,7 +99,32 @@ interface Held {
 }
 
 const keyOf = (event: Omit<SecurityEvent, 'count'>): string =>
-  JSON.stringify([event.kind, event.reason, event.ip ?? null, event.userId ?? null, event.windowStart.getTime()]);
+  JSON.stringify([
+    event.kind,
+    event.reason,
+    event.ip ?? null,
+    event.userId ?? null,
+    event.orgId ?? null,
+    event.agentId ?? null,
+    event.windowStart.getTime(),
+  ]);
+
+/** The counts as batches to write: each one organisation's or none's, and at most MOST_EVENTS_A_BATCH. */
+function batchesOf(taken: readonly SecurityEvent[]): SecurityEvent[][] {
+  const byOrg = new Map<string | undefined, SecurityEvent[]>();
+  for (const event of taken) {
+    const events = byOrg.get(event.orgId);
+    if (events === undefined) byOrg.set(event.orgId, [event]);
+    else events.push(event);
+  }
+  return [...byOrg.values()].flatMap((events) => {
+    const batches: SecurityEvent[][] = [];
+    for (let start = 0; start < events.length; start += MOST_EVENTS_A_BATCH) {
+      batches.push(events.slice(start, start + MOST_EVENTS_A_BATCH));
+    }
+    return batches;
+  });
+}
 
 export function createSecurityRecorder({
   write,
@@ -104,7 +138,7 @@ export function createSecurityRecorder({
   /** Writes one after another, so a flush never races the minute's run. */
   let writing: Promise<void> = Promise.resolve();
   /** Counts taken out for a write and not yet written or put back: what a crash mid-write would lose (MO4). */
-  let inFlight: readonly SecurityEvent[] = [];
+  let inFlight: { batches: readonly (readonly SecurityEvent[])[]; from: number } = { batches: [], from: 0 };
 
   const add = (event: Omit<SecurityEvent, 'count'>, count: number): void => {
     let key = keyOf(event);
@@ -112,7 +146,7 @@ export function createSecurityRecorder({
     if (entry === undefined && held.size >= mostCounts) {
       // Full: counted all the same, without what makes one count differ from another.
       unaddressed += count;
-      event = { ...event, ip: undefined, userId: undefined };
+      event = { ...event, ip: undefined, userId: undefined, orgId: undefined, agentId: undefined };
       key = keyOf(event);
       entry = held.get(key);
     }
@@ -141,30 +175,38 @@ export function createSecurityRecorder({
    * back; the one under way is left to finish, so no count is written twice.
    */
   const writeBefore = async (before: number, stopNow: () => boolean): Promise<void> => {
-    const taken = takeBefore(before);
-    inFlight = taken;
+    const batches = batchesOf(takeBefore(before));
+    /** Puts the batches from `index` on back to be written next run, and says how many events they held. */
+    const putBack = (index: number): number => {
+      let events = 0;
+      for (const batch of batches.slice(index)) {
+        for (const event of batch) add(event, event.count);
+        events += batch.length;
+      }
+      return events;
+    };
+    // What a crash would lose: the batches from `from` on (a place, never a copy of the rest each batch).
+    inFlight = { batches, from: 0 };
     try {
-      for (let start = 0; start < taken.length; start += MOST_EVENTS_A_BATCH) {
+      for (const [index, batch] of batches.entries()) {
         if (stopNow()) {
-          for (const event of taken.slice(start)) add(event, event.count);
+          putBack(index);
           return;
         }
-        const batch = taken.slice(start, start + MOST_EVENTS_A_BATCH);
         try {
           await write(batch);
         } catch (error) {
           if (error instanceof RangeError) {
             // Malformed by our own hand: writing it again would fail again.
             logger.error('security.events_refused', { events: batch.length, err: error });
-            inFlight = taken.slice(start + MOST_EVENTS_A_BATCH);
+            inFlight.from = index + 1;
             continue;
           }
-          const left = taken.slice(start);
-          for (const event of left) add(event, event.count);
-          logger.warn('security.events_write_failed', { events: left.length, err: error });
+          const left = putBack(index);
+          logger.warn('security.events_write_failed', { events: left, err: error });
           return;
         }
-        inFlight = taken.slice(start + MOST_EVENTS_A_BATCH);
+        inFlight.from = index + 1;
         logger.info('security.events_written', {
           events: batch.length,
           count: batch.reduce((sum, event) => sum + event.count, 0),
@@ -172,7 +214,7 @@ export function createSecurityRecorder({
       }
     } finally {
       // Written, refused or put back in held: none is in flight now.
-      inFlight = [];
+      inFlight = { batches: [], from: 0 };
     }
   };
 
@@ -195,14 +237,15 @@ export function createSecurityRecorder({
   /** Whatever is still held is lost as the process ends: counted here, so the log says what the store never got. */
   const dropHeld = (): void => {
     // A crash mid-write: the batch under way may or may not have been written, and those after it never will be.
-    const flying = inFlight.reduce((sum, event) => sum + event.count, 0);
+    const lost = inFlight.batches.slice(inFlight.from).flat();
+    const flying = lost.reduce((sum, event) => sum + event.count, 0);
     if (held.size === 0 && flying === 0) return;
     let count = 0;
     for (const entry of held.values()) count += entry.count;
     logger.error('security.events_unwritten', {
       events: held.size,
       count,
-      ...(flying > 0 && { inFlightEvents: inFlight.length, inFlightCount: flying }),
+      ...(flying > 0 && { inFlightEvents: lost.length, inFlightCount: flying }),
     });
     held.clear();
   };
@@ -215,6 +258,8 @@ export function createSecurityRecorder({
           reason: note.reason,
           ip: clientAddress(note.ip),
           userId: note.userId,
+          orgId: note.orgId?.toLowerCase(),
+          agentId: note.agentId,
           windowStart: new Date(thisMinute()),
         },
         1,

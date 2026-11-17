@@ -19,9 +19,40 @@
 // nothing (a retry of it is answered, as it would have been a day earlier).
 // Every run ends with one line, so a sweep that has stopped can be told from
 // one with nothing to delete.
-import type { Logger } from '@agentx/platform/observability';
+//
+// The same sweep deletes each organisation's own security events past their
+// retention (6E1b, CO7b; 0091), under lines of its own (`lines`).
+import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
 import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
+
+/** What a sweep's lines are called, and what its count names. */
+interface SweepLines {
+  readonly failed: ProblemEvent;
+  readonly crashed: ProblemEvent;
+  readonly swept: `${string}.${string}`;
+  readonly done: `${string}.${string}`;
+  /** The count's field on `swept` and `done`. */
+  readonly counted: string;
+}
+
+/** The idempotency keys' sweep's lines (B1e-3). */
+const IDEMPOTENCY_LINES: SweepLines = {
+  failed: 'idempotency.sweep_failed',
+  crashed: 'idempotency.sweep_crashed',
+  swept: 'idempotency.swept',
+  done: 'idempotency.sweep_done',
+  counted: 'keys',
+};
+
+/** The organisations' own security events' sweep's lines (6E1b). */
+export const SECURITY_ORG_EVENT_LINES: SweepLines = {
+  failed: 'security.org_events_sweep_failed',
+  crashed: 'security.org_events_sweep_crashed',
+  swept: 'security.org_events_swept',
+  done: 'security.org_events_sweep_done',
+  counted: 'events',
+};
 
 export interface RetentionSweepOptions {
   /** The organisations to sweep this run, by ID. */
@@ -37,6 +68,8 @@ export interface RetentionSweepOptions {
   readonly batch: number;
   /** How many batches one organisation gets in a run: the rest wait for the next. */
   readonly mostBatches: number;
+  /** Its lines: the idempotency keys' unless named. */
+  readonly lines?: SweepLines;
 }
 
 export interface RetentionSweep {
@@ -52,6 +85,7 @@ export function createRetentionSweep({
   deadlineMs,
   batch,
   mostBatches,
+  lines = IDEMPOTENCY_LINES,
 }: RetentionSweepOptions): RetentionSweep {
   // A step still under way past its deadline: one at most, so a hung database can't take every connection.
   let inFlight = false;
@@ -84,11 +118,11 @@ export function createRetentionSweep({
       }
     } catch (error) {
       if (!(error instanceof Stopped)) {
-        logger.child({ orgId }).warn('idempotency.sweep_failed', { err: error });
+        logger.child({ orgId }).warn(lines.failed, { err: error });
         return 'failed';
       }
     }
-    if (deleted > 0) logger.child({ orgId }).info('idempotency.swept', { keys: deleted });
+    if (deleted > 0) logger.child({ orgId }).info(lines.swept, { [lines.counted]: deleted });
     return deleted;
   };
 
@@ -100,7 +134,7 @@ export function createRetentionSweep({
           organizations = await step(list, signal);
         } catch (error) {
           if (error instanceof Stopped) return;
-          logger.warn('idempotency.sweep_failed', { check: 'list', err: error });
+          logger.warn(lines.failed, { check: 'list', err: error });
           return;
         }
         let keys = 0;
@@ -112,10 +146,10 @@ export function createRetentionSweep({
           else keys += outcome;
         }
         if (signal?.aborted === true) return;
-        logger.info('idempotency.sweep_done', { organizations: organizations.length, keys, failed });
+        logger.info(lines.done, { organizations: organizations.length, [lines.counted]: keys, failed });
       } catch (error) {
         // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
-        logger.error('idempotency.sweep_crashed', { err: error });
+        logger.error(lines.crashed, { err: error });
       }
     },
   });
