@@ -431,9 +431,9 @@ function belowFixes(version: Version, fixes: readonly { version: Version; inclus
  * - `>= A, <= B`: a lower bound with an upper one right after it, both applying;
  * - one bare `< X` (or `<=`): every version below it;
  * - two or more bare `< X`: fixes one per release line (belowFixes);
- * - a lone `>= A` (no upper bound right after it): with bare fixes in the same
- *   list it starts them (`< 2.41.6, < 2.40.10, >=2.39.0`: from 2.39.0, below
- *   the fixes); with none, every version from A on.
+ * - a lone `>= A` (no upper bound right after it) below some bare fix starts
+ *   the fixes (`< 2.41.6, < 2.40.10, >=2.39.0`: from 2.39.0, below the fixes);
+ *   at or above every fix, or with none, it covers every version from A on.
  */
 export function inRange(range: string, version: Version): boolean | undefined {
   const clauses = range
@@ -448,12 +448,15 @@ export function inRange(range: string, version: Version): boolean | undefined {
   const underFixes =
     fixes.length > 1 ? belowFixes(version, fixes) : fixes.some((fix) => before(version, fix.version, fix.inclusive));
   const loneLowers = parsed.flatMap((clause, index) => (clause.kind === 'lower' && !paired(index + 1) ? [clause] : []));
-  if (fixes.length > 0 && loneLowers.length > 0) {
-    // The lone lower bounds start the list of fixes.
-    if (loneLowers.some((low) => after(version, low.version, low.inclusive)) && underFixes) return true;
-  } else if (underFixes || loneLowers.some((low) => after(version, low.version, low.inclusive))) {
-    return true;
-  }
+  // A lone lower bound below some fix starts the fixes; one at or above every
+  // fix (`< 3.4.16, >= 4.0.0`) is a range of its own, open from it onwards.
+  const startsFixes = (low: Clause & { kind: 'lower' }): boolean =>
+    fixes.some((fix) => compareVersions(low.version, fix.version) < 0);
+  const starters = loneLowers.filter(startsFixes);
+  const fromLower = (lows: typeof loneLowers): boolean =>
+    lows.some((low) => after(version, low.version, low.inclusive));
+  if (fromLower(loneLowers.filter((low) => !startsFixes(low)))) return true;
+  if (starters.length > 0 ? fromLower(starters) && underFixes : underFixes) return true;
   return parsed.some((clause, index) => {
     if (clause.kind === 'between') return before(version, clause.high, true) && after(version, clause.low, true);
     if (clause.kind === 'exact') return compareVersions(version, clause.version) === 0;
