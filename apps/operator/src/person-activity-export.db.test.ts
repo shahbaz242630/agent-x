@@ -28,7 +28,8 @@ import { loadKeys } from '@agentx/platform/keys';
 import { createTestDatabase, LogCapture, type TestDatabase, testLogger, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { ANOTHER_RECORD } from './case-export.ts';
+import { ACTIVITY_PLATFORM_EXPORTED, ANOTHER_RECORD, AUDIT_PLATFORM_EXPORTED, theExportId } from './case-export.ts';
+import { OPERATOR } from './create-organization.ts';
 import { folderStore } from './evidence-store.ts';
 import {
   exportPersonActivityLog,
@@ -58,15 +59,15 @@ const API = { type: 'system', id: 'api' } as const;
 const RANGE = { from: new Date('2026-10-18T00:00:00Z'), to: new Date('2026-10-20T00:00:00Z') };
 
 let made = 0;
-/** A request of `userId`'s, written and arriving at `at`. */
-async function written(userId: string, at: string): Promise<string> {
+/** A request of `userId`'s, written at `at` and arriving at `recordedAt` (`at`, but for one written past the app). */
+async function written(userId: string, at: string, recordedAt = at): Promise<string> {
   made += 1;
   const id = `${v7Floor(Date.parse(at)).slice(0, 14)}7000-8000-${made.toString(16).padStart(12, '0')}`;
   await app
     .insertInto('access.person_requests')
     .values({
       id,
-      recorded_at: new Date(at),
+      recorded_at: new Date(recordedAt),
       user_id: userId,
       claimed_org: null,
       method: 'GET',
@@ -393,6 +394,112 @@ describe('CO8b every sealed day of the range is held to its seal before the file
 
     expect(run.code).toBe(0);
     expect(run.alarms).toEqual([]);
+  });
+});
+
+describe('CO8b review: every row of the file lies in the days its seals checked', () => {
+  /** Every day from `first`, `count` of them. */
+  const daysFrom = (first: string, count: number) =>
+    Array.from({ length: count }, (_, index) =>
+      new Date(Date.parse(`${first}T00:00:00Z`) + index * 86_400_000).toISOString().slice(0, 10),
+    );
+
+  /** The run refused with the misdated alarm for `day`, and no file written. */
+  async function misdated(request: PersonActivityExportRequest, day: string) {
+    const run = await exported(request);
+
+    expect(run.code).toBe(1);
+    expect(run.alarms).toEqual([expect.objectContaining({ chain: 'platform', reason: 'misdated', day })]);
+    expect(run.line('operator.export_unwritten')?.problems).toEqual([
+      `a request in the range was written on ${day}, outside the days its seals cover`,
+    ]);
+    expect(() => readFileSync(fileName(request))).toThrow();
+  }
+
+  it("refuses an old sealed row whose time was moved into the range past the app, its own day's seal unread", async () => {
+    const old = await written(ANA, '2026-10-10T09:00:00.000Z');
+    await written(ANA, '2026-10-18T09:00:00.000Z');
+    await sealed(...daysFrom('2026-10-10', 11));
+    await admin().query("update access.person_requests set recorded_at = '2026-10-18T12:00:00Z' where id = $1", [old]);
+
+    await misdated(requestFor(), '2026-10-10');
+  });
+
+  it('refuses a row slipped in with an ID forged early, into a sealed day the range’s seals never read', async () => {
+    await written(ANA, '2026-10-10T09:00:00.000Z');
+    await sealed(...daysFrom('2026-10-10', 11));
+    await written(ANA, '2026-10-12T09:00:00.000Z', '2026-10-18T09:00:00.000Z');
+
+    await misdated(requestFor(), '2026-10-12');
+  });
+
+  it('refuses, in a range newer than every seal, a row whose ID is older than the newest seal, or forged late', async () => {
+    await written(ANA, '2026-10-10T09:00:00.000Z');
+    await sealed(...daysFrom('2026-10-10', 3));
+    const later = { from: new Date('2026-10-25T00:00:00Z'), to: new Date('2026-10-27T00:00:00Z') };
+    const early = await written(ANA, '2026-10-11T09:00:00.000Z', '2026-10-25T09:00:00.000Z');
+
+    await misdated(requestFor(later), '2026-10-11');
+
+    await admin().query('delete from access.person_requests where id = $1', [early]);
+    await written(ANA, '2026-10-29T09:00:00.000Z', '2026-10-26T09:00:00.000Z');
+    await misdated(requestFor(later), '2026-10-29');
+  });
+
+  it('takes a row answered after midnight, its ID the next day’s, as the seals cover it', async () => {
+    await written(ANA, '2026-10-17T09:00:00.000Z');
+    const late = await written(ANA, '2026-10-20T00:00:00.400Z', '2026-10-19T23:59:59.900Z');
+    await sealed('2026-10-17', '2026-10-18', '2026-10-19', '2026-10-20');
+    const request = requestFor();
+
+    const run = await exported(request);
+
+    expect(run.code).toBe(0);
+    expect(run.alarms).toEqual([]);
+    expect(fileOf(request).map(({ id, sealed }) => ({ id, sealed }))).toEqual([{ id: late, sealed: true }]);
+  });
+});
+
+describe('CO8b review: one export ID names one export, of whatever kind', () => {
+  /** A platform record of another kind of export taking `exportId`, made by `actor` as its role. */
+  const taken = (database: Database<PlatformControlsTables>, action: string, details: Record<string, string>) =>
+    createPlatformChain({ keys, ids: uuidV7Ids }).recordAlone(database, { actor: OPERATOR, action, details });
+
+  it.each([AUDIT_PLATFORM_EXPORTED, ACTIVITY_PLATFORM_EXPORTED])(
+    "refuses an ID an organisation's export took (%s), recording nothing",
+    async (action) => {
+      await written(ANA, '2026-10-18T09:00:00.000Z');
+      const request = requestFor();
+      await taken(operator, action, { orgId: '0199a0f0-0000-7000-8000-0000000000aa', exportId: request.exportId });
+
+      const run = await exported(request);
+
+      expect(run.code).toBe(1);
+      expect(run.line('operator.refused')?.problems).toEqual([ANOTHER_RECORD]);
+      expect(await records()).toEqual([]);
+    },
+  );
+
+  it('refuses an ID whose record of a person’s export was made by anyone but the operator', async () => {
+    await written(ANA, '2026-10-18T09:00:00.000Z');
+    const request = requestFor();
+    await createPlatformChain({ keys, ids: theExportId(request.exportId) }).recordAlone(app, {
+      actor: API,
+      action: OPERATOR_PERSON_LOG_EXPORTED,
+      details: {
+        person: ANA,
+        exportId: request.exportId,
+        caseRef: CASE,
+        from: request.from.toISOString(),
+        to: request.to.toISOString(),
+        requests: 1,
+      },
+    });
+
+    const run = await exported(request);
+
+    expect(run.code).toBe(1);
+    expect(run.line('operator.refused')?.problems).toEqual([ANOTHER_RECORD]);
   });
 });
 

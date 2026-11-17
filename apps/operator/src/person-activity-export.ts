@@ -33,7 +33,10 @@
 import {
   type ActivityTables,
   brokenSealIn,
+  dayOfId,
+  idsOfDay,
   nextDay,
+  type PersonActivityRow,
   PERSON_SEAL_FORM,
   personDigestOfDay,
   personInRange,
@@ -55,7 +58,7 @@ import { type Database, type DatabaseTransaction, limitedTransaction } from '@ag
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { ANOTHER_RECORD, CaseExportRefused, runCaseExport, theExportId } from './case-export.ts';
+import { ANOTHER_RECORD, CaseExportRefused, exportIdTaken, runCaseExport, theExportId } from './case-export.ts';
 import { OPERATOR } from './create-organization.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 
@@ -110,10 +113,16 @@ async function earlierRecord(
     personLogAlarm(logger, 'unsealed', null);
     throw new CaseExportRefused("the platform audit chain's record of this export ID can't be verified");
   }
-  if (found === undefined) return undefined;
-  const { action, details } = found;
+  if (found === undefined) {
+    // An organisation's export of this ID: one export ID names one export.
+    if (await exportIdTaken(tx, request.exportId)) throw new CaseExportRefused(ANOTHER_RECORD);
+    return undefined;
+  }
+  const { action, actor, details } = found;
   const same =
     action === OPERATOR_PERSON_LOG_EXPORTED &&
+    actor.type === OPERATOR.type &&
+    actor.id === OPERATOR.id &&
     details.person === request.userId &&
     details.caseRef === request.caseRef &&
     details.from === request.from.toISOString() &&
@@ -237,15 +246,25 @@ function takeSeals(
 }
 
 /**
- * Holds every sealed day the range's rows could be written in to its seal (step 2): the newest day sealed at all, or
- * refused, the alarm raised, when one doesn't hold.
+ * What the seals checked vouch for: the newest day sealed at all, and the IDs a row of the range may have, the days
+ * checked (from the oldest seal checked; from any, when no seal is older) to the range's last.
+ */
+interface CheckedSeals {
+  readonly sealedThrough: string | null;
+  readonly idsFrom: string | null;
+  readonly idsTo: string;
+}
+
+/**
+ * Holds every sealed day the range's rows could be written in to its seal (step 2): what the seals checked vouch
+ * for, or refused, the alarm raised, when one doesn't hold.
  */
 async function sealsHold(
   database: Database<PersonActivityExportTables>,
   services: PersonActivityExportServices,
   { from, to }: PersonActivityExportRequest,
   { batch, sealsAPage }: { readonly batch: number; readonly sealsAPage: number },
-): Promise<string | null> {
+): Promise<CheckedSeals> {
   const inTx = <T>(work: (tx: ExportTx) => Promise<T>): Promise<T> => limitedTransaction(database, work);
   // A row answered after midnight is written the day after its time.
   const range = { first: dayOf(from), last: nextDay(dayOf(new Date(to.getTime() - 1))) };
@@ -259,7 +278,26 @@ async function sealsHold(
     personLogAlarm(services.logger, broken.why, broken.day);
     throw new CaseExportRefused(`the person log of ${broken.day} doesn't hold to its seal`);
   }
-  return seals.sealedThrough;
+  // Not reached the oldest: the last seal checked is the one before the range's first day, a string (takeSeals).
+  const oldest: unknown = seals.checked.at(-1)?.day;
+  return {
+    sealedThrough: seals.sealedThrough,
+    idsFrom: !seals.oldestReached && typeof oldest === 'string' ? idsOfDay(oldest).from : null,
+    idsTo: idsOfDay(range.last).to,
+  };
+}
+
+/**
+ * The file's rows, each held to the days the seals checked (CO8b review): a row of the range whose ID's day lies
+ * outside them (its time moved into the range past the app, or its ID forged early or late) would be shown sealed by
+ * a seal never read, or by none. It raises the alarm and is refused, and no file is written.
+ */
+function heldToSeals(rows: readonly PersonActivityRow[], { idsFrom, idsTo }: CheckedSeals, logger: Logger): void {
+  const outside = rows.find(({ id }) => (idsFrom !== null && id < idsFrom) || id >= idsTo);
+  if (outside === undefined) return;
+  const day = dayOfId(outside.id);
+  personLogAlarm(logger, 'misdated', day);
+  throw new CaseExportRefused(`a request in the range was written on ${day}, outside the days its seals cover`);
 }
 
 /** The range's first day not sealed (null when every day of it is): its rows are marked unsealed. */
@@ -297,10 +335,8 @@ export function exportPersonActivityLog(
     shown: (made) => ({ requests: made.requests, writtenUpTo: made.writtenUpTo, recordedBefore: made.recordedBefore }),
     content: async (made) => {
       // Every row marked against the seal read here: one landing mid-file would show a day half sealed.
-      const sealedThrough = await sealsHold(database, services, request, {
-        batch: batch ?? DIGEST_BATCH,
-        sealsAPage,
-      });
+      const checked = await sealsHold(database, services, request, { batch: batch ?? DIGEST_BATCH, sealsAPage });
+      const { sealedThrough } = checked;
       logger.info('operator.person_log_seals', {
         exportId,
         sealedThrough,
@@ -308,6 +344,8 @@ export function exportPersonActivityLog(
       });
       const read = <T>(work: (tx: ExportTx) => Promise<T>): Promise<T> => limitedTransaction(database, work);
       const rows = await personRowsWritten(read, userId, request, made.writtenUpTo, batch ?? EXPORT_BATCH);
+      heldToSeals(rows, checked, logger);
+      // Every row's ID is within the range's last day now, so a seal past it marks none it didn't check.
       return Buffer.from(`${rows.map((row) => personNdjsonLine(row, sealedThrough)).join('\n')}\n`);
     },
   });

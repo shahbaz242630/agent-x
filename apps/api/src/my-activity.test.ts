@@ -57,6 +57,7 @@ const PAGE: MyActivityPage = {
       seq: 9n,
       id: '0199a0f0-0000-7000-8000-0000000000e1',
       action: 'operator.person_log_exported',
+      actor: { type: 'system', id: 'operator' },
       recordedAt: new Date('2026-11-16T08:00:00.000Z'),
       details: { from: '2026-11-01T00:00:00.000Z', to: '2026-11-16T00:00:00.000Z', requests: 4, caseRef: 'DSP-1' },
     },
