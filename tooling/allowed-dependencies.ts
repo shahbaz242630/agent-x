@@ -16,6 +16,8 @@ export const ALLOWED_DEPENDENCIES: Readonly<Record<string, string>> = {
     "Decision 39b (look A), 6A1: the console's figures face, as font files bundled into its build (OFL); the CSP allows no font host, so fonts ship with the console",
   '@fontsource/ibm-plex-sans':
     "Decision 39b (look A), 6A1: the console's text face, as font files bundled into its build (OFL); no code, only CSS and font files",
+  '@modelcontextprotocol/server':
+    'BR-20, 6E2 (MCP-Guide M2): the official MCP SDK speaks the protocol at POST /v1/mcp, both eras, a fresh server a request; our access hook, limits and body cap run first, and its own auth is never used. Depends only on its core package (2.4.0, same pin) and zod',
   '@tanstack/react-query':
     'ADR-001: the console reads the API and keeps its answers fresh; bundled into the browser build, never run by the server',
   '@tanstack/react-router':

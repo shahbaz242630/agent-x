@@ -84,6 +84,21 @@ export interface ErrorResponse {
 }
 
 /**
+ * Writes the lines of a failure, once its answer is decided (server.ts): the error path's, and an MCP tool's whose
+ * twin failed (mcp.ts), so a failure is logged alike over either wire.
+ */
+export type LogFailure = (
+  error: unknown,
+  at: {
+    readonly correlationId: string;
+    readonly status: number;
+    readonly operation: string | undefined;
+    /** The organisation of the agent that sent it, to tell one organisation's trouble apart; none for a person's. */
+    readonly orgId: string | undefined;
+  },
+) => void;
+
+/**
  * What to send for an error status. A refusal keeps its status and gets its
  * code; any other client error is sent as a plain 400; every status from 500 up
  * is a 500.

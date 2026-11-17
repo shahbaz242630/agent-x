@@ -112,6 +112,18 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     await expect(`${JSON.stringify(app.swagger(), null, 2)}\n`).toMatchFileSnapshot('../openapi.json');
   });
 
+  it('writes every request body inline, so each operation can be read alone (the tamper e2e builds its bodies so)', () => {
+    const document = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as {
+      paths: Record<string, Record<string, { requestBody?: unknown }>>;
+    };
+    const referring = Object.entries(document.paths).flatMap(([path, item]) =>
+      Object.entries(item)
+        .filter(([, operation]) => JSON.stringify(operation.requestBody ?? {}).includes('"$ref"'))
+        .map(([method]) => `${method.toUpperCase()} ${path}`),
+    );
+    expect(referring).toEqual([]);
+  });
+
   it('holds every stop the error answer names to an operation of the API: a name gone stale answers a 500', () => {
     const document = JSON.parse(readFileSync(new URL('../openapi.json', import.meta.url), 'utf8')) as {
       paths: Record<string, Record<string, { operationId?: string }>>;
@@ -275,6 +287,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/mandates/{id}/supersede',
       'POST /v1/mandates/{id}/suspend',
       'POST /v1/mandates/{id}/suspend/confirm',
+      'POST /v1/mcp',
       'POST /v1/members/invitations',
       'POST /v1/members/invitations/{id}/approve',
       'POST /v1/members/invitations/{id}/approve/confirm',
@@ -1309,8 +1322,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), the team's payments, their exceptions and one payment (Phase 6 C1), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), a spend request's evidence and its download (Phase 6 C2a, 6C2c), a person's own activity log and its download (6E1a), the organisation's security events (6E1b), with each GET's HEAD.
-    expect(answers).toHaveLength(187);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), the team's payments, their exceptions and one payment (Phase 6 C1), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), a spend request's evidence and its download (Phase 6 C2a, 6C2c), a person's own activity log and its download (6E1a), the organisation's security events (6E1b), the MCP endpoint (6E2), with each GET's HEAD.
+    expect(answers).toHaveLength(188);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1366,6 +1379,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'MandateRevocationAsked',
       'MandateSuspensionAsked',
       'MandateVersion',
+      'McpAnswer',
       'Member',
       'MemberChangeAsked',
       'MemberChanged',

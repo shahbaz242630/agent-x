@@ -1,7 +1,10 @@
 // ADR-011 §7: one line for each request, with its method, its route pattern
 // (never the address as sent, which can hold IDs and a query), and, once it's
 // answered, the status and duration; an agent's, its agent and key by their
-// IDs (C2-1). Never the client's IP address, the query or the headers.
+// IDs (C2-1); an MCP tool's call, the tool and the status its twin would have
+// answered (6E2), a refused one always kept, and what the client says of
+// itself and its protocol era and version. Never the client's IP address,
+// the query or the headers.
 // Fastify's own request lines log all three, so this log controller replaces
 // them. Its other lines (a stream or serializer error) go
 // through the framework logger, which keeps only their message and error.
@@ -22,6 +25,8 @@ import { type FastifyInstance, type FastifyReply, type FastifyRequest, LogContro
 
 import { REQUEST_ID_BINDING } from './framework-logger.ts';
 import { EVERY_LINE, type LogSample } from './log-sample.ts';
+import type { McpClientSaid } from './mcp.ts';
+import type { ToolCalled } from './mcp-calls.ts';
 
 /** A request that was answered. */
 export const REQUEST_COMPLETED: ProblemEvent = 'http.request_completed';
@@ -91,7 +96,15 @@ export function createRequestLines(
       count(status);
       const failed = error !== null && error !== undefined;
       const route = routeOf(request);
-      const alwaysKept = failed || status >= FIRST_REFUSAL || SIGN_IN_ROUTES.has(route);
+      // Set up on every request once the MCP route is added; missing on one the router couldn't read.
+      const { toolCalled, mcpClient } = request as {
+        readonly toolCalled?: ToolCalled | null;
+        readonly mcpClient?: McpClientSaid | null;
+      };
+      const tool = toolCalled ?? undefined;
+      const client = mcpClient ?? undefined;
+      const alwaysKept =
+        failed || status >= FIRST_REFUSAL || SIGN_IN_ROUTES.has(route) || (tool?.status ?? 0) >= FIRST_REFUSAL;
       if (!alwaysKept && !sample.keeps(request.id)) return;
       // An agent's request names its agent and the key it was sent with (ADR-011 §1): IDs, public, never the secret.
       // A request the router couldn't read (a malformed address) never had the field set up, so it may be missing.
@@ -102,6 +115,14 @@ export function createRequestLines(
         status,
         durationMs: Math.round(reply.elapsedTime),
         ...(agent !== null && agent !== undefined && { agentId: agent.agentId, agentKeyId: agent.keyId }),
+        ...(tool !== undefined && { tool: tool.tool, toolStatus: tool.status }),
+        // What an MCP client says of itself and its protocol (MCP-Guide §7): plain, short, never trusted.
+        ...(client !== undefined && {
+          mcpEra: client.era,
+          mcpProtocol: client.protocol,
+          ...(client.client !== undefined && { mcpClient: client.client }),
+          ...(client.clientVersion !== undefined && { mcpClientVersion: client.clientVersion }),
+        }),
         // Each kept by the sample stands for this many in a reader's sums; off, or always kept, each is itself.
         ...(!alwaysKept && sample.oneIn > 1 && { sampleOf: sample.oneIn }),
       };

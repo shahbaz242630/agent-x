@@ -23,7 +23,7 @@
 //   bank's limits. None without such a mandate.
 // 503 INTEGRITY_FAILED when the mandate, its version or the source can't be
 // believed. The use case is agent-mandate.ts.
-import { SCOPES } from '@agentx/core/modules/agents';
+import { type AcceptedKey, SCOPES } from '@agentx/core/modules/agents';
 import { MANDATE } from '@agentx/core/modules/mandates';
 import { MOST_SOURCES_A_PAGE } from '@agentx/core/modules/funding-sources';
 import type { FastifyInstance } from 'fastify';
@@ -33,8 +33,9 @@ import { z } from 'zod';
 import { agentOf, need } from './access.ts';
 import type { AgentMandates } from './agent-mandate.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
+import { answerRefusal } from './idempotent-writes.ts';
 import { MONTHLY_CAP_FROM_FIELD } from './monthly-cap-choice.ts';
+import { answered } from './refused.ts';
 import { NEXT, pageQuery } from './route-schemas.ts';
 
 const SELF_SCHEMA = {
@@ -101,9 +102,12 @@ const AGENT_SOURCE = z
     description: 'A bank account the agent may pay from now: the safe summary alone (SEC-AG-05).',
   });
 
+/** A page of sources, as the list asks for it: its MCP tool takes it too (mcp-tools.ts). */
+export const SOURCES_PAGE = pageQuery(MOST_SOURCES_A_PAGE);
+
 const SOURCES_SCHEMA = {
   summary: 'The bank accounts your mandate lets you pay from now',
-  querystring: pageQuery(MOST_SOURCES_A_PAGE),
+  querystring: SOURCES_PAGE,
   response: {
     200: z
       .object({
@@ -114,39 +118,74 @@ const SOURCES_SCHEMA = {
   },
 };
 
+/** `GET /v1/agent`: what the key check found, in the same request. Nothing is read again. */
+export const agentSelf = ({ orgId, agentId, keyId, scopes, expiresAt }: AcceptedKey) => ({
+  agentId,
+  organizationId: orgId,
+  keyId,
+  scopes: [...scopes],
+  keyExpiresAt: expiresAt.toISOString(),
+});
+
+/** `GET /v1/agent/mandate`: the mandate the agent acts under, field by field (its route and its MCP tool). */
+export async function agentMandate(mandates: AgentMandates, { orgId, agentId }: AcceptedKey, correlationId: string) {
+  const found = await mandates.inForce(orgId, agentId, correlationId);
+  if (found.outcome === 'refused') return found;
+  const { mandate, version: v, monthlyCap, monthlyCapFrom } = found;
+  // Field by field: nothing else of the mandate can reach an agent.
+  return answered({
+    mandateId: mandate.id,
+    status: mandate.status,
+    versionId: v.id,
+    version: v.version,
+    purpose: v.purpose,
+    currency: v.perOrderLimit.currency,
+    perOrderLimitMinor: Number(v.perOrderLimit.minor),
+    monthlyLimitMinor: Number(v.monthlyLimit.minor),
+    monthlyCapMinor: monthlyCap === null ? null : Number(monthlyCap.minor),
+    monthlyCapFrom,
+    supplierIds: [...v.supplierIds],
+    fundingSourceId: v.fundingSourceId,
+    timeZone: mandate.timeZone,
+    endsAt: v.endsAt?.toISOString() ?? null,
+  });
+}
+
+/** `GET /v1/agent/funding-sources`: the source its active mandate names, the safe summary alone (its route and its MCP tool). */
+export async function agentSources(
+  mandates: AgentMandates,
+  { orgId, agentId }: AcceptedKey,
+  after: string | null,
+  correlationId: string,
+) {
+  // `limit` stays in the query for the paging contract (D2-4a): one source at most fits any page.
+  const listed = await mandates.sources(orgId, agentId, after, correlationId);
+  if (listed.outcome === 'refused') return listed;
+  // The safe summary alone, field by field: nothing else of the source can reach an agent.
+  return answered({
+    sources: listed.sources.map((source) => ({
+      id: source.id,
+      currency: source.controls.currency,
+      accountType: source.summary.accountType,
+      hint: source.summary.hint,
+    })),
+    next: listed.next,
+  });
+}
+
 export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates: AgentMandates | undefined }): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
-  routes.get('/v1/agent', { schema: SELF_SCHEMA, config: { access: ['agent'], agentScopes: [] } }, (request) => {
-    const { orgId, agentId, keyId, scopes, expiresAt } = agentOf(request);
-    return { agentId, organizationId: orgId, keyId, scopes: [...scopes], keyExpiresAt: expiresAt.toISOString() };
-  });
+  routes.get('/v1/agent', { schema: SELF_SCHEMA, config: { access: ['agent'], agentScopes: [] } }, (request) =>
+    agentSelf(agentOf(request)),
+  );
 
   routes.get(
     '/v1/agent/mandate',
     { schema: MANDATE_SCHEMA, config: { access: ['agent'], agentScopes: ['requests:write'] } },
     async (request, reply) => {
-      const { orgId, agentId } = agentOf(request);
-      const found = await need(mandates).inForce(orgId, agentId, request.id);
-      if (found.outcome === 'refused') return sendErrorBody(reply, found.status, found.code, request.id);
-      const { mandate, version: v, monthlyCap, monthlyCapFrom } = found;
-      // Field by field: nothing else of the mandate can reach an agent.
-      return {
-        mandateId: mandate.id,
-        status: mandate.status,
-        versionId: v.id,
-        version: v.version,
-        purpose: v.purpose,
-        currency: v.perOrderLimit.currency,
-        perOrderLimitMinor: Number(v.perOrderLimit.minor),
-        monthlyLimitMinor: Number(v.monthlyLimit.minor),
-        monthlyCapMinor: monthlyCap === null ? null : Number(monthlyCap.minor),
-        monthlyCapFrom,
-        supplierIds: [...v.supplierIds],
-        fundingSourceId: v.fundingSourceId,
-        timeZone: mandate.timeZone,
-        endsAt: v.endsAt?.toISOString() ?? null,
-      };
+      const answer = await agentMandate(need(mandates), agentOf(request), request.id);
+      return answer.outcome === 'refused' ? answerRefusal(answer, request, reply) : answer.body;
     },
   );
 
@@ -154,20 +193,8 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
     '/v1/agent/funding-sources',
     { schema: SOURCES_SCHEMA, config: { access: ['agent'], agentScopes: ['sources:read'] } },
     async (request, reply) => {
-      const { orgId, agentId } = agentOf(request);
-      // `limit` stays in the query for the paging contract (D2-4a): one source at most fits any page.
-      const listed = await need(mandates).sources(orgId, agentId, request.query.after ?? null, request.id);
-      if (listed.outcome === 'refused') return sendErrorBody(reply, listed.status, listed.code, request.id);
-      // The safe summary alone, field by field: nothing else of the source can reach an agent.
-      return {
-        sources: listed.sources.map((source) => ({
-          id: source.id,
-          currency: source.controls.currency,
-          accountType: source.summary.accountType,
-          hint: source.summary.hint,
-        })),
-        next: listed.next,
-      };
+      const answer = await agentSources(need(mandates), agentOf(request), request.query.after ?? null, request.id);
+      return answer.outcome === 'refused' ? answerRefusal(answer, request, reply) : answer.body;
     },
   );
 }

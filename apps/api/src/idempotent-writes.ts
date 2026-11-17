@@ -28,7 +28,7 @@ import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
 import type { Refused, StepUpAsked } from './refused.ts';
 
 /** The refusals that say when to send the same request again: a wait in a decision's lines ran out. */
-const SEND_AGAIN_CODES: ReadonlySet<string> = new Set(['AGENT_BUSY', 'ORGANISATION_BUSY', 'PLATFORM_BUSY']);
+export const SEND_AGAIN_CODES: ReadonlySet<string> = new Set(['AGENT_BUSY', 'ORGANISATION_BUSY', 'PLATFORM_BUSY']);
 
 /** Text that can't be hashed as it reads: a lone surrogate would be written as U+FFFD, so two requests could hash alike. */
 class IllFormedText extends Error {

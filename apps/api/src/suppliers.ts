@@ -67,6 +67,7 @@
 // INTEGRITY_FAILED when the caller's membership, a supplier or its version
 // can't be verified. The use cases are supplier-registry.ts,
 // supplier-changes.ts, supplier-payees.ts and supplier-remittance.ts.
+import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { PayeeDetails } from '@agentx/core/modules/providers';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import { visibleName } from '@agentx/core/shared-kernel';
@@ -94,6 +95,7 @@ import { z } from 'zod';
 import { agentOf, EVERY_MEMBER, memberInSessionOf, memberOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { answered } from './refused.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -291,7 +293,8 @@ const ADD_SCHEMA = {
   response: { 201: SUPPLIER_DETAILS.describe('The supplier, added UNVERIFIED.') },
 };
 
-const PAGE = pageQuery(MOST_SUPPLIERS_A_PAGE);
+/** A page of suppliers, as a list asks for it: the agent's list's MCP tool takes it too (mcp-tools.ts). */
+export const PAGE = pageQuery(MOST_SUPPLIERS_A_PAGE);
 
 const LIST_SCHEMA = {
   summary: "Your organisation's suppliers",
@@ -664,6 +667,27 @@ const registrationBodyOf = ({ registration, form }: PayeeRegistrationView) => ({
   form: form === null ? null : { url: form.url, expiresAt: form.expiresAt.toISOString() },
 });
 
+const pageOf = (query: { readonly after?: string | undefined; readonly limit?: number | undefined }) => ({
+  after: query.after ?? null,
+  limit: query.limit ?? MOST_SUPPLIERS_A_PAGE,
+});
+
+/** `GET /v1/agent/suppliers`: the verified suppliers the agent's organisation may pay (its route and its MCP tool). */
+export async function agentSuppliers(
+  registry: SupplierRegistry,
+  { orgId }: AcceptedKey,
+  page: z.output<typeof PAGE>,
+  correlationId: string,
+) {
+  const listed = await registry.usableByAgent(orgId, pageOf(page), correlationId);
+  if (listed.outcome === 'refused') return listed;
+  // The ID and name alone, field by field: nothing else of the supplier can reach an agent.
+  return answered({
+    suppliers: listed.suppliers.map((supplier) => ({ id: supplier.id, displayName: supplier.displayName })),
+    next: listed.next,
+  });
+}
+
 /** The routes. Each use case does its own; without one they are still documented, and no one reaches them. */
 export function registerSuppliers(
   app: FastifyInstance,
@@ -699,11 +723,6 @@ export function registerSuppliers(
     const status = { started: 201, checked: 200, waiting: 202 }[written.outcome];
     return reply.code(status).send(registrationBodyOf(written));
   };
-
-  const pageOf = (query: { after?: string | undefined; limit?: number | undefined }) => ({
-    after: query.after ?? null,
-    limit: query.limit ?? MOST_SUPPLIERS_A_PAGE,
-  });
 
   routes.post(
     '/v1/suppliers',
@@ -1074,14 +1093,8 @@ export function registerSuppliers(
     '/v1/agent/suppliers',
     { schema: AGENT_LIST_SCHEMA, config: { access: ['agent'], agentScopes: ['suppliers:read'] } },
     async (request, reply) => {
-      const { orgId } = agentOf(request);
-      const listed = await need(registry).usableByAgent(orgId, pageOf(request.query), request.id);
-      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      // The ID and name alone, field by field: nothing else of the supplier can reach an agent.
-      return {
-        suppliers: listed.suppliers.map((supplier) => ({ id: supplier.id, displayName: supplier.displayName })),
-        next: listed.next,
-      };
+      const answer = await agentSuppliers(need(registry), agentOf(request), request.query, request.id);
+      return answer.outcome === 'refused' ? answerRefusal(answer, request, reply) : answer.body;
     },
   );
 }
