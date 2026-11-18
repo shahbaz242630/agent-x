@@ -143,6 +143,11 @@ export async function agentKeyOf(
 ): Promise<AgentKeyCheck> {
   const state = await states.verifiedState(tx, AGENT_KEYS, key, lock);
   if (state.outcome !== 'verified') return state;
+  return { outcome: 'found', key: keyRecordOf(key.id, state), state };
+}
+
+/** The key a verified signed state of AGENT_KEYS says: its fields, each held to its kind. */
+export function keyRecordOf(id: string, state: VerifiedState): AgentKeyRecord {
   const agentId = state.fields.get('agent_id');
   const status = state.fields.get('status');
   const scopes = state.fields.get('scopes');
@@ -160,20 +165,16 @@ export async function agentKeyOf(
     !WHOLE.test(secretKeyVersion) ||
     Number.isNaN(expiresAt.getTime())
   ) {
-    throw new Error(`A verified agent key holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified agent key holds a field that isn't one of its own: ${id}`);
   }
   return {
-    outcome: 'found',
-    key: {
-      id: key.id.toLowerCase(),
-      agentId,
-      status,
-      scopes: scopesOf(scopes),
-      secretMac: Buffer.from(secretMac, 'hex'),
-      secretKeyVersion: Number(secretKeyVersion),
-      expiresAt,
-    },
-    state,
+    id: id.toLowerCase(),
+    agentId,
+    status,
+    scopes: scopesOf(scopes),
+    secretMac: Buffer.from(secretMac, 'hex'),
+    secretKeyVersion: Number(secretKeyVersion),
+    expiresAt,
   };
 }
 

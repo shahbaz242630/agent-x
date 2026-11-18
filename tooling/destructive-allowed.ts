@@ -252,13 +252,12 @@ export const ALLOWED: readonly Allowed[] = [
   {
     file: 'packages/core/src/modules/oauth/infrastructure/clients.ts',
     match: "deleteFrom('oauth.clients')",
-    guard: ".where('first_connected_at', 'is', null)",
+    guard: '.where(clientUnused(now))',
     proof: {
       file: 'packages/core/src/modules/oauth/infrastructure/oauth.db.test.ts',
-      title:
-        'registers a client, reads it back, notes its first connection once, and sweeps it only if it never connected',
+      title: 'registers a client, reads it back, notes when it connects at most hourly, and sweeps it once unused',
     },
-    why: 'registered MCP clients that never connected, a day after they registered',
+    why: 'registered MCP clients that never connected, a day after they registered, or unused 90 days (0094)',
   },
   {
     file: 'packages/core/src/modules/oauth/infrastructure/flows.ts',

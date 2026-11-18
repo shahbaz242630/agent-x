@@ -66,7 +66,7 @@ interface Operation {
   readonly route: string;
   readonly access: readonly string[];
   readonly schema?: Schema;
-  /** One of the OAuth server's (6E3a: the document's 'MCP connections' tag), a 404 while AGENTX_MCP_OAUTH is off. */
+  /** One of the OAuth server's (6E3a: the document's 'MCP connections' tag), on in this stack since 6E3b. */
   readonly oauth: boolean;
 }
 
@@ -97,9 +97,10 @@ const documented: Operation[] = Object.entries(document.paths).flatMap(([route, 
   })),
 );
 /**
- * The e2e stack runs with AGENTX_MCP_OAUTH off, so every OAuth operation answers 404 before anyone is asked who they
- * are: they are held to that (their own case below) and left out of the per-tenant cases, which need seeded flows.
- * 6E3b turns the flag on in the e2e stack and seeds flows, and they join the cases then.
+ * The OAuth server's operations (AGENTX_MCP_OAUTH, on in this stack since 6E3b) have their own case below: a flow
+ * belongs to no organisation until it is decided, and is read or decided only by the browser that opened it (its
+ * cookie), so the per-tenant cases don't fit them. The whole flow with a real client is mcp-oauth.e2e.test.ts. An
+ * agent's connections (`/v1/agents/{id}/connections…`) are ordinary per-tenant operations, in the cases below.
  */
 const oauthOperations = documented.filter((op) => op.oauth);
 const operations: Operation[] = documented.filter((op) => !op.oauth);
@@ -1444,20 +1445,26 @@ describe('F1 SEC-HA-09, SEC-AG-04, SEC-TEN-01: every documented operation', () =
   });
 });
 
-describe('6E3a: the OAuth server is off in this stack, so each of its operations is a 404, a refusal', () => {
+describe('6E3b: the OAuth server is on in this stack: each operation answers, and a flow is only its own browser’s', () => {
   it('finds the OAuth operations in the document', () => {
     expect(oauthOperations.length).toBeGreaterThan(0);
   });
 
   it.each(oauthOperations)('$method $route', async (op) => {
     const body = op.schema === undefined ? undefined : sample(op.schema, own);
-    // Any ID: no flow is seeded while the server is off, and none is read before the 404.
-    const answer = await send(op, allowedHeaders(op), body, op.route.replaceAll('{id}', randomUUID()));
-    expect(answer.status, `${op.method} ${op.route}: off, it is not found`).toBe(404);
-    // The 404 is the refusal that matters. The API's own answer names NOT_FOUND; a path in front of it (the edge's
-    // 404 for a dotted .well-known address, or the token endpoint's form scope) may answer the 404 without our body.
-    const { code } = summaryOf(answer.status, answer.text);
-    if (code !== undefined) expect(code).toBe('NOT_FOUND');
+    // Any flow's ID: none this caller's browser opened (it holds no flow cookie). A public operation (the metadata,
+    // registration, authorize, token and revocation) answers anyone, so its 2xx is a control, not an attack's answer.
+    const url = op.route.replaceAll('{id}', randomUUID());
+    const answer = op.access.includes('public')
+      ? await controlSend(op, allowedHeaders(op), body, url)
+      : await send(op, allowedHeaders(op), body, url);
+    expect(answer.status, `${op.method} ${op.route}: a refusal is never a server failure`).toBeLessThan(500);
+    if (op.route.includes('{id}')) {
+      // SEC-OAUTH-10: a flow another browser opened, or none, is not found, whoever is signed in.
+      expect(answer.status, `${op.method} ${op.route}: no flow of this browser's`).toBe(404);
+      const { code } = summaryOf(answer.status, answer.text);
+      if (code !== undefined) expect(code).toBe('NOT_FOUND');
+    }
   });
 });
 

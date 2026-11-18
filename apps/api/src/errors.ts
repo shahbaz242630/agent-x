@@ -141,6 +141,9 @@ export const BUSY_UNDER_TROUBLE: ReadonlySet<string> = new Set([
   'agents.owner.confirm',
   'agents.keys.revoke',
   'agents.keys.revoke.confirm',
+  // An MCP connection's revoke is a key's (6E3b).
+  'connections.revoke',
+  'connections.revoke.confirm',
   'agents.keys.rotate',
   'agents.keys.rotate.confirm',
   'mandates.suspend',

@@ -167,6 +167,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/agent/suppliers',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
+      'GET /v1/agents/{id}/connections',
       'GET /v1/approvals',
       'GET /v1/audit-log',
       'GET /v1/auth/activity',
@@ -216,6 +217,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/agent/suppliers',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
+      'HEAD /v1/agents/{id}/connections',
       'HEAD /v1/approvals',
       'HEAD /v1/audit-log',
       'HEAD /v1/auth/activity',
@@ -254,6 +256,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/agent/spend-requests/{id}/cancel',
       'POST /v1/agents',
       'POST /v1/agents/confirm',
+      'POST /v1/agents/{id}/connections/{keyId}/revoke',
+      'POST /v1/agents/{id}/connections/{keyId}/revoke/confirm',
       'POST /v1/agents/{id}/keys/{keyId}/revoke',
       'POST /v1/agents/{id}/keys/{keyId}/revoke/confirm',
       'POST /v1/agents/{id}/keys/{keyId}/rotate',
@@ -1341,8 +1345,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
     // confirm (B4a), the agent's own request (B4c), a spend request's approve and its confirm (B4b), the
     // organisation's freeze, unfreeze and its confirm (D1), each policy change's preview (E5d), a source's consent-expiry
-    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), the team's payments, their exceptions and one payment (Phase 6 C1), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), a spend request's evidence and its download (Phase 6 C2a, 6C2c), a person's own activity log and its download (6E1a), the organisation's security events (6E1b), the MCP endpoint (6E2), the OAuth server's metadata at four addresses, its authorize, token, revoke and register, and the consent's request, ask, confirm and deny (6E3a), with each GET's HEAD.
-    expect(answers).toHaveLength(206);
+    // choice (E7), a mandate's over-limit choice and its confirm (E9b), the audit log (E10a) and its download (E10b), the activity log and its download (L5), its background downloads asked, listed and read, and each file downloaded a part at a time (L5c), a supplier's remittance email and its confirm (Phase 4 C2a), the partner's messages (E1b), a payment's failure proposal, its approval and its withdrawal, each with its confirm (gate H10), the team's payments, their exceptions and one payment (Phase 6 C1), a person's own organisations (Phase 6 6A1), the statements and the console's error reports (6A2), Zitadel's machine IDs (SA3e), a spend request's evidence and its download (Phase 6 C2a, 6C2c), a person's own activity log and its download (6E1a), the organisation's security events (6E1b), the MCP endpoint (6E2), the OAuth server's metadata at four addresses, its authorize, token, revoke and register, and the consent's request, ask, confirm and deny (6E3a), an agent's connections, and a connection's revoke and its confirm (6E3b), with each GET's HEAD.
+    expect(answers).toHaveLength(210);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1368,10 +1372,13 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'AuditLogExport',
       'AuthorizationServerMetadata',
       'ConfirmationAsked',
+      'Connection',
       'ConnectionAsked',
       'ConnectionDenied',
       'ConnectionMade',
       'ConnectionRequest',
+      'ConnectionRevokeAsked',
+      'Connections',
       'Error',
       'FactorReset',
       'FactorResetChanged',

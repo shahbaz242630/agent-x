@@ -1343,6 +1343,12 @@ var signInAndPartnerSettings = [
     name: 'AGENTX_PARTNER_MODE'
     value: partnerMode
   }
+  // Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on in staging first, off in production until its
+  // own sign-off.
+  {
+    name: 'AGENTX_MCP_OAUTH'
+    value: environment == 'staging' ? 'on' : 'off'
+  }
 ]
 
 // The API as `web` copies beside the `jobs` app (4D2e D13): each counts its share

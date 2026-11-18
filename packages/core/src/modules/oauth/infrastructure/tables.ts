@@ -1,4 +1,4 @@
-/** The oauth schema's tables (db/migrations/0093_connections.sql), as Kysely sees them. */
+/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094), as Kysely sees them. */
 export interface OauthTables {
   'oauth.clients': ClientsTable;
   'oauth.flows': FlowsTable;
@@ -14,6 +14,7 @@ interface ClientsTable {
   software_version: string | null;
   created_at: Date;
   first_connected_at: Date | null;
+  last_connected_at: Date | null;
 }
 
 interface FlowsTable {

@@ -136,6 +136,7 @@ export {
   createMembershipChanges,
   DEACTIVATE_CONFIRM_OPERATION,
   DEACTIVATE_OPERATION,
+  type MemberLeaving,
   type MembershipChange,
   type MembershipChanges,
   type MembershipChangeWrite,

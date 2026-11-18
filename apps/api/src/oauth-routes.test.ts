@@ -345,7 +345,10 @@ describe('the token endpoint: forms, each field once, OAuth’s own errors, neve
     );
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({ error: 'invalid_grant', error_description: 'No.' });
-    expect((await app.inject(json('/v1/oauth/token', { grant_type: 'refresh_token' }))).statusCode).toBe(415);
+    // A body of another type is OAuth's own 400 invalid_request (below), never the one error body's 415.
+    expect((await app.inject(json('/v1/oauth/token', { grant_type: 'refresh_token' }))).json()).toMatchObject({
+      error: 'invalid_request',
+    });
   });
 
   it('takes a client’s write from any origin: OAuth clients send them from anywhere', async () => {
@@ -355,6 +358,41 @@ describe('the token endpoint: forms, each field once, OAuth’s own errors, neve
       headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'https://chatgpt.com' },
     });
     expect(response.statusCode).toBe(200);
+  });
+});
+
+describe('a body an OAuth endpoint can’t read: OAuth’s own 400 invalid_request, never cached (Schemathesis)', () => {
+  const sent = (url: string, type: string, payload: string): InjectOptions => ({
+    method: 'POST',
+    url,
+    headers: { 'content-type': type },
+    payload,
+  });
+
+  it.each<[string, InjectOptions]>([
+    ['malformed JSON to register', sent('/v1/oauth/register', 'application/json', '{"redirect_uris": [')],
+    ['a form to register', sent('/v1/oauth/register', 'application/x-www-form-urlencoded', 'redirect_uris=x')],
+    ['JSON to the token endpoint', sent('/v1/oauth/token', 'application/json', '{"grant_type":"refresh_token"}')],
+    ['text to the revocation endpoint', sent('/v1/oauth/revoke', 'text/plain', 'token=x')],
+    ['a malformed form to the revocation endpoint', sent('/v1/oauth/revoke', 'application/x-www-form-urlencoded', '%')],
+  ])('%s', async (_, request) => {
+    const { app, asked } = await oauthServer(true);
+    const response = await app.inject(request);
+    expect(response.statusCode).toBe(400);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.json()).toEqual({ error: 'invalid_request', error_description: expect.any(String) as unknown });
+    expect(asked).toEqual([]);
+  });
+
+  it.each([
+    ['register', sent('/v1/oauth/register', 'application/json', JSON.stringify({ client_name: 'x'.repeat(70_000) }))],
+    ['the token endpoint', sent('/v1/oauth/token', 'application/x-www-form-urlencoded', `code=${'c'.repeat(8192)}`)],
+  ])('keeps a body too large at 413, the one error body the document’s 4XX names: %s', async (_, request) => {
+    const { app, asked } = await oauthServer(true);
+    const response = await app.inject(request);
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toMatchObject({ error: { code: 'PAYLOAD_TOO_LARGE' } });
+    expect(asked).toEqual([]);
   });
 });
 

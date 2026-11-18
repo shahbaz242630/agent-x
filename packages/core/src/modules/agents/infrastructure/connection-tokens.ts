@@ -16,7 +16,7 @@
 //   and key are then read through their signed states.
 import { randomBytes } from 'node:crypto';
 
-import { withTenant } from '@agentx/platform/db';
+import { type SentTogether, sendTogether, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, sql } from 'kysely';
 
@@ -47,7 +47,8 @@ export interface IssuedTokens {
 /**
  * Issues an access token and a refresh token for the connection whose key this is, in the caller's transaction,
  * which must be withSignedStates' for its organisation and have read the connection and its key live. Neither
- * outlives the key. `parentId`: the refresh token this pair rotates, if any.
+ * outlives the key. `parentId`: the refresh token this pair rotates, if any. `alongside`: a statement of the caller's
+ * sent on the same trip as the pair's rows, after them (the client's last connection noted, 6E3b), so it costs no trip.
  */
 export async function issueTokens(
   tx: AgentsTransaction,
@@ -59,6 +60,7 @@ export async function issueTokens(
     now,
     keyExpiresAt,
     parentId = null,
+    alongside,
   }: {
     readonly orgId: string;
     readonly keyId: string;
@@ -66,6 +68,7 @@ export async function issueTokens(
     readonly now: Date;
     readonly keyExpiresAt: Date;
     readonly parentId?: string | null;
+    readonly alongside?: SentTogether;
   },
 ): Promise<IssuedTokens> {
   const kept = scopesText(scopes);
@@ -96,10 +99,9 @@ export async function issueTokens(
   });
   const [access, refresh] = made;
   if (access === undefined || refresh === undefined) throw new Error('a pair is two tokens');
-  await tx
-    .insertInto(TOKENS)
-    .values(made.map(({ row }) => row))
-    .execute();
+  const added = tx.insertInto(TOKENS).values(made.map(({ row }) => row));
+  if (alongside === undefined) await added.execute();
+  else await sendTogether(tx, [added, alongside]);
   return {
     accessToken: access.text,
     refreshToken: refresh.text,

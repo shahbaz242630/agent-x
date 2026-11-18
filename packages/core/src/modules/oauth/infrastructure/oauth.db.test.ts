@@ -5,10 +5,17 @@ import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } fr
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { DAY_MS } from '../../../shared-kernel/index.ts';
+import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { checkRegistration, type ClientRegistration } from './client-metadata.ts';
 import { challengeOf } from './pkce.ts';
-import { clientConnected, clientOf, MOST_REGISTRATIONS_A_DAY, registerClient, sweepClients } from './clients.ts';
+import {
+  CLIENT_KEPT_DAYS,
+  clientOf,
+  clientSeen,
+  MOST_REGISTRATIONS_A_DAY,
+  registerClient,
+  sweepClients,
+} from './clients.ts';
 import {
   CODE_SECONDS,
   codeHeld,
@@ -71,22 +78,42 @@ afterAll(async () => {
 });
 
 describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
-  it('registers a client, reads it back, notes its first connection once, and sweeps it only if it never connected', async () => {
+  it('registers a client, reads it back, notes when it connects at most hourly, and sweeps it once unused', async () => {
     const registered = await registerClient(app, registration(), NOW);
     if (registered.outcome !== 'registered') throw new Error('registered');
     const { clientId } = registered.client;
     expect(clientId).toMatch(/^axcl_[0-9a-f]{32}$/);
     expect(await clientOf(app, clientId)).toEqual({ ...registration(), clientId, createdAt: NOW });
     expect(await clientOf(app, 'axcl_ffffffffffffffffffffffffffffffff')).toBeUndefined();
+    const at = (ms: number) => new Date(NOW.getTime() + ms);
+    const seen = async () => {
+      const [row] = await database
+        .as('admin')
+        .query<{ first: Date | null; last: Date | null }>(
+          'select first_connected_at as first, last_connected_at as last from oauth.clients where client_id = $1',
+          [clientId],
+        );
+      return row;
+    };
 
     const unused = await registerClient(app, registration(), NOW);
-    await clientConnected(app, clientId, new Date(NOW.getTime() + 1000));
-    await clientConnected(app, clientId, new Date(NOW.getTime() + 2000));
+    await clientSeen(app, clientId, at(1000)).execute();
+    expect(await seen()).toEqual({ first: at(1000), last: at(1000) });
+    // Within the hour, the row isn't written again: a busy client costs one write an hour.
+    expect(Number((await clientSeen(app, clientId, at(HOUR_MS)).executeTakeFirst()).numUpdatedRows)).toBe(0);
+    await clientSeen(app, clientId, at(1000 + HOUR_MS)).execute();
+    expect(await seen()).toEqual({ first: at(1000), last: at(1000 + HOUR_MS) });
+
     // A day on, the one never connected goes; the connected one stays.
-    expect(await sweepClients(app, new Date(NOW.getTime() + DAY_MS - 1), 10)).toBe(0);
-    expect(await sweepClients(app, new Date(NOW.getTime() + DAY_MS), 10)).toBe(1);
+    expect(await sweepClients(app, at(DAY_MS - 1), 10)).toBe(0);
+    expect(await sweepClients(app, at(DAY_MS), 10)).toBe(1);
     expect(await clientOf(app, clientId)).toBeDefined();
     if (unused.outcome === 'registered') expect(await clientOf(app, unused.client.clientId)).toBeUndefined();
+    // 90 days after its last connection, no connection of its can be refreshed: it goes too.
+    const kept = 1000 + HOUR_MS + CLIENT_KEPT_DAYS * DAY_MS;
+    expect(await sweepClients(app, at(kept - 1), 10)).toBe(0);
+    expect(await sweepClients(app, at(kept), 10)).toBe(1);
+    expect(await clientOf(app, clientId)).toBeUndefined();
     await expect(sweepClients(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 

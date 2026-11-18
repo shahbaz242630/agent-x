@@ -71,6 +71,8 @@ export interface E2eFixtures {
     readonly tamperAdmin: TestUser;
     /** As `totp`, for the console's own pages in a real browser (Phase 6 6A1): in no organisation. */
     readonly console: TestUser & { readonly totpSecret: string };
+    /** As `totp`, a developer who connects an MCP client by OAuth as an agent they own (6E3b). */
+    readonly oauth: TestUser & { readonly totpSecret: string };
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -125,6 +127,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     const [tamper, tamperSecret] = await newUserWithApp('tamper');
     const tamperAdmin = await newUser('tamper-admin');
     const [consoleUser, consoleSecret] = await newUserWithApp('console');
+    const [oauthUser, oauthSecret] = await newUserWithApp('oauth');
     const tamperProvisionedAt = Date.now();
     await addOtpEmail(client, resetTarget.userId);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
@@ -137,6 +140,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await loginSees(client, tamper, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, tamperAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, consoleUser, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, oauthUser, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, resetTarget, [
       'AUTHENTICATION_METHOD_TYPE_PASSWORD',
       'AUTHENTICATION_METHOD_TYPE_TOTP',
@@ -161,6 +165,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         tamper: { ...tamper, totpSecret: tamperSecret, provisionedAt: tamperProvisionedAt },
         tamperAdmin,
         console: { ...consoleUser, totpSecret: consoleSecret },
+        oauth: { ...oauthUser, totpSecret: oauthSecret },
       },
       api,
       policy: await loginPolicy(client),

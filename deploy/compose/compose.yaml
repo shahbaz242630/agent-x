@@ -133,6 +133,8 @@ services:
       AGENTX_DB_TLS: disable
       # The app's keys (ADR-011 §2), one file per key, which prepare writes.
       AGENTX_KEYS_DIR: /mnt/secrets
+      # Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on locally, as on staging.
+      AGENTX_MCP_OAUTH: 'on'
     # Sign-in (ADR-003 §5): off until the end-to-end suite registers the API
     # with the login service as its OIDC client (tooling/e2e/api-sign-in.ts),
     # which writes this file (the issuer, the client ID, the allowlist, where
