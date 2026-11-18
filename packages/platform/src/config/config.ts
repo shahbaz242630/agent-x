@@ -87,8 +87,9 @@ export interface Config {
     /** 6E3 (ADR-016): Agent X's own OAuth server for MCP connections; off, its addresses are 404s. */
     readonly mcpOauth: boolean;
     /**
-     * 6E3c (decision 2): the origins whose MCP clients name themselves by a client ID metadata document Agent X
-     * fetches, each on the outbound allowlist; none (or absent) while the OAuth server is off, or none is set.
+     * 6E3c (decision 2): where MCP clients name themselves by a client ID metadata document Agent X fetches: each an
+     * origin, a path prefix ending in `/` or one document's exact address (AG6), its origin on the outbound
+     * allowlist; none (or absent) while the OAuth server is off, or none is set.
      */
     readonly oauthClientMetadataOrigins?: readonly string[] | undefined;
   };
@@ -423,29 +424,30 @@ function signInFrom(
 }
 
 /**
- * The MCP clients known to publish a client ID metadata document (6E3 decision 2; MCP-Guide §2): Claude, ChatGPT and
- * Hermes. Any other uses registration (RFC 7591); another origin needs a later decision record.
+ * The MCP clients known to publish a client ID metadata document (6E3 decision 2; MCP-Guide §2): Claude and ChatGPT,
+ * each trusted for its whole origin, as each company alone publishes on its own host. Hermes is not (AG6): on
+ * nousresearch.github.io any repository of that GitHub organisation can publish, so it registers (RFC 7591) until its
+ * exact document address is confirmed. Any other uses registration too; another entry needs a later decision record.
  */
-const DEFAULT_CLIENT_METADATA_ORIGINS: readonly string[] = [
-  'https://chatgpt.com',
-  'https://claude.ai',
-  'https://nousresearch.github.io',
-];
+const DEFAULT_CLIENT_METADATA_ORIGINS: readonly string[] = ['https://chatgpt.com', 'https://claude.ai'];
+
+/** The origin an entry is on: the entry itself, or the origin of a path prefix's or a document's address (AG6). */
+const originOf = (entry: string): string => new URL(entry).origin;
 
 /**
- * The origins whose client ID metadata documents are fetched (6E3c), while the OAuth server is on. Unset, the default
- * origins that are on the outbound allowlist, so a place that can't reach them simply takes none of them; set,
- * every one (each refused at start unless https and on the allowlist: clientMetadataProblems).
+ * Where client ID metadata documents are fetched (6E3c), while the OAuth server is on. Unset, the default origins
+ * that are on the outbound allowlist, so a place that can't reach them simply takes none of them; set, every entry
+ * (each refused at start unless https and its origin on the allowlist: clientMetadataProblems).
  */
 function clientMetadataOriginsOf(set: readonly string[] | undefined, allowedOrigins: readonly string[]): string[] {
   return [...(set ?? DEFAULT_CLIENT_METADATA_ORIGINS.filter((origin) => allowedOrigins.includes(origin)))];
 }
 
-/** 6E3c: each origin set for client metadata documents is https and on the outbound allowlist, as it is fetched. */
+/** 6E3c: each entry set for client metadata documents is https, its origin on the outbound allowlist, as fetched. */
 function clientMetadataProblems(set: readonly string[] | undefined, allowedOrigins: readonly string[]): string[] {
   const named = set ?? [];
-  const plain = named.filter((origin) => !origin.startsWith('https://'));
-  const unlisted = named.filter((origin) => !allowedOrigins.includes(origin));
+  const plain = named.filter((entry) => !entry.startsWith('https://'));
+  const unlisted = named.filter((entry) => !allowedOrigins.includes(originOf(entry)));
   return [
     ...(plain.length > 0
       ? [

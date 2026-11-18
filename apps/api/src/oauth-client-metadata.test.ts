@@ -23,7 +23,7 @@ function fetcher(send: Send, { outbound = [CLAUDE], timeoutMs }: { outbound?: st
     return send(url, init);
   });
   return {
-    metadata: createClientMetadataFetch({ fetch, origins: [CLAUDE], ...(timeoutMs ? { timeoutMs } : {}) }),
+    metadata: createClientMetadataFetch({ fetch, trusted: [CLAUDE], ...(timeoutMs ? { timeoutMs } : {}) }),
     sent,
   };
 }
@@ -54,6 +54,21 @@ describe('SEC-OAUTH-09 a client metadata document’s fetch', () => {
     expect(metadata.listed(clientId)).toBe(false);
     expect(await metadata.fetch(clientId)).toEqual({ outcome: 'refused', reason: 'not_listed' });
     expect(sent).toEqual([]);
+  });
+
+  it('AG6: trusting a path prefix, fetches under it and never a neighbour on the same origin', async () => {
+    const PAGES = 'https://nousresearch.github.io';
+    const sent: string[] = [];
+    const fetch = createOutboundFetch([PAGES], (url) => {
+      sent.push(url.toString());
+      return Promise.resolve(json('{}'));
+    });
+    const metadata = createClientMetadataFetch({ fetch, trusted: [`${PAGES}/hermes/`] });
+    for (const clientId of [`${PAGES}/hermes-evil/client.json`, `${PAGES}/hermes/%2e%2e/evil/client.json`]) {
+      expect(await metadata.fetch(clientId)).toEqual({ outcome: 'refused', reason: 'not_listed' });
+    }
+    expect(await metadata.fetch(`${PAGES}/hermes/client.json`)).toEqual({ outcome: 'fetched', document: {} });
+    expect(sent).toEqual([`${PAGES}/hermes/client.json`]);
   });
 
   it('is refused by the outbound fetch for an origin listed but not on the outbound allowlist', async () => {

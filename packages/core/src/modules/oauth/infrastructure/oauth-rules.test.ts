@@ -7,7 +7,11 @@ import { describe, expect, it } from 'vitest';
 
 import { SCOPES } from '../../agents/index.ts';
 import { checkRegistration, DEVICE_CODE_GRANT } from './client-metadata.ts';
-import { checkClientMetadataDocument, isMetadataClientId } from './client-metadata-document.ts';
+import {
+  checkClientMetadataDocument,
+  isMetadataClientId,
+  isTrustedMetadataClientId,
+} from './client-metadata-document.ts';
 import {
   hashOf,
   isCodeText,
@@ -268,10 +272,70 @@ describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', ()
     ['https://user@claude.ai/x', false],
     ['https://CLAUDE.ai/x', false],
     ['https://claude.ai:443/x', false],
+    // AG6: only as the parser prints it, so the path matched is the path fetched, and nothing a server might decode.
+    ['https://claude.ai/a/%2e%2e/b', false],
+    ['https://claude.ai/a/%2E/b', false],
+    ['https://claude.ai/a/.%2e/b', false],
+    ['https://claude.ai/a%2fb', false],
+    ['https://claude.ai/a%2F..%2Fb', false],
+    ['https://claude.ai/a%5cb', false],
+    ['https://claude.ai/a\\..\\b', false],
+    ['https://claude.ai/a b', false],
+    ['https://claude.ai/a?x=%2f', true],
     ['axcl_0123456789abcdef0123456789abcdef', false],
     [`https://claude.ai/${'x'.repeat(2048)}`, false],
   ])('takes %s as a document’s address: %s', (clientId, taken) => {
     expect(isMetadataClientId(clientId)).toBe(taken);
+  });
+
+  describe('AG6 trusted by an origin, a path prefix or one exact address', () => {
+    const TRUSTED = [
+      'https://claude.ai',
+      'https://nousresearch.github.io/hermes/',
+      'https://agents.example/apps/one/client.json',
+    ];
+    it.each([
+      // An origin: every address on it.
+      [CLIENT_ID, true],
+      ['https://claude.ai/anything/else.json?v=2', true],
+      ['https://claude.ai.evil.example/x', false],
+      ['https://evil.claude.ai/x', false],
+      ['https://claude.ai:8443/x', false],
+      // A prefix: the paths under it, a query or not.
+      ['https://nousresearch.github.io/hermes/client.json', true],
+      ['https://nousresearch.github.io/hermes/v2/client.json?v=1', true],
+      ['https://nousresearch.github.io/hermes', false],
+      ['https://nousresearch.github.io/hermes-evil/client.json', false],
+      ['https://nousresearch.github.io/hermesx/client.json', false],
+      ['https://nousresearch.github.io/other/client.json', false],
+      ['https://nousresearch.github.io/client.json', false],
+      ['https://nousresearch.github.io/hermes/../evil/client.json', false],
+      ['https://nousresearch.github.io/hermes/%2e%2e/evil/client.json', false],
+      ['https://nousresearch.github.io/hermes/%2E%2E/evil/client.json', false],
+      ['https://nousresearch.github.io/hermes%2fclient.json', false],
+      ['https://nousresearch.github.io/hermes/..%2fevil/client.json', false],
+      ['https://nousresearch.github.io/hermes\\..\\evil/client.json', false],
+      ['https://NOUSRESEARCH.github.io/hermes/client.json', false],
+      ['https://nousresearch.github.io:443/hermes/client.json', false],
+      ['https://x@nousresearch.github.io/hermes/client.json', false],
+      ['https://nousresearch.github.io/hermes/client.json#x', false],
+      ['http://nousresearch.github.io/hermes/client.json', false],
+      ['https://other.github.io/hermes/client.json', false],
+      // An exact address: itself alone, with no query.
+      ['https://agents.example/apps/one/client.json', true],
+      ['https://agents.example/apps/one/client.json?v=1', false],
+      ['https://agents.example/apps/one/client.json/', false],
+      ['https://agents.example/apps/one/client.jsonx', false],
+      ['https://agents.example/apps/one/other.json', false],
+      ['https://agents.example/apps/one/', false],
+      ['https://agents.example/apps/one/x/../client.json', false],
+    ])('trusts %s: %s', (clientId, trusted) => {
+      expect(isTrustedMetadataClientId(clientId, TRUSTED)).toBe(trusted);
+    });
+
+    it('trusts nothing with nothing listed', () => {
+      expect(isTrustedMetadataClientId(CLIENT_ID, [])).toBe(false);
+    });
   });
 
   it('keeps the document’s name, addresses and the grants it knows', () => {
