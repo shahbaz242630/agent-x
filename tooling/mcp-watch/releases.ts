@@ -35,8 +35,12 @@ type Version = NonNullable<ReturnType<typeof parseVersion>>;
 type RedWhen =
   /** Any newer release: the specification, the SDK and the conformance suite move rarely, and each matters. */
   | 'every'
-  /** A newer release with a note line naming MCP and a word that can break a client (CLIENT_BREAKING). */
-  | 'client';
+  /**
+   * Never (partner S201, MW1): the busy clients' notes name MCP most days, and a red on each would hide a real alarm.
+   * Every newer release is listed in the summary, one with a note line naming MCP and a word that can break a client
+   * (CLIENT_BREAKING) marked "look first"; the daily canaries (mcp-watch.yml) go red when a client really breaks.
+   */
+  | 'report';
 
 /** One thing watched: a repository's releases, which of its tags are the line we follow, and why it matters. */
 export interface Source {
@@ -98,7 +102,7 @@ export const SOURCES: readonly Source[] = [
     repo: 'anthropics/claude-code',
     tag: new RegExp(`^v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'client',
+    red: 'report',
     check: CLIENT_CHECK,
   },
   {
@@ -107,7 +111,7 @@ export const SOURCES: readonly Source[] = [
     repo: 'openai/codex',
     tag: new RegExp(`^rust-v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'client',
+    red: 'report',
     check: CLIENT_CHECK,
   },
   {
@@ -117,7 +121,7 @@ export const SOURCES: readonly Source[] = [
     tag: new RegExp(`^(?<version>${SEMVER})$`),
     prereleases: false,
     // Its GitHub notes are a link: its MCP news is in code.visualstudio.com/updates, read when it is listed.
-    red: 'client',
+    red: 'report',
     check: `${CLIENT_CHECK}; its full notes are at code.visualstudio.com/updates`,
   },
   {
@@ -126,7 +130,7 @@ export const SOURCES: readonly Source[] = [
     repo: 'google-gemini/gemini-cli',
     tag: new RegExp(`^v(?<version>${SEMVER})$`),
     prereleases: false,
-    red: 'client',
+    red: 'report',
     check: CLIENT_CHECK,
   },
   {
@@ -136,7 +140,7 @@ export const SOURCES: readonly Source[] = [
     // Its 0.x line: the calendar tags (v2026.9.x) are from before it, and would read as newer.
     tag: /^v(?<version>(?:0|[1-9]\d{0,2})\.\d+\.\d+)$/,
     prereleases: false,
-    red: 'client',
+    red: 'report',
     check: `${CLIENT_CHECK}, and that MCP-Guide.md §8's Hermes column still holds (legacy initialize, its auth)`,
   },
   {
@@ -145,7 +149,7 @@ export const SOURCES: readonly Source[] = [
     repo: 'openclaw/openclaw',
     tag: /^v(?<version>\d{4}\.\d+\.\d+)$/,
     prereleases: false,
-    red: 'client',
+    red: 'report',
     check: `${CLIENT_CHECK}, and that MCP-Guide.md §8's OpenClaw column still holds (its transport, legacy initialize)`,
   },
 ];
@@ -287,13 +291,15 @@ export function judgeSource(
     .sort((a, b) => compareVersions(b.version, a.version));
   const newest = newer[0];
   if (newest === undefined) return { errors: [], summary: `${heading}\nNothing newer.\n` };
-  const reds = newer.filter(
-    ({ release }) => source.red === 'every' || (release.body ?? '').split(/\r?\n/).some(breaksClients),
-  );
+  const reds = source.red === 'every' ? newer : [];
+  const verdict = (release: Release): string => {
+    if (source.red === 'every') return 'red';
+    return (release.body ?? '').split(/\r?\n/).some(breaksClients) ? 'look first' : 'report only';
+  };
   const rows = newer.map(({ release }) => {
     const lines = mcpLines(release.body).map(cell).join('<br>');
     return (
-      `| ${reds.some((red) => red.release === release) ? 'red' : 'report only'} | ` +
+      `| ${verdict(release)} | ` +
       `[${cell(release.tag_name ?? '')}](${release.html_url ?? ''}) | ${cell(release.published_at ?? '')} | ` +
       `${lines === '' ? '-' : lines} |`
     );
