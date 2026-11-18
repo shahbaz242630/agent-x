@@ -12,6 +12,11 @@
 //   statement, only where none was, so two exchanges at once can't both have
 //   it; the second finds it used (codeUsedBefore), and its connection is
 //   revoked by the API.
+// - A device's flow (6E3c, RFC 8628) has no browser when it opens: the
+//   person types its user code into the console, which claims it for that
+//   browser, once (deviceClaimed), and the consent that follows is the code
+//   flow's. The device polls by its device code's hash, no sooner than its
+//   interval (devicePolled), and its tokens are issued once (codeUsed).
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
@@ -40,14 +45,36 @@ export interface CodeFlow {
   readonly endsAt: Date;
 }
 
-/** A flow as read: opened, and whether it was decided and its code used. */
-export interface FlowRead extends CodeFlow {
+/** Whether a flow was decided, and how: the organisation and connection key an allowed one made, and its use. */
+interface FlowOutcome {
   readonly decided: 'allowed' | 'denied' | null;
   readonly orgId: string | null;
   readonly keyId: string | null;
-  readonly codeEndsAt: Date | null;
   readonly usedAt: Date | null;
 }
+
+/** A browser's flow as read: opened, and whether it was decided and its code used. */
+export interface FlowRead extends CodeFlow, FlowOutcome {
+  readonly kind: 'code';
+  readonly codeEndsAt: Date | null;
+}
+
+/** A device's flow as read (6E3c): the browser that claimed it, if one did, and when the device last polled. */
+export interface DeviceFlowRead extends FlowOutcome {
+  readonly kind: 'device';
+  readonly id: string;
+  readonly clientId: string;
+  readonly scopesAsked: readonly Scope[];
+  readonly resource: string;
+  readonly browserHash: string | null;
+  readonly intervalSeconds: number;
+  readonly polledAt: Date | null;
+  readonly createdAt: Date;
+  readonly endsAt: Date;
+}
+
+/** Either kind of flow, as the consent reads one by its ID. */
+export type AnyFlowRead = FlowRead | DeviceFlowRead;
 
 type Database = Kysely<OauthTables>;
 /** The database, or a transaction on it holding these tables among others (the consent's own). */
@@ -66,6 +93,17 @@ export const MOST_OPEN_FLOWS_A_BROWSER = 5;
 /** Opened; or not, every browser's flows at their cap, or this browser's. */
 export type FlowOpened = 'opened' | 'full' | 'browser_full';
 
+/** How many flows, of either kind, have not ended at `now`, counted up to MOST_OPEN_FLOWS alone (the ends index). */
+async function openFlows(tx: Transaction<OauthTables>, now: Date): Promise<number> {
+  const open = await tx
+    .selectFrom((inner) =>
+      inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now).limit(MOST_OPEN_FLOWS).as('open'),
+    )
+    .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
+    .executeTakeFirstOrThrow();
+  return open.flows;
+}
+
 /**
  * Opens the flow, for FLOW_SECONDS from its creation, unless MOST_OPEN_FLOWS have not ended, or this browser holds
  * MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a transaction of its own whose statements are limited to 10
@@ -75,18 +113,7 @@ export type FlowOpened = 'opened' | 'full' | 'browser_full';
 export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>): Promise<FlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    const open = await tx
-      .selectFrom((inner) =>
-        inner
-          .selectFrom('oauth.flows')
-          .select('id')
-          .where('ends_at', '>', flow.createdAt)
-          .limit(MOST_OPEN_FLOWS)
-          .as('open'),
-      )
-      .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
-      .executeTakeFirstOrThrow();
-    if (open.flows >= MOST_OPEN_FLOWS) return 'full';
+    if ((await openFlows(tx, flow.createdAt)) >= MOST_OPEN_FLOWS) return 'full';
     const own = await tx
       .selectFrom('oauth.flows')
       .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
@@ -121,6 +148,7 @@ async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>): Promise<v
 
 const COLUMNS = [
   'id',
+  'kind',
   'client_id',
   'redirect_uri',
   'state',
@@ -135,18 +163,47 @@ const COLUMNS = [
   'key_id',
   'code_ends_at',
   'used_at',
+  'interval_s',
+  'polled_at',
 ] as const;
 
 type FlowRow = {
   readonly [Column in (typeof COLUMNS)[number]]: OauthTables['oauth.flows'][Column];
 };
 
-/** A code flow's row as read; undefined for a device's (6E3c), which has no browser. */
+/** How a flow was decided, from its row. */
+const outcomeOf = (row: FlowRow): FlowOutcome => ({
+  decided: row.outcome === 'allowed' || row.outcome === 'denied' ? row.outcome : null,
+  orgId: row.org_id,
+  keyId: row.key_id,
+  usedAt: row.used_at,
+});
+
+/** A device flow's row as read; undefined for a code flow's. */
+function deviceFlowOf(row: FlowRow | undefined): DeviceFlowRead | undefined {
+  if (row?.kind !== 'device' || row.interval_s === null) return undefined;
+  return {
+    kind: 'device',
+    id: row.id,
+    clientId: row.client_id,
+    scopesAsked: scopesOf(row.scopes_asked),
+    resource: row.resource,
+    browserHash: row.browser_hash,
+    intervalSeconds: row.interval_s,
+    polledAt: row.polled_at,
+    createdAt: row.created_at,
+    endsAt: row.ends_at,
+    ...outcomeOf(row),
+  };
+}
+
+/** A code flow's row as read; undefined for a device's, which has no redirect address. */
 function flowOf(row: FlowRow | undefined): FlowRead | undefined {
-  if (row === undefined || row.redirect_uri === null || row.code_challenge === null || row.browser_hash === null) {
+  if (row?.kind !== 'code' || row.redirect_uri === null || row.code_challenge === null || row.browser_hash === null) {
     return undefined;
   }
   return {
+    kind: 'code',
     id: row.id,
     clientId: row.client_id,
     redirectUri: row.redirect_uri,
@@ -157,22 +214,20 @@ function flowOf(row: FlowRow | undefined): FlowRead | undefined {
     browserHash: row.browser_hash,
     createdAt: row.created_at,
     endsAt: row.ends_at,
-    decided: row.outcome === 'allowed' || row.outcome === 'denied' ? row.outcome : null,
-    orgId: row.org_id,
-    keyId: row.key_id,
     codeEndsAt: row.code_ends_at,
-    usedAt: row.used_at,
+    ...outcomeOf(row),
   };
 }
 
-/** The code flow this ID names, decided or not, in time or not; undefined for none. */
-export async function flowById(db: Handle, id: string): Promise<FlowRead | undefined> {
-  return flowOf(await db.selectFrom('oauth.flows').select(COLUMNS).where('id', '=', id).executeTakeFirst());
+/** The flow this ID names, of either kind, decided or not, in time or not; undefined for none. */
+export async function flowById(db: Handle, id: string): Promise<AnyFlowRead | undefined> {
+  const row = await db.selectFrom('oauth.flows').select(COLUMNS).where('id', '=', id).executeTakeFirst();
+  return flowOf(row) ?? deviceFlowOf(row);
 }
 
-/** How a flow was decided. */
+/** How a flow was decided: an allowed code flow keeps its code's hash; a device's has none (its device code is its own). */
 export type FlowDecision =
-  | { readonly outcome: 'allowed'; readonly orgId: string; readonly keyId: string; readonly codeHash: string }
+  | { readonly outcome: 'allowed'; readonly orgId: string; readonly keyId: string; readonly codeHash: string | null }
   | { readonly outcome: 'denied' };
 
 /**
@@ -189,10 +244,10 @@ export async function flowDecided(db: Handle, id: string, decision: FlowDecision
       org_id: allowed?.orgId ?? null,
       key_id: allowed?.keyId ?? null,
       code_hash: allowed?.codeHash ?? null,
-      code_ends_at: allowed === undefined ? null : new Date(now.getTime() + CODE_SECONDS * 1000),
+      code_ends_at:
+        allowed === undefined || allowed.codeHash === null ? null : new Date(now.getTime() + CODE_SECONDS * 1000),
     })
     .where('id', '=', id)
-    .where('kind', '=', 'code')
     .where('decided_at', 'is', null)
     .where('ends_at', '>', now)
     .returning('id')
@@ -214,6 +269,113 @@ export async function flowOfCode(db: Database, codeHash: string): Promise<FlowRe
 export async function codeHeld(db: Handle, codeHash: string): Promise<FlowRead | undefined> {
   return flowOf(
     await db.selectFrom('oauth.flows').select(COLUMNS).where('code_hash', '=', codeHash).forUpdate().executeTakeFirst(),
+  );
+}
+
+/** A device's flow, as opened (RFC 8628 §3.2): its two codes' hashes and how often it may poll. */
+export interface DeviceFlow {
+  readonly id: string;
+  readonly clientId: string;
+  readonly scopesAsked: readonly Scope[];
+  readonly resource: string;
+  readonly deviceHash: string;
+  readonly userCodeHash: string;
+  readonly intervalSeconds: number;
+  readonly createdAt: Date;
+}
+
+/** Opened; or not, every flow at the server's cap, or the user code drawn already held (draw another). */
+export type DeviceFlowOpened = 'opened' | 'full' | 'collided';
+
+/**
+ * Opens the device's flow, for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended (the code flows' own cap, best
+ * effort, as openCodeFlow's), in a transaction of its own whose statements are limited to 10 seconds. A user code
+ * another flow holds, ended or not, opens no flow: `collided`, and nothing kept.
+ */
+export async function openDeviceFlow(db: Database, flow: DeviceFlow): Promise<DeviceFlowOpened> {
+  return db.transaction().execute(async (tx) => {
+    await limitStatements(tx);
+    if ((await openFlows(tx, flow.createdAt)) >= MOST_OPEN_FLOWS) return 'full';
+    const inserted = await tx
+      .insertInto('oauth.flows')
+      .values({
+        id: flow.id,
+        kind: 'device',
+        client_id: flow.clientId,
+        scopes_asked: scopesText(flow.scopesAsked),
+        resource: flow.resource,
+        device_hash: flow.deviceHash,
+        user_code_hash: flow.userCodeHash,
+        interval_s: flow.intervalSeconds,
+        created_at: flow.createdAt,
+        ends_at: new Date(flow.createdAt.getTime() + FLOW_SECONDS * 1000),
+      })
+      .onConflict((conflict) => conflict.column('user_code_hash').doNothing())
+      .returning('id')
+      .executeTakeFirst();
+    return inserted === undefined ? 'collided' : 'opened';
+  });
+}
+
+/**
+ * Claims the device flow whose user code this is for the browser whose cookie's hash is `browserHash`, at `now`: only
+ * an undecided flow in time, claimed by no other browser (or by this one before). The flow's ID, or undefined for no
+ * such flow: a code typed wrong, ended, decided, or another browser's.
+ */
+export async function deviceClaimed(
+  db: Database,
+  userCodeHash: string,
+  browserHash: string,
+  now: Date,
+): Promise<string | undefined> {
+  const row = await db
+    .updateTable('oauth.flows')
+    .set({ browser_hash: browserHash })
+    .where('user_code_hash', '=', userCodeHash)
+    .where('kind', '=', 'device')
+    .where('decided_at', 'is', null)
+    .where('ends_at', '>', now)
+    .where((eb) => eb.or([eb('browser_hash', 'is', null), eb('browser_hash', '=', browserHash)]))
+    .returning('id')
+    .executeTakeFirst();
+  return row?.id;
+}
+
+/** The device flow this device code's hash names, read unlocked: where its organisation is, never a decision. */
+export async function deviceFlowOfCode(db: Database, deviceHash: string): Promise<DeviceFlowRead | undefined> {
+  return deviceFlowOf(
+    await db.selectFrom('oauth.flows').select(COLUMNS).where('device_hash', '=', deviceHash).executeTakeFirst(),
+  );
+}
+
+/**
+ * The device's poll noted at `now`, if it came no sooner than its interval after the last (RFC 8628 §3.5): whether it
+ * did. One statement, so two polls at once can't both pass; one too soon leaves the last poll's time as it was.
+ */
+export async function devicePolled(db: Database, flowId: string, now: Date): Promise<boolean> {
+  const row = await db
+    .updateTable('oauth.flows')
+    .set({ polled_at: now })
+    .where('id', '=', flowId)
+    .where('kind', '=', 'device')
+    .where((eb) =>
+      eb.or([
+        eb('polled_at', 'is', null),
+        eb('polled_at', '<=', sql<Date>`${now}::timestamptz - pg_catalog.make_interval(secs => interval_s)`),
+      ]),
+    )
+    .returning('id')
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/**
+ * The device flow, locked for its tokens' issue in the caller's transaction (its organisation's), so a second poll of
+ * the same allowed flow waits and finds it used: undefined if there is none.
+ */
+export async function deviceHeld(db: Handle, flowId: string): Promise<DeviceFlowRead | undefined> {
+  return deviceFlowOf(
+    await db.selectFrom('oauth.flows').select(COLUMNS).where('id', '=', flowId).forUpdate().executeTakeFirst(),
   );
 }
 

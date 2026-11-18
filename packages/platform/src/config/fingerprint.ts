@@ -89,6 +89,10 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       rateLimitPerOrganisationPerMinute: config.http.rateLimitPerOrganisationPerMinute,
       webCopies: config.http.webCopies,
       mcpOauth: config.http.mcpOauth,
+      // Only while the OAuth server is on, as the config holds it.
+      ...(config.http.oauthClientMetadataOrigins === undefined
+        ? {}
+        : { oauthClientMetadataOrigins: config.http.oauthClientMetadataOrigins }),
     },
     db: {
       host: config.db.host,

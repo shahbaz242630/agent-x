@@ -4,7 +4,9 @@
 // step-up, the code exchanged once, the access token accepted at the MCP
 // resource, a refresh used once, and the connection revoked by a reused code,
 // a reused refresh token, the client, a hand-over, a member (6E3b) or the
-// member's removal; and an agent's connections listed (6E3b). The routes' own answers
+// member's removal; and an agent's connections listed (6E3b); a device
+// connected (6E3c, RFC 8628), and a client named by its metadata document
+// (6E3c, SEC-OAUTH-09). The routes' own answers
 // are oauth-routes.test.ts and oauth-requests.test.ts.
 import { createHash } from 'node:crypto';
 
@@ -36,9 +38,13 @@ import {
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   challengeOf,
+  CLIENT_METADATA_STALE_MS,
+  DEVICE_CODE_GRANT,
+  deviceFlowOfCode,
   flowById,
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_BROWSER,
+  keepClientMetadata,
   newFlowCookie,
   type OauthTables,
   sweepClients,
@@ -59,7 +65,7 @@ import {
   waitUntilBlocked,
   waitUntilQueued,
 } from '@agentx/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { createAgentChanges, HAND_OVER_CONFIRM_OPERATION, HAND_OVER_OPERATION } from './agent-changes.ts';
 import { createAgentKeyChanges, REVOKE_OPERATION, ROTATE_OPERATION } from './agent-key-changes.ts';
@@ -80,6 +86,9 @@ import {
   DENY_OPERATION,
 } from './connection-consents.ts';
 import { createOauthAuthorizing, type OauthAuthorizing } from './oauth-authorizing.ts';
+import type { ClientMetadataFetch, MetadataFetched } from './oauth-client-metadata.ts';
+import { createOauthClients, MOST_FETCHES_A_MINUTE, type OauthClients, REFUSED_FOR_MS } from './oauth-clients.ts';
+import { createOauthDevice } from './oauth-device.ts';
 import { createOauthGrants, type GrantAnswer, type OauthGrants } from './oauth-grants.ts';
 import { capabilitiesOf } from './oauth-wire.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
@@ -114,6 +123,7 @@ let authorizing: OauthAuthorizing;
 let grants: OauthGrants;
 let consents: ConnectionConsents;
 let clientId: string;
+let oauthClients: OauthClients;
 
 const challenges = () => createStepUpChallenges({ ids, clock });
 const quiet = () => ({ keys, ids, logger: testLogger() });
@@ -288,7 +298,9 @@ beforeEach(async () => {
   capture = new LogCapture();
   noted = [];
   const logger = testLogger(capture);
-  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities });
+  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  oauthClients = clients;
+  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
   grants = createOauthGrants({
     database: app,
     keys,
@@ -297,6 +309,7 @@ beforeEach(async () => {
     logger,
     capabilities,
     securityEvents: { note: (event) => noted.push(event) },
+    clients,
   });
   consents = createConnectionConsents({
     database: app,
@@ -306,6 +319,7 @@ beforeEach(async () => {
     challenges: challenges(),
     logger,
     issuer: capabilities.issuer,
+    clients,
   });
   const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION);
   if (registered.outcome !== 'registered') throw new Error('registered');
@@ -427,7 +441,8 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     const admin = await member(org, 'admin');
     const flow = await opened();
     const write = await consents.deny(admin, keyed(admin, DENY_OPERATION, 'deny'), flow, CORRELATION);
-    if (write.outcome !== 'denied') throw new Error(`not denied: ${JSON.stringify(write)}`);
+    if (write.outcome !== 'denied' || write.redirectTo === null)
+      throw new Error(`not denied: ${JSON.stringify(write)}`);
     const url = new URL(write.redirectTo);
     expect(Object.fromEntries(url.searchParams)).toEqual({
       error: 'access_denied',
@@ -587,7 +602,15 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
         return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
       },
     });
-    const busy = createOauthAuthorizing({ database: failing, clock, ids, logger: testLogger(capture), capabilities });
+    const logger = testLogger(capture);
+    const busy = createOauthAuthorizing({
+      database: failing,
+      clock,
+      ids,
+      logger,
+      capabilities,
+      clients: createOauthClients({ database: failing, clock, logger, metadata: undefined }),
+    });
     const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined);
     if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
     expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
@@ -688,6 +711,7 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
         logger: testLogger(capture),
         capabilities,
         securityEvents: { note: () => undefined },
+        clients: oauthClients,
       });
       const exchanging = { code: sent, clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER, resource: undefined };
       expect(await once.exchangeCode(exchanging, CALLER)).toMatchObject({
@@ -855,6 +879,7 @@ describe(`refusals on the way (Postgres ${server.version})`, () => {
       logger: testLogger(capture),
       capabilities,
       securityEvents: { note: () => undefined },
+      clients: oauthClients,
     });
     expect(
       await elsewhere.refresh(
@@ -907,6 +932,7 @@ describe(`busy: a database limit answered as temporarily_unavailable (Postgres $
         logger: testLogger(capture),
         capabilities,
         securityEvents: { note: () => undefined },
+        clients: oauthClients,
       });
       const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
       expect(await busy.refresh(refresh, CALLER)).toMatchObject({ status: 503, error: 'temporarily_unavailable' });
@@ -1619,5 +1645,660 @@ describe(`mutation pass (6E3b): what each survivor showed untested (Postgres ${s
     await restoring.end();
     expect(await accepted(accessToken)).toMatchObject({ outcome: 'accepted' });
     expect(await revokedOnRemoval(org)).toEqual([]);
+  });
+});
+
+describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
+  const deviceOf = (at: FixedClock = clock) =>
+    createOauthDevice({
+      database: app,
+      clock: at,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata: undefined }),
+    });
+
+  /** A device's codes, asked for by the registered client. */
+  async function codes(scope?: string) {
+    const answer = await deviceOf().authorize(
+      { client_id: clientId, resource: capabilities.resource, ...(scope === undefined ? {} : { scope }) },
+      CORRELATION,
+    );
+    if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
+    return answer.codes;
+  }
+
+  /** The device's request, claimed by a browser whose person typed its code. */
+  async function claimed(userCode: string, cookie?: string) {
+    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie);
+    if (found.outcome !== 'claimed') throw new Error('not claimed');
+    return { flowId: found.requestId, cookie: found.cookie };
+  }
+
+  const flowOfDevice = async (deviceCode: string) =>
+    (await deviceFlowOfCode(app, createHash('sha256').update(deviceCode, 'utf8').digest('hex')))?.id;
+
+  const poll = (deviceCode: string, client = clientId) =>
+    grants.exchangeDevice({ deviceCode, clientId: client }, CALLER);
+  const errorOf = (answer: GrantAnswer) => (answer.outcome === 'refused' ? answer.error : answer.outcome);
+
+  /** The code-flow client every other case uses: it never listed the device flow. */
+  let codeOnly: string;
+  beforeEach(async () => {
+    codeOnly = clientId;
+    // A client that registered for the device flow, named as the one above.
+    const registered = await authorizing.register(
+      { redirect_uris: [REDIRECT], client_name: 'ChatGPT', grant_types: [DEVICE_CODE_GRANT] },
+      CORRELATION,
+    );
+    if (registered.outcome !== 'registered') throw new Error('registered');
+    clientId = registered.client.clientId;
+  });
+
+  it('6E3c review: refuses the device flow to a client that never listed it, at its codes and at its poll', async () => {
+    expect(await deviceOf().authorize({ client_id: codeOnly }, CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 400,
+      error: 'unauthorized_client',
+    });
+    // And the code flow to a client that registered for the device flow alone.
+    const back = await authorizing.authorize(
+      {
+        response_type: 'code',
+        client_id: clientId,
+        redirect_uri: REDIRECT,
+        state: 'xyz',
+        code_challenge: challengeOf(VERIFIER),
+        code_challenge_method: 'S256',
+      },
+      undefined,
+    );
+    if (back.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(back)}`);
+    expect(new URL(back.redirectTo).searchParams.get('error')).toBe('unauthorized_client');
+    // A client gone since its codes were given: its poll is refused too.
+    const given = await codes();
+    await database.as('admin').query('delete from oauth.clients where client_id = $1', [clientId]);
+    expect(errorOf(await poll(given.deviceCode))).toBe('unauthorized_client');
+  });
+
+  it('connects a device: its codes, the person types the code, consents, and the device’s poll gets the pair once', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes('requests:read suppliers:read');
+    expect(given).toMatchObject({
+      verificationUri: 'https://app.agentx.example/device',
+      verificationUriComplete: `https://app.agentx.example/device?user_code=${given.userCode}`,
+      expiresIn: 900,
+      interval: 5,
+    });
+    expect(given.userCode).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+    // Before anyone decides: pending, then too soon.
+    expect(errorOf(await poll(given.deviceCode))).toBe('authorization_pending');
+    expect(errorOf(await poll(given.deviceCode))).toBe('slow_down');
+    const flow = await claimed(given.userCode);
+    // Another browser typing the same code finds nothing.
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
+    expect(await consents.request(flow)).toMatchObject({
+      via: 'device',
+      client: { id: clientId, name: 'ChatGPT', verifiedBy: null },
+      redirectUri: null,
+      redirectHost: null,
+      loopback: false,
+      scopesAsked: ['requests:read', 'suppliers:read'],
+    });
+    const write = await allowed(admin, flow, { agentId, scopes: ['requests:read'] });
+    expect(write).toMatchObject({ outcome: 'connected', redirectTo: null, connection: { via: 'device', agentId } });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    clock.advanceBy(5000);
+    const tokens = issued(await poll(given.deviceCode));
+    expect(tokens.scopes).toEqual(['requests:read']);
+    expect(await accepted(tokens.accessToken)).toMatchObject({
+      outcome: 'accepted',
+      key: { keyId: write.connection.keyId, credential: 'connection' },
+    });
+    // Collected once: a poll after it is invalid_grant, and the connection stands.
+    clock.advanceBy(5000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: write.connection.keyId, via: 'device', redirectHost: null, status: 'ACTIVE' }],
+    });
+  });
+
+  it('answers a denied device access_denied, an unknown or another client’s code invalid_grant, an ended one expired_token', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const denied = await codes();
+    const flow = await claimed(denied.userCode);
+    const write = await consents.deny(admin, keyed(admin, DENY_OPERATION, 'deny-device'), flow, CORRELATION);
+    expect(write).toEqual({ outcome: 'denied', redirectTo: null });
+    expect(errorOf(await poll(denied.deviceCode))).toBe('access_denied');
+    expect(errorOf(await poll(`axd_${'x'.repeat(43)}`))).toBe('invalid_grant');
+    expect(errorOf(await poll('not a code'))).toBe('invalid_grant');
+    const other = await codes();
+    expect(errorOf(await poll(other.deviceCode, 'axcl_ffffffffffffffffffffffffffffffff'))).toBe('invalid_grant');
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(other.deviceCode))).toBe('expired_token');
+    expect(await deviceOf().lookup(other.userCode, undefined)).toEqual({ outcome: 'not_found' });
+  });
+
+  it('revokes a connection allowed but never collected once its codes end', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes();
+    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('expired_token');
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: write.connection.keyId, status: 'REVOKED' }],
+    });
+  });
+
+  /** A device allowed as `agentId` by an admin of `org`: its codes, and the connection made. */
+  async function deviceAllowed(org: string, admin: Member, agentId: string) {
+    const given = await codes();
+    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    return { given, keyId: write.connection.keyId };
+  }
+
+  it('mutation R3: a device code polled again after its 15 minutes, once collected, is invalid_grant and revokes nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    const tokens = issued(await poll(given.deviceCode));
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'device_used' });
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId, status: 'ACTIVE' }],
+    });
+  });
+
+  it('mutation R7: a poll queued behind the pair’s own issue finds the flow used, and no second pair is issued', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    const flowId = (await flowOfDevice(given.deviceCode)) ?? '';
+    // Another poll's transaction part-way: the flow's row locked, its use not yet filled in.
+    const inside = await holding(async (held) => {
+      await held.query('select id from oauth.flows where id = $1 for update', [flowId]);
+    });
+    const polling = poll(given.deviceCode);
+    await waitUntilQueued(database.as('admin'), 1);
+    await inside.query('update oauth.flows set used_at = now() where id = $1', [flowId]);
+    await inside.query('commit');
+    await inside.end();
+    expect(errorOf(await polling)).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'device_used' });
+    const rows = await database
+      .as('admin')
+      .query<{ tokens: number }>('select count(*)::int as tokens from agents.connection_tokens where key_id = $1', [
+        keyId,
+      ]);
+    expect(rows[0]?.tokens).toBe(0);
+  });
+
+  it('mutation R8: a device whose agent was suspended after the consent is refused at its poll, its connection revoked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: org, id: agentId }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspend',
+        details: {},
+      }),
+    );
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'agent_suspended' });
+    const revokedBy = await database.as('admin').query<{ actor: string }>(
+      `select actor_type || ':' || actor_id as actor from audit.events
+         where org_id = $1 and action = 'agent_key.revoked' order by seq desc limit 1`,
+      [org],
+    );
+    expect(revokedBy.map(({ actor }) => actor)).toEqual(['system:oauth-server']);
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId, status: 'REVOKED' }],
+    });
+  });
+
+  it('mutation V4: a lookup with no cookie gets one; the same browser finds it again; another browser never', async () => {
+    const given = await codes();
+    const first = await deviceOf().lookup(given.userCode, undefined);
+    if (first.outcome !== 'claimed') throw new Error('not claimed');
+    expect(await deviceOf().lookup(given.userCode, first.cookie)).toEqual({
+      outcome: 'claimed',
+      requestId: first.requestId,
+      cookie: first.cookie,
+    });
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
+  });
+
+  it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
+    const device = deviceOf();
+    expect(await device.authorize({ client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 401,
+      error: 'invalid_client',
+    });
+    expect(await device.authorize({}, CORRELATION)).toMatchObject({ error: 'invalid_client' });
+    expect(await device.authorize({ client_id: clientId, scope: 'openid' }, CORRELATION)).toMatchObject({
+      error: 'invalid_scope',
+    });
+    expect(
+      await device.authorize({ client_id: clientId, resource: 'https://elsewhere.example/v1/mcp' }, CORRELATION),
+    ).toMatchObject({ error: 'invalid_target' });
+    expect(await device.lookup('AEIO-UUUU', undefined)).toEqual({ outcome: 'not_found' });
+  });
+});
+
+describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres ${server.version})`, () => {
+  const CLIENT_URL = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const CLAUDE_BACK = 'https://claude.ai/api/mcp/auth_callback';
+
+  /** Clients over a stand-in fetcher that answers `answer` for a listed address, counting its fetches. */
+  function metadataClients(answer: () => MetadataFetched, at: FixedClock = clock) {
+    const fetched: string[] = [];
+    const metadata: ClientMetadataFetch = {
+      listed: (id) => id.startsWith('https://claude.ai/'),
+      fetch: (id) => {
+        fetched.push(id);
+        return Promise.resolve(answer());
+      },
+    };
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const viaDocument = createOauthAuthorizing({
+      database: app,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients,
+    });
+    const consentsOf = createConnectionConsents({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      logger: testLogger(capture),
+      issuer: capabilities.issuer,
+      clients,
+    });
+    return { viaDocument, consentsOf, fetched, clients };
+  }
+
+  const ask = (via: OauthAuthorizing, client = CLIENT_URL) =>
+    via.authorize(
+      {
+        response_type: 'code',
+        client_id: client,
+        redirect_uri: CLAUDE_BACK,
+        state: 'xyz',
+        code_challenge: challengeOf(VERIFIER),
+        code_challenge_method: 'S256',
+      },
+      undefined,
+    );
+
+  const DOCUMENT = { client_id: CLIENT_URL, client_name: 'Claude', redirect_uris: [CLAUDE_BACK] };
+
+  it('fetches the document once a day, shows the client verified by its host, and connects it', async () => {
+    const { viaDocument, consentsOf, fetched } = metadataClients(() => ({ outcome: 'fetched', document: DOCUMENT }));
+    const first = await ask(viaDocument);
+    if (first.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(first)}`);
+    expect(await ask(viaDocument)).toMatchObject({ outcome: 'opened' });
+    expect(fetched).toEqual([CLIENT_URL]);
+    const flow = { flowId: first.flowId, cookie: first.cookie };
+    expect(await consentsOf.request(flow)).toMatchObject({
+      via: 'code',
+      client: { id: CLIENT_URL, name: 'Claude', verifiedBy: 'claude.ai' },
+      redirectHost: 'claude.ai',
+    });
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const challengeId = askedFor(
+      await consentsOf.consent(
+        admin,
+        keyed(admin, CONSENT_OPERATION, 'cimd'),
+        flow,
+        { agentId, scopes: ['requests:read'] },
+        CORRELATION,
+      ),
+    );
+    await stepUp(admin, challengeId);
+    const write = await consentsOf.confirm(
+      admin,
+      keyed(admin, CONSENT_CONFIRM_OPERATION, 'cimd-confirm'),
+      flow,
+      { agentId, scopes: ['requests:read'] },
+      challengeId,
+      CORRELATION,
+    );
+    if (write.outcome !== 'connected' || write.redirectTo === null) throw new Error('connected');
+    const code = new URL(write.redirectTo).searchParams.get('code') ?? '';
+    const tokens = issued(
+      await grants.exchangeCode(
+        { code, clientId: CLIENT_URL, redirectUri: CLAUDE_BACK, codeVerifier: VERIFIER, resource: undefined },
+        CALLER,
+      ),
+    );
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ clientId: CLIENT_URL, clientName: 'Claude', redirectHost: 'claude.ai' }],
+    });
+    // A day on, fetched again.
+    clock.advanceBy(DAY_MS);
+    expect(await ask(viaDocument)).toMatchObject({ outcome: 'opened' });
+    expect(fetched).toEqual([CLIENT_URL, CLIENT_URL]);
+  });
+
+  it('never sends the browser back for a document refused, nor for an address not on the list, and says why', async () => {
+    // An address of its own: the test above kept Claude's for the day.
+    const other = 'https://claude.ai/oauth/other-client';
+    const document = { ...DOCUMENT, client_id: other };
+    const refused = metadataClients(() => ({ outcome: 'refused', reason: 'timeout' }));
+    expect(await ask(refused.viaDocument, other)).toEqual({ outcome: 'not_redirectable', problem: 'unknown_client' });
+    expect(lines('oauth.client_metadata_refused')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', reason: 'timeout' }),
+    ]);
+    const mismatched = metadataClients(() => ({
+      outcome: 'fetched',
+      document: { ...DOCUMENT, client_id: 'https://claude.ai/other' },
+    }));
+    expect(await ask(mismatched.viaDocument, other)).toMatchObject({ problem: 'unknown_client' });
+    expect(lines('oauth.client_metadata_refused').at(-1)).toMatchObject({ reason: 'client_id_mismatch' });
+    // A redirect address the document doesn't list: never sent back to.
+    const listed = metadataClients(() => ({ outcome: 'fetched', document }));
+    const elsewhere = await listed.viaDocument.authorize(
+      { response_type: 'code', client_id: other, redirect_uri: 'https://evil.example/cb' },
+      undefined,
+    );
+    expect(elsewhere).toEqual({ outcome: 'not_redirectable', problem: 'unregistered_redirect' });
+    const unlisted = metadataClients(() => ({ outcome: 'fetched', document: DOCUMENT }));
+    expect(await ask(unlisted.viaDocument, 'https://evil.example/client.json')).toMatchObject({
+      problem: 'unknown_client',
+    });
+    expect(unlisted.fetched).toEqual([]);
+  });
+
+  it('shares one fetch among requests at once for a client not kept', async () => {
+    const answer = Promise.withResolvers<undefined>();
+    const fetched: string[] = [];
+    // Every statement's answer counted as it comes back (a Kysely plugin, the test's alone): the second request's own
+    // read of the table is seen done before the fetch answers, so it can only find the first's fetch under way.
+    let answered = 0;
+    const counted = app.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: ({ result }) => {
+        answered += 1;
+        return Promise.resolve(result);
+      },
+    });
+    const clients = createOauthClients({
+      database: counted,
+      clock,
+      logger: testLogger(capture),
+      metadata: {
+        listed: () => true,
+        fetch: async (id) => {
+          fetched.push(id);
+          await answer.promise;
+          return { outcome: 'fetched', document: { ...DOCUMENT, client_id: id } };
+        },
+      },
+    });
+    const id = 'https://claude.ai/oauth/shared';
+    const first = clients.find(id);
+    await vi.waitFor(() => {
+      expect(fetched).toEqual([id]);
+    });
+    const second = clients.find(id);
+    await vi.waitFor(() => {
+      expect(answered).toBe(2);
+    });
+    answer.resolve(undefined);
+    const [one, other] = await Promise.all([first, second]);
+    expect(one).toEqual(other);
+    expect(one).toMatchObject({ clientId: id, verifiedBy: 'claude.ai' });
+    expect(fetched).toEqual([id]);
+  });
+
+  it('mutation K4: a document kept for an origin no longer listed names no client, and nothing is fetched', async () => {
+    const id = 'https://claude.ai/oauth/delisted';
+    await keepClientMetadata(
+      app,
+      { clientId: id, name: 'Old', redirectUris: [CLAUDE_BACK], grantTypes: ['authorization_code'] },
+      clock.now(),
+    );
+    const fetched: string[] = [];
+    const clients = createOauthClients({
+      database: app,
+      clock,
+      logger: testLogger(capture),
+      metadata: {
+        listed: () => false,
+        fetch: (one) => {
+          fetched.push(one);
+          return Promise.resolve({ outcome: 'refused', reason: 'status' });
+        },
+      },
+    });
+    expect(await clients.find(id)).toBeUndefined();
+    expect(await clients.kept(app, id)).toBeUndefined();
+    expect(fetched).toEqual([]);
+  });
+});
+
+describe(`6E3c review: a document's name never vouches for a device, and its fetches are held (Postgres ${server.version})`, () => {
+  const HERMES = 'https://claude.ai/oauth/device-client';
+  const listedFetch = (answer: (id: string) => MetadataFetched) => {
+    const fetched: string[] = [];
+    const metadata: ClientMetadataFetch = {
+      listed: (id) => id.startsWith('https://claude.ai/'),
+      fetch: (id) => {
+        fetched.push(id);
+        return Promise.resolve(answer(id));
+      },
+    };
+    return { metadata, fetched };
+  };
+
+  it('shows a device’s request from a document’s client as what it says it is, never verified', async () => {
+    const { metadata } = listedFetch((id) => ({
+      outcome: 'fetched',
+      document: {
+        client_id: id,
+        client_name: 'Claude',
+        redirect_uris: ['https://claude.ai/cb'],
+        grant_types: [DEVICE_CODE_GRANT],
+      },
+    }));
+    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    const given = await device.authorize({ client_id: HERMES }, CORRELATION);
+    if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
+    const found = await device.lookup(given.codes.userCode, undefined);
+    if (found.outcome !== 'claimed') throw new Error('not claimed');
+    const shown = createConnectionConsents({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      logger: testLogger(capture),
+      issuer: capabilities.issuer,
+      clients,
+    });
+    expect(await shown.request({ flowId: found.requestId, cookie: found.cookie })).toMatchObject({
+      via: 'device',
+      client: { id: HERMES, name: 'Claude', verifiedBy: null },
+    });
+  });
+
+  it('refuses the device flow to a document that lists no device grant: Claude’s own can’t be borrowed', async () => {
+    const { metadata } = listedFetch((id) => ({
+      outcome: 'fetched',
+      document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
+    }));
+    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    expect(await device.authorize({ client_id: 'https://claude.ai/oauth/code-only' }, CORRELATION)).toMatchObject({
+      error: 'unauthorized_client',
+    });
+  });
+
+  it('fetches a document refused for what it says again only after 5 minutes', async () => {
+    const at = new FixedClock(START);
+    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'not_json' }));
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const id = 'https://claude.ai/oauth/refused-once';
+    expect(await clients.find(id)).toBeUndefined();
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toEqual([id]);
+    at.advanceBy(REFUSED_FOR_MS - 1);
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toHaveLength(1);
+    at.advanceBy(1);
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+  });
+
+  /** A document of the real client's, valid, as its site serves it. */
+  const realDocument = (id: string): MetadataFetched => ({
+    outcome: 'fetched',
+    document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
+  });
+
+  it('6E3c review: junk filling the cap never locks out a real client whose document’s day ended', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-client';
+    const { metadata, fetched } = listedFetch((id) =>
+      id === real ? realDocument(id) : { outcome: 'refused', reason: 'status' },
+    );
+    const before = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    expect(await before.find(real)).toMatchObject({ clientId: real });
+    // A day on, in another copy of the API (nothing remembered but the row kept): junk fills the origin's minute.
+    at.advanceBy(DAY_MS + 1000);
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    for (let path = 0; path <= MOST_FETCHES_A_MINUTE; path += 1) {
+      await clients.find(`https://claude.ai/oauth/junk-${String(path)}`);
+    }
+    expect(lines('oauth.client_metadata_capped')).toHaveLength(1);
+    expect(await clients.find(real)).toMatchObject({ clientId: real, name: 'Claude', verifiedBy: 'claude.ai' });
+    // Fetched again, past the cap, as it once was valid.
+    expect(fetched.filter((id) => id === real)).toHaveLength(2);
+  });
+
+  it('6E3c review: a site failing at the refetch serves the kept document stale, and the failure is never cached', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-but-down';
+    let down = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      down ? { outcome: 'refused', reason: 'status' } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    at.advanceBy(DAY_MS + 1000);
+    down = true;
+    expect(await clients.find(real)).toMatchObject({ clientId: real, verifiedBy: 'claude.ai' });
+    expect(lines('oauth.client_metadata_stale')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', reason: 'status' }),
+    ]);
+    // Tried again a minute later, not 5: a failure of the site is no refusal of the document.
+    at.advanceBy(60_000);
+    down = false;
+    expect(await clients.find(real)).toMatchObject({ clientId: real });
+    expect(fetched).toHaveLength(3);
+    // A never-valid address failing the same way is fetched again at once, too.
+    const fresh = 'https://claude.ai/oauth/never-valid-down';
+    down = true;
+    expect(await clients.find(fresh)).toBeUndefined();
+    expect(await clients.find(fresh)).toBeUndefined();
+    expect(fetched.filter((id) => id === fresh)).toHaveLength(2);
+  });
+
+  it('6E3c review: a once-valid document now refused for what it says is held 5 minutes, and never stands in again', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/changed-shape';
+    let changed = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      changed ? { outcome: 'fetched', document: { client_id: 'https://claude.ai/other' } } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    at.advanceBy(DAY_MS + 1000);
+    changed = true;
+    expect(await clients.find(real)).toBeUndefined();
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+    expect(lines('oauth.client_metadata_stale')).toEqual([]);
+    // Not at the consent's confirm either, nor in another copy of the API: the kept one is retired.
+    expect(await clients.kept(app, real)).toBeUndefined();
+    const elsewhere = createOauthClients({
+      database: app,
+      clock: at,
+      logger: testLogger(capture),
+      metadata: listedFetch(() => ({ outcome: 'refused', reason: 'timeout' })).metadata,
+    });
+    expect(await elsewhere.find(real)).toBeUndefined();
+  });
+
+  it('6E3c review: a once-valid client whose row is gone, failing by the network, is fetched again only a minute on', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/row-gone';
+    let down = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    await database.as('admin').query('delete from oauth.client_metadata where client_id = $1', [real]);
+    down = true;
+    expect(await clients.find(real)).toBeUndefined();
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+    at.advanceBy(60_000);
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(3);
+  });
+
+  it('6E3c review: a document stale past its 7 days names no client when the site fails', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-long-gone';
+    let down = false;
+    const { metadata } = listedFetch((id) => (down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id)));
+    await createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata }).find(real);
+    at.advanceBy(DAY_MS + CLIENT_METADATA_STALE_MS);
+    down = true;
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    expect(await clients.find(real)).toBeUndefined();
+    expect(lines('oauth.client_metadata_stale')).toEqual([]);
+  });
+
+  it(`fetches one origin at most ${String(MOST_FETCHES_A_MINUTE)} times a minute, saying so once`, async () => {
+    const at = new FixedClock(START);
+    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'status' }));
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    for (let path = 0; path <= MOST_FETCHES_A_MINUTE + 2; path += 1) {
+      await clients.find(`https://claude.ai/oauth/varied-${String(path)}`);
+    }
+    expect(fetched).toHaveLength(MOST_FETCHES_A_MINUTE);
+    expect(lines('oauth.client_metadata_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', most: MOST_FETCHES_A_MINUTE }),
+    ]);
+    at.advanceBy(60_000);
+    await clients.find('https://claude.ai/oauth/varied-next-minute');
+    expect(fetched).toHaveLength(MOST_FETCHES_A_MINUTE + 1);
   });
 });

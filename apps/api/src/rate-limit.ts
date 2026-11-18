@@ -245,6 +245,21 @@ export function createAddressCounter(
 }
 
 /**
+ * A route's own limit per signed-in person (6E3c: a device's user code typed, 5 a minute), beside every other, in a
+ * window of its own. Added after the access hook (a `preHandler`) on a person's route, which the access hook lets
+ * through only with a person. Over it, the limit headers are its own, and the same 429.
+ */
+export function createRoutePersonCounter(
+  app: FastifyInstance,
+  { most, windowMs }: { readonly most: number; readonly windowMs: number },
+): CountRequest {
+  const limiter = counterOf(app, most, (request) => request.person?.userId ?? UNREADABLE_ADDRESS, windowMs);
+  return async (request, reply) => {
+    if (await overLimit(limiter, request, reply, 'when-refused')) throw new RateLimited('rate limit exceeded');
+  };
+}
+
+/**
  * Counts the request and says whether it is over the limit. The limit headers
  * are set on every counted response (`always`), or only when this limit
  * refuses the request (`when-refused`), so the address's headers stand

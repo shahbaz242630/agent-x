@@ -19,7 +19,7 @@
 // 404 before its caller is even asked for (server.ts), and nothing anywhere
 // advertises it: the MCP endpoint's 401 names no metadata.
 import { SCOPES } from '@agentx/core/modules/agents';
-import { PKCE_METHOD, SCOPES_SUPPORTED } from '@agentx/core/modules/oauth';
+import { DEVICE_CODE_GRANT, PKCE_METHOD, SCOPES_SUPPORTED } from '@agentx/core/modules/oauth';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { BUSY_RETRY_SECONDS, JSON_TYPE } from './errors.ts';
@@ -49,6 +49,10 @@ export const OAUTH_PATHS = {
   exchange: '/v1/oauth/token',
   revoke: '/v1/oauth/revoke',
   register: '/v1/oauth/register',
+  // RFC 8628 §3.1: where a device asks for its codes (6E3c).
+  deviceAuthorization: '/v1/oauth/device_authorization',
+  // Where the console's `/device` page claims a device's flow by its user code.
+  deviceLookup: '/v1/oauth/device/lookup',
   resourceMetadata: '/.well-known/oauth-protected-resource',
   serverMetadata: '/.well-known/oauth-authorization-server',
   openIdConfiguration: '/.well-known/openid-configuration',
@@ -56,6 +60,9 @@ export const OAUTH_PATHS = {
 
 /** Where the console asks the person, and where a request the client can't be told of goes (6E3b's screen). */
 export const CONNECT_PATH = '/connect';
+
+/** Where the person types a device's user code (6E3c, RFC 8628 §3.3): the console's `/device` page. */
+const DEVICE_PATH = '/device';
 
 /**
  * Everything the metadata documents say, from the one object (decision 1: the RFC 8414 document and OIDC discovery's
@@ -70,8 +77,13 @@ export interface Capabilities {
   readonly tokenEndpoint: string;
   readonly revocationEndpoint: string;
   readonly registrationEndpoint: string;
+  readonly deviceAuthorizationEndpoint: string;
+  /** Where the person types a device's user code. */
+  readonly verificationUri: string;
   readonly scopes: readonly string[];
   readonly grantTypes: readonly string[];
+  /** Clients named by a metadata document are taken (6E3c): some origin is allowed for them. */
+  readonly clientMetadataDocuments: boolean;
 }
 
 /** The origin with no slash at its end: the issuer is compared as text, exactly (RFC 8414 §3.3). */
@@ -81,7 +93,8 @@ function withoutTrailingSlash(origin: string): string {
   return origin.slice(0, end);
 }
 
-export function capabilitiesOf(publicOrigin: string): Capabilities {
+/** `clientMetadataDocuments`: some origin is allowed for clients named by a document (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS). */
+export function capabilitiesOf(publicOrigin: string, clientMetadataDocuments = false): Capabilities {
   const issuer = withoutTrailingSlash(publicOrigin);
   return {
     issuer,
@@ -91,8 +104,11 @@ export function capabilitiesOf(publicOrigin: string): Capabilities {
     tokenEndpoint: `${issuer}${OAUTH_PATHS.exchange}`,
     revocationEndpoint: `${issuer}${OAUTH_PATHS.revoke}`,
     registrationEndpoint: `${issuer}${OAUTH_PATHS.register}`,
+    deviceAuthorizationEndpoint: `${issuer}${OAUTH_PATHS.deviceAuthorization}`,
+    verificationUri: `${issuer}${DEVICE_PATH}`,
     scopes: SCOPES_SUPPORTED,
-    grantTypes: ['authorization_code', 'refresh_token'],
+    grantTypes: ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT],
+    clientMetadataDocuments,
   };
 }
 
@@ -113,6 +129,7 @@ export const serverMetadataOf = (capabilities: Capabilities) => ({
   token_endpoint: capabilities.tokenEndpoint,
   revocation_endpoint: capabilities.revocationEndpoint,
   registration_endpoint: capabilities.registrationEndpoint,
+  device_authorization_endpoint: capabilities.deviceAuthorizationEndpoint,
   scopes_supported: [...capabilities.scopes],
   response_types_supported: ['code'],
   response_modes_supported: ['query'],
@@ -121,6 +138,7 @@ export const serverMetadataOf = (capabilities: Capabilities) => ({
   token_endpoint_auth_methods_supported: ['none'],
   revocation_endpoint_auth_methods_supported: ['none'],
   authorization_response_iss_parameter_supported: true,
+  client_id_metadata_document_supported: capabilities.clientMetadataDocuments,
 });
 
 /** The OAuth error answers a route with `config.oauthWire` declares, beside the one error body for the rest. */

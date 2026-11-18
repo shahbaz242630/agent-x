@@ -1710,12 +1710,17 @@
               "invalid_request",
               "invalid_client",
               "invalid_grant",
+              "unauthorized_client",
               "unsupported_grant_type",
               "invalid_scope",
               "invalid_target",
               "invalid_redirect_uri",
               "invalid_client_metadata",
-              "temporarily_unavailable"
+              "temporarily_unavailable",
+              "authorization_pending",
+              "slow_down",
+              "access_denied",
+              "expired_token"
             ]
           },
           "error_description": {
@@ -3119,6 +3124,13 @@
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           },
+          "via": {
+            "type": "string",
+            "enum": [
+              "code",
+              "device"
+            ]
+          },
           "client": {
             "type": "object",
             "properties": {
@@ -3127,19 +3139,32 @@
               },
               "name": {
                 "type": "string"
+              },
+              "verifiedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
               "id",
-              "name"
+              "name",
+              "verifiedBy"
             ],
             "additionalProperties": false
           },
           "redirectUri": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "redirectHost": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "loopback": {
             "type": "boolean"
@@ -3167,6 +3192,7 @@
         },
         "required": [
           "id",
+          "via",
           "client",
           "redirectUri",
           "redirectHost",
@@ -3190,6 +3216,13 @@
           "connection": {
             "type": "object",
             "properties": {
+              "via": {
+                "type": "string",
+                "enum": [
+                  "code",
+                  "device"
+                ]
+              },
               "keyId": {
                 "type": "string",
                 "format": "uuid",
@@ -3222,6 +3255,7 @@
               }
             },
             "required": [
+              "via",
               "keyId",
               "agentId",
               "clientId",
@@ -3242,7 +3276,10 @@
         "type": "object",
         "properties": {
           "redirectTo": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3250,6 +3287,21 @@
         ],
         "additionalProperties": false,
         "description": "The app told no."
+      },
+      "DeviceRequestFound": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "requestId"
+        ],
+        "additionalProperties": false,
+        "description": "The device’s request, claimed for this browser."
       },
       "ProtectedResourceMetadata": {
         "type": "object",
@@ -3311,6 +3363,9 @@
           "registration_endpoint": {
             "type": "string"
           },
+          "device_authorization_endpoint": {
+            "type": "string"
+          },
           "scopes_supported": {
             "type": "array",
             "items": {
@@ -3355,6 +3410,9 @@
           },
           "authorization_response_iss_parameter_supported": {
             "type": "boolean"
+          },
+          "client_id_metadata_document_supported": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -3363,6 +3421,7 @@
           "token_endpoint",
           "revocation_endpoint",
           "registration_endpoint",
+          "device_authorization_endpoint",
           "scopes_supported",
           "response_types_supported",
           "response_modes_supported",
@@ -3370,7 +3429,8 @@
           "code_challenge_methods_supported",
           "token_endpoint_auth_methods_supported",
           "revocation_endpoint_auth_methods_supported",
-          "authorization_response_iss_parameter_supported"
+          "authorization_response_iss_parameter_supported",
+          "client_id_metadata_document_supported"
         ],
         "additionalProperties": false,
         "description": "Agent X’s authorization server, as RFC 8414 describes it: public clients, PKCE S256, no OIDC."
@@ -3406,6 +3466,43 @@
         ],
         "additionalProperties": false,
         "description": "A connection’s new pair of tokens (RFC 6749 §5.1)."
+      },
+      "OauthDeviceCodes": {
+        "type": "object",
+        "properties": {
+          "device_code": {
+            "type": "string"
+          },
+          "user_code": {
+            "type": "string"
+          },
+          "verification_uri": {
+            "type": "string"
+          },
+          "verification_uri_complete": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "interval": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in",
+          "interval"
+        ],
+        "additionalProperties": false,
+        "description": "A device’s codes (RFC 8628 §3.2)."
       },
       "OauthClient": {
         "type": "object",
@@ -28671,6 +28768,93 @@
         "security": []
       }
     },
+    "/v1/oauth/device/lookup": {
+      "post": {
+        "operationId": "connections.device-lookup",
+        "summary": "Find the device asking to be connected, by the code it shows",
+        "description": "The request becomes this browser’s: read it, then allow or deny it, as a browser’s. A code typed wrong, ended, decided or already claimed by another browser is a 404, which says nothing of which.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "userCode": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "userCode"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request does nothing twice: it answers with the first request's status and the resource as it now stands. With another request, it is refused."
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "x-body-limit": 256,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRequestFound"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "MCP connections"
+        ],
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/v1/oauth/requests/{id}": {
       "get": {
         "summary": "An MCP client asking to be connected",
@@ -29333,10 +29517,113 @@
         ]
       }
     },
+    "/v1/oauth/device_authorization": {
+      "post": {
+        "summary": "Ask for a device’s codes, to connect it as one of your agents (RFC 8628)",
+        "description": "For a client with no browser: show the person the user code and where to type it, then poll the token endpoint with the device code, no sooner than the interval, until they decide. Both last 15 minutes.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_id": {
+                    "type": "string",
+                    "maxLength": 2048
+                  },
+                  "scope": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "resource": {
+                    "type": "string",
+                    "maxLength": 2048
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-access": [
+          "public"
+        ],
+        "x-body-limit": 4096,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthDeviceCodes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "MCP connections"
+        ],
+        "security": []
+      }
+    },
     "/v1/oauth/token": {
       "post": {
         "summary": "Exchange a code, or a refresh token, for a connection’s tokens",
-        "description": "OAuth 2.1’s token endpoint, as an application/x-www-form-urlencoded form, each field once. A code is used once, within 60 seconds, with its PKCE verifier; a refresh token is used once, and a second use revokes the connection.",
+        "description": "OAuth 2.1’s token endpoint, as an application/x-www-form-urlencoded form, each field once. A code is used once, within 60 seconds, with its PKCE verifier; a refresh token is used once, and a second use revokes the connection; a device code is polled until the person decides (RFC 8628 §3.5).",
         "requestBody": {
           "required": true,
           "content": {
@@ -29353,6 +29640,10 @@
                     "maxLength": 2048
                   },
                   "code": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "device_code": {
                     "type": "string",
                     "maxLength": 128
                   },
@@ -29468,6 +29759,7 @@
                 "properties": {
                   "token": {
                     "type": "string",
+                    "minLength": 1,
                     "maxLength": 256
                   },
                   "token_type_hint": {
@@ -29478,7 +29770,10 @@
                     "type": "string",
                     "maxLength": 2048
                   }
-                }
+                },
+                "required": [
+                  "token"
+                ]
               }
             }
           }

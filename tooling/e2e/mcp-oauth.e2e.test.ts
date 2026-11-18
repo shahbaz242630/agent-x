@@ -14,6 +14,11 @@
 // a passkey, which the tamper pass covers). The browser never loads the
 // console's page: the authorize request's flow cookie is carried by hand, as
 // the browser that opened the flow would carry it.
+//
+// 6E3c: a device with no browser (RFC 8628), driven by hand as the SDK has no
+// device flow: it registers, asks for its codes and polls; the person types
+// its user code (the console's /device lookup), consents and steps up as
+// above; the device's next poll gets its pair, which lists the tools.
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 
@@ -344,6 +349,88 @@ describe('SEC-OAUTH-01, -02, -05, -07, -10, -12, -13 a real MCP client connected
     expect(revoked.status).toBe(200);
     expect(await toolsListWith(accessToken)).toBe(401);
   });
+  it('6E3c a device connects by its user code: pending until the person allows it, then its pair', async () => {
+    const form = (url: string, fields: Record<string, string>) =>
+      fetch(`${API_ORIGIN}${url}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(fields),
+      });
+    const registered = await fetch(`${API_ORIGIN}/v1/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'Agent X e2e device',
+        redirect_uris: [REDIRECT],
+        grant_types: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+      }),
+    });
+    expect(registered.status).toBe(201);
+    const { client_id: clientId } = (await registered.json()) as { client_id: string };
+    const codes = await form('/v1/oauth/device_authorization', { client_id: clientId, scope: SCOPES.join(' ') });
+    expect(codes.status).toBe(200);
+    const given = (await codes.json()) as {
+      device_code: string;
+      user_code: string;
+      verification_uri: string;
+      interval: number;
+    };
+    expect(given.verification_uri).toBe(`${API_ORIGIN}/device`);
+    const poll = () =>
+      form('/v1/oauth/token', {
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: given.device_code,
+        client_id: clientId,
+      });
+    expect(await (await poll()).json()).toMatchObject({ error: 'authorization_pending' });
+
+    // The person types the code on /device: the request becomes this browser's, by the flow cookie set.
+    const found = await fetch(`${API_ORIGIN}/v1/oauth/device/lookup`, {
+      method: 'POST',
+      headers: {
+        cookie: `${SESSION}=${await sessionCookie()}`,
+        origin: API_ORIGIN,
+        'idempotency-key': randomUUID(),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ userCode: given.user_code.toLowerCase() }),
+    });
+    expect(found.status).toBe(200);
+    const { requestId } = (await found.json()) as { requestId: string };
+    const flowCookie = found.headers
+      .getSetCookie()
+      .map((cookie) => cookie.split(';')[0] ?? '')
+      .find((cookie) => cookie.startsWith(`${FLOW_COOKIE}=`))
+      ?.slice(FLOW_COOKIE.length + 1);
+    if (flowCookie === undefined) throw new Error('the lookup set no flow cookie');
+    const shown = await fetch(`${API_ORIGIN}/v1/oauth/requests/${requestId}`, {
+      headers: { cookie: `${SESSION}=${await sessionCookie()}; ${FLOW_COOKIE}=${flowCookie}` },
+    });
+    expect(await shown.json()).toMatchObject({ via: 'device', redirectHost: null, client: { id: clientId } });
+
+    const allowed = { agentId, scopes: [...SCOPES] };
+    const asked = await consentWrite(`/v1/oauth/requests/${requestId}/consent`, flowCookie, allowed);
+    expect(asked.status).toBe(202);
+    const { stepUpChallengeId } = (await asked.json()) as { stepUpChallengeId: string };
+    await page.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${stepUpChallengeId}&returnTo=${RETURN_TO}`);
+    expect((await person.drive(page, users.oauth, [])).stoppedAt, where(page)).toBe('callback');
+    const confirmed = await consentWrite(`/v1/oauth/requests/${requestId}/consent/confirm`, flowCookie, {
+      ...allowed,
+      stepUpChallengeId,
+    });
+    expect(confirmed.status).toBe(201);
+    expect(await confirmed.json()).toMatchObject({ redirectTo: null, connection: { via: 'device' } });
+
+    // The device's next poll, after its interval, gets its pair; a poll after it, nothing more.
+    await new Promise((resolve) => setTimeout(resolve, given.interval * 1000));
+    const tokens = await poll();
+    expect(tokens.status).toBe(200);
+    const { access_token: accessToken } = (await tokens.json()) as { access_token: string };
+    expect(accessToken).toMatch(/^axa_/);
+    expect(await toolsListWith(accessToken)).toBe(200);
+    expect(await (await poll()).json()).toMatchObject({ error: 'invalid_grant' });
+  });
+
   it('M40: removing the member who made a connection revokes it: its access token is a 401 at once', async () => {
     const provider = new MemoryProvider();
     const { back } = await authorised(provider);

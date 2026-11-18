@@ -22,6 +22,7 @@ import { ApiError, isRefusal, isSignedOut, isUuid, signInAddress } from '../api.
 import {
   type ConnectionRequest,
   connectRefusal,
+  deviceAnswered,
   isWebAddress,
   requestAt,
   useConnectionRequest,
@@ -57,17 +58,35 @@ function seedOf(pending: PendingChange | undefined): Seed | undefined {
   return { organization: pending.organization, agentId, scopes: SCOPES.filter((scope) => scopes.includes(scope)) };
 }
 
-/** Who asks, where the person goes back to, and what is asked for. */
-function Asking({ request }: { readonly request: ConnectionRequest }) {
+/** Where the person goes back to, with its warning; for a device, the warning that the device is theirs. */
+function SendsBack({ request }: { readonly request: ConnectionRequest }) {
+  if (request.redirectHost === null) return <p className="notice">{t('connect.device')}</p>;
   return (
     <>
-      <p>{t('connect.says', { name: request.client.name })}</p>
       <p>
         {t('connect.sendsBack')} <strong className="mono">{request.redirectHost}</strong>
       </p>
       <p className="notice">
         {request.loopback ? t('connect.loopback') : t('connect.unknownHost', { host: request.redirectHost })}
       </p>
+    </>
+  );
+}
+
+/** Who asks, where the person goes back to, and what is asked for. */
+function Asking({ request }: { readonly request: ConnectionRequest }) {
+  const { name, verifiedBy } = request.client;
+  return (
+    <>
+      {/* A document's host vouches for its name (CIMD); a name an app registered is only what it says. */}
+      {verifiedBy === null ? (
+        <p>{t('connect.says', { name })}</p>
+      ) : (
+        <p>
+          {t('connect.verified', { name })} <strong className="mono">{verifiedBy}</strong>
+        </p>
+      )}
+      <SendsBack request={request} />
       <h2>{t('connect.askedTitle')}</h2>
       <Scopes scopes={request.scopesAsked} />
       <p className="fine">{t('connect.endsAt', { time: timeText(request.endsAt) })}</p>
@@ -78,7 +97,16 @@ function Asking({ request }: { readonly request: ConnectionRequest }) {
 type Sent = 'ready' | 'sending' | 'leaving' | 'retried' | { readonly said: string; readonly decided: boolean };
 
 /** Back from signing in again: the connection kept for it, confirmed or not made. */
-function Confirming({ pending, onClose }: { readonly pending: PendingChange; readonly onClose: () => void }) {
+function Confirming({
+  pending,
+  device,
+  onClose,
+}: {
+  readonly pending: PendingChange;
+  /** A device's request: once made, back to `/device`, as the device takes its tokens itself. */
+  readonly device: boolean;
+  readonly onClose: () => void;
+}) {
   const queries = useQueryClient();
   const [sent, setSent] = useState<Sent>('ready');
   const send = async () => {
@@ -89,6 +117,11 @@ function Confirming({ pending, onClose }: { readonly pending: PendingChange; rea
       if (isWebAddress(redirectTo)) {
         setSent('leaving');
         goTo(redirectTo);
+        return;
+      }
+      if (device && redirectTo === null) {
+        setSent('leaving');
+        goTo(deviceAnswered('allowed'));
         return;
       }
       // Made on an earlier try: its code was given then, once.
@@ -196,7 +229,7 @@ function Request({
       <Asking request={read.data} />
       {back}
       {confirming ? (
-        <Confirming pending={pending} onClose={close} />
+        <Confirming pending={pending} device={read.data.via === 'device'} onClose={close} />
       ) : (
         <Choose request={read.data} session={session} seed={seedOf(pending)} />
       )}

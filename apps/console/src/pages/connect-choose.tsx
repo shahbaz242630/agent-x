@@ -13,6 +13,7 @@ import { api, ApiError } from '../api.ts';
 import {
   type ConnectionRequest,
   connectRefusal,
+  deviceAnswered,
   isWebAddress,
   isWriteScope,
   requestAt,
@@ -143,6 +144,11 @@ async function deny(request: ConnectionRequest, organization: string): Promise<'
     organization,
     body: {},
   });
+  // A device's has none: it learns the answer by polling, and the person is told so.
+  if (request.via === 'device' && redirectTo === null) {
+    goTo(deviceAnswered('denied'));
+    return 'stepping';
+  }
   // Only ever a web address the app registered; anything else is never followed.
   if (!isWebAddress(redirectTo)) throw new ApiError(502, 'UNREADABLE');
   goTo(redirectTo);

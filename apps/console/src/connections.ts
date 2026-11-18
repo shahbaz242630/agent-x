@@ -45,13 +45,28 @@ export function useConnections(agentId: string, organization: string) {
   });
 }
 
-/** An app asking to be connected, as the browser that opened its request is shown it. */
+/** Where the person types a device's code (6E3c, RFC 8628): the console's `/device` page. */
+export const DEVICE = '/device';
+
+/** Where `/connect` sends the browser once a device's request is answered: the device learns it by polling. */
+export const deviceAnswered = (answer: 'allowed' | 'denied'): string =>
+  `${DEVICE}?${new URLSearchParams({ answered: answer }).toString()}`;
+
+/** An app asking to be connected, as the browser that opened its request (or claimed a device's) is shown it. */
 export interface ConnectionRequest {
   readonly id: string;
-  readonly client: { readonly id: string; readonly name: string };
-  readonly redirectUri: string;
-  /** Shown in bold: what a name chosen to mislead can't hide. */
-  readonly redirectHost: string;
+  /** A browser's sign-in, or a device's (6E3c), which sends no one back. */
+  readonly via: 'code' | 'device';
+  readonly client: {
+    readonly id: string;
+    readonly name: string;
+    /** The host whose metadata document named the app (6E3c, CIMD); null for an app that registered itself. */
+    readonly verifiedBy: string | null;
+  };
+  /** None for a device. */
+  readonly redirectUri: string | null;
+  /** Shown in bold: what a name chosen to mislead can't hide. None for a device. */
+  readonly redirectHost: string | null;
   /** Sent back to an app on the person's own computer. */
   readonly loopback: boolean;
   readonly scopesAsked: readonly Scope[];

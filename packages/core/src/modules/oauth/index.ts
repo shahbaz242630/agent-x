@@ -7,12 +7,39 @@
 export {
   checkRegistration,
   type ClientRegistration,
+  DEVICE_CODE_GRANT,
   GRANT_TYPES,
+  type GrantType,
   MOST_REDIRECTS,
   type RegistrationAsked,
   type RegistrationChecked,
 } from './infrastructure/client-metadata.ts';
-export { hashOf, isCodeText, isFlowCookie, newCode, newFlowCookie } from './infrastructure/codes.ts';
+export {
+  hashOf,
+  isCodeText,
+  isDeviceCodeText,
+  isFlowCookie,
+  newCode,
+  newDeviceCode,
+  newFlowCookie,
+  newUserCode,
+  userCodeOf,
+} from './infrastructure/codes.ts';
+export {
+  checkClientMetadataDocument,
+  type ClientMetadataDocument,
+  type DocumentChecked,
+  isMetadataClientId,
+} from './infrastructure/client-metadata-document.ts';
+export {
+  CLIENT_METADATA_KEPT_MS,
+  CLIENT_METADATA_STALE_MS,
+  keepClientMetadata,
+  type KeptDocument,
+  keptClientMetadata,
+  retireClientMetadata,
+  sweepClientMetadata,
+} from './infrastructure/client-metadata-cache.ts';
 export { challengeOf, isCodeChallenge, PKCE_METHOD, pkceMatches } from './infrastructure/pkce.ts';
 export { isLoopback, isRegisteredRedirect, redirectMatches, redirectProblems } from './domain/redirects.ts';
 export {
@@ -33,10 +60,19 @@ export {
   sweepClients,
 } from './infrastructure/clients.ts';
 export {
+  type AnyFlowRead,
   CODE_SECONDS,
   type CodeFlow,
   codeHeld,
   codeUsed,
+  deviceClaimed,
+  type DeviceFlow,
+  type DeviceFlowOpened,
+  deviceFlowOfCode,
+  type DeviceFlowRead,
+  deviceHeld,
+  devicePolled,
+  openDeviceFlow,
   flowOfCode,
   FLOW_SECONDS,
   flowById,

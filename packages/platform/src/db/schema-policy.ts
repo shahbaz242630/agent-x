@@ -508,9 +508,28 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'used_at',
         'polled_at',
       ],
-      // Opened, decided once, its code used once, and swept a day after it ends; never moved to another client.
+      // Opened, a device's claimed once by a browser (0095), decided once, its code used once, and swept a day after it
+      // ends; never moved to another client.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['decided_at', 'outcome', 'org_id', 'key_id', 'code_hash', 'code_ends_at', 'used_at', 'polled_at'],
+      appMayUpdate: [
+        'browser_hash',
+        'decided_at',
+        'outcome',
+        'org_id',
+        'key_id',
+        'code_hash',
+        'code_ends_at',
+        'used_at',
+        'polled_at',
+      ],
+    },
+    'oauth.client_metadata': {
+      reason:
+        "The client ID metadata documents Agent X fetched for MCP clients on its allowlist (0095, 6E3c; CIMD): a client names itself by an https address before anyone is signed in, and one client connects to many organisations. A public document, fetched by a GET carrying no customer data (ADR-013), kept a day; it grants nothing: a connection is made only by a person's consent, inside their organisation",
+      columns: ['client_id', 'name', 'redirect_uris', 'grant_types', 'fetched_at', 'expires_at'],
+      // Kept, read, fetched again over its own row once its day is past, and swept.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['name', 'redirect_uris', 'grant_types', 'fetched_at', 'expires_at'],
     },
     'platform_controls.job_lease': {
       reason:

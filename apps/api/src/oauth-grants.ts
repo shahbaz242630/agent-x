@@ -20,6 +20,13 @@
 //   answer is `invalid_grant`, as for every other refusal.
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
 //   connection, by the client it was made for; the answer is always the same.
+// - A device code (6E3c, RFC 8628 §3.4-§3.5), polled by the client it was
+//   given to: `authorization_pending` until the person decides, `slow_down`
+//   for a poll sooner than its interval, `access_denied` once told no,
+//   `expired_token` once its 15 minutes are past; allowed, the pair is issued
+//   once, as a code's is (its flow's `used_at`, in the organisation's own
+//   transaction), and a poll after that is `invalid_grant`. A device code
+//   never travels through a browser, so a second use revokes nothing.
 //
 // Every refusal of a grant is one of OAuth's errors with a fixed description,
 // never why in detail: that goes to the log, with the key's and token's IDs
@@ -45,13 +52,20 @@ import {
 import { type AuditActor, type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedAgentKey } from '@agentx/core/modules/directory';
 import {
+  type AnyFlowRead,
   clientSeen,
+  DEVICE_CODE_GRANT,
   codeHeld,
   codeUsed,
+  deviceFlowOfCode,
+  type DeviceFlowRead,
+  deviceHeld,
+  devicePolled,
   flowOfCode,
   type FlowRead,
   hashOf,
   isCodeText,
+  isDeviceCodeText,
   type OauthTables,
   pkceMatches,
   scopesNarrowed,
@@ -70,6 +84,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import type { OauthClients } from './oauth-clients.ts';
 import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
@@ -96,6 +111,12 @@ interface CodeExchange {
   readonly resource: string | undefined;
 }
 
+/** A device code polled for its tokens (RFC 8628 §3.4). */
+interface DeviceExchange {
+  readonly deviceCode: string;
+  readonly clientId: string;
+}
+
 /** A refresh token sent for a new pair (RFC 6749 §6). */
 interface RefreshAsked {
   readonly refreshToken: string;
@@ -112,6 +133,7 @@ interface Caller {
 
 export interface OauthGrants {
   exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer>;
+  exchangeDevice(asked: DeviceExchange, caller: Caller): Promise<GrantAnswer>;
   refresh(asked: RefreshAsked, caller: Caller): Promise<GrantAnswer>;
   /** Revokes the connection the token is for, if it is one and the client's own; nothing is answered of which, but busy. */
   revoke(
@@ -142,6 +164,40 @@ const INVALID_GRANT = {
   description: 'The code or refresh token is not valid, has expired, or was used already.',
 } as const;
 
+/** The device flow's answers while it waits (RFC 8628 §3.5): each its own error, at 400. */
+const DEVICE_WAITING = {
+  pending: {
+    outcome: 'refused',
+    status: 400,
+    error: 'authorization_pending',
+    description: 'The person has not decided yet; poll again after the interval.',
+  },
+  slowDown: {
+    outcome: 'refused',
+    status: 400,
+    error: 'slow_down',
+    description: 'Polled sooner than the interval; wait 5 seconds longer between polls.',
+  },
+  denied: {
+    outcome: 'refused',
+    status: 400,
+    error: 'access_denied',
+    description: 'The person said no.',
+  },
+  expired: {
+    outcome: 'refused',
+    status: 400,
+    error: 'expired_token',
+    description: 'The device code ended unused; ask for new codes.',
+  },
+  unauthorized: {
+    outcome: 'refused',
+    status: 400,
+    error: 'unauthorized_client',
+    description: 'This client may not use the device flow.',
+  },
+} as const satisfies Record<string, GrantAnswer>;
+
 /** What revokes a connection that a reused code or token gives away: the server itself. */
 const OAUTH_SERVER: AuditActor = { type: 'system', id: 'oauth-server' };
 
@@ -164,6 +220,7 @@ export function createOauthGrants({
   logger,
   capabilities,
   securityEvents,
+  clients,
 }: {
   readonly database: Database<Tables>;
   readonly keys: KeyProvider;
@@ -172,6 +229,8 @@ export function createOauthGrants({
   readonly logger: Logger;
   readonly capabilities: Capabilities;
   readonly securityEvents: SecurityEventSink;
+  /** The clients known: a device's client must list the device flow (6E3c). */
+  readonly clients: OauthClients;
 }): OauthGrants {
   /** The organisation's own transaction, counted against its share as an agent's work is (PL-63). */
   const inOrganisation = <T>(
@@ -278,7 +337,7 @@ export function createOauthGrants({
   };
 
   /** A code used up without a pair issued: its connection's key goes at once, as it can never work (lead, 6E3a). */
-  const codeSpent = async (flow: FlowRead, caller: Caller, reason: string): Promise<GrantAnswer> => {
+  const codeSpent = async (flow: AnyFlowRead, caller: Caller, reason: string): Promise<GrantAnswer> => {
     if (flow.orgId !== null && flow.keyId !== null) {
       await revokeConnection(flow.orgId, flow.keyId, caller.correlationId, {
         actor: OAUTH_SERVER,
@@ -286,6 +345,17 @@ export function createOauthGrants({
       });
     }
     return refusedFor(caller, reason, { clientId: flow.clientId, flowId: flow.id, keyId: flow.keyId });
+  };
+
+  /** A device's poll answered before any pair: told no, collected, ended, or still waiting; undefined once allowed. */
+  const deviceWaiting = async (known: DeviceFlowRead, caller: Caller, now: Date): Promise<GrantAnswer | undefined> => {
+    if (known.decided === 'denied') return DEVICE_WAITING.denied;
+    if (known.usedAt !== null) return refusedFor(caller, 'device_used', { clientId: known.clientId, flowId: known.id });
+    if (known.decided !== null) return undefined;
+    // Undecided: ended, or still waiting. An allowed flow's end is decided only with its row held (below), so a pair
+    // already collected is never taken for one left unused.
+    if (known.endsAt.getTime() <= now.getTime()) return DEVICE_WAITING.expired;
+    return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
   };
 
   const grants = {
@@ -336,6 +406,59 @@ export function createOauthGrants({
         return refusedFor(caller, 'code_used', { clientId: asked.clientId, flowId: answer.flow.id });
       }
       if (answer.outcome === 'spent') return codeSpent(answer.flow, caller, answer.reason);
+      return answer;
+    },
+
+    async exchangeDevice(asked: DeviceExchange, caller: Caller): Promise<GrantAnswer> {
+      if (!isDeviceCodeText(asked.deviceCode)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
+      const known = await deviceFlowOfCode(database, hashOf(asked.deviceCode));
+      if (known?.clientId !== asked.clientId) {
+        return refusedFor(caller, known === undefined ? 'device_unknown' : 'wrong_client', {
+          clientId: asked.clientId,
+        });
+      }
+      // Its grant types read again: a document changed since, or a client gone, takes the device flow away.
+      const client = await clients.find(known.clientId);
+      if (client?.grantTypes.includes(DEVICE_CODE_GRANT) !== true) return DEVICE_WAITING.unauthorized;
+      const now = clock.now();
+      const waiting = await deviceWaiting(known, caller, now);
+      if (waiting !== undefined) return waiting;
+      const { orgId, keyId } = known;
+      if (orgId === null || keyId === null) return refusedFor(caller, 'device_unknown', { clientId: asked.clientId });
+      // As a code's: from the flow's use to its tokens in one transaction, so a busy rolls the use back too.
+      const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
+        const flow = await deviceHeld(tx, known.id);
+        if (flow?.usedAt !== null) return { outcome: 'used' as const };
+        // Used once this commits, whatever comes next: an allowed flow past its end is spent, never collected.
+        await codeUsed(tx, flow.id, now);
+        if (flow.endsAt.getTime() <= now.getTime()) return { outcome: 'expired' as const };
+        const checked = await credentialAt(tx, states, now, orgId, keyId, {
+          prove: () => undefined,
+          resource: capabilities.resource,
+          clientId: flow.clientId,
+        });
+        if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, reason: checked.reason };
+        const tokens = await issueTokens(
+          tx,
+          { keys, ids },
+          {
+            orgId,
+            keyId,
+            scopes: checked.key.scopes,
+            now,
+            keyExpiresAt: checked.key.expiresAt,
+            alongside: clientSeen(tx, flow.clientId, now),
+          },
+        );
+        return { outcome: 'issued' as const, tokens, agent: checked.key };
+      });
+      if (answer.outcome === 'used') return refusedFor(caller, 'device_used', { clientId: known.clientId });
+      if (answer.outcome === 'expired') {
+        // Allowed but never collected, and now never can be: its connection goes (as a code spent unused does).
+        await codeSpent(known, caller, 'device_expired');
+        return DEVICE_WAITING.expired;
+      }
+      if (answer.outcome === 'spent') return codeSpent(known, caller, answer.reason);
       return answer;
     },
 
@@ -437,6 +560,7 @@ export function createOauthGrants({
 
   return {
     exchangeCode: (asked, caller) => orBusy(caller, () => grants.exchangeCode(asked, caller)),
+    exchangeDevice: (asked, caller) => orBusy(caller, () => grants.exchangeDevice(asked, caller)),
     refresh: (asked, caller) => orBusy(caller, () => grants.refresh(asked, caller)),
     revoke: (asked, caller) =>
       orBusy(caller, async () => {

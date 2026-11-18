@@ -86,6 +86,11 @@ export interface Config {
     readonly webCopies: number;
     /** 6E3 (ADR-016): Agent X's own OAuth server for MCP connections; off, its addresses are 404s. */
     readonly mcpOauth: boolean;
+    /**
+     * 6E3c (decision 2): the origins whose MCP clients name themselves by a client ID metadata document Agent X
+     * fetches, each on the outbound allowlist; none (or absent) while the OAuth server is off, or none is set.
+     */
+    readonly oauthClientMetadataOrigins?: readonly string[] | undefined;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -417,6 +422,44 @@ function signInFrom(
     : Object.freeze({ issuer, clientId, clientSecret, internalOrigin });
 }
 
+/**
+ * The MCP clients known to publish a client ID metadata document (6E3 decision 2; MCP-Guide §2): Claude, ChatGPT and
+ * Hermes. Any other uses registration (RFC 7591); another origin needs a later decision record.
+ */
+const DEFAULT_CLIENT_METADATA_ORIGINS: readonly string[] = [
+  'https://chatgpt.com',
+  'https://claude.ai',
+  'https://nousresearch.github.io',
+];
+
+/**
+ * The origins whose client ID metadata documents are fetched (6E3c), while the OAuth server is on. Unset, the default
+ * origins that are on the outbound allowlist, so a place that can't reach them simply takes none of them; set,
+ * every one (each refused at start unless https and on the allowlist: clientMetadataProblems).
+ */
+function clientMetadataOriginsOf(set: readonly string[] | undefined, allowedOrigins: readonly string[]): string[] {
+  return [...(set ?? DEFAULT_CLIENT_METADATA_ORIGINS.filter((origin) => allowedOrigins.includes(origin)))];
+}
+
+/** 6E3c: each origin set for client metadata documents is https and on the outbound allowlist, as it is fetched. */
+function clientMetadataProblems(set: readonly string[] | undefined, allowedOrigins: readonly string[]): string[] {
+  const named = set ?? [];
+  const plain = named.filter((origin) => !origin.startsWith('https://'));
+  const unlisted = named.filter((origin) => !allowedOrigins.includes(origin));
+  return [
+    ...(plain.length > 0
+      ? [
+          `AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: ${plain.join(', ')} must be https; a client's document is fetched there`,
+        ]
+      : []),
+    ...(unlisted.length > 0
+      ? [
+          `AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: ${unlisted.join(', ')} must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; a client's document is fetched there`,
+        ]
+      : []),
+  ];
+}
+
 /** Every setting the app reads, each checked on its own; the database location comes checked already. */
 function readSettings(env: Env, location: LocationChecks) {
   return {
@@ -436,6 +479,7 @@ function readSettings(env: Env, location: LocationChecks) {
     rateLimitPerOrganisation: setting(env, 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     mcpOauth: setting(env, 'AGENTX_MCP_OAUTH'),
+    clientMetadataOrigins: setting(env, 'AGENTX_OAUTH_CLIENT_METADATA_ORIGINS'),
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
     oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
@@ -606,6 +650,9 @@ function copiesProblems({ role, webCopies }: Settings): string[] {
 function serviceRuleProblems(checks: Settings): string[] {
   const { environment, allowedOrigins } = checks;
   return [
+    ...(checks.mcpOauth.ok && checks.mcpOauth.value === 'on' && checks.clientMetadataOrigins.ok && allowedOrigins.ok
+      ? clientMetadataProblems(checks.clientMetadataOrigins.value, allowedOrigins.value ?? [])
+      : []),
     ...(environment.ok &&
     checks.oidcIssuer.ok &&
     checks.oidcClientId.ok &&
@@ -715,6 +762,14 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       rateLimitPerOrganisationPerMinute: checks.rateLimitPerOrganisation.value,
       webCopies: checks.webCopies.value,
       mcpOauth: checks.mcpOauth.value === 'on',
+      // Only while the OAuth server is on: off, no document is ever fetched.
+      ...(checks.mcpOauth.value === 'on'
+        ? {
+            oauthClientMetadataOrigins: Object.freeze(
+              clientMetadataOriginsOf(checks.clientMetadataOrigins.value, checks.allowedOrigins.value ?? []),
+            ),
+          }
+        : {}),
     }),
     db: Object.freeze({
       host: checks.dbHost.value,

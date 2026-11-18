@@ -10,12 +10,19 @@ const OAUTH_ERRORS = [
   'invalid_request',
   'invalid_client',
   'invalid_grant',
+  // A flow the client never registered, nor its document lists (6E3c): its grant types bind it.
+  'unauthorized_client',
   'unsupported_grant_type',
   'invalid_scope',
   'invalid_target',
   'invalid_redirect_uri',
   'invalid_client_metadata',
   'temporarily_unavailable',
+  // The device flow's own (RFC 8628 §3.5), answered to a device polling the token endpoint.
+  'authorization_pending',
+  'slow_down',
+  'access_denied',
+  'expired_token',
 ] as const;
 export type OauthError = (typeof OAUTH_ERRORS)[number];
 
