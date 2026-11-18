@@ -36,4 +36,4 @@ ALTER TABLE oauth.clients
 CREATE INDEX flows_by_source ON oauth.flows (source_key, ends_at);
 
 -- A network's registrations need no index of their own: they are counted among the last day's, which the server's
--- cap holds to 500 (clients_by_time), in the same statement.
+-- cap holds to 2,000 (clients_by_time), in the same statement.

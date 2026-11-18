@@ -604,15 +604,15 @@ describe('SEC-OAUTH-13 the registration endpoint (RFC 7591)', () => {
     expect((await capped.app.inject(json('/v1/oauth/register', {}))).statusCode).toBe(429);
   });
 
-  it('holds each address to 10 registrations an hour', async () => {
+  it('holds each address to 60 registrations an hour', async () => {
     const { app } = await oauthServer(true, { register: REGISTERED });
     const answers: number[] = [];
-    for (let sent = 0; sent < 11; sent += 1) {
+    for (let sent = 0; sent < 61; sent += 1) {
       answers.push(
         (await app.inject(json('/v1/oauth/register', { redirect_uris: ['https://chatgpt.com/cb'] }))).statusCode,
       );
     }
-    expect(answers).toEqual([...Array.from({ length: 10 }, () => 201), 429]);
+    expect(answers).toEqual([...Array.from({ length: 60 }, () => 201), 429]);
   });
 });
 
@@ -634,10 +634,10 @@ describe('6F1 G4: each OAuth limit per address is this copy’s share across eve
     expect(await taken(form('/v1/oauth/device_authorization', `client_id=${CLIENT}`), 16)).toBe(15);
   });
 
-  it('registers 5 an hour on each of two copies, the 10 shared', async () => {
+  it('registers 30 an hour on each of two copies, the 60 shared', async () => {
     const register = json('/v1/oauth/register', { redirect_uris: ['https://chatgpt.com/cb'] });
     const refused = { outcome: 'invalid', error: 'invalid_client_metadata', description: 'Why.' } as const;
-    expect(await taken(register, 6, { register: refused })).toBe(5);
+    expect(await taken(register, 31, { register: refused })).toBe(30);
   });
 
   it('takes 30 token requests a minute on each of two copies, the 60 shared', async () => {

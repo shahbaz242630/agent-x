@@ -20,7 +20,7 @@
 //   then takes its device code.
 //
 // Each counts against a limit of its own per client address, beside the one
-// every route has: registering 10 an hour, authorizing 30 a minute (a
+// every route has: registering 60 an hour, authorizing 30 a minute (a
 // device's codes too), the token and revocation endpoints 60 a minute; with
 // several `web` copies each counts its share (6F1 G4, shareOfCopies), as every
 // other limit does. None of them reads a cookie but the
@@ -61,7 +61,9 @@ const MINUTE_MS = 60_000;
 
 /** Each endpoint's own limit per client address (plan §1), across every `web` copy. */
 const LIMITS = {
-  register: { most: 10, windowMs: 60 * MINUTE_MS },
+  // Room for a hosted client registering for each organisation from one address; the database holds each
+  // network to its day's share (6F1 G4 review).
+  register: { most: 60, windowMs: 60 * MINUTE_MS },
   authorize: { most: 30, windowMs: MINUTE_MS },
   token: { most: 60, windowMs: MINUTE_MS },
 } as const;
