@@ -5,7 +5,10 @@
 // developer's own agents alone), the ticks limited to what was asked and the
 // agent holds, a write scope never ticked for the person. Allow goes by the
 // shared step-up and comes back to confirm with the choices kept; the confirm
-// sends the browser back to the app, once. Deny tells the app no.
+// sends the browser back to the app, once. Deny tells the app no. 6E3c: an
+// app named by its metadata document is shown as verified by its host; a
+// device's request has no address to go back to, is warned of as a device,
+// and once answered goes back to `/device`.
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -43,7 +46,8 @@ const BACK = 'http://127.0.0.1:33418/callback?code=axc_x&state=s&iss=https%3A%2F
 
 const request = (loopback = true) => ({
   id: REQ,
-  client: { id: 'axcl_0123456789abcdef0123456789abcdef', name: 'Claude Desktop' },
+  via: 'code',
+  client: { id: 'axcl_0123456789abcdef0123456789abcdef', name: 'Claude Desktop', verifiedBy: null },
   redirectUri: loopback ? 'http://127.0.0.1:33418/callback' : 'https://app.example.test/callback',
   redirectHost: loopback ? '127.0.0.1:33418' : 'app.example.test',
   loopback,
@@ -537,5 +541,59 @@ describe('back from signing in again (6E3b)', () => {
     open(`${page}&stepUpFailed=${CHALLENGE}`);
     expect(await screen.findByText(/Signing in again didn't go through/)).toBeDefined();
     expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).toBeNull();
+  });
+});
+
+describe('an app named by its document, and a device (6E3c)', () => {
+  const DEVICE_REQUEST = {
+    ...request(),
+    via: 'device',
+    redirectUri: null,
+    redirectHost: null,
+    loopback: false,
+  };
+
+  it('shows an app named by its metadata document as published by its host, in bold', async () => {
+    as([ORG]);
+    answer(`GET ${at}`, {
+      status: 200,
+      body: {
+        ...request(false),
+        client: { id: 'https://claude.ai/oauth/x', name: 'Claude', verifiedBy: 'claude.ai' },
+      },
+    });
+    open(page);
+    expect(
+      await screen.findByText(/“Claude” asks to act as one of your agents. Its name and addresses are published by/),
+    ).toBeDefined();
+    expect(screen.getByText('claude.ai').tagName).toBe('STRONG');
+    expect(screen.queryByText(/says it is/)).toBeNull();
+  });
+
+  it('warns of a device, with no address to go back to', async () => {
+    as([ORG]);
+    answer(`GET ${at}`, { status: 200, body: DEVICE_REQUEST });
+    open(page);
+    expect(await screen.findByText(/This is a device, such as a server or a command line/)).toBeDefined();
+    expect(screen.queryByText(/sends you back to/)).toBeNull();
+  });
+
+  it('tells a device no, and goes to the device page to say so', async () => {
+    as([ORG]);
+    answer(`GET ${at}`, { status: 200, body: DEVICE_REQUEST });
+    answer(`POST ${at}/deny`, { status: 200, body: { redirectTo: null } });
+    open(page);
+    await userEvent.click(await screen.findByRole('button', { name: 'Deny' }));
+    expect(goTo).toHaveBeenCalledWith('/device?answered=denied');
+  });
+
+  it('confirms a device’s connection and goes to the device page, as the device takes its tokens itself', async () => {
+    as([ORG]);
+    answer(`GET ${at}`, { status: 200, body: DEVICE_REQUEST });
+    keptConsent();
+    answer(`POST ${at}/consent/confirm`, { status: 201, body: { redirectTo: null, connection: { via: 'device' } } });
+    open(`${page}&stepped=${CHALLENGE}`);
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(goTo).toHaveBeenCalledWith('/device?answered=allowed');
   });
 });
