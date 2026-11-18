@@ -562,6 +562,9 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
     ['admin', 'POST', '/v1/test-members'],
     ['admin', 'GET', '/v1/test-shared'],
     ['approver', 'GET', '/v1/test-approvals'],
+    // A route the kept role isn't named on (6F1 G1 review): a developer may not read it, nor a viewer try it.
+    ['admin', 'GET', '/v1/test-members'],
+    ['approver', 'POST', '/v1/test-tries'],
   ] as const)(
     'refuses an active %s with a passkey on %s %s as SECOND_FACTOR_REMOVED, asking about the person',
     async (role, method, url) => {
@@ -578,7 +581,6 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
   );
 
   it.each([
-    ['admin', '/v1/test-members', 'developer'],
     ['admin', '/v1/test-builds', 'developer'],
     ['approver', '/v1/test-reads', 'viewer'],
   ] as const)(
@@ -668,7 +670,7 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
     expect(refused.statusCode).toBe(403);
     expect(refused.json()).toEqual(errorBody('FORBIDDEN', FIRST_ID));
     expect(reached).toEqual([]);
-    expect((await app.inject(signedIn({ url: '/v1/test-members' }))).statusCode).toBe(200);
+    expect((await app.inject(signedIn({ url: '/v1/test-builds' }))).statusCode).toBe(200);
     expect(reached).toEqual([
       { member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'developer', withoutPowers: true }, person: LIVE },
     ]);

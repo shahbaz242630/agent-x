@@ -492,9 +492,9 @@ export function registerAccess(
               };
               /** Refuses a person in the 7 days after a second factor of theirs was removed: no admin's or approver's powers yet. */
               const secondFactorRemoved = () => void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id);
-              /** Kept to what a developer or a viewer may do: refused a route for powers, through on a shared one. */
+              /** Kept to what a developer or a viewer may do: refused a route for powers, or one the kept role isn't named on; through on a shared one. */
               const keptWithout = (refusal: () => void) => {
-                if (needsPowers(access)) refuse(refusal);
+                if (needsPowers(access) || !access.includes(roleWithoutPowers(membership.role))) refuse(refusal);
                 else through(true);
               };
               if (!WITH_PASSKEY.includes(membership.role)) {
