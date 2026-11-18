@@ -612,7 +612,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     confirmations: options.acceptanceConfirmations,
     publicOrigin: config.http.publicOrigin,
   });
-  registerOauth(app, { capabilities, authorizing: options.oauth?.authorizing, trust });
+  registerOauth(app, {
+    capabilities,
+    authorizing: options.oauth?.authorizing,
+    trust,
+    copies: config.http.webCopies,
+  });
   // OAuth's token and revocation forms, in a scope of their own whose one parser reads a form, field by field (6E3a).
   void app.register((scoped, _options, done) => {
     scoped.removeAllContentTypeParsers();
@@ -624,6 +629,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       device: options.oauth?.device,
       clock: options.oauth?.clock ?? systemClock,
       trust,
+      copies: config.http.webCopies,
     });
     done();
   });

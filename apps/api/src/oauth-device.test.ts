@@ -51,30 +51,46 @@ function device(capture = new LogCapture()) {
 describe('a device’s codes refused, never a failure', () => {
   it('draws the user code again while it is held, and opens with the next', async () => {
     opened.answers = ['collided', 'collided', 'opened'];
-    expect(await device().authorize({ client_id: CLIENT }, 'c-1')).toMatchObject({ outcome: 'opened' });
+    expect(await device().authorize({ client_id: CLIENT }, 'c-1', '192.0.2.1')).toMatchObject({ outcome: 'opened' });
   });
 
   it('answers temporarily_unavailable, with its line, at the cap or after three draws held', async () => {
     const capture = new LogCapture();
     opened.answers = ['full'];
-    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-1')).toMatchObject({
+    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-1', '192.0.2.1')).toMatchObject({
       outcome: 'refused',
       status: 503,
       error: 'temporarily_unavailable',
     });
     opened.answers = ['collided', 'collided', 'collided'];
-    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-2')).toMatchObject({ status: 503 });
+    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-2', '192.0.2.1')).toMatchObject({ status: 503 });
     expect(capture.lines().filter((line) => line.event === 'oauth.flows_capped')).toHaveLength(2);
+  });
+
+  it('6F1 G4: answers temporarily_unavailable at its source’s cap, its line at most once a minute', async () => {
+    const capture = new LogCapture();
+    const at = device(capture);
+    opened.answers = ['source_full', 'source_full'];
+    expect(await at.authorize({ client_id: CLIENT }, 'c-1', '192.0.2.1')).toMatchObject({
+      outcome: 'refused',
+      status: 503,
+      error: 'temporarily_unavailable',
+    });
+    await at.authorize({ client_id: CLIENT }, 'c-2', '192.0.2.1');
+    expect(capture.lines().filter((line) => line.event === 'oauth.source_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', kind: 'device', most: 20, refused: 1 }),
+    ]);
+    expect(capture.lines().filter((line) => line.event === 'oauth.flows_capped')).toEqual([]);
   });
 
   it('answers a database busy as temporarily_unavailable, and lets any other failure through', async () => {
     const capture = new LogCapture();
     opened.answers = [Object.assign(new Error('deadlock'), { code: '40P01' })];
-    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-1')).toMatchObject({ status: 503 });
+    expect(await device(capture).authorize({ client_id: CLIENT }, 'c-1', '192.0.2.1')).toMatchObject({ status: 503 });
     expect(capture.lines().filter((line) => line.event === 'oauth.grant_in_trouble')).toEqual([
       expect.objectContaining({ level: 'warn', at: 'device_authorization' }),
     ]);
     opened.answers = [new Error('a bug')];
-    await expect(device().authorize({ client_id: CLIENT }, 'c-2')).rejects.toThrow('a bug');
+    await expect(device().authorize({ client_id: CLIENT }, 'c-2', '192.0.2.1')).rejects.toThrow('a bug');
   });
 });

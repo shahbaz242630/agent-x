@@ -1,8 +1,9 @@
 // The clients that registered themselves (0093, RFC 7591; SEC-OAUTH-13): a
 // global table, as a client registers before anyone is known. A registration
 // grants nothing: a connection is made only by a person's consent. So it is
-// held only against filling the table: a day's cap for the whole server,
-// counted under one lock (and each address's own limit, in the API), and a
+// held only against filling the table: a day's cap for the whole server and
+// one for each network (6F1 G4), counted under one lock (and each address's
+// own limit, in the API), and a
 // client that never connects is swept a day after it registered; one that
 // did, 90 days after it last connected (0094, 6E3b), when no connection of
 // its can be refreshed any more.
@@ -15,7 +16,15 @@ import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
 /** The most clients that may register in any 24 hours, from every address together. */
-export const MOST_REGISTRATIONS_A_DAY = 500;
+export const MOST_REGISTRATIONS_A_DAY = 2000;
+
+/**
+ * The most clients that may register in any 24 hours from one network (6F1 G4): an IPv4 /24 or an IPv6 /48, so a few
+ * addresses, or one network's many, can't take the whole day's MOST_REGISTRATIONS_A_DAY from every organisation.
+ * Room for a hosted client (6F1 G4 review): its servers register a client for each organisation that adds Agent X,
+ * from one vendor network, so the share is well above one person's needs.
+ */
+export const MOST_REGISTRATIONS_A_NETWORK_A_DAY = 150;
 
 /** A registered client, as kept. */
 export interface Client extends ClientRegistration {
@@ -23,27 +32,35 @@ export interface Client extends ClientRegistration {
   readonly createdAt: Date;
 }
 
-/** Registered, with its ID and when; or the day's cap reached, nothing kept. */
-export type Registered = { readonly outcome: 'registered'; readonly client: Client } | { readonly outcome: 'capped' };
+/** Registered, with its ID and when; or a day's cap reached, the whole server's or this network's, nothing kept. */
+export type Registered =
+  | { readonly outcome: 'registered'; readonly client: Client }
+  | { readonly outcome: 'capped'; readonly cap: 'server' | 'network' };
 
 /**
- * Registers the client, in a transaction of its own whose statements are limited to 10 seconds: the day's count
- * taken under the registrations' one lock, so two at once can't both take the last place.
+ * Registers the client from `network` (6F1 G4: its client address's /24, or /48 for IPv6), in a transaction of its own
+ * whose statements are limited to 10 seconds: the day's counts, the server's and the network's, taken under the
+ * registrations' one lock, so two at once can't both take the last place.
  */
 export async function registerClient(
   db: Kysely<OauthTables>,
   registration: ClientRegistration,
   now: Date,
+  network: string,
 ): Promise<Registered> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
     await holdTransactionLock(tx, 'oauth_clients');
-    const { registered } = await tx
+    const { registered, fromNetwork } = await tx
       .selectFrom('oauth.clients')
-      .select(sql<number>`pg_catalog.count(*)::int`.as('registered'))
+      .select([
+        sql<number>`pg_catalog.count(*)::int`.as('registered'),
+        sql<number>`(pg_catalog.count(*) filter (where network = ${network}))::int`.as('fromNetwork'),
+      ])
       .where('created_at', '>', new Date(now.getTime() - DAY_MS))
       .executeTakeFirstOrThrow();
-    if (registered >= MOST_REGISTRATIONS_A_DAY) return { outcome: 'capped' };
+    if (registered >= MOST_REGISTRATIONS_A_DAY) return { outcome: 'capped', cap: 'server' };
+    if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
     const client: Client = { ...registration, clientId: newClientId(), createdAt: now };
     await tx
       .insertInto('oauth.clients')
@@ -57,6 +74,7 @@ export async function registerClient(
         software_version: client.softwareVersion,
         created_at: now,
         first_connected_at: null,
+        network,
       })
       .execute();
     return { outcome: 'registered', client };

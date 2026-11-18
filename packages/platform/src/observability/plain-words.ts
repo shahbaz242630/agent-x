@@ -483,14 +483,19 @@ export const PLAIN_WORDS = {
     next: 'If it repeats for one app, its sign-in may be intercepted or broken: look at which app on these lines.',
   },
   'oauth.registrations_capped': {
-    happened: 'MCP apps registered themselves more times today than Agent X allows in a day, so this one was refused.',
-    broke: 'No new app can register until the day rolls on; apps already registered still connect.',
-    next: 'Look for one address or app registering over and over: it may be abuse. Raise the cap only after checking.',
+    happened: 'MCP apps registered more times today than Agent X allows in all, so this one was refused.',
+    broke: 'No new app can register until the day rolls on; registered apps still connect.',
+    next: 'Look for many networks registering over and over: a spread-out attack.',
   },
   'oauth.flows_capped': {
-    happened: 'So many OAuth sign-ins were under way at once that Agent X refused new ones for a while.',
-    broke: 'People connecting an app were told to try again in a few minutes; connected apps carry on.',
-    next: 'Look for one source opening sign-ins over and over: it may be abuse. They end within 15 minutes.',
+    happened: 'So many OAuth sign-ins were under way at once that Agent X refused new ones.',
+    broke: 'People connecting an app were told to try again soon; connected apps carry on.',
+    next: 'Look for many addresses opening sign-ins over and over. They end within minutes.',
+  },
+  'oauth.source_capped': {
+    happened: 'One address or network asked for more OAuth sign-ins or registrations than its share.',
+    broke: 'Only that address or network was told to wait; everyone else connects as usual.',
+    next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
   },
   'oauth.grant_in_trouble': {
     happened: 'An OAuth token or revocation request hit a database limit or lost a deadlock.',

@@ -11,10 +11,15 @@
 //   S256 on every request; the resource, if named, is the MCP endpoint
 //   exactly (RFC 8707).
 // - A registration is checked (client-metadata.ts) and kept, within the day's
-//   cap for the whole server; the API's per-address limit is in front.
+//   cap for the whole server and its network's own (6F1 G4); the API's
+//   per-address limit is in front.
+// - 6F1 G4: a flow is held to its source's own cap too (its client address,
+//   an IPv6 /64 as one), beside the server's: a browser sending no cookie is
+//   a fresh browser every time, so the browser's own cap never holds it.
 import {
   checkRegistration,
   type Client,
+  type FlowOpened,
   isCodeChallenge,
   isFlowCookie,
   isRegisteredRedirect,
@@ -22,6 +27,8 @@ import {
   hashOf,
   type OauthTables,
   MOST_OPEN_FLOWS,
+  MOST_OPEN_FLOWS_A_SOURCE,
+  MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   openCodeFlow,
   PKCE_METHOD,
   type RegistrationAsked,
@@ -30,10 +37,11 @@ import {
 } from '@agentx/core/modules/oauth';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
-import type { Logger } from '@agentx/platform/observability';
+import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
 import type { OauthClients } from './oauth-clients.ts';
 import { backToClient, type Capabilities } from './oauth-wire.ts';
+import { clientKey, clientNetwork } from './rate-limit.ts';
 
 /** What an authorization request names (RFC 6749 §4.1.1, RFC 7636 §4.3, RFC 8707 §2). */
 interface AuthorizeAsked {
@@ -65,9 +73,10 @@ export type RegistrationAnswer =
     }
   | { readonly outcome: 'capped' };
 
+/** `ip`: the client's address as the trust rule reads it, undefined when it can't be read (rate-limit.ts). */
 export interface OauthAuthorizing {
-  authorize(asked: AuthorizeAsked, cookie: string | undefined): Promise<AuthorizeAnswer>;
-  register(asked: RegistrationAsked, correlationId: string): Promise<RegistrationAnswer>;
+  authorize(asked: AuthorizeAsked, cookie: string | undefined, ip: string | undefined): Promise<AuthorizeAnswer>;
+  register(asked: RegistrationAsked, correlationId: string, ip: string | undefined): Promise<RegistrationAnswer>;
 }
 
 /**
@@ -94,8 +103,30 @@ function requestRefusal(
   return undefined;
 }
 
-/** How often the flows' cap may warn, at most (lead's re-review): one line a minute, however many are refused. */
+/** How often a cap may warn, at most (lead's re-review): one line a minute, however many are refused. */
 const CAP_WARNING_EVERY_MS = 60_000;
+
+/**
+ * A cap's warning, said at most once a minute with how many were refused since it was last said (`refused`): an
+ * attack's flood is a line a minute, never one a request. Each call counts one refusal.
+ */
+export function capWarning(
+  logger: Logger,
+  clock: Clock,
+  event: ProblemEvent,
+  fields: Readonly<Record<string, unknown>> = {},
+): () => void {
+  let warnedAt = Number.NEGATIVE_INFINITY;
+  let refusedSince = 0;
+  return () => {
+    refusedSince += 1;
+    const now = clock.now().getTime();
+    if (now - warnedAt < CAP_WARNING_EVERY_MS) return;
+    logger.warn(event, { ...fields, refused: refusedSince });
+    warnedAt = now;
+    refusedSince = 0;
+  };
+}
 
 /** The most characters of a client's `state` kept and sent back (0093). */
 const MOST_STATE = 512;
@@ -116,16 +147,22 @@ export function createOauthAuthorizing({
   /** Registered clients, and those named by an allowlisted metadata document (6E3c). */
   readonly clients: OauthClients;
 }): OauthAuthorizing {
-  /** The flows' cap's warning, at most once a minute, with how many were refused since the last (an attack's flood). */
-  let capWarnedAt = Number.NEGATIVE_INFINITY;
-  let refusedSince = 0;
-  const flowsCapped = (): void => {
-    refusedSince += 1;
-    const now = clock.now().getTime();
-    if (now - capWarnedAt < CAP_WARNING_EVERY_MS) return;
-    logger.warn('oauth.flows_capped', { most: MOST_OPEN_FLOWS, refused: refusedSince });
-    capWarnedAt = now;
-    refusedSince = 0;
+  const flowsCapped = capWarning(logger, clock, 'oauth.flows_capped', { most: MOST_OPEN_FLOWS });
+  const sourceFlowsCapped = capWarning(logger, clock, 'oauth.source_capped', {
+    kind: 'flow',
+    most: MOST_OPEN_FLOWS_A_SOURCE,
+  });
+  const networkRegistrationsCapped = capWarning(logger, clock, 'oauth.source_capped', {
+    kind: 'registration',
+    most: MOST_REGISTRATIONS_A_NETWORK_A_DAY,
+  });
+
+  /** Why a flow wasn't opened, in the words sent back, a cap's refusal noted; undefined for one opened. */
+  const notOpened = (opened: FlowOpened): string | undefined => {
+    if (opened === 'opened') return undefined;
+    if (opened === 'browser_full') return 'This browser has too many connections waiting; finish or wait for one.';
+    (opened === 'full' ? flowsCapped : sourceFlowsCapped)();
+    return 'Too many sign-ins are under way; try again in a few minutes.';
   };
 
   /** The authorize work, a database limit or lost deadlock answered busy (never a 500), where `back` says. */
@@ -145,26 +182,27 @@ export function createOauthAuthorizing({
   };
 
   return {
-    authorize(asked, cookie) {
+    authorize(asked, cookie, ip) {
       // Once the client's address is proven, a busy answer goes back to it; before, to our own page.
       const back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer } = {};
-      return orBusy(back, () => authorized(asked, cookie, back));
+      return orBusy(back, () => authorized(asked, cookie, clientKey(ip), back));
     },
 
-    async register(asked, correlationId) {
+    async register(asked, correlationId, ip) {
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
-      const registered = await registerClient(database, checked.client, clock.now());
-      if (registered.outcome === 'capped') {
-        logger.child({ correlationId }).warn('oauth.registrations_capped');
-      }
-      return registered;
+      const registered = await registerClient(database, checked.client, clock.now(), clientNetwork(ip));
+      if (registered.outcome === 'registered') return registered;
+      if (registered.cap === 'server') logger.child({ correlationId }).warn('oauth.registrations_capped');
+      else networkRegistrationsCapped();
+      return { outcome: 'capped' };
     },
   };
 
   async function authorized(
     asked: AuthorizeAsked,
     cookie: string | undefined,
+    source: string,
     back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer },
   ): Promise<AuthorizeAnswer> {
     const client = asked.client_id === undefined ? undefined : await clients.find(asked.client_id);
@@ -200,27 +238,22 @@ export function createOauthAuthorizing({
     const kept = cookie !== undefined && isFlowCookie(cookie) ? cookie : undefined;
     const browser = kept ?? newFlowCookie();
     const flowId = ids.next();
-    const opened = await openCodeFlow(database, {
-      id: flowId,
-      clientId: client.clientId,
-      redirectUri,
-      state,
-      codeChallenge: challenge,
-      scopesAsked: scopes,
-      resource: capabilities.resource,
-      browserHash: hashOf(browser),
-      createdAt: clock.now(),
-    });
-    if (opened === 'full') {
-      flowsCapped();
-      return refused('temporarily_unavailable', 'Too many sign-ins are under way; try again in a few minutes.');
-    }
-    if (opened === 'browser_full') {
-      return refused(
-        'temporarily_unavailable',
-        'This browser has too many connections waiting; finish or wait for one.',
-      );
-    }
-    return { outcome: 'opened', flowId, cookie: browser };
+    const opened = await openCodeFlow(
+      database,
+      {
+        id: flowId,
+        clientId: client.clientId,
+        redirectUri,
+        state,
+        codeChallenge: challenge,
+        scopesAsked: scopes,
+        resource: capabilities.resource,
+        browserHash: hashOf(browser),
+        createdAt: clock.now(),
+      },
+      source,
+    );
+    const why = notOpened(opened);
+    return why === undefined ? { outcome: 'opened', flowId, cookie: browser } : refused('temporarily_unavailable', why);
   }
 }

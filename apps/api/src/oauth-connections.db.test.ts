@@ -44,6 +44,8 @@ import {
   flowById,
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_BROWSER,
+  MOST_OPEN_FLOWS_A_SOURCE,
+  MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   keepClientMetadata,
   newFlowCookie,
   type OauthTables,
@@ -115,6 +117,13 @@ const capabilities = capabilitiesOf('https://app.agentx.example');
 const REDIRECT = 'https://chatgpt.com/connector/oauth/cb';
 const VERIFIER = 'v'.repeat(43);
 const CALLER = { correlationId: CORRELATION, ip: '203.0.113.9' };
+
+let addresses = 0;
+/** A client address on a network of its own, so no flow or registration counts against another test's (6F1 G4). */
+const fresh = (): string => {
+  addresses += 1;
+  return `10.${String(Math.floor(addresses / 256))}.${String(addresses % 256)}.1`;
+};
 
 let clock: FixedClock;
 let capture: LogCapture;
@@ -212,6 +221,7 @@ async function opened(scope?: string, cookie?: string) {
       ...(scope === undefined ? {} : { scope }),
     },
     cookie,
+    fresh(),
   );
   if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
   return { flowId: answer.flowId, cookie: answer.cookie };
@@ -321,7 +331,11 @@ beforeEach(async () => {
     issuer: capabilities.issuer,
     clients,
   });
-  const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION);
+  const registered = await authorizing.register(
+    { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
+    CORRELATION,
+    fresh(),
+  );
   if (registered.outcome !== 'registered') throw new Error('registered');
   clientId = registered.client.clientId;
 });
@@ -497,25 +511,26 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
 
   it('never sends a client it doesn’t know, or an address it never registered, anywhere', async () => {
     expect(
-      await authorizing.authorize({ ...asked, client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, undefined),
+      await authorizing.authorize({ ...asked, client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, undefined, fresh()),
     ).toEqual({
       outcome: 'not_redirectable',
       problem: 'unknown_client',
     });
-    expect(await authorizing.authorize({ ...asked, client_id: undefined }, undefined)).toMatchObject({
+    expect(await authorizing.authorize({ ...asked, client_id: undefined }, undefined, fresh())).toMatchObject({
       problem: 'unknown_client',
     });
     expect(
       await authorizing.authorize(
         { ...asked, client_id: clientId, redirect_uri: 'https://evil.example/cb' },
         undefined,
+        fresh(),
       ),
     ).toEqual({ outcome: 'not_redirectable', problem: 'unregistered_redirect' });
   });
 
   it('takes the one registered address when the request names none', async () => {
     expect(
-      await authorizing.authorize({ ...asked, client_id: clientId, redirect_uri: undefined }, undefined),
+      await authorizing.authorize({ ...asked, client_id: clientId, redirect_uri: undefined }, undefined, fresh()),
     ).toMatchObject({ outcome: 'opened' });
   });
 
@@ -527,7 +542,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     [{ scope: 'openid' }, 'invalid_scope'],
     [{ resource: 'https://evil.example/v1/mcp' }, 'invalid_target'],
   ])('sends the browser back to the client with %j’s error, its state and our issuer', async (wrong, error) => {
-    const answer = await authorizing.authorize({ ...asked, client_id: clientId, ...wrong }, undefined);
+    const answer = await authorizing.authorize({ ...asked, client_id: clientId, ...wrong }, undefined, fresh());
     if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
     const back = new URL(answer.redirectTo);
     expect(back.origin + back.pathname).toBe(REDIRECT);
@@ -537,7 +552,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
   });
 
   it('takes an empty state as none, never a failure', async () => {
-    const answer = await authorizing.authorize({ ...asked, client_id: clientId, state: '' }, undefined);
+    const answer = await authorizing.authorize({ ...asked, client_id: clientId, state: '' }, undefined, fresh());
     if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
     expect(await flowById(app, answer.flowId)).toMatchObject({ state: null });
   });
@@ -546,12 +561,12 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const cookie = newFlowCookie();
     const flows = [];
     for (let open = 0; open < MOST_OPEN_FLOWS_A_BROWSER; open += 1) flows.push(await opened(undefined, cookie));
-    const full = await authorizing.authorize({ ...asked, client_id: clientId }, cookie);
+    const full = await authorizing.authorize({ ...asked, client_id: clientId }, cookie, fresh());
     if (full.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(full)}`);
     expect(new URL(full.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
     expect(new URL(full.redirectTo).searchParams.get('iss')).toBe(capabilities.issuer);
     // Another browser is not held by it.
-    expect(await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie())).toMatchObject({
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh())).toMatchObject({
       outcome: 'opened',
     });
     const org = await organization();
@@ -559,7 +574,9 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const [first] = flows;
     if (first === undefined) throw new Error('a flow');
     await consents.deny(admin, keyed(admin, DENY_OPERATION, 'free a place'), first, CORRELATION);
-    expect(await authorizing.authorize({ ...asked, client_id: clientId }, cookie)).toMatchObject({ outcome: 'opened' });
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, cookie, fresh())).toMatchObject({
+      outcome: 'opened',
+    });
   });
 
   it(`refuses every new flow while ${String(MOST_OPEN_FLOWS)} are open, with the warning`, async () => {
@@ -571,15 +588,15 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       [challengeOf(VERIFIER), 'f'.repeat(64), START, new Date(START.getTime() + 900_000), MOST_OPEN_FLOWS],
     );
     try {
-      const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
       if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
       expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
       expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn', refused: 1 })]);
       // At most one line a minute, however many are refused, then one counting them.
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
       expect(lines('oauth.flows_capped')).toHaveLength(1);
       clock.advanceBy(60_000);
-      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie(), fresh());
       expect(lines('oauth.flows_capped')).toEqual([
         expect.objectContaining({ refused: 1 }),
         expect.objectContaining({ refused: 2 }),
@@ -587,6 +604,108 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     } finally {
       await admin.query("delete from oauth.flows where client_id = 'filler'");
     }
+  });
+
+  it(`6F1 G4: holds one source to ${String(MOST_OPEN_FLOWS_A_SOURCE)} open flows, whatever browser it says it is`, async () => {
+    // Cookie-less: each request a fresh browser, so the browser's own cap never holds it; its address does.
+    const source = '198.51.100.7';
+    for (let open = 0; open < MOST_OPEN_FLOWS_A_SOURCE; open += 1) {
+      expect(await authorizing.authorize({ ...asked, client_id: clientId }, undefined, source)).toMatchObject({
+        outcome: 'opened',
+      });
+    }
+    const full = await authorizing.authorize({ ...asked, client_id: clientId }, undefined, source);
+    if (full.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(full)}`);
+    expect(new URL(full.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
+    expect(lines('oauth.source_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', kind: 'flow', refused: 1 }),
+    ]);
+    // Never the address itself in a log line (ADR-011 §7).
+    expect(JSON.stringify(capture.lines())).not.toContain(source);
+    // A device's flow from it too: one count of every flow it holds.
+    const device = createOauthDevice({
+      database: app,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: oauthClients,
+    });
+    const asDevice = await authorizing.register(
+      { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
+      CORRELATION,
+      fresh(),
+    );
+    if (asDevice.outcome !== 'registered') throw new Error('registered');
+    expect(await device.authorize({ client_id: asDevice.client.clientId }, CORRELATION, source)).toMatchObject({
+      outcome: 'refused',
+      status: 503,
+      error: 'temporarily_unavailable',
+    });
+    // Another address, even its neighbour, is not held by it.
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, undefined, '198.51.100.8')).toMatchObject({
+      outcome: 'opened',
+    });
+    expect(await device.authorize({ client_id: asDevice.client.clientId }, CORRELATION, '198.51.100.9')).toMatchObject({
+      outcome: 'opened',
+    });
+  });
+
+  it('6F1 G4: counts an IPv6 source by its /64, as the rate limit does, and frees its places as its flows end', async () => {
+    for (let open = 0; open < MOST_OPEN_FLOWS_A_SOURCE; open += 1) {
+      const address = `2001:db8:6f1:4::${String(open + 1)}`;
+      await authorizing.authorize({ ...asked, client_id: clientId }, undefined, address);
+    }
+    expect(
+      await authorizing.authorize({ ...asked, client_id: clientId }, undefined, '2001:db8:6f1:4:ffff::1'),
+    ).toMatchObject({ outcome: 'refused' });
+    expect(
+      await authorizing.authorize({ ...asked, client_id: clientId }, undefined, '2001:db8:6f1:5::1'),
+    ).toMatchObject({ outcome: 'opened' });
+    const later = new FixedClock(new Date(START.getTime() + 15 * 60_000));
+    const after = createOauthAuthorizing({
+      database: app,
+      clock: later,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: oauthClients,
+    });
+    expect(await after.authorize({ ...asked, client_id: clientId }, undefined, '2001:db8:6f1:4::1')).toMatchObject({
+      outcome: 'opened',
+    });
+  });
+
+  it(`6F1 G4: holds one network to ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} registrations a day`, async () => {
+    const register = (address: string) =>
+      authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION, address);
+    for (let made = 0; made < MOST_REGISTRATIONS_A_NETWORK_A_DAY; made += 1) {
+      // Every address of the /24 its own, as an attacker's would be.
+      expect(await register(`192.0.2.${String(made + 1)}`)).toMatchObject({ outcome: 'registered' });
+    }
+    expect(await register('192.0.2.200')).toEqual({ outcome: 'capped' });
+    expect(lines('oauth.source_capped')).toEqual([expect.objectContaining({ kind: 'registration', refused: 1 })]);
+    expect(lines('oauth.registrations_capped')).toEqual([]);
+    // Another network is not held by it; an IPv6 network is its /48.
+    expect(await register('192.0.3.1')).toMatchObject({ outcome: 'registered' });
+    for (let made = 0; made < MOST_REGISTRATIONS_A_NETWORK_A_DAY; made += 1) {
+      await register(`2001:db8:6f1:${String(made + 1)}::1`);
+    }
+    expect(await register('2001:db8:6f1:ffff::1')).toEqual({ outcome: 'capped' });
+    expect(await register('2001:db8:6f2::1')).toMatchObject({ outcome: 'registered' });
+    // A day on, its place is free again.
+    const later = new FixedClock(new Date(START.getTime() + DAY_MS + 1000));
+    const after = createOauthAuthorizing({
+      database: app,
+      clock: later,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: oauthClients,
+    });
+    expect(
+      await after.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION, '192.0.2.201'),
+    ).toMatchObject({ outcome: 'registered' });
   });
 
   it('answers busy back to the client, never a failure, when the flow’s transaction hits a limit', async () => {
@@ -611,21 +730,25 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       capabilities,
       clients: createOauthClients({ database: failing, clock, logger, metadata: undefined }),
     });
-    const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined);
+    const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined, fresh());
     if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
     expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
     expect(new URL(answer.redirectTo).searchParams.get('iss')).toBe(capabilities.issuer);
   });
 
   it('refuses a state too long, sending none back', async () => {
-    const answer = await authorizing.authorize({ ...asked, client_id: clientId, state: 's'.repeat(513) }, undefined);
+    const answer = await authorizing.authorize(
+      { ...asked, client_id: clientId, state: 's'.repeat(513) },
+      undefined,
+      fresh(),
+    );
     if (answer.outcome !== 'refused') throw new Error('not refused');
     expect(new URL(answer.redirectTo).searchParams.get('state')).toBeNull();
     expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('invalid_request');
   });
 
   it('refuses a registration that can’t be kept, with RFC 7591’s error', async () => {
-    expect(await authorizing.register({ redirect_uris: ['http://a.example/cb'] }, CORRELATION)).toMatchObject({
+    expect(await authorizing.register({ redirect_uris: ['http://a.example/cb'] }, CORRELATION, fresh())).toMatchObject({
       outcome: 'invalid',
       error: 'invalid_redirect_uri',
     });
@@ -1664,6 +1787,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     const answer = await deviceOf().authorize(
       { client_id: clientId, resource: capabilities.resource, ...(scope === undefined ? {} : { scope }) },
       CORRELATION,
+      fresh(),
     );
     if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
     return answer.codes;
@@ -1691,13 +1815,14 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     const registered = await authorizing.register(
       { redirect_uris: [REDIRECT], client_name: 'ChatGPT', grant_types: [DEVICE_CODE_GRANT] },
       CORRELATION,
+      fresh(),
     );
     if (registered.outcome !== 'registered') throw new Error('registered');
     clientId = registered.client.clientId;
   });
 
   it('6E3c review: refuses the device flow to a client that never listed it, at its codes and at its poll', async () => {
-    expect(await deviceOf().authorize({ client_id: codeOnly }, CORRELATION)).toMatchObject({
+    expect(await deviceOf().authorize({ client_id: codeOnly }, CORRELATION, fresh())).toMatchObject({
       outcome: 'refused',
       status: 400,
       error: 'unauthorized_client',
@@ -1713,6 +1838,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
         code_challenge_method: 'S256',
       },
       undefined,
+      fresh(),
     );
     if (back.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(back)}`);
     expect(new URL(back.redirectTo).searchParams.get('error')).toBe('unauthorized_client');
@@ -1885,17 +2011,23 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
 
   it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
     const device = deviceOf();
-    expect(await device.authorize({ client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, CORRELATION)).toMatchObject({
+    expect(
+      await device.authorize({ client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, CORRELATION, fresh()),
+    ).toMatchObject({
       outcome: 'refused',
       status: 401,
       error: 'invalid_client',
     });
-    expect(await device.authorize({}, CORRELATION)).toMatchObject({ error: 'invalid_client' });
-    expect(await device.authorize({ client_id: clientId, scope: 'openid' }, CORRELATION)).toMatchObject({
+    expect(await device.authorize({}, CORRELATION, fresh())).toMatchObject({ error: 'invalid_client' });
+    expect(await device.authorize({ client_id: clientId, scope: 'openid' }, CORRELATION, fresh())).toMatchObject({
       error: 'invalid_scope',
     });
     expect(
-      await device.authorize({ client_id: clientId, resource: 'https://elsewhere.example/v1/mcp' }, CORRELATION),
+      await device.authorize(
+        { client_id: clientId, resource: 'https://elsewhere.example/v1/mcp' },
+        CORRELATION,
+        fresh(),
+      ),
     ).toMatchObject({ error: 'invalid_target' });
     expect(await device.lookup('AEIO-UUUU', undefined)).toEqual({ outcome: 'not_found' });
   });
@@ -1948,6 +2080,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
         code_challenge_method: 'S256',
       },
       undefined,
+      fresh(),
     );
 
   const DOCUMENT = { client_id: CLIENT_URL, client_name: 'Claude', redirect_uris: [CLAUDE_BACK] };
@@ -2023,6 +2156,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     const elsewhere = await listed.viaDocument.authorize(
       { response_type: 'code', client_id: other, redirect_uri: 'https://evil.example/cb' },
       undefined,
+      fresh(),
     );
     expect(elsewhere).toEqual({ outcome: 'not_redirectable', problem: 'unregistered_redirect' });
     const unlisted = metadataClients(() => ({ outcome: 'fetched', document: DOCUMENT }));
@@ -2126,7 +2260,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     }));
     const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
     const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
-    const given = await device.authorize({ client_id: HERMES }, CORRELATION);
+    const given = await device.authorize({ client_id: HERMES }, CORRELATION, fresh());
     if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
     const found = await device.lookup(given.codes.userCode, undefined);
     if (found.outcome !== 'claimed') throw new Error('not claimed');
@@ -2153,7 +2287,9 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     }));
     const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
     const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
-    expect(await device.authorize({ client_id: 'https://claude.ai/oauth/code-only' }, CORRELATION)).toMatchObject({
+    expect(
+      await device.authorize({ client_id: 'https://claude.ai/oauth/code-only' }, CORRELATION, fresh()),
+    ).toMatchObject({
       error: 'unauthorized_client',
     });
   });
