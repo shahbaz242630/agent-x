@@ -231,6 +231,13 @@ async function rotatedEndingNow(who: Person, agent: { agentId: string; keyId: st
   };
 }
 
+let addresses = 0;
+/** A client address of its own for each flow or registration, so none counts against another's share (6F1 G4). */
+const fresh = (): string => {
+  addresses += 1;
+  return `10.${String(Math.floor(addresses / 256))}.${String(addresses % 256)}.2`;
+};
+
 /** A flow an MCP client opened in the person's browser: its ID and the browser's cookie. */
 async function opened() {
   const answer = await authorizing.authorize(
@@ -245,6 +252,7 @@ async function opened() {
       scope: 'requests:read',
     },
     undefined,
+    fresh(),
   );
   if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
   return { flowId: answer.flowId, cookie: answer.cookie };
@@ -282,7 +290,11 @@ beforeAll(async () => {
   const services = { database: app, keys, ids, clock, logger };
   const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
   authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
-  const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION);
+  const registered = await authorizing.register(
+    { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
+    CORRELATION,
+    fresh(),
+  );
   if (registered.outcome !== 'registered') throw new Error('registered');
   clientId = registered.client.clientId;
   const http = {
