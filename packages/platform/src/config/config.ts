@@ -6,6 +6,7 @@
 // to another job, a PG* variable, or TLS certificate checks turned off.
 // Problems name the variable and the rule, never the value, so a secret pasted
 // into the wrong variable can't leak through the error.
+import { organisationShareOf } from '../db/organisation-shares.ts';
 import type { KeySettings } from '../keys/load.ts';
 import {
   type BlobContainer,
@@ -622,18 +623,29 @@ function rateLimitRuleProblems(checks: Settings): string[] {
   );
 }
 
-/** The gate's limits against each other and the pool, where they are valid: past either, a limit can never bind. */
+/**
+ * The gate's limits against each other and the pool, where they are valid: past either, a limit can never bind. 6F1 G5:
+ * nor past an organisation's share of the pool (organisation-shares.ts), where its decisions would wait for the share,
+ * not in their turn at the gate.
+ */
 function decisionGateProblems({ dbPoolMax, gateActive, gatePerOrganisation }: Settings): string[] {
   if (!dbPoolMax.ok || !gateActive.ok || !gatePerOrganisation.ok) return [];
   const active = gateActive.value ?? dbPoolMax.value;
+  const perOrganisation = gatePerOrganisation.value ?? 0;
+  const share = organisationShareOf(dbPoolMax.value);
   return [
     ...(active > dbPoolMax.value
       ? [
           `AGENTX_DECISION_GATE_ACTIVE: must be at most AGENTX_DB_POOL_MAX (${String(dbPoolMax.value)}): past it, decisions queue for a connection, not in turn`,
         ]
       : []),
-    ...((gatePerOrganisation.value ?? 0) > active
+    ...(perOrganisation > active
       ? [`AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (${String(active)})`]
+      : []),
+    ...(perOrganisation <= active && perOrganisation > share
+      ? [
+          `AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most an organisation's share of AGENTX_DB_POOL_MAX (${String(share)}): past it, its decisions wait for the share, not in turn`,
+        ]
       : []),
   ];
 }

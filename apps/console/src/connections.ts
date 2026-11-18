@@ -121,9 +121,18 @@ export const isWriteScope = (scope: Scope): boolean => scope.endsWith(':write');
 export const tickable = (asked: readonly Scope[], held: readonly Scope[]): readonly Scope[] =>
   SCOPES.filter((scope) => asked.includes(scope) && held.includes(scope));
 
-/** Where the browser may be sent back to: the address the API answered, only ever a web one. */
-export const isWebAddress = (address: unknown): address is string =>
-  typeof address === 'string' && /^https?:\/\//i.test(address);
+/** The hosts plain http may go back to: the machine's own loopback, a native app's (the server's rule, redirects.ts). */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', '[::1]', 'localhost']);
+
+/**
+ * Where the browser may be sent back to: the address the API answered, only ever a web one. 6F1 G5: https, or http to
+ * the loopback alone, as the server lets a client register them.
+ */
+export const isWebAddress = (address: unknown): address is string => {
+  if (typeof address !== 'string' || !/^https?:\/\//i.test(address) || !URL.canParse(address)) return false;
+  const url = new URL(address);
+  return url.protocol === 'https:' || LOOPBACK_HOSTS.has(url.hostname);
+};
 
 /** The refusals a consent can meet that the person can act on, in plain words; any other by its code. */
 const CONSENT_REFUSALS = new Set([

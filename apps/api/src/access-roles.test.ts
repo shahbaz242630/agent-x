@@ -15,7 +15,7 @@ import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
-import { type FindMembership, type Member, ORGANIZATION_HEADER } from './access.ts';
+import { type FindMembership, type Member, memberInSessionOf, memberOf, ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
 import { liveSession } from './live-session.helper.test.ts';
 import { buildServer } from './server.ts';
@@ -562,6 +562,9 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
     ['admin', 'POST', '/v1/test-members'],
     ['admin', 'GET', '/v1/test-shared'],
     ['approver', 'GET', '/v1/test-approvals'],
+    // A route the kept role isn't named on (6F1 G1 review): a developer may not read it, nor a viewer try it.
+    ['admin', 'GET', '/v1/test-members'],
+    ['approver', 'POST', '/v1/test-tries'],
   ] as const)(
     'refuses an active %s with a passkey on %s %s as SECOND_FACTOR_REMOVED, asking about the person',
     async (role, method, url) => {
@@ -578,21 +581,64 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
   );
 
   it.each([
-    ['admin', '/v1/test-members'],
-    ['admin', '/v1/test-builds'],
-    ['approver', '/v1/test-reads'],
+    ['admin', '/v1/test-builds', 'developer'],
+    ['approver', '/v1/test-reads', 'viewer'],
   ] as const)(
-    'keeps what a developer or a viewer may do for a restricted %s, without asking: %s',
-    async (role, url) => {
+    'keeps what a developer or a viewer may do for a restricted %s on %s, acting as a %s (6F1 G1)',
+    async (role, url, kept) => {
       const { app, reached, lookup } = await withRoutes(ACTIVE(role), { restricted: UNTIL });
 
       const response = await app.inject(signedIn({ url }));
+
+      expect(response.statusCode).toBe(200);
+      expect(reached).toEqual([
+        { member: { orgId: ORG, membershipId: MEMBERSHIP, role: kept, withoutPowers: true }, person: LIVE },
+      ]);
+      expect(lookup.restrictionAsked).toEqual([LIVE.userId]);
+    },
+  );
+
+  it.each(['developer', 'viewer'] as const)(
+    'asks nothing of a %s on a route they share, who has no powers to lose',
+    async (role) => {
+      const { app, reached, lookup } = await withRoutes(ACTIVE(role), { restricted: UNTIL });
+
+      const response = await app.inject(
+        signedIn({ url: role === 'developer' ? '/v1/test-builds' : '/v1/test-members' }),
+      );
 
       expect(response.statusCode).toBe(200);
       expect(reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role }, person: LIVE }]);
       expect(lookup.restrictionAsked).toEqual([]);
     },
   );
+
+  it('hands a use case the member as marked: without powers only when the hook kept them so (6F1 G1)', () => {
+    const person = LIVE;
+    const found = { orgId: ORG, membershipId: MEMBERSHIP };
+    const kept = { person, member: { ...found, role: 'developer' as const, withoutPowers: true as const } };
+    const own = { person, member: { ...found, role: 'admin' as const } };
+
+    expect(memberInSessionOf(kept)).toEqual({
+      orgId: ORG,
+      userId: LIVE.userId,
+      sessionId: LIVE.sessionId,
+      withoutPowers: true,
+    });
+    expect(memberOf(kept)).toEqual({ orgId: ORG, userId: LIVE.userId, withoutPowers: true });
+    expect(memberInSessionOf(own)).toEqual({ orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId });
+    expect(memberOf(own)).toEqual({ orgId: ORG, userId: LIVE.userId });
+  });
+
+  it('keeps an unrestricted admin an admin on a route a developer shares, having asked', async () => {
+    const { app, reached, lookup } = await withRoutes(ACTIVE('admin'));
+
+    const response = await app.inject(signedIn({ url: '/v1/test-builds' }));
+
+    expect(response.statusCode).toBe(200);
+    expect(reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'admin' }, person: LIVE }]);
+    expect(lookup.restrictionAsked).toEqual([LIVE.userId]);
+  });
 
   it('lets an admin with no removal through, their membership on the request', async () => {
     const { app, reached, lookup } = await withRoutes(ACTIVE('admin'));
@@ -616,7 +662,7 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
     expect([...admin.lookup.restrictionAsked, ...viewer.lookup.restrictionAsked]).toEqual([]);
   });
 
-  it('refuses an admin’s and an approver’s routes as FORBIDDEN without the reader, and keeps the rest', async () => {
+  it('refuses an admin’s and an approver’s routes as FORBIDDEN without the reader, and keeps the rest, as a developer', async () => {
     const { app, reached } = await withRoutes(ACTIVE('admin'), { restricted: null });
 
     const refused = await app.inject(signedIn({ url: '/v1/test-shared' }));
@@ -624,7 +670,10 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
     expect(refused.statusCode).toBe(403);
     expect(refused.json()).toEqual(errorBody('FORBIDDEN', FIRST_ID));
     expect(reached).toEqual([]);
-    expect((await app.inject(signedIn({ url: '/v1/test-members' }))).statusCode).toBe(200);
+    expect((await app.inject(signedIn({ url: '/v1/test-builds' }))).statusCode).toBe(200);
+    expect(reached).toEqual([
+      { member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'developer', withoutPowers: true }, person: LIVE },
+    ]);
   });
 
   it('fails as INTERNAL_ERROR when the reader fails, never letting the request through', async () => {

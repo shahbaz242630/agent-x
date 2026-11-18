@@ -15,6 +15,7 @@ import {
   membershipOf,
   type MembershipsTransaction,
   type Role,
+  roleWithoutPowers,
   type StepUpBinding,
   type StepUpChallenges,
 } from '@agentx/core/modules/identity';
@@ -54,6 +55,11 @@ export type UseCaseTables = IdentityTables & DirectoryTables & AuditTables;
 export interface Member {
   readonly orgId: string;
   readonly userId: string;
+  /**
+   * Kept by the access hook to what a developer or a viewer may do (SEC-OPS-04, 6F1 G1): their membership, read
+   * again, then counts as the role they keep (roleWithoutPowers). Not given: as their role.
+   */
+  readonly withoutPowers?: true;
 }
 
 /** A member acting in a session of theirs. */
@@ -108,8 +114,8 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
   logger,
   Refusal,
 }: {
-  /** Both: the work's transaction has every table the area's has, withSignedStates's the shared ones. */
-  readonly database: Database<Tables> & Database<UseCaseTables>;
+  /** The work's transaction has every table the area's has. */
+  readonly database: Database<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -219,12 +225,17 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
       work: (tx: Tx, states: SignedStates) => Promise<T>,
     ): Promise<T | Refused> => orRefused(() => inOrganisation(orgId, correlationId, work)),
 
-    /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
+    /**
+     * The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED
+     * if tampered with). A member kept without powers counts as the role they keep, whatever role is read.
+     */
     memberIn: async (tx: MembershipsTransaction, states: SignedStates, member: Member, roles: readonly Role[]) => {
       const membership = await membershipOf(tx, states, member.orgId, member.userId);
       if (membership.outcome === 'tampered') throw new Refusal(503, 'INTEGRITY_FAILED');
-      if (membership.outcome !== 'active' || !roles.includes(membership.role)) throw new Refusal(403, 'FORBIDDEN');
-      return membership;
+      if (membership.outcome !== 'active') throw new Refusal(403, 'FORBIDDEN');
+      const role = member.withoutPowers === true ? roleWithoutPowers(membership.role) : membership.role;
+      if (!roles.includes(role)) throw new Refusal(403, 'FORBIDDEN');
+      return { ...membership, role };
     },
   };
 }

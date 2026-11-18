@@ -23,11 +23,13 @@ export function downloadStoreOf({ activityDownloads: { directory, container } }:
 
 type ExportsServices = Parameters<typeof createBackgroundExports>[0];
 type BuilderServices = Omit<Parameters<typeof createActivityExportBuilder>[0], 'store' | 'list'>;
+/** Both's services, with the builder's database, which has every table the exports' has: as the two handles intersected, the compiler compared them whole (CQ8). */
+type Services = Omit<ExportsServices & BuilderServices, 'database'> & Pick<BuilderServices, 'database'>;
 
 /** The routes' use cases and the builder, for the organisations it is given, with the store; all undefined without one. */
 export function backgroundDownloadsFrom(
   store: BlockStore | undefined,
-  services: ExportsServices & BuilderServices,
+  services: Services,
 ): {
   readonly exports: BackgroundExports | undefined;
   readonly files: DownloadFiles | undefined;

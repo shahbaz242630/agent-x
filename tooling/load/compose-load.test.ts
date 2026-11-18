@@ -172,7 +172,7 @@ describe('the load stack (compose.load.yaml)', () => {
         ['--gate-active', '0'],
         ['--gate-active', '21'],
         ['--gate-active', '2.5'],
-        ['--gate-per-org', '21'],
+        ['--gate-per-org', '7'],
         ['--gate-waiting', '10001'],
         ['--gate-wait-ms', '99'],
         ['--gate-wait-ms', '30001'],

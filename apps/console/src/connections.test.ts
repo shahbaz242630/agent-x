@@ -4,12 +4,15 @@ import { describe, expect, it } from 'vitest';
 import { isWebAddress } from './connections.ts';
 
 describe('SEC-OAUTH-11 isWebAddress', () => {
-  it.each(['https://chatgpt.com/cb?code=c', 'http://127.0.0.1:53682/callback', 'HTTP://a', 'Https://claude.ai/x'])(
-    'takes %j: a web address, its scheme in any case as URLs allow',
-    (address) => {
-      expect(isWebAddress(address)).toBe(true);
-    },
-  );
+  it.each([
+    'https://chatgpt.com/cb?code=c',
+    'http://127.0.0.1:53682/callback',
+    'http://[::1]:8080/cb',
+    'HTTP://localhost/cb',
+    'Https://claude.ai/x',
+  ])('takes %j: https, or http to the loopback, its scheme in any case as URLs allow', (address) => {
+    expect(isWebAddress(address)).toBe(true);
+  });
 
   it.each([
     'javascript:alert(1)',
@@ -18,6 +21,12 @@ describe('SEC-OAUTH-11 isWebAddress', () => {
     'data:text/html,https://x',
     '//evil.example',
     'https:evil.example',
+    // 6F1 G5: plain http only to the loopback, as the server's rule.
+    'HTTP://a',
+    'http://evil.example/cb',
+    'http://127.0.0.1.evil.example/cb',
+    'http://localhost.evil.example/cb',
+    'https://',
     '',
     null,
     undefined,

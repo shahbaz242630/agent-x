@@ -27,6 +27,7 @@ import {
   versionOf,
 } from '@agentx/core/modules/suppliers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { TransactionsTables } from '@agentx/core/modules/transactions';
 import { type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
@@ -43,7 +44,7 @@ import {
 import { choiceDetails, SUSPENDS } from './suspensions.ts';
 
 /** With the background downloads' months: the marks' hourly look reads every job's rows (org-work.ts). */
-export type SpendWorldTables = MandateWorldTables & ActivityExportTables;
+export type SpendWorldTables = MandateWorldTables & ActivityExportTables & TransactionsTables;
 
 /**
  * The request's claim or reservation released, or its reservation's amount

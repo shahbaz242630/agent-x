@@ -39,7 +39,7 @@ import {
   SEAL_FORM,
 } from '@agentx/core/modules/activity';
 import { type AuditTables, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import { newestSealedDay } from '@agentx/core/modules/evidence';
+import { type ActivityReadTables, newestSealedDay } from '@agentx/core/modules/evidence';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -58,7 +58,8 @@ export const ACTIVITY_SEAL_LOCK = 'access-log-seal';
 
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-type SealTables = AuditTables & ActivityTables;
+// The newest seal is read as the activity screen reads the log (ActivityReadTables).
+type SealTables = AuditTables & ActivityTables & ActivityReadTables;
 type SealTx = DatabaseTransaction<SealTables>;
 interface Held {
   readonly tx: SealTx;

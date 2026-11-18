@@ -1077,9 +1077,27 @@ describe('the fair gate before an agent’s decision (4D2e C, PL-63)', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '11' })).toEqual([
       "AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (10)",
     ]);
-    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '10' }).decisionGate.perOrganisation).toBe(
-      10,
-    );
+    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '3' }).decisionGate.perOrganisation).toBe(3);
+  });
+
+  it('6F1 G5: refuses an organisation’s limit past its share of the pool, where it could never bind', () => {
+    // A pool of ten: an organisation's share is three (30%).
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '4' })).toEqual([
+      "AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most an organisation's share of AGENTX_DB_POOL_MAX (3): past it, its decisions wait for the share, not in turn",
+    ]);
+    expect(
+      loadConfig({ ...MINIMAL, AGENTX_DB_POOL_MAX: '20', AGENTX_DECISION_GATE_PER_ORGANISATION: '6' }).decisionGate
+        .perOrganisation,
+    ).toBe(6);
+    // Azure's load run: twelve connections, two an organisation (apps.bicep).
+    expect(
+      problemsWith({
+        ...MINIMAL,
+        AGENTX_DB_POOL_MAX: '12',
+        AGENTX_DECISION_GATE_ACTIVE: '11',
+        AGENTX_DECISION_GATE_PER_ORGANISATION: '2',
+      }),
+    ).toEqual([]);
   });
 
   it('refuses each setting past its own bounds, and says nothing of the others then', () => {

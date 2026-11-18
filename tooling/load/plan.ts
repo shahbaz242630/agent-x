@@ -89,7 +89,8 @@ const VALUED_OPTIONS = new Map<
   ['--db-cpus', { name: 'dbCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_DB_CPUS }],
   // As the API's config takes them, at the load run's twenty connections.
   ['--gate-active', { name: 'gateActive', fits: wholeFrom(1, 20) }],
-  ['--gate-per-org', { name: 'gatePerOrganisation', fits: wholeFrom(1, 20) }],
+  // 6F1 G5: and an organisation's at most its share of them, 30% of twenty (organisation-shares.ts).
+  ['--gate-per-org', { name: 'gatePerOrganisation', fits: wholeFrom(1, 6) }],
   ['--gate-waiting', { name: 'gateWaitingPerOrganisation', fits: wholeFrom(1, 10_000) }],
   ['--gate-wait-ms', { name: 'gateWaitMs', fits: wholeFrom(100, 30_000) }],
 ]);

@@ -1107,6 +1107,32 @@ describe('giving new bank details (6D2, ADR-012)', () => {
     expect(sentTo('POST', `${at}/payee-registrations/${REGISTRATION}/check`)[1]?.body).toBeUndefined();
   });
 
+  it.each(['http://partner.example/form/1', 'javascript:alert(1)'])(
+    '6F1 G5: links to no partner page that isn’t https (%s), and says so',
+    async (url) => {
+      as('admin');
+      answer(`POST ${at}/payee-registrations`, {
+        status: 201,
+        body: registration({
+          route: 'hosted',
+          status: 'STARTED',
+          nameCheck: null,
+          maskedName: null,
+          payeeHint: null,
+          form: { url, expiresAt: FUTURE },
+        }),
+      });
+      open(page);
+      await giving('No', 'hosted');
+      await press('Continue');
+      const dialog = await screen.findByRole('dialog');
+      await userEvent.click(await within(dialog).findByLabelText('Its requests are cancelled.'));
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Continue to the bank partner' }));
+      expect(await screen.findByText(/gave a page address Agent X won't open/)).toBeDefined();
+      expect(screen.queryByRole('link', { name: "Open the bank partner's page" })).toBeNull();
+    },
+  );
+
   it.each([
     ['PAYEE_ROUTE_NOT_OFFERED', 409, /doesn't take bank details that way/],
     ['SUPPLIER_CHANGE_WAITING', 409, /Another change to this supplier is waiting/],

@@ -54,7 +54,14 @@ import type { Outbox } from '@agentx/core/modules/notifications';
 import type { ApprovalWaitHours } from '@agentx/core/modules/spend-requests';
 import { suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type IdempotentRequest, isUnwritten, lockName, ORGANISATION_BRAKE } from '@agentx/platform/db';
+import {
+  type Database,
+  type DatabaseTransaction,
+  type IdempotentRequest,
+  isUnwritten,
+  lockName,
+  ORGANISATION_BRAKE,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -302,7 +309,8 @@ export function createPolicyChanges({
    * makes, the policy read FOR SHARE, and its waiting requests' plan.
    */
   const weighedIn = async (
-    tx: MandateTx,
+    // The waiting requests' plan reads the decision's tables too.
+    tx: DatabaseTransaction<DecisionTables>,
     states: SignedStates,
     member: SessionMember,
     target: PolicyTarget,

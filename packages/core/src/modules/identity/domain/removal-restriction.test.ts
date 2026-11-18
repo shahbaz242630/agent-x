@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { SECOND_FACTOR_REMOVED_EVENTS } from './idp-event.ts';
-import { isRestricted, REMOVAL_RESTRICTION_DAYS, restrictedUntil } from './removal-restriction.ts';
+import { isRestricted, REMOVAL_RESTRICTION_DAYS, restrictedUntil, roleWithoutPowers } from './removal-restriction.ts';
 
 const removedAt = new Date('2026-09-28T10:00:00.000Z');
 const ms = (count: number): Date => new Date(restrictedUntil(removedAt).getTime() + count);
@@ -32,6 +32,15 @@ describe('SEC-OPS-04 the restriction after a second factor is removed', () => {
       'user.human.mfa.recoverycode.removed',
       'user.human.mfa.u2f.token.removed',
       'user.human.passwordless.token.removed',
+    ]);
+  });
+
+  it('keeps an admin a developer’s powers, an approver a viewer’s, and a developer or a viewer their own (6F1 G1)', () => {
+    expect((['admin', 'approver', 'developer', 'viewer'] as const).map(roleWithoutPowers)).toEqual([
+      'developer',
+      'viewer',
+      'developer',
+      'viewer',
     ]);
   });
 });

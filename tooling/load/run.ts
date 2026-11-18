@@ -327,7 +327,7 @@ if (import.meta.main) {
     const options = optionsOf(process.argv.slice(2));
     if (options === undefined) {
       throw new LoadRefused(
-        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>] [--db-cpus <d>] [--gate-active <a>] [--gate-per-org <p>] [--gate-waiting <w>] [--gate-wait-ms <t>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}, d from ${String(LEAST_API_CPUS)} to ${String(MOST_DB_CPUS)}, a and p whole numbers from 1 to 20, w from 1 to 10000, t from 100 to 30000.`,
+        `Run it as \`corepack pnpm load [--keep] [--cpus <n>] [--delay-ms <ms>] [--db-cpus <d>] [--gate-active <a>] [--gate-per-org <p>] [--gate-waiting <w>] [--gate-wait-ms <t>]\`, n from ${String(LEAST_API_CPUS)} to ${String(MOST_API_CPUS)}, ms a whole number from 0 to ${String(MOST_DELAY_MS)}, d from ${String(LEAST_API_CPUS)} to ${String(MOST_DB_CPUS)}, a a whole number from 1 to 20, p from 1 to 6 (an organisation's share of a pool of 20), w from 1 to 10000, t from 100 to 30000.`,
       );
     }
     process.exitCode = await main(options);
