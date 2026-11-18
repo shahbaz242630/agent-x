@@ -11,7 +11,7 @@
 --   rate limit keys it (an IPv4 address; an IPv6 /64 as one): at most 20 flows
 --   not yet ended from one source.
 -- - oauth.clients.network: the network that registered the client (an IPv4
---   /24, an IPv6 /48): at most 20 registrations a day from one network.
+--   /24, an IPv6 /48): at most 150 registrations a day from one network.
 --
 -- Kept plainly, as the security events keep an address (0012; ADR-011 §7):
 -- in-country, here alone, never in a log line. A keyed hash would hide little

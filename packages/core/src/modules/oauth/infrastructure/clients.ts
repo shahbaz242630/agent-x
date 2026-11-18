@@ -16,13 +16,15 @@ import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
 /** The most clients that may register in any 24 hours, from every address together. */
-export const MOST_REGISTRATIONS_A_DAY = 500;
+export const MOST_REGISTRATIONS_A_DAY = 2000;
 
 /**
  * The most clients that may register in any 24 hours from one network (6F1 G4): an IPv4 /24 or an IPv6 /48, so a few
  * addresses, or one network's many, can't take the whole day's MOST_REGISTRATIONS_A_DAY from every organisation.
+ * Room for a hosted client (6F1 G4 review): its servers register a client for each organisation that adds Agent X,
+ * from one vendor network, so the share is well above one person's needs.
  */
-export const MOST_REGISTRATIONS_A_NETWORK_A_DAY = 20;
+export const MOST_REGISTRATIONS_A_NETWORK_A_DAY = 150;
 
 /** A registered client, as kept. */
 export interface Client extends ClientRegistration {

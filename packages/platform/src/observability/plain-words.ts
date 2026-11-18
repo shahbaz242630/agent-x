@@ -486,7 +486,7 @@ export const PLAIN_WORDS = {
     happened:
       'MCP apps registered themselves more times today than Agent X allows in a day from every network together, so this one was refused.',
     broke:
-      'No new app can register until the day rolls on; apps already registered still connect. Each network is held to 20 a day, so this took many networks.',
+      'No new app can register until the day rolls on; apps already registered still connect. Each network is held to 150 a day, so this took many networks.',
     next: 'Look for many networks registering over and over: it may be a spread-out attack. Raise the cap only after checking.',
   },
   'oauth.flows_capped': {
@@ -499,7 +499,7 @@ export const PLAIN_WORDS = {
     happened:
       'One address (or network) opened more OAuth sign-ins, device codes or app registrations than its own share, so Agent X refused it more (kind says which; refused counts them since the last line).',
     broke:
-      'Only that address or network was told to wait: 20 sign-ins at once, or 20 registrations a day. Everyone else connects as usual.',
+      'Only that address or network was told to wait: 20 sign-ins at once, or 150 registrations a day. Everyone else connects as usual.',
     next: 'Nothing to do if rare: one office can share an address. If it goes on, its address is in oauth.flows (source_key) or oauth.clients (network), never in a log: block it at the front door if it is abuse.',
   },
   'oauth.grant_in_trouble': {
