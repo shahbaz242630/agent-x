@@ -448,8 +448,10 @@ export const MCP_ALERTS = [
     what: `any ${MCP_PATH} request line naming a protocol version outside ${PROTOCOLS.join(', ')} (apps/api/src/mcp-protocols.ts)`,
     lines: [
       `where tostring(parse_json(Log).route) == "${MCP_PATH}"`,
-      'where isnotempty(tostring(parse_json(Log).mcpProtocol))',
-      `where tostring(parse_json(Log).mcpProtocol) !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`,
+      // From the raw line: parse_json makes "2025-11-25" a datetime, which then matches no entry (S202).
+      `extend mcpProtocol = extract(@'"mcpProtocol":"([^"]*)"', 1, Log)`,
+      'where isnotempty(mcpProtocol)',
+      `where mcpProtocol !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`,
     ],
     threshold: 0,
   },
