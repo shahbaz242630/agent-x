@@ -150,38 +150,43 @@ describe('the MCP release watch (6E4)', () => {
       ['- Removed the deprecated MCP SSE fallback', true],
       ['- Docs: see https://example.com/mcp', false],
       ['- New OAuth flow for plugins', false],
-    ])('a client note line %j is red: %s', (line, red) => {
-      const { errors } = judgeSource(source('claude-code'), seenOf('claude-code'), [
+    ])('never turns red on a client note line %j (MW1); marks it "look first": %s', (line, first) => {
+      const { errors, summary } = judgeSource(source('claude-code'), seenOf('claude-code'), [
         release('v2.1.400', { body: `Changes:\n${line}\n- Other` }),
       ]);
-      expect(errors).toHaveLength(red ? 1 : 0);
+      expect(errors).toEqual([]);
+      expect(summary).toContain(first ? '| look first | [v2.1.400]' : '| report only | [v2.1.400]');
     });
 
-    it('turns a busy client red only when a newer release names MCP with a word that breaks clients, listing every newer one either way', () => {
-      const quiet = judgeSource(source('claude-code'), seenOf('claude-code'), [
-        release('v2.1.400', { body: 'Faster startup.\nFixed a crash.' }),
-      ]);
-      expect(quiet.errors).toEqual([]);
-      expect(quiet.summary).toContain('| report only | [v2.1.400]');
-      const loud = judgeSource(source('claude-code'), seenOf('claude-code'), [
+    it('lists every newer release of a busy client in the summary, red on none (MW1: the canaries are the alarm)', () => {
+      const listed = judgeSource(source('claude-code'), seenOf('claude-code'), [
         release('v2.1.401', { body: '- Fixed MCP OAuth refresh | on <b>Windows</b>\n- Other' }),
         release('v2.1.400', { body: 'Nothing here.' }),
       ]);
-      expect(loud.errors).toHaveLength(1);
-      expect(loud.summary).toContain('Fixed MCP OAuth refresh \\| on &lt;b&gt;Windows&lt;/b&gt;');
-      expect(loud.summary).toContain('| report only | [v2.1.400]');
+      expect(listed.errors).toEqual([]);
+      expect(listed.summary).toContain('| look first | [v2.1.401]');
+      expect(listed.summary).toContain('Fixed MCP OAuth refresh \\| on &lt;b&gt;Windows&lt;/b&gt;');
+      expect(listed.summary).toContain('| report only | [v2.1.400]');
     });
 
-    it('lists VS Code, whose GitHub notes are a link, red only on a note line as any client', () => {
+    it('lists VS Code, whose GitHub notes are a link, as any client: never red', () => {
       const link = { body: 'Read the full release notes at https://code.visualstudio.com/updates/v1_147' };
-      const quiet = judgeSource(source('vscode'), seenOf('vscode'), [release('1.147.0', link)]);
-      expect(quiet.errors).toEqual([]);
-      expect(quiet.summary).toContain('| report only | [1.147.0]');
-      const loud = judgeSource(source('vscode'), seenOf('vscode'), [
+      expect(judgeSource(source('vscode'), seenOf('vscode'), [release('1.147.0', link)]).summary).toContain(
+        '| report only | [1.147.0]',
+      );
+      const auth = judgeSource(source('vscode'), seenOf('vscode'), [
         release('1.147.0', { body: 'MCP: HTTP auth changed' }),
       ]);
-      expect(loud.errors[0]).toContain('code.visualstudio.com/updates');
+      expect(auth.errors).toEqual([]);
+      expect(auth.summary).toContain('| look first | [1.147.0]');
     });
+
+    it.each(['claude-code', 'codex', 'vscode', 'gemini-cli', 'hermes-agent', 'openclaw'])(
+      'keeps the client %s report-only: no client source can turn the watch red on a release',
+      (key) => {
+        expect(source(key).red).toBe('report');
+      },
+    );
 
     it("goes red when none of a repository's releases is on the followed line: its tags may have changed", () => {
       const { errors } = judgeSource(source('codex'), seenOf('codex'), [
@@ -194,15 +199,18 @@ describe('the MCP release watch (6E4)', () => {
       expect(judgeSource(source('codex'), seenOf('codex'), [{}]).errors).toHaveLength(1);
     });
 
-    it('goes red on every source in the positive control, which judges against nothing seen', () => {
-      const { errors, summary } = judgeSource(
+    it('goes red in the positive control on a source that turns red, judging against nothing seen; a client only lists', () => {
+      const { errors, summary } = judgeSource(source('conformance'), seenOf('conformance'), [release('v9.0.0')], true);
+      expect(errors[0]).toContain('than nothing seen (the positive control)');
+      expect(summary).toContain('Positive control');
+      const client = judgeSource(
         source('openclaw'),
         seenOf('openclaw'),
         [release('v2026.11.5', { body: 'MCP transport' })],
         true,
       );
-      expect(errors[0]).toContain('than nothing seen (the positive control)');
-      expect(summary).toContain('Positive control');
+      expect(client.errors).toEqual([]);
+      expect(client.summary).toContain('| look first | [v2026.11.5]');
     });
   });
 
