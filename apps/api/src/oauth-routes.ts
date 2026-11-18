@@ -171,7 +171,11 @@ const DEVICE_CODES = z
   .register(API_SCHEMAS, { id: 'OauthDeviceCodes', description: 'A device’s codes (RFC 8628 §3.2).' });
 
 const REVOKE_FORM = z.object({
-  token: text(256).describe('Either of the connection’s tokens: the connection is revoked.'),
+  token: z
+    .string()
+    .min(1)
+    .max(256)
+    .describe('Either of the connection’s tokens: the connection is revoked (required, RFC 7009 §2.1).'),
   token_type_hint: text(64),
   client_id: text(2048),
 });
@@ -457,7 +461,6 @@ export function registerOauthForms(
       if (grants === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
       const { token, client_id: clientId } = request.body;
-      if (token === undefined) return sendOauthError(reply, 400, 'invalid_request', 'Send token.');
       const taken = await grants.revoke({ token, clientId }, { correlationId: request.id, ip: request.ip });
       if (taken.outcome === 'refused') return sendOauthError(reply, taken.status, taken.error, taken.description);
       return noStore(reply).code(200).send({});
