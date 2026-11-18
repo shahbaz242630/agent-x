@@ -158,6 +158,7 @@ describe(`an agent's request with its key (C2-1, Postgres ${server.version})`, (
       keyId: agent.keyId,
       scopes: ['suppliers:read'],
       keyExpiresAt: new Date(START.getTime() + 90 * DAY_MS).toISOString(),
+      credential: 'key',
     });
     expect(lines(REQUEST_COMPLETED)).toEqual([
       expect.objectContaining({ route: '/v1/agent', status: 200, agentId: agent.agentId, agentKeyId: agent.keyId }),

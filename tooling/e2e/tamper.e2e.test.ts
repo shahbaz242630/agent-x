@@ -66,6 +66,8 @@ interface Operation {
   readonly route: string;
   readonly access: readonly string[];
   readonly schema?: Schema;
+  /** One of the OAuth server's (6E3a: the document's 'MCP connections' tag), a 404 while AGENTX_MCP_OAUTH is off. */
+  readonly oauth: boolean;
 }
 
 const document = JSON.parse(readFileSync(new URL('../../apps/api/openapi.json', import.meta.url), 'utf8')) as {
@@ -75,21 +77,32 @@ const document = JSON.parse(readFileSync(new URL('../../apps/api/openapi.json', 
       string,
       {
         'x-access': string[];
+        tags?: string[];
         requestBody?: { content?: { 'application/json'?: { schema: Schema } } };
       }
     >
   >;
 };
-const operations: Operation[] = Object.entries(document.paths).flatMap(([route, item]) =>
+/** The tag every OAuth server address carries (api-guide.ts), so the suite knows them by the document alone. */
+const OAUTH_TAG = 'MCP connections';
+const documented: Operation[] = Object.entries(document.paths).flatMap(([route, item]) =>
   Object.entries(item).map(([method, operation]) => ({
     method: method.toUpperCase(),
     route,
     access: operation['x-access'],
+    oauth: operation.tags?.includes(OAUTH_TAG) === true,
     ...(operation.requestBody?.content?.['application/json']?.schema === undefined
       ? {}
       : { schema: operation.requestBody.content['application/json'].schema }),
   })),
 );
+/**
+ * The e2e stack runs with AGENTX_MCP_OAUTH off, so every OAuth operation answers 404 before anyone is asked who they
+ * are: they are held to that (their own case below) and left out of the per-tenant cases, which need seeded flows.
+ * 6E3b turns the flag on in the e2e stack and seeds flows, and they join the cases then.
+ */
+const oauthOperations = documented.filter((op) => op.oauth);
+const operations: Operation[] = documented.filter((op) => !op.oauth);
 const roles: readonly Role[] = ['admin', 'approver', 'developer', 'viewer'];
 const roleRoute = (op: Operation) => roles.some((role) => op.access.includes(role));
 const cookieHeader = (cookie: string) => ({ cookie: `__Host-agentx-session=${cookie}` });
@@ -1428,6 +1441,20 @@ describe('F1 SEC-HA-09, SEC-AG-04, SEC-TEN-01: every documented operation', () =
     } else {
       await credentials(op, body, forged);
     }
+  });
+});
+
+describe('6E3a: the OAuth server is off in this stack, so each of its operations is a 404, a refusal', () => {
+  it('finds the OAuth operations in the document', () => {
+    expect(oauthOperations.length).toBeGreaterThan(0);
+  });
+
+  it.each(oauthOperations)('$method $route', async (op) => {
+    const body = op.schema === undefined ? undefined : sample(op.schema, own);
+    // Any ID: no flow is seeded while the server is off, and none is read before the 404.
+    const answer = await send(op, allowedHeaders(op), body, op.route.replaceAll('{id}', randomUUID()));
+    expect(answer.status, `${op.method} ${op.route}: off, it is not found`).toBe(404);
+    expect(summaryOf(answer.status, answer.text).code).toBe('NOT_FOUND');
   });
 });
 

@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { ConnectionConsents, ConsentWrite, RequestShown } from './connection-consents.ts';
 import { liveSession } from './live-session.helper.test.ts';
-import { OAUTH_COOKIE } from './oauth-wire.ts';
+import { CONNECT_COOKIE } from './oauth-wire.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -81,7 +81,7 @@ async function consentServer(write: ConsentWrite, shown: RequestShown | null = S
   return { app, calls };
 }
 
-const cookies = `${SESSION_COOKIE}=${COOKIE}; ${OAUTH_COOKIE}=${BROWSER}`;
+const cookies = `${SESSION_COOKIE}=${COOKIE}; ${CONNECT_COOKIE}=${BROWSER}`;
 
 const write = (path: string, body: unknown): InjectOptions => ({
   method: 'POST',

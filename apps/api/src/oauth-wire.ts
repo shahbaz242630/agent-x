@@ -144,14 +144,14 @@ export function sendOauthError(
 export const noStore = (reply: FastifyReply): FastifyReply => reply.headers(NO_STORE);
 
 /** The browser's flow cookie (a `__Host-` cookie, as the console's are): it alone reads or decides its flows. */
-export const OAUTH_COOKIE = '__Host-agentx-oauth';
+export const CONNECT_COOKIE = '__Host-agentx-connect';
 
 /** How long the flow cookie lasts: a day, so one browser's flows share it. */
-const OAUTH_COOKIE_SECONDS = 86_400;
+const CONNECT_COOKIE_SECONDS = 86_400;
 
 /** The cookie as set: Secure, HttpOnly, Lax (it rides the client's redirect back to the console). */
-export const oauthCookie = (value: string): string =>
-  `${OAUTH_COOKIE}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${String(OAUTH_COOKIE_SECONDS)}`;
+export const connectCookie = (value: string): string =>
+  `${CONNECT_COOKIE}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${String(CONNECT_COOKIE_SECONDS)}`;
 
 /** The most a token or revocation form may be (plan §3): every field a client sends, with room to spare. */
 export const FORM_BODY_LIMIT = 4096;

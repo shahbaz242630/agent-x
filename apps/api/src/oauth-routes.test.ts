@@ -13,7 +13,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { createCredentialCheck } from './credentials.ts';
 import type { AuthorizeAnswer, OauthAuthorizing, RegistrationAnswer } from './oauth-authorizing.ts';
 import type { GrantAnswer, OauthGrants } from './oauth-grants.ts';
-import { capabilitiesOf, OAUTH_COOKIE } from './oauth-wire.ts';
+import { capabilitiesOf, CONNECT_COOKIE } from './oauth-wire.ts';
 
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -229,12 +229,12 @@ describe('SEC-OAUTH-11 the authorize endpoint', () => {
     const response = await app.inject({
       method: 'GET',
       url: `/v1/oauth/authorize?response_type=code&client_id=${CLIENT}&state=xyz`,
-      headers: { cookie: `${OAUTH_COOKIE}=${BROWSER}` },
+      headers: { cookie: `${CONNECT_COOKIE}=${BROWSER}` },
     });
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toBe(`/connect?request=${FLOW}`);
     expect(response.headers['set-cookie']).toBe(
-      `${OAUTH_COOKIE}=${BROWSER}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400`,
+      `${CONNECT_COOKIE}=${BROWSER}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400`,
     );
     expect(asked).toEqual([{ query: { response_type: 'code', client_id: CLIENT, state: 'xyz' }, cookie: BROWSER }]);
   });
@@ -244,7 +244,7 @@ describe('SEC-OAUTH-11 the authorize endpoint', () => {
     const response = await kept.app.inject({
       method: 'GET',
       url: '/v1/oauth/authorize',
-      headers: { cookie: `${OAUTH_COOKIE}=${BROWSER}` },
+      headers: { cookie: `${CONNECT_COOKIE}=${BROWSER}` },
     });
     expect(response.headers['set-cookie']).toContain('Max-Age=86400');
     const unknown = await oauthServer(true, { authorize: { outcome: 'not_redirectable', problem: 'unknown_client' } });

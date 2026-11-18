@@ -1,6 +1,6 @@
 // The consent page's addresses (6E3a, ADR-016; SEC-OAUTH-10): what the
 // console's `/connect` screen (6E3b) reads and sends for a flow an MCP client
-// opened. Only the browser that opened the flow (its `__Host-agentx-oauth`
+// opened. Only the browser that opened the flow (its `__Host-agentx-connect`
 // cookie) reaches it; anyone else, or a flow decided or ended, is a 404.
 //
 // - `GET /v1/oauth/requests/:id`: the client, by what it says it is, the host
@@ -28,7 +28,7 @@ import {
 } from './connection-consents.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerAsked, idempotentRequest } from './idempotent-writes.ts';
-import { OAUTH_COOKIE } from './oauth-wire.ts';
+import { CONNECT_COOKIE } from './oauth-wire.ts';
 import { NOTHING, NOTHING_BODY_LIMIT, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 import { cookieValue } from './sign-in.ts';
 
@@ -95,7 +95,7 @@ const OAUTH_MEMBER_ROUTE = { access: [...CONNECTING_ROLES], oauth: true } as con
 /** The flow named, and the cookie of the browser asking. */
 const namedBy = (request: FastifyRequest<{ Params: { id: string } }>): FlowNamed => ({
   flowId: request.params.id,
-  cookie: cookieValue(request.headers.cookie, OAUTH_COOKIE),
+  cookie: cookieValue(request.headers.cookie, CONNECT_COOKIE),
 });
 
 /** Answers a consent's write: connected, denied, a step-up asked, or a refusal. */

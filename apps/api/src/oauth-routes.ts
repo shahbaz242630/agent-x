@@ -38,10 +38,10 @@ import {
   CONNECT_PATH,
   FORM_BODY_LIMIT,
   noStore,
-  OAUTH_COOKIE,
+  CONNECT_COOKIE,
   OAUTH_ERROR_RESPONSES,
   OAUTH_PATHS,
-  oauthCookie,
+  connectCookie,
   resourceMetadataOf,
   sendOauthError,
   serverMetadataOf,
@@ -240,13 +240,13 @@ export function registerOauth(
     },
     async (request, reply) => {
       if (authorizing === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-      const answer = await authorizing.authorize(request.query, cookieValue(request.headers.cookie, OAUTH_COOKIE));
+      const answer = await authorizing.authorize(request.query, cookieValue(request.headers.cookie, CONNECT_COOKIE));
       if (answer.outcome === 'not_redirectable') {
         return reply.code(302).header('location', `${CONNECT_PATH}?problem=${answer.problem}`).send({});
       }
       if (answer.outcome === 'refused') return reply.code(302).header('location', answer.redirectTo).send({});
       // Set again every time, its day starting now: a flow opened near the cookie's end is never stranded.
-      void reply.header('set-cookie', oauthCookie(answer.cookie));
+      void reply.header('set-cookie', connectCookie(answer.cookie));
       return reply.code(302).header('location', `${CONNECT_PATH}?request=${answer.flowId}`).send({});
     },
   );
