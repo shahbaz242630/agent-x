@@ -246,7 +246,7 @@ async function authorised(provider: MemoryProvider): Promise<{ back: URL; connec
 }
 
 beforeAll(async () => {
-  browser = await chromium.launch();
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
   context = await browser.newContext();
   page = await context.newPage();
   await page.goto(`${API_ORIGIN}/v1/auth/sign-in?returnTo=${RETURN_TO}`);
