@@ -1428,6 +1428,33 @@ describe(`ADR-006 §6 1b: removing a member takes their agents' brakes, in order
     // Nothing was kept: the same removal, sent again, is made.
     expect(await removed(admin, developer)).toMatchObject({ outcome: 'written' });
   }, 40_000);
+
+  it('AG4: bounds the waits of all its brakes together to one brake’s, not one each', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const [lower, higher] = [await agent(org, developer), await agent(org, developer)].sort();
+    if (lower === undefined || higher === undefined) throw new Error('two agents');
+    await connected(org, developer, lower);
+    await connected(org, developer, higher);
+    const confirm = await removalAsked(admin, developer);
+    // Both stuck: the lower let go only once the removal has waited on it for most of a brake's wait, so the higher
+    // has what is left; bounded one each, it would wait a whole brake's wait there too.
+    const lowerHeld = await holding(brakeAlone(brakeOf(org, lower)));
+    const higherHeld = await holding(brakeAlone(brakeOf(org, higher)));
+    const started = performance.now();
+    try {
+      const removing = confirm();
+      await waitUntilQueued(database.as('admin'), 1);
+      await new Promise((resolve) => setTimeout(resolve, 9_000));
+      await letGo(lowerHeld);
+      expect(await removing).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+    } finally {
+      await letGo(higherHeld);
+    }
+    // One brake's wait is 12 s: past the lower's 9 s, the higher had about 3 s left, never another 12.
+    expect(performance.now() - started).toBeLessThan(16_000);
+  }, 40_000);
 });
 
 describe(`SEC-OAUTH-06 a connection's own record tampered with, at its revocation (Postgres ${server.version})`, () => {
