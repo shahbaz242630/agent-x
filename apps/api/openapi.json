@@ -1709,7 +1709,8 @@
               "invalid_scope",
               "invalid_target",
               "invalid_redirect_uri",
-              "invalid_client_metadata"
+              "invalid_client_metadata",
+              "temporarily_unavailable"
             ]
           },
           "error_description": {
@@ -28120,6 +28121,16 @@
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -28895,6 +28906,16 @@
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
+          },
           "4XX": {
             "description": "Refused. The reason code says why.",
             "content": {
@@ -28988,6 +29009,16 @@
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OauthError"
+                }
+              }
+            }
           },
           "4XX": {
             "description": "Refused. The reason code says why.",

@@ -51,6 +51,7 @@ interface Stand {
   readonly authorize?: AuthorizeAnswer;
   readonly register?: RegistrationAnswer;
   readonly grant?: GrantAnswer;
+  readonly revoked?: Awaited<ReturnType<OauthGrants['revoke']>>;
 }
 
 /** A server with stand-in OAuth use cases answering as `stand` says, and what each was asked. */
@@ -59,7 +60,7 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
   const authorizing: OauthAuthorizing = {
     authorize: (query, cookie) => {
       asked.push({ query, cookie });
-      return Promise.resolve(stand.authorize ?? { outcome: 'opened', flowId: FLOW, cookie: BROWSER, set: true });
+      return Promise.resolve(stand.authorize ?? { outcome: 'opened', flowId: FLOW, cookie: BROWSER });
     },
     register: (body) => {
       asked.push(body);
@@ -77,7 +78,7 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
     },
     revoke: (revoke) => {
       asked.push(revoke);
-      return Promise.resolve();
+      return Promise.resolve(stand.revoked ?? { outcome: 'taken' });
     },
   };
   const app = await routeServer({
@@ -238,12 +239,14 @@ describe('SEC-OAUTH-11 the authorize endpoint', () => {
     expect(asked).toEqual([{ query: { response_type: 'code', client_id: CLIENT, state: 'xyz' }, cookie: BROWSER }]);
   });
 
-  it('keeps the browser’s own cookie, and never sends an unknown client anywhere but our own page', async () => {
-    const kept = await oauthServer(true, {
-      authorize: { outcome: 'opened', flowId: FLOW, cookie: BROWSER, set: false },
+  it('sets the cookie again every time, and never sends an unknown client anywhere but our own page', async () => {
+    const kept = await oauthServer(true);
+    const response = await kept.app.inject({
+      method: 'GET',
+      url: '/v1/oauth/authorize',
+      headers: { cookie: `${OAUTH_COOKIE}=${BROWSER}` },
     });
-    const response = await kept.app.inject({ method: 'GET', url: '/v1/oauth/authorize' });
-    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(response.headers['set-cookie']).toContain('Max-Age=86400');
     const unknown = await oauthServer(true, { authorize: { outcome: 'not_redirectable', problem: 'unknown_client' } });
     expect((await unknown.app.inject({ method: 'GET', url: '/v1/oauth/authorize' })).headers.location).toBe(
       '/connect?problem=unknown_client',
@@ -352,6 +355,32 @@ describe('the revocation endpoint (RFC 7009)', () => {
     expect((await app.inject(form('/v1/oauth/revoke', 'token=a&token=b'))).json()).toMatchObject({
       error: 'invalid_request',
     });
+  });
+});
+
+describe('busy: a database limit answered as OAuth’s temporarily_unavailable, never a failure', () => {
+  const BUSY = {
+    outcome: 'refused',
+    status: 503,
+    error: 'temporarily_unavailable',
+    description: 'Busy.',
+  } as const;
+
+  it('answers a token request 503 with Retry-After', async () => {
+    const { app } = await oauthServer(true, { grant: BUSY });
+    const response = await app.inject(
+      form('/v1/oauth/token', `grant_type=refresh_token&refresh_token=a&client_id=${CLIENT}`),
+    );
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBeDefined();
+    expect(response.json()).toEqual({ error: 'temporarily_unavailable', error_description: 'Busy.' });
+  });
+
+  it('answers a revocation 503 with Retry-After', async () => {
+    const { app } = await oauthServer(true, { revoked: BUSY });
+    const response = await app.inject(form('/v1/oauth/revoke', 'token=axa_x'));
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBeDefined();
   });
 });
 

@@ -62,6 +62,9 @@ import {
   type Database,
   type DatabaseTransaction,
   holdBrakeLookedUp,
+  isRetryable,
+  isStatementLimit,
+  OrganisationBusy,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -78,7 +81,7 @@ export type GrantAnswer =
   | { readonly outcome: 'issued'; readonly tokens: IssuedTokens; readonly agent: AcceptedKey }
   | {
       readonly outcome: 'refused';
-      readonly status: 400 | 401;
+      readonly status: 400 | 401 | 503;
       readonly error: OauthError;
       readonly description: string;
     };
@@ -109,9 +112,27 @@ interface Caller {
 export interface OauthGrants {
   exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer>;
   refresh(asked: RefreshAsked, caller: Caller): Promise<GrantAnswer>;
-  /** Revokes the connection the token is for, if it is one and the client's own; nothing is answered of which. */
-  revoke(asked: { readonly token: string; readonly clientId: string | undefined }, caller: Caller): Promise<void>;
+  /** Revokes the connection the token is for, if it is one and the client's own; nothing is answered of which, but busy. */
+  revoke(
+    asked: { readonly token: string; readonly clientId: string | undefined },
+    caller: Caller,
+  ): Promise<{ readonly outcome: 'taken' } | Busy>;
 }
+
+/** A grant, or a revocation, that hit a database limit or lost a deadlock: nothing of it kept, send it again. */
+interface Busy {
+  readonly outcome: 'refused';
+  readonly status: 503;
+  readonly error: 'temporarily_unavailable';
+  readonly description: string;
+}
+
+const BUSY: Busy = {
+  outcome: 'refused',
+  status: 503,
+  error: 'temporarily_unavailable',
+  description: 'Agent X is busy; send the same request again in a few seconds.',
+};
 
 const INVALID_GRANT = {
   outcome: 'refused',
@@ -124,6 +145,7 @@ const INVALID_GRANT = {
 const OAUTH_SERVER: AuditActor = { type: 'system', id: 'oauth-server' };
 
 /** Why a code's flow refuses this exchange, for the log alone; none if it may go on. */
+/** `resource` is optional (RFC 8707): some clients send none, and the flow keeps our own MCP endpoint's either way. */
 function codeRefusal(flow: FlowRead, asked: CodeExchange, resource: string, now: Date): string | undefined {
   if (flow.codeEndsAt === null || flow.codeEndsAt.getTime() <= now.getTime()) return 'code_expired';
   if (flow.clientId !== asked.clientId) return 'wrong_client';
@@ -238,8 +260,36 @@ export function createOauthGrants({
     return { orgId, door };
   };
 
-  return {
-    async exchangeCode(asked, caller) {
+  /**
+   * The grant's work, a database limit or a lost deadlock answered busy, never a failure (as the access check's key
+   * check does, 4D2e C3): nothing it began is kept, and the client sends it again.
+   */
+  const orBusy = async <T>(caller: Caller, work: () => Promise<T>): Promise<T | Busy> => {
+    const started = performance.now();
+    try {
+      return await work();
+    } catch (error) {
+      if (!isStatementLimit(error) && !isRetryable(error) && !(error instanceof OrganisationBusy)) throw error;
+      logger
+        .child({ correlationId: caller.correlationId })
+        .warn('oauth.grant_in_trouble', { waitedMs: Math.round(performance.now() - started) });
+      return BUSY;
+    }
+  };
+
+  /** A code used up without a pair issued: its connection's key goes at once, as it can never work (lead, 6E3a). */
+  const codeSpent = async (flow: FlowRead, caller: Caller, reason: string): Promise<GrantAnswer> => {
+    if (flow.orgId !== null && flow.keyId !== null) {
+      await revokeConnection(flow.orgId, flow.keyId, caller.correlationId, {
+        actor: OAUTH_SERVER,
+        reason: 'code_spent',
+      });
+    }
+    return refusedFor(caller, reason, { clientId: flow.clientId, flowId: flow.id, keyId: flow.keyId });
+  };
+
+  const grants = {
+    async exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer> {
       if (!isCodeText(asked.code)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
       const codeHash = hashOf(asked.code);
       const now = clock.now();
@@ -250,9 +300,8 @@ export function createOauthGrants({
       }
       const refusal = codeRefusal(flow, asked, capabilities.resource, now);
       const { orgId, keyId } = flow;
-      if (refusal !== undefined || orgId === null || keyId === null) {
-        return refusedFor(caller, refusal ?? 'not_allowed', { clientId: asked.clientId, flowId: flow.id });
-      }
+      if (refusal !== undefined || orgId === null || keyId === null)
+        return codeSpent(flow, caller, refusal ?? 'not_allowed');
       const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
         const checked = await credentialAt(tx, states, now, orgId, keyId, {
           prove: () => undefined,
@@ -268,14 +317,15 @@ export function createOauthGrants({
         await clientConnected(tx, flow.clientId, now);
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
-      if (answer.outcome === 'refused') return refusedFor(caller, answer.reason, { keyId, flowId: flow.id });
+      if (answer.outcome === 'refused') return codeSpent(flow, caller, answer.reason);
       return answer;
     },
 
-    async refresh(asked, caller) {
+    async refresh(asked: RefreshAsked, caller: Caller): Promise<GrantAnswer> {
       const presented = parseConnectionToken(asked.refreshToken, 'refresh');
       if (presented === undefined) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
       const named = { keyId: presented.keyId, tokenId: presented.tokenId };
+      // Optional (RFC 8707): some clients send none; a connection is only ever for our MCP endpoint anyway.
       if (asked.resource !== undefined && asked.resource !== capabilities.resource) {
         return { outcome: 'refused', status: 400, error: 'invalid_target', description: 'The resource is not ours.' };
       }
@@ -345,7 +395,10 @@ export function createOauthGrants({
       return INVALID_GRANT;
     },
 
-    async revoke(asked, caller) {
+    async revoke(
+      asked: { readonly token: string; readonly clientId: string | undefined },
+      caller: Caller,
+    ): Promise<void> {
       const presented =
         parseConnectionToken(asked.token, 'access') ?? parseConnectionToken(asked.token, 'refresh') ?? undefined;
       if (presented === undefined) return;
@@ -360,5 +413,15 @@ export function createOauthGrants({
         .child({ correlationId: caller.correlationId, orgId })
         .info('oauth.connection_revoked', { keyId: presented.keyId, revoked: revoked !== undefined });
     },
+  };
+
+  return {
+    exchangeCode: (asked, caller) => orBusy(caller, () => grants.exchangeCode(asked, caller)),
+    refresh: (asked, caller) => orBusy(caller, () => grants.refresh(asked, caller)),
+    revoke: (asked, caller) =>
+      orBusy(caller, async () => {
+        await grants.revoke(asked, caller);
+        return { outcome: 'taken' as const };
+      }),
   };
 }

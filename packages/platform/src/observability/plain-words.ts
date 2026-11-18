@@ -487,6 +487,16 @@ export const PLAIN_WORDS = {
     broke: 'No new app can register until the day rolls on; apps already registered still connect.',
     next: 'Look for one address or app registering over and over: it may be abuse. Raise the cap only after checking.',
   },
+  'oauth.flows_capped': {
+    happened: 'So many OAuth sign-ins were under way at once that Agent X refused new ones for a while.',
+    broke: 'People connecting an app were told to try again in a few minutes; connected apps carry on.',
+    next: 'Look for one source opening sign-ins over and over: it may be abuse. They end within 15 minutes.',
+  },
+  'oauth.grant_in_trouble': {
+    happened: 'An OAuth token or revocation request hit a database limit or lost a deadlock.',
+    broke: 'That one request was told to try again shortly; nothing of it was kept.',
+    next: "Nothing to do if rare. If often, look at what is holding that organisation's rows.",
+  },
   'oauth.flow_sweep_failed': {
     happened: 'The clean-up of ended OAuth sign-in flows failed.',
     broke: 'Ended flows stay a little longer; nothing a person or app does is affected.',

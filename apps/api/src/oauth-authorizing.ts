@@ -21,6 +21,7 @@ import {
   newFlowCookie,
   hashOf,
   type OauthTables,
+  MOST_OPEN_FLOWS,
   openCodeFlow,
   PKCE_METHOD,
   type RegistrationAsked,
@@ -51,8 +52,8 @@ type NotRedirectable = 'unknown_client' | 'unregistered_redirect';
 export type AuthorizeAnswer =
   | { readonly outcome: 'not_redirectable'; readonly problem: NotRedirectable }
   | { readonly outcome: 'refused'; readonly redirectTo: string }
-  /** The flow opened: its ID, and the browser's cookie (`set`: a new one to set). */
-  | { readonly outcome: 'opened'; readonly flowId: string; readonly cookie: string; readonly set: boolean };
+  /** The flow opened: its ID, and the browser's cookie, set again each time so a flow never outlives it. */
+  | { readonly outcome: 'opened'; readonly flowId: string; readonly cookie: string };
 
 export type RegistrationAnswer =
   | { readonly outcome: 'registered'; readonly client: Client }
@@ -66,6 +67,30 @@ export type RegistrationAnswer =
 export interface OauthAuthorizing {
   authorize(asked: AuthorizeAsked, cookie: string | undefined): Promise<AuthorizeAnswer>;
   register(asked: RegistrationAsked, correlationId: string): Promise<RegistrationAnswer>;
+}
+
+/**
+ * Why an authorization request from a known client, to an address it registered, is refused, as OAuth's error and
+ * our words; none if it may open a flow. `stateTooLong`: its state past what is kept.
+ */
+function requestRefusal(
+  asked: AuthorizeAsked,
+  stateTooLong: boolean,
+  resource: string,
+): readonly [string, string] | undefined {
+  if (stateTooLong) return ['invalid_request', 'The state is too long.'];
+  if (asked.response_type !== 'code') return ['unsupported_response_type', 'Only the code flow is offered.'];
+  // SEC-OAUTH-02: PKCE S256 on every request, never `plain` (OAuth 2.1).
+  const challenge = asked.code_challenge;
+  if (challenge === undefined || !isCodeChallenge(challenge) || asked.code_challenge_method !== PKCE_METHOD) {
+    return ['invalid_request', 'A PKCE code_challenge with code_challenge_method S256 is required.'];
+  }
+  if (scopesAsked(asked.scope) === undefined) return ['invalid_scope', 'A scope asked for is not one Agent X has.'];
+  // SEC-OAUTH-01: a connection's tokens are for the MCP endpoint alone. Optional (RFC 8707): some clients send none.
+  if (asked.resource !== undefined && asked.resource !== resource) {
+    return ['invalid_target', 'The resource is not this server’s MCP endpoint.'];
+  }
+  return undefined;
 }
 
 /** The most characters of a client's `state` kept and sent back (0093). */
@@ -94,7 +119,9 @@ export function createOauthAuthorizing({
       if (redirectUri === undefined || !isRegisteredRedirect(client.redirectUris, redirectUri)) {
         return { outcome: 'not_redirectable', problem: 'unregistered_redirect' };
       }
-      const state = asked.state !== undefined && asked.state.length <= MOST_STATE ? asked.state : null;
+      // An empty state is no state (RFC 6749 §4.1.1 makes it optional): the column holds 1 to 512 characters.
+      const given = asked.state === '' ? undefined : asked.state;
+      const state = given !== undefined && given.length <= MOST_STATE ? given : null;
       const refused = (error: string, description: string): AuthorizeAnswer => ({
         outcome: 'refused',
         redirectTo: backToClient(redirectUri, {
@@ -104,23 +131,15 @@ export function createOauthAuthorizing({
           iss: capabilities.issuer,
         }),
       });
-      if (asked.state !== undefined && state === null) return refused('invalid_request', 'The state is too long.');
-      if (asked.response_type !== 'code') return refused('unsupported_response_type', 'Only the code flow is offered.');
-      // SEC-OAUTH-02: PKCE S256 on every request, never `plain` (OAuth 2.1).
-      const challenge = asked.code_challenge;
-      if (challenge === undefined || !isCodeChallenge(challenge) || asked.code_challenge_method !== PKCE_METHOD) {
-        return refused('invalid_request', 'A PKCE code_challenge with code_challenge_method S256 is required.');
-      }
-      const scopes = scopesAsked(asked.scope);
-      if (scopes === undefined) return refused('invalid_scope', 'A scope asked for is not one Agent X has.');
-      // SEC-OAUTH-01: a connection's tokens are for the MCP endpoint alone.
-      if (asked.resource !== undefined && asked.resource !== capabilities.resource) {
-        return refused('invalid_target', 'The resource is not this server’s MCP endpoint.');
-      }
+      const wrong = requestRefusal(asked, given !== undefined && state === null, capabilities.resource);
+      if (wrong !== undefined) return refused(...wrong);
+      // Checked just above: a challenge and scopes there are.
+      const challenge = asked.code_challenge ?? '';
+      const scopes = scopesAsked(asked.scope) ?? [];
       const kept = cookie !== undefined && isFlowCookie(cookie) ? cookie : undefined;
       const browser = kept ?? newFlowCookie();
       const flowId = ids.next();
-      await openCodeFlow(database, {
+      const opened = await openCodeFlow(database, {
         id: flowId,
         clientId: client.clientId,
         redirectUri,
@@ -131,7 +150,17 @@ export function createOauthAuthorizing({
         browserHash: hashOf(browser),
         createdAt: clock.now(),
       });
-      return { outcome: 'opened', flowId, cookie: browser, set: kept === undefined };
+      if (opened === 'full') {
+        logger.warn('oauth.flows_capped', { most: MOST_OPEN_FLOWS });
+        return refused('temporarily_unavailable', 'Too many sign-ins are under way; try again in a few minutes.');
+      }
+      if (opened === 'browser_full') {
+        return refused(
+          'temporarily_unavailable',
+          'This browser has too many connections waiting; finish or wait for one.',
+        );
+      }
+      return { outcome: 'opened', flowId, cookie: browser };
     },
 
     async register(asked, correlationId) {

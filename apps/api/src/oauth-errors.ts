@@ -15,6 +15,7 @@ const OAUTH_ERRORS = [
   'invalid_target',
   'invalid_redirect_uri',
   'invalid_client_metadata',
+  'temporarily_unavailable',
 ] as const;
 export type OauthError = (typeof OAUTH_ERRORS)[number];
 

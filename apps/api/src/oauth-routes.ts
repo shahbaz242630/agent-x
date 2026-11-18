@@ -245,7 +245,8 @@ export function registerOauth(
         return reply.code(302).header('location', `${CONNECT_PATH}?problem=${answer.problem}`).send({});
       }
       if (answer.outcome === 'refused') return reply.code(302).header('location', answer.redirectTo).send({});
-      if (answer.set) void reply.header('set-cookie', oauthCookie(answer.cookie));
+      // Set again every time, its day starting now: a flow opened near the cookie's end is never stranded.
+      void reply.header('set-cookie', oauthCookie(answer.cookie));
       return reply.code(302).header('location', `${CONNECT_PATH}?request=${answer.flowId}`).send({});
     },
   );
@@ -378,7 +379,8 @@ export function registerOauthForms(
       if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
       const { token, client_id: clientId } = request.body;
       if (token === undefined) return sendOauthError(reply, 400, 'invalid_request', 'Send token.');
-      await grants.revoke({ token, clientId }, { correlationId: request.id, ip: request.ip });
+      const taken = await grants.revoke({ token, clientId }, { correlationId: request.id, ip: request.ip });
+      if (taken.outcome === 'refused') return sendOauthError(reply, taken.status, taken.error, taken.description);
       return noStore(reply).code(200).send({});
     },
   );

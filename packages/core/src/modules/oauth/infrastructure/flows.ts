@@ -12,8 +12,8 @@
 //   statement, only where none was, so two exchanges at once can't both have
 //   it; the second finds it used (codeUsedBefore), and its connection is
 //   revoked by the API.
-import { limitStatements } from '@agentx/platform/db';
-import { type Kysely, type Transaction } from 'kysely';
+import { holdTransactionLock, limitStatements } from '@agentx/platform/db';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type Scope, scopesOf, scopesText } from '../../agents/index.ts';
@@ -53,8 +53,54 @@ type Database = Kysely<OauthTables>;
 /** The database, or a transaction on it holding these tables among others (the consent's own). */
 type Handle = Database | Transaction<OauthTables>;
 
-/** Opens the flow, for FLOW_SECONDS from its creation. */
-export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>): Promise<void> {
+/**
+ * The most flows not yet ended at once, every browser together (lead's review, 6E3a): anyone can open one with an
+ * anonymous GET, and an image on a busy page beats any per-address limit, so the table is held here whatever comes.
+ * Far above any real day: a flow lives 15 minutes.
+ */
+export const MOST_OPEN_FLOWS = 20_000;
+
+/** The most flows one browser (its flow cookie) holds open and undecided at once: a person connects a few apps. */
+export const MOST_OPEN_FLOWS_A_BROWSER = 5;
+
+/** Opened; or not, every browser's flows at their cap, or this browser's. */
+export type FlowOpened = 'opened' | 'full' | 'browser_full';
+
+/**
+ * Opens the flow, for FLOW_SECONDS from its creation, unless MOST_OPEN_FLOWS have not ended, or this browser holds
+ * MOST_OPEN_FLOWS_A_BROWSER open and undecided: both counted under the flows' one lock, in a transaction of its own
+ * whose statements are limited to 10 seconds, each count stopping at its cap (the ends index, the browser index).
+ */
+export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>): Promise<FlowOpened> {
+  return db.transaction().execute(async (tx) => {
+    await limitStatements(tx);
+    await holdTransactionLock(tx, 'oauth_flows');
+    const open = await tx
+      .selectFrom((inner) =>
+        inner
+          .selectFrom('oauth.flows')
+          .select('id')
+          .where('ends_at', '>', flow.createdAt)
+          .limit(MOST_OPEN_FLOWS)
+          .as('open'),
+      )
+      .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
+      .executeTakeFirstOrThrow();
+    if (open.flows >= MOST_OPEN_FLOWS) return 'full';
+    const own = await tx
+      .selectFrom('oauth.flows')
+      .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
+      .where('browser_hash', '=', flow.browserHash)
+      .where('ends_at', '>', flow.createdAt)
+      .where('decided_at', 'is', null)
+      .executeTakeFirstOrThrow();
+    if (own.flows >= MOST_OPEN_FLOWS_A_BROWSER) return 'browser_full';
+    await insertFlow(tx, flow);
+    return 'opened';
+  });
+}
+
+async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>): Promise<void> {
   await db
     .insertInto('oauth.flows')
     .values({

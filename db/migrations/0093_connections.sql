@@ -200,8 +200,10 @@ CREATE TABLE oauth.flows (
   CONSTRAINT used_only_once_allowed CHECK (used_at IS NULL OR outcome = 'allowed')
 );
 
--- The sweep's ended flows.
+-- The sweep's ended flows, and the count of those open against the server's cap.
 CREATE INDEX flows_by_end ON oauth.flows (ends_at);
+-- One browser's open flows, counted against its own cap.
+CREATE INDEX flows_by_browser ON oauth.flows (browser_hash, ends_at);
 
 GRANT SELECT, INSERT, DELETE ON oauth.flows TO agentx_app;
 GRANT UPDATE (decided_at, outcome, org_id, key_id, code_hash, code_ends_at, used_at, polled_at)

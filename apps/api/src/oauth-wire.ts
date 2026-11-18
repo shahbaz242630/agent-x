@@ -19,7 +19,7 @@ import { SCOPES } from '@agentx/core/modules/agents';
 import { PKCE_METHOD, SCOPES_SUPPORTED } from '@agentx/core/modules/oauth';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
-import { JSON_TYPE } from './errors.ts';
+import { BUSY_RETRY_SECONDS, JSON_TYPE } from './errors.ts';
 import { MCP_PATH } from './mcp.ts';
 import { OAUTH_ERROR_BODY, type OauthError } from './oauth-errors.ts';
 import { markWritten } from './written-answers.ts';
@@ -121,7 +121,7 @@ export const serverMetadataOf = (capabilities: Capabilities) => ({
 });
 
 /** The OAuth error answers a route with `config.oauthWire` declares, beside the one error body for the rest. */
-export const OAUTH_ERROR_RESPONSES = { 400: OAUTH_ERROR_BODY, 401: OAUTH_ERROR_BODY } as const;
+export const OAUTH_ERROR_RESPONSES = { 400: OAUTH_ERROR_BODY, 401: OAUTH_ERROR_BODY, 503: OAUTH_ERROR_BODY } as const;
 
 /** What no token answer, nor any refusal of a token endpoint, may be kept as (RFC 6749 §5.1). */
 const NO_STORE = { 'cache-control': 'no-store', pragma: 'no-cache' } as const;
@@ -129,12 +129,14 @@ const NO_STORE = { 'cache-control': 'no-store', pragma: 'no-cache' } as const;
 /** Sends OAuth's own error body, written as the contract's (the second wire exception). */
 export function sendOauthError(
   reply: FastifyReply,
-  status: 400 | 401,
+  status: 400 | 401 | 503,
   error: OauthError,
   description: string,
 ): FastifyReply {
   const text = JSON.stringify({ error, error_description: description });
   markWritten(reply, text);
+  // Busy: send the same again after this many seconds (RFC 7009 §2.2.1), as every busy answer says.
+  if (status === 503) void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
   return reply.code(status).headers(NO_STORE).type(JSON_TYPE).send(text);
 }
 

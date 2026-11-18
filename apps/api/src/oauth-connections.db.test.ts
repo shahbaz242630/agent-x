@@ -24,7 +24,14 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { challengeOf, flowById, newFlowCookie, type OauthTables } from '@agentx/core/modules/oauth';
+import {
+  challengeOf,
+  flowById,
+  MOST_OPEN_FLOWS,
+  MOST_OPEN_FLOWS_A_BROWSER,
+  newFlowCookie,
+  type OauthTables,
+} from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
@@ -494,6 +501,50 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     expect(back.searchParams.get('iss')).toBe(capabilities.issuer);
   });
 
+  it('takes an empty state as none, never a failure', async () => {
+    const answer = await authorizing.authorize({ ...asked, client_id: clientId, state: '' }, undefined);
+    if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
+    expect(await flowById(app, answer.flowId)).toMatchObject({ state: null });
+  });
+
+  it(`holds one browser to ${String(MOST_OPEN_FLOWS_A_BROWSER)} open flows, a decided one freeing its place`, async () => {
+    const cookie = newFlowCookie();
+    const flows = [];
+    for (let open = 0; open < MOST_OPEN_FLOWS_A_BROWSER; open += 1) flows.push(await opened(undefined, cookie));
+    const full = await authorizing.authorize({ ...asked, client_id: clientId }, cookie);
+    if (full.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(full)}`);
+    expect(new URL(full.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
+    expect(new URL(full.redirectTo).searchParams.get('iss')).toBe(capabilities.issuer);
+    // Another browser is not held by it.
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie())).toMatchObject({
+      outcome: 'opened',
+    });
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const [first] = flows;
+    if (first === undefined) throw new Error('a flow');
+    await consents.deny(admin, keyed(admin, DENY_OPERATION, 'free a place'), first, CORRELATION);
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, cookie)).toMatchObject({ outcome: 'opened' });
+  });
+
+  it(`refuses every new flow while ${String(MOST_OPEN_FLOWS)} are open, with the warning`, async () => {
+    const admin = database.as('admin');
+    await admin.query(
+      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource, browser_hash, created_at, ends_at)
+       select gen_random_uuid(), 'code', 'filler', 'https://a.example/cb', $1, 'requests:read', 'r', $2, $3, $4
+       from generate_series(1, $5::int)`,
+      [challengeOf(VERIFIER), 'f'.repeat(64), START, new Date(START.getTime() + 900_000), MOST_OPEN_FLOWS],
+    );
+    try {
+      const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
+      expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
+      expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn' })]);
+    } finally {
+      await admin.query("delete from oauth.flows where client_id = 'filler'");
+    }
+  });
+
   it('refuses a state too long, sending none back', async () => {
     const answer = await authorizing.authorize({ ...asked, client_id: clientId, state: 's'.repeat(513) }, undefined);
     if (answer.outcome !== 'refused') throw new Error('not refused');
@@ -542,6 +593,21 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
     expect(await exchange(late)).toMatchObject({ error: 'invalid_grant' });
     expect(await exchange('axc_not-a-code')).toMatchObject({ error: 'invalid_grant' });
     expect(noted).toContainEqual({ kind: 'oauth_refused', reason: 'invalid_grant', ip: CALLER.ip });
+  });
+
+  it('revokes the connection’s key at once when its code is used up without a pair', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const code = codeOf(await allowed(admin, await opened(), { agentId, scopes: ['requests:read'] }));
+    expect(await exchange(code, { codeVerifier: 'w'.repeat(43) })).toMatchObject({ error: 'invalid_grant' });
+    // The right verifier now finds the code used, and its key already revoked.
+    expect(await exchange(code)).toMatchObject({ error: 'invalid_grant' });
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      expect(await agentKeysOf(tx, states, org, agentId, 'share', 'connections')).toMatchObject({
+        keys: [{ status: 'REVOKED' }],
+      });
+    });
   });
 
   it('revokes the connection when its code is sent again: someone else holds it', async () => {
@@ -721,6 +787,44 @@ describe(`refusals on the way (Postgres ${server.version})`, () => {
       code: 'INTEGRITY_FAILED',
     });
   });
+});
+
+describe(`busy: a database limit answered as temporarily_unavailable (Postgres ${server.version})`, () => {
+  it.each(['57014', '40P01'])(
+    'answers a refresh, and a revocation, busy when its transaction hits %s',
+    async (code) => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const first = await connected(org, admin, await agent(org, admin));
+      const failing = new Proxy(app, {
+        get: (target, name) => {
+          if (name === 'transaction') {
+            return () => {
+              throw Object.assign(new Error('forced'), { code });
+            };
+          }
+          const value = Reflect.get(target, name) as unknown;
+          // Kysely's own private fields want the real object as `this`.
+          return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      const busy = createOauthGrants({
+        database: failing,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        capabilities,
+        securityEvents: { note: () => undefined },
+      });
+      const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+      expect(await busy.refresh(refresh, CALLER)).toMatchObject({ status: 503, error: 'temporarily_unavailable' });
+      expect(await busy.revoke({ token: first.accessToken, clientId }, CALLER)).toMatchObject({ status: 503 });
+      expect(lines('oauth.grant_in_trouble')).toHaveLength(2);
+      // Nothing of it was kept: the refresh token still works.
+      expect(await grants.refresh(refresh, CALLER)).toMatchObject({ outcome: 'issued' });
+    },
+  );
 });
 
 describe(`a connection revoked (Postgres ${server.version})`, () => {
