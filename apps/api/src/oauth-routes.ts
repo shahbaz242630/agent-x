@@ -144,7 +144,11 @@ const TOKENS = z
   .register(API_SCHEMAS, { id: 'OauthTokens', description: 'A connection’s new pair of tokens (RFC 6749 §5.1).' });
 
 const REVOKE_FORM = z.object({
-  token: text(256).describe('Either of the connection’s tokens: the connection is revoked.'),
+  token: z
+    .string()
+    .min(1)
+    .max(256)
+    .describe('Either of the connection’s tokens: the connection is revoked (required, RFC 7009 §2.1).'),
   token_type_hint: text(64),
   client_id: text(2048),
 });
