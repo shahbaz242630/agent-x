@@ -29,6 +29,9 @@ const INVISIBLE = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Script=B
 const JOINER_IN_A_WORD =
   /(?<=\p{M})\p{Join_Control}(?=[\p{L}\p{M}])|(?<=[\p{L}\p{M}])\p{Join_Control}(?=\p{M})|(?<=\p{Script=Arabic})\p{Join_Control}(?=\p{Script=Arabic})/gu;
 
+/** The same joiners' pattern, for a text made plain alike elsewhere (6F1 G5: an MCP tool's answer). */
+export const JOINER_IN_A_WORD_SOURCE: string = JOINER_IN_A_WORD.source;
+
 /** Every joiner, taken out before marks are counted, so none can split a stack. */
 const JOINERS = /\p{Join_Control}/gu;
 

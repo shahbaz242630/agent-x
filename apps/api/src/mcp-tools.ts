@@ -29,6 +29,7 @@
 // they wrote reads as Agent X's instructions. Nothing a caller sends is ever
 // evaluated: arguments are checked as data.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
+import { JOINER_IN_A_WORD_SOURCE } from '@agentx/core/shared-kernel';
 import { type IdempotentRequest, isIdempotencyKey } from '@agentx/platform/db';
 import { z } from 'zod';
 
@@ -368,13 +369,17 @@ export function checkedInput(
 /** The most characters a text in a tool's answer keeps (SEC-MCP-03): above every reason code's words. */
 export const MOST_TEXT = 500;
 
-/** Characters that control a terminal or turn text's direction (Trojan Source), and line and paragraph separators. */
-const UNSAFE_CHARACTERS = /[\p{Cc}\u202A-\u202E\u2066-\u2069\u2028\u2029]/gu;
+/**
+ * Characters that control a terminal, line and paragraph separators, and every format character (6F1 G5): those that
+ * turn text's direction (Trojan Source) and those that hide text (zero-width, tag characters), as a visible name
+ * refuses them (visible-name.ts). Its first group is the one exception, a joiner a script needs within a word, kept.
+ */
+const UNSAFE_CHARACTERS = new RegExp(String.raw`(${JOINER_IN_A_WORD_SOURCE})|[\p{Cc}\p{Cf}\u2028\u2029]`, 'gu');
 
 /** A text as a tool answers it: unsafe characters removed, cut to MOST_TEXT characters. */
 export function plainText(text: string): string {
   // By code point, so a character is never cut in half; a cut emoji sequence is still well-formed text.
-  const characters = Array.from(text.replace(UNSAFE_CHARACTERS, ''));
+  const characters = Array.from(text.replace(UNSAFE_CHARACTERS, (_found, joiner?: string) => joiner ?? ''));
   return characters.length <= MOST_TEXT ? characters.join('') : `${characters.slice(0, MOST_TEXT - 1).join('')}…`;
 }
 

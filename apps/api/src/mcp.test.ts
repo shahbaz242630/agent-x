@@ -786,6 +786,21 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
       b: { c: 'd' },
     });
   });
+
+  it('6F1 G5: takes hidden format characters out too, but keeps a joiner a script needs within a word', () => {
+    const zwnj = String.fromCodePoint(0x200c);
+    const zwj = String.fromCodePoint(0x200d);
+    // Zero-width space, word joiner, soft hyphen, byte order mark, Arabic letter mark, and a tag character's letter.
+    const hidden = String.fromCodePoint(0x200b, 0x2060, 0xad, 0xfeff, 0x61c, 0xe0041);
+    expect(plainText(`pay${hidden}me`)).toBe('payme');
+    // Between two Latin letters a joiner changes nothing a person sees: out, as a visible name refuses it.
+    expect(plainText(`a${zwj}b${zwnj}c`)).toBe('abc');
+    // Persian's non-joiner between two Arabic letters, and Devanagari's joiner after a virama: kept.
+    const persian = `می${zwnj}خواهم`;
+    const devanagari = `क्${zwj}ष`;
+    expect(plainText(persian)).toBe(persian);
+    expect(plainText(devanagari)).toBe(devanagari);
+  });
 });
 
 describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Guide M3)', () => {

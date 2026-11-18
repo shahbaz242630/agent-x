@@ -24,4 +24,4 @@ export {
   type Transition,
 } from './state-machine.ts';
 export { minorOf, oneOf, oneOfOrNull, timeOf, wholeOf } from './verified-fields.ts';
-export { keptNote, visibleName } from './visible-name.ts';
+export { JOINER_IN_A_WORD_SOURCE, keptNote, visibleName } from './visible-name.ts';
