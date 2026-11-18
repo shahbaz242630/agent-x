@@ -263,6 +263,12 @@ const SETTINGS = {
     schema: text.pipe(z.enum(['off', 'on'], { error: 'must be off or on' })),
     default: 'off',
   },
+  // 6E3c (ADR-016, decision 2): the origins whose MCP clients may name themselves by a client ID metadata document,
+  // an https address Agent X fetches (CIMD). Each must also be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; `none` takes none.
+  // Unset: the three well-known clients' origins, those of them on the outbound allowlist (config.ts).
+  AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: {
+    schema: z.union([z.literal('none').transform((): string[] => []), originList]).optional(),
+  },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
   // as its tokens name it; the secret is read by secretSetting (database.ts).
@@ -493,6 +499,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_MCP_OAUTH',
+      'AGENTX_OAUTH_CLIENT_METADATA_ORIGINS',
       'AGENTX_OIDC_ISSUER',
       'AGENTX_OIDC_CLIENT_ID',
       'AGENTX_OIDC_CLIENT_SECRET',

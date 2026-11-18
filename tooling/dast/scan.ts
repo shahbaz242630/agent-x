@@ -134,10 +134,10 @@ export const ACCEPTED: readonly Accepted[] = [
   {
     tool: 'schemathesis',
     rule: 'schemathesis/api-rejected-schema-compliant-request',
-    operations: ['POST /v1/oauth/register', 'POST /v1/oauth/token'],
+    operations: ['POST /v1/oauth/register', 'POST /v1/oauth/token', 'POST /v1/oauth/device_authorization'],
     statuses: [400],
     reason:
-      "OAuth's own rules reach past what a schema can say (6E3b, S202): a registration's redirect addresses must be https or loopback with no fragment (RFC 7591 invalid_redirect_uri / invalid_client_metadata), and a token request's code, verifier or refresh token must be one we issued (RFC 6749 invalid_grant). A well-shaped request a fuzzer makes up is rightly refused 400.",
+      "OAuth's own rules reach past what a schema can say (6E3b, S202): a registration's redirect addresses must be https or loopback with no fragment (RFC 7591 invalid_redirect_uri / invalid_client_metadata), a token request's code, verifier, refresh token or device code must be one we issued (RFC 6749 invalid_grant, RFC 8628 §3.5), and a device's codes are only for a known client listing the device flow, with scopes we have and our own resource (RFC 8628 §3.1: unauthorized_client, invalid_scope, invalid_target; 6E3c). A well-shaped request a fuzzer makes up is rightly refused 400.",
   },
 ];
 

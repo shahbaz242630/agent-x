@@ -60,14 +60,20 @@ export async function routeServer({
   live,
   member,
   oauthOn = false,
+  clientMetadataOrigins,
   ...routes
 }: {
   readonly live?: LiveSession;
   readonly member?: MembershipCheck;
   /** The OAuth server for MCP connections switched on (6E3a, AGENTX_MCP_OAUTH); off, as by default. */
   readonly oauthOn?: boolean;
+  /** The origins whose clients name themselves by a metadata document (6E3c); none when not given. */
+  readonly clientMetadataOrigins?: readonly string[];
 } & Partial<ServerOptions>): Promise<FastifyInstance> {
-  const config = { ...CONFIG, http: { ...CONFIG.http, mcpOauth: oauthOn } };
+  const config = {
+    ...CONFIG,
+    http: { ...CONFIG.http, mcpOauth: oauthOn, oauthClientMetadataOrigins: clientMetadataOrigins },
+  };
   const app = await buildServer({
     config,
     logger: createLogger({

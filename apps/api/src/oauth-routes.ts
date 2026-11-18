@@ -15,15 +15,19 @@
 //   once, at most 4 KB, never cached; OAuth's own error bodies
 //   (oauth-grants.ts).
 // - `POST /v1/oauth/register` (RFC 7591): a public client registered.
+// - `POST /v1/oauth/device_authorization` (RFC 8628, 6E3c): a device's codes
+//   (oauth-device.ts), a form as the token endpoint's; the token endpoint
+//   then takes its device code.
 //
 // Each counts against a limit of its own per client address, beside the one
-// every route has: registering 10 an hour, authorizing 30 a minute, the token
-// and revocation endpoints 60 a minute. None of them reads a cookie but the
+// every route has: registering 10 an hour, authorizing 30 a minute (a
+// device's codes too), the token and revocation endpoints 60 a minute. None of them reads a cookie but the
 // authorize endpoint's own flow cookie, so the token, revocation and
 // registration endpoints take writes from any origin (`oauthClient`), as
 // OAuth clients send them; none answers a browser's cross-origin read (no
 // CORS, decision 10).
 import { ACCESS_TOKEN_SECONDS } from '@agentx/core/modules/agents';
+import { DEVICE_CODE_GRANT } from '@agentx/core/modules/oauth';
 import type { Clock } from '@agentx/core/shared-kernel';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -32,6 +36,7 @@ import { z } from 'zod';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import type { OauthAuthorizing } from './oauth-authorizing.ts';
+import type { OauthDevice } from './oauth-device.ts';
 import type { GrantAnswer, OauthGrants } from './oauth-grants.ts';
 import {
   type Capabilities,
@@ -88,6 +93,7 @@ const SERVER_METADATA = z
     token_endpoint: z.string(),
     revocation_endpoint: z.string(),
     registration_endpoint: z.string(),
+    device_authorization_endpoint: z.string().describe('Where a device with no browser asks for its codes (RFC 8628).'),
     scopes_supported: words,
     response_types_supported: words,
     response_modes_supported: words,
@@ -96,6 +102,9 @@ const SERVER_METADATA = z
     token_endpoint_auth_methods_supported: words,
     revocation_endpoint_auth_methods_supported: words,
     authorization_response_iss_parameter_supported: z.boolean(),
+    client_id_metadata_document_supported: z
+      .boolean()
+      .describe('A client may name itself by its metadata document’s https address, from an allowlisted origin.'),
   })
   .register(API_SCHEMAS, {
     id: 'AuthorizationServerMetadata',
@@ -123,9 +132,10 @@ const AUTHORIZE_QUERY = z.object({
 });
 
 const TOKEN_FORM = z.object({
-  grant_type: text(64).describe('authorization_code or refresh_token.'),
+  grant_type: text(64).describe('authorization_code, refresh_token, or the device code’s (RFC 8628 §3.4).'),
   client_id: text(2048),
   code: text(128),
+  device_code: text(128).describe('The device code, polled with (RFC 8628 §3.4).'),
   redirect_uri: text(2048),
   code_verifier: text(128),
   refresh_token: text(256),
@@ -142,6 +152,23 @@ const TOKENS = z
     scope: z.string().describe('The scopes the tokens hold, space-delimited.'),
   })
   .register(API_SCHEMAS, { id: 'OauthTokens', description: 'A connection’s new pair of tokens (RFC 6749 §5.1).' });
+
+const DEVICE_FORM = z.object({
+  client_id: text(2048).describe('The client, as it registered, or its metadata document’s address.'),
+  scope: text(256).describe('The scopes asked for, space-delimited; none asks for all, the person ticks which.'),
+  resource: text(2048).describe('The MCP endpoint (RFC 8707), if named.'),
+});
+
+const DEVICE_CODES = z
+  .object({
+    device_code: z.string().describe('`axd_…`: polled with at the token endpoint, never shown to the person.'),
+    user_code: z.string().describe('What the person types, `BCDF-GHJK`: eight letters, no vowels.'),
+    verification_uri: z.string().describe('Where the person types it: Agent X’s `/device` page.'),
+    verification_uri_complete: z.string().describe('The same page with the code filled in, for a link or QR code.'),
+    expires_in: z.int().describe('Seconds both codes last.'),
+    interval: z.int().describe('Seconds to wait between polls.'),
+  })
+  .register(API_SCHEMAS, { id: 'OauthDeviceCodes', description: 'A device’s codes (RFC 8628 §3.2).' });
 
 const REVOKE_FORM = z.object({
   token: z
@@ -302,12 +329,51 @@ export function registerOauthForms(
   scope: FastifyInstance,
   {
     grants,
+    device,
     clock,
     trust,
-  }: { readonly grants: OauthGrants | undefined; readonly clock: Clock; readonly trust: ProxyTrust },
+  }: {
+    readonly grants: OauthGrants | undefined;
+    readonly device: OauthDevice | undefined;
+    readonly clock: Clock;
+    readonly trust: ProxyTrust;
+  },
 ): void {
   const tokenLimit = createAddressCounter(scope, LIMITS.token, trust);
+  const deviceLimit = createAddressCounter(scope, LIMITS.authorize, trust);
   const forms = scope.withTypeProvider<ZodTypeProvider>();
+  forms.post(
+    OAUTH_PATHS.deviceAuthorization,
+    {
+      schema: {
+        summary: 'Ask for a device’s codes, to connect it as one of your agents (RFC 8628)',
+        description:
+          'For a client with no browser: show the person the user code and where to type it, then poll the token ' +
+          'endpoint with the device code, no sooner than the interval, until they decide. Both last 15 minutes.',
+        consumes: ['application/x-www-form-urlencoded'],
+        body: DEVICE_FORM,
+        response: { 200: DEVICE_CODES, ...OAUTH_ERROR_RESPONSES },
+      },
+      bodyLimit: FORM_BODY_LIMIT,
+      onRequest: deviceLimit,
+      config: OAUTH_CLIENT_ROUTE,
+    },
+    async (request, reply) => {
+      if (device === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
+      const answer = await device.authorize(request.body, request.id);
+      if (answer.outcome === 'refused') return sendOauthError(reply, answer.status, answer.error, answer.description);
+      const { codes } = answer;
+      return noStore(reply).code(200).send({
+        device_code: codes.deviceCode,
+        user_code: codes.userCode,
+        verification_uri: codes.verificationUri,
+        verification_uri_complete: codes.verificationUriComplete,
+        expires_in: codes.expiresIn,
+        interval: codes.interval,
+      });
+    },
+  );
   forms.post(
     OAUTH_PATHS.exchange,
     {
@@ -316,7 +382,7 @@ export function registerOauthForms(
         description:
           'OAuth 2.1’s token endpoint, as an application/x-www-form-urlencoded form, each field once. A code is used ' +
           'once, within 60 seconds, with its PKCE verifier; a refresh token is used once, and a second use revokes ' +
-          'the connection.',
+          'the connection; a device code is polled until the person decides (RFC 8628 §3.5).',
         consumes: ['application/x-www-form-urlencoded'],
         body: TOKEN_FORM,
         response: { 200: TOKENS, ...OAUTH_ERROR_RESPONSES },
@@ -351,8 +417,16 @@ export function registerOauthForms(
           { refreshToken: form.refresh_token, clientId: form.client_id, scope: form.scope, resource: form.resource },
           caller,
         );
+      } else if (form.grant_type === DEVICE_CODE_GRANT) {
+        if (form.device_code === undefined) return sendOauthError(reply, 400, 'invalid_request', 'Send device_code.');
+        answer = await grants.exchangeDevice({ deviceCode: form.device_code, clientId: form.client_id }, caller);
       } else {
-        return sendOauthError(reply, 400, 'unsupported_grant_type', 'Use authorization_code or refresh_token.');
+        return sendOauthError(
+          reply,
+          400,
+          'unsupported_grant_type',
+          'Use authorization_code, refresh_token or the device code’s grant.',
+        );
       }
       if (answer.outcome === 'refused') return sendOauthError(reply, answer.status, answer.error, answer.description);
       // The connection verified: its request is the agent's own in the activity log (decision 26).

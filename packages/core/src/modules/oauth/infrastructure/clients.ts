@@ -10,7 +10,7 @@ import { holdTransactionLock, limitStatements } from '@agentx/platform/db';
 import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
-import type { ClientRegistration, GrantType } from './client-metadata.ts';
+import { type ClientRegistration, isGrantType } from './client-metadata.ts';
 import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
@@ -62,8 +62,6 @@ export async function registerClient(
     return { outcome: 'registered', client };
   });
 }
-
-const isGrantType = (value: string): value is GrantType => value === 'authorization_code' || value === 'refresh_token';
 
 /** The client this ID names, as registered, or undefined. */
 export async function clientOf(

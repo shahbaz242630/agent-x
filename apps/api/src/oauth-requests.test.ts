@@ -2,14 +2,17 @@
 // stand-in use case: what the browser that opened a flow is shown, and each
 // write's answer, the flow's cookie passed on as the browser sent it. Who
 // reaches them is the access hook's (role-matrix.test.ts); what the use case
-// does in the database is oauth-connections.db.test.ts.
-import type { MembershipCheck } from '@agentx/core/modules/identity';
+// does in the database is oauth-connections.db.test.ts. 6E3c: a device's
+// request found by its user code, five tries a minute a person, and shown and
+// decided as a browser's with no address to go back to.
+import type { MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { ConnectionConsents, ConsentWrite, RequestShown } from './connection-consents.ts';
 import { liveSession } from './live-session.helper.test.ts';
+import type { LookupAnswer, OauthDevice } from './oauth-device.ts';
 import { CONNECT_COOKIE } from './oauth-wire.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -30,7 +33,8 @@ const ADMIN = {
 
 const SHOWN: RequestShown = {
   id: FLOW,
-  client: { id: 'axcl_0123456789abcdef0123456789abcdef', name: 'ChatGPT' },
+  via: 'code',
+  client: { id: 'axcl_0123456789abcdef0123456789abcdef', name: 'ChatGPT', verifiedBy: null },
   redirectUri: 'https://chatgpt.com/cb',
   redirectHost: 'chatgpt.com',
   loopback: false,
@@ -40,8 +44,20 @@ const SHOWN: RequestShown = {
 };
 
 /** A server whose consent use case answers `write` (or `shown`), and what it was called with. */
-async function consentServer(write: ConsentWrite, shown: RequestShown | null = SHOWN) {
+async function consentServer(
+  write: ConsentWrite,
+  shown: RequestShown | null = SHOWN,
+  found: LookupAnswer = { outcome: 'claimed', requestId: FLOW, cookie: BROWSER },
+  signIn?: Parameters<typeof routeServer>[0]['signIn'],
+) {
   const calls: unknown[] = [];
+  const device: OauthDevice = {
+    authorize: () => Promise.reject(new Error('no')),
+    lookup: (typed, cookie) => {
+      calls.push({ typed, cookie });
+      return Promise.resolve(found);
+    },
+  };
   const consents: ConnectionConsents = {
     request: (named) => {
       calls.push(named);
@@ -64,6 +80,7 @@ async function consentServer(write: ConsentWrite, shown: RequestShown | null = S
     oauthOn: true,
     live: LIVE,
     member: ADMIN,
+    ...(signIn === undefined ? {} : { signIn }),
     oauth: {
       authorizing: {
         authorize: () => Promise.reject(new Error('no')),
@@ -71,10 +88,12 @@ async function consentServer(write: ConsentWrite, shown: RequestShown | null = S
       },
       grants: {
         exchangeCode: () => Promise.reject(new Error('no')),
+        exchangeDevice: () => Promise.reject(new Error('no')),
         refresh: () => Promise.reject(new Error('no')),
         revoke: () => Promise.reject(new Error('no')),
       },
       consents,
+      device,
       clock: { now: () => new Date('2026-09-28T09:00:00.000Z') },
     },
   });
@@ -138,6 +157,7 @@ describe('the consent and its confirm', () => {
       outcome: 'connected',
       redirectTo: 'https://chatgpt.com/cb?code=axc_x&state=s&iss=https%3A%2F%2Fapp.agentx.example',
       connection: {
+        via: 'code',
         keyId: KEY,
         agentId: AGENT,
         clientId: SHOWN.client.id,
@@ -183,5 +203,113 @@ describe('the deny', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ redirectTo });
     expect(calls).toEqual([{ member: MEMBER, operation: 'connections.deny', named: NAMED }]);
+  });
+});
+
+describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
+  const lookup = (userCode: string, cookie = cookies): InjectOptions => ({
+    method: 'POST',
+    url: '/v1/oauth/device/lookup',
+    headers: {
+      cookie,
+      origin: PUBLIC_ORIGIN,
+      'idempotency-key': 'k-1',
+      'content-type': 'application/json',
+    },
+    payload: JSON.stringify({ userCode }),
+  });
+
+  it('finds the request by the code typed, for this browser, and sets its cookie again', async () => {
+    const { app, calls } = await consentServer({ outcome: 'conflict' });
+    const response = await app.inject(lookup('bcdf-ghjk'));
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ requestId: FLOW });
+    expect(response.headers['set-cookie']).toBe(
+      `${CONNECT_COOKIE}=${BROWSER}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400`,
+    );
+    expect(calls).toEqual([{ typed: 'bcdf-ghjk', cookie: BROWSER }]);
+  });
+
+  it('answers 404 for a code that finds nothing, saying nothing of why', async () => {
+    const { app } = await consentServer({ outcome: 'conflict' }, SHOWN, { outcome: 'not_found' });
+    const response = await app.inject(lookup('BCDF-GHJK', `${SESSION_COOKIE}=${COOKIE}`));
+    expect(response.statusCode).toBe(404);
+    expect(response.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('holds each person to 5 tries a minute', async () => {
+    const { app } = await consentServer({ outcome: 'conflict' }, SHOWN, { outcome: 'not_found' });
+    const answers: number[] = [];
+    for (let typed = 0; typed < 6; typed += 1) answers.push((await app.inject(lookup('BCDF-GHJK'))).statusCode);
+    expect(answers).toEqual([404, 404, 404, 404, 404, 429]);
+  });
+
+  it('mutation W2: holds each person to their own 5: another person’s first try is still looked up', async () => {
+    const OTHER_COOKIE = 'T'.repeat(43);
+    const other = {
+      ...LIVE,
+      userId: '0199a0f0-0000-7000-8000-0000000e3b99',
+      sessionId: '0199a0f0-0000-7000-8000-0000000e3b98',
+    };
+    const twoPeople: SignIn = {
+      begin: () => Promise.reject(new Error('no')),
+      beginStepUp: () => Promise.reject(new Error('no')),
+      complete: () => Promise.reject(new Error('no')),
+      signOut: () => Promise.resolve(undefined),
+      holderOf: (cookie) =>
+        Promise.resolve(cookie === COOKIE ? LIVE.userId : cookie === OTHER_COOKIE ? other.userId : undefined),
+      signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : cookie === OTHER_COOKIE ? other : undefined),
+    };
+    const { app } = await consentServer(
+      { outcome: 'conflict' },
+      SHOWN,
+      { outcome: 'not_found' },
+      {
+        service: twoPeople,
+        sessionSeconds: 43_200,
+      },
+    );
+    const answers: number[] = [];
+    for (let typed = 0; typed < 6; typed += 1) answers.push((await app.inject(lookup('BCDF-GHJK'))).statusCode);
+    expect(answers.at(-1)).toBe(429);
+    const theirs = await app.inject(lookup('BCDF-GHJK', `${SESSION_COOKIE}=${OTHER_COOKIE}`));
+    expect(theirs.statusCode).toBe(404);
+  });
+
+  it('is a person’s: signed out, refused before any lookup', async () => {
+    const { app, calls } = await consentServer({ outcome: 'conflict' });
+    const response = await app.inject(lookup('BCDF-GHJK', `${CONNECT_COOKIE}=${BROWSER}`));
+    expect(response.statusCode).toBe(401);
+    expect(calls).toEqual([]);
+  });
+
+  it('shows a device’s request with no address, and answers its confirm and deny with none', async () => {
+    const shown: RequestShown = {
+      ...SHOWN,
+      via: 'device',
+      // Never verified: a device's flow is bound to no address of the document's (6E3c review).
+      client: { ...SHOWN.client, verifiedBy: null },
+      redirectUri: null,
+      redirectHost: null,
+    };
+    const connected: ConsentWrite = {
+      outcome: 'connected',
+      redirectTo: null,
+      connection: {
+        via: 'device',
+        keyId: KEY,
+        agentId: AGENT,
+        clientId: SHOWN.client.id,
+        scopes: ['requests:read'],
+        expiresAt: new Date('2026-12-27T09:00:00.000Z'),
+      },
+    };
+    const { app } = await consentServer(connected, shown);
+    const read = await app.inject({ method: 'GET', url: `/v1/oauth/requests/${FLOW}`, headers: { cookie: cookies } });
+    expect(read.json()).toEqual({ ...shown, endsAt: '2026-09-28T09:15:00.000Z' });
+    const confirmed = await app.inject(write('/consent/confirm', { ...ASKED, stepUpChallengeId: CHALLENGE }));
+    expect(confirmed.json()).toMatchObject({ redirectTo: null, connection: { via: 'device' } });
+    const denied = await consentServer({ outcome: 'denied', redirectTo: null }, shown);
+    expect((await denied.app.inject(write('/deny', {}))).json()).toEqual({ redirectTo: null });
   });
 });

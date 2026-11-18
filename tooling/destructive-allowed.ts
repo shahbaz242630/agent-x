@@ -260,6 +260,16 @@ export const ALLOWED: readonly Allowed[] = [
     why: 'registered MCP clients that never connected, a day after they registered, or unused 90 days (0094)',
   },
   {
+    file: 'packages/core/src/modules/oauth/infrastructure/client-metadata-cache.ts',
+    match: "deleteFrom('oauth.client_metadata')",
+    guard: ".where('expires_at', '<=', new Date(now.getTime() - CLIENT_METADATA_STALE_MS))",
+    proof: {
+      file: 'packages/core/src/modules/oauth/infrastructure/oauth.db.test.ts',
+      title: 'keeps a document for a day, fetched again over its own row, and sweeps it once past its day',
+    },
+    why: "MCP clients' metadata documents past their day (0095): one still in use is fetched again",
+  },
+  {
     file: 'packages/core/src/modules/oauth/infrastructure/flows.ts',
     match: "deleteFrom('oauth.flows')",
     guard: ".where('ends_at', '<=', new Date(now.getTime() - DAY_MS))",

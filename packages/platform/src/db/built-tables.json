@@ -46,6 +46,7 @@
   "mandates.versions",
   "migrations.applied",
   "notifications.outbox",
+  "oauth.client_metadata",
   "oauth.clients",
   "oauth.flows",
   "organizations.organizations",
