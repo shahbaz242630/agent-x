@@ -32,7 +32,7 @@ import { checkedInput, MCP_TOOLS, MOST_TEXT, plainText, plainTexts, type Twinned
 import { recordTwins, twinOf } from './mcp-twins.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { registerAgentSelf } from './agent-self.ts';
-import { registerContract } from './contract.ts';
+import { NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { callTool as callToolCore, toolDefinitions } from './mcp-calls.ts';
 import { buildServer } from './server.ts';
 import { registerSpendRequests } from './spend-requests.ts';
@@ -786,6 +786,36 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
       b: { c: 'd' },
     });
   });
+
+  it('6F1 G5: takes hidden format characters out too, but keeps a joiner a script needs within a word', () => {
+    const zwnj = String.fromCodePoint(0x200c);
+    const zwj = String.fromCodePoint(0x200d);
+    // Zero-width space, word joiner, soft hyphen, byte order mark, Arabic letter mark, and a tag character's letter.
+    const hidden = String.fromCodePoint(0x200b, 0x2060, 0xad, 0xfeff, 0x61c, 0xe0041);
+    expect(plainText(`pay${hidden}me`)).toBe('payme');
+    // Variation selectors (both blocks), Hangul fillers, the combining grapheme joiner, a Mongolian free variation
+    // selector, unassigned tag-block characters and a private-use one: all hide text, all out (6F1 G5 review).
+    const masked = String.fromCodePoint(
+      0xfe0f,
+      0xe0100,
+      0xe01ef,
+      0x3164,
+      0x115f,
+      0xffa0,
+      0x34f,
+      0x180b,
+      0xe0000,
+      0xe0002,
+    );
+    expect(plainText(`pay${masked}me${String.fromCodePoint(0xe000)}`)).toBe('payme');
+    // Between two Latin letters a joiner changes nothing a person sees: out, as a visible name refuses it.
+    expect(plainText(`a${zwj}b${zwnj}c`)).toBe('abc');
+    // Persian's non-joiner between two Arabic letters, and Devanagari's joiner after a virama: kept.
+    const persian = `\u0645\u06CC${zwnj}\u062E\u0648\u0627\u0647\u0645`;
+    const devanagari = `\u0915\u094D${zwj}\u0937`;
+    expect(plainText(persian)).toBe(persian);
+    expect(plainText(devanagari)).toBe(devanagari);
+  });
 });
 
 describe('MCP over Streamable HTTP, both protocol eras, no session (6E2, MCP-Guide M3)', () => {
@@ -1086,6 +1116,43 @@ describe('an MCP tool stands only with its REST twin as it was registered (SEC-M
     ).toMatchObject({ method: 'GET,HEAD', scopes: ['requests:read'], status: 200 });
   });
 
+  it("6F1 G5: refuses a twin with a hook or a header check of its own, which its tool's call would skip", () => {
+    const agentRoute = (extra: Record<string, unknown>, headers?: unknown) =>
+      ({
+        method: 'POST',
+        url: '/v1/x',
+        handler: () => undefined,
+        config: { access: ['agent'] },
+        schema: { response: { 201: z.object({}) }, ...(headers !== undefined && { headers }) },
+        ...extra,
+      }) as never;
+    const own = () => undefined;
+    for (const hook of ['onRequest', 'preParsing', 'preValidation', 'preHandler', 'preSerialization', 'onSend']) {
+      expect(twinOf(agentRoute({ [hook]: own }))).toEqual({
+        problems: [`its route checks what its tool wouldn't (${hook} hook)`],
+      });
+    }
+    expect(twinOf(agentRoute({ preHandler: [own], onSend: [own] }))).toEqual({
+      problems: ["its route checks what its tool wouldn't (preHandler hook, onSend hook)"],
+    });
+    expect(twinOf(agentRoute({}, z.object({ 'x-signature': z.string() })))).toEqual({
+      problems: ["its route checks what its tool wouldn't (schema.headers)"],
+    });
+    expect(twinOf(agentRoute({}, { type: 'object' }))).toEqual({
+      problems: ["its route checks what its tool wouldn't (schema.headers)"],
+    });
+    // The contract's own: its answer checks, and the idempotency key and organisation headers.
+    const contract = NOT_FOUND_CHECKS as { preSerialization: unknown[]; onSend: unknown[] };
+    expect(
+      twinOf(
+        agentRoute(
+          { preSerialization: contract.preSerialization, onSend: contract.onSend },
+          z.object({ 'idempotency-key': z.string(), [ORGANIZATION_HEADER]: z.string() }),
+        ),
+      ),
+    ).toMatchObject({ method: 'POST', status: 201 });
+  });
+
   it('asks a key for every scope its twin names, never just one of them (a twin of two scopes)', () => {
     if (getAgent === undefined) throw new Error('no tools');
     const twin = twinOf(route({ access: ['agent'], agentScopes: ['requests:read', 'sources:read'] }));
@@ -1232,6 +1299,38 @@ describe('the MCP tools apart from any transport: definitions and results (6E2, 
     );
     expect(result.structuredContent).not.toHaveProperty('keyHash');
     expect(JSON.stringify(result.content)).not.toContain('not for agents');
+  });
+
+  it("6F1 G5: an answer its twin's schema refuses is a logged 500, as its twin's would be", async () => {
+    const getAgent = (await twinnedTools()).find(({ tool }) => tool.name === 'get_agent');
+    if (getAgent === undefined) throw new Error('missing tool');
+    const broken: TwinnedTool = {
+      ...getAgent,
+      tool: {
+        ...getAgent.tool,
+        answer: () => Promise.resolve({ outcome: 'answered', body: { agentId: 'not an id' }, summary: 'summary' }),
+      },
+    };
+    const failed: unknown[] = [];
+    const { result, called } = await callToolCore(
+      broken,
+      {},
+      {
+        agent: accepted([]),
+        correlationId: AFTER,
+        useCases: {
+          mandates: undefined,
+          decisions: undefined,
+          cancels: undefined,
+          reads: undefined,
+          registry: undefined,
+        },
+        logFailure: (error) => failed.push(error),
+      },
+    );
+    expect(called).toEqual({ tool: 'get_agent', status: 500, reason: 'INTERNAL_ERROR', pathIds: [] });
+    expect(result).toMatchObject({ isError: true, structuredContent: { error: { code: 'INTERNAL_ERROR' } } });
+    expect(failed).toEqual([expect.any(z.ZodError)]);
   });
 
   it('answers with a summary, then the structured content as JSON text, and refuses with the reason code alike', async () => {

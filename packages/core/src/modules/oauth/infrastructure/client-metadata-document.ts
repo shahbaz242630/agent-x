@@ -37,6 +37,7 @@ export type DocumentChecked =
  * AG6: and written exactly as the URL parser prints it, so the path matched against the allowlist is the path fetched
  * (the parser would tidy a `.` or `..` segment away, even one written `%2e`, and turn a `\` into a `/`), with no
  * %-encoded `.`, `/` or `\` in the path, which a server might decode into another path.
+ * 6F1 G5: and no path segment starting `..` (`..;`, Tomcat's path parameter), which a server might read as `..`.
  */
 export function isMetadataClientId(clientId: string): boolean {
   if (clientId.length > MOST_CHARACTERS || !clientId.startsWith('https://') || !URL.canParse(clientId)) return false;
@@ -47,7 +48,8 @@ export function isMetadataClientId(clientId: string): boolean {
     url.password === '' &&
     !clientId.includes('#') &&
     url.pathname !== '/' &&
-    !/%(?:2e|2f|5c)/i.test(url.pathname)
+    !/%(?:2e|2f|5c)/i.test(url.pathname) &&
+    !url.pathname.split('/').some((segment) => segment.startsWith('..'))
   );
 }
 
@@ -55,7 +57,8 @@ export function isMetadataClientId(clientId: string): boolean {
  * AG6: whether a client ID is a document address the allowlist trusts (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS, each
  * entry already checked at start). An origin trusts every address on it; a path prefix (ending in `/`) the addresses
  * whose path starts with it, a query or not; an exact address only itself, with no query, so a query can't make
- * another document of the same path. Same origin always: scheme, host and port, as the parser prints them.
+ * another document of the same path (6F1 G5: not even a bare trailing `?`, which the parser keeps in the text but not
+ * in `search`). Same origin always: scheme, host and port, as the parser prints them.
  */
 export function isTrustedMetadataClientId(clientId: string, trusted: readonly string[]): boolean {
   if (!isMetadataClientId(clientId)) return false;
@@ -66,7 +69,7 @@ export function isTrustedMetadataClientId(clientId: string, trusted: readonly st
     // An origin's path is `/`, a prefix every address on it starts with.
     return allowed.pathname.endsWith('/')
       ? url.pathname.startsWith(allowed.pathname)
-      : url.search === '' && url.pathname === allowed.pathname;
+      : !clientId.includes('?') && url.pathname === allowed.pathname;
   });
 }
 

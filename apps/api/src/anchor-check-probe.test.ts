@@ -365,6 +365,34 @@ describe("the probe's pages and its time (4D2e E8 follow-up)", () => {
     expect(lines('audit.anchor_check_done').at(-1)).toMatchObject({ chains: 3, unchanged: 2, failed: 1 });
   });
 
+  it('6F1 G5: counts a probe cut short found unmoved as unanchored, no alarm, where its anchor moved since', async () => {
+    const later: { anchors?: ReturnType<typeof probing>['anchors'] } = {};
+    const { check, steps, lines, anchors } = probing(
+      (chains, signal) => {
+        // Another copy anchors the second one further on while the probe runs.
+        later.anchors?.keep(
+          signAnchor(keys, { kind: 'organisation', orgId: ORGS[1] ?? '' }, point(2n), new Date(AT.getTime() + 1)),
+        );
+        const answered = new Map(chains.slice(0, 2).map(({ orgId }) => [orgId, { kind: 'same' } as const]));
+        return new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            resolve(answered);
+          });
+        });
+      },
+      120_000,
+      2,
+      { orgs: ORGS, runWithinMs: 80 },
+    );
+    later.anchors = anchors;
+    await check.run();
+    await check.run();
+
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([]);
+    expect(lines('audit.anchor_check_done').at(-1)).toMatchObject({ unchanged: 1, unanchored: 1, failed: 0 });
+  });
+
   it('raises the unchecked alarm, no hold, for one left unprobed past the stale limit', async () => {
     const { check, clock, steps, lines } = probing(halfThenTimeUp, 120_000, 2, { orgs: ORGS, runWithinMs: 80 });
     await check.run();

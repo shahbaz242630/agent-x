@@ -934,7 +934,14 @@ export function createAnchorCheck({
     const outcomes: Outcome[] = [];
     for (const [orgId, found] of probed) {
       const chain = { kind: 'organisation', orgId } as const;
-      const outcome = compared(chain, logger.child({ orgId }), reportOf(found), anchors.latest(chain), false);
+      const latest = anchors.latest(chain);
+      // 6F1 G5: as probedReport, the answer counts only against the very anchor it compared with. One anchored since (a
+      // hand-off, another copy) is read next run, never compared with the newer anchor: a false 'anchor' alarm and hold.
+      if (latest === undefined || !samePoint(found.anchor, latest)) {
+        outcomes.push('unanchored');
+        continue;
+      }
+      const outcome = compared(chain, logger.child({ orgId }), reportOf(found), latest, false);
       if (outcome === 'failed') await settle(from, orgId, undefined);
       outcomes.push(outcome);
     }

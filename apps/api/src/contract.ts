@@ -317,6 +317,9 @@ export const NOT_FOUND_CHECKS: object = Object.freeze({
   onSend: Object.freeze([answerLeaves]),
 });
 
+/** 6F1 G5: whether a route's hook is one the contract adds to every route (its answer checks), not the route's own. */
+export const isContractHook = (hook: unknown): boolean => hook === answerGuard || hook === answerLeaves;
+
 /**
  * Only the contract puts a hook between an answer being written and it
  * leaving. An onSend hook on the server or a plugin could rewrite an answer

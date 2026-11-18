@@ -124,6 +124,9 @@ export async function callTool(
     } else {
       pathIds = pathIdsOf(checked.parts.params);
       settled = await tool.answer(useCases, { agent, ...checked.parts, idempotent: checked.idempotent, correlationId });
+      // Written through its twin's own answer schema (SEC-AG-05) in here (6F1 G5), so an answer that fails it is a
+      // logged failure, as its twin's would be, never an unlogged throw.
+      if (settled.outcome === 'answered') settled = { ...settled, body: twin.answer.parse(settled.body) };
     }
   } catch (error) {
     // As the error path answers its twin: by its operation, so a decision in trouble is busy, never a 500.
@@ -133,8 +136,8 @@ export async function callTool(
   }
   if (settled.outcome === 'answered') {
     const called: ToolCalled = { tool: tool.name, status: twin.status, reason: undefined, pathIds };
-    // Written through its twin's own answer schema first (SEC-AG-05), then every text in it made plain.
-    const structuredContent = plainTexts(twin.answer.parse(settled.body));
+    // Already written through its twin's answer schema above; every text in it made plain.
+    const structuredContent = plainTexts(settled.body);
     const result = { content: textsOf(settled.summary, structuredContent), structuredContent, isError: false };
     return { result, called };
   }

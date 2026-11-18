@@ -21,6 +21,7 @@ import { Confirm } from '../confirm.tsx';
 import { type HeldTry, heldTry, holdTry } from '../held-tries.ts';
 import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
+import { isBankPage } from '../sources.ts';
 import { byPasskey } from '../step-up.ts';
 import {
   ADDING,
@@ -183,9 +184,14 @@ function PartnerForm({
   return (
     <>
       <p>{t('suppliers.bank.formIntro', { time: timeText(page.expiresAt) })}</p>
-      <a className="link" href={page.url} target="_blank" rel="noopener noreferrer">
-        {t('suppliers.bank.formOpen')}
-      </a>
+      {/* 6F1 G5: a link only to an https page, as a bank link's (source-link.tsx): never javascript: or plain http. */}
+      {isBankPage(page.url) ? (
+        <a className="link" href={page.url} target="_blank" rel="noopener noreferrer">
+          {t('suppliers.bank.formOpen')}
+        </a>
+      ) : (
+        <p className="notice">{t('suppliers.bank.formBadPage')}</p>
+      )}
       <button type="button" className="primary" disabled={sending.busy} onClick={() => void check()}>
         {t('suppliers.bank.formCheck')}
       </button>
