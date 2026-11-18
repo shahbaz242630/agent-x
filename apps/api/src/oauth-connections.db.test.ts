@@ -601,13 +601,15 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
     const agentId = await agent(org, admin);
     const code = codeOf(await allowed(admin, await opened(), { agentId, scopes: ['requests:read'] }));
     expect(await exchange(code, { codeVerifier: 'w'.repeat(43) })).toMatchObject({ error: 'invalid_grant' });
-    // The right verifier now finds the code used, and its key already revoked.
+    // Revoked by the failed exchange itself, before anyone sends the code again.
+    const status = () =>
+      withSignedStates(app, org, quiet(), (tx, states) =>
+        agentKeysOf(tx, states, org, agentId, 'share', 'connections'),
+      );
+    expect(await status()).toMatchObject({ keys: [{ status: 'REVOKED' }] });
+    // The right verifier now finds the code used, with nothing left to revoke.
     expect(await exchange(code)).toMatchObject({ error: 'invalid_grant' });
-    await withSignedStates(app, org, quiet(), async (tx, states) => {
-      expect(await agentKeysOf(tx, states, org, agentId, 'share', 'connections')).toMatchObject({
-        keys: [{ status: 'REVOKED' }],
-      });
-    });
+    expect(lines('oauth.code_reused')).toEqual([expect.objectContaining({ revoked: false })]);
   });
 
   it('revokes the connection when its code is sent again: someone else holds it', async () => {
