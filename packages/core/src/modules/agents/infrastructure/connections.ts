@@ -12,13 +12,13 @@
 // outside the audit module's steps, as for a key's row (agent-keys.ts).
 import { sql } from 'kysely';
 
-import type {
-  AuditActor,
-  RecordedState,
-  SignedStates,
-  StateCheck,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  checkOf,
+  type RecordedState,
+  type SignedStates,
+  type TamperSign,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { AGENT_KEYS, agentKeyOf, type AgentKeyRecord, keyRecordOf } from './agent-keys.ts';
@@ -222,13 +222,6 @@ export interface ConnectionListed {
   readonly lastConnectedAt: Date | null;
 }
 
-/** The check verifiedStates answered for one of the IDs it was asked: it answers every one. */
-const checkFor = (checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck => {
-  const check = checks.get(id.toLowerCase());
-  if (check === undefined) throw new Error(`A signed state was asked for and not read: ${id}`);
-  return check;
-};
-
 /**
  * The agent's connections, newest first, at most MOST_CONNECTIONS_LISTED: every live one, and those ended (revoked or
  * expired) whose key expired, or would have, less than ENDED_CONNECTIONS_SHOWN_DAYS before `now`. One statement for
@@ -275,23 +268,24 @@ export async function connectionsListed(
   const ids = rows.map(({ id }) => id);
   const keyChecks = await states.verifiedStates(tx, AGENT_KEYS, orgId, ids);
   const connectionChecks = await states.verifiedStates(tx, CONNECTIONS, orgId, ids);
-  const ours = agentId.toLowerCase();
   const connections: ConnectionListed[] = [];
   for (const row of rows) {
-    const keyCheck = checkFor(keyChecks, row.id);
-    const connectionCheck = checkFor(connectionChecks, row.id);
+    const keyCheck = checkOf(keyChecks, row.id.toLowerCase());
+    const connectionCheck = checkOf(connectionChecks, row.id.toLowerCase());
     if (keyCheck.outcome === 'tampered') return keyCheck;
     if (connectionCheck.outcome === 'tampered') return connectionCheck;
+    // Neither is ever deleted, so both are there: one gone since its row was listed is no connection to show.
     if (keyCheck.outcome === 'missing' || connectionCheck.outcome === 'missing') continue;
+    // Both rows name the agent (the list's own condition, and the connection's foreign key to the key with its
+    // agent), and each equals its seal or was answered tampered just above: both are the agent's.
     const key = keyRecordOf(row.id, keyCheck);
     const connection = connectionRecordOf(row.id, connectionCheck);
-    if (key.agentId !== ours || connection.agentId !== ours) continue;
     connections.push({
       connection,
       key,
       clientName: row.client_name,
       // The table's check holds it to the two.
-      via: row.via === 'device' ? 'device' : 'code',
+      via: row.via as ConnectionVia,
       madeBy: row.made_by,
       createdAt: row.created_at,
       lastConnectedAt: row.last_connected_at,

@@ -12,6 +12,7 @@ import {
   addAgent,
   addAgentKey,
   agentKeysOf,
+  AGENT_KEYS,
   AGENTS,
   CONNECTIONS,
   createConnectionTokenCheck,
@@ -1002,6 +1003,36 @@ async function revoked(who: Member, named: { agentId: string; keyId: string }) {
   );
 }
 
+/** An admin removes the member from the organisation (deactivates them), with step-up: the confirm's write. */
+async function removed(admin: Member, gone: Member) {
+  const memberships = createMembershipChanges({
+    database: app,
+    keys,
+    ids,
+    challenges: challenges(),
+    outbox: createOutbox({ ids, clock }),
+    logger: testLogger(),
+    leaving: connectionsOfLeaving(clock),
+  });
+  const asked = await memberships.ask(
+    admin,
+    keyed(admin, DEACTIVATE_OPERATION, gone.membershipId),
+    gone.membershipId,
+    { kind: 'deactivate' },
+    CORRELATION,
+  );
+  if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+  await stepUp(admin, asked.stepUpChallengeId);
+  return memberships.confirm(
+    admin,
+    keyed(admin, DEACTIVATE_CONFIRM_OPERATION, `${gone.membershipId} confirm`),
+    gone.membershipId,
+    { kind: 'deactivate' },
+    asked.stepUpChallengeId,
+    CORRELATION,
+  );
+}
+
 describe(`SEC-OAUTH-06, -07 an agent's connections listed (Postgres ${server.version})`, () => {
   it('lists them newest first, each as its signed state says, ended ones until 90 days after their expiry', async () => {
     const org = await organization();
@@ -1161,34 +1192,7 @@ describe(`SEC-OAUTH-07, -10 a connection revoked by a member (Postgres ${server.
     const agentId = await agent(org, developer);
     const theirs = await connected(org, developer, agentId);
     const kept = await connected(org, admin, agentId);
-    const memberships = createMembershipChanges({
-      database: app,
-      keys,
-      ids,
-      challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
-      logger: testLogger(),
-      leaving: connectionsOfLeaving(clock),
-    });
-    const asked = await memberships.ask(
-      admin,
-      keyed(admin, DEACTIVATE_OPERATION, developer.membershipId),
-      developer.membershipId,
-      { kind: 'deactivate' },
-      CORRELATION,
-    );
-    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
-    await stepUp(admin, asked.stepUpChallengeId);
-    expect(
-      await memberships.confirm(
-        admin,
-        keyed(admin, DEACTIVATE_CONFIRM_OPERATION, `${developer.membershipId} confirm`),
-        developer.membershipId,
-        { kind: 'deactivate' },
-        asked.stepUpChallengeId,
-        CORRELATION,
-      ),
-    ).toMatchObject({ outcome: 'written', member: { status: 'DEACTIVATED' } });
+    expect(await removed(admin, developer)).toMatchObject({ outcome: 'written', member: { status: 'DEACTIVATED' } });
 
     expect(await accepted(theirs.accessToken)).toEqual({ outcome: 'refused' });
     expect(await accepted(kept.accessToken)).toMatchObject({ outcome: 'accepted' });
@@ -1201,5 +1205,70 @@ describe(`SEC-OAUTH-07, -10 a connection revoked by a member (Postgres ${server.
     expect(events.map(({ details }) => details)).toEqual([
       expect.objectContaining({ reason: 'member_removed', membershipId: developer.membershipId }),
     ]);
+  });
+
+  it('answers INTEGRITY_FAILED for anything tampered with, changing nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const { keyId } = await connected(org, developer, agentId);
+    const integrityFailed = { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
+
+    // The connection's key: its scopes widened behind the seal. Its list, its revocation and its maker's removal refuse.
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    const saved = await owner.saveRow(keyId);
+    await owner.setColumn(keyId, 'scopes', 'requests:read requests:write sources:read suppliers:read');
+    await owner.end();
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toEqual(integrityFailed);
+    expect(await revoked(admin, { agentId, keyId })).toEqual(integrityFailed);
+    expect(await removed(admin, developer)).toEqual(integrityFailed);
+
+    // The agent, the key put back: the revocation refuses, and the connection is untouched.
+    const restoring = await tamperAsOwner(database, AGENT_KEYS, org);
+    await restoring.restoreRow(saved);
+    await restoring.end();
+    const agents = await tamperAsOwner(database, AGENTS, org);
+    await agents.setColumn(agentId, 'scopes', 'requests:read requests:write sources:read suppliers:read');
+    await agents.end();
+    expect(await revoked(admin, { agentId, keyId })).toEqual(integrityFailed);
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toEqual(integrityFailed);
+    expect(await connectionChanges().list(org, ids.next(), CORRELATION)).toMatchObject({ code: 'NOT_FOUND' });
+    expect(await revoked(admin, { agentId: ids.next(), keyId })).toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe(`SEC-OAUTH-06 a connection's own record tampered with, at its revocation (Postgres ${server.version})`, () => {
+  it('answers INTEGRITY_FAILED, and a wrong step-up STEP_UP_FAILED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { keyId } = await connected(org, admin, agentId);
+    const changes = connectionChanges();
+    const asked = await changes.revoke(
+      admin,
+      keyed(admin, CONNECTION_REVOKE_OPERATION, keyId),
+      { agentId, keyId },
+      CORRELATION,
+    );
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    expect(
+      await changes.revokeConfirm(
+        admin,
+        keyed(admin, CONNECTION_REVOKE_CONFIRM_OPERATION, `${keyId} unproven`),
+        { agentId, keyId },
+        asked.stepUpChallengeId,
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
+
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    await owner.deleteEvents(keyId);
+    await owner.end();
+    expect(await revoked(admin, { agentId, keyId })).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
   });
 });
