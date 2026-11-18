@@ -52,6 +52,43 @@ const originList = text.transform((raw, ctx) => {
   return [...new Set(entries)].sort();
 });
 
+/**
+ * AG6: an entry of AGENTX_OAUTH_CLIENT_METADATA_ORIGINS. An origin trusts every document there; an address under one
+ * trusts less: ending in `/`, the documents under that path; otherwise that one document. Written exactly as the URL
+ * parser prints it (so no `.` or `..` segment, user, query or fragment), and no %-encoded `.`, `/` or `\` a server
+ * might decode into another path.
+ */
+function isClientMetadataEntry(entry: string): boolean {
+  if (isCanonicalOrigin(entry)) return true;
+  if (!URL.canParse(entry)) return false;
+  const url = new URL(entry);
+  return (
+    isCanonicalOrigin(url.origin) &&
+    `${url.origin}${url.pathname}` === entry &&
+    url.pathname !== '/' &&
+    !/%(?:2e|2f|5c)/i.test(url.pathname)
+  );
+}
+
+/** `none` is no entry; otherwise every entry checked, so a malformed one is named by its place (not zod's "Invalid input"). */
+const clientMetadataList = text.transform((raw, ctx): string[] => {
+  if (raw === 'none') return [];
+  const entries = raw.split(',');
+  const bad = entries.flatMap((entry, index) => (isClientMetadataEntry(entry) ? [] : [index + 1]));
+  if (bad.length > 0) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        `entry ${bad.join(', ')} is neither an origin nor a document's address. Write each as https://host ` +
+        '(every document there), https://host/path/ (those under that path) or https://host/path/client.json ' +
+        '(that one): lowercase, no default port, no user name, query, fragment, . or .. segment or %-encoded ' +
+        '. / or \\, comma-separated with no spaces',
+    });
+    return z.NEVER;
+  }
+  return [...new Set(entries)].sort();
+});
+
 const publicOrigin = text.refine(isCanonicalOrigin, {
   error:
     'is not an origin. Write it as scheme://host[:port]: http or https, lowercase, no default port, no path, no user name',
@@ -263,11 +300,12 @@ const SETTINGS = {
     schema: text.pipe(z.enum(['off', 'on'], { error: 'must be off or on' })),
     default: 'off',
   },
-  // 6E3c (ADR-016, decision 2): the origins whose MCP clients may name themselves by a client ID metadata document,
-  // an https address Agent X fetches (CIMD). Each must also be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; `none` takes none.
-  // Unset: the three well-known clients' origins, those of them on the outbound allowlist (config.ts).
+  // 6E3c (ADR-016, decision 2): where MCP clients may name themselves by a client ID metadata document, an https
+  // address Agent X fetches (CIMD). Each entry an origin, a path prefix ending in `/` or one document's exact address
+  // (AG6, isClientMetadataEntry); each entry's origin must also be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; `none` takes
+  // none. Unset: the well-known clients' origins, those of them on the outbound allowlist (config.ts).
   AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: {
-    schema: z.union([z.literal('none').transform((): string[] => []), originList]).optional(),
+    schema: clientMetadataList.optional(),
   },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
