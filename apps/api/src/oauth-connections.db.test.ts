@@ -38,6 +38,7 @@ import {
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   challengeOf,
+  DEVICE_CODE_GRANT,
   flowById,
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_BROWSER,
@@ -83,7 +84,7 @@ import {
 } from './connection-consents.ts';
 import { createOauthAuthorizing, type OauthAuthorizing } from './oauth-authorizing.ts';
 import type { ClientMetadataFetch, MetadataFetched } from './oauth-client-metadata.ts';
-import { createOauthClients } from './oauth-clients.ts';
+import { createOauthClients, MOST_FETCHES_A_MINUTE, type OauthClients, REFUSED_FOR_MS } from './oauth-clients.ts';
 import { createOauthDevice } from './oauth-device.ts';
 import { createOauthGrants, type GrantAnswer, type OauthGrants } from './oauth-grants.ts';
 import { capabilitiesOf } from './oauth-wire.ts';
@@ -119,6 +120,7 @@ let authorizing: OauthAuthorizing;
 let grants: OauthGrants;
 let consents: ConnectionConsents;
 let clientId: string;
+let oauthClients: OauthClients;
 
 const challenges = () => createStepUpChallenges({ ids, clock });
 const quiet = () => ({ keys, ids, logger: testLogger() });
@@ -294,6 +296,7 @@ beforeEach(async () => {
   noted = [];
   const logger = testLogger(capture);
   const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  oauthClients = clients;
   authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
   grants = createOauthGrants({
     database: app,
@@ -303,6 +306,7 @@ beforeEach(async () => {
     logger,
     capabilities,
     securityEvents: { note: (event) => noted.push(event) },
+    clients,
   });
   consents = createConnectionConsents({
     database: app,
@@ -704,6 +708,7 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
         logger: testLogger(capture),
         capabilities,
         securityEvents: { note: () => undefined },
+        clients: oauthClients,
       });
       const exchanging = { code: sent, clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER, resource: undefined };
       expect(await once.exchangeCode(exchanging, CALLER)).toMatchObject({
@@ -871,6 +876,7 @@ describe(`refusals on the way (Postgres ${server.version})`, () => {
       logger: testLogger(capture),
       capabilities,
       securityEvents: { note: () => undefined },
+      clients: oauthClients,
     });
     expect(
       await elsewhere.refresh(
@@ -923,6 +929,7 @@ describe(`busy: a database limit answered as temporarily_unavailable (Postgres $
         logger: testLogger(capture),
         capabilities,
         securityEvents: { note: () => undefined },
+        clients: oauthClients,
       });
       const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
       expect(await busy.refresh(refresh, CALLER)).toMatchObject({ status: 503, error: 'temporarily_unavailable' });
@@ -1643,6 +1650,45 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     grants.exchangeDevice({ deviceCode, clientId: client }, CALLER);
   const errorOf = (answer: GrantAnswer) => (answer.outcome === 'refused' ? answer.error : answer.outcome);
 
+  /** The code-flow client every other case uses: it never listed the device flow. */
+  let codeOnly: string;
+  beforeEach(async () => {
+    codeOnly = clientId;
+    // A client that registered for the device flow, named as the one above.
+    const registered = await authorizing.register(
+      { redirect_uris: [REDIRECT], client_name: 'ChatGPT', grant_types: [DEVICE_CODE_GRANT] },
+      CORRELATION,
+    );
+    if (registered.outcome !== 'registered') throw new Error('registered');
+    clientId = registered.client.clientId;
+  });
+
+  it('6E3c review: refuses the device flow to a client that never listed it, at its codes and at its poll', async () => {
+    expect(await deviceOf().authorize({ client_id: codeOnly }, CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 400,
+      error: 'unauthorized_client',
+    });
+    // And the code flow to a client that registered for the device flow alone.
+    const back = await authorizing.authorize(
+      {
+        response_type: 'code',
+        client_id: clientId,
+        redirect_uri: REDIRECT,
+        state: 'xyz',
+        code_challenge: challengeOf(VERIFIER),
+        code_challenge_method: 'S256',
+      },
+      undefined,
+    );
+    if (back.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(back)}`);
+    expect(new URL(back.redirectTo).searchParams.get('error')).toBe('unauthorized_client');
+    // A client gone since its codes were given: its poll is refused too.
+    const given = await codes();
+    await database.as('admin').query('delete from oauth.clients where client_id = $1', [clientId]);
+    expect(errorOf(await poll(given.deviceCode))).toBe('unauthorized_client');
+  });
+
   it('connects a device: its codes, the person types the code, consents, and the device’s poll gets the pair once', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -1742,7 +1788,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
   const CLAUDE_BACK = 'https://claude.ai/api/mcp/auth_callback';
 
   /** Clients over a stand-in fetcher that answers `answer` for a listed address, counting its fetches. */
-  function metadataClients(answer: () => MetadataFetched) {
+  function metadataClients(answer: () => MetadataFetched, at: FixedClock = clock) {
     const fetched: string[] = [];
     const metadata: ClientMetadataFetch = {
       listed: (id) => id.startsWith('https://claude.ai/'),
@@ -1751,7 +1797,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
         return Promise.resolve(answer());
       },
     };
-    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
     const viaDocument = createOauthAuthorizing({
       database: app,
       clock,
@@ -1770,7 +1816,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
       issuer: capabilities.issuer,
       clients,
     });
-    return { viaDocument, consentsOf, fetched };
+    return { viaDocument, consentsOf, fetched, clients };
   }
 
   const ask = (via: OauthAuthorizing, client = CLIENT_URL) =>
@@ -1804,10 +1850,13 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);
     const challengeId = askedFor(
-      await consentsOf.consent(admin, keyed(admin, CONSENT_OPERATION, 'cimd'), flow, {
-        agentId,
-        scopes: ['requests:read'],
-      }),
+      await consentsOf.consent(
+        admin,
+        keyed(admin, CONSENT_OPERATION, 'cimd'),
+        flow,
+        { agentId, scopes: ['requests:read'] },
+        CORRELATION,
+      ),
     );
     await stepUp(admin, challengeId);
     const write = await consentsOf.confirm(
@@ -1888,5 +1937,96 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     expect(one).toEqual(other);
     expect(one).toMatchObject({ clientId: id, verifiedBy: 'claude.ai' });
     expect(fetched).toEqual([id]);
+  });
+});
+
+describe(`6E3c review: a document's name never vouches for a device, and its fetches are held (Postgres ${server.version})`, () => {
+  const HERMES = 'https://claude.ai/oauth/device-client';
+  const listedFetch = (answer: (id: string) => MetadataFetched) => {
+    const fetched: string[] = [];
+    const metadata: ClientMetadataFetch = {
+      listed: (id) => id.startsWith('https://claude.ai/'),
+      fetch: (id) => {
+        fetched.push(id);
+        return Promise.resolve(answer(id));
+      },
+    };
+    return { metadata, fetched };
+  };
+
+  it('shows a device’s request from a document’s client as what it says it is, never verified', async () => {
+    const { metadata } = listedFetch((id) => ({
+      outcome: 'fetched',
+      document: {
+        client_id: id,
+        client_name: 'Claude',
+        redirect_uris: ['https://claude.ai/cb'],
+        grant_types: [DEVICE_CODE_GRANT],
+      },
+    }));
+    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    const given = await device.authorize({ client_id: HERMES }, CORRELATION);
+    if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
+    const found = await device.lookup(given.codes.userCode, undefined);
+    if (found.outcome !== 'claimed') throw new Error('not claimed');
+    const shown = createConnectionConsents({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      logger: testLogger(capture),
+      issuer: capabilities.issuer,
+      clients,
+    });
+    expect(await shown.request({ flowId: found.requestId, cookie: found.cookie })).toMatchObject({
+      via: 'device',
+      client: { id: HERMES, name: 'Claude', verifiedBy: null },
+    });
+  });
+
+  it('refuses the device flow to a document that lists no device grant: Claude’s own can’t be borrowed', async () => {
+    const { metadata } = listedFetch((id) => ({
+      outcome: 'fetched',
+      document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
+    }));
+    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    expect(await device.authorize({ client_id: 'https://claude.ai/oauth/code-only' }, CORRELATION)).toMatchObject({
+      error: 'unauthorized_client',
+    });
+  });
+
+  it('fetches a refused document again only after 5 minutes', async () => {
+    const at = new FixedClock(START);
+    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'status' }));
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const id = 'https://claude.ai/oauth/refused-once';
+    expect(await clients.find(id)).toBeUndefined();
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toEqual([id]);
+    at.advanceBy(REFUSED_FOR_MS - 1);
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toHaveLength(1);
+    at.advanceBy(1);
+    expect(await clients.find(id)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+  });
+
+  it(`fetches one origin at most ${String(MOST_FETCHES_A_MINUTE)} times a minute, saying so once`, async () => {
+    const at = new FixedClock(START);
+    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'status' }));
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    for (let path = 0; path <= MOST_FETCHES_A_MINUTE + 2; path += 1) {
+      await clients.find(`https://claude.ai/oauth/varied-${String(path)}`);
+    }
+    expect(fetched).toHaveLength(MOST_FETCHES_A_MINUTE);
+    expect(lines('oauth.client_metadata_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', most: MOST_FETCHES_A_MINUTE }),
+    ]);
+    at.advanceBy(60_000);
+    await clients.find('https://claude.ai/oauth/varied-next-minute');
+    expect(fetched).toHaveLength(MOST_FETCHES_A_MINUTE + 1);
   });
 });

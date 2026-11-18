@@ -305,6 +305,7 @@ describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', ()
     ['a secret', { ...DOCUMENT, client_secret: 'shh' }, 'not_public'],
     ['no code response', { ...DOCUMENT, response_types: ['token'] }, 'response_types'],
     ['grant types that are no list', { ...DOCUMENT, grant_types: 'authorization_code' }, 'grant_types'],
+    ['grant types none of which are ours', { ...DOCUMENT, grant_types: ['client_credentials'] }, 'grant_types'],
   ])('refuses %s', (_, document, reason) => {
     expect(checkClientMetadataDocument(CLIENT_ID, document)).toEqual({ outcome: 'invalid', reason });
   });

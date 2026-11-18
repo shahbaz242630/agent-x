@@ -335,7 +335,13 @@ export function createConnectionConsents({
       return {
         id: flow.id,
         via: flow.kind,
-        client: { id: flow.clientId, name: client?.name ?? unnamed(flow), verifiedBy: client?.verifiedBy ?? null },
+        client: {
+          id: flow.clientId,
+          name: client?.name ?? unnamed(flow),
+          // Only a browser's flow is bound to the document's own addresses: a device's could be anyone's, under any
+          // client's name, so it is never shown as verified (6E3c review).
+          verifiedBy: flow.kind === 'code' ? (client?.verifiedBy ?? null) : null,
+        },
         redirectUri,
         redirectHost: redirectUri === null ? null : new URL(redirectUri).host,
         loopback: redirectUri !== null && isLoopback(redirectUri),

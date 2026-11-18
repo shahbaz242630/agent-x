@@ -188,6 +188,10 @@ export function createOauthAuthorizing({
       }),
     });
     back.redirectTo = refused;
+    // Only a client whose registration or document lists the code flow may use it (6E3c).
+    if (!client.grantTypes.includes('authorization_code')) {
+      return refused('unauthorized_client', 'This client may not use the code flow.');
+    }
     const wrong = requestRefusal(asked, given !== undefined && state === null, capabilities.resource);
     if (wrong !== undefined) return refused(...wrong);
     // Checked just above: a challenge and scopes there are.

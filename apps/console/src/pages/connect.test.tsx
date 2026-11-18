@@ -576,6 +576,9 @@ describe('an app named by its document, and a device (6E3c)', () => {
     open(page);
     expect(await screen.findByText(/This is a device, such as a server or a command line/)).toBeDefined();
     expect(screen.queryByText(/sends you back to/)).toBeNull();
+    // Named only by what it says it is: a device is never shown as published by a host (6E3c review).
+    expect(screen.getByText(/An app that says it is “Claude Desktop”/)).toBeDefined();
+    expect(screen.queryByText(/published by/)).toBeNull();
   });
 
   it('tells a device no, and goes to the device page to say so', async () => {

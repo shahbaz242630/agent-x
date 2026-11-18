@@ -9,6 +9,7 @@ export {
   type ClientRegistration,
   DEVICE_CODE_GRANT,
   GRANT_TYPES,
+  type GrantType,
   MOST_REDIRECTS,
   type RegistrationAsked,
   type RegistrationChecked,

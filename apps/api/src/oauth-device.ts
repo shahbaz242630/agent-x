@@ -5,7 +5,8 @@
 // decides.
 //
 // - `authorize` (`POST /v1/oauth/device_authorization`): a known client
-//   (registered, or named by an allowlisted document), the scopes it asks for
+//   (registered, or named by an allowlisted document) that lists the device
+//   flow among its grant types, the scopes it asks for
 //   and our MCP endpoint as its resource; a flow opened for 15 minutes, the
 //   device polling every 5 seconds. Both codes are kept as their SHA-256.
 // - `lookup` (`POST /v1/oauth/device/lookup`, a signed-in person, 5 tries a
@@ -14,6 +15,7 @@
 //   browser's (connection-consents.ts). A code typed wrong, ended, decided or
 //   claimed by another browser: nothing found, and nothing said of which.
 import {
+  DEVICE_CODE_GRANT,
   deviceClaimed,
   FLOW_SECONDS,
   hashOf,
@@ -124,6 +126,11 @@ export function createOauthDevice({
       try {
         const client = asked.client_id === undefined ? undefined : await clients.find(asked.client_id);
         if (client === undefined) return refused(401, 'invalid_client', 'The client is not one Agent X knows.');
+        // Only a client whose registration or document lists the device flow (RFC 8628 §3.1): no one may borrow
+        // another client's name, Claude's document among them, for a device of their own.
+        if (!client.grantTypes.includes(DEVICE_CODE_GRANT)) {
+          return refused(400, 'unauthorized_client', 'This client may not use the device flow.');
+        }
         const scopes = scopesAsked(asked.scope);
         if (scopes === undefined) return refused(400, 'invalid_scope', 'A scope asked for is not one Agent X has.');
         // SEC-OAUTH-01: optional (RFC 8707), and only ever our MCP endpoint.

@@ -54,9 +54,11 @@ import { type DirectoryTables, listedAgentKey } from '@agentx/core/modules/direc
 import {
   type AnyFlowRead,
   clientSeen,
+  DEVICE_CODE_GRANT,
   codeHeld,
   codeUsed,
   deviceFlowOfCode,
+  type DeviceFlowRead,
   deviceHeld,
   devicePolled,
   flowOfCode,
@@ -82,6 +84,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import type { OauthClients } from './oauth-clients.ts';
 import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
@@ -187,6 +190,12 @@ const DEVICE_WAITING = {
     error: 'expired_token',
     description: 'The device code ended unused; ask for new codes.',
   },
+  unauthorized: {
+    outcome: 'refused',
+    status: 400,
+    error: 'unauthorized_client',
+    description: 'This client may not use the device flow.',
+  },
 } as const satisfies Record<string, GrantAnswer>;
 
 /** What revokes a connection that a reused code or token gives away: the server itself. */
@@ -211,6 +220,7 @@ export function createOauthGrants({
   logger,
   capabilities,
   securityEvents,
+  clients,
 }: {
   readonly database: Database<Tables>;
   readonly keys: KeyProvider;
@@ -219,6 +229,8 @@ export function createOauthGrants({
   readonly logger: Logger;
   readonly capabilities: Capabilities;
   readonly securityEvents: SecurityEventSink;
+  /** The clients known: a device's client must list the device flow (6E3c). */
+  readonly clients: OauthClients;
 }): OauthGrants {
   /** The organisation's own transaction, counted against its share as an agent's work is (PL-63). */
   const inOrganisation = <T>(
@@ -335,6 +347,21 @@ export function createOauthGrants({
     return refusedFor(caller, reason, { clientId: flow.clientId, flowId: flow.id, keyId: flow.keyId });
   };
 
+  /** A device's poll answered before any pair: told no, collected, ended, or still waiting; undefined once allowed. */
+  const deviceWaiting = async (known: DeviceFlowRead, caller: Caller, now: Date): Promise<GrantAnswer | undefined> => {
+    if (known.decided === 'denied') return DEVICE_WAITING.denied;
+    if (known.usedAt !== null) return refusedFor(caller, 'device_used', { clientId: known.clientId, flowId: known.id });
+    if (known.endsAt.getTime() <= now.getTime()) {
+      // Allowed but never collected: its connection can never work, so it goes (as a code spent unused does).
+      if (known.decided === 'allowed') await codeSpent(known, caller, 'device_expired');
+      return DEVICE_WAITING.expired;
+    }
+    if (known.decided === null) {
+      return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
+    }
+    return undefined;
+  };
+
   const grants = {
     async exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer> {
       if (!isCodeText(asked.code)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
@@ -394,18 +421,12 @@ export function createOauthGrants({
           clientId: asked.clientId,
         });
       }
+      // Its grant types read again: a document changed since, or a client gone, takes the device flow away.
+      const client = await clients.find(known.clientId);
+      if (client?.grantTypes.includes(DEVICE_CODE_GRANT) !== true) return DEVICE_WAITING.unauthorized;
       const now = clock.now();
-      if (known.decided === 'denied') return DEVICE_WAITING.denied;
-      if (known.usedAt !== null)
-        return refusedFor(caller, 'device_used', { clientId: known.clientId, flowId: known.id });
-      if (known.endsAt.getTime() <= now.getTime()) {
-        // Allowed but never collected: its connection can never work, so it goes (as a code spent unused does).
-        if (known.decided === 'allowed') await codeSpent(known, caller, 'device_expired');
-        return DEVICE_WAITING.expired;
-      }
-      if (known.decided === null) {
-        return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
-      }
+      const waiting = await deviceWaiting(known, caller, now);
+      if (waiting !== undefined) return waiting;
       const { orgId, keyId } = known;
       if (orgId === null || keyId === null) return refusedFor(caller, 'device_unknown', { clientId: asked.clientId });
       // As a code's: from the flow's use to its tokens in one transaction, so a busy rolls the use back too.

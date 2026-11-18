@@ -10,6 +10,8 @@ const OAUTH_ERRORS = [
   'invalid_request',
   'invalid_client',
   'invalid_grant',
+  // A flow the client never registered, nor its document lists (6E3c): its grant types bind it.
+  'unauthorized_client',
   'unsupported_grant_type',
   'invalid_scope',
   'invalid_target',

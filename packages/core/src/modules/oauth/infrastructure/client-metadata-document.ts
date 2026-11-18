@@ -54,10 +54,14 @@ const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
 const isTextList = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every((one) => typeof one === 'string');
 
-/** The grant types the document names that we know, or the code flow's alone where it names none of them. */
-function grantsOf(value: unknown): readonly GrantType[] {
-  const known = isTextList(value) ? GRANT_TYPES.filter((grant) => value.some((one) => one === grant)) : [];
-  return known.length > 0 ? known : ['authorization_code'];
+/**
+ * The grant types the document names that we know, or the code flow's alone where it names none (RFC 7591 §2's
+ * default); undefined where it names some, none of which we know: no flow of ours is the client's.
+ */
+function grantsOf(value: readonly string[] | undefined): readonly GrantType[] | undefined {
+  if (value === undefined) return ['authorization_code'];
+  const known = GRANT_TYPES.filter((grant) => value.includes(grant));
+  return known.length > 0 ? known : undefined;
 }
 
 /** The name the document gives, if it is a visible one, or the client ID's host. */
@@ -85,14 +89,17 @@ export function checkClientMetadataDocument(clientId: string, document: unknown)
   if (method !== 'none' || 'client_secret' in document) return invalid('not_public');
   const responses = document.response_types ?? ['code'];
   if (!isTextList(responses) || !responses.includes('code')) return invalid('response_types');
-  if (document.grant_types !== undefined && !isTextList(document.grant_types)) return invalid('grant_types');
+  const grants = document.grant_types;
+  if (grants !== undefined && !isTextList(grants)) return invalid('grant_types');
+  const grantTypes = grantsOf(grants);
+  if (grantTypes === undefined) return invalid('grant_types');
   return {
     outcome: 'valid',
     document: {
       clientId,
       name: nameOf(document.client_name, clientId),
       redirectUris: [...redirects],
-      grantTypes: grantsOf(document.grant_types),
+      grantTypes,
     },
   };
 }

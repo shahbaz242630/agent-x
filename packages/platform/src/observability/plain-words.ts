@@ -507,6 +507,11 @@ export const PLAIN_WORDS = {
     broke: 'That app cannot connect until it can be read; other apps are not affected.',
     next: 'The reason says why: a timeout or refusal is the site or network; a bad document is the app maker’s.',
   },
+  'oauth.client_metadata_capped': {
+    happened: "MCP apps' metadata documents were asked for from one site more than 20 times in a minute.",
+    broke: 'Apps from that site not already known were refused for the rest of the minute; known ones carry on.',
+    next: 'Someone may be varying addresses to make Agent X fetch: look for one source sending many authorize calls.',
+  },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
     broke: 'Those documents stay a little longer; an app in use is fetched again anyway, so nothing is affected.',

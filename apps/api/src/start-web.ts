@@ -341,6 +341,7 @@ export async function startWeb(
         logger,
         capabilities,
         securityEvents: recorder,
+        clients: oauthClients,
       }),
       consents: createConnectionConsents({
         database,

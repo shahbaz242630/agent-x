@@ -253,7 +253,8 @@ describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
     const shown: RequestShown = {
       ...SHOWN,
       via: 'device',
-      client: { ...SHOWN.client, verifiedBy: 'nousresearch.github.io' },
+      // Never verified: a device's flow is bound to no address of the document's (6E3c review).
+      client: { ...SHOWN.client, verifiedBy: null },
       redirectUri: null,
       redirectHost: null,
     };

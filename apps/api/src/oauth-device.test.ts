@@ -2,7 +2,7 @@
 // flow at the server's cap, a user code drawn three times already held, or
 // the database busy, each answered as OAuth's own error, never a failure.
 // The flow on the real schema is oauth-connections.db.test.ts.
-import type { OauthTables } from '@agentx/core/modules/oauth';
+import { DEVICE_CODE_GRANT, type OauthTables } from '@agentx/core/modules/oauth';
 import type { Database } from '@agentx/platform/db';
 import { LogCapture, SequentialIds, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -28,7 +28,11 @@ afterEach(() => {
 const CLIENT = 'axcl_0123456789abcdef0123456789abcdef';
 const clients: OauthClients = {
   find: (clientId) =>
-    Promise.resolve(clientId === CLIENT ? { clientId, name: 'Hermes', redirectUris: [], verifiedBy: null } : undefined),
+    Promise.resolve(
+      clientId === CLIENT
+        ? { clientId, name: 'Hermes', redirectUris: [], grantTypes: [DEVICE_CODE_GRANT], verifiedBy: null }
+        : undefined,
+    ),
   kept: () => Promise.resolve(undefined),
 };
 
