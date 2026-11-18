@@ -493,6 +493,39 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(second.form).toEqual(first.form);
   });
 
+  it('SEC-PAY-03 never carries on with another admin’s, nor answers its form to anyone but its starter (6F1 G2)', async () => {
+    const org = await organization();
+    const alice = await member(org, 'admin');
+    const bea = await member(org, 'admin');
+    const id = await added(alice);
+    const hers = answered(await start(alice, id), 'started');
+
+    const theirs = answered(await start(bea, id), 'started');
+    expect(theirs.registration).toMatchObject({ status: 'STARTED', startedBy: bea.membershipId });
+    expect(theirs.registration.id).not.toBe(hers.registration.id);
+    expect(theirs.form).not.toBeNull();
+    expect(theirs.form?.url).not.toBe(hers.form?.url);
+    // Each carries on with their own, and asks after the other's with no form in the answer.
+    expect(answered(await start(alice, id), 'started')).toEqual(hers);
+    expect(answered(await start(bea, id), 'started')).toEqual(theirs);
+    expect(await check(bea, id, hers.registration.id)).toEqual({ ...hers, outcome: 'waiting', form: null });
+    expect(await check(alice, id, hers.registration.id)).toEqual({ ...hers, outcome: 'waiting' });
+
+    // Alice still finishes her own: the payee is entered by her, whoever checks it.
+    await filled(org, hers);
+    const checked = answered(await check(bea, id, hers.registration.id), 'checked');
+    expect(checked).toMatchObject({ registration: { status: 'REGISTERED' }, form: null });
+    const pending = await versionNow(org, id, checked.registration.versionId);
+    expect(pending.enteredBy).toBe(alice.membershipId);
+    // Bea's, still open at the partner's form, now finds the change waiting.
+    await filled(org, theirs);
+    expect(await check(bea, id, theirs.registration.id)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'SUPPLIER_CHANGE_WAITING',
+    });
+  });
+
   it('carries on only with one still open, of this partner: past ended ones, and never another partner’s', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
