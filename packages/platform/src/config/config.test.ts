@@ -1931,12 +1931,21 @@ describe('config: client ID metadata documents (6E3c, decision 2; SEC-OAUTH-09)'
     ).toBeUndefined();
   });
 
-  it('unset, takes the three known clients’ origins that are on the outbound allowlist, and only those', () => {
+  it('unset, takes the known clients’ origins that are on the outbound allowlist, and only those', () => {
     expect(originsOf(ON)).toEqual([]);
     expect(
       originsOf({
         ...ON,
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://claude.ai,https://chatgpt.com,https://other.example',
+      }),
+    ).toEqual(['https://chatgpt.com', 'https://claude.ai']);
+  });
+
+  it('AG6: unset, never trusts Hermes’ GitHub Pages origin, where any repository of its organisation publishes', () => {
+    expect(
+      originsOf({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://chatgpt.com,https://claude.ai,https://nousresearch.github.io',
       }),
     ).toEqual(['https://chatgpt.com', 'https://claude.ai']);
   });
@@ -1947,9 +1956,9 @@ describe('config: client ID metadata documents (6E3c, decision 2; SEC-OAUTH-09)'
       originsOf({
         ...ON,
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: allowed,
-        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://nousresearch.github.io,https://claude.ai',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://nousresearch.github.io/hermes/,https://claude.ai',
       }),
-    ).toEqual(['https://claude.ai', 'https://nousresearch.github.io']);
+    ).toEqual(['https://claude.ai', 'https://nousresearch.github.io/hermes/']);
     expect(
       originsOf({ ...ON, AGENTX_OUTBOUND_ALLOWED_ORIGINS: allowed, AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'none' }),
     ).toEqual([]);
@@ -1968,6 +1977,74 @@ describe('config: client ID metadata documents (6E3c, decision 2; SEC-OAUTH-09)'
     ).toEqual([expect.stringMatching(/^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: http:\/\/cimd\.test must be https/)]);
     expect(problemsWith({ ...ON, AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'claude.ai' })).toEqual([
       expect.stringMatching(/^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: /),
+    ]);
+  });
+
+  it('AG6: takes an origin, a path prefix ending in / or one document’s exact address', () => {
+    const entries = [
+      'https://agents.example/apps/one/client.json',
+      'https://claude.ai',
+      'https://nousresearch.github.io/hermes/',
+    ];
+    expect(
+      originsOf({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://agents.example,https://claude.ai,https://nousresearch.github.io',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: entries.join(','),
+      }),
+    ).toEqual(entries);
+  });
+
+  it.each([
+    'https://claude.ai/',
+    'https://CLAUDE.ai/x/',
+    'https://claude.ai:443/x/',
+    'https://me@claude.ai/x/',
+    'https://claude.ai/x?v=1',
+    'https://claude.ai/x#y',
+    'https://claude.ai/x/../y/',
+    'https://claude.ai/x/%2e%2e/y/',
+    'https://claude.ai/x%2fy/',
+    'https://claude.ai/x%2Ey',
+    'https://claude.ai/x%5cy',
+    'https://claude.ai/x\\y',
+    'https://claude.ai/x y',
+    'https://*.claude.ai/x',
+    'ftp://claude.ai/x',
+    'claude.ai/x',
+    '',
+  ])('AG6: refuses to start with the malformed entry %s, naming its place', (entry) => {
+    expect(
+      problemsWith({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://claude.ai',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: `https://claude.ai,${entry}`,
+      }),
+    ).toEqual([
+      expect.stringMatching(
+        /^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: entry 2 is neither an origin nor a document's address\. Write each as /,
+      ),
+    ]);
+  });
+
+  it('AG6: refuses an address whose origin is not on the outbound allowlist, or not https', () => {
+    expect(
+      problemsWith({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://claude.ai',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://claude.ai/x/,https://nousresearch.github.io/hermes/',
+      }),
+    ).toEqual([
+      "AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: https://nousresearch.github.io/hermes/ must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; a client's document is fetched there",
+    ]);
+    expect(
+      problemsWith({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://cimd.test',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'http://cimd.test/client.json',
+      }),
+    ).toEqual([
+      expect.stringMatching(/^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: http:\/\/cimd\.test\/client\.json must be https/),
     ]);
   });
 

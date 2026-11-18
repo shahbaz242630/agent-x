@@ -11,8 +11,10 @@
 //    from pass-through, PAYEE_ROUTE_NOT_OFFERED). Tx 1: the key claimed; the
 //    organisation's lock for payee changes; the admin read again; the day's
 //    supplier, with no change already waiting (SUPPLIER_CHANGE_WAITING); one
-//    of its registrations still open carried on with, rather than another
-//    opened; otherwise the day's budget (PAYEE_REGISTRATIONS_SPENT: never
+//    of its registrations still open that this admin started carried on with,
+//    rather than another opened (never another admin's: the form is a bearer
+//    link, and whoever fills it is recorded as entering the payee, so it
+//    reaches the admin who started it alone, SEC-PAY-03, 6F1 G2); otherwise the day's budget (PAYEE_REGISTRATIONS_SPENT: never
 //    retired, the B8-1 lesson) and the registration, STARTED, naming the
 //    version Tx 2 will make, with no bank data. Then the partner, outside any transaction, with our ID as its
 //    idempotency key: its form, held to the partner's own form origin over
@@ -24,7 +26,8 @@
 //    the browser is believed.
 // 3. `check` (`suppliers.payee.check`), an admin: the partner is asked,
 //    server to server, how the registration Agent X started for this
-//    organisation and supplier stands (SEC-PAY-08). Tx 2: the key claimed;
+//    organisation and supplier stands (SEC-PAY-08), the form, while it waits,
+//    answered to the admin who started it alone. Tx 2: the key claimed;
 //    the admin read again; the supplier and the registration read for
 //    change; then: still waiting at the form, left as it is (202) and the
 //    key's claim rolled back, so asking again with the same key asks the
@@ -393,8 +396,10 @@ export function createSupplierPayees({
 
   /**
    * The answer after a write: the registration as it now stands, with the
-   * partner's form if it gave one; a registration REGISTERED with no version
-   * made from it, SUPPLIER_PAYEE_TAKEN (keepRegistered left it so).
+   * partner's form if it gave one, to the admin who started it alone (whoever
+   * fills it is recorded as entering the payee: SEC-PAY-03, 6F1 G2); a
+   * registration REGISTERED with no version made from it, SUPPLIER_PAYEE_TAKEN
+   * (keepRegistered left it so).
    */
   const answer = (
     outcome: 'started' | 'checked' | 'waiting',
@@ -406,6 +411,7 @@ export function createSupplierPayees({
   ): Promise<PayeeWrite> =>
     work.answered(member.orgId, correlationId, async (tx, states) => {
       const { orgId } = member;
+      const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
       const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
       const { registration } = await registrationIn(tx, states, orgId, supplier.id, registrationId, 'share');
       if (registration.status === 'REGISTERED') {
@@ -413,7 +419,8 @@ export function createSupplierPayees({
         if (made.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
         if (made.outcome === 'missing') throw new SupplierRefused(409, 'SUPPLIER_PAYEE_TAKEN');
       }
-      return { outcome, registration, form: isOpen(registration) ? form : null };
+      const theirs = isOpen(registration) && registration.startedBy === admin.id;
+      return { outcome, registration, form: theirs ? form : null };
     });
 
   /**
@@ -598,9 +605,12 @@ export function createSupplierPayees({
       const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
       const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
       if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
-      // One open at a time for a supplier's form: a start carries on with it, starting nothing new.
+      // One open at a time for a supplier's form, each admin's own: a start carries on with the admin's, starting
+      // nothing new. Never another admin's, whose form would come back to this one, who'd fill it as its starter.
       const open =
-        route === 'hosted' ? await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner, route }) : null;
+        route === 'hosted'
+          ? await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner, route, startedBy: admin.id })
+          : null;
       const carried = open === null ? null : await registrationIn(tx, states, orgId, supplier.id, open, 'change');
       if (carried !== null && isOpen(carried.registration)) {
         // The admin chose otherwise this time: the newer choice holds (chosenOf).
@@ -742,7 +752,8 @@ export function createSupplierPayees({
         // Ended already, by this write's retry or another check (the lock waits for one at once): as it stands.
         if (!isOpen(found.registration) || outcome === undefined) return { status: 200, resourceId };
         if (outcome.kind === 'waiting') throw new StillWaiting();
-        // Whoever started it entered the details at the partner's form, whoever checks (E3-2a's review: the two-person rule).
+        // Whoever started it entered the details at the partner's form, whoever checks (E3-2a's review: the two-person
+        // rule): its form reaches its starter alone, carried on with by no one else and answered to no one else.
         await keepAnswer(tx, states, member, {
           supplier,
           found,

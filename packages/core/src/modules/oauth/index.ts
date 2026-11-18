@@ -29,7 +29,7 @@ export {
   checkClientMetadataDocument,
   type ClientMetadataDocument,
   type DocumentChecked,
-  isMetadataClientId,
+  isTrustedMetadataClientId,
 } from './infrastructure/client-metadata-document.ts';
 export {
   CLIENT_METADATA_KEPT_MS,
