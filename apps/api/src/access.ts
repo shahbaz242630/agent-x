@@ -35,8 +35,13 @@
 // B6-3d (SEC-OPS-04, ADR-003 §4): for 7 days after a second factor of theirs
 // is removed, by a reset or at the login service, a person keeps the same
 // only: a route naming neither is 403 SECOND_FACTOR_REMOVED, in every
-// organisation. The restriction is read last, for those routes alone, and
-// without its reader no one reaches them.
+// organisation. The restriction is read last, for an admin or an approver
+// alone, and without its reader no one reaches those routes. On a route a
+// developer or a viewer shares (6F1 G1), they go on in the role they keep
+// (roleWithoutPowers: an admin as a developer), marked `withoutPowers`, so a
+// use case reading their membership again keeps them to it too: an admin's
+// wider reach there (another member's agent's key, a connection as it) is
+// not theirs.
 //
 // C2-1 (ADR-011 §1, SEC-AG-01, SEC-AG-02): an AI agent sends its key as
 // `Authorization: Bearer axk_<keyId>_<secret>`. A request carrying an
@@ -66,6 +71,7 @@ import {
   PASSKEY_METHOD,
   type RemovalRestriction,
   type Role,
+  roleWithoutPowers,
 } from '@agentx/core/modules/identity';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -98,7 +104,13 @@ export interface Member {
   /** The organisation, in lower case as Postgres prints a uuid. */
   readonly orgId: string;
   readonly membershipId: string;
+  /** The role they act in: their own, or the one they keep while without an admin's or approver's powers. */
   readonly role: Role;
+  /**
+   * An admin or approver kept to what a developer or a viewer may do, in the 7 days after a second factor removed
+   * (SEC-OPS-04), or with no reader of that to ask: `role` is then the one they keep. Not given for anyone else.
+   */
+  readonly withoutPowers?: true;
 }
 
 declare module 'fastify' {
@@ -134,13 +146,18 @@ export function agentOf(request: Pick<FastifyRequest, 'agent'>): AcceptedKey {
 export function memberInSessionOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
   const { member, person } = request;
   if (member === null || person === null) throw new Error("a member's route ran without a member");
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
+  return {
+    orgId: member.orgId,
+    userId: person.userId,
+    sessionId: person.sessionId,
+    ...(member.withoutPowers && { withoutPowers: member.withoutPowers }),
+  };
 }
 
 /** A member's route's caller: their organisation, and who they are. The hooks let no one else through. */
 export function memberOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
-  const { orgId, userId } = memberInSessionOf(request);
-  return { orgId, userId };
+  const { orgId, userId, withoutPowers } = memberInSessionOf(request);
+  return { orgId, userId, ...(withoutPowers && { withoutPowers }) };
 }
 
 /** A route's use case: without it the route is still documented, and no one reaches it, as no one holds a role. */
@@ -466,20 +483,28 @@ export function registerAccess(
             ) {
               refuse(() => void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id));
             } else {
-              const through = () => {
-                request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
+              const through = (withoutPowers: boolean) => {
+                const found = { orgId: orgId.toLowerCase(), membershipId: membership.id };
+                request.member = withoutPowers
+                  ? { ...found, role: roleWithoutPowers(membership.role), withoutPowers }
+                  : { ...found, role: membership.role };
                 done();
               };
               /** Refuses a person in the 7 days after a second factor of theirs was removed: no admin's or approver's powers yet. */
               const secondFactorRemoved = () => void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id);
-              if (!needsPowers(access)) {
-                through();
+              /** Kept to what a developer or a viewer may do: refused a route for powers, or one the kept role isn't named on; through on a shared one. */
+              const keptWithout = (refusal: () => void) => {
+                if (needsPowers(access) || !access.includes(roleWithoutPowers(membership.role))) refuse(refusal);
+                else through(true);
+              };
+              if (!WITH_PASSKEY.includes(membership.role)) {
+                through(false);
               } else if (restrictedUntil === undefined) {
-                refuse(() => void forbidden(request, reply));
+                keptWithout(() => void forbidden(request, reply));
               } else {
                 restrictedUntil(session.userId).then((until) => {
-                  if (until === undefined) through();
-                  else refuse(secondFactorRemoved);
+                  if (until === undefined) through(false);
+                  else keptWithout(secondFactorRemoved);
                 }, failed);
               }
             }

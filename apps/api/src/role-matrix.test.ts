@@ -29,6 +29,7 @@ import {
   type LiveSession,
   type MembershipCheck,
   type Role,
+  roleWithoutPowers,
   type SignIn,
   SignInFailed,
 } from '@agentx/core/modules/identity';
@@ -288,13 +289,16 @@ const codeOf = (body: string): string | undefined => (JSON.parse(body) as { erro
 
 /**
  * Whether the caller's role is named, yet on a route for the powers they lack;
- * or, without a passkey, on any write (AUTH-01).
+ * or, without a passkey, on any write (AUTH-01); or, restricted, on one their
+ * kept role (an admin's developer, an approver's viewer) isn't named on (6F1 G1).
  */
 const lacksPowers = (operation: Operation, caller: Caller): boolean =>
   caller.withoutPowers !== undefined &&
   operation.access.includes(caller.withoutPowers.role) &&
   (!operation.access.some((principal) => WITHOUT_PASSKEY.includes(principal)) ||
-    (caller.withoutPowers.code === 'PASSKEY_REQUIRED' && operation.writes));
+    (caller.withoutPowers.code === 'PASSKEY_REQUIRED' && operation.writes) ||
+    (caller.withoutPowers.code === 'SECOND_FACTOR_REMOVED' &&
+      !operation.access.includes(roleWithoutPowers(caller.withoutPowers.role))));
 
 /** Whether an agent's key lacks a scope the operation needs: refused as INSUFFICIENT_SCOPE. */
 const lacksScopes = (operation: Operation, caller: Caller): boolean =>
