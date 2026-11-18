@@ -388,6 +388,75 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(await verified(dan, supplierId)).toMatchObject({ supplier: { status: 'VERIFIED' } });
   });
 
+  it('SEC-PAY-03 never lets a second admin fill the form another admin started, then verify what they entered (6F1 G2)', async () => {
+    const { org, alice } = await team();
+    const bea = await member(org, 'admin');
+    clock.advanceBy(15 * DAY_MS);
+    const [aliceIn, beaIn] = [await signedIn(alice), await signedIn(bea)];
+    const added = await registry.add(
+      aliceIn,
+      keyed(aliceIn, ADD_OPERATION),
+      { details: DETAILS, remittanceEmail: 'on' },
+      CORRELATION,
+    );
+    if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
+    const supplierId = added.supplier.id;
+    const startBy = (who: SessionMember) =>
+      payees.start(who, keyed(who, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
+    const hers = await startBy(aliceIn);
+    if (hers.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(hers)}`);
+
+    // Bea starts too, fills whatever form she is given with an account of her own choosing, and checks it.
+    const theirs = await startBy(beaIn);
+    if (theirs.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(theirs)}`);
+    await rail.bank.fillForm(org, theirs.form?.url ?? '', { name: HOLDER, iban: ibanOf(JASMINE) });
+    const checked = await payees.check(
+      beaIn,
+      keyed(beaIn, PAYEE_CHECK_OPERATION),
+      supplierId,
+      theirs.registration.id,
+      CORRELATION,
+    );
+    expect(checked).toMatchObject({ outcome: 'checked', registration: { status: 'REGISTERED' } });
+    // The change is confirmed by whoever it names as entering it, as only they may (PAYEE_CHANGE_NOT_YOURS).
+    const pending = await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const supplier = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'share');
+      if (supplier.outcome !== 'found') throw new Error(`not found: ${supplier.outcome}`);
+      const version = await versionOf(
+        tx,
+        states,
+        { orgId: org, id: supplier.supplier.pendingVersionId ?? '' },
+        supplierId,
+      );
+      if (version.outcome !== 'found') throw new Error(`no version: ${version.outcome}`);
+      return version.version;
+    });
+    const enterer = pending.enteredBy === alice.membershipId ? aliceIn : beaIn;
+    const challengeId = askedFor(
+      await payeeChanges.approve(enterer, keyed(enterer, PAYEE_APPROVE_OPERATION), supplierId, CORRELATION),
+    );
+    await stepUp(enterer, challengeId);
+    const confirmed = await payeeChanges.approveConfirm(
+      enterer,
+      keyed(enterer, PAYEE_APPROVE_CONFIRM_OPERATION),
+      supplierId,
+      challengeId,
+      CORRELATION,
+    );
+    expect(confirmed).toMatchObject({ outcome: 'changed' });
+    clock.advanceBy(PAYEE_COOLING_OFF_MS);
+
+    // Bea entered the payee, so Bea can never be the second person who verifies it: refused at the ask, or, were
+    // it ever asked, at the confirm, which then shows what the rule let through.
+    const asked = await ask(await signedIn(bea), supplierId);
+    const verdict = asked.outcome === 'asked' ? await verified(bea, supplierId) : asked;
+    expect(verdict).toEqual(refusedWith('VERIFIER_ENTERED_DETAILS', 403));
+    expect(await supplierNow(org, supplierId)).toMatchObject({ status: 'UNVERIFIED', verifiedBy: null });
+    expect(pending.enteredBy).toBe(bea.membershipId);
+    expect(theirs.registration.id).not.toBe(hers.registration.id);
+    expect(theirs.form?.url).not.toBe(hers.form?.url);
+  });
+
   it('takes the single-user path in an organisation of one: its own admin, once cooled off', async () => {
     const org = await organization();
     const alice = await member(org, 'admin');
