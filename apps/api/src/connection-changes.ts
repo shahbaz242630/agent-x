@@ -52,7 +52,14 @@ import {
   stepUpDetails,
 } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { AGENT_BRAKE, type Database, holdBrake, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import {
+  AGENT_BRAKE,
+  type Database,
+  holdBrake,
+  holdBrakesWithin,
+  type IdempotentRequest,
+  isUnwritten,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -147,14 +154,18 @@ const revocationHash = (orgId: string, keyEventId: string): Buffer =>
  * What removing a member ends of the agents module's (decision 7): the live connections they made. First, the brakes of
  * their agents (1b), found by one unlocked statement and taken one by one in order of agent ID, before any session or
  * row (ADR-006 §6: the one change that may hold more than one brake), so a stream of decisions and key checks can't
- * starve the revocations. Then the keys read for change, and revoked by the admin removing them, each event naming
+ * starve the revocations, their waits together bounded to one brake's (AG4). Then the keys read for change, and revoked by the admin removing them, each event naming
  * the membership removed. A connection made for another agent between the two (its consent committed before the
  * membership was locked) is revoked too, without its brake: correct, only not starvation-proof, and as rare as that.
  */
 export const connectionsOfLeaving = (clock: Clock): MemberLeaving<AgentsTables> => ({
   async brakes(tx, { orgId, membershipId }) {
     const agents = await agentsOfLiveConnectionsMadeBy(tx, orgId, membershipId, clock.now());
-    for (const agentId of agents) await holdBrake(tx, AGENT_BRAKE, orgId, agentId);
+    await holdBrakesWithin(
+      tx,
+      AGENT_BRAKE,
+      agents.map((agentId) => [orgId, agentId]),
+    );
     return agents.length > 0;
   },
   async read(tx, states, { orgId, membershipId }) {
