@@ -6,6 +6,7 @@ import { testLogger } from '@agentx/testing';
 
 import { type AuditTables, withSignedStates } from '../audit/index.ts';
 import type { Clock, IdGenerator } from '../../shared-kernel/index.ts';
+import type { DirectoryTables } from '../directory/index.ts';
 import { draftReset } from './infrastructure/factor-resets.ts';
 import { draftInvitation, invitationChange } from './infrastructure/invitations.ts';
 import { contactChange, draftContact } from './infrastructure/registered-contacts.ts';
@@ -13,7 +14,7 @@ import type { IdentityTables } from './infrastructure/tables.ts';
 
 /** Signed drafts exist in the foreign tenant even when the first route check is step-up. */
 export async function tamperIdentityFixtures(
-  database: Database<IdentityTables & AuditTables>,
+  database: Database<IdentityTables & DirectoryTables & AuditTables>,
   keys: KeyProvider,
   ids: IdGenerator,
   clock: Clock,

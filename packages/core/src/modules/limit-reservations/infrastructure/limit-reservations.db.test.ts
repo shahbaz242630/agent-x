@@ -7,19 +7,22 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { seedRows } from '../../../seed-rows.helper.test.ts';
+import type { AuditTables } from '../../audit/index.ts';
 import { RESERVATION } from '../domain/reservation.ts';
 import { type MonthToSum, monthSpentRead, monthsSpent, splitHeld } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<LimitReservationsTables>;
+// The reads below take the audit tables too (reservations.ts).
+type Tables = LimitReservationsTables & AuditTables;
+let app: Database<Tables>;
 
 const AT = new Date('2026-10-08T08:00:00Z');
 const LATER = new Date('2026-10-09T08:00:00Z');
 const MONTH = '2026-10';
 
-type Tx = DatabaseTransaction<LimitReservationsTables>;
+type Tx = DatabaseTransaction<Tables>;
 type ReservationRow = Insertable<LimitReservationsTables['limit_reservations.reservations']>;
 
 interface Org {
@@ -189,7 +192,7 @@ const DENIED: unknown = expect.objectContaining({ code: '42501' });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<LimitReservationsTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {

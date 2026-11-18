@@ -15,6 +15,7 @@ import {
   type ResetRemovals,
 } from '@agentx/core/modules/identity';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { type Clock, HOUR_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Database } from '@agentx/platform/db';
@@ -47,7 +48,9 @@ export function resetRemovalsFrom({
   /** The organisations to look in. */
   readonly list: () => Promise<readonly string[]>;
   readonly config: Config;
-  readonly database: Database<IdentityTables & DirectoryTables & AuditTables & NotificationsTables>;
+  readonly database: Database<
+    IdentityTables & DirectoryTables & AuditTables & NotificationsTables & PlatformControlsTables
+  >;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
