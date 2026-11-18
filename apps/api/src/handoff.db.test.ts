@@ -27,6 +27,7 @@
 import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
 import { createAuditTrail, holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
+import { MANDATE_VERSIONS } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -654,8 +655,12 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(await stoppedToldOf(w)).toEqual([request.id]);
   });
 
-  it('hands off one whose mandate’s version in force ends later: its end not yet reached (6F1 G3)', async () => {
-    const { w, acting } = await ready({ endsAt: new Date(clock.now().getTime() + 2 * HOUR) });
+  it.each([
+    ['ends later: its end not yet reached', 2 * HOUR],
+    ['has no end', null],
+  ] as const)('hands off one whose mandate’s version in force %s (6F1 G3)', async (_what, after) => {
+    const endsAt = after === null ? null : new Date(clock.now().getTime() + after);
+    const { w, acting } = await ready({ endsAt });
     const request = await ask(acting, w, { amount: ALLOWED() });
     clock.advanceBy(HOUR);
     const { rail, submitted } = counted(w);
@@ -2244,6 +2249,30 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
         await owner.setColumn(versionId ?? '', 'beneficiary_ref', 'planted-beneficiary');
       } finally {
         await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
+      }
+    });
+
+    refusedWithTheHold(await handedOnce(w, request.id));
+  });
+
+  it('SEC-AG-12 refuses a mandate version’s end pushed out past the app once it has passed: no call, the hold (6F1 G3)', async () => {
+    const { w, acting } = await ready({ endsAt: new Date(clock.now().getTime() + HOUR) });
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    clock.advanceBy(HOUR);
+    const mandateId = await mandateIdOf(w);
+    const { current_version_id: versionId } = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('mandates.mandates')
+        .select('current_version_id')
+        .where('id', '=', mandateId)
+        .executeTakeFirstOrThrow(),
+    );
+    await asOwner(w, MANDATE_VERSIONS, async (owner) => {
+      await owner.query('alter table mandates.versions disable trigger made_once');
+      try {
+        await owner.setColumn(versionId ?? '', 'ends_at', new Date(clock.now().getTime() + 24 * HOUR).toISOString());
+      } finally {
+        await owner.query('alter table mandates.versions enable trigger made_once');
       }
     });
 
