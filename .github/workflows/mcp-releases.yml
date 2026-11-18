@@ -6,15 +6,15 @@
 # tooling/mcp-watch/seen.json. Apart from the canaries (mcp-watch.yml), so a red
 # here never hides a canary's red in the same failure email.
 # Red, in plain words: a newer release of the specification, the SDK or the
-# conformance suite; a client's only when a note line names MCP with a word that
-# can break a client (transport, auth, protocol, version, removed, ...), the rest
-# listed in the summary; red until a person reads it and moves seen.json, with a
-# note. An SDK advisory covering the version the API runs is red until the pin
-# moves past it. Reads public data with the workflow's own read-only token.
+# conformance suite, red until a person reads it and moves seen.json, with a note.
+# A client's releases are never red (MW1, partner S201: their notes name MCP most
+# days): each newer one is listed in the summary, "look first" when a note line
+# names MCP with a word that can break a client; the canaries are the alarm for a
+# client that really breaks. An SDK advisory covering the version the API runs is
+# red until the pin moves past it. Reads public data with a read-only token.
 # Positive controls (a silent watch proves nothing): run it by hand with
-# control_unseen, and the spec, SDK and conformance go red (with the clients
-# whose newest notes say so); with server_version 2.2.0, the advisory check goes
-# red. releases.test.ts holds the same with fixtures.
+# control_unseen, and the spec, SDK and conformance go red; with server_version
+# 2.2.0, the advisory check goes red. releases.test.ts holds the same.
 name: MCP releases (daily)
 
 on:
