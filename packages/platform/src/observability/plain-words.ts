@@ -503,10 +503,9 @@ export const PLAIN_WORDS = {
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
   'oauth.client_metadata_refused': {
-    happened:
-      "An MCP app named itself by a metadata document on an allowed site, but the document couldn't be fetched or wasn't valid.",
-    broke: 'That app cannot connect until its document can be read; apps that registered themselves are not affected.',
-    next: 'The reason says which: a timeout or refusal is the site or the network; a bad document is the app maker’s to fix.',
+    happened: "An MCP app's metadata document, on an allowed site, couldn't be fetched or wasn't valid.",
+    broke: 'That app cannot connect until it can be read; other apps are not affected.',
+    next: 'The reason says why: a timeout or refusal is the site or network; a bad document is the app maker’s.',
   },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
