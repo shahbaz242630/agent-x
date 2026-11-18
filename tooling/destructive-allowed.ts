@@ -101,6 +101,7 @@ export const ALLOWED: readonly Allowed[] = [
       ['packages/testing/src/keys.ts', 'rmSync(directory, { recursive'],
       ['tooling/git-hooks/gitleaks.ts', 'rmSync(work, { recursive'],
       ['tooling/load/job.ts', 'rmSync(dir, { recursive'],
+      ['tooling/quality/lint-whole.ts', 'rmSync(dir, { recursive'],
     ] as const
   ).map(([file, match]) => ({
     file,
