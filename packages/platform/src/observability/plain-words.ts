@@ -502,6 +502,17 @@ export const PLAIN_WORDS = {
     broke: 'Ended flows stay a little longer; nothing a person or app does is affected.',
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
+  'oauth.client_metadata_refused': {
+    happened:
+      "An MCP app named itself by a metadata document on an allowed site, but the document couldn't be fetched or wasn't valid.",
+    broke: 'That app cannot connect until its document can be read; apps that registered themselves are not affected.',
+    next: 'The reason says which: a timeout or refusal is the site or the network; a bad document is the app maker’s to fix.',
+  },
+  'oauth.client_metadata_sweep_failed': {
+    happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
+    broke: 'Those documents stay a little longer; an app in use is fetched again anyway, so nothing is affected.',
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
+  },
   'oauth.client_sweep_failed': {
     happened: 'The clean-up of MCP apps that registered and never connected failed.',
     broke: 'Those registrations stay a little longer; nothing a person or app does is affected.',

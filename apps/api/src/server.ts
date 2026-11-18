@@ -69,6 +69,7 @@ import { MCP_PATH } from './mcp-protocols.ts';
 import { registerMcp } from './mcp.ts';
 import type { ConnectionConsents } from './connection-consents.ts';
 import type { OauthAuthorizing } from './oauth-authorizing.ts';
+import type { OauthDevice } from './oauth-device.ts';
 import type { OauthGrants } from './oauth-grants.ts';
 import { registerOauthRequests } from './oauth-requests.ts';
 import { registerOauth, registerOauthForms, registerOauthSwitch } from './oauth-routes.ts';
@@ -288,6 +289,8 @@ export interface ServerOptions {
         readonly authorizing: OauthAuthorizing;
         readonly grants: OauthGrants;
         readonly consents: ConnectionConsents;
+        /** A device's codes and the console's lookup of them (6E3c, RFC 8628). */
+        readonly device: OauthDevice;
         readonly clock: Clock;
       }
     | undefined;
@@ -479,7 +482,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   );
   // The OAuth server's routes, 404s while it is off, before anyone is asked who they are (6E3a).
   const oauthOn = config.http.mcpOauth;
-  const capabilities = capabilitiesOf(config.http.publicOrigin);
+  const capabilities = capabilitiesOf(
+    config.http.publicOrigin,
+    (config.http.oauthClientMetadataOrigins ?? []).length > 0,
+  );
   registerOauthSwitch(app, oauthOn);
   registerAccess(app, {
     findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
@@ -614,12 +620,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     });
     registerOauthForms(scoped, {
       grants: options.oauth?.grants,
+      device: options.oauth?.device,
       clock: options.oauth?.clock ?? systemClock,
       trust,
     });
     done();
   });
-  registerOauthRequests(app, { consents: options.oauth?.consents });
+  registerOauthRequests(app, { consents: options.oauth?.consents, device: options.oauth?.device });
   // Last: its tools read their twins, every one added by now (mcp.ts, 6E2).
   registerMcp(app, {
     useCases: {

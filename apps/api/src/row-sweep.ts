@@ -14,7 +14,8 @@
 //   names, with the client's IP address, and no longer;
 // - the OAuth flows (6E3a): a day after each ends, so a used code's second use
 //   is still caught; and the clients that registered and never connected, a
-//   day after they registered, so anyone registering can't fill the table.
+//   day after they registered, so anyone registering can't fill the table;
+//   and the clients' metadata documents past their day (6E3c).
 //
 // The API sweeps each when it starts and then an hour after each sweep ends,
 // each on a timer of its own beside the idempotency keys' retention sweep, a
@@ -39,7 +40,8 @@ export type SweptRows =
   | 'security.event'
   | 'provider_events.message'
   | 'oauth.flow'
-  | 'oauth.client';
+  | 'oauth.client'
+  | 'oauth.client_metadata';
 
 export interface RowSweepOptions {
   readonly rows: SweptRows;

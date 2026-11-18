@@ -16,6 +16,11 @@ const OAUTH_ERRORS = [
   'invalid_redirect_uri',
   'invalid_client_metadata',
   'temporarily_unavailable',
+  // The device flow's own (RFC 8628 §3.5), answered to a device polling the token endpoint.
+  'authorization_pending',
+  'slow_down',
+  'access_denied',
+  'expired_token',
 ] as const;
 export type OauthError = (typeof OAUTH_ERRORS)[number];
 

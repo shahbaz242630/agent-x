@@ -10,6 +10,11 @@
 //   Admins and developers of the organisation the header names. The confirm
 //   answers where the browser goes next, with the code, this once.
 // - `POST /v1/oauth/requests/:id/deny`: the client told no.
+// - `POST /v1/oauth/device/lookup` (6E3c, RFC 8628 §3.3): the user code a
+//   device showed, typed by a signed-in person on the console's `/device`
+//   page, claims that device's request for this browser (oauth-device.ts);
+//   the request is then read and decided as above. Five tries a minute a
+//   person, beside every other limit: the code is all that guards it.
 import { SCOPES } from '@agentx/core/modules/agents';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -28,7 +33,9 @@ import {
 } from './connection-consents.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerAsked, idempotentRequest } from './idempotent-writes.ts';
-import { CONNECT_COOKIE } from './oauth-wire.ts';
+import type { OauthDevice } from './oauth-device.ts';
+import { CONNECT_COOKIE, connectCookie, OAUTH_PATHS } from './oauth-wire.ts';
+import { createRoutePersonCounter } from './rate-limit.ts';
 import { NOTHING, NOTHING_BODY_LIMIT, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 import { cookieValue } from './sign-in.ts';
 
@@ -42,14 +49,22 @@ const SCOPE_LIST = z.array(z.enum(SCOPES)).describe('The scopes, in the order Ag
 const REQUEST_SHOWN = z
   .object({
     id: z.uuid(),
+    via: z.enum(['code', 'device']).describe('A browser’s sign-in, or a device’s (RFC 8628), which sends no one back.'),
     client: z
       .object({
         id: z.string().describe('The client’s ID.'),
         name: z.string().describe('What the client says it is: never proof of who it is.'),
+        verifiedBy: z
+          .string()
+          .nullable()
+          .describe('The host whose metadata document named the client; null for one that registered itself.'),
       })
       .describe('The app asking.'),
-    redirectUri: z.string().describe('Where the person is sent back to, with the code.'),
-    redirectHost: z.string().describe('That address’s host: show it in bold, it is what the name can’t hide.'),
+    redirectUri: z.string().nullable().describe('Where the person is sent back to, with the code; none for a device.'),
+    redirectHost: z
+      .string()
+      .nullable()
+      .describe('That address’s host: show it in bold, it is what the name can’t hide. None for a device.'),
     loopback: z.boolean().describe('Sent back to an app on the person’s own computer.'),
     scopesAsked: SCOPE_LIST.describe('What the app asks to do: tick among these, and those the agent holds.'),
     resource: z.string().describe('The MCP endpoint the connection is for.'),
@@ -76,6 +91,7 @@ const CONNECTED = z
       .describe('Where to send the browser now, with the code: this once. Null on a retry of the same request.'),
     connection: z
       .object({
+        via: z.enum(['code', 'device']).describe('Made for a browser’s sign-in, or a device’s: then go back to it.'),
         keyId: z.uuid().describe('The connection, by its key’s ID.'),
         agentId: z.uuid(),
         clientId: z.string(),
@@ -87,10 +103,34 @@ const CONNECTED = z
   .register(API_SCHEMAS, { id: 'ConnectionMade', description: 'The app connected as the agent.' });
 
 const DENIED = z
-  .object({ redirectTo: z.string().describe('Where to send the browser now: the app is told no.') })
+  .object({
+    redirectTo: z
+      .string()
+      .nullable()
+      .describe('Where to send the browser now: the app is told no. None for a device, which learns it by polling.'),
+  })
   .register(API_SCHEMAS, { id: 'ConnectionDenied', description: 'The app told no.' });
 
 const OAUTH_MEMBER_ROUTE = { access: [...CONNECTING_ROLES], oauth: true } as const;
+
+/** Claiming a device's request by its user code: its operation. */
+export const DEVICE_LOOKUP_OPERATION = 'connections.device-lookup';
+
+/** A person's tries at a user code (6E3 plan §1): 5 a minute, so 20^8 codes can't be walked. */
+const LOOKUP_LIMIT = { most: 5, windowMs: 60_000 } as const;
+
+const LOOKUP = z
+  .strictObject({ userCode: z.string().min(1).max(32).describe('The code the device shows, as typed: `BCDF-GHJK`.') })
+  .describe('A device’s user code.');
+
+const LOOKED_UP = z
+  .object({
+    requestId: z.uuid().describe('The device’s request, now this browser’s: read and decide it as any other.'),
+  })
+  .register(API_SCHEMAS, { id: 'DeviceRequestFound', description: 'The device’s request, claimed for this browser.' });
+
+/** The most a lookup's body may be: the code, with room to spare. */
+const LOOKUP_BODY_LIMIT = 256;
 
 /** The flow named, and the cookie of the browser asking. */
 const namedBy = (request: FastifyRequest<{ Params: { id: string } }>): FlowNamed => ({
@@ -113,9 +153,36 @@ function answerConsent(written: ConsentWrite, request: FastifyRequest, reply: Fa
 
 export function registerOauthRequests(
   app: FastifyInstance,
-  { consents }: { readonly consents: ConnectionConsents | undefined },
+  { consents, device }: { readonly consents: ConnectionConsents | undefined; readonly device: OauthDevice | undefined },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+
+  routes.post(
+    OAUTH_PATHS.deviceLookup,
+    {
+      schema: {
+        summary: 'Find the device asking to be connected, by the code it shows',
+        description:
+          'The request becomes this browser’s: read it, then allow or deny it, as a browser’s. A code typed wrong, ' +
+          'ended, decided or already claimed by another browser is a 404, which says nothing of which.',
+        body: LOOKUP,
+        response: { 200: LOOKED_UP },
+      },
+      bodyLimit: LOOKUP_BODY_LIMIT,
+      preHandler: createRoutePersonCounter(app, LOOKUP_LIMIT),
+      config: { access: ['person'], oauth: true, operation: DEVICE_LOOKUP_OPERATION },
+    },
+    async (request, reply) => {
+      const found = await need(device).lookup(
+        request.body.userCode,
+        cookieValue(request.headers.cookie, CONNECT_COOKIE),
+      );
+      if (found.outcome === 'not_found') return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      // Set again every time, its day starting now, as the authorize endpoint does.
+      void reply.header('set-cookie', connectCookie(found.cookie));
+      return { requestId: found.requestId };
+    },
+  );
 
   routes.get(
     '/v1/oauth/requests/:id',

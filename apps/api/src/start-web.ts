@@ -40,6 +40,9 @@ import { connectionsOfLeaving, createConnectionChanges } from './connection-chan
 import { createConnectionConsents } from './connection-consents.ts';
 import { createCredentialCheck } from './credentials.ts';
 import { createOauthAuthorizing } from './oauth-authorizing.ts';
+import { createClientMetadataFetch } from './oauth-client-metadata.ts';
+import { createOauthClients } from './oauth-clients.ts';
+import { createOauthDevice } from './oauth-device.ts';
 import { createOauthGrants } from './oauth-grants.ts';
 import { capabilitiesOf } from './oauth-wire.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
@@ -135,7 +138,21 @@ export async function startWeb(
   // An agent's key, checked before its request goes on (C2-1); on the MCP endpoint, an MCP connection's access token
   // too, while the OAuth server is on (6E3a).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
-  const capabilities = capabilitiesOf(config.http.publicOrigin);
+  // The origins whose clients name themselves by a metadata document (6E3c): none while the OAuth server is off.
+  const metadataOrigins = config.http.oauthClientMetadataOrigins ?? [];
+  const capabilities = capabilitiesOf(config.http.publicOrigin, metadataOrigins.length > 0);
+  const oauthClients = createOauthClients({
+    database,
+    clock: systemClock,
+    logger,
+    metadata:
+      metadataOrigins.length === 0
+        ? undefined
+        : createClientMetadataFetch({
+            fetch: createOutboundFetch(config.outbound.allowedOrigins),
+            origins: metadataOrigins,
+          }),
+  });
   const checkCredential = createCredentialCheck({
     keys: keyCheck,
     connections: config.http.mcpOauth
@@ -300,7 +317,22 @@ export async function startWeb(
     checkAgentKey: checkCredential,
     // Agent X's own OAuth server for MCP connections (6E3a): its routes answer only while AGENTX_MCP_OAUTH is on.
     oauth: {
-      authorizing: createOauthAuthorizing({ database, clock: systemClock, ids: uuidV7Ids, logger, capabilities }),
+      authorizing: createOauthAuthorizing({
+        database,
+        clock: systemClock,
+        ids: uuidV7Ids,
+        logger,
+        capabilities,
+        clients: oauthClients,
+      }),
+      device: createOauthDevice({
+        database,
+        clock: systemClock,
+        ids: uuidV7Ids,
+        logger,
+        capabilities,
+        clients: oauthClients,
+      }),
       grants: createOauthGrants({
         database,
         keys,
@@ -318,6 +350,7 @@ export async function startWeb(
         challenges,
         logger,
         issuer: capabilities.issuer,
+        clients: oauthClients,
       }),
       clock: systemClock,
     },

@@ -3,7 +3,8 @@
 // -13).
 //
 // - An authorization request opens a flow for the person's browser, or is
-//   refused. A client unknown, or a redirect address it never registered, is
+//   refused. Its client registered itself, or names itself by a metadata
+//   document on an allowlisted origin (6E3c, oauth-clients.ts). A client unknown, or a redirect address it never registered, is
 //   never sent back to (an open redirect, RFC 6749 §4.1.2.1): the browser goes
 //   to our own page saying so. Anything else wrong goes back to the client's
 //   address with OAuth's error, its `state` and our issuer (RFC 9207). PKCE
@@ -14,7 +15,6 @@
 import {
   checkRegistration,
   type Client,
-  clientOf,
   isCodeChallenge,
   isFlowCookie,
   isRegisteredRedirect,
@@ -32,6 +32,7 @@ import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
+import type { OauthClients } from './oauth-clients.ts';
 import { backToClient, type Capabilities } from './oauth-wire.ts';
 
 /** What an authorization request names (RFC 6749 §4.1.1, RFC 7636 §4.3, RFC 8707 §2). */
@@ -105,12 +106,15 @@ export function createOauthAuthorizing({
   ids,
   logger,
   capabilities,
+  clients,
 }: {
   readonly database: Database<OauthTables>;
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly logger: Logger;
   readonly capabilities: Capabilities;
+  /** Registered clients, and those named by an allowlisted metadata document (6E3c). */
+  readonly clients: OauthClients;
 }): OauthAuthorizing {
   /** The flows' cap's warning, at most once a minute, with how many were refused since the last (an attack's flood). */
   let capWarnedAt = Number.NEGATIVE_INFINITY;
@@ -163,7 +167,7 @@ export function createOauthAuthorizing({
     cookie: string | undefined,
     back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer },
   ): Promise<AuthorizeAnswer> {
-    const client = asked.client_id === undefined ? undefined : await clientOf(database, asked.client_id);
+    const client = asked.client_id === undefined ? undefined : await clients.find(asked.client_id);
     if (client === undefined) return { outcome: 'not_redirectable', problem: 'unknown_client' };
     // OAuth 2.1 §4.1.1: one registered address may be left out; with more, the request must name one.
     const [only] = client.redirectUris.length === 1 ? client.redirectUris : [];

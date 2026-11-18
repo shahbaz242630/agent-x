@@ -4,7 +4,9 @@
 // step-up, the code exchanged once, the access token accepted at the MCP
 // resource, a refresh used once, and the connection revoked by a reused code,
 // a reused refresh token, the client, a hand-over, a member (6E3b) or the
-// member's removal; and an agent's connections listed (6E3b). The routes' own answers
+// member's removal; and an agent's connections listed (6E3b); a device
+// connected (6E3c, RFC 8628), and a client named by its metadata document
+// (6E3c, SEC-OAUTH-09). The routes' own answers
 // are oauth-routes.test.ts and oauth-requests.test.ts.
 import { createHash } from 'node:crypto';
 
@@ -80,6 +82,9 @@ import {
   DENY_OPERATION,
 } from './connection-consents.ts';
 import { createOauthAuthorizing, type OauthAuthorizing } from './oauth-authorizing.ts';
+import type { ClientMetadataFetch, MetadataFetched } from './oauth-client-metadata.ts';
+import { createOauthClients } from './oauth-clients.ts';
+import { createOauthDevice } from './oauth-device.ts';
 import { createOauthGrants, type GrantAnswer, type OauthGrants } from './oauth-grants.ts';
 import { capabilitiesOf } from './oauth-wire.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
@@ -288,7 +293,8 @@ beforeEach(async () => {
   capture = new LogCapture();
   noted = [];
   const logger = testLogger(capture);
-  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities });
+  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
   grants = createOauthGrants({
     database: app,
     keys,
@@ -306,6 +312,7 @@ beforeEach(async () => {
     challenges: challenges(),
     logger,
     issuer: capabilities.issuer,
+    clients,
   });
   const registered = await authorizing.register({ redirect_uris: [REDIRECT], client_name: 'ChatGPT' }, CORRELATION);
   if (registered.outcome !== 'registered') throw new Error('registered');
@@ -427,7 +434,8 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     const admin = await member(org, 'admin');
     const flow = await opened();
     const write = await consents.deny(admin, keyed(admin, DENY_OPERATION, 'deny'), flow, CORRELATION);
-    if (write.outcome !== 'denied') throw new Error(`not denied: ${JSON.stringify(write)}`);
+    if (write.outcome !== 'denied' || write.redirectTo === null)
+      throw new Error(`not denied: ${JSON.stringify(write)}`);
     const url = new URL(write.redirectTo);
     expect(Object.fromEntries(url.searchParams)).toEqual({
       error: 'access_denied',
@@ -587,7 +595,15 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
         return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
       },
     });
-    const busy = createOauthAuthorizing({ database: failing, clock, ids, logger: testLogger(capture), capabilities });
+    const logger = testLogger(capture);
+    const busy = createOauthAuthorizing({
+      database: failing,
+      clock,
+      ids,
+      logger,
+      capabilities,
+      clients: createOauthClients({ database: failing, clock, logger, metadata: undefined }),
+    });
     const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined);
     if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
     expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
@@ -1592,5 +1608,285 @@ describe(`mutation pass (6E3b): what each survivor showed untested (Postgres ${s
     await restoring.end();
     expect(await accepted(accessToken)).toMatchObject({ outcome: 'accepted' });
     expect(await revokedOnRemoval(org)).toEqual([]);
+  });
+});
+
+describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
+  const deviceOf = (at: FixedClock = clock) =>
+    createOauthDevice({
+      database: app,
+      clock: at,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata: undefined }),
+    });
+
+  /** A device's codes, asked for by the registered client. */
+  async function codes(scope?: string) {
+    const answer = await deviceOf().authorize(
+      { client_id: clientId, resource: capabilities.resource, ...(scope === undefined ? {} : { scope }) },
+      CORRELATION,
+    );
+    if (answer.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(answer)}`);
+    return answer.codes;
+  }
+
+  /** The device's request, claimed by a browser whose person typed its code. */
+  async function claimed(userCode: string, cookie?: string) {
+    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie);
+    if (found.outcome !== 'claimed') throw new Error('not claimed');
+    return { flowId: found.requestId, cookie: found.cookie };
+  }
+
+  const poll = (deviceCode: string, client = clientId) =>
+    grants.exchangeDevice({ deviceCode, clientId: client }, CALLER);
+  const errorOf = (answer: GrantAnswer) => (answer.outcome === 'refused' ? answer.error : answer.outcome);
+
+  it('connects a device: its codes, the person types the code, consents, and the device’s poll gets the pair once', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes('requests:read suppliers:read');
+    expect(given).toMatchObject({
+      verificationUri: 'https://app.agentx.example/device',
+      verificationUriComplete: `https://app.agentx.example/device?user_code=${given.userCode}`,
+      expiresIn: 900,
+      interval: 5,
+    });
+    expect(given.userCode).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+    // Before anyone decides: pending, then too soon.
+    expect(errorOf(await poll(given.deviceCode))).toBe('authorization_pending');
+    expect(errorOf(await poll(given.deviceCode))).toBe('slow_down');
+    const flow = await claimed(given.userCode);
+    // Another browser typing the same code finds nothing.
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
+    expect(await consents.request(flow)).toMatchObject({
+      via: 'device',
+      client: { id: clientId, name: 'ChatGPT', verifiedBy: null },
+      redirectUri: null,
+      redirectHost: null,
+      loopback: false,
+      scopesAsked: ['requests:read', 'suppliers:read'],
+    });
+    const write = await allowed(admin, flow, { agentId, scopes: ['requests:read'] });
+    expect(write).toMatchObject({ outcome: 'connected', redirectTo: null, connection: { via: 'device', agentId } });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    clock.advanceBy(5000);
+    const tokens = issued(await poll(given.deviceCode));
+    expect(tokens.scopes).toEqual(['requests:read']);
+    expect(await accepted(tokens.accessToken)).toMatchObject({
+      outcome: 'accepted',
+      key: { keyId: write.connection.keyId, credential: 'connection' },
+    });
+    // Collected once: a poll after it is invalid_grant, and the connection stands.
+    clock.advanceBy(5000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: write.connection.keyId, via: 'device', redirectHost: null, status: 'ACTIVE' }],
+    });
+  });
+
+  it('answers a denied device access_denied, an unknown or another client’s code invalid_grant, an ended one expired_token', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const denied = await codes();
+    const flow = await claimed(denied.userCode);
+    const write = await consents.deny(admin, keyed(admin, DENY_OPERATION, 'deny-device'), flow, CORRELATION);
+    expect(write).toEqual({ outcome: 'denied', redirectTo: null });
+    expect(errorOf(await poll(denied.deviceCode))).toBe('access_denied');
+    expect(errorOf(await poll(`axd_${'x'.repeat(43)}`))).toBe('invalid_grant');
+    expect(errorOf(await poll('not a code'))).toBe('invalid_grant');
+    const other = await codes();
+    expect(errorOf(await poll(other.deviceCode, 'axcl_ffffffffffffffffffffffffffffffff'))).toBe('invalid_grant');
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(other.deviceCode))).toBe('expired_token');
+    expect(await deviceOf().lookup(other.userCode, undefined)).toEqual({ outcome: 'not_found' });
+  });
+
+  it('revokes a connection allowed but never collected once its codes end', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes();
+    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('expired_token');
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: write.connection.keyId, status: 'REVOKED' }],
+    });
+  });
+
+  it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
+    const device = deviceOf();
+    expect(await device.authorize({ client_id: 'axcl_ffffffffffffffffffffffffffffffff' }, CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 401,
+      error: 'invalid_client',
+    });
+    expect(await device.authorize({}, CORRELATION)).toMatchObject({ error: 'invalid_client' });
+    expect(await device.authorize({ client_id: clientId, scope: 'openid' }, CORRELATION)).toMatchObject({
+      error: 'invalid_scope',
+    });
+    expect(
+      await device.authorize({ client_id: clientId, resource: 'https://elsewhere.example/v1/mcp' }, CORRELATION),
+    ).toMatchObject({ error: 'invalid_target' });
+    expect(await device.lookup('AEIO-UUUU', undefined)).toEqual({ outcome: 'not_found' });
+  });
+});
+
+describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres ${server.version})`, () => {
+  const CLIENT_URL = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const CLAUDE_BACK = 'https://claude.ai/api/mcp/auth_callback';
+
+  /** Clients over a stand-in fetcher that answers `answer` for a listed address, counting its fetches. */
+  function metadataClients(answer: () => MetadataFetched) {
+    const fetched: string[] = [];
+    const metadata: ClientMetadataFetch = {
+      listed: (id) => id.startsWith('https://claude.ai/'),
+      fetch: (id) => {
+        fetched.push(id);
+        return Promise.resolve(answer());
+      },
+    };
+    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const viaDocument = createOauthAuthorizing({
+      database: app,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients,
+    });
+    const consentsOf = createConnectionConsents({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      logger: testLogger(capture),
+      issuer: capabilities.issuer,
+      clients,
+    });
+    return { viaDocument, consentsOf, fetched };
+  }
+
+  const ask = (via: OauthAuthorizing, client = CLIENT_URL) =>
+    via.authorize(
+      {
+        response_type: 'code',
+        client_id: client,
+        redirect_uri: CLAUDE_BACK,
+        state: 'xyz',
+        code_challenge: challengeOf(VERIFIER),
+        code_challenge_method: 'S256',
+      },
+      undefined,
+    );
+
+  const DOCUMENT = { client_id: CLIENT_URL, client_name: 'Claude', redirect_uris: [CLAUDE_BACK] };
+
+  it('fetches the document once a day, shows the client verified by its host, and connects it', async () => {
+    const { viaDocument, consentsOf, fetched } = metadataClients(() => ({ outcome: 'fetched', document: DOCUMENT }));
+    const first = await ask(viaDocument);
+    if (first.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(first)}`);
+    expect(await ask(viaDocument)).toMatchObject({ outcome: 'opened' });
+    expect(fetched).toEqual([CLIENT_URL]);
+    const flow = { flowId: first.flowId, cookie: first.cookie };
+    expect(await consentsOf.request(flow)).toMatchObject({
+      via: 'code',
+      client: { id: CLIENT_URL, name: 'Claude', verifiedBy: 'claude.ai' },
+      redirectHost: 'claude.ai',
+    });
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const challengeId = askedFor(
+      await consentsOf.consent(admin, keyed(admin, CONSENT_OPERATION, 'cimd'), flow, {
+        agentId,
+        scopes: ['requests:read'],
+      }),
+    );
+    await stepUp(admin, challengeId);
+    const write = await consentsOf.confirm(
+      admin,
+      keyed(admin, CONSENT_CONFIRM_OPERATION, 'cimd-confirm'),
+      flow,
+      { agentId, scopes: ['requests:read'] },
+      challengeId,
+      CORRELATION,
+    );
+    if (write.outcome !== 'connected' || write.redirectTo === null) throw new Error('connected');
+    const code = new URL(write.redirectTo).searchParams.get('code') ?? '';
+    const tokens = issued(
+      await grants.exchangeCode(
+        { code, clientId: CLIENT_URL, redirectUri: CLAUDE_BACK, codeVerifier: VERIFIER, resource: undefined },
+        CALLER,
+      ),
+    );
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ clientId: CLIENT_URL, clientName: 'Claude', redirectHost: 'claude.ai' }],
+    });
+    // A day on, fetched again.
+    clock.advanceBy(DAY_MS);
+    expect(await ask(viaDocument)).toMatchObject({ outcome: 'opened' });
+    expect(fetched).toEqual([CLIENT_URL, CLIENT_URL]);
+  });
+
+  it('never sends the browser back for a document refused, nor for an address not on the list, and says why', async () => {
+    // An address of its own: the test above kept Claude's for the day.
+    const other = 'https://claude.ai/oauth/other-client';
+    const document = { ...DOCUMENT, client_id: other };
+    const refused = metadataClients(() => ({ outcome: 'refused', reason: 'timeout' }));
+    expect(await ask(refused.viaDocument, other)).toEqual({ outcome: 'not_redirectable', problem: 'unknown_client' });
+    expect(lines('oauth.client_metadata_refused')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', reason: 'timeout' }),
+    ]);
+    const mismatched = metadataClients(() => ({
+      outcome: 'fetched',
+      document: { ...DOCUMENT, client_id: 'https://claude.ai/other' },
+    }));
+    expect(await ask(mismatched.viaDocument, other)).toMatchObject({ problem: 'unknown_client' });
+    expect(lines('oauth.client_metadata_refused').at(-1)).toMatchObject({ reason: 'client_id_mismatch' });
+    // A redirect address the document doesn't list: never sent back to.
+    const listed = metadataClients(() => ({ outcome: 'fetched', document }));
+    const elsewhere = await listed.viaDocument.authorize(
+      { response_type: 'code', client_id: other, redirect_uri: 'https://evil.example/cb' },
+      undefined,
+    );
+    expect(elsewhere).toEqual({ outcome: 'not_redirectable', problem: 'unregistered_redirect' });
+    const unlisted = metadataClients(() => ({ outcome: 'fetched', document: DOCUMENT }));
+    expect(await ask(unlisted.viaDocument, 'https://evil.example/client.json')).toMatchObject({
+      problem: 'unknown_client',
+    });
+    expect(unlisted.fetched).toEqual([]);
+  });
+
+  it('shares one fetch among requests at once for a client not kept', async () => {
+    const answer = Promise.withResolvers<undefined>();
+    const fetched: string[] = [];
+    const clients = createOauthClients({
+      database: app,
+      clock,
+      logger: testLogger(capture),
+      metadata: {
+        listed: () => true,
+        fetch: async (id) => {
+          fetched.push(id);
+          await answer.promise;
+          return { outcome: 'fetched', document: { ...DOCUMENT, client_id: id } };
+        },
+      },
+    });
+    const id = 'https://claude.ai/oauth/shared';
+    const both = Promise.all([clients.find(id), clients.find(id)]);
+    answer.resolve(undefined);
+    const [one, other] = await both;
+    expect(one).toEqual(other);
+    expect(one).toMatchObject({ clientId: id, verifiedBy: 'claude.ai' });
+    expect(fetched).toEqual([id]);
   });
 });

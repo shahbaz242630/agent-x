@@ -4,7 +4,9 @@
 // come from the one capabilities object, the authorize endpoint never sends an
 // unproven client anywhere, and the token, revocation and registration
 // endpoints answer OAuth's own error bodies. What the use cases do in the
-// database is oauth-connections.db.test.ts.
+// database is oauth-connections.db.test.ts. 6E3c: a device's codes, its
+// device code at the token endpoint, and the metadata naming both, and
+// client metadata documents only while some origin is allowed.
 import type { AcceptedKey, IssuedTokens } from '@agentx/core/modules/agents';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import { createCredentialCheck } from './credentials.ts';
 import type { AuthorizeAnswer, OauthAuthorizing, RegistrationAnswer } from './oauth-authorizing.ts';
+import type { DeviceAnswer, OauthDevice } from './oauth-device.ts';
 import type { GrantAnswer, OauthGrants } from './oauth-grants.ts';
 import { capabilitiesOf, CONNECT_COOKIE } from './oauth-wire.ts';
 
@@ -52,11 +55,32 @@ interface Stand {
   readonly register?: RegistrationAnswer;
   readonly grant?: GrantAnswer;
   readonly revoked?: Awaited<ReturnType<OauthGrants['revoke']>>;
+  readonly device?: DeviceAnswer;
+  readonly clientMetadataOrigins?: readonly string[];
 }
+
+const DEVICE_CODES: DeviceAnswer = {
+  outcome: 'opened',
+  codes: {
+    deviceCode: `axd_${'d'.repeat(43)}`,
+    userCode: 'BCDF-GHJK',
+    verificationUri: `${PUBLIC_ORIGIN}/device`,
+    verificationUriComplete: `${PUBLIC_ORIGIN}/device?user_code=BCDF-GHJK`,
+    expiresIn: 900,
+    interval: 5,
+  },
+};
 
 /** A server with stand-in OAuth use cases answering as `stand` says, and what each was asked. */
 async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
   const asked: unknown[] = [];
+  const device: OauthDevice = {
+    authorize: (body) => {
+      asked.push(body);
+      return Promise.resolve(stand.device ?? DEVICE_CODES);
+    },
+    lookup: () => Promise.reject(new Error('not here')),
+  };
   const authorizing: OauthAuthorizing = {
     authorize: (query, cookie) => {
       asked.push({ query, cookie });
@@ -72,6 +96,10 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
       asked.push(exchange);
       return Promise.resolve(stand.grant ?? { outcome: 'issued', tokens: TOKENS, agent: ACCEPTED });
     },
+    exchangeDevice: (exchange) => {
+      asked.push(exchange);
+      return Promise.resolve(stand.grant ?? { outcome: 'issued', tokens: TOKENS, agent: ACCEPTED });
+    },
     refresh: (refresh) => {
       asked.push(refresh);
       return Promise.resolve(stand.grant ?? { outcome: 'issued', tokens: TOKENS, agent: ACCEPTED });
@@ -83,6 +111,7 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
   };
   const app = await routeServer({
     oauthOn,
+    ...(stand.clientMetadataOrigins === undefined ? {} : { clientMetadataOrigins: stand.clientMetadataOrigins }),
     oauth: {
       authorizing,
       grants,
@@ -92,6 +121,7 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
         confirm: () => Promise.reject(new Error('not here')),
         deny: () => Promise.reject(new Error('not here')),
       },
+      device,
       clock: { now: () => new Date('2099-12-28T08:00:00Z') },
     },
   });
@@ -121,6 +151,7 @@ const ADDRESSES: readonly (InjectOptions & { readonly url: string })[] = [
   form('/v1/oauth/token', 'grant_type=refresh_token'),
   form('/v1/oauth/revoke', 'token=x'),
   json('/v1/oauth/register', { redirect_uris: ['https://a.example/cb'] }),
+  form('/v1/oauth/device_authorization', `client_id=${CLIENT}`),
   { method: 'GET', url: `/v1/oauth/requests/${FLOW}` },
   {
     method: 'POST',
@@ -133,6 +164,17 @@ const ADDRESSES: readonly (InjectOptions & { readonly url: string })[] = [
       'content-type': 'application/json',
     },
     payload: JSON.stringify({ agentId: AGENT, scopes: ['requests:read'] }),
+  },
+  {
+    method: 'POST',
+    url: '/v1/oauth/device/lookup',
+    headers: {
+      cookie: `${SESSION_COOKIE}=${COOKIE}`,
+      origin: PUBLIC_ORIGIN,
+      'idempotency-key': 'k-1',
+      'content-type': 'application/json',
+    },
+    payload: JSON.stringify({ userCode: 'BCDF-GHJK' }),
   },
 ];
 
@@ -162,7 +204,7 @@ describe('AGENTX_MCP_OAUTH off (the default): nothing of the OAuth server answer
 
   it('answers 404 with no use cases, flag on or not', async () => {
     const app = await routeServer({ oauthOn: true });
-    for (const options of ADDRESSES.slice(4, 8)) {
+    for (const options of ADDRESSES.slice(4, 9)) {
       expect((await app.inject(options)).statusCode).toBe(404);
     }
   });
@@ -212,16 +254,24 @@ describe('the metadata documents (RFC 9728, RFC 8414): one capabilities object, 
       token_endpoint: `${PUBLIC_ORIGIN}/v1/oauth/token`,
       revocation_endpoint: `${PUBLIC_ORIGIN}/v1/oauth/revoke`,
       registration_endpoint: `${PUBLIC_ORIGIN}/v1/oauth/register`,
+      device_authorization_endpoint: `${PUBLIC_ORIGIN}/v1/oauth/device_authorization`,
       scopes_supported: ['requests:read', 'requests:write', 'sources:read', 'suppliers:read', 'offline_access'],
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none'],
       revocation_endpoint_auth_methods_supported: ['none'],
       authorization_response_iss_parameter_supported: true,
+      client_id_metadata_document_supported: false,
     });
     expect(JSON.stringify(one.json())).not.toMatch(/jwks|id_token|userinfo|openid"/);
+  });
+
+  it('SEC-OAUTH-09 says client metadata documents are taken only while some origin is allowed for them', async () => {
+    const { app } = await oauthServer(true, { clientMetadataOrigins: ['https://claude.ai'] });
+    const response = await app.inject({ method: 'GET', url: '/.well-known/oauth-authorization-server' });
+    expect(response.json()).toMatchObject({ client_id_metadata_document_supported: true });
   });
 
   it('names the metadata on the MCP endpoint’s 401, and an issuer from an origin with no trailing slash', async () => {
@@ -355,6 +405,68 @@ describe('the token endpoint: forms, each field once, OAuth’s own errors, neve
       headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'https://chatgpt.com' },
     });
     expect(response.statusCode).toBe(200);
+  });
+});
+
+describe('the device flow (6E3c, RFC 8628)', () => {
+  it('gives a device its codes, never cached, from a form', async () => {
+    const { app, asked } = await oauthServer(true);
+    const response = await app.inject(
+      form('/v1/oauth/device_authorization', `client_id=${CLIENT}&scope=requests%3Aread`),
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.json()).toEqual({
+      device_code: `axd_${'d'.repeat(43)}`,
+      user_code: 'BCDF-GHJK',
+      verification_uri: `${PUBLIC_ORIGIN}/device`,
+      verification_uri_complete: `${PUBLIC_ORIGIN}/device?user_code=BCDF-GHJK`,
+      expires_in: 900,
+      interval: 5,
+    });
+    expect(asked).toEqual([{ client_id: CLIENT, scope: 'requests:read' }]);
+  });
+
+  it('answers a refusal as OAuth’s, and a field twice before the use case', async () => {
+    const { app, asked } = await oauthServer(true, {
+      device: { outcome: 'refused', status: 401, error: 'invalid_client', description: 'Who?' },
+    });
+    const response = await app.inject(form('/v1/oauth/device_authorization', 'client_id=x'));
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: 'invalid_client', error_description: 'Who?' });
+    const twice = await app.inject(form('/v1/oauth/device_authorization', 'client_id=x&client_id=y'));
+    expect(twice.json()).toMatchObject({ error: 'invalid_request' });
+    expect(asked).toEqual([{ client_id: 'x' }]);
+  });
+
+  it('holds each address to 30 a minute, as authorizing', async () => {
+    const { app } = await oauthServer(true);
+    const answers: number[] = [];
+    for (let sent = 0; sent < 31; sent += 1) {
+      answers.push((await app.inject(form('/v1/oauth/device_authorization', `client_id=${CLIENT}`))).statusCode);
+    }
+    expect(answers.at(-2)).toBe(200);
+    expect(answers.at(-1)).toBe(429);
+  });
+
+  it('exchanges a device code at the token endpoint, and answers its waiting as RFC 8628 says', async () => {
+    const { app, asked } = await oauthServer(true);
+    const grant = 'urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code';
+    const response = await app.inject(
+      form('/v1/oauth/token', `grant_type=${grant}&device_code=axd_x&client_id=${CLIENT}`),
+    );
+    expect(response.statusCode).toBe(200);
+    expect(asked).toEqual([{ deviceCode: 'axd_x', clientId: CLIENT }]);
+    const missing = await app.inject(form('/v1/oauth/token', `grant_type=${grant}&client_id=${CLIENT}`));
+    expect(missing.json()).toMatchObject({ error: 'invalid_request' });
+    const pending = await oauthServer(true, {
+      grant: { outcome: 'refused', status: 400, error: 'authorization_pending', description: 'Wait.' },
+    });
+    const waiting = await pending.app.inject(
+      form('/v1/oauth/token', `grant_type=${grant}&device_code=axd_x&client_id=${CLIENT}`),
+    );
+    expect(waiting.statusCode).toBe(400);
+    expect(waiting.json()).toEqual({ error: 'authorization_pending', error_description: 'Wait.' });
   });
 });
 

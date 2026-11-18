@@ -24,6 +24,10 @@
 //   the address the browser goes back to, its hash kept on the flow for 60 s.
 // - `deny`: the flow decided denied, and the browser sent back with
 //   `access_denied`.
+// - A device's flow (6E3c, RFC 8628), once the person's browser claimed it by
+//   its user code (oauth-device.ts), is asked and decided here the same way:
+//   only no address to send the browser back to (the device polls for its
+//   tokens), and its connection made `via: device`, with no redirect address.
 //
 // Lock order (ADR-006 §6): the idempotency key, the agent's brake, the issue
 // lock (the confirm), the flow (decided by one UPDATE, before any event), the
@@ -54,11 +58,9 @@ import {
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import {
-  type Client,
-  clientOf,
+  type AnyFlowRead,
   flowById,
   flowDecided,
-  type FlowRead,
   hashOf,
   isFlowCookie,
   isLoopback,
@@ -79,6 +81,7 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { KEY_CHANGING_ROLES } from './agent-key-changes.ts';
 import { type AgentMember, AgentRefused, type AgentTables } from './agent-writes.ts';
+import type { OauthClients } from './oauth-clients.ts';
 import { backToClient } from './oauth-wire.ts';
 import type { Refused, StepUpAsked } from './refused.ts';
 import { createStepUps, createUseCaseWork } from './use-case-work.ts';
@@ -111,10 +114,18 @@ export interface ConsentAsked {
 /** What the browser that opened a flow is shown. */
 export interface RequestShown {
   readonly id: string;
-  readonly client: { readonly id: string; readonly name: string };
-  readonly redirectUri: string;
-  /** The host the person is sent back to, shown in bold: what a phishing client's name can't hide. */
-  readonly redirectHost: string;
+  /** A browser's sign-in, or a device's (6E3c), which sends no one back. */
+  readonly via: 'code' | 'device';
+  readonly client: {
+    readonly id: string;
+    readonly name: string;
+    /** The host whose metadata document named the client (CIMD); null for a client that registered itself. */
+    readonly verifiedBy: string | null;
+  };
+  /** None for a device's. */
+  readonly redirectUri: string | null;
+  /** The host the person is sent back to, shown in bold: what a phishing client's name can't hide. None for a device's. */
+  readonly redirectHost: string | null;
   /** Sent back to an app on the person's own computer. */
   readonly loopback: boolean;
   readonly scopesAsked: readonly Scope[];
@@ -124,6 +135,7 @@ export interface RequestShown {
 
 /** A connection just made, as its confirm answers it. */
 interface ConnectionMade {
+  readonly via: 'code' | 'device';
   readonly keyId: string;
   readonly agentId: string;
   readonly clientId: string;
@@ -139,7 +151,8 @@ export type ConsentWrite =
       readonly redirectTo: string | null;
       readonly connection: ConnectionMade;
     }
-  | { readonly outcome: 'denied'; readonly redirectTo: string }
+  /** Where the browser goes, told no; none for a device's, which learns it by polling. */
+  | { readonly outcome: 'denied'; readonly redirectTo: string | null }
   | { readonly outcome: 'conflict' | 'busy' }
   | Refused;
 
@@ -173,20 +186,25 @@ export interface ConnectionConsents {
  * The pending connection's SHA-256: the organisation, the flow, the agent, the scopes as kept, the client, its
  * redirect address and the resource, so the step-up makes exactly that connection and no other.
  */
-const consentHash = (orgId: string, flow: FlowRead, asked: ConsentAsked): Buffer =>
+const consentHash = (orgId: string, flow: AnyFlowRead, asked: ConsentAsked): Buffer =>
   changeHashOf([
     orgId.toLowerCase(),
     flow.id.toLowerCase(),
     asked.agentId.toLowerCase(),
     scopesText(asked.scopes),
     flow.clientId,
-    flow.redirectUri,
+    // A device's has none: its kind, where the address would be, so neither can stand for the other.
+    flow.kind === 'code' ? flow.redirectUri : 'device',
     flow.resource,
   ]);
 
-/** Whether the browser asking is the one that opened the flow: its cookie's hash, as kept. */
-const fromItsBrowser = (flow: FlowRead, cookie: string | undefined): boolean =>
-  cookie !== undefined && isFlowCookie(cookie) && hashOf(cookie) === flow.browserHash;
+/** Whether the browser asking is the one that opened the flow (or claimed a device's): its cookie's hash, as kept. */
+const fromItsBrowser = (flow: AnyFlowRead, cookie: string | undefined): boolean =>
+  cookie !== undefined && flow.browserHash !== null && isFlowCookie(cookie) && hashOf(cookie) === flow.browserHash;
+
+/** What a client no longer known is called: its redirect address's host, or its ID, at most 100 characters. */
+const unnamed = (flow: AnyFlowRead): string =>
+  (flow.kind === 'code' ? new URL(flow.redirectUri).host : flow.clientId).slice(0, 100);
 
 /** A signed state's read as found, or the refusal it is: INTEGRITY_FAILED tampered with, NOT_FOUND missing. */
 function foundIn<Read extends { readonly outcome: string }>(read: Read): Extract<Read, { readonly outcome: 'found' }> {
@@ -196,7 +214,8 @@ function foundIn<Read extends { readonly outcome: string }>(read: Read): Extract
 }
 
 /** Whether the flow can still be decided at `now`. */
-const isOpen = (flow: FlowRead, now: Date): boolean => flow.decided === null && flow.endsAt.getTime() > now.getTime();
+const isOpen = (flow: AnyFlowRead, now: Date): boolean =>
+  flow.decided === null && flow.endsAt.getTime() > now.getTime();
 
 export function createConnectionConsents({
   database,
@@ -206,6 +225,7 @@ export function createConnectionConsents({
   challenges,
   logger,
   issuer,
+  clients,
 }: {
   readonly database: Database<ConsentTables>;
   readonly keys: KeyProvider;
@@ -215,12 +235,14 @@ export function createConnectionConsents({
   readonly logger: Logger;
   /** The authorization server's issuer, named on every answer to the client (RFC 9207, SEC-OAUTH-12). */
   readonly issuer: string;
+  /** The clients known, registered or named by a metadata document (6E3c). */
+  readonly clients: OauthClients;
 }): ConnectionConsents {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: AgentRefused });
   const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
   /** The flow named, open and this browser's: NOT_FOUND for any other, which says nothing of whether it exists. */
-  const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, now: Date): Promise<FlowRead> => {
+  const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, now: Date): Promise<AnyFlowRead> => {
     const flow = await flowById(tx, flowId);
     if (flow === undefined || !isOpen(flow, now) || !fromItsBrowser(flow, cookie)) {
       throw new AgentRefused(404, 'NOT_FOUND');
@@ -236,7 +258,7 @@ export function createConnectionConsents({
     tx: Tx,
     states: SignedStates,
     { orgId, role, membershipId }: { readonly orgId: string; readonly role: string; readonly membershipId: string },
-    flow: FlowRead,
+    flow: AnyFlowRead,
     asked: ConsentAsked,
   ): Promise<AgentRecord> => {
     const read = foundIn(await agentOf(tx, states, { orgId, id: asked.agentId }, 'share'));
@@ -294,6 +316,8 @@ export function createConnectionConsents({
       const { key } = foundIn(await agentKeyOf(tx, states, { orgId, id: keyId }, 'share'));
       const connectionRead = foundIn(await connectionOf(tx, states, { orgId, id: keyId }));
       return {
+        // Only a device's has no redirect address (0093's a_code_has_its_redirect).
+        via: connectionRead.connection.redirectUri === null ? ('device' as const) : ('code' as const),
         keyId: key.id,
         agentId: key.agentId,
         clientId: connectionRead.connection.clientId,
@@ -306,13 +330,15 @@ export function createConnectionConsents({
     async request(named) {
       const flow = await flowById(database, named.flowId);
       if (flow === undefined || !isOpen(flow, clock.now()) || !fromItsBrowser(flow, named.cookie)) return undefined;
-      const client: Client | undefined = await clientOf(database, flow.clientId);
+      const client = await clients.find(flow.clientId);
+      const redirectUri = flow.kind === 'code' ? flow.redirectUri : null;
       return {
         id: flow.id,
-        client: { id: flow.clientId, name: client?.name ?? new URL(flow.redirectUri).host },
-        redirectUri: flow.redirectUri,
-        redirectHost: new URL(flow.redirectUri).host,
-        loopback: isLoopback(flow.redirectUri),
+        via: flow.kind,
+        client: { id: flow.clientId, name: client?.name ?? unnamed(flow), verifiedBy: client?.verifiedBy ?? null },
+        redirectUri,
+        redirectHost: redirectUri === null ? null : new URL(redirectUri).host,
+        loopback: redirectUri !== null && isLoopback(redirectUri),
         scopesAsked: SCOPES.filter((scope) => flow.scopesAsked.includes(scope)),
         resource: flow.resource,
         endsAt: flow.endsAt,
@@ -338,7 +364,7 @@ export function createConnectionConsents({
     },
 
     async confirm(member, idempotent, named, asked, stepUpChallengeId, correlationId) {
-      let made: { readonly redirectTo: string; readonly connection: ConnectionMade } | undefined;
+      let made: { readonly redirectTo: string | null; readonly connection: ConnectionMade } | undefined;
       const done = await work.brakeWrite(
         member,
         idempotent,
@@ -356,14 +382,16 @@ export function createConnectionConsents({
             { action: CONSENT_OPERATION, changeHash: consentHash(member.orgId, flow, asked) },
             { passkeyRequired: membership.role === 'admin' },
           );
-          const client = await clientOf(tx, flow.clientId);
+          // As kept when the person was shown it: never fetched inside the transaction.
+          const client = await clients.kept(tx, flow.clientId);
           const keyId = ids.next();
-          const code = newCode();
+          // A device's flow has no code: its device code, polling, takes the tokens (oauth-grants.ts).
+          const code = flow.kind === 'code' ? newCode() : null;
           // Decided first, by one UPDATE of an undecided flow in time: a second confirm of it finds none, and rolls back.
           const decided = await flowDecided(
             tx,
             flow.id,
-            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash: hashOf(code) },
+            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash: code === null ? null : hashOf(code) },
             now,
           );
           if (!decided) throw new AgentRefused(404, 'NOT_FOUND');
@@ -392,10 +420,10 @@ export function createConnectionConsents({
             keyId,
             agentId: agent.id,
             clientId: flow.clientId,
-            clientName: client?.name ?? new URL(flow.redirectUri).host,
+            clientName: client?.name ?? unnamed(flow),
             resource: flow.resource,
-            redirectUri: flow.redirectUri,
-            via: 'code',
+            redirectUri: flow.kind === 'code' ? flow.redirectUri : null,
+            via: flow.kind,
             madeBy: membership.id,
             createdAt: now,
             actor,
@@ -403,8 +431,12 @@ export function createConnectionConsents({
           });
           made = {
             // RFC 9207 (SEC-OAUTH-12): the issuer named, so a client talking to two servers can't be mixed up.
-            redirectTo: backToClient(flow.redirectUri, { code, state: flow.state, iss: issuer }),
+            redirectTo:
+              flow.kind === 'code' && code !== null
+                ? backToClient(flow.redirectUri, { code, state: flow.state, iss: issuer })
+                : null,
             connection: {
+              via: flow.kind,
               keyId,
               agentId: agent.id,
               clientId: flow.clientId,
@@ -436,7 +468,10 @@ export function createConnectionConsents({
       if (flow === undefined) return { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
       return {
         outcome: 'denied',
-        redirectTo: backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer }),
+        redirectTo:
+          flow.kind === 'code'
+            ? backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer })
+            : null,
       };
     },
   };
