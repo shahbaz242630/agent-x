@@ -1452,8 +1452,12 @@ describe('6E3b: the OAuth server is on in this stack: each operation answers, an
 
   it.each(oauthOperations)('$method $route', async (op) => {
     const body = op.schema === undefined ? undefined : sample(op.schema, own);
-    // Any flow's ID: none this caller's browser opened (it holds no flow cookie).
-    const answer = await send(op, allowedHeaders(op), body, op.route.replaceAll('{id}', randomUUID()));
+    // Any flow's ID: none this caller's browser opened (it holds no flow cookie). A public operation (the metadata,
+    // registration, authorize, token and revocation) answers anyone, so its 2xx is a control, not an attack's answer.
+    const url = op.route.replaceAll('{id}', randomUUID());
+    const answer = op.access.includes('public')
+      ? await controlSend(op, allowedHeaders(op), body, url)
+      : await send(op, allowedHeaders(op), body, url);
     expect(answer.status, `${op.method} ${op.route}: a refusal is never a server failure`).toBeLessThan(500);
     if (op.route.includes('{id}')) {
       // SEC-OAUTH-10: a flow another browser opened, or none, is not found, whoever is signed in.
