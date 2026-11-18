@@ -228,6 +228,16 @@ export const ALLOWED: readonly Allowed[] = [
     why: 'a page of settled marks, each its own job and organisation, only while it reads as listed',
   },
   {
+    file: 'packages/core/src/modules/agents/infrastructure/connection-tokens.ts',
+    match: '.deleteFrom(TOKENS)',
+    guard: 'TOKEN_RETENTION_DAYS',
+    proof: {
+      file: 'packages/core/src/modules/agents/infrastructure/connections.db.test.ts',
+      title: 'sweeps rows past 120 days, and the database refuses the app any younger',
+    },
+    why: "one organisation's connection tokens past 120 days, a page at a time; the database's retention policy refuses any younger",
+  },
+  {
     file: 'packages/core/src/modules/identity/infrastructure/login-flows.ts',
     match: ".deleteFrom('identity.login_flows')",
     guard: ".where('ends_at', '<=', now)",
@@ -237,6 +247,27 @@ export const ALLOWED: readonly Allowed[] = [
     },
     why: 'a sign-in flow taken once by its cookie hash, and the sweep of those past their ten minutes',
     lines: 2,
+  },
+  {
+    file: 'packages/core/src/modules/oauth/infrastructure/clients.ts',
+    match: "deleteFrom('oauth.clients')",
+    guard: ".where('first_connected_at', 'is', null)",
+    proof: {
+      file: 'packages/core/src/modules/oauth/infrastructure/oauth.db.test.ts',
+      title:
+        'registers a client, reads it back, notes its first connection once, and sweeps it only if it never connected',
+    },
+    why: 'registered MCP clients that never connected, a day after they registered',
+  },
+  {
+    file: 'packages/core/src/modules/oauth/infrastructure/flows.ts',
+    match: "deleteFrom('oauth.flows')",
+    guard: ".where('ends_at', '<=', new Date(now.getTime() - DAY_MS))",
+    proof: {
+      file: 'packages/core/src/modules/oauth/infrastructure/oauth.db.test.ts',
+      title: 'sweeps a flow a day after it ends, never before',
+    },
+    why: 'OAuth flows a day after they ended (the day keeps a used code for its reuse to be caught)',
   },
   {
     file: 'packages/core/src/modules/identity/infrastructure/sessions.ts',
