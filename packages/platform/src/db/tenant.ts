@@ -390,6 +390,31 @@ export const holdBrake = <Schema>(tx: Transaction<Schema>, scope: string, ...ids
   holdBrakeNamed(tx, lockName(scope, ...ids));
 
 /**
+ * Several brakes of one scope, in the order given (ADR-006 §6: member removal alone holds more than one), their waits
+ * together bounded to one brake's BRAKE_WAIT_SECONDS: each waits only what the ones before it left (AG4, S202), so a
+ * removal across many busy agents answers busy as soon as one stop would, not a brake's wait per agent later. The
+ * last statement puts a stop's own bounds back for what follows.
+ */
+export async function holdBrakesWithin<Schema>(
+  tx: Transaction<Schema>,
+  scope: string,
+  each: readonly (readonly string[])[],
+): Promise<void> {
+  if (each.length === 0) return;
+  const ends = performance.now() + BRAKE_WAIT_SECONDS * 1000;
+  for (const ids of each) {
+    const left = `${String(Math.max(1, Math.floor(ends - performance.now())))}ms`;
+    await holdBrakeNamed(
+      tx,
+      lockName(scope, ...ids),
+      sql`select pg_catalog.set_config('lock_timeout', ${left}, true),
+        pg_catalog.set_config('statement_timeout', ${BRAKE_STATEMENT}, true)`,
+    );
+  }
+  await STOP_WAITS.execute(tx);
+}
+
+/**
  * A statement of its own that bounds the rest of the transaction's waits as a claim's does, for one with no claim:
  * so a read behind a brake waiting is told busy, not cut off by a statement's limit.
  */

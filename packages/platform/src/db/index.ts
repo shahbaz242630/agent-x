@@ -108,6 +108,7 @@ export {
   assertTenant,
   brakeShared,
   holdBrake,
+  holdBrakesWithin,
   holdRoutineBrakeNamed,
   lockWaitBoundedAlone,
   SOURCE_BRAKE,
