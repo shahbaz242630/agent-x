@@ -19,7 +19,8 @@
 //   with the choice and its words' version, into the step-up.
 // - The checks: the agent active (AGENT_NOT_ACTIVE); every mandate of the
 //   agent verified (B2's open-mandate query trusts the row's status, S89
-//   review); this one neither ended (MANDATE_ENDED) nor suspended
+//   review); this one neither ended (MANDATE_ENDED, its version in force
+//   past its end included, before the expiry job records it) nor suspended
 //   (MANDATE_SUSPENDED: resume it first, B4); its draft the one named and
 //   waiting (MANDATE_NOT_WAITING) and not past its end
 //   (MANDATE_DRAFT_EXPIRED); the source able to fund (SOURCE_NOT_USABLE)
@@ -235,6 +236,11 @@ export function createMandateAcceptance({
     const { mandate } = read;
     if (isEnded(mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
     if (mandate.status === 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_SUSPENDED');
+    // Its version in force past its end is ended, as resume weighs it, though the expiry job hasn't recorded it yet.
+    if (mandate.currentVersionId !== null) {
+      const current = await versionIn(tx, states, orgId, mandate.id, mandate.currentVersionId);
+      if (current.endsAt !== null && current.endsAt <= now) throw new MandateRefused(409, 'MANDATE_ENDED');
+    }
     const waiting = mandate.pendingVersionId;
     if (waiting === null || (versionId !== null && versionId.toLowerCase() !== waiting)) {
       throw new MandateRefused(409, 'MANDATE_NOT_WAITING');
