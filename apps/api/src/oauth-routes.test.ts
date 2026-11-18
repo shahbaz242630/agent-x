@@ -168,6 +168,22 @@ describe('AGENTX_MCP_OAUTH off (the default): nothing of the OAuth server answer
   });
 });
 
+describe('the authorize endpoint’s request line, at its longest, fits the front door (Schemathesis, 414)', () => {
+  it('stays under 8 KB with every field at its longest and every character percent-encoded', async () => {
+    const app = await routeServer({ oauthOn: true });
+    const document = app.swagger() as {
+      paths: Record<string, { get: { parameters: { name: string; schema: { maxLength?: number } }[] } }>;
+    };
+    const parameters = document.paths['/v1/oauth/authorize']?.get.parameters ?? [];
+    expect(parameters.length).toBeGreaterThan(0);
+    const query = parameters.reduce((sum, { name, schema }) => {
+      expect(schema.maxLength, `${name} has a maximum`).toBeDefined();
+      return sum + name.length + 2 + 3 * (schema.maxLength ?? Number.POSITIVE_INFINITY);
+    }, 0);
+    expect('GET /v1/oauth/authorize? HTTP/1.1'.length + query).toBeLessThan(8192);
+  });
+});
+
 describe('the metadata documents (RFC 9728, RFC 8414): one capabilities object, nothing claiming OIDC', () => {
   it('names the MCP endpoint and our issuer, exactly, at both resource paths', async () => {
     const { app } = await oauthServer(true);

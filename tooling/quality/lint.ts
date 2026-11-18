@@ -1,11 +1,12 @@
-// `pnpm lint` (Rule Book §5): ESLint once over the repository (or over the
-// files named, as the pre-push hook names a branch's changed ones), with
+// One lint run (Rule Book §5): ESLint once over the files or directories named
+// (a branch's changed files, or one part of the whole: `pnpm lint` runs the
+// whole in parts, lint-whole.ts), or the repository when none is named, with
 // eslint.quality.config.js. Every finding of the repository's own rules
 // fails the run, as `eslint --max-warnings 0` did. A SonarJS finding fails it
 // only once its rule is in BLOCKING; until then it is reported, counted by
 // rule, so the garbage-code findings can be cleaned one rule at a time and
 // each rule then made to block (partner, S69).
-import { statSync } from 'node:fs';
+import { appendFileSync, statSync } from 'node:fs';
 
 import { ESLint } from 'eslint';
 
@@ -45,6 +46,12 @@ export function reportByRule(findings: readonly Finding[]): readonly (readonly [
   }
   return [...counts].sort(([a, m], [b, n]) => n - m || (a < b ? -1 : 1));
 }
+
+/**
+ * Where a run in parts (lint-whole.ts) asks each part to write its reported-only counts, one JSON list a line, so the
+ * whole's report sums them; unset, the run prints its own.
+ */
+export const REPORT_FILE_ENV = 'AGENTX_LINT_REPORT_FILE';
 
 /** The config `pnpm lint` runs: the repository's own rules and SonarJS's. */
 export const lintWith = () => new ESLint({ overrideConfigFile: 'eslint.quality.config.js' });
@@ -97,7 +104,10 @@ async function main(files: readonly string[]): Promise<number> {
   const patterns = await lintPatterns(files, (file) => eslint.isPathIgnored(file));
   if (patterns.length === 0) return 0;
   const { failing, reported, fails } = split(await eslint.lintFiles([...patterns]));
-  if (reported.length > 0) {
+  const reportFile = process.env[REPORT_FILE_ENV];
+  if (reportFile !== undefined && reportFile !== '') {
+    appendFileSync(reportFile, `${JSON.stringify(reported)}\n`);
+  } else if (reported.length > 0) {
     console.log('Garbage-code report (SonarJS, not yet blocking):');
     for (const [rule, count] of reported) console.log(`${String(count).padStart(6)}  ${rule}`);
   }

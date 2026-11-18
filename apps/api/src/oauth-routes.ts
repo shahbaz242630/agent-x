@@ -106,15 +106,20 @@ const REDIRECT = z.object({}).describe('Sent on: the Location header names where
 
 const text = (most: number) => z.string().max(most).optional();
 
+/**
+ * The authorization request's fields, each held to what any real client sends (a registered address is at most 512
+ * characters; our client IDs 37): together, percent-encoded at worst, the request line stays under the 8 KB a front door
+ * (nginx's default) and Node read, so a request the document allows is never refused 414 before the API sees it.
+ */
 const AUTHORIZE_QUERY = z.object({
-  response_type: text(64).describe('code: the only flow offered.'),
-  client_id: text(2048).describe('The client, as it registered.'),
-  redirect_uri: text(2048).describe('One of its registered addresses, exactly (a loopback address on any port).'),
+  response_type: text(32).describe('code: the only flow offered.'),
+  client_id: text(256).describe('The client, as it registered.'),
+  redirect_uri: text(512).describe('One of its registered addresses, exactly (a loopback address on any port).'),
   scope: text(256).describe('The scopes asked for, space-delimited; none asks for all, the person ticks which.'),
-  state: text(2048).describe('Sent back unchanged: at most 512 characters.'),
+  state: text(512).describe('Sent back unchanged.'),
   code_challenge: text(128).describe('PKCE: BASE64URL(SHA-256(code_verifier)).'),
   code_challenge_method: text(16).describe('S256, the only method taken.'),
-  resource: text(2048).describe('The MCP endpoint (RFC 8707), if named.'),
+  resource: text(256).describe('The MCP endpoint (RFC 8707), if named.'),
 });
 
 const TOKEN_FORM = z.object({
