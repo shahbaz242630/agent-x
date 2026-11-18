@@ -5,9 +5,13 @@
 // and lint read the working tree; CI checks the commit itself. The lint reads
 // only the files the branch changes (S200: the whole repository took ~45 min
 // and ~6 GB on the partner's laptop), the whole when the lint's own setup
-// changed or git can't say what changed; CI still lints the whole.
+// changed or git can't say what changed; CI still lints the whole. The whole
+// runs in parts, one process each (S201: one run passed V8's 6 GB cap).
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+
+import { lintWith } from '../quality/lint.ts';
+import { lintParts, type LintPart, workspaceGlobs } from '../quality/lint-parts.ts';
 
 import { ensureGitleaks } from './gitleaks.ts';
 import { runGit } from './pre-commit.ts';
@@ -120,9 +124,27 @@ export function changedFiles(base = 'origin/main'): readonly string[] | undefine
   }
 }
 
+/**
+ * The files one whole lint reads, as parts (tooling/quality/lint-parts.ts):
+ * those git lists, tracked and untracked, deleted ones left out, less those
+ * ESLint ignores, so no part names a directory holding only ignored files
+ * (ESLint stops on one: "All files matched ... are ignored").
+ */
+export async function wholeParts(): Promise<readonly LintPart[]> {
+  const eslint = lintWith();
+  const listed = runGit(['ls-files', '--cached', '--others', '--exclude-standard', '--deduplicate'])
+    .split(String.fromCharCode(10))
+    .filter((path) => LINTED.test(path) && existsSync(path));
+  const ignored = await Promise.all(listed.map((path) => eslint.isPathIgnored(path)));
+  return lintParts(
+    listed.filter((_, index) => ignored[index] === false),
+    workspaceGlobs(),
+  );
+}
+
 /** The lint, run by node itself (no shell: a long file list would pass cmd.exe's line limit). */
-function lintFiles(files: readonly string[] | 'all'): SpawnSyncReturns<Buffer> {
-  const args = ['--max-old-space-size=6144', 'tooling/quality/lint.ts', ...(files === 'all' ? [] : files)];
+function lintFiles(paths: readonly string[]): SpawnSyncReturns<Buffer> {
+  const args = ['--max-old-space-size=6144', 'tooling/quality/lint.ts', ...paths];
   return spawnSync(process.execPath, args, { stdio: 'inherit', windowsHide: true });
 }
 
@@ -132,7 +154,8 @@ export interface Steps {
   readonly gitleaks: (range: string) => Promise<number>;
   readonly typecheck: () => number;
   readonly changed: () => readonly string[] | undefined;
-  readonly lint: (files: readonly string[] | 'all') => number;
+  readonly parts: () => Promise<readonly LintPart[]>;
+  readonly lint: (paths: readonly string[]) => number;
 }
 
 const realSteps: Steps = {
@@ -144,7 +167,8 @@ const realSteps: Steps = {
   },
   typecheck: () => typecheckScript().status ?? 1,
   changed: () => changedFiles(),
-  lint: (files) => lintFiles(files).status ?? 1,
+  parts: wholeParts,
+  lint: (paths) => lintFiles(paths).status ?? 1,
 };
 
 /** The hook: returns the exit code. Stops at the first failing step. */
@@ -179,13 +203,30 @@ export async function prePush(
   }
   if (steps.typecheck() !== 0) return refuse('the type check failed');
   const targets = lintTargets(steps.changed());
-  if (targets === 'all')
-    log('Linting the whole repository (the lint setup changed, or git could not say what changed).');
-  else if (targets.length === 0) {
+  if (targets === 'all') return await lintWhole(steps, log, refuse);
+  if (targets.length === 0) {
     log('No changed files to lint; CI lints the whole repository.');
     return 0;
-  } else log(`Linting the ${targets.length} changed file(s); CI lints the whole repository.`);
-  if (steps.lint(targets) !== 0) return refuse('lint failed');
+  }
+  log(`Linting the ${targets.length} changed file(s); CI lints the whole repository.`);
+  return steps.lint(targets) === 0 ? 0 : refuse('lint failed');
+}
+
+/** The whole repository's lint, one part at a time, stopping at the first that fails. */
+async function lintWhole(steps: Steps, log: (line: string) => void, refuse: (what: string) => number): Promise<number> {
+  let parts: readonly LintPart[];
+  try {
+    parts = await steps.parts();
+  } catch (error) {
+    return refuse(`the files to lint could not be listed (${(error as Error).message})`);
+  }
+  log(
+    `Linting the whole repository in ${parts.length} parts (the lint setup changed, or git could not say what changed).`,
+  );
+  for (const [index, part] of parts.entries()) {
+    log(`Linting part ${index + 1} of ${parts.length}: ${part.label}...`);
+    if (steps.lint(part.paths) !== 0) return refuse(`lint failed in part ${index + 1} (${part.label})`);
+  }
   return 0;
 }
 

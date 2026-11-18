@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 
 import { describe, expect, it } from 'vitest';
 
+import type { LintPart } from '../quality/lint-parts.ts';
+
 import {
   changedFiles,
   commitCount,
@@ -18,6 +20,11 @@ const NONE = '0'.repeat(40);
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
 const C = 'c'.repeat(40);
+const PARTS: readonly LintPart[] = [
+  { label: 'the root files', paths: ['a.ts', 'b.js'] },
+  { label: 'apps/api', paths: ['apps/api'] },
+  { label: 'tooling', paths: ['tooling'] },
+];
 
 describe("reading git's list of refs being pushed", () => {
   it('reads one ref per line and ignores blank or partial lines', () => {
@@ -84,9 +91,10 @@ describe('the hook', () => {
 
   /** Steps that succeed unless told otherwise, recording the order they ran in. */
   const steps = (
-    fail: Partial<Record<'gitleaks' | 'typecheck' | 'lint', number | Error>> = {},
+    fail: Partial<Record<'gitleaks' | 'typecheck' | 'lint', number | Error>> & { lintPath?: string } = {},
     commits: (range: string) => number = () => 1,
     changed: () => readonly string[] | undefined = () => ['a.ts'],
+    parts: () => Promise<readonly LintPart[]> = () => Promise.resolve(PARTS),
   ): Steps & { ran: string[] } => {
     const ran: string[] = [];
     const outcome = (name: 'typecheck' | 'lint') => {
@@ -107,9 +115,10 @@ describe('the hook', () => {
         return outcome('typecheck');
       },
       changed,
-      lint: (files) => {
-        ran.push(files === 'all' ? 'lint all' : `lint ${files.join(' ')}`);
-        return outcome('lint');
+      parts,
+      lint: (paths) => {
+        ran.push(`lint ${paths.join(' ')}`);
+        return paths.includes(String(fail.lintPath)) ? 1 : outcome('lint');
       },
     };
   };
@@ -165,7 +174,7 @@ describe('the hook', () => {
     expect(said[0]).toContain('gitleaks could not run (offline); run corepack pnpm hooks');
   });
 
-  it('lints the whole repository when git cannot say what changed', async () => {
+  it('lints the whole repository in parts, one run each, when git cannot say what changed', async () => {
     const said: string[] = [];
     const run = steps(
       {},
@@ -173,8 +182,40 @@ describe('the hook', () => {
       () => undefined,
     );
     expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(0);
-    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint all']);
-    expect(said).toEqual(['Linting the whole repository (the lint setup changed, or git could not say what changed).']);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint a.ts b.js', 'lint apps/api', 'lint tooling']);
+    expect(said).toEqual([
+      'Linting the whole repository in 3 parts (the lint setup changed, or git could not say what changed).',
+      'Linting part 1 of 3: the root files...',
+      'Linting part 2 of 3: apps/api...',
+      'Linting part 3 of 3: tooling...',
+    ]);
+  });
+
+  it('stops at the first part that fails, and names it', async () => {
+    const said: string[] = [];
+    const run = steps(
+      { lintPath: 'apps/api' },
+      () => 1,
+      () => ['package.json'],
+    );
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(1);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck', 'lint a.ts b.js', 'lint apps/api']);
+    expect(said.at(-1)).toBe(
+      'Push refused by the pre-push hook: lint failed in part 2 (apps/api). CI would refuse it too; never skip this with --no-verify.',
+    );
+  });
+
+  it('refuses when the files for the whole lint cannot be listed', async () => {
+    const said: string[] = [];
+    const run = steps(
+      {},
+      () => 1,
+      () => undefined,
+      () => Promise.reject(new Error('git ls-files failed: boom')),
+    );
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(1);
+    expect(run.ran).toEqual([`gitleaks ${B}..${A}`, 'typecheck']);
+    expect(said.at(-1)).toContain('the files to lint could not be listed (git ls-files failed: boom)');
   });
 
   it('skips the lint when no changed file is one it reads, and says CI lints the whole', async () => {
