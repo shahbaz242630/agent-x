@@ -167,6 +167,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerAgentPerMinute: 120,
         rateLimitPerOrganisationPerMinute: 300,
         webCopies: 1,
+        mcpOauth: false,
       },
       decisionGate: { active: null, perOrganisation: null, waitingPerOrganisation: 100, waitMs: 10_000 },
       db: DB_DEFAULTS,
@@ -243,6 +244,7 @@ describe('config: a correct config loads', () => {
         rateLimitPerAgentPerMinute: 30,
         rateLimitPerOrganisationPerMinute: 300,
         webCopies: 1,
+        mcpOauth: false,
       },
       db: {
         host: '10.0.0.5',

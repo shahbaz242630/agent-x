@@ -40,6 +40,7 @@ beforeAll(async () => {
       rateLimitPerAgentPerMinute: 10_000,
       rateLimitPerOrganisationPerMinute: 100_000,
       webCopies: 1,
+      mcpOauth: false,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

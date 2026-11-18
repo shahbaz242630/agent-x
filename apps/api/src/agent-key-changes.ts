@@ -50,6 +50,7 @@ import {
   agentKeysOf,
   agentOf,
   bringKeyExpiryForward,
+  isConnectionKey,
   isLiveKey,
   keysOnceIssued,
   MOST_LIVE_KEYS,
@@ -185,6 +186,8 @@ export function createAgentKeyChanges({
     const agentRead = await agentOf(tx, states, { orgId, id: agentId }, 'change');
     if (agentRead.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
     if (agentRead.outcome === 'missing') throw new AgentRefused(404, 'NOT_FOUND');
+    // An MCP connection's key is no key of the agent's here (6E3a): it is revoked as its connection.
+    if (await isConnectionKey(tx, orgId, keyId)) throw new AgentRefused(404, 'NOT_FOUND');
     const keyRead = await agentKeyOf(tx, states, { orgId, id: keyId }, 'change');
     if (keyRead.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
     if (keyRead.outcome === 'missing' || keyRead.key.agentId !== agentRead.agent.id) {

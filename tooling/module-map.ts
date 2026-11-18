@@ -30,6 +30,8 @@ const DEPENDENCIES = {
   ],
   'platform-controls': [],
   'security-events': [],
+  // 6E3a (ADR-016): the OAuth server's rules and records; a connection itself is an agent's key.
+  oauth: ['agents'],
   activity: [],
   routing: ['funding-sources', 'mandates'],
   instructions: ['suppliers', 'providers'],

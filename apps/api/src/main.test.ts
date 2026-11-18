@@ -156,13 +156,27 @@ const sweeps = vi.hoisted(() => ({
   everyMs: [] as number[],
   /** The organisations' own security events' sweep (6E1b), the same sweep under lines of its own: kept apart. */
   security: { options: [] as { batch: number; mostBatches: number; deadlineMs: number }[] },
+  /** The MCP connections' token rows' sweep (6E3a), under lines of its own too. */
+  tokens: { options: [] as { batch: number; mostBatches: number; deadlineMs: number }[] },
   stopped: 0,
 }));
 
 vi.mock('./retention-sweep.ts', () => ({
   SECURITY_ORG_EVENT_LINES: { done: 'security.org_events_sweep_done' },
-  createRetentionSweep: (options: { batch: number; mostBatches: number; deadlineMs: number; lines?: unknown }) => {
-    (options.lines === undefined ? sweeps.options : sweeps.security.options).push(options);
+  CONNECTION_TOKEN_LINES: { done: 'agents.connection_tokens_sweep_done' },
+  createRetentionSweep: (options: {
+    batch: number;
+    mostBatches: number;
+    deadlineMs: number;
+    lines?: { readonly done: string };
+  }) => {
+    const kept =
+      options.lines === undefined
+        ? sweeps.options
+        : options.lines.done === 'security.org_events_sweep_done'
+          ? sweeps.security.options
+          : sweeps.tokens.options;
+    kept.push(options);
     return { run: () => Promise.resolve() };
   },
   scheduleRetentionSweep: (_sweep: unknown, everyMs: number) => {
@@ -422,6 +436,7 @@ beforeEach(() => {
   sweeps.options.length = 0;
   sweeps.everyMs.length = 0;
   sweeps.security.options.length = 0;
+  sweeps.tokens.options.length = 0;
   sweeps.stopped = 0;
   rowSweeps.scheduled.length = 0;
   rowSweeps.stopped.length = 0;
@@ -481,6 +496,8 @@ const EVERY_TIMER: [string, number][] = [
   ['schema_check', 300_000],
   // Each organisation's own security events past their retention (6E1b), beside the idempotency keys' sweep.
   ['security_org_event_sweep', 3_600_000],
+  // Each organisation's MCP connection token rows past 120 days (6E3a).
+  ['connection_token_sweep', 3_600_000],
   ['mandate_expiry', 300_000],
   ['hold_history', 30_000],
   ['grant_summaries', 3_600_000],
@@ -712,6 +729,14 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     await start();
 
     expect(sweeps.security.options).toEqual([
+      expect.objectContaining({ batch: 1_000, mostBatches: 100, deadlineMs: 120_000 }),
+    ]);
+  });
+
+  it("sweeps each organisation's MCP connection token rows past their keeping, under their own lines (6E3a)", async () => {
+    await start();
+
+    expect(sweeps.tokens.options).toEqual([
       expect.objectContaining({ batch: 1_000, mostBatches: 100, deadlineMs: 120_000 }),
     ]);
   });
@@ -1059,6 +1084,8 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     'identity.session',
     'identity.step_up_challenge',
     'security.event',
+    'oauth.flow',
+    'oauth.client',
     'provider_events.message',
     'notifications.notice',
   ];
@@ -1260,6 +1287,8 @@ describe('the API stops cleanly on a signal', () => {
       'identity.session',
       'identity.step_up_challenge',
       'security.event',
+      'oauth.flow',
+      'oauth.client',
       'provider_events.message',
       'notifications.notice',
     ];

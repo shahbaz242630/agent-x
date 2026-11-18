@@ -1375,7 +1375,9 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   it('holds only a listed table to it: off the list, its DELETE and UPDATE are a tenant table’s, but not its second policy', async () => {
     await owner.query('grant update on idempotency.keys to agentx_app');
 
-    expect(await liveSchemaProblems(app, { ...ROLES, policy: { ...SCHEMA_POLICY, fillInTables: {} } })).toEqual([
+    // Only the keys come off the list: the connection tokens' entry (0093) keeps its own retention policy allowed.
+    const { 'idempotency.keys': _keys, ...others } = SCHEMA_POLICY.fillInTables;
+    expect(await liveSchemaProblems(app, { ...ROLES, policy: { ...SCHEMA_POLICY, fillInTables: others } })).toEqual([
       'idempotency.keys does not have exactly one row-security policy',
       'the tenant policies no longer all read the same way',
     ]);
@@ -1383,7 +1385,7 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
 
   it('names DELETE on a listed table with no retention', async () => {
     const { sweptAfter: _, ...entry } = SCHEMA_POLICY.fillInTables['idempotency.keys'] ?? { reason: '', columns: [] };
-    const policy = { ...SCHEMA_POLICY, fillInTables: { 'idempotency.keys': entry } };
+    const policy = { ...SCHEMA_POLICY, fillInTables: { ...SCHEMA_POLICY.fillInTables, 'idempotency.keys': entry } };
 
     expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([
       'agentx_app may DELETE on idempotency.keys',

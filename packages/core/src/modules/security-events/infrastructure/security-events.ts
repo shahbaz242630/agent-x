@@ -27,11 +27,26 @@ import { type Kysely } from 'kysely';
 import { type Clock, DAY_MS, type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
-export const SECURITY_EVENT_KINDS = ['sign_in_failed', 'rate_limited', 'partner_event_refused'] as const;
+export const SECURITY_EVENT_KINDS = [
+  'sign_in_failed',
+  'rate_limited',
+  'partner_event_refused',
+  // 0093 (6E3a): an OAuth client refused before any organisation is known.
+  'oauth_refused',
+  // 0093 (6E3a): an MCP connection's refresh token used twice, the connection revoked: its organisation's alone.
+  'connection_token_reused',
+] as const;
 export type SecurityEventKind = (typeof SECURITY_EVENT_KINDS)[number];
 
-/** The kinds an organisation's own events can be (0091): a partner's refused message is never one. */
-export const ORG_EVENT_KINDS = ['sign_in_failed', 'rate_limited'] as const satisfies readonly SecurityEventKind[];
+/** The kinds an organisation's own events can be (0091): a partner's refused message, or an OAuth client's, never. */
+export const ORG_EVENT_KINDS = [
+  'sign_in_failed',
+  'rate_limited',
+  'connection_token_reused',
+] as const satisfies readonly SecurityEventKind[];
+
+/** The kinds only ever an organisation's (0093): never written where no organisation is named. */
+const ONLY_AN_ORGANISATIONS: readonly SecurityEventKind[] = ['connection_token_reused'];
 
 /** The least time a security event is kept: AGENTX_SECURITY_EVENT_RETENTION_DAYS's minimum. */
 export const LEAST_RETENTION_DAYS = 30;
@@ -77,6 +92,8 @@ function ownerProblem(event: SecurityEvent): string | undefined {
   if (event.agentId !== undefined && event.userId !== undefined) return 'it names both a person and an agent';
   if (event.orgId !== undefined && !(ORG_EVENT_KINDS as readonly string[]).includes(event.kind))
     return "its kind is never an organisation's";
+  if (event.orgId === undefined && ONLY_AN_ORGANISATIONS.includes(event.kind))
+    return "its kind is only an organisation's";
   return undefined;
 }
 

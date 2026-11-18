@@ -75,6 +75,16 @@ export const REASON_CODES = {
     "The staging partner's payee form can't take these details: the account must be a UAE IBAN with valid check digits, and the name readable. Nothing was changed. Fix them and send the form again.",
   BANK_LINK_NOT_WAITING:
     "No link of this organisation's is waiting at the staging bank under this session: it was approved or turned down already, or it ran out. Nothing was changed. Start a new link if one is still needed.",
+  CONNECTIONS_FULL:
+    'The agent already has 10 working app connections, the most it may have at once, so this one was not made. Revoke one it no longer needs, then connect the app again.',
+  CONNECTIONS_SPENT:
+    'The organisation has connected as many apps to its agents as it may in 24 hours (20), so this one was not made. Try again tomorrow; if no one at the organisation connected them, tell its admins at once.',
+  CONNECTIONS_TOO_MANY:
+    'The agent has had 100 app connections, ended ones included, the most Agent X keeps for one agent, so it can’t be given another. Register it again as a new agent to connect it. Nothing was changed.',
+  CONNECTION_AGENT_NOT_ACTIVE:
+    'The agent is suspended, so no app can be connected to it. Lift its suspension first, or choose another agent. Nothing was changed.',
+  CONNECTION_SCOPES_REFUSED:
+    'The permissions chosen are not all ones the app asked for and the agent holds, so the app was not connected. Choose among those shown, then allow it again.',
   CONTACTS_FULL:
     'The organisation already has as many registered contacts as it may, so no other can be added. Remove one first.',
   CONTACT_ADDS_SPENT:

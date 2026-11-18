@@ -33,6 +33,12 @@
 //   unnamed parts, and written as text the route marks as the contract's.
 //   What its tools answer is still allowlisted: each through its REST twin's
 //   own answer schema (mcp-calls.ts).
+// - A second (6E3a, ADR-016): OAuth's own endpoints (`config.oauthWire`,
+//   oauth-wire.ts) answer a refusal as OAuth clients read one, RFC 6749
+//   §5.2's `{error, error_description}`, at 400 and 401. Such a route may
+//   declare those two statuses with that one body (OAUTH_ERROR_BODY), which the
+//   document shows, and sends it written as the contract's own; every other
+//   refusal is still the one error body.
 // - The document says how to call the API at all (api-guide.ts): versioning,
 //   sign-in, idempotency, errors, rate limits; each operation's security and
 //   tag come from its access and address.
@@ -59,6 +65,7 @@ import { accessProblems, agentScopeProblems, namesRole, ORGANIZATION_HEADER, ORG
 import { withGuide } from './api-guide.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
+import { OAUTH_ERROR_BODY } from './oauth-errors.ts';
 import {
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_SCHEMA,
@@ -433,12 +440,19 @@ function responseProblems(route: RouteOptions): string[] {
       problems.push(`its ${status} response names no content type`);
     } else if (!schemas.every((entry) => entry instanceof z.ZodType)) {
       problems.push(`its ${status} response schema is not a zod schema`);
-    } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
+    } else if (
+      isErrorPathStatus(status) &&
+      !schemas.every((entry) => entry === ERROR_BODY || oauthOwn(route, status, entry))
+    ) {
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
   }
   return problems;
 }
+
+/** The second wire exception (6E3a): an OAuth endpoint's own refusal at 400 or 401, and nothing else. */
+const oauthOwn = (route: RouteOptions, status: string, schema: unknown): boolean =>
+  route.config?.oauthWire === true && (status === '400' || status === '401') && schema === OAUTH_ERROR_BODY;
 
 /** Error answers that aren't the contract's, its last hooks not last, or a hook that rewrites answers after they are written. */
 function hookProblems(route: RouteOptions, declared: ReadonlyMap<string, unknown>, written: boolean): string[] {

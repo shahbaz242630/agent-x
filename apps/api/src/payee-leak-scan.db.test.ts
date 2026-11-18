@@ -146,6 +146,7 @@ async function serverWith(rail: FakeRail): Promise<FastifyInstance> {
     rateLimitPerAgentPerMinute: 1000,
     rateLimitPerOrganisationPerMinute: 100_000,
     webCopies: 1,
+    mcpOauth: false,
   };
   const api = await buildServer({
     config: { http, log: { level: 'info', eventCapPerMinute: 10_000 } },

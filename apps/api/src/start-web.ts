@@ -1,7 +1,7 @@
 // The API's `web` side (one of the roles, 4D2e D): the server and every route's use case, built and listening.
 // It runs at `all` beside the jobs and at `web` without them. Nothing here starts a timer.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
-import { createAgentKeyCheck } from '@agentx/core/modules/agents';
+import { createAgentKeyCheck, createConnectionTokenCheck } from '@agentx/core/modules/agents';
 import {
   createOidcClient,
   createSignIn,
@@ -36,6 +36,11 @@ import type { FastifyInstance } from 'fastify';
 
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
+import { createConnectionConsents } from './connection-consents.ts';
+import { createCredentialCheck } from './credentials.ts';
+import { createOauthAuthorizing } from './oauth-authorizing.ts';
+import { createOauthGrants } from './oauth-grants.ts';
+import { capabilitiesOf } from './oauth-wire.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createActivityPages } from './activity-log.ts';
 import { createSecurityEventPages } from './security-events.ts';
@@ -126,8 +131,18 @@ export async function startWeb(
   whenRefused: () => Promise<void>,
 ): Promise<FastifyInstance | undefined> {
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
-  // An agent's key, checked before its request goes on (C2-1).
+  // An agent's key, checked before its request goes on (C2-1); on the MCP endpoint, an MCP connection's access token
+  // too, while the OAuth server is on (6E3a).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
+  const capabilities = capabilitiesOf(config.http.publicOrigin);
+  const checkCredential = createCredentialCheck({
+    keys: keyCheck,
+    connections: config.http.mcpOauth
+      ? createConnectionTokenCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger })
+      : undefined,
+    resource: capabilities.resource,
+    logger,
+  });
   // One a process, so a request's line and its decision's timers are in or out together.
   const logSample = createLogSample(config.logSuccessSampleOneIn);
   // A failure to build the server is a bug, so it goes to the crash handler (boot.ts).
@@ -264,7 +279,30 @@ export async function startWeb(
       logger,
     }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
-    checkAgentKey: keyCheck.check.bind(keyCheck),
+    checkAgentKey: checkCredential,
+    // Agent X's own OAuth server for MCP connections (6E3a): its routes answer only while AGENTX_MCP_OAUTH is on.
+    oauth: {
+      authorizing: createOauthAuthorizing({ database, clock: systemClock, ids: uuidV7Ids, logger, capabilities }),
+      grants: createOauthGrants({
+        database,
+        keys,
+        ids: uuidV7Ids,
+        clock: systemClock,
+        logger,
+        capabilities,
+        securityEvents: recorder,
+      }),
+      consents: createConnectionConsents({
+        database,
+        keys,
+        ids: uuidV7Ids,
+        clock: systemClock,
+        challenges,
+        logger,
+        issuer: capabilities.issuer,
+      }),
+      clock: systemClock,
+    },
     fundingSourceLinks: createFundingSourceLinks({
       database,
       keys,

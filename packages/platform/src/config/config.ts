@@ -84,6 +84,8 @@ export interface Config {
     readonly rateLimitPerOrganisationPerMinute: number;
     /** How many `web` copies run together (4D2e D12): each counts its share of every limit above (rate-limit.ts). */
     readonly webCopies: number;
+    /** 6E3 (ADR-016): Agent X's own OAuth server for MCP connections; off, its addresses are 404s. */
+    readonly mcpOauth: boolean;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -433,6 +435,7 @@ function readSettings(env: Env, location: LocationChecks) {
     rateLimitPerAgent: setting(env, 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'),
     rateLimitPerOrganisation: setting(env, 'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
+    mcpOauth: setting(env, 'AGENTX_MCP_OAUTH'),
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
     oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
@@ -711,6 +714,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,
       rateLimitPerOrganisationPerMinute: checks.rateLimitPerOrganisation.value,
       webCopies: checks.webCopies.value,
+      mcpOauth: checks.mcpOauth.value === 'on',
     }),
     db: Object.freeze({
       host: checks.dbHost.value,

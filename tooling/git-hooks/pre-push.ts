@@ -8,10 +8,10 @@
 // changed or git can't say what changed; CI still lints the whole. The whole
 // runs in parts, one process each (S201: one run passed V8's 6 GB cap).
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
-import { lintWith } from '../quality/lint.ts';
-import { lintParts, type LintPart, workspaceGlobs } from '../quality/lint-parts.ts';
+import type { LintPart } from '../quality/lint-parts.ts';
+import { lintPart, wholeParts } from '../quality/lint-whole.ts';
 
 import { ensureGitleaks } from './gitleaks.ts';
 import { runGit } from './pre-commit.ts';
@@ -124,30 +124,6 @@ export function changedFiles(base = 'origin/main'): readonly string[] | undefine
   }
 }
 
-/**
- * The files one whole lint reads, as parts (tooling/quality/lint-parts.ts):
- * those git lists, tracked and untracked, deleted ones left out, less those
- * ESLint ignores, so no part names a directory holding only ignored files
- * (ESLint stops on one: "All files matched ... are ignored").
- */
-export async function wholeParts(): Promise<readonly LintPart[]> {
-  const eslint = lintWith();
-  const listed = runGit(['ls-files', '--cached', '--others', '--exclude-standard', '--deduplicate'])
-    .split(String.fromCharCode(10))
-    .filter((path) => LINTED.test(path) && existsSync(path));
-  const ignored = await Promise.all(listed.map((path) => eslint.isPathIgnored(path)));
-  return lintParts(
-    listed.filter((_, index) => ignored[index] === false),
-    workspaceGlobs(),
-  );
-}
-
-/** The lint, run by node itself (no shell: a long file list would pass cmd.exe's line limit). */
-function lintFiles(paths: readonly string[]): SpawnSyncReturns<Buffer> {
-  const args = ['--max-old-space-size=6144', 'tooling/quality/lint.ts', ...paths];
-  return spawnSync(process.execPath, args, { stdio: 'inherit', windowsHide: true });
-}
-
 export interface Steps {
   readonly known: (sha: string) => boolean;
   readonly commits: (range: string) => number;
@@ -167,8 +143,9 @@ const realSteps: Steps = {
   },
   typecheck: () => typecheckScript().status ?? 1,
   changed: () => changedFiles(),
+  // The same parts and runs as `pnpm lint` on CI (lint-whole.ts).
   parts: wholeParts,
-  lint: (paths) => lintFiles(paths).status ?? 1,
+  lint: (paths) => lintPart(paths),
 };
 
 /** The hook: returns the exit code. Stops at the first failing step. */

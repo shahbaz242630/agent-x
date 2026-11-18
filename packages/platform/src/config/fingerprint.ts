@@ -88,6 +88,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       rateLimitPerAgentPerMinute: config.http.rateLimitPerAgentPerMinute,
       rateLimitPerOrganisationPerMinute: config.http.rateLimitPerOrganisationPerMinute,
       webCopies: config.http.webCopies,
+      mcpOauth: config.http.mcpOauth,
     },
     db: {
       host: config.db.host,

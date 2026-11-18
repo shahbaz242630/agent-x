@@ -15,9 +15,10 @@ import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
 /** Each check and the exact command it runs. */
 const CHECKS = {
   'format:check': 'prettier --check .',
-  // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222);
-  // with a 6 GB heap: the whole repository in one process passed Node's 4 GB default on CI's runner (S141, #453).
-  lint: 'node --max-old-space-size=6144 tooling/quality/lint.ts',
+  // ESLint with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222),
+  // over the whole in parts, each its own process with a 6 GB heap: one run over the whole passed V8's cap (S141 #453,
+  // S201), so CI's Lint step and the pre-push hook take the same parts (lint-whole.ts).
+  lint: 'node tooling/quality/lint-whole.ts',
   // The server's code against Node alone, in parts each with room under Node's 4 GB heap (one program for all passed it,
   // S201; typecheck-parts.test.ts holds the parts to tsconfig.json), then the console's against the browser's (6A1).
   typecheck: [

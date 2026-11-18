@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { runGit } from '../git-hooks/pre-commit.ts';
-import { wholeParts } from '../git-hooks/pre-push.ts';
+import { wholeParts } from './lint-whole.ts';
 import { lintWith } from './lint.ts';
 import { areaOf, type LintPart, lintParts, MAX_PART_FILES, workspaceGlobs } from './lint-parts.ts';
 

@@ -91,6 +91,7 @@ async function server(
       rateLimitPerAgentPerMinute: 100,
       rateLimitPerOrganisationPerMinute: 100_000,
       webCopies: 1,
+      mcpOauth: false,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
@@ -428,6 +429,7 @@ describe('C2-1 GET /v1/agent: the agent a key is', () => {
       keyId: ACCEPTED.keyId,
       scopes: ['requests:read', 'suppliers:read'],
       keyExpiresAt: '2026-12-28T09:00:00.000Z',
+      credential: 'key',
     });
     expect(asked.keys).toHaveLength(1);
   });

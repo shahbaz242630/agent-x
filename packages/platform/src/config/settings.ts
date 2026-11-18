@@ -257,6 +257,12 @@ const SETTINGS = {
     default: '300',
   },
   AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
+  // 6E3 (ADR-016): Agent X's own OAuth server for MCP connections. Off, every OAuth address is a 404 and nothing
+  // advertises it: on only where the console's consent screen ships (6E3b), local and staging first.
+  AGENTX_MCP_OAUTH: {
+    schema: text.pipe(z.enum(['off', 'on'], { error: 'must be off or on' })),
+    default: 'off',
+  },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
   // as its tokens name it; the secret is read by secretSetting (database.ts).
@@ -486,6 +492,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
+      'AGENTX_MCP_OAUTH',
       'AGENTX_OIDC_ISSUER',
       'AGENTX_OIDC_CLIENT_ID',
       'AGENTX_OIDC_CLIENT_SECRET',

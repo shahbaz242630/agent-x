@@ -54,6 +54,11 @@
 // An organisation frozen or on hold is refused where it matters, at a new
 // spend request (ORG_FROZEN, PRD §5.3) and at a hand-off, not here: its
 // agents may still read.
+//
+// 6E3a (ADR-016, SEC-OAUTH-01): an MCP connection's access token, `axa_…`, is
+// an agent's credential too, accepted as the agent its connection acts as,
+// but on the MCP endpoint alone (`config.toolCalls`): on any other route it
+// is the same 401 as any key refused, before any lookup (credentials.ts).
 import { type AcceptedKey, type KeyChecked, type Scope, SCOPES } from '@agentx/core/modules/agents';
 import {
   type LiveSession,
@@ -144,8 +149,12 @@ export function need<T>(useCase: T | undefined): T {
   return useCase;
 }
 
-/** Checks the key text an agent sent (key-check.ts): the same `refused` for every reason. */
-export type CheckAgentKey = (text: string, correlationId: string) => Promise<KeyChecked>;
+/**
+ * Checks the credential an agent sent: its key (key-check.ts), or, on the MCP endpoint alone (`toolCalls`), an MCP
+ * connection's access token (connection-check.ts, 6E3a; credentials.ts tells them apart). The same `refused` for
+ * every reason.
+ */
+export type CheckAgentKey = (text: string, correlationId: string, toolCalls: boolean) => Promise<KeyChecked>;
 
 /** Finds the live session a session cookie names, its last use moved on. */
 export type FindSession = (cookie: string) => Promise<LiveSession | undefined>;
@@ -305,10 +314,19 @@ const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBod
 const unauthenticated = (request: FastifyRequest, reply: FastifyReply, access: readonly Principal[]) =>
   sendErrorBody(reply.header('www-authenticate', challengeFor(access)), 401, 'UNAUTHENTICATED', request.id);
 
-/** A key refused, for whatever reason: the one answer, which tells the caller nothing of why (RFC 6750 §3.1). */
-const keyRefused = (request: FastifyRequest, reply: FastifyReply) =>
+/**
+ * A key refused, for whatever reason: the one answer, which tells the caller nothing of why (RFC 6750 §3.1). On the
+ * MCP endpoint, with the OAuth server on (6E3a), the challenge names the endpoint's metadata (RFC 9728 §5.1), so a
+ * client can find how to connect.
+ */
+const keyRefused = (request: FastifyRequest, reply: FastifyReply, resourceMetadata: string | undefined) =>
   sendErrorBody(
-    reply.header('www-authenticate', `${AGENT_CHALLENGE}, error="invalid_token"`),
+    reply.header(
+      'www-authenticate',
+      request.routeOptions.config.toolCalls === true && resourceMetadata !== undefined
+        ? `${AGENT_CHALLENGE}, resource_metadata="${resourceMetadata}", error="invalid_token"`
+        : `${AGENT_CHALLENGE}, error="invalid_token"`,
+    ),
     401,
     'UNAUTHENTICATED',
     request.id,
@@ -346,6 +364,7 @@ export function registerAccess(
     restrictedUntil,
     checkKey,
     counters,
+    resourceMetadata,
   }: {
     readonly findSession: FindSession | undefined;
     readonly findMembership: FindMembership | undefined;
@@ -359,6 +378,8 @@ export function registerAccess(
      * limit's 429 instead.
      */
     readonly counters: { readonly person: CountRequest; readonly agent: CountRequest };
+    /** The MCP endpoint's OAuth metadata, named by its 401 while the OAuth server is on (6E3a); none while off. */
+    readonly resourceMetadata?: string | undefined;
   },
 ): void {
   app.decorateRequest('person', null);
@@ -381,8 +402,9 @@ export function registerAccess(
     const { authorization } = request.headers;
     // The MCP endpoint (6E2) answers an agent's key alone: none sent is the key's own 401, so an MCP client
     // learns it needs one (MCP-Guide M4), never the session's challenge, whatever cookie came with it.
-    if (authorization === undefined && request.routeOptions.config.toolCalls === true) {
-      void keyRefused(request, reply);
+    const toolCalls = request.routeOptions.config.toolCalls === true;
+    if (authorization === undefined && toolCalls) {
+      void keyRefused(request, reply, resourceMetadata);
       return;
     }
     if (authorization !== undefined) {
@@ -390,11 +412,11 @@ export function registerAccess(
       if (!access.includes('agent')) {
         void forbidden(request, reply);
       } else if (checkKey === undefined) {
-        void keyRefused(request, reply);
+        void keyRefused(request, reply, resourceMetadata);
       } else {
-        checkKey(bearerToken(authorization), request.id).then((checked) => {
+        checkKey(bearerToken(authorization), request.id, toolCalls).then((checked) => {
           if (checked.outcome !== 'accepted') {
-            void keyRefused(request, reply);
+            void keyRefused(request, reply, resourceMetadata);
           } else if (!agentScopes.every((scope) => checked.key.scopes.includes(scope))) {
             // Known, and refused: counted as the agent (its line names it too, request-log.ts).
             request.agent = checked.key;

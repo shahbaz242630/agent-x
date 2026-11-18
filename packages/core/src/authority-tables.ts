@@ -13,7 +13,7 @@
 // its migration.
 import type { SignedStateTable } from '@agentx/platform/db';
 
-import { AGENT_KEYS, AGENTS } from './modules/agents/index.ts';
+import { AGENT_KEYS, AGENTS, CONNECTIONS } from './modules/agents/index.ts';
 import { SOURCES } from './modules/funding-sources/index.ts';
 import {
   FACTOR_RESETS,
@@ -75,7 +75,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * after its membership: OR1, 0085), then its registered contacts (2b,
  * B6-1a: an admin's membership is read before the contacts it changes), then
  * its factor resets (2c, B6-3a: a reset is confirmed by a contact read
- * first), then its agents (3) and their keys (3a, C1-1), then its mandates
+ * first), then its agents (3) and their keys (3a, C1-1) and their MCP
+ * connections (3b, 6E3a), then its mandates
  * and their versions (4, Phase 2 B1) and their policies and theirs (4,
  * after the mandates, Phase 2 C1), then its funding sources (5, D2-2),
  * then its suppliers (6), their payee registrations (6, after their supplier,
@@ -98,6 +99,7 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   FACTOR_RESETS,
   AGENTS,
   AGENT_KEYS,
+  CONNECTIONS,
   MANDATES,
   MANDATE_VERSIONS,
   POLICIES,

@@ -462,6 +462,55 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['only_row', 'signed_from'],
       appMay: ['SELECT'],
     },
+    'oauth.clients': {
+      reason:
+        "The MCP clients that registered themselves (0093, RFC 7591; 6E3a): a client registers before anyone is signed in or any organisation is known, and one client connects to many organisations. Its name is what it says it is, never trusted; it grants nothing: a connection is made only by a person's consent, inside their organisation",
+      columns: [
+        'client_id',
+        'name',
+        'redirect_uris',
+        'application_type',
+        'grant_types',
+        'software_id',
+        'software_version',
+        'created_at',
+        'first_connected_at',
+      ],
+      // Registered, read, and swept once unused; changed only to note its first connection, never its addresses.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['first_connected_at'],
+    },
+    'oauth.flows': {
+      reason:
+        "The OAuth authorization flows under way (0093, 6E3a): a client sends a person's browser here before anyone is signed in or any organisation chosen. A flow names the organisation and connection key it was allowed with by ID alone, and its code's SHA-256; a token is issued only once that organisation's own signed rows are read. Stated trade: it keeps the client's `state` until it ends, as OAuth sends it back unchanged",
+      columns: [
+        'id',
+        'kind',
+        'client_id',
+        'redirect_uri',
+        'state',
+        'code_challenge',
+        'scopes_asked',
+        'resource',
+        'browser_hash',
+        'device_hash',
+        'user_code_hash',
+        'interval_s',
+        'created_at',
+        'ends_at',
+        'decided_at',
+        'outcome',
+        'org_id',
+        'key_id',
+        'code_hash',
+        'code_ends_at',
+        'used_at',
+        'polled_at',
+      ],
+      // Opened, decided once, its code used once, and swept a day after it ends; never moved to another client.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['decided_at', 'outcome', 'org_id', 'key_id', 'code_hash', 'code_ends_at', 'used_at', 'polled_at'],
+    },
     'platform_controls.job_lease': {
       reason:
         "The lease on the API's jobs (0068, 4D2e D): one row saying which process leads, until when, and when the hand-off last beat. Of no organisation; a forged row delays jobs, which the dead-man rules see, and decides nothing",
@@ -526,6 +575,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         "An order's claim (ADR-006 §11, 0039): the app adds it and only ever releases it, once its request or payment ends. A claim deleted, or its order, supplier or payee changed, would let the same order be paid twice",
       columns: ['released_at'],
     },
+    'agents.connection_tokens': {
+      reason:
+        "An MCP connection's access and refresh tokens (0093, 6E3a): each a MAC of its secret over its kind, key, expiry and scopes. The app adds them and fills in a refresh token's use once; a second use revokes the connection. One deleted early refuses a working token; its use cleared, a refresh token could be used twice",
+      columns: ['used_at'],
+      // Past every token's life: an hour, 30 idle days, a connection's 90.
+      sweptAfter: { column: 'created_at', days: 120 },
+    },
     'limit_reservations.agent_periods': {
       reason:
         "An agent's month, only a lock target (ADR-006 §6–§7, partner decision 4; 0040): UPDATE on one column only because Postgres asks for it before a row lock, and `period_lock_only` refuses every change. A period deleted would let a request go on without the lock its monthly total serialises on",
@@ -545,6 +601,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id'],
       references: 'directory.orgs',
       referencedColumns: ['org_id'],
+    },
+    {
+      reason:
+        "An MCP connection points at its own key with that key's agent (0093, 6E3a), so a connection can't be pointed at another agent's key, nor a token act as an agent its consent never named",
+      table: 'agents.connections',
+      columns: ['org_id', 'id', 'agent_id'],
+      references: 'agents.agent_keys',
+      referencedColumns: ['org_id', 'id', 'agent_id'],
     },
   ],
   partialUniqueIndexes: [

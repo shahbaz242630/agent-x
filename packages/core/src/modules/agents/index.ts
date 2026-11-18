@@ -25,6 +25,7 @@ export {
   SCOPES,
   rotatedKeyExpiresAt,
   ScopesRefused,
+  scopesOf,
   scopesText,
 } from './domain/agent.ts';
 export {
@@ -69,3 +70,37 @@ export {
   type KeyRefusal,
 } from './infrastructure/key-check.ts';
 export type { AgentsTables } from './infrastructure/tables.ts';
+// MCP connections by OAuth (6E3a, ADR-016): a key whose secret was thrown away, its connection, and its tokens.
+export {
+  ACCESS_TOKEN_SECONDS,
+  type ConnectionTokenKind,
+  MOST_CONNECTIONS_MADE_A_DAY,
+  MOST_LIVE_CONNECTIONS,
+  parseConnectionToken,
+  type PresentedToken,
+  REFRESH_IDLE_DAYS,
+} from './domain/connection.ts';
+export {
+  addConnection,
+  connectionOf,
+  type ConnectionRecord,
+  CONNECTIONS,
+  connectionsCounted,
+  connectionsMadeSince,
+  isConnectionKey,
+} from './infrastructure/connections.ts';
+export {
+  type IssuedTokens,
+  issueTokens,
+  tokenProven,
+  type TokenRow,
+  sweepConnectionTokens,
+  tokenRowLocked,
+  usedNow,
+} from './infrastructure/connection-tokens.ts';
+export {
+  type ConnectionTokenChecker,
+  createConnectionTokenCheck,
+  tokenAtTheDoor,
+} from './infrastructure/connection-check.ts';
+export { credentialAt, pepperHeld } from './infrastructure/key-check.ts';

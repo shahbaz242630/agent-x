@@ -1,0 +1,258 @@
+// A connection's tokens (0093, 6E3a): each access and refresh token kept as
+// HMAC-SHA-256 of its secret with the agent-key pepper, over its kind, key,
+// ID, expiry and scopes (domain/connection.ts), never the secret. Not a signed
+// state: what a token grants is its connection's and its key's, both signed,
+// and a row changed in anything its MAC covers no longer matches its secret.
+//
+// - issueTokens adds an access token and a refresh token in one statement, in
+//   the organisation's transaction that read the connection live.
+// - A refresh token is used once: usedNow fills in its use in one statement,
+//   only where none was, so two uses at once can't both rotate it; the second
+//   is a reuse, and its connection is revoked (the API's oauth-grants.ts).
+// - The door's read (tokenRowRead, tokenProven): the row read alone, unlocked,
+//   outside any share, and its secret checked with exactly one verifyMac
+//   whatever is found, a MAC of zeros for no row, so a token's ID not in use
+//   takes as long as a wrong secret. The row grants nothing: its connection
+//   and key are then read through their signed states.
+import { randomBytes } from 'node:crypto';
+
+import { withTenant } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
+import { type Kysely, sql } from 'kysely';
+
+import { DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
+import { KEY_SECRET_BYTES, type Scope, scopesOf, scopesText } from '../domain/agent.ts';
+import {
+  type ConnectionTokenKind,
+  connectionTokenMessage,
+  connectionTokenText,
+  type PresentedToken,
+  tokenExpiresAt,
+} from '../domain/connection.ts';
+import type { AgentsTransaction } from './agents.ts';
+import type { AgentsTables } from './tables.ts';
+
+const TOKENS = 'agents.connection_tokens';
+
+/** A pair just issued: the texts, shown once, and when the access token ends. */
+export interface IssuedTokens {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  /** The access token's ID, for the log alone (it is public, as a key's ID is). */
+  readonly accessTokenId: string;
+  readonly accessExpiresAt: Date;
+  readonly scopes: readonly Scope[];
+}
+
+/**
+ * Issues an access token and a refresh token for the connection whose key this is, in the caller's transaction,
+ * which must be withSignedStates' for its organisation and have read the connection and its key live. Neither
+ * outlives the key. `parentId`: the refresh token this pair rotates, if any.
+ */
+export async function issueTokens(
+  tx: AgentsTransaction,
+  { keys, ids }: { readonly keys: KeyProvider; readonly ids: IdGenerator },
+  {
+    orgId,
+    keyId,
+    scopes,
+    now,
+    keyExpiresAt,
+    parentId = null,
+  }: {
+    readonly orgId: string;
+    readonly keyId: string;
+    readonly scopes: readonly Scope[];
+    readonly now: Date;
+    readonly keyExpiresAt: Date;
+    readonly parentId?: string | null;
+  },
+): Promise<IssuedTokens> {
+  const kept = scopesText(scopes);
+  const made = (['access', 'refresh'] as const).map((kind) => {
+    const id = ids.next();
+    const secret = randomBytes(KEY_SECRET_BYTES);
+    const expiresAt = tokenExpiresAt(kind, now, keyExpiresAt);
+    const { mac, keyVersion } = keys.mac(
+      'agent-key-pepper',
+      connectionTokenMessage({ kind, keyId, tokenId: id, expiresAt, scopes: kept }, secret),
+    );
+    return {
+      text: connectionTokenText(kind, keyId, id, secret),
+      row: {
+        org_id: orgId,
+        id,
+        key_id: keyId,
+        kind,
+        scopes: kept,
+        secret_mac: mac.toString('hex'),
+        secret_key_version: keyVersion,
+        expires_at: expiresAt,
+        created_at: now,
+        parent_id: parentId,
+        used_at: null,
+      },
+    };
+  });
+  const [access, refresh] = made;
+  if (access === undefined || refresh === undefined) throw new Error('a pair is two tokens');
+  await tx
+    .insertInto(TOKENS)
+    .values(made.map(({ row }) => row))
+    .execute();
+  return {
+    accessToken: access.text,
+    refreshToken: refresh.text,
+    accessTokenId: access.row.id,
+    accessExpiresAt: access.row.expires_at,
+    scopes: scopesOf(kept),
+  };
+}
+
+/** A token's row as kept. */
+export interface TokenRow {
+  readonly keyId: string;
+  readonly kind: ConnectionTokenKind;
+  readonly scopes: string;
+  readonly secretMac: Buffer;
+  readonly secretKeyVersion: number;
+  readonly expiresAt: Date;
+  readonly usedAt: Date | null;
+}
+
+interface RawTokenRow {
+  readonly key_id: string;
+  readonly kind: string;
+  readonly scopes: string;
+  readonly secret_mac: string;
+  readonly secret_key_version: number;
+  readonly expires_at: Date;
+  readonly used_at: Date | null;
+}
+
+/** The row as the table's checks hold it, or undefined for none. */
+const tokenRowOf = (row: RawTokenRow | undefined): TokenRow | undefined =>
+  row === undefined
+    ? undefined
+    : {
+        keyId: row.key_id.toLowerCase(),
+        kind: row.kind === 'refresh' ? 'refresh' : 'access',
+        scopes: row.scopes,
+        secretMac: Buffer.from(row.secret_mac, 'hex'),
+        secretKeyVersion: row.secret_key_version,
+        expiresAt: row.expires_at,
+        usedAt: row.used_at,
+      };
+
+const COLUMNS = ['key_id', 'kind', 'scopes', 'secret_mac', 'secret_key_version', 'expires_at', 'used_at'] as const;
+
+/** The door's one statement, not run: the token's row by its organisation and ID, unlocked. */
+export function tokenRowRead(db: Pick<Kysely<AgentsTables>, 'selectFrom'>, orgId: string, id: string) {
+  return db.selectFrom(TOKENS).select(COLUMNS).where('org_id', '=', orgId).where('id', '=', id);
+}
+
+/** The door's read, judged: the row, if there is one. */
+export const tokenRowFound = (rows: readonly RawTokenRow[]): TokenRow | undefined => tokenRowOf(rows[0]);
+
+/**
+ * The token's row locked for its use (lock level 3c, after its connection's 3b), in the caller's transaction:
+ * a refresh token about to be used or found used.
+ */
+export async function tokenRowLocked(tx: AgentsTransaction, orgId: string, id: string): Promise<TokenRow | undefined> {
+  return tokenRowOf(await tokenRowRead(tx, orgId, id).forUpdate().executeTakeFirst());
+}
+
+/** Fills in the refresh token's use, only where none was: whether this call is the one that used it. */
+export async function usedNow(tx: AgentsTransaction, orgId: string, id: string, now: Date): Promise<boolean> {
+  const used = await tx
+    .updateTable(TOKENS)
+    .set({ used_at: now })
+    .where('org_id', '=', orgId)
+    .where('id', '=', id)
+    .where('kind', '=', 'refresh')
+    .where('used_at', 'is', null)
+    .returning(sql<number>`1`.as('used'))
+    .executeTakeFirst();
+  return used !== undefined;
+}
+
+/** How long a token's row is kept: past every token's life (an hour, 30 idle days, a connection's 90); 0093's policy. */
+const TOKEN_RETENTION_DAYS = 120;
+
+/**
+ * Deletes up to `most` of the organisation's token rows older than TOKEN_RETENTION_DAYS, oldest first, and says how
+ * many, inside its own withTenant (statements limited): 0093's `retention` policy holds the same line.
+ */
+export async function sweepConnectionTokens(
+  db: Kysely<AgentsTables>,
+  orgId: string,
+  now: Date,
+  most: number,
+): Promise<number> {
+  if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one token at a time');
+  const past = new Date(now.getTime() - TOKEN_RETENTION_DAYS * DAY_MS);
+  return withTenant(
+    db,
+    orgId,
+    async (tx) => {
+      const oldest = tx
+        .selectFrom(TOKENS)
+        .select('id')
+        .where('org_id', '=', orgId.toLowerCase())
+        .where('created_at', '<', past)
+        .orderBy('created_at')
+        .limit(most);
+      const rows = await tx
+        .deleteFrom(TOKENS)
+        .where('org_id', '=', orgId.toLowerCase())
+        .where('id', 'in', oldest)
+        .returning('id')
+        .execute();
+      return rows.length;
+    },
+    { limited: true },
+  );
+}
+
+/** What a sent token's secret came to against its row. */
+export type TokenProof =
+  | { readonly outcome: 'proven'; readonly row: TokenRow }
+  | { readonly outcome: 'unread' | 'wrong_secret' | 'key_not_held' };
+
+/** What a token's secret is compared with when there is no row: the same one verifyMac either way. */
+const NO_MAC = Buffer.alloc(32);
+
+/** A time no row's expiry is, for the MAC over zeros. */
+const NO_TIME = new Date(0);
+
+/**
+ * The sent token's secret against its row: exactly one verifyMac whatever is found (a MAC of zeros, under the
+ * pepper's current version, for no row, a row of another key or kind, or a version this process doesn't hold), so
+ * the time it takes tells nothing of what was there. `unread`: no row for it; `key_not_held`: a row made with a
+ * pepper version this process no longer holds, ours to fix.
+ */
+export function tokenProven(keys: KeyProvider, row: TokenRow | undefined, presented: PresentedToken): TokenProof {
+  const pepper = keys.describe().find(({ purpose }) => purpose === 'agent-key-pepper');
+  const ours = row?.keyId === presented.keyId.toLowerCase() && row.kind === presented.kind;
+  const held = ours && pepper?.versions.some(({ version }) => version === row.secretKeyVersion) === true;
+  const version = held ? row.secretKeyVersion : pepper?.current;
+  const binding = {
+    kind: presented.kind,
+    keyId: presented.keyId,
+    tokenId: presented.tokenId,
+    expiresAt: ours ? row.expiresAt : NO_TIME,
+    scopes: ours ? row.scopes : '',
+  };
+  // No pepper at all: nothing can be verified, so nothing is.
+  const matches =
+    version !== undefined &&
+    keys.verifyMac(
+      'agent-key-pepper',
+      version,
+      connectionTokenMessage(binding, presented.secret),
+      held ? row.secretMac : NO_MAC,
+    );
+  if (!ours) return { outcome: 'unread' };
+  if (!held) return { outcome: 'key_not_held' };
+  return matches ? { outcome: 'proven', row } : { outcome: 'wrong_secret' };
+}

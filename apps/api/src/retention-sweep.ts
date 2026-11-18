@@ -54,6 +54,15 @@ export const SECURITY_ORG_EVENT_LINES: SweepLines = {
   counted: 'events',
 };
 
+/** The MCP connections' token rows' sweep's lines (6E3a, 0093): each organisation's past 120 days. */
+export const CONNECTION_TOKEN_LINES: SweepLines = {
+  failed: 'agents.connection_tokens_sweep_failed',
+  crashed: 'agents.connection_tokens_sweep_crashed',
+  swept: 'agents.connection_tokens_swept',
+  done: 'agents.connection_tokens_sweep_done',
+  counted: 'tokens',
+};
+
 export interface RetentionSweepOptions {
   /** The organisations to sweep this run, by ID. */
   readonly list: () => Promise<readonly string[]>;
