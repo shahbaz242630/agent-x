@@ -357,10 +357,15 @@ describe(`SEC-OAUTH-14 trip parity with a key (Postgres ${server.version})`, () 
   it('never logs the token, only its key’s and its own IDs', async () => {
     const keyId = await connect(await newAgent());
     const { accessToken } = await tokens(keyId);
-    await check(`${accessToken.slice(0, -1)}A`);
+    // A secret's last character is one of 16 (32 bytes in base64url): a fixed 'A' left 1 token in 16 unchanged,
+    // accepted and never logged (CQ9). Always a different one, so the token presented is always a wrong one.
+    const last = accessToken.endsWith('A') ? 'E' : 'A';
+    expect(await check(`${accessToken.slice(0, -1)}${last}`)).toEqual({ outcome: 'refused' });
     const presented = parseConnectionToken(accessToken, 'access');
     const text = JSON.stringify(capture.lines());
-    expect(text).not.toContain(accessToken.slice(-43));
+    // The 42 characters the presented secret shares with the real one: neither secret appears.
+    expect(text).not.toContain(accessToken.slice(-43, -1));
+    expect(text).toContain(keyId);
     expect(text).toContain(presented?.tokenId);
   });
 });
