@@ -90,30 +90,53 @@ export const MOST_OPEN_FLOWS = 20_000;
 /** The most flows one browser (its flow cookie) holds open and undecided at once: a person connects a few apps. */
 export const MOST_OPEN_FLOWS_A_BROWSER = 5;
 
-/** Opened; or not, every browser's flows at their cap, or this browser's. */
-export type FlowOpened = 'opened' | 'full' | 'browser_full';
+/**
+ * The most flows one source holds open at once, of either kind, decided or not (6F1 G4): its client address, an IPv6
+ * /64 as one, as the rate limit counts it. A browser sending no cookie is a fresh browser each time, so the browser's
+ * cap never holds it; this does, and a few addresses can't fill MOST_OPEN_FLOWS for every organisation's people.
+ */
+export const MOST_OPEN_FLOWS_A_SOURCE = 20;
 
-/** How many flows, of either kind, have not ended at `now`, counted up to MOST_OPEN_FLOWS alone (the ends index). */
-async function openFlows(tx: Transaction<OauthTables>, now: Date): Promise<number> {
-  const open = await tx
-    .selectFrom((inner) =>
-      inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now).limit(MOST_OPEN_FLOWS).as('open'),
-    )
-    .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
-    .executeTakeFirstOrThrow();
-  return open.flows;
+/** Opened; or not, every browser's flows at their cap, this source's, or this browser's. */
+export type FlowOpened = 'opened' | 'full' | 'source_full' | 'browser_full';
+
+/**
+ * Whether the flows of either kind not ended at `now` are at a cap: every source's together (MOST_OPEN_FLOWS, the ends
+ * index), or this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
+ */
+async function flowsFull(
+  tx: Transaction<OauthTables>,
+  source: string,
+  now: Date,
+): Promise<'full' | 'source_full' | undefined> {
+  const atCap = async (most: number, of?: string): Promise<boolean> => {
+    const { flows } = await tx
+      .selectFrom((inner) => {
+        const open = inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now);
+        return (of === undefined ? open : open.where('source_key', '=', of)).limit(most).as('open');
+      })
+      .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
+      .executeTakeFirstOrThrow();
+    return flows >= most;
+  };
+  if (await atCap(MOST_OPEN_FLOWS)) return 'full';
+  if (await atCap(MOST_OPEN_FLOWS_A_SOURCE, source)) return 'source_full';
+  return undefined;
 }
 
 /**
- * Opens the flow, for FLOW_SECONDS from its creation, unless MOST_OPEN_FLOWS have not ended, or this browser holds
+ * Opens the flow from `source` (its client address's key, 6F1 G4), for FLOW_SECONDS from its creation, unless
+ * MOST_OPEN_FLOWS have not ended, or this source holds MOST_OPEN_FLOWS_A_SOURCE not ended, or this browser holds
  * MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a transaction of its own whose statements are limited to 10
- * seconds, each count stopping at its cap (the ends index, the browser index). Best effort, with no lock (lead's
- * re-review: one would make every authorize wait its turn): flows opened at once may pass a cap by a few rows.
+ * seconds, each count stopping at its cap (the ends index, the source index, the browser index). Best effort, with no
+ * lock (lead's re-review: one would make every authorize wait its turn): flows opened at once may pass a cap by a few
+ * rows.
  */
-export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>): Promise<FlowOpened> {
+export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>, source: string): Promise<FlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    if ((await openFlows(tx, flow.createdAt)) >= MOST_OPEN_FLOWS) return 'full';
+    const full = await flowsFull(tx, source, flow.createdAt);
+    if (full !== undefined) return full;
     const own = await tx
       .selectFrom('oauth.flows')
       .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
@@ -122,12 +145,12 @@ export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>)
       .where('decided_at', 'is', null)
       .executeTakeFirstOrThrow();
     if (own.flows >= MOST_OPEN_FLOWS_A_BROWSER) return 'browser_full';
-    await insertFlow(tx, flow);
+    await insertFlow(tx, flow, source);
     return 'opened';
   });
 }
 
-async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>): Promise<void> {
+async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>, source: string): Promise<void> {
   await db
     .insertInto('oauth.flows')
     .values({
@@ -140,6 +163,7 @@ async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>): Promise<v
       scopes_asked: scopesText(flow.scopesAsked),
       resource: flow.resource,
       browser_hash: flow.browserHash,
+      source_key: source,
       created_at: flow.createdAt,
       ends_at: new Date(flow.createdAt.getTime() + FLOW_SECONDS * 1000),
     })
@@ -284,18 +308,20 @@ export interface DeviceFlow {
   readonly createdAt: Date;
 }
 
-/** Opened; or not, every flow at the server's cap, or the user code drawn already held (draw another). */
-export type DeviceFlowOpened = 'opened' | 'full' | 'collided';
+/** Opened; or not, every flow at the server's cap or this source's, or the user code drawn already held (draw another). */
+export type DeviceFlowOpened = 'opened' | 'full' | 'source_full' | 'collided';
 
 /**
- * Opens the device's flow, for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended (the code flows' own cap, best
- * effort, as openCodeFlow's), in a transaction of its own whose statements are limited to 10 seconds. A user code
- * another flow holds, ended or not, opens no flow: `collided`, and nothing kept.
+ * Opens the device's flow from `source` (6F1 G4), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended or this
+ * source holds MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best effort, as openCodeFlow's), in a transaction of
+ * its own whose statements are limited to 10 seconds. A user code another flow holds, ended or not, opens no flow:
+ * `collided`, and nothing kept.
  */
-export async function openDeviceFlow(db: Database, flow: DeviceFlow): Promise<DeviceFlowOpened> {
+export async function openDeviceFlow(db: Database, flow: DeviceFlow, source: string): Promise<DeviceFlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    if ((await openFlows(tx, flow.createdAt)) >= MOST_OPEN_FLOWS) return 'full';
+    const full = await flowsFull(tx, source, flow.createdAt);
+    if (full !== undefined) return full;
     const inserted = await tx
       .insertInto('oauth.flows')
       .values({
@@ -307,6 +333,7 @@ export async function openDeviceFlow(db: Database, flow: DeviceFlow): Promise<De
         device_hash: flow.deviceHash,
         user_code_hash: flow.userCodeHash,
         interval_s: flow.intervalSeconds,
+        source_key: source,
         created_at: flow.createdAt,
         ends_at: new Date(flow.createdAt.getTime() + FLOW_SECONDS * 1000),
       })

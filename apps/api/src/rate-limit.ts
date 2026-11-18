@@ -77,6 +77,21 @@ export function clientKey(ip: string | undefined): string {
   return address === undefined ? UNREADABLE_ADDRESS : normalizeIP(address, IPV6_PREFIX);
 }
 
+/** An IPv6 network a registration counts under (6F1 G4): a site's whole allocation, usually a /48. */
+const IPV6_NETWORK_PREFIX = 48;
+
+/**
+ * The network a request is counted under where one network's many addresses must count as one (6F1 G4, the OAuth
+ * registrations' day): an IPv4 address's /24 (`192.0.2.0`), an IPv6 address's /48. It never throws.
+ */
+export function clientNetwork(ip: string | undefined): string {
+  const address = clientAddress(ip);
+  if (address === undefined) return UNREADABLE_ADDRESS;
+  const network = normalizeIP(address, IPV6_NETWORK_PREFIX);
+  // normalizeIP gives an IPv4 address, or an IPv6 address written as one (::ffff:a.b.c.d), as plain IPv4.
+  return network.includes(':') ? network : network.replace(/\.\d+$/, '.0');
+}
+
 /** The client's address as the trust rule reads it from the connection and its proxies' headers. */
 export function rawClientIp(request: FastifyRequest, trust: ProxyTrust): string | undefined {
   // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to
