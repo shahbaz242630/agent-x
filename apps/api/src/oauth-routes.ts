@@ -387,7 +387,6 @@ export function registerOauthForms(
       if (grants === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
       const { token, client_id: clientId } = request.body;
-      if (token === undefined) return sendOauthError(reply, 400, 'invalid_request', 'Send token.');
       const taken = await grants.revoke({ token, clientId }, { correlationId: request.id, ip: request.ip });
       if (taken.outcome === 'refused') return sendOauthError(reply, taken.status, taken.error, taken.description);
       return noStore(reply).code(200).send({});
