@@ -444,11 +444,13 @@ export async function registrationsStartedSince(
 
 /**
  * The ID of one of the supplier's registrations still open (STARTED or
- * UNKNOWN) with this partner by this route, or null, in one statement: where
- * to look alone, so a start carries on with it rather than opening another
- * (E2-2a's review); one with another partner, which this one is never asked
- * about, or by the other route (E2-2d), is never carried on with. The caller
- * reads it through its signed state before deciding anything of it.
+ * UNKNOWN) with this partner by this route, started by this member, or null,
+ * in one statement: where to look alone, so a start carries on with it rather
+ * than opening another (E2-2a's review); one with another partner, which this
+ * one is never asked about, or by the other route (E2-2d), is never carried on
+ * with, nor one another member started, whose form is theirs alone to fill
+ * (SEC-PAY-03, 6F1 G2). The caller reads it through its signed state before
+ * deciding anything of it.
  */
 export async function openRegistrationOf(
   tx: RegistrationsTransaction,
@@ -457,7 +459,14 @@ export async function openRegistrationOf(
     supplierId,
     partner,
     route,
-  }: { readonly supplierId: string; readonly partner: string; readonly route: RegistrationRoute },
+    startedBy,
+  }: {
+    readonly supplierId: string;
+    readonly partner: string;
+    readonly route: RegistrationRoute;
+    /** The member's membership, as the registration keeps who started it. */
+    readonly startedBy: string;
+  },
 ): Promise<string | null> {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; the registration is then read through its signed state
@@ -468,6 +477,7 @@ export async function openRegistrationOf(
     .where('status', 'in', ['STARTED', 'UNKNOWN'])
     .where('partner', '=', partner)
     .where('route', '=', route)
+    .where('started_by', '=', startedBy)
     .orderBy('created_at')
     .executeTakeFirst();
   return row?.id ?? null;

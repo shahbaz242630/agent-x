@@ -1,6 +1,7 @@
 // Why a pending spend request is void (PRD §4.2, §11; BR-09, BR-11; Phase 3
 // C1; partner decisions 4, 7 and 10): the authority it was decided under no
-// longer stands. Its organisation frozen, its agent suspended, its mandate no longer in force or
+// longer stands. Its organisation frozen, its agent suspended, its mandate no longer in force,
+// past its version's end (whether or not the expiry job has recorded it yet: SEC-AG-12) or
 // superseded (a new version accepted), its source unable to fund, or its
 // supplier no longer verified or its details changed (a new version). Not the
 // limits or the policies: an approval weighs those again (B4b), and a request
@@ -75,14 +76,17 @@ export interface AuthorityNow {
   readonly organizationStatus: string;
   readonly agentStatus: string;
   /**
-   * Its status and version in force, and whether that one still carries
+   * Its status and version in force, whether that one still carries
    * requests from older versions (Phase 4 A3, PL-47: an acceptance that
-   * carried past 20, its rest waiting for the carry job).
+   * carried past 20, its rest waiting for the carry job), and whether that
+   * one has reached its end (SEC-AG-12, 6F1 G3): ended by the clock whatever
+   * its status says until the expiry job records it.
    */
   readonly mandate: {
     readonly status: string;
     readonly currentVersionId: string | null;
     readonly carriesRest?: boolean;
+    readonly ended: boolean;
   } | null;
   /**
    * Its own status, the bank's word on it (its availability), whether its
@@ -136,6 +140,7 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly V
     decided.mandateId === null ||
     mandate === null ||
     stopped(mandate.status, 'ACTIVE', 'mandate') ||
+    mandate.ended ||
     (mandate.currentVersionId !== decided.mandateVersionId &&
       (decided.mandateVersionId === null || mandate.carriesRest !== true))
   ) {

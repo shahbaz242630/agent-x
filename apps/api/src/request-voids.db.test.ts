@@ -20,6 +20,7 @@
 // judged again each run.
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { mandateOf } from '@agentx/core/modules/mandates';
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
@@ -49,7 +50,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts';
-import { createRequestVoids, type RequestVoids } from './request-voids.ts';
+import { createRequestVoids, type RequestVoids, requestVoidsDue } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 import { chosenAgain, SUSPENDS } from './suspensions.ts';
@@ -351,6 +352,41 @@ describe('pending spend requests voided once their authority no longer stands (C
     expect(await statusOf(w, waiting.id)).toBe('DENIED');
   });
 
+  it('SEC-AG-12 voids the moment its mandate’s version in force ends, though the expiry job hasn’t run: MANDATE_NOT_IN_FORCE (6F1 G3)', async () => {
+    const w = await shared.world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    const endsAt = new Date(clock.now().getTime() + 3_600_000);
+    const mandateId = await shared.inForce(registry, w, { approvalThreshold: AED(100_000n), endsAt });
+    const acting = await shared.agentKey(w);
+    const approved = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-A' });
+    const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+    const dueBy = () =>
+      withTenant(app, w.org, (tx) => requestVoidsDue(tx, w.org, clock.now()).executeTakeFirstOrThrow());
+    // Woken as the version ends, the consent running out later (4D2e D9).
+    expect((await dueBy()).due).toEqual(endsAt);
+
+    clock.advanceBy(endsAt.getTime() - clock.now().getTime() - 1);
+    await voidsOf(only(w)).run();
+    expect([await statusOf(w, approved.id), await statusOf(w, waiting.id)]).toEqual(['APPROVED', 'APPROVAL_REQUIRED']);
+
+    clock.advanceBy(1);
+    expect((await dueBy()).due).toEqual(clock.now());
+    await voidsOf(only(w)).run();
+
+    for (const request of [approved, waiting]) {
+      expect(await statusOf(w, request.id)).toBe('DENIED');
+      expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'RELEASED', released: true });
+      const events = await shared.eventsAbout(w.org, request.id, SPEND_REQUESTS.subject);
+      expect(events.at(-1)).toMatchObject({
+        action: 'spend_request.voided',
+        details: { statusTo: 'DENIED', causes: 'MANDATE_NOT_IN_FORCE' },
+      });
+    }
+    // The job is the record: the mandate still reads ACTIVE until the expiry job reaches it.
+    const mandate = await signed(w, (tx, states) => mandateOf(tx, states, { orgId: w.org, id: mandateId }, 'share'));
+    expect(mandate).toMatchObject({ outcome: 'found', mandate: { status: 'ACTIVE' } });
+  });
+
   it('voids one whose source’s bank consent has passed: SOURCE_NOT_USABLE', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
@@ -561,7 +597,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       return {
         organizationStatus: 'ACTIVE',
         agentStatus: 'ACTIVE',
-        mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id },
+        mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id, ended: false },
         source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false, consentHeld: false },
         supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '', pausedFrom: [] },
         paused: new Set(),

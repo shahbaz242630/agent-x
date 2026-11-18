@@ -29,13 +29,16 @@
 //   an un-pause when its suspension cancelled them. Admins.
 // - `POST /v1/suppliers/:id/payee-registrations`: starts registering the
 //   supplier's bank details with the payment partner, through the partner's
-//   own form: 201 with the registration and the form to send the admin to.
+//   own form: 201 with the registration and the form to send the admin to,
+//   carrying on with one this admin started and left open, never another
+//   admin's (SEC-PAY-03: whoever fills the form is recorded as entering it).
 //   Admins; 100 a day (409 PAYEE_REGISTRATIONS_SPENT); 409
 //   SUPPLIER_CHANGE_WAITING while another change waits; 409
 //   PAYEE_ROUTE_NOT_OFFERED where the partner has no form for it.
 // - `POST /v1/suppliers/:id/payee-registrations/:registrationId/check`,
 //   once the form is filled in: the partner asked how it stands, server to
-//   server: 202 with the form while it waits, otherwise 200 with the
+//   server: 202 while it waits, with the form to the admin who started it
+//   alone, otherwise 200 with the
 //   registration, FAILED with why, or REGISTERED, the new details then
 //   waiting for the admin's confirmation (409 SUPPLIER_PAYEE_TAKEN while
 //   another supplier is paid to that account). Admins. 503
@@ -512,7 +515,9 @@ const REGISTRATION = z
         expiresAt: z.iso.datetime().describe('When the form closes.'),
       })
       .nullable()
-      .describe('The partner’s form, while the registration waits for it, else null.'),
+      .describe(
+        'The partner’s form, while the registration waits for it, to the admin who started it alone, else null.',
+      ),
   })
   .register(API_SCHEMAS, {
     id: 'PayeeRegistration',
