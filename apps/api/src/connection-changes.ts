@@ -70,7 +70,7 @@ export const CONNECTION_REVOKE_CONFIRM_OPERATION = 'connections.revoke.confirm';
 export const CONNECTION_REVOKING_ROLES = KEY_CHANGING_ROLES;
 
 /** What a connection's status is: its key's, or EXPIRED once its key's expiry has passed. */
-export type ConnectionStatus = 'ACTIVE' | 'REVOKED' | 'EXPIRED';
+type ConnectionStatus = 'ACTIVE' | 'REVOKED' | 'EXPIRED';
 
 /** A connection as an answer shows it: never a token, nor its key's MAC. */
 export interface ConnectionShown {
@@ -90,7 +90,7 @@ export interface ConnectionShown {
 }
 
 /** The agent's connections, newest first. */
-export interface ConnectionsShown {
+interface ConnectionsShown {
   readonly connections: readonly ConnectionShown[];
 }
 
@@ -119,7 +119,7 @@ export interface ConnectionChanges {
 }
 
 /** The connection as its list shows it at `now`: its status is its key's, EXPIRED past its key's expiry. */
-export function connectionShown({ connection, key, ...made }: ConnectionListed, now: Date): ConnectionShown {
+function connectionShown({ connection, key, ...made }: ConnectionListed, now: Date): ConnectionShown {
   const ended = key.expiresAt.getTime() <= now.getTime() ? 'EXPIRED' : 'ACTIVE';
   return {
     keyId: key.id,
