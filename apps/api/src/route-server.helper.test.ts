@@ -28,6 +28,7 @@ const CONFIG = {
     rateLimitPerAgentPerMinute: 1000,
     rateLimitPerOrganisationPerMinute: 100_000,
     webCopies: 1,
+    mcpOauth: false,
   },
   log: { level: 'info' as const, eventCapPerMinute: 10_000 },
 };
@@ -58,16 +59,20 @@ const signedIn = (live: LiveSession | undefined): SignIn => ({
 export async function routeServer({
   live,
   member,
+  oauthOn = false,
   ...routes
 }: {
   readonly live?: LiveSession;
   readonly member?: MembershipCheck;
+  /** The OAuth server for MCP connections switched on (6E3a, AGENTX_MCP_OAUTH); off, as by default. */
+  readonly oauthOn?: boolean;
 } & Partial<ServerOptions>): Promise<FastifyInstance> {
+  const config = { ...CONFIG, http: { ...CONFIG.http, mcpOauth: oauthOn } };
   const app = await buildServer({
-    config: CONFIG,
+    config,
     logger: createLogger({
       service: 'api',
-      config: { environment: 'test', release: 'r-1', ...CONFIG },
+      config: { environment: 'test', release: 'r-1', ...config },
       destination: new LogCapture(),
     }),
     ids: new SequentialIds(),

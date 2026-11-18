@@ -462,6 +462,51 @@ export const PLAIN_WORDS = {
     broke: 'It was told busy, send again; nothing of it began, and sending again cannot do it twice.',
     next: 'Look at how busy the database is and what holds connections. If it keeps coming, it needs more room.',
   },
+  'connection_token.refused': {
+    happened: "An MCP connection's token was turned away: the server no longer holds the key version it was made with.",
+    broke: 'That connected app cannot act as its agent; nothing it asked for was done.',
+    next: "Put the retired key version back in the app's settings, or have the person connect the app again.",
+  },
+  'connection_token.check_in_trouble': {
+    happened: "An MCP connection's token check hit a database limit or lost a deadlock.",
+    broke: 'That one MCP request was told busy, send again. Other organisations carried on.',
+    next: "Nothing to do if rare. If often, look at what is holding that organisation's rows.",
+  },
+  'oauth.refresh_reused': {
+    happened: "An MCP connection's refresh token was used twice, so its connection was revoked at once.",
+    broke: 'The app, and anyone who copied its token, can no longer act as the agent until it is connected again.',
+    next: 'If the person did not expect it, their app may be leaking its tokens: tell them and their admins.',
+  },
+  'oauth.code_reused': {
+    happened: 'A one-time OAuth sign-in code was sent a second time, so the connection it made was revoked at once.',
+    broke: 'That connection no longer works; the person must connect the app again.',
+    next: 'If it repeats for one app, its sign-in may be intercepted or broken: look at which app on these lines.',
+  },
+  'oauth.registrations_capped': {
+    happened: 'MCP apps registered themselves more times today than Agent X allows in a day, so this one was refused.',
+    broke: 'No new app can register until the day rolls on; apps already registered still connect.',
+    next: 'Look for one address or app registering over and over: it may be abuse. Raise the cap only after checking.',
+  },
+  'oauth.flow_sweep_failed': {
+    happened: 'The clean-up of ended OAuth sign-in flows failed.',
+    broke: 'Ended flows stay a little longer; nothing a person or app does is affected.',
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
+  },
+  'oauth.client_sweep_failed': {
+    happened: 'The clean-up of MCP apps that registered and never connected failed.',
+    broke: 'Those registrations stay a little longer; nothing a person or app does is affected.',
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
+  },
+  'agents.connection_tokens_sweep_failed': {
+    happened: 'The daily clean-up of old MCP connection token records failed for one organisation or for all.',
+    broke: 'Those records stay a little longer. None of them works any more, so nothing is at risk.',
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
+  },
+  'agents.connection_tokens_sweep_crashed': {
+    happened: 'The daily clean-up of old MCP connection token records hit an unexpected error.',
+    broke: 'Some old records stay a little past their keeping time. None of them works any more.',
+    next: 'The next clean-up runs about an hour later. If it repeats, a developer should look at it.',
+  },
   'agent_key.check_in_trouble': {
     happened: 'An agent key check hit a database limit or lost a deadlock.',
     broke: 'That one request was told busy, send again. Other organisations carried on.',

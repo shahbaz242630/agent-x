@@ -1,0 +1,199 @@
+// SEC-OAUTH-02, -03, -08, -11, -13 (6E3a): the OAuth server's own rules, apart
+// from any database: PKCE S256 alone, redirect addresses matched exactly (a
+// loopback's port aside), scopes asked and narrowed, and a client's
+// registration checked before anything is kept.
+import { describe, expect, it } from 'vitest';
+
+import { SCOPES } from '../../agents/index.ts';
+import { checkRegistration } from './client-metadata.ts';
+import {
+  hashOf,
+  isCodeText,
+  isFlowCookie,
+  isRegisteredClientId,
+  newClientId,
+  newCode,
+  newFlowCookie,
+} from './codes.ts';
+import { challengeOf, isCodeChallenge, isCodeVerifier, pkceMatches } from './pkce.ts';
+import { isLoopback, isRegisteredRedirect, redirectMatches, redirectProblems } from '../domain/redirects.ts';
+import { OFFLINE_ACCESS, scopeParameter, scopesAsked, scopesNarrowed } from './scopes.ts';
+
+const VERIFIER = 'a'.repeat(43);
+
+describe('SEC-OAUTH-02 PKCE: S256 alone, compared in constant time', () => {
+  it('matches a verifier with the challenge made from it, and nothing else', () => {
+    const challenge = challengeOf(VERIFIER);
+    expect(isCodeChallenge(challenge)).toBe(true);
+    expect(pkceMatches(VERIFIER, challenge)).toBe(true);
+    expect(pkceMatches('b'.repeat(43), challenge)).toBe(false);
+    // `plain`: the verifier as its own challenge is never taken.
+    expect(pkceMatches(VERIFIER, VERIFIER)).toBe(false);
+  });
+
+  it('takes only RFC 7636 verifiers: 43 to 128 unreserved characters', () => {
+    expect(isCodeVerifier('a'.repeat(42))).toBe(false);
+    expect(isCodeVerifier('a'.repeat(128))).toBe(true);
+    expect(isCodeVerifier('a'.repeat(129))).toBe(false);
+    expect(isCodeVerifier(`${'a'.repeat(42)}~`)).toBe(true);
+    expect(isCodeVerifier(`${'a'.repeat(42)}+`)).toBe(false);
+    expect(pkceMatches('short', challengeOf('short'))).toBe(false);
+    expect(pkceMatches(VERIFIER, 'not a challenge')).toBe(false);
+  });
+});
+
+describe('SEC-OAUTH-03, -11 redirect addresses: registered exactly, matched exactly', () => {
+  it('registers https, and http only to the loopback', () => {
+    expect(redirectProblems('https://chatgpt.com/connector/oauth/callback')).toEqual([]);
+    expect(redirectProblems('http://127.0.0.1:18789/oauth/mcp/callback')).toEqual([]);
+    expect(redirectProblems('http://localhost/callback')).toEqual([]);
+    expect(redirectProblems('http://[::1]:4000/cb')).toEqual([]);
+    expect(redirectProblems('http://example.com/cb')).toEqual([
+      "a redirect address is https, or http to the machine's own loopback",
+    ]);
+    expect(redirectProblems('cursor://anysphere/callback')).toEqual([
+      "a redirect address is https, or http to the machine's own loopback",
+    ]);
+  });
+
+  it('refuses a fragment, a wildcard, a user, no URL at all, and one too long', () => {
+    expect(redirectProblems('https://a.example/cb#x')).toEqual(['a redirect address has no fragment']);
+    expect(redirectProblems('https://*.example/cb')).toContain('a redirect address has no wildcard');
+    expect(redirectProblems('https://user:pass@a.example/cb')).toEqual([
+      'a redirect address names no user or password',
+    ]);
+    expect(redirectProblems('/relative')).toEqual(['a redirect address is an absolute URL']);
+    expect(redirectProblems('')).toEqual(['a redirect address is 1 to 512 characters']);
+    expect(redirectProblems(`https://a.example/${'x'.repeat(512)}`)).toEqual([
+      'a redirect address is 1 to 512 characters',
+    ]);
+  });
+
+  it('matches the very text registered, never a prefix, a path or a host like it', () => {
+    const registered = 'https://claude.ai/api/mcp/auth_callback';
+    expect(redirectMatches(registered, registered)).toBe(true);
+    expect(redirectMatches(registered, `${registered}/more`)).toBe(false);
+    expect(redirectMatches(registered, 'https://claude.ai/api/mcp/auth_callback?x=1')).toBe(false);
+    expect(redirectMatches(registered, 'https://claude.ai.evil.example/api/mcp/auth_callback')).toBe(false);
+    expect(redirectMatches(registered, 'https://CLAUDE.ai/api/mcp/auth_callback')).toBe(false);
+  });
+
+  it('matches a loopback address on any port, its host, path and query exactly', () => {
+    const registered = 'http://127.0.0.1:27890/callback';
+    expect(redirectMatches(registered, 'http://127.0.0.1:51234/callback')).toBe(true);
+    expect(redirectMatches(registered, 'http://127.0.0.1/callback')).toBe(true);
+    expect(redirectMatches(registered, 'http://localhost:51234/callback')).toBe(false);
+    expect(redirectMatches(registered, 'http://127.0.0.1:51234/callback/')).toBe(false);
+    expect(redirectMatches(registered, 'http://127.0.0.1:51234/callback?x=1')).toBe(false);
+    expect(redirectMatches(registered, 'http://127.0.0.1:51234/callback#x')).toBe(false);
+    expect(redirectMatches(registered, 'http://user@127.0.0.1:51234/callback')).toBe(false);
+    expect(redirectMatches(registered, 'https://127.0.0.1:51234/callback')).toBe(false);
+    expect(redirectMatches(registered, 'http://LOCALHOST:5/callback')).toBe(false);
+    expect(redirectMatches('http://[::1]:1/cb', 'http://[::1]:2/cb')).toBe(true);
+    expect(redirectMatches('https://a.example/cb', 'http://127.0.0.1:2/cb')).toBe(false);
+    expect(isLoopback('http://127.0.0.1:1/x')).toBe(true);
+    expect(isLoopback('https://127.0.0.1:1/x')).toBe(false);
+    expect(isLoopback('not a url')).toBe(false);
+    expect(isRegisteredRedirect(['https://a.example/cb', registered], 'http://127.0.0.1:9/callback')).toBe(true);
+    expect(isRegisteredRedirect(['https://a.example/cb'], 'https://b.example/cb')).toBe(false);
+  });
+});
+
+describe('SEC-OAUTH-08 scopes: asked among those there are, narrowed and never widened', () => {
+  it('asks for every scope when none is named, offline_access alone included', () => {
+    expect(scopesAsked(undefined)).toEqual(SCOPES);
+    expect(scopesAsked('  ')).toEqual(SCOPES);
+    expect(scopesAsked(OFFLINE_ACCESS)).toEqual(SCOPES);
+    expect(scopesAsked(`requests:write requests:read ${OFFLINE_ACCESS}`)).toEqual(['requests:read', 'requests:write']);
+  });
+
+  it('refuses a word that is no scope, a word twice, and a parameter too long', () => {
+    expect(scopesAsked('openid')).toBeUndefined();
+    expect(scopesAsked('requests:read requests:read')).toBeUndefined();
+    expect(scopesAsked('requests:read '.repeat(30))).toBeUndefined();
+  });
+
+  it('narrows a refresh to the scopes named, all of them held; keeps them all when none is named', () => {
+    const held = ['requests:read', 'suppliers:read'] as const;
+    expect(scopesNarrowed(undefined, held)).toEqual(held);
+    expect(scopesNarrowed(OFFLINE_ACCESS, held)).toEqual(held);
+    expect(scopesNarrowed('suppliers:read', held)).toEqual(['suppliers:read']);
+    expect(scopesNarrowed('requests:write', held)).toBeUndefined();
+    expect(scopesNarrowed('nope', held)).toBeUndefined();
+    expect(scopeParameter(['requests:read', 'suppliers:read'])).toBe('requests:read suppliers:read');
+  });
+});
+
+describe('the random texts handed out', () => {
+  it('makes codes, cookies and client IDs of their own shapes, and keeps secrets as their SHA-256', () => {
+    const code = newCode();
+    expect(isCodeText(code)).toBe(true);
+    expect(isCodeText(`${code}x`)).toBe(false);
+    expect(isFlowCookie(newFlowCookie())).toBe(true);
+    expect(isFlowCookie('short')).toBe(false);
+    expect(isRegisteredClientId(newClientId())).toBe(true);
+    expect(isRegisteredClientId('axcl_nothex')).toBe(false);
+    expect(hashOf('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(newCode()).not.toBe(code);
+  });
+});
+
+describe('SEC-OAUTH-13 a client registering itself', () => {
+  const asked = { redirect_uris: ['https://chatgpt.com/connector/oauth/abc'], client_name: 'ChatGPT' };
+
+  it('keeps a public code-flow client, refresh tokens always', () => {
+    expect(checkRegistration(asked)).toEqual({
+      outcome: 'valid',
+      client: {
+        name: 'ChatGPT',
+        redirectUris: ['https://chatgpt.com/connector/oauth/abc'],
+        applicationType: 'web',
+        grantTypes: ['authorization_code', 'refresh_token'],
+        softwareId: null,
+        softwareVersion: null,
+      },
+    });
+    const native = checkRegistration({
+      redirect_uris: ['http://127.0.0.1:18789/oauth/mcp/callback'],
+      grant_types: ['authorization_code'],
+      software_id: 'openclaw',
+      software_version: '2026.11.5',
+    });
+    expect(native).toMatchObject({
+      outcome: 'valid',
+      client: {
+        // No name given: the redirect address's host is shown instead.
+        name: '127.0.0.1:18789',
+        applicationType: 'native',
+        grantTypes: ['authorization_code', 'refresh_token'],
+        softwareId: 'openclaw',
+        softwareVersion: '2026.11.5',
+      },
+    });
+  });
+
+  it('shows a name that is no visible name as the host instead', () => {
+    expect(checkRegistration({ ...asked, client_name: `${String.fromCharCode(0x20_2e)}gnp.exe` })).toMatchObject({
+      client: { name: 'chatgpt.com' },
+    });
+  });
+
+  it.each([
+    [{ redirect_uris: [] }, 'invalid_redirect_uri'],
+    [
+      { redirect_uris: Array.from({ length: 6 }, (_, index) => `https://a.example/${String(index)}`) },
+      'invalid_redirect_uri',
+    ],
+    [{ redirect_uris: ['https://a.example/cb', 'https://a.example/cb'] }, 'invalid_redirect_uri'],
+    [{ redirect_uris: ['http://a.example/cb'] }, 'invalid_redirect_uri'],
+    [{ ...asked, token_endpoint_auth_method: 'client_secret_basic' }, 'invalid_client_metadata'],
+    [{ ...asked, response_types: ['token'] }, 'invalid_client_metadata'],
+    [{ ...asked, grant_types: ['refresh_token'] }, 'invalid_client_metadata'],
+    [{ ...asked, grant_types: ['authorization_code', 'implicit'] }, 'invalid_client_metadata'],
+    [{ ...asked, scope: 'openid' }, 'invalid_client_metadata'],
+    [{ ...asked, software_id: 'x'.repeat(256) }, 'invalid_client_metadata'],
+    [{ ...asked, software_version: 'x'.repeat(256) }, 'invalid_client_metadata'],
+  ])('refuses %j as %s', (registration, error) => {
+    expect(checkRegistration(registration)).toMatchObject({ outcome: 'invalid', error });
+  });
+});

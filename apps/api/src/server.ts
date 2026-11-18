@@ -41,7 +41,7 @@ import type {
   SignIn,
 } from '@agentx/core/modules/identity';
 import type { FakeBank } from '@agentx/core/modules/providers';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, systemClock } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import { asAgentTraffic, isLockWaitRunOut } from '@agentx/platform/db';
 import { type Logger, withLogContext } from '@agentx/platform/observability';
@@ -66,6 +66,12 @@ import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { loginHostCheck } from './login-host.ts';
 import { MCP_PATH, registerMcp } from './mcp.ts';
+import type { ConnectionConsents } from './connection-consents.ts';
+import type { OauthAuthorizing } from './oauth-authorizing.ts';
+import type { OauthGrants } from './oauth-grants.ts';
+import { registerOauthRequests } from './oauth-requests.ts';
+import { registerOauth, registerOauthForms, registerOauthSwitch } from './oauth-routes.ts';
+import { capabilitiesOf, FORM_TYPE, formFields } from './oauth-wire.ts';
 import { recordTwins } from './mcp-twins.ts';
 import { type MachineIds, registerMachineIds } from './machine-ids.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
@@ -268,6 +274,18 @@ export interface ServerOptions {
   readonly consoleFiles?: ConsoleFiles | undefined;
   /** The login service's public origin, the OIDC issuer: a request naming its host gets a 404 (login-host.ts); none when not given. */
   readonly loginOrigin?: string | undefined;
+  /**
+   * Agent X's own OAuth server for MCP connections (6E3a, ADR-016): its use cases, which answer only while
+   * AGENTX_MCP_OAUTH is on; without them, its routes answer 404.
+   */
+  readonly oauth?:
+    | {
+        readonly authorizing: OauthAuthorizing;
+        readonly grants: OauthGrants;
+        readonly consents: ConnectionConsents;
+        readonly clock: Clock;
+      }
+    | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -419,12 +437,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
-    const { access = [], partnerSigned, toolCalls } = request.routeOptions.config;
+    const { access = [], partnerSigned, toolCalls, oauthClient } = request.routeOptions.config;
     // The MCP endpoint checks a browser's origin itself (mcp.ts): a CLI client sends none, and must reach the key's 401.
+    // An OAuth client's own endpoints read no cookie, and are called from anywhere (oauth-routes.ts, 6E3a).
     if (
       !isAgentsRequest(request.headers.authorization, access) &&
       partnerSigned !== true &&
       toolCalls !== true &&
+      oauthClient !== true &&
       isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)
     ) {
       void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
@@ -452,6 +472,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip, agentId, orgId });
     },
   );
+  // The OAuth server's routes, 404s while it is off, before anyone is asked who they are (6E3a).
+  const oauthOn = config.http.mcpOauth;
+  const capabilities = capabilitiesOf(config.http.publicOrigin);
+  registerOauthSwitch(app, oauthOn);
   registerAccess(app, {
     findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
     findMembership: options.findMembership,
@@ -459,6 +483,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     checkKey: options.checkAgentKey,
     // A request refused once its caller is known is counted there; one let through, by the hooks below.
     counters: { person: personCounter, agent: agentCounter },
+    resourceMetadata: oauthOn ? capabilities.resourceMetadataUrl : undefined,
   });
   // After the access hook, which finds the person.
   app.addHook('onRequest', personCounter);
@@ -574,6 +599,21 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     confirmations: options.acceptanceConfirmations,
     publicOrigin: config.http.publicOrigin,
   });
+  registerOauth(app, { capabilities, authorizing: options.oauth?.authorizing, trust });
+  // OAuth's token and revocation forms, in a scope of their own whose one parser reads a form, field by field (6E3a).
+  void app.register((scoped, _options, done) => {
+    scoped.removeAllContentTypeParsers();
+    scoped.addContentTypeParser(FORM_TYPE, { parseAs: 'string' }, (request, body, parsed) => {
+      parsed(null, formFields(request, body));
+    });
+    registerOauthForms(scoped, {
+      grants: options.oauth?.grants,
+      clock: options.oauth?.clock ?? systemClock,
+      trust,
+    });
+    done();
+  });
+  registerOauthRequests(app, { consents: options.oauth?.consents });
   // Last: its tools read their twins, every one added by now (mcp.ts, 6E2).
   registerMcp(app, {
     useCases: {

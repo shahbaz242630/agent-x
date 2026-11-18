@@ -52,6 +52,8 @@ describe('SEC-DATA-05 names whose values are never logged', () => {
     'salt',
     'nonce',
     'codeVerifier',
+    'device_code',
+    'userCode',
     'credentials',
     'sessionId',
     'x-signature',
@@ -140,6 +142,8 @@ describe('names that are logged', () => {
     'keyVersion',
     'idempotencyKey',
     'publicKey',
+    // A connection token's own ID (6E3a): public, as a key's is.
+    'tokenId',
     'author',
     'eventName',
     'moduleName',

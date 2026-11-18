@@ -77,7 +77,8 @@ import {
 } from '../../audit/index.ts';
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { keySecretMessage, parseAgentKey, type PresentedKey, type Scope } from '../domain/agent.ts';
-import { AGENT_KEYS, agentKeyOf } from './agent-keys.ts';
+import { AGENT_KEYS, agentKeyOf, type AgentKeyRecord } from './agent-keys.ts';
+import { connectionOf, CONNECTIONS } from './connections.ts';
 import { AGENTS, agentOf, type AgentsTransaction } from './agents.ts';
 import type { AgentsTables } from './tables.ts';
 
@@ -90,6 +91,8 @@ export interface AcceptedKey {
   readonly scopes: readonly Scope[];
   /** When the key stops working, so an agent can rotate it in time. */
   readonly expiresAt: Date;
+  /** Sent as an MCP connection's access token (`axa_`, 6E3a) rather than the agent's own key: never a key's. */
+  readonly credential?: 'connection';
 }
 
 /** Why a key was refused: for the log alone, never an answer. */
@@ -102,7 +105,10 @@ export type KeyRefusal =
   | 'wrong_secret'
   | 'agent_suspended'
   | 'revoked'
-  | 'expired';
+  | 'expired'
+  | 'not_a_connection'
+  | 'wrong_resource'
+  | 'wrong_client';
 
 /** The key checked in a transaction: accepted, or refused with its reason (logged, never answered). */
 export type KeyAtCheck =
@@ -114,19 +120,37 @@ export type KeyChecked = { readonly outcome: 'accepted'; readonly key: AcceptedK
 
 const refused = (reason: KeyRefusal): KeyAtCheck => ({ outcome: 'refused', reason });
 
+/** What a credential's own check proves of the key it names, beside steps 3 and 5. */
+export interface CredentialProof {
+  /**
+   * Step 4 for this credential, once its key is read sound: an agent key's secret against the key's MAC; a
+   * connection token's was proven at the door against its own row (connection-check.ts), so nothing more.
+   */
+  readonly prove: (key: AgentKeyRecord) => KeyRefusal | undefined;
+  /**
+   * For a connection token (6E3a): the MCP resource it may be used at. The key's connection is then gathered too
+   * (lock level 3b, after the key's 3a) and must be sound, the key's own agent's, and made for exactly this resource.
+   * None for an agent key, whose own secret no connection's key has (it was thrown away).
+   */
+  readonly resource?: string;
+  /** With a resource: the OAuth client the connection must have been made for (a refresh's, a revocation's). */
+  readonly clientId?: string;
+}
+
 /**
- * Checks the key in the caller's transaction, which must be withSignedStates'
- * for the organisation the directory lists the key in, with nothing of the
- * agents module locked yet: steps 3 to 5 above.
+ * Steps 3 and 5 for any credential naming the key (an agent key's own text, or a connection token pointing at it),
+ * with its own step 4 (`proof`), in the caller's transaction, which must be withSignedStates' for the organisation
+ * the directory lists the key in, with nothing of the agents module locked yet. One gather statement whatever the
+ * credential, so a connection token takes the trips a key does.
  */
-export async function agentKeyAt(
+export async function credentialAt(
   tx: AgentsTransaction,
   states: SignedStates,
-  { keys, now }: { readonly keys: KeyProvider; readonly now: Date },
+  now: Date,
   orgId: string,
-  presented: PresentedKey,
+  keyId: string,
+  { prove, resource, clientId }: CredentialProof,
 ): Promise<KeyAtCheck> {
-  const { keyId, secret } = presented;
   const agentOfKey = { table: AGENT_KEYS, id: keyId, column: 'agent_id' };
   // A row pointed elsewhere only waits on another's brake: its alarm is still the key's own read.
   const {
@@ -138,6 +162,7 @@ export async function agentKeyAt(
     [
       { table: AGENTS, id: { lookedUp: agentOfKey }, lock: 'share' },
       { table: AGENT_KEYS, id: { id: keyId }, lock: 'share' },
+      ...(resource === undefined ? [] : [{ table: CONNECTIONS, id: { id: keyId }, lock: 'share' } as const]),
     ],
   );
   // Both answered from the gather, or each read again alone (agentOf and agentKeyOf, through verifiedState).
@@ -156,18 +181,15 @@ export async function agentKeyAt(
     return refused('tampered');
   }
   const { agent } = agentRead;
-  // A pepper version retired while a key made with it still lives (Azure.md, "Rotating a key") can't
-  // check its secret: refused, and logged as the fault it is, never taken for a wrong secret.
-  const held = keys
-    .describe()
-    .some(
-      ({ purpose, versions }) =>
-        purpose === 'agent-key-pepper' && versions.some(({ version }) => version === key.secretKeyVersion),
-    );
-  if (!held) return refused('key_not_held');
-  if (!keys.verifyMac('agent-key-pepper', key.secretKeyVersion, keySecretMessage(keyId, secret), key.secretMac)) {
-    return refused('wrong_secret');
+  if (resource !== undefined) {
+    const unconnected = await connectionRefusal(tx, states, { orgId, id: keyId }, key.agentId, {
+      resource,
+      clientId,
+    });
+    if (unconnected !== undefined) return refused(unconnected);
   }
+  const unproven = prove(key);
+  if (unproven !== undefined) return refused(unproven);
   if (agent.status !== 'ACTIVE') return refused('agent_suspended');
   if (key.status !== 'ACTIVE') return refused('revoked');
   if (key.expiresAt.getTime() <= now.getTime()) return refused('expired');
@@ -179,8 +201,60 @@ export async function agentKeyAt(
       keyId: key.id,
       scopes: key.scopes.filter((scope) => agent.scopes.includes(scope)),
       expiresAt: key.expiresAt,
+      ...(resource === undefined ? {} : { credential: 'connection' as const }),
     },
   };
+}
+
+/** Why the key's connection refuses a token for `resource`, if it does: none, tampered with, another's, elsewhere. */
+async function connectionRefusal(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  agentId: string,
+  { resource, clientId }: { readonly resource: string; readonly clientId: string | undefined },
+): Promise<KeyRefusal | undefined> {
+  const read = await connectionOf(tx, states, key);
+  if (read.outcome === 'tampered') return 'tampered';
+  if (read.outcome === 'missing') return 'not_a_connection';
+  // Its agent is the key's by the row's foreign key and both seals: another is tampering the seals didn't show.
+  if (read.connection.agentId !== agentId) return 'tampered';
+  // SEC-OAUTH-01: a token is for the one MCP resource its connection was made for, exactly.
+  if (read.connection.resource !== resource) return 'wrong_resource';
+  return clientId === undefined || read.connection.clientId === clientId ? undefined : 'wrong_client';
+}
+
+/** Whether this process holds the agent-key pepper's version a key or token was made with. */
+export const pepperHeld = (keys: KeyProvider, version: number): boolean =>
+  keys
+    .describe()
+    .some(
+      ({ purpose, versions }) => purpose === 'agent-key-pepper' && versions.some((held) => held.version === version),
+    );
+
+/**
+ * Checks the key in the caller's transaction, which must be withSignedStates'
+ * for the organisation the directory lists the key in, with nothing of the
+ * agents module locked yet: steps 3 to 5 above.
+ */
+export async function agentKeyAt(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  { keys, now }: { readonly keys: KeyProvider; readonly now: Date },
+  orgId: string,
+  presented: PresentedKey,
+): Promise<KeyAtCheck> {
+  const { keyId, secret } = presented;
+  return credentialAt(tx, states, now, orgId, keyId, {
+    prove: (key) => {
+      // A pepper version retired while a key made with it still lives (Azure.md, "Rotating a key") can't
+      // check its secret: refused, and logged as the fault it is, never taken for a wrong secret.
+      if (!pepperHeld(keys, key.secretKeyVersion)) return 'key_not_held';
+      return keys.verifyMac('agent-key-pepper', key.secretKeyVersion, keySecretMessage(keyId, secret), key.secretMac)
+        ? undefined
+        : 'wrong_secret';
+    },
+  });
 }
 
 /** Where an ID the directory doesn't list is read for: no organisation is this one, so no row is found. */

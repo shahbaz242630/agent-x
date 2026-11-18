@@ -48,6 +48,11 @@ const SELF_SCHEMA = {
         keyId: z.uuid().describe('The key the request was sent with, by its ID.'),
         scopes: z.array(z.enum(SCOPES)).describe('What requests with this key may do: its scopes, within its agent’s.'),
         keyExpiresAt: z.iso.datetime().describe('When the key stops working: ask for it to be rotated before then.'),
+        credential: z
+          .enum(['key', 'connection'])
+          .describe(
+            'What the request was sent with: the agent’s own key, or an MCP connection’s access token (the key is then the connection’s, and its end the connection’s).',
+          ),
       })
       .register(API_SCHEMAS, { id: 'AgentSelf', description: 'The agent a key is, as the key check found it.' }),
   },
@@ -119,12 +124,13 @@ const SOURCES_SCHEMA = {
 };
 
 /** `GET /v1/agent`: what the key check found, in the same request. Nothing is read again. */
-export const agentSelf = ({ orgId, agentId, keyId, scopes, expiresAt }: AcceptedKey) => ({
+export const agentSelf = ({ orgId, agentId, keyId, scopes, expiresAt, credential }: AcceptedKey) => ({
   agentId,
   organizationId: orgId,
   keyId,
   scopes: [...scopes],
   keyExpiresAt: expiresAt.toISOString(),
+  credential: credential ?? ('key' as const),
 });
 
 /** `GET /v1/agent/mandate`: the mandate the agent acts under, field by field (its route and its MCP tool). */

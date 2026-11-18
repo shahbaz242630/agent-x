@@ -109,6 +109,8 @@ describe('at start-up', () => {
       statusGuardedTables: statuses,
       // And the made-once guard on each whose rows are made once (E1-1's review).
       madeOnceTables: [
+        // An MCP connection (0093, 6E3a).
+        'agents.connections',
         'mandates.versions',
         'mandates.policy_versions',
         'suppliers.supplier_versions',

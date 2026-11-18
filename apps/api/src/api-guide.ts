@@ -75,6 +75,12 @@ export const TAGS: readonly {
     prefixes: ['/v1/mcp'],
   },
   {
+    name: 'MCP connections',
+    description:
+      "Agent X's own OAuth 2.1 server, for an MCP client a key can't be pasted into: a person connects it as one of their organisation's agents, and its tokens act as that agent at the MCP endpoint alone. Off unless the deployment turns it on.",
+    prefixes: ['/v1/oauth', '/.well-known'],
+  },
+  {
     name: 'Spend requests',
     description:
       "Spend requests and their decisions. An agent creates one (POST /v1/spend-requests); the organisation's people read, approve, reject and cancel them.",

@@ -8,7 +8,7 @@
 export type NameRule = 'keep' | 'redact' | 'redact-unless-constant';
 
 /** Names that look sensitive but aren't: public identifiers. Compared after removing case and punctuation. */
-const ALLOWED = new Set(['keyid', 'keyversion', 'idempotencykey', 'publickey']);
+const ALLOWED = new Set(['keyid', 'keyversion', 'idempotencykey', 'publickey', 'tokenid']);
 
 /** Long, unambiguous names, matched anywhere in the name with case and punctuation removed. */
 const NAME_PARTS = [
@@ -64,6 +64,9 @@ const NAME_PARTS = [
   'connectionstring',
   'databaseurl',
   'codeverifier',
+  // OAuth's device flow (RFC 8628): what a person types, and what the device polls with.
+  'devicecode',
+  'usercode',
 ];
 
 /** Short words that are sensitive only as a whole word of the name. */

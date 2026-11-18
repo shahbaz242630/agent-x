@@ -99,6 +99,14 @@ const BASIC = /\bBasic\s{1,10}[A-Za-z0-9+/]{8,4096}={0,2}/gi;
  */
 const AGENT_KEY = /(axk_[A-Za-z0-9-]{1,64}_)[A-Za-z0-9_+/=-]+/g;
 
+/**
+ * An MCP connection's access or refresh token, `axa_` / `axr_<keyId>_<tokenId>_<secret>` (6E3a): both IDs stay, as
+ * a key's does, the secret becomes `…`. An authorization code, `axc_<secret>`, and a device code, `axd_<secret>`, are
+ * nothing but their secret: all of it goes.
+ */
+const CONNECTION_TOKEN = /(ax[ar]_[0-9a-f]{32}_[0-9a-f]{32}_)[A-Za-z0-9_+/=-]+/g;
+const OAUTH_CODE = /(ax[cd]_)[A-Za-z0-9_+/=-]+/g;
+
 /** An email address, in any script, with `@` or its URL-encoded form `%40`. */
 const EMAIL = /[\p{L}\p{N}._%+-]{1,64}(?:@|%40)[\p{L}\p{N}-]{1,63}(?:\.[\p{L}\p{N}-]{1,63}){0,8}\.\p{L}{2,24}/gu;
 
@@ -319,6 +327,8 @@ export function scrub(text: string): string {
       .replace(BEARER, `Bearer ${LABELS.secret}`)
       .replace(BASIC, `Basic ${LABELS.secret}`)
       .replace(AGENT_KEY, '$1…')
+      .replace(CONNECTION_TOKEN, '$1…')
+      .replace(OAUTH_CODE, '$1…')
       .replace(EMAIL, LABELS.email)
       .replace(IBAN, LABELS.iban)
       .replace(IBAN_ANY_CASE, cleanIbanAnyCase)

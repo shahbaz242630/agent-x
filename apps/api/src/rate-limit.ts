@@ -113,10 +113,15 @@ type Limiter = ReturnType<FastifyInstance['createRateLimit']>;
  * A limit's counter of its own, keyed by `key`. The plugin's store takes `cache` from these options (its `child`),
  * though its type for them leaves it out; rate-limit.test.ts holds it to remembering past the plugin's default.
  */
-function counterOf(app: FastifyInstance, perMinute: number, key: (request: FastifyRequest) => string): Limiter {
+function counterOf(
+  app: FastifyInstance,
+  perMinute: number,
+  key: (request: FastifyRequest) => string,
+  windowMs = WINDOW_MS,
+): Limiter {
   const options: CreateRateLimitOptions & { readonly cache: number } = {
     max: perMinute,
-    timeWindow: WINDOW_MS,
+    timeWindow: windowMs,
     cache: CALLERS_REMEMBERED,
     keyGenerator: key,
   };
@@ -220,6 +225,22 @@ export function createOrganisationCounter(
       limited(rawClientIp(request, trust), agent);
       throw new RateLimited('rate limit exceeded');
     }
+  };
+}
+
+/**
+ * A route's own limit per client address (6E3a: the OAuth endpoints'), beside the address's limit for every route,
+ * in a window of its own (`windowMs`): an hour for registering a client, a minute for the rest. A count of its own
+ * for each counter made. Over it, the limit headers are its own, and the same 429.
+ */
+export function createAddressCounter(
+  app: FastifyInstance,
+  { most, windowMs }: { readonly most: number; readonly windowMs: number },
+  trust: ProxyTrust,
+): CountRequest {
+  const limiter = counterOf(app, most, (request) => clientKey(rawClientIp(request, trust)), windowMs);
+  return async (request, reply) => {
+    if (await overLimit(limiter, request, reply, 'when-refused')) throw new RateLimited('rate limit exceeded');
   };
 }
 

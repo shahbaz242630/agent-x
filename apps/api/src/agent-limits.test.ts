@@ -58,6 +58,7 @@ async function server({ perAddress = 100, perAgent = 10, perOrganisation = 100_0
       rateLimitPerAgentPerMinute: perAgent,
       rateLimitPerOrganisationPerMinute: perOrganisation,
       webCopies: copies,
+      mcpOauth: false,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

@@ -43,7 +43,8 @@
 //   for change; the challenge consumed; then the owner changed (its event
 //   naming both owners and the step-up's evidence), every ACTIVE key revoked
 //   at once with no overlap (live or expired: none from before the handover
-//   is left), and one new key issued and shown this once, with the scopes of
+//   is left), its MCP connections' keys among them (6E3a: their keys are
+//   read for change after its own, by ID), and one new key issued and shown this once, with the scopes of
 //   the newest live key it replaces that the agent still holds, or the
 //   agent's own if none was live, expiring as a registered agent's first key
 //   does. Its status and scopes stay as they are. The new owner and the
@@ -430,6 +431,9 @@ export function createAgentChanges({
           const now = clock.now();
           await work.keyBudgetLeft(tx, member.orgId, now);
           const agentKeys = await keysWithRoom(tx, states, member.orgId, read.agent.id, 'change');
+          // Its MCP connections' keys too (6E3a): whoever connected a client as the agent holds nothing that works.
+          const connected = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change', 'connections');
+          if (connected.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
           const shown = await work.shown(tx, member.orgId, read.agent);
           const consumed = await stepUps.consumed(
             tx,
@@ -449,7 +453,7 @@ export function createAgentChanges({
             details: stepUpDetails(consumed),
           });
           await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
-          for (const old of agentKeys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
+          for (const old of [...agentKeys, ...connected.keys].filter((listedKey) => listedKey.status === 'ACTIVE')) {
             await revokeKey(
               tx,
               states,

@@ -11,7 +11,10 @@
 //   until its change consumes it or its session ends, and most sessions last
 //   hours;
 // - security events (B2-5a): each is kept for the retention period the config
-//   names, with the client's IP address, and no longer.
+//   names, with the client's IP address, and no longer;
+// - the OAuth flows (6E3a): a day after each ends, so a used code's second use
+//   is still caught; and the clients that registered and never connected, a
+//   day after they registered, so anyone registering can't fill the table.
 //
 // The API sweeps each when it starts and then an hour after each sweep ends,
 // each on a timer of its own beside the idempotency keys' retention sweep, a
@@ -34,7 +37,9 @@ export type SweptRows =
   | 'identity.step_up_challenge'
   | 'notifications.notice'
   | 'security.event'
-  | 'provider_events.message';
+  | 'provider_events.message'
+  | 'oauth.flow'
+  | 'oauth.client';
 
 export interface RowSweepOptions {
   readonly rows: SweptRows;

@@ -13,6 +13,7 @@
 // recorder's, MO4). Every exit writes the logger's held-back line counts
 // first, so none are lost.
 import type { AgentsTables } from '@agentx/core/modules/agents';
+import type { OauthTables } from '@agentx/core/modules/oauth';
 import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
 import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
@@ -96,7 +97,8 @@ export type ApiTables = PlatformControlsTables &
   ActivityExportTables &
   InstructionsTables &
   TransactionsTables &
-  ProviderEventsTables;
+  ProviderEventsTables &
+  OauthTables;
 
 const SERVICE = 'api';
 

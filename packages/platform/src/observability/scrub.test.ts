@@ -6,6 +6,10 @@ import { hasValidIbanCheckDigits, isPlainConstant, passesLuhn, scrub } from './s
 
 /** Built from parts, so secret scanners reading this file don't mistake it for a real credential. */
 const join = (...parts: string[]): string => parts.join('');
+
+/** An MCP connection's tokens' start: their prefix and their key's and own IDs, which the log keeps. */
+const ACCESS_IDS = join('axa_', '1'.repeat(32), '_', '2'.repeat(32), '_');
+const REFRESH_IDS = join('axr_', '3'.repeat(32), '_', '4'.repeat(32), '_');
 const NBSP = String.fromCharCode(0xa0);
 /** fast-check runs are seeded, so the tests are deterministic (Rule Book §6). */
 const RUNS = { numRuns: 300, seed: 20_260_914 };
@@ -28,6 +32,18 @@ describe('SEC-DATA-01 scrub: secrets and credentials', () => {
     ['an agent key, keeping its key ID', `key ${SAMPLES.agentKey} used`, 'key axk_k7Fq2_… used'],
     ['an agent key run into a word', `key_${SAMPLES.agentKey}`, 'key_axk_k7Fq2_…'],
     ['an agent key in standard base64', join('axk_k7Fq2_', 'abcDEF+ghiJKL/mnoPQR='), 'axk_k7Fq2_…'],
+    [
+      "an MCP connection's access token, keeping its two IDs (6E3a)",
+      join(ACCESS_IDS, 'Zm9vYmFyYmF6cXV4cXV1eA-_xyz'),
+      join(ACCESS_IDS, '…'),
+    ],
+    [
+      "an MCP connection's refresh token",
+      join('sent ', REFRESH_IDS, 'cXV4cXV1eGZvb2Jhcg once'),
+      join('sent ', REFRESH_IDS, '… once'),
+    ],
+    ['an OAuth code, all of it', `code ${join('axc_', 'Zm9vYmFyYmF6cXV4cXV1eA')}`, 'code axc_…'],
+    ['a device code, all of it', join('axd_', 'Zm9vYmFyYmF6cXV4cXV1eA'), 'axd_…'],
     ['a password given in text', SAMPLES.secretAssignment, 'password=[redacted]'],
     ['an access token inside JSON text', SAMPLES.jsonSecret, '{"access_token":[redacted]}'],
     ['an API key header line', join('x-api-key: ', 'sk_live_', 'abc123'), 'x-api-key: [redacted]'],

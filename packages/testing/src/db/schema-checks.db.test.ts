@@ -1076,6 +1076,8 @@ describe('CI-06 each rule fails on a broken fixture', () => {
           't.gone': { reason: 'Removed', columns: ['result'] },
           'migrations.applied': { reason: 'Not a key', columns: ['name'] },
           'audit.events': { reason: 'Not a key', columns: ['details'] },
+          // Kept as it is: its retention policy is a fill-in table's (0093, 6E3a).
+          'agents.connection_tokens': POLICY.fillInTables['agents.connection_tokens'] ?? { reason: '', columns: [] },
         },
       };
       expect(await problemsAfter(KEYS, policy)).toEqual([

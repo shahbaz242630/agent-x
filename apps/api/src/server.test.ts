@@ -46,6 +46,7 @@ const HTTP: Config['http'] = {
   rateLimitPerAgentPerMinute: 100,
   rateLimitPerOrganisationPerMinute: 100_000,
   webCopies: 1,
+  mcpOauth: false,
 };
 const LOG: Config['log'] = { level: 'debug', eventCapPerMinute: 10_000 };
 

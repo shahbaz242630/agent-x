@@ -6,6 +6,7 @@
   "exports": {
     "./authority-tables": "./src/authority-tables.ts",
     "./modules/agents": "./src/modules/agents/index.ts",
+    "./modules/oauth": "./src/modules/oauth/index.ts",
     "./modules/audit": "./src/modules/audit/index.ts",
     "./modules/directory": "./src/modules/directory/index.ts",
     "./modules/evidence": "./src/modules/evidence/index.ts",

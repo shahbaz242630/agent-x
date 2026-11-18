@@ -16,7 +16,7 @@
 // Its secret's MAC is sealed but never put in an event: a seal is a MAC over
 // the fields, so the audit trail holds nothing a key could be guessed from.
 import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
-import { sql } from 'kysely';
+import { type ExpressionBuilder, sql } from 'kysely';
 
 import type {
   AuditActor,
@@ -30,6 +30,11 @@ import { registerAgentKey } from '../../directory/index.ts';
 import { movedAsRead } from '../../../shared-kernel/index.ts';
 import { AGENT_KEY, type AgentKeyStatus, type Scope, scopesOf, scopesText } from '../domain/agent.ts';
 import type { AgentsTransaction } from './agents.ts';
+import { CONNECTIONS } from './connection-table.ts';
+import type { AgentsTables } from './tables.ts';
+
+/** A key read as `k` beside the connections, for the condition that tells them apart. */
+type KeysAndConnections = AgentsTables & { k: AgentsTables['agents.agent_keys'] };
 
 /** A key's row, as the signed state reads, records and moves it. */
 export const AGENT_KEYS = {
@@ -172,6 +177,22 @@ export async function agentKeyOf(
   };
 }
 
+/** An agent's own keys, or its MCP connections' keys (6E3a): each list's and count's rows are one or the other. */
+export type KeysOrConnections = 'keys' | 'connections';
+
+/** The rows of `k`, agents.agent_keys, that are `which`: whether an MCP connection is made on each, in one condition. */
+const connectionKeys = (which: KeysOrConnections) => (eb: ExpressionBuilder<KeysAndConnections, 'k'>) => {
+  const made = eb.exists(
+    eb
+      // eslint-disable-next-line agentx/authority-tables-through-signed-state -- whether a key is a connection's alone; nothing is decided on the connection from it
+      .selectFrom(`${CONNECTIONS.table} as c`)
+      .select('c.id')
+      .whereRef('c.org_id', '=', 'k.org_id')
+      .whereRef('c.id', '=', 'k.id'),
+  );
+  return which === 'keys' ? eb.not(made) : made;
+};
+
 /** The most keys of one agent a list reads: more is refused, never cut short unseen. */
 export const MOST_KEYS_LISTED = 100;
 
@@ -190,6 +211,10 @@ export class TooManyAgentKeys extends Error {
  * and have read the agent first; or tampered with, at the first key that is. One statement for the IDs, then
  * each key's own read: the row's agent is only where to look, and a key
  * whose sealed agent is another is left out.
+ *
+ * `which`: its own keys alone (`keys`), every list, limit and budget of keys counting none of its MCP connections'
+ * (6E3a: a connection is a key whose secret was thrown away, with limits of its own); or its connections' keys
+ * alone (`connections`), for a hand-over, which revokes them too.
  */
 export async function agentKeysOf(
   tx: AgentsTransaction,
@@ -197,17 +222,19 @@ export async function agentKeysOf(
   orgId: string,
   agentId: string,
   lock: 'share' | 'change' = 'share',
+  which: KeysOrConnections = 'keys',
 ): Promise<
   | { readonly outcome: 'listed'; readonly keys: readonly AgentKeyRecord[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each key is then read through its signed state
-    .selectFrom(AGENT_KEYS.table)
-    .select('id')
-    .where('org_id', '=', orgId)
-    .where('agent_id', '=', agentId)
-    .orderBy('id')
+    .selectFrom(`${AGENT_KEYS.table} as k`)
+    .select('k.id')
+    .where('k.org_id', '=', orgId)
+    .where('k.agent_id', '=', agentId)
+    .where(connectionKeys(which))
+    .orderBy('k.id')
     .limit(MOST_KEYS_LISTED + 1)
     .execute();
   if (rows.length > MOST_KEYS_LISTED) throw new TooManyAgentKeys();
@@ -265,14 +292,18 @@ export async function oneKeyIssueAtATime(tx: AgentsTransaction, orgId: string): 
   await holdTransactionLock(tx, 'agent_keys', orgId);
 }
 
-/** How many keys the organisation issued after `since`, first keys included: its budget's count, in one statement. */
+/**
+ * How many keys the organisation issued after `since`, first keys included, its MCP connections' left out (they have
+ * a budget of their own): its budget's count, in one statement.
+ */
 export async function keysIssuedSince(tx: AgentsTransaction, orgId: string, since: Date): Promise<number> {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone, for a budget; no key is decided on from it
-    .selectFrom(AGENT_KEYS.table)
+    .selectFrom(`${AGENT_KEYS.table} as k`)
     .select(sql<number>`pg_catalog.count(*)::int`.as('issued'))
-    .where('org_id', '=', orgId)
-    .where('created_at', '>', since)
+    .where('k.org_id', '=', orgId)
+    .where('k.created_at', '>', since)
+    .where(connectionKeys('keys'))
     .executeTakeFirstOrThrow();
   return row.issued;
 }
