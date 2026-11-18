@@ -1,12 +1,15 @@
 // Fetching an MCP client's metadata document (6E3c, decision 2; CIMD;
-// SEC-OAUTH-09): a client whose ID is an https address on the allowlist
-// (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS) publishes there what it is. The
+// SEC-OAUTH-09): a client whose ID is an https address the allowlist trusts
+// (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: an origin, a path prefix or one
+// document's exact address, AG6) publishes there what it is. The
 // fetch is a public GET carrying no customer data (ADR-013): no cookie, no
 // token, nothing of the person or organisation.
 //
 // Every guard against the fetch being turned on us (SSRF):
-// - An address not on the allowlist is never fetched, nor one that is not
-//   https, nor one the client-ID rules refuse (a `..`, a user, a fragment).
+// - An address the allowlist doesn't trust is never fetched, nor one that is
+//   not https, nor one the client-ID rules refuse (a `..`, a user, a
+//   fragment, an address not as the URL parser prints it, a %-encoded `.`,
+//   `/` or `\`).
 // - The outbound fetch's own rules (outbound-fetch.ts): only origins on the
 //   outbound allowlist (each of ours must be, or the app refuses to start),
 //   redirects never followed, TLS checks on.
@@ -16,7 +19,7 @@
 // The document is then checked (client-metadata-document.ts) before anything
 // of it is kept. Private addresses are not checked here: only the allowlist's
 // fixed public hosts are ever named.
-import { isMetadataClientId } from '@agentx/core/modules/oauth';
+import { isTrustedMetadataClientId } from '@agentx/core/modules/oauth';
 import { type OutboundFetch, OutboundRefused } from '@agentx/platform/outbound';
 
 /** The whole fetch's time, headers and body (6E3 plan §6). */
@@ -61,17 +64,16 @@ async function bodyUpTo(response: Response, most: number): Promise<Buffer | unde
 
 export function createClientMetadataFetch({
   fetch,
-  origins,
+  trusted,
   timeoutMs = FETCH_MS,
 }: {
   readonly fetch: OutboundFetch;
-  /** The allowlist: origins, exactly as the setting holds them. */
-  readonly origins: readonly string[];
+  /** The allowlist, exactly as the setting holds it: origins, path prefixes and documents' exact addresses (AG6). */
+  readonly trusted: readonly string[];
   /** Tests alone shorten it. */
   readonly timeoutMs?: number;
 }): ClientMetadataFetch {
-  const listed = (clientId: string): boolean =>
-    isMetadataClientId(clientId) && origins.includes(new URL(clientId).origin);
+  const listed = (clientId: string): boolean => isTrustedMetadataClientId(clientId, trusted);
 
   /** The document's text, or why not; the time limit already running. */
   const read = async (clientId: string, signal: AbortSignal): Promise<MetadataFetched> => {

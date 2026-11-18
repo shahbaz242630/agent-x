@@ -34,16 +34,40 @@ export type DocumentChecked =
 /**
  * Whether a client ID is a metadata document's address, as the draft allows one (§3): https, with a path, no user or
  * password, no fragment, no `.` or `..` segment, at most 2048 characters. Anything else is never fetched.
+ * AG6: and written exactly as the URL parser prints it, so the path matched against the allowlist is the path fetched
+ * (the parser would tidy a `.` or `..` segment away, even one written `%2e`, and turn a `\` into a `/`), with no
+ * %-encoded `.`, `/` or `\` in the path, which a server might decode into another path.
  */
 export function isMetadataClientId(clientId: string): boolean {
   if (clientId.length > MOST_CHARACTERS || !clientId.startsWith('https://') || !URL.canParse(clientId)) return false;
   const url = new URL(clientId);
-  // Written as the parser prints its origin (no capitals, no default port), so the path is the text after it, as sent:
-  // the parser would tidy a `.` or `..` segment away.
-  if (!clientId.startsWith(`${url.origin}/`) || url.username !== '' || url.password !== '') return false;
-  const [path = ''] = clientId.slice(url.origin.length).split('?', 1);
-  const segments = path.split('/');
-  return !clientId.includes('#') && path !== '/' && !segments.includes('.') && !segments.includes('..');
+  return (
+    url.href === clientId &&
+    url.username === '' &&
+    url.password === '' &&
+    !clientId.includes('#') &&
+    url.pathname !== '/' &&
+    !/%(?:2e|2f|5c)/i.test(url.pathname)
+  );
+}
+
+/**
+ * AG6: whether a client ID is a document address the allowlist trusts (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS, each
+ * entry already checked at start). An origin trusts every address on it; a path prefix (ending in `/`) the addresses
+ * whose path starts with it, a query or not; an exact address only itself, with no query, so a query can't make
+ * another document of the same path. Same origin always: scheme, host and port, as the parser prints them.
+ */
+export function isTrustedMetadataClientId(clientId: string, trusted: readonly string[]): boolean {
+  if (!isMetadataClientId(clientId)) return false;
+  const url = new URL(clientId);
+  return trusted.some((entry) => {
+    const allowed = new URL(entry);
+    if (allowed.origin !== url.origin) return false;
+    if (allowed.pathname === '/') return true;
+    return allowed.pathname.endsWith('/')
+      ? url.pathname.startsWith(allowed.pathname)
+      : url.search === '' && url.pathname === allowed.pathname;
+  });
 }
 
 const invalid = (reason: string): DocumentChecked => ({ outcome: 'invalid', reason });
