@@ -796,8 +796,8 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
     // Between two Latin letters a joiner changes nothing a person sees: out, as a visible name refuses it.
     expect(plainText(`a${zwj}b${zwnj}c`)).toBe('abc');
     // Persian's non-joiner between two Arabic letters, and Devanagari's joiner after a virama: kept.
-    const persian = `می${zwnj}خواهم`;
-    const devanagari = `क्${zwj}ष`;
+    const persian = `\u0645\u06CC${zwnj}\u062E\u0648\u0627\u0647\u0645`;
+    const devanagari = `\u0915\u094D${zwj}\u0937`;
     expect(plainText(persian)).toBe(persian);
     expect(plainText(devanagari)).toBe(devanagari);
   });
