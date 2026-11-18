@@ -204,8 +204,12 @@ export async function connectionsMadeSince(tx: AgentsTransaction, orgId: string,
 /** The most connections an agent's list shows: its 10 live ones and those ended lately, newest first. */
 export const MOST_CONNECTIONS_LISTED = 50;
 
-/** How long an ended connection stays on its agent's list: until 90 days after its key's expiry. */
-export const ENDED_CONNECTIONS_SHOWN_DAYS = 90;
+/**
+ * How long an ended connection stays on its agent's list: until 30 days after its key's expiry (or when it would have
+ * expired, for one revoked). Inside its tokens' 120 days (0093's retention: a key's 90 days and these 30), so the
+ * newest token, which says when it last connected, is still kept while it is listed.
+ */
+export const ENDED_CONNECTIONS_SHOWN_DAYS = 30;
 
 /** A connection as its agent's list shows it: as its signed state and its key's say, and what it was made with. */
 export interface ConnectionListed {
@@ -294,6 +298,34 @@ export async function connectionsListed(
   return { outcome: 'listed', connections };
 }
 
+/** The member's live connections (key ACTIVE, not expired at `now`) as rows: where to look alone. */
+const liveMadeBy = (tx: AgentsTransaction, orgId: string, membershipId: string, now: Date) =>
+  tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each key is then read through its signed state
+    .selectFrom(`${CONNECTIONS.table} as c`)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same rows' keys, to leave ended ones out; each is then read through its signed state
+    .innerJoin(`${AGENT_KEYS.table} as k`, (join) => join.onRef('k.org_id', '=', 'c.org_id').onRef('k.id', '=', 'c.id'))
+    .where('c.org_id', '=', orgId)
+    .where('c.made_by', '=', membershipId)
+    .where('k.status', '=', 'ACTIVE')
+    .where('k.expires_at', '>', now);
+
+/**
+ * The agents of the live connections the member made, in order of ID, by one unlocked statement: whose brakes (1b)
+ * removing the member takes, in this order, before any row (ADR-006 §6). Where to look alone: the keys are then read,
+ * locked, by liveConnectionsMadeBy.
+ */
+export async function agentsOfLiveConnectionsMadeBy(
+  tx: AgentsTransaction,
+  orgId: string,
+  membershipId: string,
+  now: Date,
+): Promise<readonly string[]> {
+  const rows = await liveMadeBy(tx, orgId, membershipId, now).select('c.agent_id').distinct().execute();
+  // In code too, as the brakes' names are: lower-case IDs, the order every taker of more than one keeps.
+  return rows.map(({ agent_id }) => agent_id.toLowerCase()).sort();
+}
+
 /**
  * The live keys of the connections the member made in the organisation (ACTIVE, not expired at `now`), in order of ID,
  * each read for change (3a) and verified: what removing the member revokes (decision 7). One statement for the IDs,
@@ -310,18 +342,7 @@ export async function liveConnectionsMadeBy(
   | { readonly outcome: 'listed'; readonly keys: readonly AgentKeyRecord[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each key is then read through its signed state
-    .selectFrom(`${CONNECTIONS.table} as c`)
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same rows' keys, to leave ended ones out; each is then read through its signed state
-    .innerJoin(`${AGENT_KEYS.table} as k`, (join) => join.onRef('k.org_id', '=', 'c.org_id').onRef('k.id', '=', 'c.id'))
-    .select('c.id')
-    .where('c.org_id', '=', orgId)
-    .where('c.made_by', '=', membershipId)
-    .where('k.status', '=', 'ACTIVE')
-    .where('k.expires_at', '>', now)
-    .orderBy('c.id')
-    .execute();
+  const rows = await liveMadeBy(tx, orgId, membershipId, now).select('c.id').orderBy('c.id').execute();
   const keys: AgentKeyRecord[] = [];
   for (const { id } of rows) {
     const read = await agentKeyOf(tx, states, { orgId, id }, 'change');

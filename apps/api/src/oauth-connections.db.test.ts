@@ -15,6 +15,7 @@ import {
   AGENT_KEYS,
   AGENTS,
   CONNECTIONS,
+  ENDED_CONNECTIONS_SHOWN_DAYS,
   createConnectionTokenCheck,
   MOST_LIVE_CONNECTIONS,
   type Scope,
@@ -41,7 +42,7 @@ import {
 } from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { DAY_MS } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
+import { AGENT_BRAKE, createDatabase, type Database, type IdempotentRequest, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
@@ -49,8 +50,11 @@ import {
   LogCapture,
   SequentialIds,
   tamperAsOwner,
+  type TestClient,
   type TestDatabase,
   testLogger,
+  waitUntilBlocked,
+  waitUntilQueued,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -1003,15 +1007,18 @@ async function revoked(who: Member, named: { agentId: string; keyId: string }) {
   );
 }
 
-/** An admin removes the member from the organisation (deactivates them), with step-up: the confirm's write. */
-async function removed(admin: Member, gone: Member) {
+/**
+ * An admin asks to remove the member from the organisation (deactivate them) and steps up: the confirm, to send when
+ * the test is ready (ADR-006's forced cases send it while a lock is held).
+ */
+async function removalAsked(admin: Member, gone: Member) {
   const memberships = createMembershipChanges({
     database: app,
     keys,
     ids,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: testLogger(),
+    logger: testLogger(capture),
     leaving: connectionsOfLeaving(clock),
   });
   const asked = await memberships.ask(
@@ -1023,18 +1030,68 @@ async function removed(admin: Member, gone: Member) {
   );
   if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
   await stepUp(admin, asked.stepUpChallengeId);
-  return memberships.confirm(
-    admin,
-    keyed(admin, DEACTIVATE_CONFIRM_OPERATION, `${gone.membershipId} confirm`),
-    gone.membershipId,
-    { kind: 'deactivate' },
-    asked.stepUpChallengeId,
-    CORRELATION,
-  );
+  return () =>
+    memberships.confirm(
+      admin,
+      keyed(admin, DEACTIVATE_CONFIRM_OPERATION, `${gone.membershipId} confirm`),
+      gone.membershipId,
+      { kind: 'deactivate' },
+      asked.stepUpChallengeId,
+      CORRELATION,
+    );
+}
+
+/** An admin removes the member from the organisation, with step-up: the confirm's write. */
+const removed = async (admin: Member, gone: Member) => (await removalAsked(admin, gone))();
+
+const BRAKE_SHARED = 'select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended($1, 0))';
+const BRAKE_ALONE = 'select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))';
+const BRAKE_FREE = 'select pg_catalog.pg_try_advisory_lock_shared(pg_catalog.hashtextextended($1, 0)) as free';
+const BRAKE_LET_GO = 'select pg_catalog.pg_advisory_unlock_shared(pg_catalog.hashtextextended($1, 0))';
+const KEY_SHARE = 'select 1 from agents.agent_keys where org_id = $1 and id = $2 for share';
+
+/** A lock a holding transaction takes. */
+type Hold = (holder: TestClient) => Promise<unknown>;
+const brakeShared =
+  (name: string): Hold =>
+  (holder) =>
+    holder.query(BRAKE_SHARED, [name]);
+const brakeAlone =
+  (name: string): Hold =>
+  (holder) =>
+    holder.query(BRAKE_ALONE, [name]);
+const keyShared =
+  (org: string, keyId: string): Hold =>
+  (holder) =>
+    holder.query(KEY_SHARE, [org, keyId]);
+
+/** A transaction of its own, begun, holding what `holds` take, as a decision part-way through its work does. */
+async function holding(...holds: readonly Hold[]): Promise<TestClient> {
+  const holder = await database.connect('admin');
+  await holder.query('begin');
+  for (const hold of holds) await hold(holder);
+  return holder;
+}
+
+const letGo = async (holder: TestClient) => {
+  await holder.query('rollback');
+  await holder.end();
+};
+
+/** Whether the brake is free of any exclusive holder now: a shared try taken and given straight back. */
+async function brakeFree(name: string): Promise<boolean> {
+  const session = await database.connect('admin');
+  try {
+    const [row] = await session.query<{ free: boolean }>(BRAKE_FREE, [name]);
+    if (row?.free === true) await session.query(BRAKE_LET_GO, [name]);
+    return row?.free === true;
+  } finally {
+    await session.end();
+  }
 }
 
 describe(`SEC-OAUTH-06, -07 an agent's connections listed (Postgres ${server.version})`, () => {
-  it('lists them newest first, each as its signed state says, ended ones until 90 days after their expiry', async () => {
+  it('lists them newest first, each as its signed state says, ended ones until 30 days after their expiry', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);
@@ -1073,15 +1130,25 @@ describe(`SEC-OAUTH-06, -07 an agent's connections listed (Postgres ${server.ver
         },
       ],
     });
-    // Past its expiry, the live one is EXPIRED; 90 days on, both are off the list.
-    const later = new FixedClock(new Date(clock.now().getTime() + 90 * DAY_MS));
-    expect(await connectionChanges(later).list(org, agentId, CORRELATION)).toMatchObject({
+    // Past its expiry, the live one is EXPIRED; each is listed until 30 days past its key's expiry (or when it would
+    // have expired, revoked), inside its tokens' 120 days: its last connection is still known (lastConnectedAt).
+    const at = (ms: number) => connectionChanges(new FixedClock(new Date(ms)));
+    const firstEnds = START.getTime() + 90 * DAY_MS;
+    expect(await at(clock.now().getTime() + 90 * DAY_MS).list(org, agentId, CORRELATION)).toMatchObject({
       connections: [
-        { keyId: second.keyId, status: 'EXPIRED' },
-        { keyId: first.keyId, status: 'REVOKED' },
+        { keyId: second.keyId, status: 'EXPIRED', lastConnectedAt: clock.now() },
+        { keyId: first.keyId, status: 'REVOKED', lastConnectedAt: START },
       ],
     });
-    const gone = new FixedClock(new Date(clock.now().getTime() + 180 * DAY_MS));
+    const shownUntil = firstEnds + ENDED_CONNECTIONS_SHOWN_DAYS * DAY_MS;
+    expect(ENDED_CONNECTIONS_SHOWN_DAYS).toBe(30);
+    expect(await at(shownUntil - 1).list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: second.keyId }, { keyId: first.keyId, lastConnectedAt: START }],
+    });
+    expect(await at(shownUntil).list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId: second.keyId, status: 'EXPIRED' }],
+    });
+    const gone = new FixedClock(new Date(clock.now().getTime() + (90 + 30) * DAY_MS));
     expect(await connectionChanges(gone).list(org, agentId, CORRELATION)).toEqual({ connections: [] });
   });
 
@@ -1236,6 +1303,80 @@ describe(`SEC-OAUTH-07, -10 a connection revoked by a member (Postgres ${server.
     expect(await connectionChanges().list(org, ids.next(), CORRELATION)).toMatchObject({ code: 'NOT_FOUND' });
     expect(await revoked(admin, { agentId: ids.next(), keyId })).toMatchObject({ code: 'NOT_FOUND' });
   });
+});
+
+describe(`ADR-006 §6 1b: removing a member takes their agents' brakes, in order (Postgres ${server.version})`, () => {
+  const brakeOf = (org: string, agentId: string) => lockName(AGENT_BRAKE, org, agentId);
+
+  it('queues behind a decision inside the brake holding the key FOR SHARE, and a later one queues behind it', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const { keyId, accessToken } = await connected(org, developer, agentId);
+    const confirm = await removalAsked(admin, developer);
+    const monitor = database.as('admin');
+    // A decision part-way: the brake's shared side, then the key FOR SHARE, as a key check holds them.
+    const inside = await holding(brakeShared(brakeOf(org, agentId)), keyShared(org, keyId));
+
+    const removing = confirm();
+    const [remover] = await waitUntilQueued(monitor, 1);
+    // A decision after it lines up behind the waiting removal, never past it: the key's FOR SHARE can't starve it.
+    const late = await holding();
+    const lateTaking = late.query(BRAKE_SHARED, [brakeOf(org, agentId)]);
+    const queued = await waitUntilQueued(monitor, 2);
+    const latecomer = queued.find((pid) => pid !== remover) ?? 0;
+    expect(await waitUntilBlocked(monitor, latecomer)).toContain(remover);
+
+    await letGo(inside);
+    expect(await removing).toMatchObject({ outcome: 'written', member: { status: 'DEACTIVATED' } });
+    await lateTaking;
+    await letGo(late);
+    expect(await accepted(accessToken)).toEqual({ outcome: 'refused' });
+  });
+
+  it.each([
+    ['the lower held: it waits there, holding neither', 'lower'],
+    ['the higher held: it waits there, holding the lower', 'higher'],
+  ] as const)('takes two agents’ brakes in order of agent ID: %s', async (_, held) => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const [lower, higher] = [await agent(org, developer), await agent(org, developer)].sort();
+    if (lower === undefined || higher === undefined) throw new Error('two agents');
+    const first = await connected(org, developer, lower);
+    const second = await connected(org, developer, higher);
+    const confirm = await removalAsked(admin, developer);
+    const blocker = await holding(brakeAlone(brakeOf(org, held === 'lower' ? lower : higher)));
+
+    const removing = confirm();
+    await waitUntilQueued(database.as('admin'), 1);
+    expect(await brakeFree(brakeOf(org, held === 'lower' ? higher : lower))).toBe(held === 'lower');
+
+    await letGo(blocker);
+    expect(await removing).toMatchObject({ outcome: 'written' });
+    expect(await accepted(first.accessToken)).toEqual({ outcome: 'refused' });
+    expect(await accepted(second.accessToken)).toEqual({ outcome: 'refused' });
+  });
+
+  it('answers ORGANISATION_BUSY past the brake’s wait, nothing changed, with the alarm a stop raises', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const { accessToken } = await connected(org, developer, agentId);
+    const confirm = await removalAsked(admin, developer);
+    const stuck = await holding(brakeAlone(brakeOf(org, agentId)));
+    try {
+      expect(await confirm()).toEqual({ outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' });
+    } finally {
+      await letGo(stuck);
+    }
+    expect(lines('brake.not_applied')).toEqual([expect.objectContaining({ orgId: org })]);
+    expect(await accepted(accessToken)).toMatchObject({ outcome: 'accepted' });
+    // Nothing was kept: the same removal, sent again, is made.
+    expect(await removed(admin, developer)).toMatchObject({ outcome: 'written' });
+  }, 40_000);
 });
 
 describe(`SEC-OAUTH-06 a connection's own record tampered with, at its revocation (Postgres ${server.version})`, () => {

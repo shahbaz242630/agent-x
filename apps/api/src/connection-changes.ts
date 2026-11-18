@@ -5,7 +5,8 @@
 //
 // - `list`: the agent's connections, newest first, each as its own signed
 //   state and its key's say (connectionsListed): every live one, and those
-//   ended in the last 90 days. Any member. NOT_FOUND for an agent the
+//   ended in the last 30 days (inside their tokens' retention, so when each
+//   last connected is still known). Any member. NOT_FOUND for an agent the
 //   organisation doesn't have; INTEGRITY_FAILED for anything tampered with.
 // - `revoke` (`connections.revoke`), then its confirm: the connection stops at
 //   once, its key revoked (revokeKey), so every token it was given is refused
@@ -32,6 +33,7 @@
 import {
   agentKeyOf,
   agentOf,
+  agentsOfLiveConnectionsMadeBy,
   type AgentsTables,
   type ConnectionListed,
   connectionOf,
@@ -142,12 +144,20 @@ const revocationHash = (orgId: string, keyEventId: string): Buffer =>
   changeHashOf([orgId.toLowerCase(), keyEventId.toLowerCase()]);
 
 /**
- * What removing a member ends of the agents module's (decision 7): the live connections they made, read for change in
- * the removal's transaction, then revoked by the admin removing them, each event naming the membership removed.
+ * What removing a member ends of the agents module's (decision 7): the live connections they made. First, the brakes of
+ * their agents (1b), found by one unlocked statement and taken one by one in order of agent ID, before any session or
+ * row (ADR-006 §6: the one change that may hold more than one brake), so a stream of decisions and key checks can't
+ * starve the revocations. Then the keys read for change, and revoked by the admin removing them, each event naming
+ * the membership removed. A connection made for another agent between the two (its consent committed before the
+ * membership was locked) is revoked too, without its brake: correct, only not starvation-proof, and as rare as that.
  */
-export const connectionsOfLeaving =
-  (clock: Clock): MemberLeaving<AgentsTables> =>
-  async (tx, states, { orgId, membershipId }) => {
+export const connectionsOfLeaving = (clock: Clock): MemberLeaving<AgentsTables> => ({
+  async brakes(tx, { orgId, membershipId }) {
+    const agents = await agentsOfLiveConnectionsMadeBy(tx, orgId, membershipId, clock.now());
+    for (const agentId of agents) await holdBrake(tx, AGENT_BRAKE, orgId, agentId);
+    return agents.length > 0;
+  },
+  async read(tx, states, { orgId, membershipId }) {
     const listed = await liveConnectionsMadeBy(tx, states, orgId, membershipId, clock.now());
     if (listed.outcome === 'tampered') return { outcome: 'tampered' };
     return {
@@ -163,7 +173,8 @@ export const connectionsOfLeaving =
         }
       },
     };
-  };
+  },
+});
 
 export function createConnectionChanges({
   database,

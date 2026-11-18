@@ -26,8 +26,12 @@
 //
 // Deactivating a member also ends what `leaving` names outside this module
 // (6E3b, decision 7: the MCP connections they made, the API's composition):
-// read for change after the memberships and before the first event, ended
-// after the membership's own.
+// its brakes taken first, right after the key's claim and before any session
+// or challenge (ADR-006 §6, 1b: the agents' brakes, in order of agent ID, the
+// one change that may hold more than one); read for change after the
+// memberships and before the first event; ended after the membership's own.
+// A brake's wait run out answers 503 ORGANISATION_BUSY, nothing changed, with
+// the alarm a stop raises (`brake.not_applied`).
 //
 // So a session of the member's never outlives the role it was opened under,
 // and nothing is locked backwards: two admins changing each other at the same
@@ -37,7 +41,13 @@
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import {
+  createIdempotentWrites,
+  type IdempotentRequest,
+  isLockWaitRunOut,
+  isRetryable,
+  isStatementLimit,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type Transaction } from 'kysely';
@@ -106,18 +116,29 @@ export interface MembershipChanges {
   ): Promise<MembershipChangeWrite>;
 }
 
+/** The member a deactivation removes. */
+interface Leaving {
+  readonly orgId: string;
+  readonly membershipId: string;
+}
+
 /**
- * What else deactivating a member ends, outside this module (6E3b: the MCP connections they made): read, for change,
- * in the deactivation's transaction after the memberships and before its first event, then ended after the
- * membership's own event by `end`; or something it read was tampered with (its alarm raised), refusing the change.
+ * What else deactivating a member ends, outside this module (6E3b: the MCP connections they made). `brakes`: first in
+ * the deactivation's transaction, right after its key's claim, before any session, challenge or row, the brakes its
+ * changes need (ADR-006 §6, 1b), answering whether it took any. `read`: for change, after the memberships and before
+ * the first event; then `end` after the membership's own event; or something it read was tampered with (its alarm
+ * raised), refusing the change.
  */
-export type MemberLeaving<Theirs> = (
-  tx: Transaction<Tables & Theirs>,
-  states: SignedStates,
-  leaving: { readonly orgId: string; readonly membershipId: string },
-) => Promise<
-  { readonly outcome: 'read'; readonly end: (actor: AuditActor) => Promise<void> } | { readonly outcome: 'tampered' }
->;
+export interface MemberLeaving<Theirs> {
+  readonly brakes: (tx: Transaction<Tables & Theirs>, leaving: Leaving) => Promise<boolean>;
+  readonly read: (
+    tx: Transaction<Tables & Theirs>,
+    states: SignedStates,
+    leaving: Leaving,
+  ) => Promise<
+    { readonly outcome: 'read'; readonly end: (actor: AuditActor) => Promise<void> } | { readonly outcome: 'tampered' }
+  >;
+}
 
 class ChangeRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
@@ -277,7 +298,27 @@ export function createMembershipChanges<Theirs extends object = object>({
     },
 
     async confirm(admin, idempotent, membershipId, change, stepUpChallengeId, correlationId) {
-      const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
+      const leavingNow = change.kind === 'deactivate' ? leaving : undefined;
+      const started = performance.now();
+      // Set inside the write, read once it has thrown.
+      const brakes = { held: false };
+      const confirmed = () =>
+        write(admin, idempotent, correlationId, async (tx, states) => {
+          // Opened on `database`, which holds their tables too.
+          const wider = tx as unknown as Transaction<Tables & Theirs>;
+          const removed = { orgId: admin.orgId, membershipId };
+          // Level 1b's brakes first, after the key's claim alone, before any session or challenge (ADR-006 §6). Held
+          // from the first one's wait: its lookup before takes no lock, so only a brake's wait can run out in it.
+          brakes.held = leavingNow !== undefined;
+          brakes.held = (await leavingNow?.brakes(wider, removed)) ?? false;
+          return deactivatedOrChanged(tx, wider, states, removed);
+        });
+      const deactivatedOrChanged = async (
+        tx: Transaction<Tables>,
+        wider: Transaction<Tables & Theirs>,
+        states: SignedStates,
+        removed: Leaving,
+      ) => {
         const memberUserId = await memberUserOf(tx, admin, membershipId);
         // Level 0b, before any membership: the admin's and the member's sessions, then their challenges.
         const people = [admin.userId.toLowerCase(), memberUserId];
@@ -289,12 +330,7 @@ export function createMembershipChanges<Theirs extends object = object>({
         // The member's grant summary for the change, after the memberships (ADR-006 §6, 2a; OR1).
         const grants = await grantsToChange(tx, states, { orgId: admin.orgId, id: member.id });
         if (grants.outcome === 'tampered') throw new ChangeRefused(503, 'INTEGRITY_FAILED');
-        // Opened on `database`, which holds their tables too.
-        const wider = tx as unknown as Transaction<Tables & Theirs>;
-        const ending =
-          change.kind === 'deactivate' && leaving !== undefined
-            ? await leaving(wider, states, { orgId: admin.orgId, membershipId: member.id })
-            : undefined;
+        const ending = await leavingNow?.read(wider, states, { ...removed, membershipId: member.id });
         if (ending?.outcome === 'tampered') throw new ChangeRefused(503, 'INTEGRITY_FAILED');
         const consumed = await challenges.consume(
           tx,
@@ -341,7 +377,18 @@ export function createMembershipChanges<Theirs extends object = object>({
           });
         }
         return { status: 200, resourceId: member.id };
-      });
+      };
+      let ran: Awaited<ReturnType<typeof confirmed>>;
+      try {
+        ran = await confirmed();
+      } catch (error) {
+        // A brake's wait run out, or the statements behind it past their limit: nothing changed, the key free again.
+        if (!brakes.held || !(isLockWaitRunOut(error) || isStatementLimit(error) || isRetryable(error))) throw error;
+        logger
+          .child({ correlationId, orgId: admin.orgId })
+          .error('brake.not_applied', { waitedMs: Math.round(performance.now() - started) });
+        return { outcome: 'refused', status: 503, code: 'ORGANISATION_BUSY' };
+      }
       if ('refused' in ran) return ran.refused;
       const { done, services } = ran;
       if (done.outcome === 'conflict' || done.outcome === 'busy') return done;

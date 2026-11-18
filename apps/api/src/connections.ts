@@ -2,7 +2,7 @@
 // SEC-OAUTH-07, -10). The use case is connection-changes.ts.
 //
 // - `GET /v1/agents/:id/connections`: the agent's connections, newest first,
-//   at most 50: every live one and those ended in the last 90 days, each
+//   at most 50: every live one and those ended in the last 30 days, each
 //   verified against its signed state and its key's. Any member.
 // - `POST /v1/agents/:id/connections/:keyId/revoke`, then `…/revoke/confirm`
 //   with the step-up's ID: the connection stops at once, every token it was
@@ -62,7 +62,7 @@ const CONNECTIONS = z
   .object({
     connections: z
       .array(CONNECTION)
-      .describe('Newest first, at most 50: every live one, and those ended in the last 90 days.'),
+      .describe('Newest first, at most 50: every live one, and those ended in the last 30 days.'),
   })
   .register(API_SCHEMAS, { id: 'Connections', description: "An agent's app connections." });
 

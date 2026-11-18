@@ -82,6 +82,7 @@ export {
 } from './domain/connection.ts';
 export {
   addConnection,
+  agentsOfLiveConnectionsMadeBy,
   type ConnectionListed,
   connectionOf,
   type ConnectionRecord,
