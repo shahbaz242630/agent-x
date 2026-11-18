@@ -8,9 +8,12 @@
 // error_description}` at 400 and 401, never the one error body, as every OAuth
 // client reads those. A route says so with `config.oauthWire`, and may then
 // declare those two statuses with OAUTH_ERROR_BODY alone; what it sends is
-// written here and marked as the contract's own, as an error body is. Anything
-// the framework refuses first (a body too large, a rate limit) is still the
-// one error body.
+// written here and marked as the contract's own, as an error body is. A body
+// the framework can't read first (malformed JSON or form, or of a type the
+// endpoint doesn't take, 400 or 415) is OAuth's own 400 `invalid_request` too
+// (oauthUnreadable), as clients and RFC 6749 §5.2 expect at 400. A body too
+// large (413) and a rate limit (429) stay the one error body, as the document's
+// 4XX says: no OAuth RFC names them.
 //
 // Off (AGENTX_MCP_OAUTH, the default), every route with `config.oauth` is a
 // 404 before its caller is even asked for (server.ts), and nothing anywhere
@@ -156,6 +159,20 @@ export function sendOauthError(
   // Busy: send the same again after this many seconds (RFC 7009 §2.2.1), as every busy answer says.
   if (status === 503) void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
   return reply.code(status).headers(NO_STORE).type(JSON_TYPE).send(text);
+}
+
+/** What an OAuth endpoint answers for a body it can't read, as `invalid_request`. */
+const UNREADABLE =
+  'The request body could not be read: send it well formed, as JSON to register and as a form (application/x-www-form-urlencoded) to the token and revocation endpoints.';
+
+/**
+ * Answers an OAuth wire route's unreadable body (the framework's 400 or 415, before the route runs) as OAuth's own
+ * `400 invalid_request`, never kept by a cache: whether it did. Every other answer is left to the one error body.
+ */
+export function oauthUnreadable(request: FastifyRequest, reply: FastifyReply, status: number): boolean {
+  if (request.routeOptions.config.oauthWire !== true || (status !== 400 && status !== 415)) return false;
+  sendOauthError(reply, 400, 'invalid_request', UNREADABLE);
+  return true;
 }
 
 /** A token endpoint's answer: never kept by a cache (RFC 6749 §5.1). */

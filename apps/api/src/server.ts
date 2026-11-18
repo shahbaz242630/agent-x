@@ -73,7 +73,7 @@ import type { OauthDevice } from './oauth-device.ts';
 import type { OauthGrants } from './oauth-grants.ts';
 import { registerOauthRequests } from './oauth-requests.ts';
 import { registerOauth, registerOauthForms, registerOauthSwitch } from './oauth-routes.ts';
-import { capabilitiesOf, FORM_TYPE, formFields } from './oauth-wire.ts';
+import { capabilitiesOf, FORM_TYPE, formFields, oauthUnreadable } from './oauth-wire.ts';
 import { recordTwins } from './mcp-twins.ts';
 import { type MachineIds, registerMachineIds } from './machine-ids.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
@@ -348,7 +348,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     if (code === 'ORGANISATION_BUSY' || code === 'PLATFORM_BUSY') {
       void reply.header('retry-after', String(BUSY_RETRY_SECONDS));
     }
-    void sendErrorBody(reply, status, code, request.id);
+    // An OAuth endpoint's body it can't read (malformed, or of another type): OAuth's own 400 (oauth-wire.ts).
+    if (!oauthUnreadable(request, reply, status)) void sendErrorBody(reply, status, code, request.id);
     // After sending, so a failure to log can't stop the plain answer going out.
     logFailure(error, { correlationId: request.id, status, operation, orgId: request.agent?.orgId });
     return reply;
