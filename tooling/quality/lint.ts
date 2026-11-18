@@ -5,6 +5,8 @@
 // only once its rule is in BLOCKING; until then it is reported, counted by
 // rule, so the garbage-code findings can be cleaned one rule at a time and
 // each rule then made to block (partner, S69).
+import { statSync } from 'node:fs';
+
 import { ESLint } from 'eslint';
 
 /** The SonarJS rules whose findings are cleaned, so they block like any other. */
@@ -73,17 +75,20 @@ export function split(results: readonly ESLint.LintResult[]) {
 }
 
 /**
- * What to lint: the whole repository, or the files named (the pre-push hook
- * names a branch's changed files), less those the config ignores, which
- * ESLint would otherwise warn about and so fail the run.
+ * What to lint: the whole repository, or the files and directories named
+ * (the pre-push hook names a branch's changed files, or one part of the
+ * whole), less the files the config ignores, which ESLint would otherwise
+ * warn about and so fail the run. A directory is kept as named: ESLint walks
+ * it with its own ignores, and isPathIgnored calls any directory ignored.
  */
 export async function lintPatterns(
   files: readonly string[],
   ignored: (file: string) => Promise<boolean>,
+  isDirectory: (path: string) => boolean = (path) => statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false,
 ): Promise<readonly string[]> {
   if (files.length === 0) return ['.'];
   const kept: string[] = [];
-  for (const file of files) if (!(await ignored(file))) kept.push(file);
+  for (const file of files) if (isDirectory(file) || !(await ignored(file))) kept.push(file);
   return kept;
 }
 

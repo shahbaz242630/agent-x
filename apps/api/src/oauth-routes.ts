@@ -46,7 +46,7 @@ import {
   sendOauthError,
   serverMetadataOf,
 } from './oauth-wire.ts';
-import { MCP_PATH } from './mcp.ts';
+import { MCP_PATH } from './mcp-protocols.ts';
 import { type CountRequest, createAddressCounter, type ProxyTrust } from './rate-limit.ts';
 import { cookieValue } from './sign-in.ts';
 

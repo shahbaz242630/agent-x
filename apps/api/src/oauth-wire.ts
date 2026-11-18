@@ -20,7 +20,7 @@ import { PKCE_METHOD, SCOPES_SUPPORTED } from '@agentx/core/modules/oauth';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { BUSY_RETRY_SECONDS, JSON_TYPE } from './errors.ts';
-import { MCP_PATH } from './mcp.ts';
+import { MCP_PATH } from './mcp-protocols.ts';
 import { OAUTH_ERROR_BODY, type OauthError } from './oauth-errors.ts';
 import { markWritten } from './written-answers.ts';
 

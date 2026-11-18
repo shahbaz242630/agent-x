@@ -65,7 +65,8 @@ import { BUSY_RETRY_SECONDS, type LogFailure, responseFor, sendErrorBody, troubl
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { loginHostCheck } from './login-host.ts';
-import { MCP_PATH, registerMcp } from './mcp.ts';
+import { MCP_PATH } from './mcp-protocols.ts';
+import { registerMcp } from './mcp.ts';
 import type { ConnectionConsents } from './connection-consents.ts';
 import type { OauthAuthorizing } from './oauth-authorizing.ts';
 import type { OauthGrants } from './oauth-grants.ts';

@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { PROTOCOLS } from '../../apps/api/src/mcp-protocols.ts';
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS } from './app-keys.ts';
 import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
@@ -28,6 +29,7 @@ import {
   gateBusy,
   LOAD_RUN,
   LOGIN_COPIES,
+  MCP_ALERTS,
   ZITADEL_COPIES,
 } from './policy.ts';
 import {
@@ -387,6 +389,9 @@ const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
 const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$/);
+const MCP_REFUSALS_ALERT = named(/^alert-agentx-.+-mcp-refusals$/);
+const MCP_UNKNOWN_PROTOCOL_ALERT = named(/^alert-agentx-.+-mcp-unknown-protocol$/);
+const MCP_KEYS_REFUSED_ALERT = named(/^alert-agentx-.+-mcp-keys-refused$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const LOGIN_SERVICE_ALERT = named(/^alert-agentx-.+-login-service$/);
@@ -713,6 +718,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-decisions-suppressed',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-refusals',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-unknown-protocol',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-keys-refused',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Network\/privateEndpoints pe-stagentxstg[a-z0-9]{6}-blob$/),
       expect.stringMatching(
@@ -3358,6 +3366,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [RECORDS_FILLING_ALERT, 'records-filling-alert'],
       [ANCHOR_STOPPED_ALERT, 'dead-man-alerts'],
       [JOBS_STOPPED_ALERT, 'dead-man-alerts'],
+      [MCP_REFUSALS_ALERT, 'mcp-alerts'],
+      [MCP_UNKNOWN_PROTOCOL_ALERT, 'mcp-alerts'],
+      [MCP_KEYS_REFUSED_ALERT, 'mcp-alerts'],
     ] as const) {
       expect(brokenRules(changed(pick, onLogins))).toEqual([rule]);
     }
@@ -4347,6 +4358,61 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(String(at(staging.predictedResources.find(DECISIONS_SUPPRESSED_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section J\.$/,
     );
+  });
+
+  it("mcp-alerts: no alert on the MCP door's refusals, an unspoken version or refused keys, or one that counts something else, can't fire or fires too late (6E4)", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const ROUTE = 'where tostring(parse_json(Log).route) == "/v1/mcp"';
+    const NAMED = 'where isnotempty(tostring(parse_json(Log).mcpProtocol))';
+    const SPOKEN = `where tostring(parse_json(Log).mcpProtocol) !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`;
+    for (const alert of [MCP_REFUSALS_ALERT, MCP_UNKNOWN_PROTOCOL_ALERT, MCP_KEYS_REFUSED_ALERT]) {
+      expect(brokenRules(without(alert))).toEqual(['mcp-alerts']);
+      for (const change of [
+        ...LATE_OR_BLIND,
+        (each: Mutable) => (criterion(each).operator = 'LessThan'),
+        (each: Mutable) => (criterion(each).timeAggregation = 'Count'),
+        (each: Mutable) => (criterion(each).threshold = 1000),
+        (each: Mutable) => (properties(each).scopes = ['/subscriptions/x/workspaces/y']),
+      ]) {
+        expect(brokenRules(changed(alert, change))).toEqual(['mcp-alerts']);
+      }
+      // Its runbook is the playbook's section Y (the MCP door).
+      expect(String(at(staging.predictedResources.find(alert)?.properties, 'description'))).toMatch(
+        / Runbook: Incident-Response-Playbook\.md section Y\.$/,
+      );
+    }
+    for (const [alert, text] of [
+      // Another event, or every warning.
+      [
+        MCP_REFUSALS_ALERT,
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "mcp.protocol_error" | summarize Events = count()',
+      ],
+      [
+        MCP_REFUSALS_ALERT,
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) == "warn" | summarize Events = count()',
+      ],
+      // A version table short of the server's (a revision added there, not here), or every route, or lines naming none.
+      [
+        MCP_UNKNOWN_PROTOCOL_ALERT,
+        `ContainerAppConsoleLogs | ${ROUTE} | ${NAMED} | ${SPOKEN.replace(', "2025-03-26"', '')} | summarize Requests = count()`,
+      ],
+      [MCP_UNKNOWN_PROTOCOL_ALERT, `ContainerAppConsoleLogs | ${NAMED} | ${SPOKEN} | summarize Requests = count()`],
+      [MCP_UNKNOWN_PROTOCOL_ALERT, `ContainerAppConsoleLogs | ${ROUTE} | ${SPOKEN} | summarize Requests = count()`],
+      // Another status, or another route.
+      [
+        MCP_KEYS_REFUSED_ALERT,
+        `ContainerAppConsoleLogs | ${ROUTE} | where toint(parse_json(Log).status) == 403 | summarize Refused = count()`,
+      ],
+      [
+        MCP_KEYS_REFUSED_ALERT,
+        'ContainerAppConsoleLogs | where toint(parse_json(Log).status) == 401 | summarize Refused = count()',
+      ],
+    ] as const) {
+      expect(brokenRules(changed(alert, query(text)))).toEqual(['mcp-alerts']);
+    }
+    // The table the check holds the alert to is the server's own.
+    expect(MCP_ALERTS[1].lines[2]).toBe(SPOKEN);
   });
 
   it("records-filling-alert: no alert on an organisation's records filling, or one that counts something else, can't fire or fires too late", () => {

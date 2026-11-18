@@ -178,6 +178,19 @@ describe('what the lint reads', () => {
     expect(await lintPatterns(['a.ts', 'dist/b.js', 'c.tsx'], ignoring('dist/b.js'))).toEqual(['a.ts', 'c.tsx']);
   });
 
+  it('keeps a directory named, which ESLint walks with its own ignores', async () => {
+    const isDirectory = (path: string) => path === 'apps/operator';
+    expect(
+      await lintPatterns(['apps/operator', 'dist/b.js'], ignoring('apps/operator', 'dist/b.js'), isDirectory),
+    ).toEqual(['apps/operator']);
+  });
+
+  it('tells a directory from a file on disk', async () => {
+    expect(
+      await lintPatterns(['tooling/quality', 'tooling/quality/lint.ts', 'no-such'], () => Promise.resolve(true)),
+    ).toEqual(['tooling/quality']);
+  });
+
   it('is nothing when every file named is ignored', async () => {
     expect(await lintPatterns(['dist/b.js'], ignoring('dist/b.js'))).toEqual([]);
   });

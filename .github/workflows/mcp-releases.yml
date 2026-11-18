@@ -1,0 +1,66 @@
+# 6E4 (MCP-Guide §7, partner S201): the daily watch on what can break our
+# customers' agents before they notice (tooling/mcp-watch/releases.ts): MCP's
+# specification, the official TypeScript SDK (its umbrella and its production
+# packages' releases, and its security advisories), the conformance suite, and
+# the main agents' clients that publish on GitHub, against
+# tooling/mcp-watch/seen.json. Apart from the canaries (mcp-watch.yml), so a red
+# here never hides a canary's red in the same failure email.
+# Red, in plain words: a newer release of the specification, the SDK or the
+# conformance suite; a client's only when a note line names MCP with a word that
+# can break a client (transport, auth, protocol, version, removed, ...), the rest
+# listed in the summary; red until a person reads it and moves seen.json, with a
+# note. An SDK advisory covering the version the API runs is red until the pin
+# moves past it. Reads public data with the workflow's own read-only token.
+# Positive controls (a silent watch proves nothing): run it by hand with
+# control_unseen, and the spec, SDK and conformance go red (with the clients
+# whose newest notes say so); with server_version 2.2.0, the advisory check goes
+# red. releases.test.ts holds the same with fixtures.
+name: MCP releases (daily)
+
+on:
+  schedule:
+    - cron: '47 4 * * *' # every day, 04:47 UTC, after the MCP canaries
+  workflow_dispatch:
+    inputs:
+      control_unseen:
+        description: 'Positive control: judge every source as if nothing were seen; it must go red'
+        type: boolean
+        required: false
+        default: false
+      server_version:
+        description: "Positive control: judge the SDK's advisories against this version (e.g. 2.2.0); it must go red"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-releases
+  cancel-in-progress: false
+
+jobs:
+  releases:
+    name: Watch MCP releases and the SDK's advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CONTROL_UNSEEN: ${{ inputs.control_unseen }}
+      SERVER_VERSION: ${{ inputs.server_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Newer than seen.json, and advisories covering our pin
+        run: |
+          args=()
+          if [ "$CONTROL_UNSEEN" = 'true' ]; then args+=(--control-unseen); fi
+          if [ -n "$SERVER_VERSION" ]; then args+=(--server-version "$SERVER_VERSION"); fi
+          node tooling/mcp-watch/releases.ts "${args[@]}"

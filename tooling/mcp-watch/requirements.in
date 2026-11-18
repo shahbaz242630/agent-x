@@ -1,0 +1,4 @@
+# The Python canaries' clients (canary.py), pinned. requirements.txt is compiled from this file with every
+# package's hashes; see its header for the command.
+mcp==2.3.0
+openai-agents==0.24.0
