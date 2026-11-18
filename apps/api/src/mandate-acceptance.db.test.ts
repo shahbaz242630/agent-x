@@ -317,6 +317,22 @@ describe('what acceptance refuses (B3)', () => {
     expect(await ask(w.admin, id, second)).toEqual(refused(409, 'MANDATE_SUSPENDED'));
   });
 
+  it('a new draft once the version in force has reached its end, the expiry job not yet run: MANDATE_ENDED, as resume (6F1 G3)', async () => {
+    const w = await world();
+    const HOUR = 3_600_000;
+    const { id, versionId } = await drafted(w, { endsAt: new Date(clock.now().getTime() + HOUR) });
+    acceptedOf(await accepted(w, id, versionId));
+    const second = await redrafted(w, id);
+    // Asked and stepped up a minute before the end, confirmed at it: the confirm weighs it again.
+    clock.advanceBy(HOUR - 60_000);
+    const challengeId = askedFor(await ask(w.admin, id, second, 'cancel'));
+    await stepUp(w.admin, challengeId, PASSKEY);
+    clock.advanceBy(60_000);
+
+    expect(await confirm(w.admin, id, challengeId, undefined, 'cancel')).toEqual(refused(409, 'MANDATE_ENDED'));
+    expect(await ask(w.admin, id, second, 'cancel')).toEqual(refused(409, 'MANDATE_ENDED'));
+  });
+
   it('an ACTIVE mandate with no draft waiting', async () => {
     const w = await world();
     const { id, versionId } = await drafted(w);
