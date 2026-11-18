@@ -37,6 +37,7 @@ export {
   keepClientMetadata,
   type KeptDocument,
   keptClientMetadata,
+  retireClientMetadata,
   sweepClientMetadata,
 } from './infrastructure/client-metadata-cache.ts';
 export { challengeOf, isCodeChallenge, PKCE_METHOD, pkceMatches } from './infrastructure/pkce.ts';

@@ -73,6 +73,20 @@ export async function keepClientMetadata(
 }
 
 /**
+ * Retires the document kept for this client at `now` (6E3c review): its site now publishes one refused for what it
+ * says, so the old one never stands in again. Its times are set past the 7 stale days, so it reads as none, the client
+ * counts as never valid, and the sweep takes the row.
+ */
+export async function retireClientMetadata(db: Kysely<OauthTables>, clientId: string, now: Date): Promise<void> {
+  const ended = now.getTime() - CLIENT_METADATA_STALE_MS - DAY_MS;
+  await db
+    .updateTable('oauth.client_metadata')
+    .set({ fetched_at: new Date(ended - 1), expires_at: new Date(ended) })
+    .where('client_id', '=', clientId)
+    .execute();
+}
+
+/**
  * Deletes up to `most` documents past their day and their 7 stale days at `now`, and says how many, in a transaction
  * of its own whose statement is limited to 10 seconds. One still in use is fetched again on its next request.
  */

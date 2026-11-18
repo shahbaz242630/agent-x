@@ -2201,6 +2201,51 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     expect(fetched.filter((id) => id === fresh)).toHaveLength(2);
   });
 
+  it('6E3c review: a once-valid document now refused for what it says is held 5 minutes, and never stands in again', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/changed-shape';
+    let changed = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      changed ? { outcome: 'fetched', document: { client_id: 'https://claude.ai/other' } } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    at.advanceBy(DAY_MS + 1000);
+    changed = true;
+    expect(await clients.find(real)).toBeUndefined();
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+    expect(lines('oauth.client_metadata_stale')).toEqual([]);
+    // Not at the consent's confirm either, nor in another copy of the API: the kept one is retired.
+    expect(await clients.kept(app, real)).toBeUndefined();
+    const elsewhere = createOauthClients({
+      database: app,
+      clock: at,
+      logger: testLogger(capture),
+      metadata: listedFetch(() => ({ outcome: 'refused', reason: 'timeout' })).metadata,
+    });
+    expect(await elsewhere.find(real)).toBeUndefined();
+  });
+
+  it('6E3c review: a once-valid client whose row is gone, failing by the network, is fetched again only a minute on', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/row-gone';
+    let down = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    await database.as('admin').query('delete from oauth.client_metadata where client_id = $1', [real]);
+    down = true;
+    expect(await clients.find(real)).toBeUndefined();
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(2);
+    at.advanceBy(60_000);
+    expect(await clients.find(real)).toBeUndefined();
+    expect(fetched).toHaveLength(3);
+  });
+
   it('6E3c review: a document stale past its 7 days names no client when the site fails', async () => {
     const at = new FixedClock(START);
     const real = 'https://claude.ai/oauth/real-long-gone';

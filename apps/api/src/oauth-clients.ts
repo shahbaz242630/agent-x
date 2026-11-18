@@ -30,6 +30,7 @@ import {
   keepClientMetadata,
   keptClientMetadata,
   type OauthTables,
+  retireClientMetadata,
 } from '@agentx/core/modules/oauth';
 import type { Clock } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
@@ -159,11 +160,16 @@ export function createOauthClients({
     const origin = new URL(clientId).origin;
     logger.warn('oauth.client_metadata_refused', { origin, reason: checked.reason });
     if (!PASSING.has(checked.reason)) {
+      // Refused for what it says: held 5 minutes, valid no more, and the old one never stands in again.
       remember(refused, clientId, now + REFUSED_FOR_MS);
+      onceValid.delete(clientId);
+      await retireClientMetadata(database, clientId, clock.now());
       return undefined;
     }
-    if (stale === undefined) return undefined;
+    // Once valid: tried again a minute on, whether a stale one stands in or none is kept any more.
+    if (stale === undefined && !onceValid.has(clientId)) return undefined;
     remember(onceValid, clientId, now + RETRY_STALE_MS);
+    if (stale === undefined) return undefined;
     logger.warn('oauth.client_metadata_stale', { origin, reason: checked.reason });
     return fromDocument(stale);
   };
@@ -178,15 +184,15 @@ export function createOauthClients({
       if (keptNow?.fresh === true) return fromDocument(keptNow.document);
       const under = fetching.get(clientId);
       if (under !== undefined) return under;
+      // Refused for what it says: held 5 minutes, once valid or not.
+      if ((refused.get(clientId) ?? 0) > now.getTime()) return undefined;
       const stale = keptNow?.document;
       const retryAt = onceValid.get(clientId);
       if (stale !== undefined || retryAt !== undefined) {
         // Once valid: never held by the cap, only by its own minute after a failed refetch, the stale one standing in.
-        if (stale !== undefined && retryAt !== undefined && retryAt > now.getTime()) return fromDocument(stale);
-      } else if (
-        (refused.get(clientId) ?? 0) > now.getTime() ||
-        !roomToFetch(new URL(clientId).origin, now.getTime())
-      ) {
+        if (retryAt !== undefined && retryAt > now.getTime())
+          return stale === undefined ? undefined : fromDocument(stale);
+      } else if (!roomToFetch(new URL(clientId).origin, now.getTime())) {
         return undefined;
       }
       const fetch = fetched(metadata, clientId, stale).finally(() => fetching.delete(clientId));
