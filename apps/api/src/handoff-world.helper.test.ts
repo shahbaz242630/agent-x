@@ -141,12 +141,12 @@ export function handoffWorld({
     });
   }
 
-  /** A world whose first supplier has a payee, both verified, with a mandate in force and the agent's key. */
-  async function ready() {
+  /** A world whose first supplier has a payee, both verified, with a mandate in force (its terms as `terms` change them) and the agent's key. */
+  async function ready(terms: Parameters<typeof shared.inForce>[2] = {}) {
     const w = await shared.world();
     await payeeRegistered(w);
     for (const id of w.suppliers) await shared.verified(w, id);
-    await shared.inForce(registry(), w, { approvalThreshold: AED(100_000n) });
+    await shared.inForce(registry(), w, { approvalThreshold: AED(100_000n), ...terms });
     return { w, acting: await shared.agentKey(w) };
   }
 
