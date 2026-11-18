@@ -63,7 +63,7 @@ export function isTrustedMetadataClientId(clientId: string, trusted: readonly st
   return trusted.some((entry) => {
     const allowed = new URL(entry);
     if (allowed.origin !== url.origin) return false;
-    if (allowed.pathname === '/') return true;
+    // An origin's path is `/`, a prefix every address on it starts with.
     return allowed.pathname.endsWith('/')
       ? url.pathname.startsWith(allowed.pathname)
       : url.search === '' && url.pathname === allowed.pathname;
