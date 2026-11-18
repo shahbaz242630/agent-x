@@ -20,9 +20,9 @@ import {
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from '../../apps/api/src/mandate-registry.ts';
-import { AED, keys, type MandateWorldTables, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
+import { AED, keys, type World } from '../../apps/api/src/mandate-world.helper.test.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from '../../apps/api/src/spend-request-decisions.ts';
-import { spendWorld } from '../../apps/api/src/spend-world.helper.test.ts';
+import { spendWorld, type SpendWorldTables } from '../../apps/api/src/spend-world.helper.test.ts';
 import { LOAD_CHECKS } from './checks.ts';
 import { stageGChecks, type StageGCheckedStep, WalledCheckRole } from './stageg-checks.ts';
 import type { CohortAgent } from './stageg-seed.ts';
@@ -30,8 +30,8 @@ import type { CohortAgent } from './stageg-seed.ts';
 const server = inject('postgres');
 const ids = new SequentialIds(0x5c6e_0000_0000);
 let database: TestDatabase;
-let app: Database<MandateWorldTables>;
-let everyOrganisation: Database<MandateWorldTables>;
+let app: Database<SpendWorldTables>;
+let everyOrganisation: Database<SpendWorldTables>;
 let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
@@ -48,8 +48,8 @@ const shared = spendWorld({
 beforeEach(async () => {
   // Each test its own database: the checks read every organisation, so one test's fault must not reach the next.
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<MandateWorldTables>(database.connection('app'), testLogger());
-  everyOrganisation = createDatabase<MandateWorldTables>(database.connection('backup'), testLogger());
+  app = createDatabase<SpendWorldTables>(database.connection('app'), testLogger());
+  everyOrganisation = createDatabase<SpendWorldTables>(database.connection('backup'), testLogger());
   clock = new FixedClock(new Date());
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: testLogger() });
   decisions = createSpendRequestDecisions({

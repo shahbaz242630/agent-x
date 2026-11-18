@@ -42,22 +42,39 @@ describe('which hosts are the login service’s (SA1)', () => {
     }
   });
 
-  it('is never another host, no host, or a Host that isn’t a plain host', () => {
+  it('is never another host, or no Host at all', () => {
     for (const host of [
       undefined,
-      '',
       'app.agentx.example',
+      'APP.agentx.example.',
+      'app.agentx.example:8080',
+      '127.0.0.1:8080',
+      '[::1]:8080',
       'ca-agentx-stg-api.internal.example',
       'auth.agentx.example.evil',
       'xauth.agentx.example',
-      'auth.agentx.example/x',
-      'user@auth.agentx.example',
-      'auth.agentx.example?x',
-      'auth.agentx.example#x',
-      'auth agentx',
     ]) {
       expect(isLogin(host), String(host)).toBe(false);
     }
+  });
+
+  it('6F1 G5: fails closed: a Host that isn’t a plain host is refused as the login host is', () => {
+    for (const host of [
+      '',
+      'auth.agentx.example/x',
+      'app.agentx.example/x',
+      'user@auth.agentx.example',
+      'user@app.agentx.example',
+      'auth.agentx.example?x',
+      'app.agentx.example#x',
+      'auth agentx',
+      'app.agentx.example:notaport',
+      '[::1',
+    ]) {
+      expect(isLogin(host), host).toBe(true);
+    }
+    // Nothing is refused where sign-in is off.
+    expect(loginHostCheck(undefined)('app.agentx.example/x')).toBe(false);
   });
 
   it('names a port where the issuer does: a local run’s login service beside the API on localhost', () => {
@@ -119,6 +136,13 @@ describe('the login service’s host on the API (SA1)', () => {
       { host: 'app.agentx.example', 'x-forwarded-host': 'auth.agentx.example' },
     ]) {
       expect((await app.inject({ url: '/health', headers })).statusCode, headers.host).toBe(200);
+    }
+  });
+
+  it('6F1 G5: answers a Host that isn’t a plain host with the plain 404 too', async () => {
+    const app = await routeServer({ loginOrigin: LOGIN_ORIGIN });
+    for (const host of ['app.agentx.example/x', 'user@app.agentx.example']) {
+      expectPlain404(await app.inject({ url: '/health', headers: { host } }), host);
     }
   });
 

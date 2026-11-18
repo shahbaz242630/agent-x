@@ -9,10 +9,15 @@
 // A twin must be an agent's own route that checks nothing a tool would leave
 // out: a route config beyond its access, its scopes and its operation (a
 // statement's words, a partner's signature) is a check its tool doesn't make,
-// and stops the API starting (mcp.ts).
+// and stops the API starting (mcp.ts); so is a route hook beyond the contract's
+// own, or a header check beyond its idempotency key's and organisation's (6F1 G5).
 import { type Scope, SCOPES } from '@agentx/core/modules/agents';
 import type { FastifyContextConfig, FastifyInstance, RouteOptions } from 'fastify';
 import { z } from 'zod';
+
+import { ORGANIZATION_HEADER } from './access.ts';
+import { isContractHook } from './contract.ts';
+import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
 
 /** An agent's REST route, as an MCP tool checks and answers by it. */
 export interface Twin {
@@ -31,6 +36,31 @@ export interface Twin {
   readonly body: z.ZodType | undefined;
   /** The most its body may be, in bytes; none for a read. */
   readonly bodyLimit: number | undefined;
+}
+
+// 6F1 G5: the route hooks that could check a request or rewrite its answer; a tool's call runs none of them.
+const CHECKING_HOOKS = [
+  'onRequest',
+  'preParsing',
+  'preValidation',
+  'preHandler',
+  'preSerialization',
+  'onSend',
+] as const;
+
+/** The headers a twin may check: the contract's own (contract.ts), which a tool's call settles its own way. */
+const TWIN_HEADERS: ReadonlySet<string> = new Set([IDEMPOTENCY_KEY_HEADER, ORGANIZATION_HEADER]);
+
+/** The route's own checks a tool would skip (6F1 G5): a hook beyond the contract's, a header beyond its own. */
+function skippedChecks(route: RouteOptions): string[] {
+  const hooks = CHECKING_HOOKS.filter((name) =>
+    [route[name] ?? []].flat().some((hook: unknown) => !isContractHook(hook)),
+  ).map((name) => `${name} hook`);
+  const headers: unknown = route.schema?.headers;
+  const ownHeaders =
+    headers === undefined ||
+    (headers instanceof z.ZodObject && Object.keys(headers.shape).every((name) => TWIN_HEADERS.has(name)));
+  return ownHeaders ? hooks : [...hooks, 'schema.headers'];
 }
 
 /** A twin by its method and address, or why it can't be one. */
@@ -53,6 +83,8 @@ export function twinOf(route: RouteOptions): Twin | { readonly problems: readonl
   }
   const extra = Object.keys(config).filter((name) => !TWIN_CONFIG.has(name));
   if (extra.length > 0) problems.push(`its route checks what its tool wouldn't (config.${extra.join(', config.')})`);
+  const skipped = skippedChecks(route);
+  if (skipped.length > 0) problems.push(`its route checks what its tool wouldn't (${skipped.join(', ')})`);
   const responses: object = route.schema?.response ?? {};
   const successes = Object.keys(responses).filter((status) => SUCCESS.test(status));
   const [status] = successes;

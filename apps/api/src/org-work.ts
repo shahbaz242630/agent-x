@@ -58,7 +58,13 @@ import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import { type Clock, HOUR_MS, systemClock } from '@agentx/core/shared-kernel';
 import type { TransactionsTables } from '@agentx/core/modules/transactions';
-import { type Database, type DatabaseTransaction, sendTogether, withTenant } from '@agentx/platform/db';
+import {
+  type Database,
+  type DatabaseTransaction,
+  sendTogether,
+  type SentTogether,
+  withTenant,
+} from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
 import { createGate, type Gate } from './fair-lanes.ts';
@@ -299,7 +305,11 @@ export function withWholePasses(
 }
 
 /** Each job with the read saying when its work is next due: no answer or a null, none is. In the order of the trip. */
-const DUE_READS = [
+// Typed as one read each: as their union, every call of one weighed the transaction against all eleven (CQ8).
+const DUE_READS: readonly (readonly [
+  OrgWorkJob,
+  (tx: DatabaseTransaction<OrgWorkTables>, orgId: string, now: Date) => SentTogether,
+])[] = [
   ['hand_off', handOffDue],
   ['hand_off_sweep', handOffSweepDue],
   ['payment_check', paymentCheckDue],
@@ -311,7 +321,7 @@ const DUE_READS = [
   ['factor_removals', factorRemovalsDue],
   ['background_downloads', backgroundDownloadsDue],
   ['hold_history', holdHistoryDue],
-] as const satisfies readonly (readonly [OrgWorkJob, unknown])[];
+];
 
 /** What the organisation's rows and marks said on one trip. */
 interface Looked {

@@ -17,7 +17,7 @@ export {
 } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { classOfIdpEvent, type IdpEventClass, type OurLoginChanges, WATCHED_IDP_EVENTS } from './domain/idp-event.ts';
-export { REMOVAL_RESTRICTION_DAYS } from './domain/removal-restriction.ts';
+export { REMOVAL_RESTRICTION_DAYS, roleWithoutPowers } from './domain/removal-restriction.ts';
 export {
   ESTABLISHED_DAYS,
   mayVerify,

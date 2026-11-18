@@ -2,6 +2,7 @@
 // is locked out holds its own lane, and no other organisation's check, anchor or
 // durable write, while real chains are read on real connections.
 import { createAuditTrail, holdOrganisation, type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
+import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { CHAIN_START, createAnchorLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
@@ -30,15 +31,14 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const clock = { now: () => new Date() };
 
 let database: TestDatabase;
-let app: Database<AuditTables & OrganizationsTables>;
+// What createOrganization writes (OrganizationsTransaction).
+type Tables = AuditTables & DirectoryTables & OrganizationsTables;
+let app: Database<Tables>;
 const organisations: string[] = [];
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<AuditTables & OrganizationsTables>(
-    { ...database.connection('app'), maxConnections: 8 },
-    testLogger(),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 8 }, testLogger());
   for (let index = 0; index < 8; index += 1) {
     const id = ids.next();
     organisations.push(id);

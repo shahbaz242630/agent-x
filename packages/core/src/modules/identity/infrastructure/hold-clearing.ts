@@ -157,8 +157,8 @@ export function createHoldClearings<Theirs extends object = object>({
   objectsChecked = OBJECTS_CHECKED,
   recordsFilling = RECORDS_FILLING,
 }: {
-  /** Both: every table the clearing reads, and those `namedRecordChecks` read too. */
-  readonly database: Kysely<Tables> & Kysely<Tables & Theirs>;
+  /** Every table the clearing reads, and those `namedRecordChecks` read too. */
+  readonly database: Kysely<Tables & Theirs>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly challenges: StepUpChallenges;

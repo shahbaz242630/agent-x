@@ -124,9 +124,15 @@ export interface AuditLogExports {
   ): Promise<ExportWrite>;
 }
 
+/**
+ * What a spreadsheet may read as a formula's start (SEC-EVD-04): a lead character after any spaces (6F1 G5: some
+ * trim them first), its full-width form too (\uFF1D \uFF0B \uFF0D \uFF20, which some fold to the plain one), or a tab or line break.
+ */
+const FORMULA_LEAD = /^\s*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]|^[\t\r\n]/u;
+
 /** A CSV cell: quoted, its quotes doubled, and one a spreadsheet would read as a formula made text (SEC-EVD-04). */
 export const csvCell = (value: string): string => {
-  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const text = FORMULA_LEAD.test(value) ? `'${value}` : value;
   return `"${text.replaceAll('"', '""')}"`;
 };
 

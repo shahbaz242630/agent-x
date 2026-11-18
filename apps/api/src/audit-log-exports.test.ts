@@ -67,6 +67,25 @@ describe('csvCell (SEC-EVD-04)', () => {
   it.each(['=1+1', '+1', '-1', '@SUM(A1)', '\tx', '\rx'])('makes %j text, as a spreadsheet would run it', (value) => {
     expect(csvCell(value)).toBe(`"'${value}"`);
   });
+
+  it.each([
+    ' =1+1',
+    '  @x',
+    '\u00A0+1',
+    '\n=1',
+    '\nplain',
+    '\uFF1D1+1',
+    '\uFF0B1',
+    '\uFF0D1',
+    '\uFF20SUM(A1)',
+    ' \uFF1D1',
+  ])('6F1 G5: makes %j text too: a lead after spaces, a full-width lead, a leading line break', (value) => {
+    expect(csvCell(value)).toBe(`"'${value}"`);
+  });
+
+  it.each(['a=1', 'x-1', ' plain', 'mail@example.com'])('leaves %j as it is', (value) => {
+    expect(csvCell(value)).toBe(`"${value}"`);
+  });
 });
 
 describe('POST /v1/audit-log/exports (E10b, decision 24)', () => {

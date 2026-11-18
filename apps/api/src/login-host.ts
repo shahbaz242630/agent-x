@@ -5,8 +5,9 @@
 // on the login host, our console would share a browser origin with Zitadel's
 // own console and the administrator tokens it keeps. So any request whose Host names the login
 // service's public host (the OIDC issuer's) gets the API's plain 404, whatever
-// its path or method, before the console's files or any route. Every other
-// host (the app host, the internal one) is left alone.
+// its path or method, before the console's files or any route, and so does a
+// Host that isn't a plain host (6F1 G5). Every other host (the app host, the
+// internal one) is left alone.
 
 /** A Host header's host name, lower case, without a trailing dot, and its port ('' for none); undefined if it isn't one. */
 function hostOf(host: string): { readonly name: string; readonly port: string } | undefined {
@@ -27,15 +28,19 @@ function hostOf(host: string): { readonly name: string; readonly port: string } 
  * host whatever port a client wrote, so `auth.host:8443` is the login host
  * too. A port only where the issuer names one, so a local run's login service
  * on another port of localhost (http://localhost:8081) leaves the API's own
- * (localhost:8080) alone.
+ * (localhost:8080) alone. 6F1 G5: a Host given that isn't a plain host (a path, a user, a query, or no host at all)
+ * gets the plain 404 too, where sign-in is on; a request with no Host is left alone, as before.
  */
 export function loginHostCheck(issuer: string | undefined): (host: string | undefined) => boolean {
   if (issuer === undefined) return () => false;
   const login = new URL(issuer);
   const name = login.hostname.replace(/\.$/, '');
   return (host) => {
-    const found = host === undefined ? undefined : hostOf(host);
-    if (found?.name !== name) return false;
+    if (host === undefined) return false;
+    const found = hostOf(host);
+    // 6F1 G5: fail closed: a Host that isn't a plain host can't be told apart from the login host, so it is refused too.
+    if (found === undefined) return true;
+    if (found.name !== name) return false;
     return login.port === '' || found.port === login.port;
   };
 }
