@@ -282,6 +282,11 @@ describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', ()
     ['https://claude.ai/a\\..\\b', false],
     ['https://claude.ai/a b', false],
     ['https://claude.ai/a?x=%2f', true],
+    // 6F1 G5: no segment starting `..`, which a Tomcat-style server reads as `..` (`..;` a path parameter).
+    ['https://claude.ai/a/..;/b', false],
+    ['https://claude.ai/a/..x/b', false],
+    ['https://claude.ai/..;', false],
+    ['https://claude.ai/a/b..', true],
     ['axcl_0123456789abcdef0123456789abcdef', false],
     [`https://claude.ai/${'x'.repeat(2048)}`, false],
   ])('takes %s as a document’s address: %s', (clientId, taken) => {
@@ -324,6 +329,9 @@ describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', ()
       // An exact address: itself alone, with no query.
       ['https://agents.example/apps/one/client.json', true],
       ['https://agents.example/apps/one/client.json?v=1', false],
+      // 6F1 G5: a bare trailing `?` is a query too, though the parser's `search` is empty.
+      ['https://agents.example/apps/one/client.json?', false],
+      ['https://nousresearch.github.io/hermes/..;/evil/client.json', false],
       ['https://agents.example/apps/one/client.json/', false],
       ['https://agents.example/apps/one/client.jsonx', false],
       ['https://agents.example/apps/one/other.json', false],
