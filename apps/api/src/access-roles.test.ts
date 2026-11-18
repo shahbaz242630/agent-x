@@ -15,7 +15,7 @@ import { z } from 'zod';
 
 // Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
 import './route-server.helper.test.ts';
-import { type FindMembership, type Member, ORGANIZATION_HEADER } from './access.ts';
+import { type FindMembership, type Member, memberInSessionOf, memberOf, ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
 import { liveSession } from './live-session.helper.test.ts';
 import { buildServer } from './server.ts';
@@ -610,6 +610,23 @@ describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a seco
       expect(lookup.restrictionAsked).toEqual([]);
     },
   );
+
+  it('hands a use case the member as marked: without powers only when the hook kept them so (6F1 G1)', () => {
+    const person = LIVE;
+    const found = { orgId: ORG, membershipId: MEMBERSHIP };
+    const kept = { person, member: { ...found, role: 'developer' as const, withoutPowers: true as const } };
+    const own = { person, member: { ...found, role: 'admin' as const } };
+
+    expect(memberInSessionOf(kept)).toEqual({
+      orgId: ORG,
+      userId: LIVE.userId,
+      sessionId: LIVE.sessionId,
+      withoutPowers: true,
+    });
+    expect(memberOf(kept)).toEqual({ orgId: ORG, userId: LIVE.userId, withoutPowers: true });
+    expect(memberInSessionOf(own)).toEqual({ orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId });
+    expect(memberOf(own)).toEqual({ orgId: ORG, userId: LIVE.userId });
+  });
 
   it('keeps an unrestricted admin an admin on a route a developer shares, having asked', async () => {
     const { app, reached, lookup } = await withRoutes(ACTIVE('admin'));

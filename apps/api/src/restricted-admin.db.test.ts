@@ -27,6 +27,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { challengeOf, type OauthTables } from '@agentx/core/modules/oauth';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { DAY_MS } from '@agentx/core/shared-kernel';
@@ -38,6 +39,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import { createAgentChanges, REACTIVATE_OPERATION } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentTables } from './agent-writes.ts';
 import { createConnectionChanges } from './connection-changes.ts';
@@ -415,5 +417,42 @@ describe(`SEC-OPS-04 a restricted admin keeps only a developer's powers on share
       status: 200,
       code: undefined,
     });
+  });
+
+  it('keeps a member marked without powers to the role they keep in the use case too, whatever role is read again', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { agentId } = await agentWithKey(admin);
+    const changes = createAgentChanges({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      outbox: createOutbox({ ids, clock }),
+      logger,
+    });
+    // Reactivating is an admin's alone: the admin, marked as the hook marks a restricted one, is a developer here.
+    const reactivated = (withoutPowers?: true) => {
+      keysUsed += 1;
+      const who = {
+        orgId: org,
+        userId: admin.userId,
+        sessionId: admin.sessionId,
+        ...(withoutPowers && { withoutPowers }),
+      };
+      const idempotent = {
+        orgId: org,
+        client: { kind: 'user' as const, id: admin.userId },
+        operation: REACTIVATE_OPERATION,
+        key: `restricted-${String(keysUsed)}`,
+        payload: agentId,
+      };
+      return changes.reactivate(who, idempotent, agentId, CORRELATION);
+    };
+
+    expect(await reactivated(true)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+    // Unmarked, the admin passes the role check, and is refused only as the agent isn't suspended.
+    expect(await reactivated()).toMatchObject({ outcome: 'refused', status: 409 });
   });
 });
