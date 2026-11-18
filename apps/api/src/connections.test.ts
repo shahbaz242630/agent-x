@@ -182,10 +182,15 @@ describe('SEC-OAUTH-10 POST /v1/agents/:id/connections/:keyId/revoke, with its s
     ]);
   });
 
-  it.each<Role>(['approver', 'viewer'])('refuses a %s: 403, never reaching the use case', async (role) => {
+  it.each<[Role, string, unknown]>([
+    ['approver', '/revoke', undefined],
+    ['viewer', '/revoke', undefined],
+    ['approver', '/revoke/confirm', { stepUpChallengeId: CHALLENGE }],
+    ['viewer', '/revoke/confirm', { stepUpChallengeId: CHALLENGE }],
+  ])('refuses a %s at %s: 403, never reaching the use case', async (role, path, body) => {
     const { app, calls } = await connectionServer({ written: { outcome: 'busy' } }, role);
 
-    expect((await app.inject(revocation('/revoke'))).statusCode).toBe(403);
+    expect((await app.inject(revocation(path, body))).statusCode).toBe(403);
     expect(calls).toEqual([]);
   });
 

@@ -27,6 +27,8 @@ import {
   createSessions,
   DEACTIVATE_CONFIRM_OPERATION,
   DEACTIVATE_OPERATION,
+  ROLE_CONFIRM_OPERATION,
+  ROLE_OPERATION,
   createStepUpChallenges,
   type Role,
   userForSubject,
@@ -39,9 +41,10 @@ import {
   MOST_OPEN_FLOWS_A_BROWSER,
   newFlowCookie,
   type OauthTables,
+  sweepClients,
 } from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { DAY_MS } from '@agentx/core/shared-kernel';
+import { DAY_MS, HOUR_MS } from '@agentx/core/shared-kernel';
 import { AGENT_BRAKE, createDatabase, type Database, type IdempotentRequest, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -993,11 +996,11 @@ const connectionChanges = (at: FixedClock = clock) =>
   createConnectionChanges({ database: app, keys, ids, clock: at, challenges: challenges(), logger: testLogger() });
 
 /** Asks to revoke the connection, steps up, and confirms: the confirm's write. */
-async function revoked(who: Member, named: { agentId: string; keyId: string }) {
+async function revoked(who: Member, named: { agentId: string; keyId: string }, amr: readonly string[] = PASSKEY) {
   const changes = connectionChanges();
   const asked = await changes.revoke(who, keyed(who, CONNECTION_REVOKE_OPERATION, named.keyId), named, CORRELATION);
   if (asked.outcome !== 'asked') return asked;
-  await stepUp(who, asked.stepUpChallengeId);
+  await stepUp(who, asked.stepUpChallengeId, amr);
   return changes.revokeConfirm(
     who,
     keyed(who, CONNECTION_REVOKE_CONFIRM_OPERATION, `${named.keyId} confirm`),
@@ -1011,7 +1014,7 @@ async function revoked(who: Member, named: { agentId: string; keyId: string }) {
  * An admin asks to remove the member from the organisation (deactivate them) and steps up: the confirm, to send when
  * the test is ready (ADR-006's forced cases send it while a lock is held).
  */
-async function removalAsked(admin: Member, gone: Member) {
+async function removalAsked(admin: Member, gone: Member, leavingAt: FixedClock = clock) {
   const memberships = createMembershipChanges({
     database: app,
     keys,
@@ -1019,7 +1022,7 @@ async function removalAsked(admin: Member, gone: Member) {
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
     logger: testLogger(capture),
-    leaving: connectionsOfLeaving(clock),
+    leaving: connectionsOfLeaving(leavingAt),
   });
   const asked = await memberships.ask(
     admin,
@@ -1042,7 +1045,29 @@ async function removalAsked(admin: Member, gone: Member) {
 }
 
 /** An admin removes the member from the organisation, with step-up: the confirm's write. */
-const removed = async (admin: Member, gone: Member) => (await removalAsked(admin, gone))();
+const removed = async (admin: Member, gone: Member, leavingAt: FixedClock = clock) =>
+  (await removalAsked(admin, gone, leavingAt))();
+
+/** The keys a member's removal revoked, by the reason on their events. */
+const revokedOnRemoval = async (org: string) =>
+  (
+    await database.as('admin').query<{ id: string }>(
+      `select subject_id as id from audit.events where org_id = $1 and action = 'agent_key.revoked'
+           and details::jsonb ->> 'reason' = 'member_removed' order by seq`,
+      [org],
+    )
+  ).map(({ id }) => id);
+
+/** The client's row's connection times, as kept. */
+const clientTimes = async (id: string) => {
+  const [row] = await database
+    .as('admin')
+    .query<{ first: Date | null; last: Date | null }>(
+      'select first_connected_at as first, last_connected_at as last from oauth.clients where client_id = $1',
+      [id],
+    );
+  return row;
+};
 
 const BRAKE_SHARED = 'select pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended($1, 0))';
 const BRAKE_ALONE = 'select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))';
@@ -1411,5 +1436,161 @@ describe(`SEC-OAUTH-06 a connection's own record tampered with, at its revocatio
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+});
+
+describe(`mutation pass (6E3b): what each survivor showed untested (Postgres ${server.version})`, () => {
+  it('M08: a step-up for one connection’s revocation can’t revoke another', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const a = await connected(org, admin, agentId);
+    const b = await connected(org, admin, agentId);
+    const changes = connectionChanges();
+    const asked = await changes.revoke(
+      admin,
+      keyed(admin, CONNECTION_REVOKE_OPERATION, a.keyId),
+      { agentId, keyId: a.keyId },
+      CORRELATION,
+    );
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    await stepUp(admin, asked.stepUpChallengeId);
+    expect(
+      await changes.revokeConfirm(
+        admin,
+        keyed(admin, CONNECTION_REVOKE_CONFIRM_OPERATION, `${b.keyId} with a's step-up`),
+        { agentId, keyId: b.keyId },
+        asked.stepUpChallengeId,
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
+    expect(await accepted(b.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await accepted(a.accessToken)).toMatchObject({ outcome: 'accepted' });
+  });
+
+  it('M20: an agent’s list shows its own connections alone', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const x = await agent(org, admin);
+    const y = await agent(org, admin);
+    const ofX = await connected(org, admin, x);
+    const ofY = await connected(org, admin, y);
+    const keysOf = async (agentId: string) => {
+      const listed = await connectionChanges().list(org, agentId, CORRELATION);
+      if ('outcome' in listed) throw new Error(`not listed: ${JSON.stringify(listed)}`);
+      return listed.connections.map(({ keyId }) => keyId);
+    };
+    expect(await keysOf(x)).toEqual([ofX.keyId]);
+    expect(await keysOf(y)).toEqual([ofY.keyId]);
+  });
+
+  it('M29, M30: a code’s exchange and a refresh each note when the client connected; the sweep keeps it', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { refreshToken } = await connected(org, admin, agentId);
+    expect(await clientTimes(clientId)).toEqual({ first: START, last: START });
+
+    clock.advanceBy(HOUR_MS);
+    expect(
+      await grants.refresh({ refreshToken, clientId, scope: undefined, resource: undefined }, CALLER),
+    ).toMatchObject({ outcome: 'issued' });
+    expect(await clientTimes(clientId)).toEqual({ first: START, last: clock.now() });
+    await sweepClients(app, new Date(clock.now().getTime() + DAY_MS), 1000);
+    expect(await clientTimes(clientId)).toBeDefined();
+  });
+
+  it('M17: a member’s removal revokes their live connections, never one already expired', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const ending = await connected(org, developer, agentId);
+    clock.advanceBy(10 * 60_000);
+    const live = await connected(org, developer, agentId);
+    // Read once the first has expired and the second not: its key's 90 days ended 10 minutes before the second's.
+    const between = new FixedClock(new Date(START.getTime() + 90 * DAY_MS + 5 * 60_000));
+    expect(await removed(admin, developer, between)).toMatchObject({ outcome: 'written' });
+    expect(await revokedOnRemoval(org)).toEqual([live.keyId]);
+    expect(ending.keyId).not.toBe(live.keyId);
+  });
+
+  it('M18, M19: a member’s removal revokes their active connections, never one revoked already', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const gone = await connected(org, developer, agentId);
+    const live = await connected(org, developer, agentId);
+    expect(await revoked(admin, { agentId, keyId: gone.keyId })).toMatchObject({ outcome: 'revoked' });
+    expect(await removed(admin, developer)).toMatchObject({ outcome: 'written' });
+    expect(await revokedOnRemoval(org)).toEqual([live.keyId]);
+  });
+
+  it('M03: an admin revokes with a passkey alone; a developer, on their own agent, with their app code', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer', APP_CODE);
+    const adminsAgent = await agent(org, admin);
+    const theirs = await connected(org, admin, adminsAgent);
+    expect(await revoked(admin, { agentId: adminsAgent, keyId: theirs.keyId }, APP_CODE)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await accepted(theirs.accessToken)).toMatchObject({ outcome: 'accepted' });
+
+    const developersAgent = await agent(org, developer);
+    const own = await connected(org, admin, developersAgent);
+    expect(await revoked(developer, { agentId: developersAgent, keyId: own.keyId }, APP_CODE)).toMatchObject({
+      outcome: 'revoked',
+    });
+    expect(await accepted(own.accessToken)).toEqual({ outcome: 'refused' });
+  });
+
+  it('M13: a role change ends nothing of the member’s connections, nor reads them', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const developer = await member(org, 'developer');
+    const agentId = await agent(org, developer);
+    const { keyId, accessToken } = await connected(org, developer, agentId);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, org);
+    const saved = await owner.saveRow(keyId);
+    await owner.setColumn(keyId, 'scopes', 'requests:read requests:write sources:read suppliers:read');
+    await owner.end();
+    const memberships = createMembershipChanges({
+      database: app,
+      keys,
+      ids,
+      challenges: challenges(),
+      outbox: createOutbox({ ids, clock }),
+      logger: testLogger(),
+      leaving: connectionsOfLeaving(clock),
+    });
+    const toViewer = { kind: 'role', role: 'viewer' } as const;
+    const asked = await memberships.ask(
+      admin,
+      keyed(admin, ROLE_OPERATION, `${developer.membershipId} viewer`),
+      developer.membershipId,
+      toViewer,
+      CORRELATION,
+    );
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    await stepUp(admin, asked.stepUpChallengeId);
+    expect(
+      await memberships.confirm(
+        admin,
+        keyed(admin, ROLE_CONFIRM_OPERATION, `${developer.membershipId} viewer confirm`),
+        developer.membershipId,
+        toViewer,
+        asked.stepUpChallengeId,
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'written', member: { role: 'viewer' } });
+    const restoring = await tamperAsOwner(database, AGENT_KEYS, org);
+    await restoring.restoreRow(saved);
+    await restoring.end();
+    expect(await accepted(accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await revokedOnRemoval(org)).toEqual([]);
   });
 });

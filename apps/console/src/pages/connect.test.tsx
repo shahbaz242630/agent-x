@@ -157,6 +157,8 @@ function keptConsent(scopes = ['requests:read', 'requests:write']) {
   );
 }
 
+/** Answers that are no web address of the app's: a script, one hiding a web address after it, one with a space first. */
+const NO_WEB_ADDRESS = ['javascript:alert(1)', "javascript:fetch('https://evil.example')//", ' https://x'];
 describe('the connect page before a request is read (6E3b)', () => {
   it.each([
     ['unknown_client', /isn't registered with Agent X/],
@@ -375,9 +377,9 @@ describe('allowing and denying (6E3b)', () => {
     expect(goTo).toHaveBeenCalledWith(denied);
   });
 
-  it('never follows a deny’s answer that is no web address', async () => {
+  it.each(NO_WEB_ADDRESS)('never follows a deny’s answer that is no web address: %j', async (redirectTo) => {
     as([ORG]);
-    answer(`POST ${at}/deny`, { status: 200, body: { redirectTo: 'javascript:alert(1)' } });
+    answer(`POST ${at}/deny`, { status: 200, body: { redirectTo } });
     open(page);
     await userEvent.click(await screen.findByRole('button', { name: 'Deny' }));
     expect(await screen.findByText(/couldn't be reached/)).toBeDefined();
@@ -512,10 +514,10 @@ describe('back from signing in again (6E3b)', () => {
     expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).not.toBeNull();
   });
 
-  it('never follows a confirm’s answer that is no web address', async () => {
+  it.each(NO_WEB_ADDRESS)('never follows a confirm’s answer that is no web address: %j', async (redirectTo) => {
     as([ORG]);
     keptConsent();
-    answer(`POST ${at}/consent/confirm`, { status: 201, body: { redirectTo: 'javascript:alert(1)' } });
+    answer(`POST ${at}/consent/confirm`, { status: 201, body: { redirectTo } });
     open(back);
     await userEvent.click(await screen.findByRole('button', { name: 'Confirm' }));
     expect(await screen.findByText(/couldn't be reached/)).toBeDefined();

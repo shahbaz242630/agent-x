@@ -281,9 +281,11 @@ export async function connectionsListed(
     // Neither is ever deleted, so both are there: one gone since its row was listed is no connection to show.
     if (keyCheck.outcome === 'missing' || connectionCheck.outcome === 'missing') continue;
     // Both rows name the agent (the list's own condition, and the connection's foreign key to the key with its
-    // agent), and each equals its seal or was answered tampered just above: both are the agent's.
+    // agent), and each equals its seal or was answered tampered just above. Held to it again from the seals, so a
+    // list that ever reads wider still shows only this agent's.
     const key = keyRecordOf(row.id, keyCheck);
     const connection = connectionRecordOf(row.id, connectionCheck);
+    if (connection.agentId !== agentId.toLowerCase() || key.agentId !== connection.agentId) continue;
     connections.push({
       connection,
       key,
