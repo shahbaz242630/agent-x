@@ -4364,8 +4364,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
     const ROUTE = 'where tostring(parse_json(Log).route) == "/v1/mcp"';
-    const NAMED = 'where isnotempty(tostring(parse_json(Log).mcpProtocol))';
-    const SPOKEN = `where tostring(parse_json(Log).mcpProtocol) !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`;
+    const NAMED = `extend mcpProtocol = extract(@'"mcpProtocol":"([^"]*)"', 1, Log) | where isnotempty(mcpProtocol)`;
+    const SPOKEN = `where mcpProtocol !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`;
     for (const alert of [MCP_REFUSALS_ALERT, MCP_UNKNOWN_PROTOCOL_ALERT, MCP_KEYS_REFUSED_ALERT]) {
       expect(brokenRules(without(alert))).toEqual(['mcp-alerts']);
       for (const change of [
@@ -4399,6 +4399,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ],
       [MCP_UNKNOWN_PROTOCOL_ALERT, `ContainerAppConsoleLogs | ${NAMED} | ${SPOKEN} | summarize Requests = count()`],
       [MCP_UNKNOWN_PROTOCOL_ALERT, `ContainerAppConsoleLogs | ${ROUTE} | ${SPOKEN} | summarize Requests = count()`],
+      // The version read through parse_json, which makes "2025-11-25" a datetime and so fired on every request (S202).
+      [
+        MCP_UNKNOWN_PROTOCOL_ALERT,
+        `ContainerAppConsoleLogs | ${ROUTE} | where isnotempty(tostring(parse_json(Log).mcpProtocol)) | ${SPOKEN.replace('where mcpProtocol', 'where tostring(parse_json(Log).mcpProtocol)')} | summarize Requests = count()`,
+      ],
       // Another status, or another route.
       [
         MCP_KEYS_REFUSED_ALERT,
@@ -4412,7 +4417,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(brokenRules(changed(alert, query(text)))).toEqual(['mcp-alerts']);
     }
     // The table the check holds the alert to is the server's own.
-    expect(MCP_ALERTS[1].lines[2]).toBe(SPOKEN);
+    expect(MCP_ALERTS[1].lines[3]).toBe(SPOKEN);
   });
 
   it("records-filling-alert: no alert on an organisation's records filling, or one that counts something else, can't fire or fires too late", () => {

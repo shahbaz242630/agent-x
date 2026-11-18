@@ -42,6 +42,10 @@
       "why": "Container Apps' regional extension endpoint"
     },
     {
+      "domain": "uaenorth.azurecontainerapps.io.",
+      "why": "Container Apps' own names in our region: from 18 Nov 2026 (S202) the platform's health probe looks up our environment's default domain (cappscanary-…), which the catch-all blocked every 15 minutes. Microsoft runs the zone's servers, so no customer can see a lookup's labels (as vault.azure.net)"
+    },
+    {
       "domain": "dc.services.visualstudio.com.",
       "why": "The platform's own telemetry endpoint (not ours: ADR-013's apps send none)"
     },

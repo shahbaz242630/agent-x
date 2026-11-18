@@ -1125,7 +1125,9 @@ resource mcpRefusalsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
 // holds this list to it). A new revision's clients arriving, or someone
 // probing. A 2025 client asking for a newer version is answered in one we
 // speak, so its line can be a 200, of which the API keeps a sample: any kept
-// line fires it.
+// line fires it. The version is read from the raw line: parse_json turns a
+// date-shaped string such as "2025-11-25" into a datetime, whose text then
+// matches no entry (S202: it fired on every request).
 var mcpProtocols = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26']
 
 resource mcpUnknownProtocolAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
@@ -1146,7 +1148,7 @@ resource mcpUnknownProtocolAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | where isnotempty(tostring(parse_json(Log).mcpProtocol)) | where tostring(parse_json(Log).mcpProtocol) !in (${join(map(mcpProtocols, version => '"${version}"'), ', ')}) | summarize Requests = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | extend mcpProtocol = extract(@\'"mcpProtocol":"([^"]*)"\', 1, Log) | where isnotempty(mcpProtocol) | where mcpProtocol !in (${join(map(mcpProtocols, version => '"${version}"'), ', ')}) | summarize Requests = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Requests'
           operator: 'GreaterThan'
