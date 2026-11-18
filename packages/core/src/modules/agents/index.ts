@@ -82,12 +82,18 @@ export {
 } from './domain/connection.ts';
 export {
   addConnection,
+  type ConnectionListed,
   connectionOf,
   type ConnectionRecord,
   CONNECTIONS,
   connectionsCounted,
+  connectionsListed,
   connectionsMadeSince,
+  type ConnectionVia,
+  ENDED_CONNECTIONS_SHOWN_DAYS,
   isConnectionKey,
+  liveConnectionsMadeBy,
+  MOST_CONNECTIONS_LISTED,
 } from './infrastructure/connections.ts';
 export {
   type IssuedTokens,

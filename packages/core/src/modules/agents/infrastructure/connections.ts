@@ -12,15 +12,23 @@
 // outside the audit module's steps, as for a key's row (agent-keys.ts).
 import { sql } from 'kysely';
 
-import type { AuditActor, RecordedState, SignedStates, TamperSign } from '../../audit/index.ts';
-import { AGENT_KEYS } from './agent-keys.ts';
+import type {
+  AuditActor,
+  RecordedState,
+  SignedStates,
+  StateCheck,
+  TamperSign,
+  VerifiedState,
+} from '../../audit/index.ts';
+import { DAY_MS } from '../../../shared-kernel/index.ts';
+import { AGENT_KEYS, agentKeyOf, type AgentKeyRecord, keyRecordOf } from './agent-keys.ts';
 import { CONNECTIONS } from './connection-table.ts';
 import type { AgentsTransaction } from './agents.ts';
 
 export { CONNECTIONS } from './connection-table.ts';
 
 /** How a connection was made: a browser's code (6E3a), or a device's (6E3c). */
-type ConnectionVia = 'code' | 'device';
+export type ConnectionVia = 'code' | 'device';
 
 export interface NewConnection {
   readonly orgId: string;
@@ -113,6 +121,11 @@ export async function connectionOf(
 ): Promise<ConnectionCheck> {
   const state = await states.verifiedState(tx, CONNECTIONS, key, 'share');
   if (state.outcome !== 'verified') return state;
+  return { outcome: 'found', connection: connectionRecordOf(key.id, state) };
+}
+
+/** The connection a verified signed state of CONNECTIONS says: its fields, each held to its kind. */
+function connectionRecordOf(id: string, state: VerifiedState): ConnectionRecord {
   const agentId = state.fields.get('agent_id');
   const clientId = state.fields.get('client_id');
   const resource = state.fields.get('resource');
@@ -124,12 +137,9 @@ export async function connectionOf(
     typeof resource !== 'string' ||
     redirectUri === undefined
   ) {
-    throw new Error(`A verified connection holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified connection holds a field that isn't one of its own: ${id}`);
   }
-  return {
-    outcome: 'found',
-    connection: { keyId: key.id.toLowerCase(), agentId, clientId, resource, redirectUri },
-  };
+  return { keyId: id.toLowerCase(), agentId, clientId, resource, redirectUri };
 }
 
 /** The agent's connections as a count: how many there are in all, and how many of them still work at `now`. */
@@ -189,4 +199,140 @@ export async function connectionsMadeSince(tx: AgentsTransaction, orgId: string,
     .where('created_at', '>', since)
     .executeTakeFirstOrThrow();
   return row.made;
+}
+
+/** The most connections an agent's list shows: its 10 live ones and those ended lately, newest first. */
+export const MOST_CONNECTIONS_LISTED = 50;
+
+/** How long an ended connection stays on its agent's list: until 90 days after its key's expiry. */
+export const ENDED_CONNECTIONS_SHOWN_DAYS = 90;
+
+/** A connection as its agent's list shows it: as its signed state and its key's say, and what it was made with. */
+export interface ConnectionListed {
+  readonly connection: ConnectionRecord;
+  /** Its key, as its signed state says: the connection's status, scopes and expiry are its key's. */
+  readonly key: AgentKeyRecord;
+  /** What the consent page called the client: shown, never trusted. */
+  readonly clientName: string;
+  readonly via: ConnectionVia;
+  /** The membership of the person who made it. */
+  readonly madeBy: string;
+  readonly createdAt: Date;
+  /** When it was last given tokens (its newest token's issue), or null if never. */
+  readonly lastConnectedAt: Date | null;
+}
+
+/** The check verifiedStates answered for one of the IDs it was asked: it answers every one. */
+const checkFor = (checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck => {
+  const check = checks.get(id.toLowerCase());
+  if (check === undefined) throw new Error(`A signed state was asked for and not read: ${id}`);
+  return check;
+};
+
+/**
+ * The agent's connections, newest first, at most MOST_CONNECTIONS_LISTED: every live one, and those ended (revoked or
+ * expired) whose key expired, or would have, less than ENDED_CONNECTIONS_SHOWN_DAYS before `now`. One statement for
+ * the rows and when each last had tokens, then the keys' signed states (3a) and the connections' (3b), each table's in
+ * one read (`share`). In the caller's transaction, withSignedStates' for the organisation, which read the agent first.
+ * A row whose sealed agent is another is left out; tampered with, the first found is answered, its alarm raised.
+ */
+export async function connectionsListed(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  orgId: string,
+  agentId: string,
+  now: Date,
+): Promise<
+  | { readonly outcome: 'listed'; readonly connections: readonly ConnectionListed[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look and what it was made with, which grant nothing; each connection is then read through its signed state
+    .selectFrom(`${CONNECTIONS.table} as c`)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same rows' keys' expiry, to leave long-ended ones out; each key is then read through its signed state
+    .innerJoin(`${AGENT_KEYS.table} as k`, (join) => join.onRef('k.org_id', '=', 'c.org_id').onRef('k.id', '=', 'c.id'))
+    .select((eb) => [
+      'c.id',
+      'c.client_name',
+      'c.via',
+      'c.made_by',
+      'c.created_at',
+      eb
+        .selectFrom('agents.connection_tokens as t')
+        .select(sql<Date>`pg_catalog.max(t.created_at)`.as('last'))
+        .whereRef('t.org_id', '=', 'c.org_id')
+        .whereRef('t.key_id', '=', 'c.id')
+        .as('last_connected_at'),
+    ])
+    .where('c.org_id', '=', orgId)
+    .where('c.agent_id', '=', agentId)
+    .where('k.expires_at', '>', new Date(now.getTime() - ENDED_CONNECTIONS_SHOWN_DAYS * DAY_MS))
+    .orderBy('c.created_at', 'desc')
+    .orderBy('c.id', 'desc')
+    .limit(MOST_CONNECTIONS_LISTED)
+    .execute();
+  if (rows.length === 0) return { outcome: 'listed', connections: [] };
+  const ids = rows.map(({ id }) => id);
+  const keyChecks = await states.verifiedStates(tx, AGENT_KEYS, orgId, ids);
+  const connectionChecks = await states.verifiedStates(tx, CONNECTIONS, orgId, ids);
+  const ours = agentId.toLowerCase();
+  const connections: ConnectionListed[] = [];
+  for (const row of rows) {
+    const keyCheck = checkFor(keyChecks, row.id);
+    const connectionCheck = checkFor(connectionChecks, row.id);
+    if (keyCheck.outcome === 'tampered') return keyCheck;
+    if (connectionCheck.outcome === 'tampered') return connectionCheck;
+    if (keyCheck.outcome === 'missing' || connectionCheck.outcome === 'missing') continue;
+    const key = keyRecordOf(row.id, keyCheck);
+    const connection = connectionRecordOf(row.id, connectionCheck);
+    if (key.agentId !== ours || connection.agentId !== ours) continue;
+    connections.push({
+      connection,
+      key,
+      clientName: row.client_name,
+      // The table's check holds it to the two.
+      via: row.via === 'device' ? 'device' : 'code',
+      madeBy: row.made_by,
+      createdAt: row.created_at,
+      lastConnectedAt: row.last_connected_at,
+    });
+  }
+  return { outcome: 'listed', connections };
+}
+
+/**
+ * The live keys of the connections the member made in the organisation (ACTIVE, not expired at `now`), in order of ID,
+ * each read for change (3a) and verified: what removing the member revokes (decision 7). One statement for the IDs,
+ * then each key's own read. In the caller's transaction, withSignedStates' for the organisation, before its first
+ * event; tampered with, the first found is answered, its alarm raised.
+ */
+export async function liveConnectionsMadeBy(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  orgId: string,
+  membershipId: string,
+  now: Date,
+): Promise<
+  | { readonly outcome: 'listed'; readonly keys: readonly AgentKeyRecord[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each key is then read through its signed state
+    .selectFrom(`${CONNECTIONS.table} as c`)
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same rows' keys, to leave ended ones out; each is then read through its signed state
+    .innerJoin(`${AGENT_KEYS.table} as k`, (join) => join.onRef('k.org_id', '=', 'c.org_id').onRef('k.id', '=', 'c.id'))
+    .select('c.id')
+    .where('c.org_id', '=', orgId)
+    .where('c.made_by', '=', membershipId)
+    .where('k.status', '=', 'ACTIVE')
+    .where('k.expires_at', '>', now)
+    .orderBy('c.id')
+    .execute();
+  const keys: AgentKeyRecord[] = [];
+  for (const { id } of rows) {
+    const read = await agentKeyOf(tx, states, { orgId, id }, 'change');
+    if (read.outcome === 'tampered') return read;
+    if (read.outcome === 'found' && read.key.status === 'ACTIVE') keys.push(read.key);
+  }
+  return { outcome: 'listed', keys };
 }

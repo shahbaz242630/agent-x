@@ -36,6 +36,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
+import { connectionsOfLeaving, createConnectionChanges } from './connection-changes.ts';
 import { createConnectionConsents } from './connection-consents.ts';
 import { createCredentialCheck } from './credentials.ts';
 import { createOauthAuthorizing } from './oauth-authorizing.ts';
@@ -207,7 +208,16 @@ export async function startWeb(
       challenges,
       logger,
     }),
-    membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
+    // Removing a member revokes the MCP connections they made (6E3b, decision 7).
+    membershipChanges: createMembershipChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      challenges,
+      outbox,
+      logger,
+      leaving: connectionsOfLeaving(systemClock),
+    }),
     listContacts: registeredContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     contactChanges: createContactChanges({
       database,
@@ -279,6 +289,14 @@ export async function startWeb(
       logger,
     }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
+    connectionChanges: createConnectionChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      logger,
+    }),
     checkAgentKey: checkCredential,
     // Agent X's own OAuth server for MCP connections (6E3a): its routes answer only while AGENTX_MCP_OAUTH is on.
     oauth: {

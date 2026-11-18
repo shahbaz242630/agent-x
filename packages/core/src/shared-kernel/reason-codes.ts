@@ -83,6 +83,7 @@ export const REASON_CODES = {
     'The agent has had 100 app connections, ended ones included, the most Agent X keeps for one agent, so it can’t be given another. Register it again as a new agent to connect it. Nothing was changed.',
   CONNECTION_AGENT_NOT_ACTIVE:
     'The agent is suspended, so no app can be connected to it. Lift its suspension first, or choose another agent. Nothing was changed.',
+  CONNECTION_REVOKED: 'The app connection is revoked already, so it can’t work again. Nothing was changed.',
   CONNECTION_SCOPES_REFUSED:
     'The permissions chosen are not all ones the app asked for and the agent holds, so the app was not connected. Choose among those shown, then allow it again.',
   CONTACTS_FULL:

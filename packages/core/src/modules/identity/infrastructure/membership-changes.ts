@@ -24,6 +24,11 @@
 //    the audit trail refuses a detail named for sessions, as it would a
 //    session's secret).
 //
+// Deactivating a member also ends what `leaving` names outside this module
+// (6E3b, decision 7: the MCP connections they made, the API's composition):
+// read for change after the memberships and before the first event, ended
+// after the membership's own.
+//
 // So a session of the member's never outlives the role it was opened under,
 // and nothing is locked backwards: two admins changing each other at the same
 // moment, a step-up's return, or a sign-out wait on each other in order,
@@ -38,7 +43,13 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type Transaction } from 'kysely';
 
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
-import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
+import {
+  type AuditActor,
+  type AuditTables,
+  type SignedStates,
+  type SignedStatesServices,
+  withSignedStates,
+} from '../../audit/index.ts';
 import { type DirectoryTables, listedMember, listedMembership } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
@@ -95,6 +106,19 @@ export interface MembershipChanges {
   ): Promise<MembershipChangeWrite>;
 }
 
+/**
+ * What else deactivating a member ends, outside this module (6E3b: the MCP connections they made): read, for change,
+ * in the deactivation's transaction after the memberships and before its first event, then ended after the
+ * membership's own event by `end`; or something it read was tampered with (its alarm raised), refusing the change.
+ */
+export type MemberLeaving<Theirs> = (
+  tx: Transaction<Tables & Theirs>,
+  states: SignedStates,
+  leaving: { readonly orgId: string; readonly membershipId: string },
+) => Promise<
+  { readonly outcome: 'read'; readonly end: (actor: AuditActor) => Promise<void> } | { readonly outcome: 'tampered' }
+>;
+
 class ChangeRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
     super(`a membership's change refused: ${code}`, status, code);
@@ -124,14 +148,16 @@ function found(read: MemberCheck): Extract<MemberCheck, { outcome: 'found' }> {
   return read;
 }
 
-export function createMembershipChanges({
+export function createMembershipChanges<Theirs extends object = object>({
   database,
   keys,
   ids,
   challenges,
   outbox,
   logger,
+  leaving,
 }: {
+  /** Holding `leaving`'s tables too, when it is given. */
   readonly database: Kysely<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -139,6 +165,8 @@ export function createMembershipChanges({
   /** Where the admins' notices of a role granted are written (B5-1b). */
   readonly outbox: Outbox;
   readonly logger: Logger;
+  /** What else a deactivation ends (MemberLeaving); nothing when not given. */
+  readonly leaving?: MemberLeaving<Theirs>;
 }): MembershipChanges {
   /**
    * The admin's membership and the member's, each read once, in order of
@@ -261,6 +289,13 @@ export function createMembershipChanges({
         // The member's grant summary for the change, after the memberships (ADR-006 §6, 2a; OR1).
         const grants = await grantsToChange(tx, states, { orgId: admin.orgId, id: member.id });
         if (grants.outcome === 'tampered') throw new ChangeRefused(503, 'INTEGRITY_FAILED');
+        // Opened on `database`, which holds their tables too.
+        const wider = tx as unknown as Transaction<Tables & Theirs>;
+        const ending =
+          change.kind === 'deactivate' && leaving !== undefined
+            ? await leaving(wider, states, { orgId: admin.orgId, membershipId: member.id })
+            : undefined;
+        if (ending?.outcome === 'tampered') throw new ChangeRefused(503, 'INTEGRITY_FAILED');
         const consumed = await challenges.consume(
           tx,
           held,
@@ -296,6 +331,7 @@ export function createMembershipChanges({
           });
         } else {
           await deactivateMembership(tx, states, read);
+          await ending?.end(actor);
           // Told to the admins (the S68 audit): who is removed, with the role they held.
           await tellAdminsOfRemoval(tx, outbox, {
             orgId: admin.orgId,
