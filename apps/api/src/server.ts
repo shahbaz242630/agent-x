@@ -65,7 +65,8 @@ import { BUSY_RETRY_SECONDS, type LogFailure, responseFor, sendErrorBody, troubl
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { loginHostCheck } from './login-host.ts';
-import { MCP_PATH, registerMcp } from './mcp.ts';
+import { MCP_PATH } from './mcp-protocols.ts';
+import { registerMcp } from './mcp.ts';
 import { recordTwins } from './mcp-twins.ts';
 import { type MachineIds, registerMachineIds } from './machine-ids.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';

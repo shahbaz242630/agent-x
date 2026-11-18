@@ -48,20 +48,12 @@ import { API_SCHEMAS } from './api-schemas.ts';
 import { ContractBroken } from './contract.ts';
 import { type LogFailure, sendErrorBody } from './errors.ts';
 import { callTool, type ToolCalled, toolDefinitions } from './mcp-calls.ts';
+import { MCP_PATH, PROTOCOLS } from './mcp-protocols.ts';
 import { type AgentUseCases, MCP_TOOLS, plainText, type TwinnedTool, twinned } from './mcp-tools.ts';
 import type { FindTwin } from './mcp-twins.ts';
 import { isForeignWrite } from './origin-check.ts';
 import type { Refused } from './refused.ts';
 import { markWritten } from './written-answers.ts';
-
-/** The MCP endpoint's address. */
-export const MCP_PATH = '/v1/mcp';
-
-/**
- * The MCP versions this server speaks, newest first: the one table. The 2026 revision is reached by
- * `server/discover`, the 2025 ones by `initialize` (or a request naming none: 2025-03-26).
- */
-export const PROTOCOLS = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26'] as const;
 
 /** The version a request naming none is taken to speak (MCP 2025-06-18, transports). */
 const UNNAMED_VERSION = '2025-03-26';

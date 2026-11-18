@@ -54,6 +54,9 @@ param anchorStoreAlertName string
 param recordsFillingAlertName string
 param dailyCheckAlertName string
 param fullPassAlertName string
+param mcpRefusalsAlertName string
+param mcpUnknownProtocolAlertName string
+param mcpKeysRefusedAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -1051,6 +1054,144 @@ resource decisionsSuppressedAlert 'Microsoft.Insights/scheduledQueryRules@2026-0
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
           threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The MCP door's early warning (6E4, MCP-Guide.md §7): most customers reach us
+// through an agent's MCP client, so a client release that breaks against us
+// shows here first, before the daily canaries or a customer say so. Each is a
+// count with no IDs (ADR-013 rule 3): which client and version is the request
+// lines' to show, in the workspace (mcpClient, mcpClientVersion). Stateful:
+// each fires once and resolves after a quiet window. First numbers, to tune
+// on real traffic.
+//
+// Protocol refusals rising: the SDK's protocol layer refused requests it
+// couldn't read (a version we don't speak, headers that disagree with the
+// body, a method we don't have), each logged as `mcp.protocol_refused`. A
+// client now and then is noise; more than 20 in 15 minutes is a client
+// release, or many customers' agents, failing against us.
+resource mcpRefusalsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: mcpRefusalsAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'MCP: protocol refusals rising'
+    description: 'SEV-2. More than 20 MCP requests in 15 minutes were refused by the protocol layer (mcp.protocol_refused): a client release, or many agents, failing against our MCP endpoint. Their request lines show which client and version. Runbook: Incident-Response-Playbook.md section Y.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "mcp.protocol_refused" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 20
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// A protocol version we don't speak: any MCP request line whose client named a
+// version outside our table (apps/api/src/mcp-protocols.ts; the policy check
+// holds this list to it). A new revision's clients arriving, or someone
+// probing. A 2025 client asking for a newer version is answered in one we
+// speak, so its line can be a 200, of which the API keeps a sample: any kept
+// line fires it.
+var mcpProtocols = ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26']
+
+resource mcpUnknownProtocolAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: mcpUnknownProtocolAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'MCP: a protocol version we do not speak'
+    description: 'SEV-2. An MCP request named a protocol version outside the ones we serve (mcpProtocol on its request line): a new MCP revision\'s clients are arriving, or someone is probing. Their request lines show which client and version. Runbook: Incident-Response-Playbook.md section Y.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | where isnotempty(tostring(parse_json(Log).mcpProtocol)) | where tostring(parse_json(Log).mcpProtocol) !in (${join(map(mcpProtocols, version => '"${version}"'), ', ')}) | summarize Requests = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Requests'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// Keys refused at the MCP door spiking: 401 lines on /v1/mcp (every refusal's
+// line is kept). A client release that stopped sending the key as a bearer
+// header, or someone trying keys. More than 30 in 15 minutes.
+resource mcpKeysRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: mcpKeysRefusedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'MCP: keys refused spiking'
+    description: 'SEV-2. More than 30 MCP requests in 15 minutes were refused for their key (401): a client release that stopped sending the key as a bearer header, or someone trying keys. Their request lines show which client and version. Runbook: Incident-Response-Playbook.md section Y.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | where toint(parse_json(Log).status) == 401 | summarize Refused = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Refused'
+          operator: 'GreaterThan'
+          threshold: 30
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

@@ -1,0 +1,41 @@
+{
+  "//": "6E4: the last release of each source the daily MCP watch follows that a person has read (tooling/mcp-watch/releases.ts). When the watch goes red on a newer one, read it, check what its line says, then move the version here with a note of what you checked.",
+  "seen": {
+    "spec": {
+      "version": "2026-07-28",
+      "note": "S201 6E4 seed: the newest revision, which we serve (MCP-Guide.md §2)"
+    },
+    "typescript-sdk": {
+      "version": "v2.4.0",
+      "note": "S201 6E4 seed: the server and client we pin (2.4.0)"
+    },
+    "conformance": {
+      "version": "v0.1.16",
+      "note": "S201 6E4 seed: the newest GitHub release; we pin npm's 0.2.0-alpha.12, which runs ahead of it"
+    },
+    "claude-code": {
+      "version": "v2.1.327",
+      "note": "S201 6E4: read; MCP lines are its own CLI (mcp add-json from stdin, .mcp.json edits, /mcp screens) and remote servers retried after an outage: nothing changes how it connects to us"
+    },
+    "codex": {
+      "version": "rust-v0.169.1",
+      "note": "S201 6E4 seed: newest at the build; its connect line in docs/api/README.md §9 checked in 6E2"
+    },
+    "vscode": {
+      "version": "1.146.0",
+      "note": "S201 6E4 seed: newest at the build; its connect line in docs/api/README.md §9 checked in 6E2"
+    },
+    "gemini-cli": {
+      "version": "v0.68.0",
+      "note": "S201 6E4 seed: newest at the build; its connect line in docs/api/README.md §9 checked in 6E2"
+    },
+    "hermes-agent": {
+      "version": "v0.23.2",
+      "note": "S201 6E4 seed: the version MCP-Guide.md §8 researched"
+    },
+    "openclaw": {
+      "version": "v2026.11.5",
+      "note": "S201 6E4 seed: the version MCP-Guide.md §8 researched"
+    }
+  }
+}

@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
+import { MCP_PATH, PROTOCOLS } from '../../apps/api/src/mcp-protocols.ts';
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
@@ -94,6 +95,7 @@ export type RuleId =
   | 'agent-cancels-alert'
   | 'agent-cancel-cap-alert'
   | 'decisions-suppressed-alert'
+  | 'mcp-alerts'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -433,6 +435,29 @@ const LOGIN_SERVICE_LINES = `where tostring(parse_json(Log).event) in (${LOGIN_S
 const DECISIONS_SUPPRESSED_LINES = [
   'where tostring(parse_json(Log).event) == "log.suppressed"',
   'where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided"',
+] as const;
+
+/** The MCP door's early warning (6E4): each alert's lines, and the most it lets pass in a window. */
+export const MCP_ALERTS = [
+  {
+    what: 'more than 20 mcp.protocol_refused lines',
+    lines: ['where tostring(parse_json(Log).event) == "mcp.protocol_refused"'],
+    threshold: 20,
+  },
+  {
+    what: `any ${MCP_PATH} request line naming a protocol version outside ${PROTOCOLS.join(', ')} (apps/api/src/mcp-protocols.ts)`,
+    lines: [
+      `where tostring(parse_json(Log).route) == "${MCP_PATH}"`,
+      'where isnotempty(tostring(parse_json(Log).mcpProtocol))',
+      `where tostring(parse_json(Log).mcpProtocol) !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`,
+    ],
+    threshold: 0,
+  },
+  {
+    what: `more than 30 ${MCP_PATH} request lines refused 401`,
+    lines: [`where tostring(parse_json(Log).route) == "${MCP_PATH}"`, 'where toint(parse_json(Log).status) == 401'],
+    threshold: 30,
+  },
 ] as const;
 
 /**
@@ -3349,8 +3374,9 @@ const alertRules: Check = (snapshot, expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    // The playbook's alert sections: A to S, and W (a blocked DNS lookup, AZ1); T to V answer workflows, not alerts.
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-SW]\.$/.exec(
+    // The playbook's alert sections: A to S, W (a blocked DNS lookup, AZ1) and Y (the MCP door, 6E4); T to V and X
+    // answer workflows and deploys, not alerts.
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-SWY]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -3700,6 +3726,35 @@ const tokenRefusedAlert: Check = (snapshot, _expected, add) => {
         message:
           "needs an enabled alert on this deployment's workspace that fires on any LoginTokenRefused error line, watching every minute and firing on the first window",
       });
+    }
+  }
+};
+
+/**
+ * The MCP door's early warning (6E4, MCP-Guide §7): for each of MCP_ALERTS, an enabled alert on the workspace that
+ * counts its lines and fires past its threshold, watching every window. The protocol versions are the server's own
+ * table, so a version added there without the alert fails here.
+ */
+const mcpAlerts: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    for (const { what, lines, threshold } of MCP_ALERTS) {
+      const alerted = workspaceAlerted(
+        snapshot,
+        'any',
+        (criterion, alert) =>
+          queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', lines, 'count()') &&
+          totals(criterion) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === threshold &&
+          watchesEveryWindow(alert, criterion),
+      );
+      if (!alerted) {
+        add({
+          rule: 'mcp-alerts',
+          resource: environment.name,
+          message: `needs an enabled alert on this deployment's workspace that fires on ${what} in a window, watching every window`,
+        });
+      }
     }
   }
 };
@@ -6525,6 +6580,7 @@ const CHECKS: readonly Check[] = [
   agentCancelsAlert,
   agentCancelCapAlert,
   decisionsSuppressedAlert,
+  mcpAlerts,
   ownerLoginAlert,
   refusedLoginAlert,
   loginLinesAlert,
