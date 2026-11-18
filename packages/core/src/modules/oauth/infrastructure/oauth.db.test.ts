@@ -1,7 +1,7 @@
 // SEC-OAUTH-04, -13 (6E3a): the OAuth server's global records on the real
 // migrated schema, as the app role: a client registered within the day's cap,
 // a flow decided once, its code used once, and both swept once past their use.
-import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
+import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -11,8 +11,9 @@ import { challengeOf } from './pkce.ts';
 import { clientConnected, clientOf, MOST_REGISTRATIONS_A_DAY, registerClient, sweepClients } from './clients.ts';
 import {
   CODE_SECONDS,
-  codeTaken,
-  codeUsedBefore,
+  codeHeld,
+  codeUsed,
+  flowOfCode,
   FLOW_SECONDS,
   flowById,
   flowDecided,
@@ -141,15 +142,36 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
     expect(await flowById(app, denied)).toMatchObject({ decided: 'denied', orgId: null, codeEndsAt: null });
   });
 
-  it('takes a code once: the second finds it used, and no flow has a code never given', async () => {
+  it('holds a code for its use: a second exchange waits, then finds it used; a use rolled back is no use', async () => {
     const id = await opened();
     const codeHash = 'd'.repeat(64);
     await flowDecided(app, id, { outcome: 'allowed', orgId: ORG, keyId: KEY, codeHash }, NOW);
-    expect(await codeUsedBefore(app, codeHash)).toBeUndefined();
-    const [one, two] = await Promise.all([codeTaken(app, codeHash, NOW), codeTaken(app, codeHash, NOW)]);
-    expect([one, two].filter((taken) => taken !== undefined)).toHaveLength(1);
-    expect(await codeUsedBefore(app, codeHash)).toMatchObject({ id, orgId: ORG, keyId: KEY, usedAt: NOW });
-    expect(await codeTaken(app, 'e'.repeat(64), NOW)).toBeUndefined();
+    expect(await flowOfCode(app, codeHash)).toMatchObject({ id, orgId: ORG, keyId: KEY, usedAt: null });
+    // A use whose transaction rolls back (a busy) leaves the code unused.
+    await expect(
+      app.transaction().execute(async (tx) => {
+        await codeUsed(tx, id, NOW);
+        throw new Error('rolled back');
+      }),
+    ).rejects.toThrow('rolled back');
+    expect(await flowOfCode(app, codeHash)).toMatchObject({ usedAt: null });
+    const made = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const first = app.transaction().execute(async (tx) => {
+      const held = await codeHeld(tx, codeHash);
+      await codeUsed(tx, id, NOW);
+      made.resolve(undefined);
+      await letGo.promise;
+      return held?.usedAt;
+    });
+    await made.promise;
+    const second = app.transaction().execute(async (tx) => (await codeHeld(tx, codeHash))?.usedAt);
+    await waitUntilQueued(database.as('admin'), 1);
+    letGo.resolve(undefined);
+    expect(await first).toBeNull();
+    expect(await second).toEqual(NOW);
+    expect(await app.transaction().execute((tx) => codeHeld(tx, 'e'.repeat(64)))).toBeUndefined();
+    expect(await flowOfCode(app, 'e'.repeat(64))).toBeUndefined();
   });
 
   it('sweeps a flow a day after it ends, never before', async () => {

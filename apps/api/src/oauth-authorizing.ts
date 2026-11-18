@@ -29,7 +29,7 @@ import {
   scopesAsked,
 } from '@agentx/core/modules/oauth';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database } from '@agentx/platform/db';
+import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
 import { backToClient, type Capabilities } from './oauth-wire.ts';
@@ -47,7 +47,7 @@ interface AuthorizeAsked {
 }
 
 /** Why a request can't go back to its client: shown on our own page, never sent to an address unproven. */
-type NotRedirectable = 'unknown_client' | 'unregistered_redirect';
+type NotRedirectable = 'unknown_client' | 'unregistered_redirect' | 'temporarily_unavailable';
 
 export type AuthorizeAnswer =
   | { readonly outcome: 'not_redirectable'; readonly problem: NotRedirectable }
@@ -93,6 +93,9 @@ function requestRefusal(
   return undefined;
 }
 
+/** How often the flows' cap may warn, at most (lead's re-review): one line a minute, however many are refused. */
+const CAP_WARNING_EVERY_MS = 60_000;
+
 /** The most characters of a client's `state` kept and sent back (0093). */
 const MOST_STATE = 512;
 
@@ -109,58 +112,39 @@ export function createOauthAuthorizing({
   readonly logger: Logger;
   readonly capabilities: Capabilities;
 }): OauthAuthorizing {
+  /** The flows' cap's warning, at most once a minute, with how many were refused since the last (an attack's flood). */
+  let capWarnedAt = Number.NEGATIVE_INFINITY;
+  let refusedSince = 0;
+  const flowsCapped = (): void => {
+    refusedSince += 1;
+    const now = clock.now().getTime();
+    if (now - capWarnedAt < CAP_WARNING_EVERY_MS) return;
+    logger.warn('oauth.flows_capped', { most: MOST_OPEN_FLOWS, refused: refusedSince });
+    capWarnedAt = now;
+    refusedSince = 0;
+  };
+
+  /** The authorize work, a database limit or lost deadlock answered busy (never a 500), where `back` says. */
+  const orBusy = async (
+    back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer },
+    work: () => Promise<AuthorizeAnswer>,
+  ): Promise<AuthorizeAnswer> => {
+    try {
+      return await work();
+    } catch (error) {
+      if (!isStatementLimit(error) && !isRetryable(error)) throw error;
+      logger.warn('oauth.grant_in_trouble', { at: 'authorize' });
+      return back.redirectTo === undefined
+        ? { outcome: 'not_redirectable', problem: 'temporarily_unavailable' }
+        : back.redirectTo('temporarily_unavailable', 'Agent X is busy; try again in a few seconds.');
+    }
+  };
+
   return {
-    async authorize(asked, cookie) {
-      const client = asked.client_id === undefined ? undefined : await clientOf(database, asked.client_id);
-      if (client === undefined) return { outcome: 'not_redirectable', problem: 'unknown_client' };
-      // OAuth 2.1 §4.1.1: one registered address may be left out; with more, the request must name one.
-      const [only] = client.redirectUris.length === 1 ? client.redirectUris : [];
-      const redirectUri = asked.redirect_uri ?? only;
-      if (redirectUri === undefined || !isRegisteredRedirect(client.redirectUris, redirectUri)) {
-        return { outcome: 'not_redirectable', problem: 'unregistered_redirect' };
-      }
-      // An empty state is no state (RFC 6749 §4.1.1 makes it optional): the column holds 1 to 512 characters.
-      const given = asked.state === '' ? undefined : asked.state;
-      const state = given !== undefined && given.length <= MOST_STATE ? given : null;
-      const refused = (error: string, description: string): AuthorizeAnswer => ({
-        outcome: 'refused',
-        redirectTo: backToClient(redirectUri, {
-          error,
-          error_description: description,
-          state,
-          iss: capabilities.issuer,
-        }),
-      });
-      const wrong = requestRefusal(asked, given !== undefined && state === null, capabilities.resource);
-      if (wrong !== undefined) return refused(...wrong);
-      // Checked just above: a challenge and scopes there are.
-      const challenge = asked.code_challenge ?? '';
-      const scopes = scopesAsked(asked.scope) ?? [];
-      const kept = cookie !== undefined && isFlowCookie(cookie) ? cookie : undefined;
-      const browser = kept ?? newFlowCookie();
-      const flowId = ids.next();
-      const opened = await openCodeFlow(database, {
-        id: flowId,
-        clientId: client.clientId,
-        redirectUri,
-        state,
-        codeChallenge: challenge,
-        scopesAsked: scopes,
-        resource: capabilities.resource,
-        browserHash: hashOf(browser),
-        createdAt: clock.now(),
-      });
-      if (opened === 'full') {
-        logger.warn('oauth.flows_capped', { most: MOST_OPEN_FLOWS });
-        return refused('temporarily_unavailable', 'Too many sign-ins are under way; try again in a few minutes.');
-      }
-      if (opened === 'browser_full') {
-        return refused(
-          'temporarily_unavailable',
-          'This browser has too many connections waiting; finish or wait for one.',
-        );
-      }
-      return { outcome: 'opened', flowId, cookie: browser };
+    authorize(asked, cookie) {
+      // Once the client's address is proven, a busy answer goes back to it; before, to our own page.
+      const back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer } = {};
+      return orBusy(back, () => authorized(asked, cookie, back));
     },
 
     async register(asked, correlationId) {
@@ -173,4 +157,62 @@ export function createOauthAuthorizing({
       return registered;
     },
   };
+
+  async function authorized(
+    asked: AuthorizeAsked,
+    cookie: string | undefined,
+    back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer },
+  ): Promise<AuthorizeAnswer> {
+    const client = asked.client_id === undefined ? undefined : await clientOf(database, asked.client_id);
+    if (client === undefined) return { outcome: 'not_redirectable', problem: 'unknown_client' };
+    // OAuth 2.1 §4.1.1: one registered address may be left out; with more, the request must name one.
+    const [only] = client.redirectUris.length === 1 ? client.redirectUris : [];
+    const redirectUri = asked.redirect_uri ?? only;
+    if (redirectUri === undefined || !isRegisteredRedirect(client.redirectUris, redirectUri)) {
+      return { outcome: 'not_redirectable', problem: 'unregistered_redirect' };
+    }
+    // An empty state is no state (RFC 6749 §4.1.1 makes it optional): the column holds 1 to 512 characters.
+    const given = asked.state === '' ? undefined : asked.state;
+    const state = given !== undefined && given.length <= MOST_STATE ? given : null;
+    const refused = (error: string, description: string): AuthorizeAnswer => ({
+      outcome: 'refused',
+      redirectTo: backToClient(redirectUri, {
+        error,
+        error_description: description,
+        state,
+        iss: capabilities.issuer,
+      }),
+    });
+    back.redirectTo = refused;
+    const wrong = requestRefusal(asked, given !== undefined && state === null, capabilities.resource);
+    if (wrong !== undefined) return refused(...wrong);
+    // Checked just above: a challenge and scopes there are.
+    const challenge = asked.code_challenge ?? '';
+    const scopes = scopesAsked(asked.scope) ?? [];
+    const kept = cookie !== undefined && isFlowCookie(cookie) ? cookie : undefined;
+    const browser = kept ?? newFlowCookie();
+    const flowId = ids.next();
+    const opened = await openCodeFlow(database, {
+      id: flowId,
+      clientId: client.clientId,
+      redirectUri,
+      state,
+      codeChallenge: challenge,
+      scopesAsked: scopes,
+      resource: capabilities.resource,
+      browserHash: hashOf(browser),
+      createdAt: clock.now(),
+    });
+    if (opened === 'full') {
+      flowsCapped();
+      return refused('temporarily_unavailable', 'Too many sign-ins are under way; try again in a few minutes.');
+    }
+    if (opened === 'browser_full') {
+      return refused(
+        'temporarily_unavailable',
+        'This browser has too many connections waiting; finish or wait for one.',
+      );
+    }
+    return { outcome: 'opened', flowId, cookie: browser };
+  }
 }

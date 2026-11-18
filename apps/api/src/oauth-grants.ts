@@ -46,8 +46,9 @@ import { type AuditActor, type AuditTables, type SignedStates, withSignedStates 
 import { type DirectoryTables, listedAgentKey } from '@agentx/core/modules/directory';
 import {
   clientConnected,
-  codeTaken,
-  codeUsedBefore,
+  codeHeld,
+  codeUsed,
+  flowOfCode,
   type FlowRead,
   hashOf,
   isCodeText,
@@ -234,9 +235,8 @@ export function createOauthGrants({
     });
 
   /** A code sent a second time: the connection it made is revoked, and the line says so. */
-  const codeReused = async (codeHash: string, caller: Caller): Promise<void> => {
-    const used = await codeUsedBefore(database, codeHash);
-    if (used === undefined || used.orgId === null || used.keyId === null) return;
+  const codeReused = async (used: FlowRead, caller: Caller): Promise<void> => {
+    if (used.orgId === null || used.keyId === null) return;
     const revoked = await revokeConnection(used.orgId, used.keyId, caller.correlationId, {
       actor: OAUTH_SERVER,
       reason: 'code_reused',
@@ -293,22 +293,28 @@ export function createOauthGrants({
       if (!isCodeText(asked.code)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
       const codeHash = hashOf(asked.code);
       const now = clock.now();
-      const flow = await codeTaken(database, codeHash, now);
-      if (flow === undefined) {
-        await codeReused(codeHash, caller);
-        return refusedFor(caller, 'code_unknown_or_used', { clientId: asked.clientId });
+      // Where its organisation is alone: the code is taken, and used, inside that organisation's transaction below.
+      const known = await flowOfCode(database, codeHash);
+      if (known === undefined || known.orgId === null || known.keyId === null) {
+        return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
       }
-      const refusal = codeRefusal(flow, asked, capabilities.resource, now);
-      const { orgId, keyId } = flow;
-      if (refusal !== undefined || orgId === null || keyId === null)
-        return codeSpent(flow, caller, refusal ?? 'not_allowed');
+      const { orgId, keyId } = known;
+      // One transaction from the code's use to its tokens (lead's re-review): a busy rolls the use back too, so the
+      // client's retry of the same code succeeds instead of reading as a stolen code.
       const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
+        const flow = await codeHeld(tx, codeHash);
+        if (flow === undefined) return { outcome: 'unknown' as const };
+        if (flow.usedAt !== null) return { outcome: 'reused' as const, flow };
+        // Used once this commits, whatever comes next: a code is tried once.
+        await codeUsed(tx, flow.id, now);
+        const refusal = codeRefusal(flow, asked, capabilities.resource, now);
+        if (refusal !== undefined) return { outcome: 'spent' as const, flow, reason: refusal };
         const checked = await credentialAt(tx, states, now, orgId, keyId, {
           prove: () => undefined,
           resource: capabilities.resource,
           clientId: flow.clientId,
         });
-        if (checked.outcome !== 'accepted') return checked;
+        if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, flow, reason: checked.reason };
         const tokens = await issueTokens(
           tx,
           { keys, ids },
@@ -317,7 +323,12 @@ export function createOauthGrants({
         await clientConnected(tx, flow.clientId, now);
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
-      if (answer.outcome === 'refused') return codeSpent(flow, caller, answer.reason);
+      if (answer.outcome === 'unknown') return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
+      if (answer.outcome === 'reused') {
+        await codeReused(answer.flow, caller);
+        return refusedFor(caller, 'code_used', { clientId: asked.clientId, flowId: answer.flow.id });
+      }
+      if (answer.outcome === 'spent') return codeSpent(answer.flow, caller, answer.reason);
       return answer;
     },
 

@@ -539,10 +539,39 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       const answer = await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
       if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
       expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
-      expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn' })]);
+      expect(lines('oauth.flows_capped')).toEqual([expect.objectContaining({ level: 'warn', refused: 1 })]);
+      // At most one line a minute, however many are refused, then one counting them.
+      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      expect(lines('oauth.flows_capped')).toHaveLength(1);
+      clock.advanceBy(60_000);
+      await authorizing.authorize({ ...asked, client_id: clientId }, newFlowCookie());
+      expect(lines('oauth.flows_capped')).toEqual([
+        expect.objectContaining({ refused: 1 }),
+        expect.objectContaining({ refused: 2 }),
+      ]);
     } finally {
       await admin.query("delete from oauth.flows where client_id = 'filler'");
     }
+  });
+
+  it('answers busy back to the client, never a failure, when the flow’s transaction hits a limit', async () => {
+    const failing = new Proxy(app, {
+      get: (target, name) => {
+        if (name === 'transaction') {
+          return () => {
+            throw Object.assign(new Error('forced'), { code: '57014' });
+          };
+        }
+        const value = Reflect.get(target, name) as unknown;
+        // Kysely's own private fields want the real object as `this`.
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const busy = createOauthAuthorizing({ database: failing, clock, ids, logger: testLogger(capture), capabilities });
+    const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined);
+    if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
+    expect(new URL(answer.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
+    expect(new URL(answer.redirectTo).searchParams.get('iss')).toBe(capabilities.issuer);
   });
 
   it('refuses a state too long, sending none back', async () => {
@@ -611,6 +640,46 @@ describe(`SEC-OAUTH-02, -04 the code exchanged once (Postgres ${server.version})
     expect(await exchange(code)).toMatchObject({ error: 'invalid_grant' });
     expect(lines('oauth.code_reused')).toEqual([expect.objectContaining({ revoked: false })]);
   });
+
+  it.each(['57014', '40P01'])(
+    'lets the client send the same code again after a busy (%s) inside the exchange: no stolen code',
+    async (code) => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const agentId = await agent(org, admin);
+      const sent = codeOf(await allowed(admin, await opened(), { agentId, scopes: ['requests:read'] }));
+      // The tokens' MAC fails once, after the code was marked used inside the same transaction.
+      let failed = false;
+      const flaky: typeof keys = {
+        ...keys,
+        mac: (...args: Parameters<typeof keys.mac>) => {
+          if (!failed) {
+            failed = true;
+            throw Object.assign(new Error('forced'), { code });
+          }
+          return keys.mac(...args);
+        },
+      };
+      const once = createOauthGrants({
+        database: app,
+        keys: flaky,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        capabilities,
+        securityEvents: { note: () => undefined },
+      });
+      const exchanging = { code: sent, clientId, redirectUri: REDIRECT, codeVerifier: VERIFIER, resource: undefined };
+      expect(await once.exchangeCode(exchanging, CALLER)).toMatchObject({
+        status: 503,
+        error: 'temporarily_unavailable',
+      });
+      const retried = issued(await once.exchangeCode(exchanging, CALLER));
+      expect(await accepted(retried.accessToken)).toMatchObject({ outcome: 'accepted' });
+      expect(lines('oauth.code_reused')).toEqual([]);
+      expect(lines('oauth.grant_in_trouble')).toHaveLength(1);
+    },
+  );
 
   it('revokes the connection when its code is sent again: someone else holds it', async () => {
     const org = await organization();

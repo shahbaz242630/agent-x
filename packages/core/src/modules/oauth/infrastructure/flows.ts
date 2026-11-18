@@ -12,7 +12,7 @@
 //   statement, only where none was, so two exchanges at once can't both have
 //   it; the second finds it used (codeUsedBefore), and its connection is
 //   revoked by the API.
-import { holdTransactionLock, limitStatements } from '@agentx/platform/db';
+import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
@@ -68,13 +68,13 @@ export type FlowOpened = 'opened' | 'full' | 'browser_full';
 
 /**
  * Opens the flow, for FLOW_SECONDS from its creation, unless MOST_OPEN_FLOWS have not ended, or this browser holds
- * MOST_OPEN_FLOWS_A_BROWSER open and undecided: both counted under the flows' one lock, in a transaction of its own
- * whose statements are limited to 10 seconds, each count stopping at its cap (the ends index, the browser index).
+ * MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a transaction of its own whose statements are limited to 10
+ * seconds, each count stopping at its cap (the ends index, the browser index). Best effort, with no lock (lead's
+ * re-review: one would make every authorize wait its turn): flows opened at once may pass a cap by a few rows.
  */
 export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>): Promise<FlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    await holdTransactionLock(tx, 'oauth_flows');
     const open = await tx
       .selectFrom((inner) =>
         inner
@@ -200,32 +200,34 @@ export async function flowDecided(db: Handle, id: string, decision: FlowDecision
   return row !== undefined;
 }
 
-/**
- * Uses the code whose hash this is, once: the flow it was given in, if this call is the one that used it, whether or
- * not it is still in time (the caller judges that); undefined if no flow has it, or it was used before.
- */
-export async function codeTaken(db: Database, codeHash: string, now: Date): Promise<FlowRead | undefined> {
+/** The flow a code was given in, read unlocked, used or not: where its organisation is, never a decision. */
+export async function flowOfCode(db: Database, codeHash: string): Promise<FlowRead | undefined> {
   return flowOf(
-    await db
-      .updateTable('oauth.flows')
-      .set({ used_at: now })
-      .where('code_hash', '=', codeHash)
-      .where('used_at', 'is', null)
-      .returning(COLUMNS)
-      .executeTakeFirst(),
+    await db.selectFrom('oauth.flows').select(COLUMNS).where('code_hash', '=', codeHash).executeTakeFirst(),
   );
 }
 
-/** The flow whose code this is, if it was used before: a second use, whose connection is then revoked. */
-export async function codeUsedBefore(db: Database, codeHash: string): Promise<FlowRead | undefined> {
+/**
+ * The flow a code was given in, locked for its use in the caller's transaction (its organisation's, which then issues
+ * the tokens), so a second exchange of the same code waits and finds it used: undefined if no flow has it.
+ */
+export async function codeHeld(db: Handle, codeHash: string): Promise<FlowRead | undefined> {
   return flowOf(
-    await db
-      .selectFrom('oauth.flows')
-      .select(COLUMNS)
-      .where('code_hash', '=', codeHash)
-      .where('used_at', 'is not', null)
-      .executeTakeFirst(),
+    await db.selectFrom('oauth.flows').select(COLUMNS).where('code_hash', '=', codeHash).forUpdate().executeTakeFirst(),
   );
+}
+
+/**
+ * Marks the held code used, in the same transaction: kept only if that transaction commits, so a busy that rolls the
+ * exchange back leaves the code to be sent again.
+ */
+export async function codeUsed(db: Handle, flowId: string, now: Date): Promise<void> {
+  await db
+    .updateTable('oauth.flows')
+    .set({ used_at: now })
+    .where('id', '=', flowId)
+    .where('used_at', 'is', null)
+    .execute();
 }
 
 /**

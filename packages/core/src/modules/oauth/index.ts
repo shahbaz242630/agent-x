@@ -34,8 +34,9 @@ export {
 export {
   CODE_SECONDS,
   type CodeFlow,
-  codeTaken,
-  codeUsedBefore,
+  codeHeld,
+  codeUsed,
+  flowOfCode,
   FLOW_SECONDS,
   flowById,
   type FlowOpened,
