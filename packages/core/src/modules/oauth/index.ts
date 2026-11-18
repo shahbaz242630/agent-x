@@ -24,8 +24,9 @@ export {
 } from './infrastructure/scopes.ts';
 export {
   type Client,
-  clientConnected,
+  CLIENT_KEPT_DAYS,
   clientOf,
+  clientSeen,
   MOST_REGISTRATIONS_A_DAY,
   type Registered,
   registerClient,

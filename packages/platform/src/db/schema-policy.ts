@@ -475,10 +475,11 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'software_version',
         'created_at',
         'first_connected_at',
+        'last_connected_at',
       ],
-      // Registered, read, and swept once unused; changed only to note its first connection, never its addresses.
+      // Registered, read, and swept once unused; changed only to note when it connects (0094), never its addresses.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['first_connected_at'],
+      appMayUpdate: ['first_connected_at', 'last_connected_at'],
     },
     'oauth.flows': {
       reason:

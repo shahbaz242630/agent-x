@@ -234,6 +234,7 @@
   {"table":"oauth.clients","name":"clients_software_id_check","expression":"((char_length(software_id) >= 1) AND (char_length(software_id) <= 255))"},
   {"table":"oauth.clients","name":"clients_software_version_check","expression":"((char_length(software_version) >= 1) AND (char_length(software_version) <= 255))"},
   {"table":"oauth.clients","name":"connected_after_it_registered","expression":"((first_connected_at IS NULL) OR (first_connected_at >= created_at))"},
+  {"table":"oauth.clients","name":"last_connected_after_the_first","expression":"((last_connected_at IS NULL) OR ((first_connected_at IS NOT NULL) AND (last_connected_at >= first_connected_at)))"},
   {"table":"oauth.flows","name":"a_code_flow_is_a_browser","expression":"((kind <> 'code'::text) OR ((redirect_uri IS NOT NULL) AND (code_challenge IS NOT NULL) AND (browser_hash IS NOT NULL) AND (device_hash IS NULL) AND (user_code_hash IS NULL) AND (interval_s IS NULL) AND (polled_at IS NULL)))"},
   {"table":"oauth.flows","name":"a_code_with_its_end","expression":"((code_hash IS NULL) = (code_ends_at IS NULL))"},
   {"table":"oauth.flows","name":"a_device_flow_is_a_device","expression":"((kind <> 'device'::text) OR ((redirect_uri IS NULL) AND (code_challenge IS NULL) AND (browser_hash IS NULL) AND (state IS NULL) AND (device_hash IS NOT NULL) AND (user_code_hash IS NOT NULL) AND (interval_s IS NOT NULL) AND (code_hash IS NULL)))"},

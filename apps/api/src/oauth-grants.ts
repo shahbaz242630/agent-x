@@ -45,7 +45,7 @@ import {
 import { type AuditActor, type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedAgentKey } from '@agentx/core/modules/directory';
 import {
-  clientConnected,
+  clientSeen,
   codeHeld,
   codeUsed,
   flowOfCode,
@@ -315,12 +315,19 @@ export function createOauthGrants({
           clientId: flow.clientId,
         });
         if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, flow, reason: checked.reason };
+        // The client's connection noted on the pair's own trip (0094): the sweep keeps a client in use.
         const tokens = await issueTokens(
           tx,
           { keys, ids },
-          { orgId, keyId, scopes: checked.key.scopes, now, keyExpiresAt: checked.key.expiresAt },
+          {
+            orgId,
+            keyId,
+            scopes: checked.key.scopes,
+            now,
+            keyExpiresAt: checked.key.expiresAt,
+            alongside: clientSeen(tx, flow.clientId, now),
+          },
         );
-        await clientConnected(tx, flow.clientId, now);
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'unknown') return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
@@ -382,6 +389,8 @@ export function createOauthGrants({
             now,
             keyExpiresAt: checked.key.expiresAt,
             parentId: presented.tokenId,
+            // The connection's own client (credentialAt held it to the connection's): noted on the pair's trip.
+            alongside: clientSeen(tx, asked.clientId, now),
           },
         );
         return { outcome: 'issued' as const, tokens, agent: checked.key };

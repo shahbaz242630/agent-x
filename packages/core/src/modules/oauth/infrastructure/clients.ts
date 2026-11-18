@@ -3,11 +3,13 @@
 // grants nothing: a connection is made only by a person's consent. So it is
 // held only against filling the table: a day's cap for the whole server,
 // counted under one lock (and each address's own limit, in the API), and a
-// client that never connects is swept a day after it registered.
+// client that never connects is swept a day after it registered; one that
+// did, 90 days after it last connected (0094, 6E3b), when no connection of
+// its can be refreshed any more.
 import { holdTransactionLock, limitStatements } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
-import { DAY_MS } from '../../../shared-kernel/index.ts';
+import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import type { ClientRegistration, GrantType } from './client-metadata.ts';
 import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
@@ -82,34 +84,40 @@ export async function clientOf(
   };
 }
 
-/** Notes the client's first connection, in the caller's transaction: from then on it is never swept as unused. */
-export async function clientConnected(
-  db: Kysely<OauthTables> | Transaction<OauthTables>,
-  clientId: string,
-  now: Date,
-): Promise<void> {
-  await db
-    .updateTable('oauth.clients')
-    .set({ first_connected_at: now })
-    .where('client_id', '=', clientId)
-    .where('first_connected_at', 'is', null)
-    .execute();
-}
+/** How long after its last connection a client is swept: past a refresh token's 30 idle days and a connection's 90. */
+export const CLIENT_KEPT_DAYS = 90;
 
 /**
- * Deletes up to `most` clients that registered more than a day before `now` and never connected, and says how many,
- * in a transaction of its own whose statement is limited to 10 seconds.
+ * The statement noting that the client connected at `now` (a code or a refresh issued tokens), for the caller to send
+ * in its own transaction on the trip that issues them: it changes the row only when its last connection is an hour old
+ * or more, or it has none, so a busy client's row is written at most once an hour; its first connection is kept.
+ */
+export function clientSeen(db: Kysely<OauthTables> | Transaction<OauthTables>, clientId: string, now: Date) {
+  return db
+    .updateTable('oauth.clients')
+    .set({ first_connected_at: sql<Date>`coalesce(first_connected_at, ${now})`, last_connected_at: now })
+    .where('client_id', '=', clientId)
+    .where((eb) =>
+      eb.or([eb('last_connected_at', 'is', null), eb('last_connected_at', '<=', new Date(now.getTime() - HOUR_MS))]),
+    );
+}
+
+/** The clients unused at `now`: registered a day ago and never connected, or last connected CLIENT_KEPT_DAYS ago. */
+const clientUnused = (now: Date) => (eb: ExpressionBuilder<OauthTables, 'oauth.clients'>) =>
+  eb.or([
+    eb.and([eb('last_connected_at', 'is', null), eb('created_at', '<=', new Date(now.getTime() - DAY_MS))]),
+    eb('last_connected_at', '<=', new Date(now.getTime() - CLIENT_KEPT_DAYS * DAY_MS)),
+  ]);
+
+/**
+ * Deletes up to `most` clients unused at `now` (clientUnused), and says how many, in a transaction of its own whose
+ * statement is limited to 10 seconds.
  */
 export async function sweepClients(db: Kysely<OauthTables>, now: Date, most: number): Promise<number> {
   if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one client at a time');
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    const unused = tx
-      .selectFrom('oauth.clients')
-      .select('client_id')
-      .where('first_connected_at', 'is', null)
-      .where('created_at', '<=', new Date(now.getTime() - DAY_MS))
-      .limit(most);
+    const unused = tx.selectFrom('oauth.clients').select('client_id').where(clientUnused(now)).limit(most);
     const rows = await tx.deleteFrom('oauth.clients').where('client_id', 'in', unused).returning('client_id').execute();
     return rows.length;
   });
