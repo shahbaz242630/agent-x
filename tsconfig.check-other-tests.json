@@ -11,6 +11,6 @@
     "apps/migrate/src/**/*.test.ts",
     "apps/operator/src/**/*.test.ts"
   ],
-  "files": ["tooling/test-db/global-setup.ts", "packages/platform/src/db/kysely-variance.d.ts"],
+  "files": ["tooling/test-db/global-setup.ts"],
   "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
 }

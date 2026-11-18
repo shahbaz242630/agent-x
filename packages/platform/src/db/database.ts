@@ -6,6 +6,8 @@ import { Kysely, sql, type Transaction } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import { asNoWork, type Logger } from '../observability/index.ts';
+// Kysely's handles covariant in their tables (CQ8): imported for its types only, so every program using this module gets it.
+import type {} from './kysely-variance.d.ts';
 import { PINNED_SEARCH_PATH } from './search-path.ts';
 import { refuseTenantPreset, tenantCheckedDialect } from './tenant.ts';
 
