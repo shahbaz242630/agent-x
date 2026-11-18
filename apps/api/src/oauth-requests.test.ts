@@ -5,7 +5,7 @@
 // does in the database is oauth-connections.db.test.ts. 6E3c: a device's
 // request found by its user code, five tries a minute a person, and shown and
 // decided as a browser's with no address to go back to.
-import type { MembershipCheck } from '@agentx/core/modules/identity';
+import type { MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -48,6 +48,7 @@ async function consentServer(
   write: ConsentWrite,
   shown: RequestShown | null = SHOWN,
   found: LookupAnswer = { outcome: 'claimed', requestId: FLOW, cookie: BROWSER },
+  signIn?: Parameters<typeof routeServer>[0]['signIn'],
 ) {
   const calls: unknown[] = [];
   const device: OauthDevice = {
@@ -79,6 +80,7 @@ async function consentServer(
     oauthOn: true,
     live: LIVE,
     member: ADMIN,
+    ...(signIn === undefined ? {} : { signIn }),
     oauth: {
       authorizing: {
         authorize: () => Promise.reject(new Error('no')),
@@ -240,6 +242,38 @@ describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
     const answers: number[] = [];
     for (let typed = 0; typed < 6; typed += 1) answers.push((await app.inject(lookup('BCDF-GHJK'))).statusCode);
     expect(answers).toEqual([404, 404, 404, 404, 404, 429]);
+  });
+
+  it('mutation W2: holds each person to their own 5: another person’s first try is still looked up', async () => {
+    const OTHER_COOKIE = 'T'.repeat(43);
+    const other = {
+      ...LIVE,
+      userId: '0199a0f0-0000-7000-8000-0000000e3b99',
+      sessionId: '0199a0f0-0000-7000-8000-0000000e3b98',
+    };
+    const twoPeople: SignIn = {
+      begin: () => Promise.reject(new Error('no')),
+      beginStepUp: () => Promise.reject(new Error('no')),
+      complete: () => Promise.reject(new Error('no')),
+      signOut: () => Promise.resolve(undefined),
+      holderOf: (cookie) =>
+        Promise.resolve(cookie === COOKIE ? LIVE.userId : cookie === OTHER_COOKIE ? other.userId : undefined),
+      signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : cookie === OTHER_COOKIE ? other : undefined),
+    };
+    const { app } = await consentServer(
+      { outcome: 'conflict' },
+      SHOWN,
+      { outcome: 'not_found' },
+      {
+        service: twoPeople,
+        sessionSeconds: 43_200,
+      },
+    );
+    const answers: number[] = [];
+    for (let typed = 0; typed < 6; typed += 1) answers.push((await app.inject(lookup('BCDF-GHJK'))).statusCode);
+    expect(answers.at(-1)).toBe(429);
+    const theirs = await app.inject(lookup('BCDF-GHJK', `${SESSION_COOKIE}=${OTHER_COOKIE}`));
+    expect(theirs.statusCode).toBe(404);
   });
 
   it('is a person’s: signed out, refused before any lookup', async () => {

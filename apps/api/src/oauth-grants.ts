@@ -351,15 +351,11 @@ export function createOauthGrants({
   const deviceWaiting = async (known: DeviceFlowRead, caller: Caller, now: Date): Promise<GrantAnswer | undefined> => {
     if (known.decided === 'denied') return DEVICE_WAITING.denied;
     if (known.usedAt !== null) return refusedFor(caller, 'device_used', { clientId: known.clientId, flowId: known.id });
-    if (known.endsAt.getTime() <= now.getTime()) {
-      // Allowed but never collected: its connection can never work, so it goes (as a code spent unused does).
-      if (known.decided === 'allowed') await codeSpent(known, caller, 'device_expired');
-      return DEVICE_WAITING.expired;
-    }
-    if (known.decided === null) {
-      return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
-    }
-    return undefined;
+    if (known.decided !== null) return undefined;
+    // Undecided: ended, or still waiting. An allowed flow's end is decided only with its row held (below), so a pair
+    // already collected is never taken for one left unused.
+    if (known.endsAt.getTime() <= now.getTime()) return DEVICE_WAITING.expired;
+    return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
   };
 
   const grants = {
@@ -433,7 +429,9 @@ export function createOauthGrants({
       const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
         const flow = await deviceHeld(tx, known.id);
         if (flow?.usedAt !== null) return { outcome: 'used' as const };
+        // Used once this commits, whatever comes next: an allowed flow past its end is spent, never collected.
         await codeUsed(tx, flow.id, now);
+        if (flow.endsAt.getTime() <= now.getTime()) return { outcome: 'expired' as const };
         const checked = await credentialAt(tx, states, now, orgId, keyId, {
           prove: () => undefined,
           resource: capabilities.resource,
@@ -455,6 +453,11 @@ export function createOauthGrants({
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'used') return refusedFor(caller, 'device_used', { clientId: known.clientId });
+      if (answer.outcome === 'expired') {
+        // Allowed but never collected, and now never can be: its connection goes (as a code spent unused does).
+        await codeSpent(known, caller, 'device_expired');
+        return DEVICE_WAITING.expired;
+      }
       if (answer.outcome === 'spent') return codeSpent(known, caller, answer.reason);
       return answer;
     },

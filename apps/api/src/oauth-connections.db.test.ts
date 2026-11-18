@@ -39,9 +39,11 @@ import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   challengeOf,
   DEVICE_CODE_GRANT,
+  deviceFlowOfCode,
   flowById,
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_BROWSER,
+  keepClientMetadata,
   newFlowCookie,
   type OauthTables,
   sweepClients,
@@ -62,7 +64,7 @@ import {
   waitUntilBlocked,
   waitUntilQueued,
 } from '@agentx/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { createAgentChanges, HAND_OVER_CONFIRM_OPERATION, HAND_OVER_OPERATION } from './agent-changes.ts';
 import { createAgentKeyChanges, REVOKE_OPERATION, ROTATE_OPERATION } from './agent-key-changes.ts';
@@ -1646,6 +1648,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     return { flowId: found.requestId, cookie: found.cookie };
   }
 
+  const flowOfDevice = async (deviceCode: string) =>
+    (await deviceFlowOfCode(app, createHash('sha256').update(deviceCode, 'utf8').digest('hex')))?.id;
+
   const poll = (deviceCode: string, client = clientId) =>
     grants.exchangeDevice({ deviceCode, clientId: client }, CALLER);
   const errorOf = (answer: GrantAnswer) => (answer.outcome === 'refused' ? answer.error : answer.outcome);
@@ -1763,6 +1768,91 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
       connections: [{ keyId: write.connection.keyId, status: 'REVOKED' }],
     });
+  });
+
+  /** A device allowed as `agentId` by an admin of `org`: its codes, and the connection made. */
+  async function deviceAllowed(org: string, admin: Member, agentId: string) {
+    const given = await codes();
+    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    return { given, keyId: write.connection.keyId };
+  }
+
+  it('mutation R3: a device code polled again after its 15 minutes, once collected, is invalid_grant and revokes nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    const tokens = issued(await poll(given.deviceCode));
+    clock.advanceBy(15 * 60_000);
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'device_used' });
+    expect(await accepted(tokens.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId, status: 'ACTIVE' }],
+    });
+  });
+
+  it('mutation R7: a poll queued behind the pair’s own issue finds the flow used, and no second pair is issued', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    const flowId = (await flowOfDevice(given.deviceCode)) ?? '';
+    // Another poll's transaction part-way: the flow's row locked, its use not yet filled in.
+    const inside = await holding(async (held) => {
+      await held.query('select id from oauth.flows where id = $1 for update', [flowId]);
+    });
+    const polling = poll(given.deviceCode);
+    await waitUntilQueued(database.as('admin'), 1);
+    await inside.query('update oauth.flows set used_at = now() where id = $1', [flowId]);
+    await inside.query('commit');
+    await inside.end();
+    expect(errorOf(await polling)).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'device_used' });
+    const rows = await database
+      .as('admin')
+      .query<{ tokens: number }>('select count(*)::int as tokens from agents.connection_tokens where key_id = $1', [
+        keyId,
+      ]);
+    expect(rows[0]?.tokens).toBe(0);
+  });
+
+  it('mutation R8: a device whose agent was suspended after the consent is refused at its poll, its connection revoked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const { given, keyId } = await deviceAllowed(org, admin, agentId);
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: org, id: agentId }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspend',
+        details: {},
+      }),
+    );
+    expect(errorOf(await poll(given.deviceCode))).toBe('invalid_grant');
+    expect(lines('oauth.grant_refused').at(-1)).toMatchObject({ reason: 'agent_suspended' });
+    const revokedBy = await database.as('admin').query<{ actor: string }>(
+      `select actor_type || ':' || actor_id as actor from audit.events
+         where org_id = $1 and action = 'agent_key.revoked' order by seq desc limit 1`,
+      [org],
+    );
+    expect(revokedBy.map(({ actor }) => actor)).toEqual(['system:oauth-server']);
+    expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
+      connections: [{ keyId, status: 'REVOKED' }],
+    });
+  });
+
+  it('mutation V4: a lookup with no cookie gets one; the same browser finds it again; another browser never', async () => {
+    const given = await codes();
+    const first = await deviceOf().lookup(given.userCode, undefined);
+    if (first.outcome !== 'claimed') throw new Error('not claimed');
+    expect(await deviceOf().lookup(given.userCode, first.cookie)).toEqual({
+      outcome: 'claimed',
+      requestId: first.requestId,
+      cookie: first.cookie,
+    });
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
   });
 
   it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
@@ -1917,12 +2007,16 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
   it('shares one fetch among requests at once for a client not kept', async () => {
     const answer = Promise.withResolvers<undefined>();
     const fetched: string[] = [];
+    let listedCalls = 0;
     const clients = createOauthClients({
       database: app,
       clock,
       logger: testLogger(capture),
       metadata: {
-        listed: () => true,
+        listed: () => {
+          listedCalls += 1;
+          return true;
+        },
         fetch: async (id) => {
           fetched.push(id);
           await answer.promise;
@@ -1932,11 +2026,40 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     });
     const id = 'https://claude.ai/oauth/shared';
     const both = Promise.all([clients.find(id), clients.find(id)]);
+    // Both past their own reads (two listings each) before the fetch answers: the second shares the first's.
+    await vi.waitFor(() => {
+      expect(listedCalls).toBe(4);
+    });
     answer.resolve(undefined);
     const [one, other] = await both;
     expect(one).toEqual(other);
     expect(one).toMatchObject({ clientId: id, verifiedBy: 'claude.ai' });
     expect(fetched).toEqual([id]);
+  });
+
+  it('mutation K4: a document kept for an origin no longer listed names no client, and nothing is fetched', async () => {
+    const id = 'https://claude.ai/oauth/delisted';
+    await keepClientMetadata(
+      app,
+      { clientId: id, name: 'Old', redirectUris: [CLAUDE_BACK], grantTypes: ['authorization_code'] },
+      clock.now(),
+    );
+    const fetched: string[] = [];
+    const clients = createOauthClients({
+      database: app,
+      clock,
+      logger: testLogger(capture),
+      metadata: {
+        listed: () => false,
+        fetch: (one) => {
+          fetched.push(one);
+          return Promise.resolve({ outcome: 'refused', reason: 'status' });
+        },
+      },
+    });
+    expect(await clients.find(id)).toBeUndefined();
+    expect(await clients.kept(app, id)).toBeUndefined();
+    expect(fetched).toEqual([]);
   });
 });
 

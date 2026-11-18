@@ -213,6 +213,12 @@ describe('a device’s codes (6E3c, RFC 8628 §3.2, §6.1)', () => {
     const drawn = Array.from({ length: 200 }, newUserCode);
     for (const code of drawn) expect(code).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
     expect(new Set(drawn).size).toBeGreaterThan(195);
+    expect(isDeviceCodeText('axd_short')).toBe(false);
+  });
+
+  it('mutation U1: draws every one of the 20 letters', () => {
+    const letters = new Set(Array.from({ length: 2000 }, newUserCode).join('').replaceAll('-', ''));
+    expect([...letters].sort().join('')).toBe('BCDFGHJKLMNPQRSTVWXZ');
   });
 
   it('reads a user code as typed: any case, its dash or spaces, and nothing that can be no code', () => {

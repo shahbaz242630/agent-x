@@ -76,7 +76,18 @@ describe('SEC-OAUTH-09 a client metadata document’s fetch', () => {
       () => new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } }),
       'status',
     ],
+    [
+      'a 203, though JSON',
+      () => new Response('{}', { status: 203, headers: { 'content-type': 'application/json' } }),
+      'status',
+    ],
     ['HTML', () => new Response('<html>', { status: 200, headers: { 'content-type': 'text/html' } }), 'content_type'],
+    ['text/json', () => new Response('{}', { status: 200, headers: { 'content-type': 'text/json' } }), 'content_type'],
+    [
+      'another JSON type',
+      () => new Response('{}', { status: 200, headers: { 'content-type': 'application/jwk-set+json' } }),
+      'content_type',
+    ],
     ['no type', () => new Response('{}', { status: 200, headers: { 'content-type': '' } }), 'content_type'],
     ['text that is no JSON', () => json('{"client_id":'), 'not_json'],
     ['a body past 16 KB', () => json(`"${'x'.repeat(MOST_DOCUMENT_BYTES)}"`), 'too_large'],
