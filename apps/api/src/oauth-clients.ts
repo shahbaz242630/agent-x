@@ -11,11 +11,20 @@
 // it is never shown as verified (connection-consents.ts).
 //
 // The fetches are held so that varying the address can't make Agent X fetch
-// without end from an allowed host: a refused document is not fetched again
-// for 5 minutes, and each origin is fetched at most 20 times a minute by
-// this copy of the API.
+// without end from an allowed host, and so that no one can lock a real
+// client out (6E3c reviews):
+// - An address never yet valid is fetched at most 20 times a minute an
+//   origin by this copy of the API, and one whose document was refused for
+//   what it says (not JSON, too large, another client's ID, bad addresses,
+//   a secret, grant types) is not fetched again for 5 minutes.
+// - An address once valid (its document kept, or seen valid by this copy) is
+//   never held by that cap. If its document can't be fetched again for a
+//   reason of the network or the site (a status, a refusal, a timeout), the
+//   document kept stands in, stale, for up to 7 days past its day, and the
+//   fetch is tried again a minute later.
 import {
   checkClientMetadataDocument,
+  type ClientMetadataDocument,
   clientOf,
   type GrantType,
   keepClientMetadata,
@@ -41,28 +50,49 @@ interface KnownClient {
 }
 
 export interface OauthClients {
-  /** The client this ID names, its document fetched if none is kept; undefined for none, or one refused. */
+  /** The client this ID names, its document fetched if none is kept fresh; undefined for none, or one refused. */
   find(clientId: string): Promise<KnownClient | undefined>;
-  /** The client as kept, in the caller's transaction, never fetched: for a flow already shown to its person. */
+  /** The client as kept, fresh or stale, in the caller's transaction, never fetched: for a flow already shown. */
   kept(
     db: Database<OauthTables> | DatabaseTransaction<OauthTables>,
     clientId: string,
   ): Promise<KnownClient | undefined>;
 }
 
-/** How long a refused document is not fetched again. */
+/** How long a document refused for what it says is not fetched again. */
 export const REFUSED_FOR_MS = 5 * 60_000;
 
-/** The most fetches of one origin's documents a minute, by one copy of the API. */
+/** The most fetches of one origin's never-valid addresses a minute, by one copy of the API. */
 export const MOST_FETCHES_A_MINUTE = 20;
 
 const MINUTE_MS = 60_000;
 
-/** The most refused client IDs remembered: past it, the oldest is forgotten (and may be fetched again). */
+/** How long after a once-valid document's fetch failed it is tried again, the stale one standing in meanwhile. */
+const RETRY_STALE_MS = MINUTE_MS;
+
+/** The most client IDs each memory below holds: past it, the oldest is forgotten. */
 const MOST_REMEMBERED = 10_000;
+
+/** Refusals of the network or the site, never of the document: never cached, and a stale document stands in. */
+const PASSING: ReadonlySet<string> = new Set(['refused', 'status', 'timeout', 'unreadable']);
 
 /** The host a document's client ID names, which vouches for it. */
 const hostOf = (clientId: string): string => new URL(clientId).host;
+
+const fromDocument = (document: ClientMetadataDocument): KnownClient => ({
+  ...document,
+  verifiedBy: hostOf(document.clientId),
+});
+
+/** Remembers `key` until `value`, the oldest forgotten past MOST_REMEMBERED. */
+function remember<V>(memory: Map<string, V>, key: string, value: V): void {
+  memory.delete(key);
+  memory.set(key, value);
+  if (memory.size > MOST_REMEMBERED) {
+    const [oldest] = memory.keys();
+    if (oldest !== undefined) memory.delete(oldest);
+  }
+}
 
 export function createOauthClients({
   database,
@@ -78,9 +108,11 @@ export function createOauthClients({
 }): OauthClients {
   /** The fetches under way, by client ID: requests at once for a client not kept share one fetch. */
   const fetching = new Map<string, Promise<KnownClient | undefined>>();
-  /** Client IDs whose document was refused, and until when it isn't fetched again (oldest first). */
+  /** Client IDs whose document was refused for what it says, and until when it isn't fetched again. */
   const refused = new Map<string, number>();
-  /** Each origin's fetches this minute: when its minute began, and how many. */
+  /** Client IDs whose document came back valid here (beside those kept), and when a failed refetch may try again. */
+  const onceValid = new Map<string, number>();
+  /** Each origin's fetches of never-valid addresses this minute: when its minute began, and how many. */
   const fetchesOf = new Map<string, { readonly since: number; count: number }>();
 
   /** Whether the origin may be fetched once more now; the line, once a minute an origin, when it may not. */
@@ -97,50 +129,67 @@ export function createOauthClients({
     return counted.count <= MOST_FETCHES_A_MINUTE;
   };
 
-  const refuse = (clientId: string, now: number): void => {
-    refused.delete(clientId);
-    refused.set(clientId, now + REFUSED_FOR_MS);
-    if (refused.size > MOST_REMEMBERED) {
-      const [oldest] = refused.keys();
-      if (oldest !== undefined) refused.delete(oldest);
-    }
-  };
-
   const kept: OauthClients['kept'] = async (db, clientId) => {
     if (metadata?.listed(clientId) === true) {
       const document = await keptClientMetadata(db, clientId, clock.now());
-      return document === undefined ? undefined : { ...document, verifiedBy: hostOf(clientId) };
+      return document === undefined ? undefined : fromDocument(document.document);
     }
     const client = await clientOf(db, clientId);
     return client === undefined ? undefined : { ...client, verifiedBy: null };
   };
 
-  /** The document fetched, checked and kept for a day; undefined, and the line saying why, for one refused. */
-  const fetched = async (fetch: ClientMetadataFetch, clientId: string): Promise<KnownClient | undefined> => {
+  /**
+   * The document fetched, checked and kept for a day; else `stale`, the one kept, where the refusal is the network's
+   * or the site's; else undefined. Each refusal says why on its line.
+   */
+  const fetched = async (
+    fetch: ClientMetadataFetch,
+    clientId: string,
+    stale: ClientMetadataDocument | undefined,
+  ): Promise<KnownClient | undefined> => {
     const answer = await fetch.fetch(clientId);
     const checked = answer.outcome === 'fetched' ? checkClientMetadataDocument(clientId, answer.document) : answer;
-    if (checked.outcome !== 'valid') {
-      refuse(clientId, clock.now().getTime());
-      // The origin alone: the rest of the address is the client's to choose, and says nothing more.
-      logger.warn('oauth.client_metadata_refused', { origin: new URL(clientId).origin, reason: checked.reason });
+    const now = clock.now().getTime();
+    if (checked.outcome === 'valid') {
+      await keepClientMetadata(database, checked.document, clock.now());
+      remember(onceValid, clientId, 0);
+      return fromDocument(checked.document);
+    }
+    // The origin alone: the rest of the address is the client's to choose, and says nothing more.
+    const origin = new URL(clientId).origin;
+    logger.warn('oauth.client_metadata_refused', { origin, reason: checked.reason });
+    if (!PASSING.has(checked.reason)) {
+      remember(refused, clientId, now + REFUSED_FOR_MS);
       return undefined;
     }
-    await keepClientMetadata(database, checked.document, clock.now());
-    return { ...checked.document, verifiedBy: hostOf(clientId) };
+    if (stale === undefined) return undefined;
+    remember(onceValid, clientId, now + RETRY_STALE_MS);
+    logger.warn('oauth.client_metadata_stale', { origin, reason: checked.reason });
+    return fromDocument(stale);
   };
 
   return {
     kept,
     async find(clientId) {
-      const known = await kept(database, clientId);
       // Anything but a listed address is never fetched (SEC-OAUTH-09): an unknown client, as a mistyped `axcl_` is.
-      if (known !== undefined || metadata?.listed(clientId) !== true) return known;
+      if (metadata?.listed(clientId) !== true) return kept(database, clientId);
+      const now = clock.now();
+      const keptNow = await keptClientMetadata(database, clientId, now);
+      if (keptNow?.fresh === true) return fromDocument(keptNow.document);
       const under = fetching.get(clientId);
       if (under !== undefined) return under;
-      const now = clock.now().getTime();
-      if ((refused.get(clientId) ?? 0) > now) return undefined;
-      if (!roomToFetch(new URL(clientId).origin, now)) return undefined;
-      const fetch = fetched(metadata, clientId).finally(() => fetching.delete(clientId));
+      const stale = keptNow?.document;
+      const retryAt = onceValid.get(clientId);
+      if (stale !== undefined || retryAt !== undefined) {
+        // Once valid: never held by the cap, only by its own minute after a failed refetch, the stale one standing in.
+        if (stale !== undefined && retryAt !== undefined && retryAt > now.getTime()) return fromDocument(stale);
+      } else if (
+        (refused.get(clientId) ?? 0) > now.getTime() ||
+        !roomToFetch(new URL(clientId).origin, now.getTime())
+      ) {
+        return undefined;
+      }
+      const fetch = fetched(metadata, clientId, stale).finally(() => fetching.delete(clientId));
       fetching.set(clientId, fetch);
       return fetch;
     },

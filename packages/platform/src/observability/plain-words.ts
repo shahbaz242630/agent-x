@@ -512,6 +512,11 @@ export const PLAIN_WORDS = {
     broke: 'Apps from that site not already known were refused for the rest of the minute; known ones carry on.',
     next: 'Someone may be varying addresses to make Agent X fetch: look for one source sending many authorize calls.',
   },
+  'oauth.client_metadata_stale': {
+    happened: "An MCP app's metadata document couldn't be fetched again, so the copy kept from before was used.",
+    broke: 'Nothing yet: the app still connects. Past 7 days without a fresh copy, it would be refused.',
+    next: 'The reason says why: if the site stays down or refuses for days, tell the app maker.',
+  },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
     broke: 'Those documents stay a little longer; an app in use is fetched again anyway, so nothing is affected.',

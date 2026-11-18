@@ -38,6 +38,7 @@ import {
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   challengeOf,
+  CLIENT_METADATA_STALE_MS,
   DEVICE_CODE_GRANT,
   deviceFlowOfCode,
   flowById,
@@ -2026,10 +2027,12 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     });
     const id = 'https://claude.ai/oauth/shared';
     const both = Promise.all([clients.find(id), clients.find(id)]);
-    // Both past their own reads (two listings each) before the fetch answers: the second shares the first's.
+    // Both asked, then time for the second's own read of the table (a few milliseconds) before the fetch answers: it
+    // finds the first's fetch under way and shares it. Answered sooner, the kept row would hide a fetch not shared.
     await vi.waitFor(() => {
-      expect(listedCalls).toBe(4);
+      expect(listedCalls).toBe(2);
     });
+    await new Promise((resolve) => setTimeout(resolve, 250));
     answer.resolve(undefined);
     const [one, other] = await both;
     expect(one).toEqual(other);
@@ -2121,9 +2124,9 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     });
   });
 
-  it('fetches a refused document again only after 5 minutes', async () => {
+  it('fetches a document refused for what it says again only after 5 minutes', async () => {
     const at = new FixedClock(START);
-    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'status' }));
+    const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'not_json' }));
     const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
     const id = 'https://claude.ai/oauth/refused-once';
     expect(await clients.find(id)).toBeUndefined();
@@ -2135,6 +2138,73 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     at.advanceBy(1);
     expect(await clients.find(id)).toBeUndefined();
     expect(fetched).toHaveLength(2);
+  });
+
+  /** A document of the real client's, valid, as its site serves it. */
+  const realDocument = (id: string): MetadataFetched => ({
+    outcome: 'fetched',
+    document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
+  });
+
+  it('6E3c review: junk filling the cap never locks out a real client whose document’s day ended', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-client';
+    const { metadata, fetched } = listedFetch((id) =>
+      id === real ? realDocument(id) : { outcome: 'refused', reason: 'status' },
+    );
+    const before = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    expect(await before.find(real)).toMatchObject({ clientId: real });
+    // A day on, in another copy of the API (nothing remembered but the row kept): junk fills the origin's minute.
+    at.advanceBy(DAY_MS + 1000);
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    for (let path = 0; path <= MOST_FETCHES_A_MINUTE; path += 1) {
+      await clients.find(`https://claude.ai/oauth/junk-${String(path)}`);
+    }
+    expect(lines('oauth.client_metadata_capped')).toHaveLength(1);
+    expect(await clients.find(real)).toMatchObject({ clientId: real, name: 'Claude', verifiedBy: 'claude.ai' });
+    // Fetched again, past the cap, as it once was valid.
+    expect(fetched.filter((id) => id === real)).toHaveLength(2);
+  });
+
+  it('6E3c review: a site failing at the refetch serves the kept document stale, and the failure is never cached', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-but-down';
+    let down = false;
+    const { metadata, fetched } = listedFetch((id) =>
+      down ? { outcome: 'refused', reason: 'status' } : realDocument(id),
+    );
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    await clients.find(real);
+    at.advanceBy(DAY_MS + 1000);
+    down = true;
+    expect(await clients.find(real)).toMatchObject({ clientId: real, verifiedBy: 'claude.ai' });
+    expect(lines('oauth.client_metadata_stale')).toEqual([
+      expect.objectContaining({ level: 'warn', origin: 'https://claude.ai', reason: 'status' }),
+    ]);
+    // Tried again a minute later, not 5: a failure of the site is no refusal of the document.
+    at.advanceBy(60_000);
+    down = false;
+    expect(await clients.find(real)).toMatchObject({ clientId: real });
+    expect(fetched).toHaveLength(3);
+    // A never-valid address failing the same way is fetched again at once, too.
+    const fresh = 'https://claude.ai/oauth/never-valid-down';
+    down = true;
+    expect(await clients.find(fresh)).toBeUndefined();
+    expect(await clients.find(fresh)).toBeUndefined();
+    expect(fetched.filter((id) => id === fresh)).toHaveLength(2);
+  });
+
+  it('6E3c review: a document stale past its 7 days names no client when the site fails', async () => {
+    const at = new FixedClock(START);
+    const real = 'https://claude.ai/oauth/real-long-gone';
+    let down = false;
+    const { metadata } = listedFetch((id) => (down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id)));
+    await createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata }).find(real);
+    at.advanceBy(DAY_MS + CLIENT_METADATA_STALE_MS);
+    down = true;
+    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    expect(await clients.find(real)).toBeUndefined();
+    expect(lines('oauth.client_metadata_stale')).toEqual([]);
   });
 
   it(`fetches one origin at most ${String(MOST_FETCHES_A_MINUTE)} times a minute, saying so once`, async () => {

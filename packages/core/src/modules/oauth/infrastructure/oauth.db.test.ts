@@ -11,6 +11,7 @@ import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { checkRegistration, type ClientRegistration } from './client-metadata.ts';
 import {
   CLIENT_METADATA_KEPT_MS,
+  CLIENT_METADATA_STALE_MS,
   keepClientMetadata,
   keptClientMetadata,
   sweepClientMetadata,
@@ -382,13 +383,23 @@ describe(`SEC-OAUTH-09 client metadata documents kept a day (6E3c; Postgres ${se
   it('keeps a document for a day, fetched again over its own row, and sweeps it once past its day', async () => {
     expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toBeUndefined();
     await keepClientMetadata(app, DOCUMENT, NOW);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toEqual(DOCUMENT);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toEqual({ document: DOCUMENT, fresh: true });
     const dayOn = new Date(NOW.getTime() + CLIENT_METADATA_KEPT_MS);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toBeUndefined();
+    // Past its day: stale, still kept for 7 days to stand in while it can't be fetched again.
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toEqual({ document: DOCUMENT, fresh: false });
+    const staleEnd = new Date(dayOn.getTime() + CLIENT_METADATA_STALE_MS);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, new Date(staleEnd.getTime() - 1))).toMatchObject({
+      fresh: false,
+    });
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, staleEnd)).toBeUndefined();
     await keepClientMetadata(app, { ...DOCUMENT, name: 'Claude (new)' }, dayOn);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toMatchObject({ name: 'Claude (new)' });
-    expect(await sweepClientMetadata(app, new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS - 1), 10)).toBe(0);
-    expect(await sweepClientMetadata(app, new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS), 10)).toBe(1);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toMatchObject({
+      document: { name: 'Claude (new)' },
+      fresh: true,
+    });
+    const sweptFrom = new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS + CLIENT_METADATA_STALE_MS);
+    expect(await sweepClientMetadata(app, new Date(sweptFrom.getTime() - 1), 10)).toBe(0);
+    expect(await sweepClientMetadata(app, sweptFrom, 10)).toBe(1);
     expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toBeUndefined();
     await expect(sweepClientMetadata(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });

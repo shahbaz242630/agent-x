@@ -262,7 +262,7 @@ export const ALLOWED: readonly Allowed[] = [
   {
     file: 'packages/core/src/modules/oauth/infrastructure/client-metadata-cache.ts',
     match: "deleteFrom('oauth.client_metadata')",
-    guard: ".where('expires_at', '<=', now)",
+    guard: ".where('expires_at', '<=', new Date(now.getTime() - CLIENT_METADATA_STALE_MS))",
     proof: {
       file: 'packages/core/src/modules/oauth/infrastructure/oauth.db.test.ts',
       title: 'keeps a document for a day, fetched again over its own row, and sweeps it once past its day',

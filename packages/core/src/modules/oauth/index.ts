@@ -33,7 +33,9 @@ export {
 } from './infrastructure/client-metadata-document.ts';
 export {
   CLIENT_METADATA_KEPT_MS,
+  CLIENT_METADATA_STALE_MS,
   keepClientMetadata,
+  type KeptDocument,
   keptClientMetadata,
   sweepClientMetadata,
 } from './infrastructure/client-metadata-cache.ts';
