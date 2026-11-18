@@ -374,7 +374,7 @@ export const MOST_TEXT = 500;
  * turn text's direction (Trojan Source) and those that hide text (zero-width, tag characters), as a visible name
  * refuses them (visible-name.ts). Its first group is the one exception, a joiner a script needs within a word, kept.
  */
-const UNSAFE_CHARACTERS = new RegExp(String.raw`(${JOINER_IN_A_WORD_SOURCE})|[\p{Cc}\p{Cf}\u2028\u2029]`, 'gu');
+const UNSAFE_CHARACTERS = new RegExp(`(${JOINER_IN_A_WORD_SOURCE})|[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]`, 'gu');
 
 /** A text as a tool answers it: unsafe characters removed, cut to MOST_TEXT characters. */
 export function plainText(text: string): string {
