@@ -20,6 +20,6 @@
     "apps/api/src/y*.db.test.ts",
     "apps/api/src/z*.db.test.ts"
   ],
-  "files": ["tooling/test-db/global-setup.ts"],
+  "files": ["tooling/test-db/global-setup.ts", "packages/platform/src/db/kysely-variance.d.ts"],
   "exclude": ["tooling/gate-proofs/fixtures", "apps/console"]
 }

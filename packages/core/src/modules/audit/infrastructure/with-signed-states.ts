@@ -602,8 +602,8 @@ export async function holdOrganisation(
  * Returns what `work` returns, or throws what it throws.
  */
 export async function withSignedStates<Tables extends AuditTables, Result>(
-  // Both: the work's transaction has every table the caller's has, the hold's the audit tables.
-  db: Kysely<Tables> & Kysely<AuditTables>,
+  // The work's transaction has every table the caller's has; the hold takes it as the audit tables' (kysely-variance.d.ts).
+  db: Kysely<Tables>,
   orgId: string,
   services: SignedStatesServices,
   work: (tx: Transaction<Tables>, states: SignedStates) => Promise<Result>,

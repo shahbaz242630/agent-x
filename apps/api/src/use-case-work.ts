@@ -108,8 +108,8 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
   logger,
   Refusal,
 }: {
-  /** Both: the work's transaction has every table the area's has, withSignedStates's the shared ones. */
-  readonly database: Database<Tables> & Database<UseCaseTables>;
+  /** The work's transaction has every table the area's has. */
+  readonly database: Database<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
