@@ -1,7 +1,8 @@
 // Pending spend requests voided once their authority no longer stands (PRD
 // §4.2, §11; BR-09, BR-11; ADR-006 §10; Phase 3 C1): the API's job, on a
 // timer of its own, denying each request waiting, approved or ready whose
-// organisation is frozen, whose agent is suspended, whose mandate is no longer in force or superseded,
+// organisation is frozen, whose agent is suspended, whose mandate is no longer in force, past its
+// version's end (before the expiry job records it: SEC-AG-12) or superseded,
 // whose source can't fund, or whose supplier is no longer verified or has
 // new details (voidCauses), a suspension only when it was chosen to cancel
 // (decision 7: one that pauses, or the bank's own, voids nothing; consent the
@@ -13,9 +14,9 @@
 // brake left past its batch.
 //
 // For each organisation its marks list (4D2e D9: those where a candidate
-// stands or a consent's end has come, `requestVoidsDue`), the candidates are found by
+// stands or a consent's or mandate version's end has come, `requestVoidsDue`), the candidates are found by
 // their rows (pending, 0046's index, joined to their organisation's, agent's,
-// mandate's, source's and supplier's rows), a page at a time, each page after the last,
+// mandate's and its version in force's, source's and supplier's rows), a page at a time, each page after the last,
 // so requests refused on every run (tampered with) can't fill a page and keep
 // the rest; then each in a transaction of its own, in ADR-006's lock order:
 // its organisation, agent, mandate, source and supplier read through their
@@ -60,7 +61,7 @@ import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, SOURCES, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
+import { mandateOf, type MandatesTables, mandateVersionOf } from '@agentx/core/modules/mandates';
 import {
   type AuthorityNow,
   decisionOf,
@@ -140,6 +141,10 @@ const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undef
       join.onRef('m.org_id', '=', 'r.org_id').onRef('m.id', '=', 'r.mandate_id'),
     )
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
+    .leftJoin('mandates.versions as v', (join) =>
+      join.onRef('v.org_id', '=', 'r.org_id').onRef('v.id', '=', 'm.current_version_id'),
+    )
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
     .innerJoin('funding_sources.sources as s', (join) =>
       join.onRef('s.org_id', '=', 'r.org_id').onRef('s.id', '=', 'r.funding_source_id'),
     )
@@ -189,6 +194,8 @@ const stoppedRows = (tx: VoidTx, orgId: string, now: Date, after: string | undef
         looksStopped('a.status', 'ACTIVE', 'agent', 'a.id'),
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
+        // Its version in force past its end, though the expiry job hasn't recorded it yet (SEC-AG-12, 6F1 G3).
+        where('v.ends_at', '<=', now),
         looksStopped('s.status', 'ACTIVE', 'source', 's.id'),
         // The bank's availability needs no filter: its end (UNAVAILABLE) ends the source too (updateFromPartner), but
         // consent run out on a source holding its requests (decision 21, E7), which its newest choice leaves out here.
@@ -272,7 +279,8 @@ async function lapsedByTheirRows(
 /**
  * When the voids' look next has work in an organisation, by `now`, not run (4D2e D9): now while one of its
  * candidates stands, a pending request whose rows look stopped or a consent run out with no lapse logged; else as
- * the soonest consent of a source not ended runs out, whose lapse it logs; else none. A visit that leaves one (refused,
+ * the soonest consent of a source not ended runs out, whose lapse it logs, or the soonest version in force of an open
+ * mandate ends (its requests then void, SEC-AG-12), whichever comes first; else none. A visit that leaves one (refused,
  * past its share) keeps its organisation due.
  */
 export const requestVoidsDue = (tx: VoidTx, orgId: string, now: Date) =>
@@ -287,13 +295,27 @@ export const requestVoidsDue = (tx: VoidTx, orgId: string, now: Date) =>
       )
       .then(eb.cast<Date | null>(eb.val(now), 'timestamptz'))
       .else(
-        eb
-          // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
-          .selectFrom('funding_sources.sources as s')
-          .select((min) => min.fn.min<Date | null>('s.consent_expires_at').as('soonest'))
-          .where('s.org_id', '=', orgId)
-          .where('s.status', '<>', 'ENDED')
-          .where('s.consent_expires_at', '>', now),
+        // Postgres's least passes over a null: none only where neither has an end to come.
+        eb.fn<Date | null>('least', [
+          eb
+            // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+            .selectFrom('funding_sources.sources as s')
+            .select((min) => min.fn.min<Date | null>('s.consent_expires_at').as('soonest'))
+            .where('s.org_id', '=', orgId)
+            .where('s.status', '<>', 'ENDED')
+            .where('s.consent_expires_at', '>', now),
+          eb
+            // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a time alone, for choosing when to look
+            .selectFrom('mandates.mandates as m')
+            // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the same
+            .innerJoin('mandates.versions as v', (join) =>
+              join.onRef('v.org_id', '=', 'm.org_id').onRef('v.id', '=', 'm.current_version_id'),
+            )
+            .select((min) => min.fn.min<Date | null>('v.ends_at').as('soonest'))
+            .where('m.org_id', '=', orgId)
+            .where('m.status', 'in', ['ACTIVE', 'SUSPENDED'])
+            .where('v.ends_at', '>', now),
+        ]),
       )
       .end()
       .as('due'),
@@ -357,6 +379,28 @@ export interface AuthorityRead {
 }
 
 /**
+ * Whether the mandate's version in force has reached its end by `now`, read
+ * through its signed state just after the mandate (its lock order): the
+ * expiry job records the end within minutes, but a spend weighs it itself
+ * (SEC-AG-12, 6F1 G3), as decide() does. None in force, none to end. Throws
+ * for a version that can't be believed (its alarm raised) or isn't the
+ * mandate's own.
+ */
+async function versionEnded(
+  tx: VoidTx,
+  states: SignedStates,
+  orgId: string,
+  mandate: { readonly id: string; readonly currentVersionId: string | null },
+  now: Date,
+): Promise<boolean> {
+  if (mandate.currentVersionId === null) return false;
+  const read = await mandateVersionOf(tx, states, { orgId, id: mandate.currentVersionId }, mandate.id);
+  if (read.outcome !== 'found') throw new Error(`A mandate's version in force can't be believed: ${mandate.id}`);
+  const { endsAt } = read.version;
+  return endsAt !== null && endsAt <= now;
+}
+
+/**
  * The authority a pending request was decided under, as it stands now, in
  * ADR-006's lock order: its organisation, agent, mandate, source and supplier
  * read through their signed states (levels 2–6, share), each stop's chosen
@@ -377,6 +421,7 @@ export async function authorityOf(
   const agent = await agentOf(tx, states, { orgId, id: named.agentId }, 'share');
   const agentKey = await agentKeyOf(tx, states, { orgId, id: named.agentKeyId }, 'share');
   const mandate = await mandateOf(tx, states, { orgId, id: named.mandateId }, 'share');
+  const ended = mandate.outcome === 'found' && (await versionEnded(tx, states, orgId, mandate.mandate, now));
   const source = await sourceOf(tx, states, { orgId, id: named.fundingSourceId }, 'share');
   const supplier = await supplierOf(tx, states, { orgId, id: named.supplierId }, 'share');
   const consentPast = source.outcome === 'found' && source.source.consentExpiresAt <= now;
@@ -423,6 +468,7 @@ export async function authorityOf(
     mandate: {
       ...mandate.mandate,
       carriesRest: replaced && (await carriesRest(tx, states, orgId, mandate.mandate)),
+      ended,
     },
     source: {
       status: source.source.status,

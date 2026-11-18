@@ -107,6 +107,7 @@ const ids = new SequentialIds(0xb4a0_0000_0000);
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0xb4b0_0000_0000) });
 
 let clock: FixedClock;
+const HOUR = 3_600_000;
 let capture: LogCapture;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
@@ -630,6 +631,39 @@ describe('authority withdrawn since the approval: denied now, its holdings freed
     expect(lines('handoff.denied')).toEqual([expect.objectContaining({ requestId: request.id, causes })]);
     // Approved, then stopped before the bank: the admins told, with the denial (decision 3, B4b).
     expect(await stoppedToldOf(w)).toEqual([request.id]);
+  });
+
+  it('SEC-AG-12 denies it once its mandate’s version in force has reached its end, before the expiry job has run (6F1 G3)', async () => {
+    const endsAt = new Date(clock.now().getTime() + HOUR);
+    const { w, acting } = await ready({ endsAt });
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    expect(request.status).toBe('APPROVED');
+    // The term over, the mandate still ACTIVE: the expiry job (every 5 minutes) hasn't reached it.
+    clock.advanceBy(HOUR);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(await holdingsOf(w, request.id)).toEqual({ reservation: 'RELEASED', released: true });
+    expect(await paymentOf(w, request.id)).toEqual({ instruction: 'missing' });
+    expect(submitted()).toBe(0);
+    expect(lines('handoff.denied')).toEqual([
+      expect.objectContaining({ requestId: request.id, causes: 'MANDATE_NOT_IN_FORCE' }),
+    ]);
+    expect(await stoppedToldOf(w)).toEqual([request.id]);
+  });
+
+  it('hands off one whose mandate’s version in force ends later: its end not yet reached (6F1 G3)', async () => {
+    const { w, acting } = await ready({ endsAt: new Date(clock.now().getTime() + 2 * HOUR) });
+    const request = await ask(acting, w, { amount: ALLOWED() });
+    clock.advanceBy(HOUR);
+    const { rail, submitted } = counted(w);
+
+    await handoffOf(w, rail).run();
+
+    expect(await statusOf(w, request.id)).toBe('HANDED_OFF');
+    expect(submitted()).toBe(1);
   });
 
   it('SEC-AG-12 denies it once its agent key was ended at once (AGENT_KEY_ENDED)', async () => {

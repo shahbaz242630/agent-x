@@ -23,7 +23,7 @@ const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplie
 const STANDING: AuthorityNow = {
   organizationStatus: 'ACTIVE',
   agentStatus: 'ACTIVE',
-  mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
+  mandate: { status: 'ACTIVE', currentVersionId: 'mv1', ended: false },
   source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false, consentHeld: false },
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1', pausedFrom: [] },
   paused: new Set(),
@@ -38,7 +38,10 @@ describe('voidCauses', () => {
   });
 
   it('finds none for a request its mandate’s version in force still carries (PL-47), but one with no version', () => {
-    const carrying = { ...STANDING, mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: true } };
+    const carrying = {
+      ...STANDING,
+      mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: true, ended: false },
+    };
     expect(voidCauses(DECIDED, carrying)).toEqual([]);
     expect(voidCauses({ ...DECIDED, mandateVersionId: null }, carrying)).toEqual(['MANDATE_NOT_IN_FORCE']);
     // Still judged by everything else.
@@ -48,15 +51,33 @@ describe('voidCauses', () => {
   it.each([
     ['the organisation frozen', { organizationStatus: 'FROZEN' }, 'ORG_FROZEN'],
     ['the agent suspended', { agentStatus: 'SUSPENDED' }, 'AGENT_SUSPENDED'],
-    ['the mandate suspended', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
-    ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
-    ['the mandate superseded', { mandate: { status: 'ACTIVE', currentVersionId: 'mv2' } }, 'MANDATE_NOT_IN_FORCE'],
+    [
+      'the mandate suspended',
+      { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1', ended: false } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
+    [
+      'the mandate revoked',
+      { mandate: { status: 'REVOKED', currentVersionId: 'mv1', ended: false } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
+    [
+      'the mandate superseded',
+      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', ended: false } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
     [
       'the mandate superseded, its version in force carrying no rest (PL-47)',
-      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: false } },
+      { mandate: { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: false, ended: false } },
       'MANDATE_NOT_IN_FORCE',
     ],
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],
+    // Its version's end reached, still ACTIVE until the expiry job records it (SEC-AG-12, 6F1 G3).
+    [
+      'the mandate’s version in force past its end',
+      { mandate: { status: 'ACTIVE', currentVersionId: 'mv1', ended: true } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
     [
       'the source suspended',
       { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false, consentHeld: false } },
@@ -111,6 +132,15 @@ describe('voidCauses', () => {
     const frozen = { ...STANDING, organizationStatus: 'FROZEN', paused: EVERY_PAUSED };
     expect(voidCauses(DECIDED, frozen)).toEqual([]);
     expect(voidCauses(DECIDED, { ...frozen, cancelledBy: new Set(['organization'] as const) })).toEqual(['ORG_FROZEN']);
+  });
+
+  it('finds one whose mandate’s version ended though a pause or a carry would leave it standing (SEC-AG-12)', () => {
+    const ended = { status: 'SUSPENDED', currentVersionId: 'mv1', ended: true };
+    expect(voidCauses(DECIDED, { ...STANDING, mandate: ended, paused: EVERY_PAUSED })).toEqual([
+      'MANDATE_NOT_IN_FORCE',
+    ]);
+    const carrying = { status: 'ACTIVE', currentVersionId: 'mv2', carriesRest: true, ended: true };
+    expect(voidCauses(DECIDED, { ...STANDING, mandate: carrying })).toEqual(['MANDATE_NOT_IN_FORCE']);
   });
 
   it('finds one decided under no mandate never in force', () => {
@@ -169,7 +199,7 @@ describe('voidCauses', () => {
   it.each([
     ['the organisation', 'organization', { organizationStatus: 'FROZEN' }],
     ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
-    ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
+    ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1', ended: false } }],
     [
       'the source',
       'source',
@@ -192,11 +222,19 @@ describe('voidCauses', () => {
   );
 
   it.each([
-    ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
-    ['the mandate expired', { mandate: { status: 'EXPIRED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
+    [
+      'the mandate revoked',
+      { mandate: { status: 'REVOKED', currentVersionId: 'mv1', ended: false } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
+    [
+      'the mandate expired',
+      { mandate: { status: 'EXPIRED', currentVersionId: 'mv1', ended: false } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
     [
       'the mandate superseded while paused',
-      { mandate: { status: 'SUSPENDED', currentVersionId: 'mv2' } },
+      { mandate: { status: 'SUSPENDED', currentVersionId: 'mv2', ended: false } },
       'MANDATE_NOT_IN_FORCE',
     ],
     [
@@ -259,7 +297,7 @@ describe('VOID_CAUSES and the choice', () => {
     const each = [
       voidCauses(DECIDED, { ...STANDING, organizationStatus: 'FROZEN' }),
       voidCauses(DECIDED, { ...STANDING, agentStatus: 'SUSPENDED' }),
-      voidCauses(DECIDED, { ...STANDING, mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }),
+      voidCauses(DECIDED, { ...STANDING, mandate: { status: 'REVOKED', currentVersionId: 'mv1', ended: false } }),
       voidCauses(DECIDED, { ...STANDING, source: { ...STANDING.source, status: 'SUSPENDED' } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'SUSPENDED', currentVersionId: 'sv1', pausedFrom: [] } }),
       voidCauses(DECIDED, { ...STANDING, supplier: { status: 'VERIFIED', currentVersionId: 'sv2', pausedFrom: [] } }),
