@@ -9,6 +9,7 @@
 // makes a new one. Each goes by passkey (the shared step-up); a new key is
 // shown once on the way back (stepped-up.tsx, key-once.tsx). Buttons show by
 // role (rotating: an admin, or the developer who owns it); the API checks again.
+// Below the keys, the apps connected as the agent (6E3b, agent-connections.tsx).
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 
@@ -33,6 +34,7 @@ import { timeText } from '../requests.ts';
 import { useActing } from '../session.tsx';
 import { byPasskey } from '../step-up.ts';
 import { t } from '../text.ts';
+import { Connections } from './agent-connections.tsx';
 import { Said, useChange } from './change.tsx';
 import { Loading, NotShown } from './failed.tsx';
 
@@ -192,6 +194,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
   const owner = listed.find((member) => member.id === agent.owner);
   const role = organization.role;
   // Rotating is an admin's, or the developer's who owns it (agent-key-changes.ts mayRotate); revoking any of either.
+  // Revoking a connection goes as rotating does (connections.ts in the API).
   const canRevoke = KEY_CHANGING.includes(role);
   const canRotate = role === 'admin' || (canRevoke && owner?.userId.toLowerCase() === me);
   const close = () => {
@@ -247,6 +250,16 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
           </ul>
         )}
       </section>
+      <Connections
+        agent={agent}
+        canRevoke={canRotate}
+        named={(membershipId) =>
+          memberText(
+            listed.find((member) => member.id === membershipId),
+            me,
+          )
+        }
+      />
       <section className="stack" aria-labelledby="agent-mandates">
         <h2 id="agent-mandates">{t('mandates.title')}</h2>
         <p className="muted">{t('mandates.agentIntro')}</p>

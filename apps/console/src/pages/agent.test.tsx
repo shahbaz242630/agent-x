@@ -83,7 +83,10 @@ let sent: { method: string; path: string; body: unknown }[];
 const answer = (at: string, ...given: Answer[]) => answers.set(at, given);
 const ASKED = { status: 202, body: { stepUpChallengeId: CHALLENGE } };
 
-function as(role: string, { owner = MINE, keys = KEYS }: { owner?: string; keys?: unknown[] } = {}) {
+function as(
+  role: string,
+  { owner = MINE, keys = KEYS, connections = [] }: { owner?: string; keys?: unknown[]; connections?: unknown[] } = {},
+) {
   answer('GET /v1/auth/session', {
     status: 200,
     body: {
@@ -98,6 +101,7 @@ function as(role: string, { owner = MINE, keys = KEYS }: { owner?: string; keys?
   answer('GET /v1/statements', { status: 200, body: STATEMENTS });
   answer('GET /v1/members', { status: 200, body: { members: MEMBERS } });
   answer(`GET /v1/agents/${AGENT}`, { status: 200, body: { agent: agent(owner), keys } });
+  answer(`GET /v1/agents/${AGENT}/connections`, { status: 200, body: { connections } });
   answer('GET /v1/agents', { status: 200, body: { agents: [agent(owner)], next: null, unchecked: [] } });
 }
 
@@ -487,5 +491,122 @@ describe('registering an agent (6D1)', () => {
     open('/agents');
     expect(await screen.findByRole('link', { name: 'Invoice agent' })).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Register an agent' })).toBeNull();
+  });
+});
+
+describe('an agent’s connected apps (6E3b)', () => {
+  const connection = (keyId: string, status: string, more: Record<string, unknown> = {}) => ({
+    keyId,
+    clientId: 'axcl_0123456789abcdef0123456789abcdef',
+    clientName: 'Claude Desktop',
+    redirectHost: '127.0.0.1:33418',
+    via: 'code',
+    scopes: ['requests:read'],
+    madeBy: MINE,
+    createdAt: '2026-11-01T05:00:00.000Z',
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    lastConnectedAt: '2026-11-02T05:00:00.000Z',
+    status,
+    ...more,
+  });
+  const CONNECTIONS = [
+    connection(LIVE, 'ACTIVE'),
+    connection(REVOKED, 'REVOKED', { clientName: 'Old app', redirectHost: 'old.example.test', madeBy: DEVELOPER }),
+    connection(EXPIRED, 'EXPIRED', {
+      clientName: 'Device app',
+      redirectHost: null,
+      via: 'device',
+      lastConnectedAt: null,
+      expiresAt: '2020-01-01T00:00:00.000Z',
+    }),
+  ];
+  const revokeAt = `/v1/agents/${AGENT}/connections/${LIVE}/revoke`;
+
+  it('lists each app by what it says, its host in bold, who allowed it, and where it stands', async () => {
+    as('admin', { connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByRole('heading', { name: 'Connected apps' })).toBeDefined();
+    expect((await screen.findByText('127.0.0.1:33418')).tagName).toBe('STRONG');
+    expect(screen.getAllByText(/^Allowed .* by Admin \(you\)$/)).toHaveLength(2);
+    expect(screen.getByText(/^Allowed .* by Developer$/)).toBeDefined();
+    expect(screen.getAllByText(/^Last connected/)).toHaveLength(2);
+    expect(screen.getByText('Not connected yet')).toBeDefined();
+    expect(screen.getByText('Connected from a device')).toBeDefined();
+    expect(screen.getAllByText(/^Revoked$/).length).toBeGreaterThan(1);
+    expect(screen.getAllByText(/^Expired/).length).toBeGreaterThan(1);
+    // Only the live one can be revoked.
+    expect(screen.getAllByRole('button', { name: /^Revoke the connection of/ })).toHaveLength(1);
+    expect(sentTo('GET', `/v1/agents/${AGENT}/connections`)).toHaveLength(1);
+  });
+
+  it('says an agent with no connected app has none', async () => {
+    as('admin');
+    open(page);
+    expect(await screen.findByText('No app is connected to this agent.')).toBeDefined();
+  });
+
+  it('revokes after saying the app stops at once, then the passkey', async () => {
+    as('admin', { connections: CONNECTIONS });
+    answer(`POST ${revokeAt}`, ASKED);
+    open(page);
+    await userEvent.click(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/The app stops working as this agent at once/)).toBeDefined();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Continue with passkey' }));
+
+    expect(sentTo('POST', revokeAt)[0]?.body).toEqual({});
+    expect(kept()).toMatchObject({
+      label: 'Revoke the connection of Claude Desktop to Invoice agent',
+      confirmPath: `${revokeAt}/confirm`,
+      body: {},
+      organization: ORG.id,
+    });
+    expect(goTo).toHaveBeenCalledOnce();
+  });
+
+  it('says a connection already revoked plainly, and reads them again', async () => {
+    as('admin', { connections: CONNECTIONS });
+    answer(`POST ${revokeAt}`, { status: 409, body: { error: { code: 'CONNECTION_REVOKED' } } });
+    open(page);
+    await userEvent.click(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' }));
+    await userEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Continue with passkey' }),
+    );
+    expect(await screen.findByText('This connection is already revoked. Nothing was changed.')).toBeDefined();
+    expect(sentTo('GET', `/v1/agents/${AGENT}/connections`).length).toBeGreaterThan(1);
+    expect(goTo).not.toHaveBeenCalled();
+  });
+
+  it('shows an approver the apps and why there is nothing to press', async () => {
+    as('approver', { connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByText(/Only an admin can revoke a connection/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: /^Revoke the connection of/ })).toBeNull();
+  });
+
+  it('lets a developer revoke only on an agent they are responsible for', async () => {
+    as('developer', { owner: DEVELOPER, connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByText(/a developer on an agent they are responsible for/)).toBeDefined();
+    // The members read in (the owner named by role), so the rule is decided by now.
+    expect(await screen.findByText('Developer')).toBeDefined();
+    expect(screen.queryByRole('button', { name: /^Revoke the connection of/ })).toBeNull();
+    cleanup();
+
+    as('developer', { owner: MINE, connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' })).toBeDefined();
+  });
+
+  it('offers to read the apps again when they couldn’t be read', async () => {
+    as('admin');
+    answer(
+      `GET /v1/agents/${AGENT}/connections`,
+      { status: 403, body: { error: { code: 'FORBIDDEN' } } },
+      { status: 200, body: { connections: CONNECTIONS } },
+    );
+    open(page);
+    await userEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' })).toBeDefined();
   });
 });
