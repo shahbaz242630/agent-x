@@ -555,6 +555,7 @@
   "suppliers.bank.hostedConfirm": "Continue to the bank partner",
   "suppliers.bank.formIntro": "Enter the bank details on the bank partner's own page, open until {time}. Come back here once you've finished.",
   "suppliers.bank.formOpen": "Open the bank partner's page",
+  "suppliers.bank.formBadPage": "The bank partner gave a page address Agent X won't open, so nothing was changed. Start again once its time above is up.",
   "suppliers.bank.formCheck": "I've finished: check",
   "suppliers.bank.formWaiting": "The bank partner doesn't have the details yet. Finish on its page, then check again.",
   "suppliers.bank.registered": "The bank partner has the new bank details. Confirm them under New bank details waiting to start the 24-hour cooling-off.",
