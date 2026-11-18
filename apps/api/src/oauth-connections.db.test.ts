@@ -2008,16 +2008,22 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
   it('shares one fetch among requests at once for a client not kept', async () => {
     const answer = Promise.withResolvers<undefined>();
     const fetched: string[] = [];
-    let listedCalls = 0;
+    // Every statement's answer counted as it comes back (a Kysely plugin, the test's alone): the second request's own
+    // read of the table is seen done before the fetch answers, so it can only find the first's fetch under way.
+    let answered = 0;
+    const counted = app.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: ({ result }) => {
+        answered += 1;
+        return Promise.resolve(result);
+      },
+    });
     const clients = createOauthClients({
-      database: app,
+      database: counted,
       clock,
       logger: testLogger(capture),
       metadata: {
-        listed: () => {
-          listedCalls += 1;
-          return true;
-        },
+        listed: () => true,
         fetch: async (id) => {
           fetched.push(id);
           await answer.promise;
@@ -2026,15 +2032,16 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
       },
     });
     const id = 'https://claude.ai/oauth/shared';
-    const both = Promise.all([clients.find(id), clients.find(id)]);
-    // Both asked, then time for the second's own read of the table (a few milliseconds) before the fetch answers: it
-    // finds the first's fetch under way and shares it. Answered sooner, the kept row would hide a fetch not shared.
+    const first = clients.find(id);
     await vi.waitFor(() => {
-      expect(listedCalls).toBe(2);
+      expect(fetched).toEqual([id]);
     });
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    const second = clients.find(id);
+    await vi.waitFor(() => {
+      expect(answered).toBe(2);
+    });
     answer.resolve(undefined);
-    const [one, other] = await both;
+    const [one, other] = await Promise.all([first, second]);
     expect(one).toEqual(other);
     expect(one).toMatchObject({ clientId: id, verifiedBy: 'claude.ai' });
     expect(fetched).toEqual([id]);
