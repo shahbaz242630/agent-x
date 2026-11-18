@@ -104,7 +104,7 @@ export function createOauthClients({
   readonly database: Database<OauthTables>;
   readonly clock: Clock;
   readonly logger: Logger;
-  /** None while no origin is allowed (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS): an address names no client then. */
+  /** None while nothing is trusted (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS): an address names no client then. */
   readonly metadata: ClientMetadataFetch | undefined;
 }): OauthClients {
   /** The fetches under way, by client ID: requests at once for a client not kept share one fetch. */

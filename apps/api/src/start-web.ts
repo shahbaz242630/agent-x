@@ -138,7 +138,7 @@ export async function startWeb(
   // An agent's key, checked before its request goes on (C2-1); on the MCP endpoint, an MCP connection's access token
   // too, while the OAuth server is on (6E3a).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
-  // The origins whose clients name themselves by a metadata document (6E3c): none while the OAuth server is off.
+  // Where clients name themselves by a metadata document (6E3c, AG6): none while the OAuth server is off.
   const metadataOrigins = config.http.oauthClientMetadataOrigins ?? [];
   const capabilities = capabilitiesOf(config.http.publicOrigin, metadataOrigins.length > 0);
   const oauthClients = createOauthClients({
@@ -150,7 +150,7 @@ export async function startWeb(
         ? undefined
         : createClientMetadataFetch({
             fetch: createOutboundFetch(config.outbound.allowedOrigins),
-            origins: metadataOrigins,
+            trusted: metadataOrigins,
           }),
   });
   const checkCredential = createCredentialCheck({
