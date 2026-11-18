@@ -59,7 +59,7 @@ export const OAUTH_PATHS = {
 export const CONNECT_PATH = '/connect';
 
 /** Where the person types a device's user code (6E3c, RFC 8628 §3.3): the console's `/device` page. */
-export const DEVICE_PATH = '/device';
+const DEVICE_PATH = '/device';
 
 /**
  * Everything the metadata documents say, from the one object (decision 1: the RFC 8414 document and OIDC discovery's

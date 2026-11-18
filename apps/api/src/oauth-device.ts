@@ -35,7 +35,7 @@ import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
 
 /** How often a device may poll, in seconds (RFC 8628 §3.2's default). */
-export const DEVICE_INTERVAL_SECONDS = 5;
+const DEVICE_INTERVAL_SECONDS = 5;
 
 /** How many user codes are drawn before giving up: a second draw already held is one chance in billions. */
 const MOST_DRAWS = 3;
@@ -48,7 +48,7 @@ interface DeviceAsked {
 }
 
 /** A device's codes (RFC 8628 §3.2). */
-export interface DeviceCodes {
+interface DeviceCodes {
   readonly deviceCode: string;
   readonly userCode: string;
   readonly verificationUri: string;

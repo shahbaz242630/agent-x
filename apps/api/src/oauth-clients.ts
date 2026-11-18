@@ -21,7 +21,7 @@ import type { Logger } from '@agentx/platform/observability';
 import type { ClientMetadataFetch } from './oauth-client-metadata.ts';
 
 /** A client the server knows, as the authorize endpoint and the consent page read it. */
-export interface KnownClient {
+interface KnownClient {
   readonly clientId: string;
   /** What it says it is: shown as such, never as proof. */
   readonly name: string;

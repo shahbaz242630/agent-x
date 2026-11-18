@@ -114,7 +114,7 @@ const DENIED = z
 const OAUTH_MEMBER_ROUTE = { access: [...CONNECTING_ROLES], oauth: true } as const;
 
 /** Claiming a device's request by its user code: its operation. */
-export const DEVICE_LOOKUP_OPERATION = 'connections.device-lookup';
+const DEVICE_LOOKUP_OPERATION = 'connections.device-lookup';
 
 /** A person's tries at a user code (6E3 plan §1): 5 a minute, so 20^8 codes can't be walked. */
 const LOOKUP_LIMIT = { most: 5, windowMs: 60_000 } as const;

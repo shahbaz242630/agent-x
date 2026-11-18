@@ -26,7 +26,7 @@ const FETCH_MS = 3000;
 export const MOST_DOCUMENT_BYTES = 16_384;
 
 /** Why a document wasn't taken, for the log: never the document itself. */
-export type MetadataRefusal =
+type MetadataRefusal =
   'not_listed' | 'refused' | 'status' | 'content_type' | 'too_large' | 'timeout' | 'unreadable' | 'not_json';
 
 export type MetadataFetched =
