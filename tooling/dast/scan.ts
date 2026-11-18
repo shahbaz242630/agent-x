@@ -123,6 +123,22 @@ export const ACCEPTED: readonly Accepted[] = [
     statuses: [200],
     reason: "The login service's sign-in page (text/html), reached by following sign-in's 302: not the API's answer.",
   },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-http-status-code',
+    operations: ['GET /v1/oauth/authorize', 'HEAD /v1/oauth/authorize'],
+    statuses: [200],
+    reason:
+      "Schemathesis follows authorize's 302 to the console's /connect page (200, text/html), as it does sign-in's (6E3b, S202). The API's own answer is the documented 302.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/api-rejected-schema-compliant-request',
+    operations: ['POST /v1/oauth/register', 'POST /v1/oauth/token'],
+    statuses: [400],
+    reason:
+      "OAuth's own rules reach past what a schema can say (6E3b, S202): a registration's redirect addresses must be https or loopback with no fragment (RFC 7591 invalid_redirect_uri / invalid_client_metadata), and a token request's code, verifier or refresh token must be one we issued (RFC 6749 invalid_grant). A well-shaped request a fuzzer makes up is rightly refused 400.",
+  },
 ];
 
 /** The paths the API's document holds, read once. */
