@@ -20,6 +20,7 @@ import {
   FLOW_SECONDS,
   hashOf,
   isFlowCookie,
+  MOST_OPEN_FLOWS_A_SOURCE,
   newDeviceCode,
   newFlowCookie,
   newUserCode,
@@ -32,9 +33,11 @@ import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
+import { capWarning } from './oauth-authorizing.ts';
 import type { OauthClients } from './oauth-clients.ts';
 import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
+import { clientKey } from './rate-limit.ts';
 
 /** How often a device may poll, in seconds (RFC 8628 §3.2's default). */
 const DEVICE_INTERVAL_SECONDS = 5;
@@ -74,7 +77,8 @@ export type LookupAnswer =
   | { readonly outcome: 'not_found' };
 
 export interface OauthDevice {
-  authorize(asked: DeviceAsked, correlationId: string): Promise<DeviceAnswer>;
+  /** `ip`: the client's address as the trust rule reads it, undefined when it can't be read (rate-limit.ts). */
+  authorize(asked: DeviceAsked, correlationId: string, ip: string | undefined): Promise<DeviceAnswer>;
   lookup(typed: string, cookie: string | undefined): Promise<LookupAnswer>;
 }
 
@@ -102,27 +106,36 @@ export function createOauthDevice({
   readonly capabilities: Capabilities;
   readonly clients: OauthClients;
 }): OauthDevice {
-  /** The flow opened with a fresh pair of codes, drawn again while the user code is one already held. */
-  const opened = async (clientId: string, scopes: NonNullable<ReturnType<typeof scopesAsked>>) => {
+  const sourceCapped = capWarning(logger, clock, 'oauth.source_capped', {
+    kind: 'device',
+    most: MOST_OPEN_FLOWS_A_SOURCE,
+  });
+
+  /** The flow opened from `source` with a fresh pair of codes, drawn again while the user code is one already held. */
+  const opened = async (clientId: string, scopes: NonNullable<ReturnType<typeof scopesAsked>>, source: string) => {
     for (let draw = 0; draw < MOST_DRAWS; draw += 1) {
       const [deviceCode, userCode] = [newDeviceCode(), newUserCode()];
-      const outcome = await openDeviceFlow(database, {
-        id: ids.next(),
-        clientId,
-        scopesAsked: scopes,
-        resource: capabilities.resource,
-        deviceHash: hashOf(deviceCode),
-        userCodeHash: hashOf(userCodeOf(userCode) ?? userCode),
-        intervalSeconds: DEVICE_INTERVAL_SECONDS,
-        createdAt: clock.now(),
-      });
+      const outcome = await openDeviceFlow(
+        database,
+        {
+          id: ids.next(),
+          clientId,
+          scopesAsked: scopes,
+          resource: capabilities.resource,
+          deviceHash: hashOf(deviceCode),
+          userCodeHash: hashOf(userCodeOf(userCode) ?? userCode),
+          intervalSeconds: DEVICE_INTERVAL_SECONDS,
+          createdAt: clock.now(),
+        },
+        source,
+      );
       if (outcome !== 'collided') return { outcome, deviceCode, userCode };
     }
     return { outcome: 'full' as const };
   };
 
   return {
-    async authorize(asked, correlationId) {
+    async authorize(asked, correlationId, ip) {
       try {
         const client = asked.client_id === undefined ? undefined : await clients.find(asked.client_id);
         if (client === undefined) return refused(401, 'invalid_client', 'The client is not one Agent X knows.');
@@ -137,9 +150,10 @@ export function createOauthDevice({
         if (asked.resource !== undefined && asked.resource !== capabilities.resource) {
           return refused(400, 'invalid_target', 'The resource is not this server’s MCP endpoint.');
         }
-        const flow = await opened(client.clientId, scopes);
-        if (flow.outcome === 'full') {
-          logger.child({ correlationId }).warn('oauth.flows_capped', { kind: 'device' });
+        const flow = await opened(client.clientId, scopes, clientKey(ip));
+        if (flow.outcome === 'full' || flow.outcome === 'source_full') {
+          if (flow.outcome === 'full') logger.child({ correlationId }).warn('oauth.flows_capped', { kind: 'device' });
+          else sourceCapped();
           return refused(
             503,
             'temporarily_unavailable',

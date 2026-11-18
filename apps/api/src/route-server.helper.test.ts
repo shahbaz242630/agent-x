@@ -61,6 +61,7 @@ export async function routeServer({
   member,
   oauthOn = false,
   clientMetadataOrigins,
+  webCopies = 1,
   ...routes
 }: {
   readonly live?: LiveSession;
@@ -69,10 +70,12 @@ export async function routeServer({
   readonly oauthOn?: boolean;
   /** The origins whose clients name themselves by a metadata document (6E3c); none when not given. */
   readonly clientMetadataOrigins?: readonly string[];
+  /** The API's `web` copies (AGENTX_WEB_COPIES), each counting its share of every limit; one when not given. */
+  readonly webCopies?: number;
 } & Partial<ServerOptions>): Promise<FastifyInstance> {
   const config = {
     ...CONFIG,
-    http: { ...CONFIG.http, mcpOauth: oauthOn, oauthClientMetadataOrigins: clientMetadataOrigins },
+    http: { ...CONFIG.http, mcpOauth: oauthOn, oauthClientMetadataOrigins: clientMetadataOrigins, webCopies },
   };
   const app = await buildServer({
     config,

@@ -23,6 +23,7 @@ import {
   clientOf,
   clientSeen,
   MOST_REGISTRATIONS_A_DAY,
+  MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   registerClient,
   sweepClients,
 } from './clients.ts';
@@ -39,6 +40,7 @@ import {
   flowById,
   flowDecided,
   MOST_OPEN_FLOWS,
+  MOST_OPEN_FLOWS_A_SOURCE,
   openCodeFlow,
   openDeviceFlow,
   sweepFlows,
@@ -58,6 +60,13 @@ const flowId = () => {
   return `0199a0f0-0000-7000-8000-${next.toString(16).padStart(12, '0')}`;
 };
 
+/** A source, or a network, of its own (6F1 G4), so no case's flows or registrations count against another's. */
+let sources = 0;
+const fresh = (): string => {
+  sources += 1;
+  return `source ${String(sources)}`;
+};
+
 const registration = (): ClientRegistration => {
   const checked = checkRegistration({
     redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
@@ -67,19 +76,25 @@ const registration = (): ClientRegistration => {
   return checked.client;
 };
 
-const opened = async (createdAt = NOW) => {
+/** A code flow opened at `createdAt` from `source`, by one browser unless another is named; its ID. */
+const opened = async (createdAt = NOW, source = fresh(), browserHash = 'a'.repeat(64)) => {
   const id = flowId();
-  await openCodeFlow(app, {
-    id,
-    clientId: 'axcl_0123456789abcdef0123456789abcdef',
-    redirectUri: 'https://claude.ai/api/mcp/auth_callback',
-    state: 'client state',
-    codeChallenge: challengeOf('v'.repeat(43)),
-    scopesAsked: ['requests:read', 'suppliers:read'],
-    resource: 'https://app.agentx.example/v1/mcp',
-    browserHash: 'a'.repeat(64),
-    createdAt,
-  });
+  const outcome = await openCodeFlow(
+    app,
+    {
+      id,
+      clientId: 'axcl_0123456789abcdef0123456789abcdef',
+      redirectUri: 'https://claude.ai/api/mcp/auth_callback',
+      state: 'client state',
+      codeChallenge: challengeOf('v'.repeat(43)),
+      scopesAsked: ['requests:read', 'suppliers:read'],
+      resource: 'https://app.agentx.example/v1/mcp',
+      browserHash,
+      createdAt,
+    },
+    source,
+  );
+  if (outcome !== 'opened') throw new Error(`not opened: ${outcome}`);
   return id;
 };
 
@@ -95,7 +110,7 @@ afterAll(async () => {
 
 describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
   it('registers a client, reads it back, notes when it connects at most hourly, and sweeps it once unused', async () => {
-    const registered = await registerClient(app, registration(), NOW);
+    const registered = await registerClient(app, registration(), NOW, fresh());
     if (registered.outcome !== 'registered') throw new Error('registered');
     const { clientId } = registered.client;
     expect(clientId).toMatch(/^axcl_[0-9a-f]{32}$/);
@@ -112,7 +127,7 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
       return row;
     };
 
-    const unused = await registerClient(app, registration(), NOW);
+    const unused = await registerClient(app, registration(), NOW, fresh());
     await clientSeen(app, clientId, at(1000)).execute();
     expect(await seen()).toEqual({ first: at(1000), last: at(1000) });
     // Within the hour, the row isn't written again: a busy client costs one write an hour.
@@ -142,8 +157,30 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
        from generate_series(1, $2::int) as n`,
       [day, MOST_REGISTRATIONS_A_DAY],
     );
-    expect(await registerClient(app, registration(), new Date(day.getTime() + 1000))).toEqual({ outcome: 'capped' });
-    expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1))).toMatchObject({
+    expect(await registerClient(app, registration(), new Date(day.getTime() + 1000), fresh())).toEqual({
+      outcome: 'capped',
+      cap: 'server',
+    });
+    expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1), fresh())).toMatchObject({
+      outcome: 'registered',
+    });
+  });
+
+  it(`6F1 G4: refuses a network past ${String(MOST_REGISTRATIONS_A_NETWORK_A_DAY)} in 24 hours; another network not`, async () => {
+    const day = new Date('2027-01-01T09:00:00Z');
+    const network = fresh();
+    for (let made = 0; made < MOST_REGISTRATIONS_A_NETWORK_A_DAY; made += 1) {
+      expect(await registerClient(app, registration(), day, network)).toMatchObject({ outcome: 'registered' });
+    }
+    expect(await registerClient(app, registration(), day, network)).toEqual({ outcome: 'capped', cap: 'network' });
+    expect(await registerClient(app, registration(), day, fresh())).toMatchObject({ outcome: 'registered' });
+    const [row] = await database
+      .as('admin')
+      .query<{ registered: number }>('select count(*)::int as registered from oauth.clients where network = $1', [
+        network,
+      ]);
+    expect(row).toEqual({ registered: MOST_REGISTRATIONS_A_NETWORK_A_DAY });
+    expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1), network)).toMatchObject({
       outcome: 'registered',
     });
   });
@@ -246,7 +283,7 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
 describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   let codes = 0;
   /** A device's flow opened at `createdAt`, its two codes' hashes distinct from every other test's. */
-  const device = async (createdAt = NOW, userCodeHash?: string) => {
+  const device = async (createdAt = NOW, userCodeHash?: string, source = fresh()) => {
     codes += 1;
     const id = flowId();
     const flow = {
@@ -259,7 +296,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       intervalSeconds: 5,
       createdAt,
     };
-    return { flow, opened: await openDeviceFlow(app, flow) };
+    return { flow, opened: await openDeviceFlow(app, flow, source) };
   };
   const BROWSER = 'b'.repeat(64);
   const OTHER = 'c'.repeat(64);
@@ -369,6 +406,24 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     );
     expect((await device(later)).opened).toBe('full');
     await admin.query("delete from oauth.flows where id::text like '0199a0f0-0000-7000-9000-%'");
+  });
+
+  it(`6F1 G4: holds one source to ${String(MOST_OPEN_FLOWS_A_SOURCE)} flows not ended, of either kind, decided or not`, async () => {
+    const at = new Date('2027-02-01T09:00:00Z');
+    const source = fresh();
+    // Each from a browser of its own, as a cookie-less client's are: the browser's cap never holds them.
+    const browser = () => hashOf(fresh());
+    const first = await opened(at, source, browser());
+    // A decided flow still holds its place until it ends: deciding is no way round the cap.
+    expect(await flowDecided(app, first, { outcome: 'denied' }, at)).toBe(true);
+    for (let open = 1; open < MOST_OPEN_FLOWS_A_SOURCE - 1; open += 1) await opened(at, source, browser());
+    expect((await device(at, undefined, source)).opened).toBe('opened');
+    expect((await device(at, undefined, source)).opened).toBe('source_full');
+    await expect(opened(at, source, browser())).rejects.toThrow('not opened: source_full');
+    // Another source is not held by it; once its flows end, this one isn't either.
+    expect((await device(at)).opened).toBe('opened');
+    await opened(at);
+    await opened(new Date(at.getTime() + FLOW_SECONDS * 1000), source, browser());
   });
 });
 

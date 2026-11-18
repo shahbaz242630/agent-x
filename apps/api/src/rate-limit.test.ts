@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clientAddress,
   clientKey,
+  clientNetwork,
   createCounter,
   createOrganisationCounter,
   proxyTrust,
@@ -33,6 +34,23 @@ describe('SEC-AV-07 the key a request is counted under', () => {
     ['an IPv6 address with a zone', 'fe80::1%eth0'],
   ])('puts %s in one shared bucket, and never throws', (_what, ip) => {
     expect(clientKey(ip)).toBe(UNREADABLE_ADDRESS);
+  });
+});
+
+describe('6F1 G4 the network an OAuth registration is counted under', () => {
+  it.each([
+    ['an IPv4 address, by its /24', '203.0.113.9', '203.0.113.0'],
+    ['another address in the same /24', '203.0.113.250:40001', '203.0.113.0'],
+    ['an IPv4-mapped address', '::ffff:198.51.100.7', '198.51.100.0'],
+    ['an IPv6 address, by its /48', '2001:db8:1:2:aaaa::1', '2001:db8:1::'],
+    ['another /64 of the same /48', '[2001:db8:1:ffff::7]:443', '2001:db8:1::'],
+  ])('keys %s', (_what, ip, expected) => {
+    expect(clientNetwork(ip)).toBe(expected);
+  });
+
+  it('puts an address it can’t read in the one shared bucket', () => {
+    expect(clientNetwork(undefined)).toBe(UNREADABLE_ADDRESS);
+    expect(clientNetwork('unknown')).toBe(UNREADABLE_ADDRESS);
   });
 });
 

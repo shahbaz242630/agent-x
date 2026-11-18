@@ -57,6 +57,7 @@ interface Stand {
   readonly revoked?: Awaited<ReturnType<OauthGrants['revoke']>>;
   readonly device?: DeviceAnswer;
   readonly clientMetadataOrigins?: readonly string[];
+  readonly webCopies?: number;
 }
 
 const DEVICE_CODES: DeviceAnswer = {
@@ -112,6 +113,7 @@ async function oauthServer(oauthOn: boolean, stand: Stand = {}) {
   const app = await routeServer({
     oauthOn,
     ...(stand.clientMetadataOrigins === undefined ? {} : { clientMetadataOrigins: stand.clientMetadataOrigins }),
+    ...(stand.webCopies === undefined ? {} : { webCopies: stand.webCopies }),
     oauth: {
       authorizing,
       grants,
@@ -611,6 +613,36 @@ describe('SEC-OAUTH-13 the registration endpoint (RFC 7591)', () => {
       );
     }
     expect(answers).toEqual([...Array.from({ length: 10 }, () => 201), 429]);
+  });
+});
+
+describe('6F1 G4: each OAuth limit per address is this copy’s share across every `web` copy', () => {
+  /** How many of `sent` requests each copy of two takes before its 429. */
+  async function taken(request: InjectOptions & { readonly url: string }, sent: number, stand: Stand = {}) {
+    const { app } = await oauthServer(true, { ...stand, webCopies: 2 });
+    const answers: number[] = [];
+    for (let made = 0; made < sent; made += 1) answers.push((await app.inject(request)).statusCode);
+    return answers.findIndex((status) => status === 429);
+  }
+
+  it('authorizes 15 a minute on each of two copies, the 30 shared', async () => {
+    const authorize = { method: 'GET' as const, url: `/v1/oauth/authorize?client_id=${CLIENT}` };
+    expect(await taken(authorize, 16)).toBe(15);
+  });
+
+  it('gives a device its codes 15 a minute on each of two copies', async () => {
+    expect(await taken(form('/v1/oauth/device_authorization', `client_id=${CLIENT}`), 16)).toBe(15);
+  });
+
+  it('registers 5 an hour on each of two copies, the 10 shared', async () => {
+    const register = json('/v1/oauth/register', { redirect_uris: ['https://chatgpt.com/cb'] });
+    const refused = { outcome: 'invalid', error: 'invalid_client_metadata', description: 'Why.' } as const;
+    expect(await taken(register, 6, { register: refused })).toBe(5);
+  });
+
+  it('takes 30 token requests a minute on each of two copies, the 60 shared', async () => {
+    const token = form('/v1/oauth/token', `grant_type=refresh_token&refresh_token=axr_x&client_id=${CLIENT}`);
+    expect(await taken(token, 31)).toBe(30);
   });
 });
 

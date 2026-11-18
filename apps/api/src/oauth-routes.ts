@@ -21,7 +21,9 @@
 //
 // Each counts against a limit of its own per client address, beside the one
 // every route has: registering 10 an hour, authorizing 30 a minute (a
-// device's codes too), the token and revocation endpoints 60 a minute. None of them reads a cookie but the
+// device's codes too), the token and revocation endpoints 60 a minute; with
+// several `web` copies each counts its share (6F1 G4, shareOfCopies), as every
+// other limit does. None of them reads a cookie but the
 // authorize endpoint's own flow cookie, so the token, revocation and
 // registration endpoints take writes from any origin (`oauthClient`), as
 // OAuth clients send them; none answers a browser's cross-origin read (no
@@ -52,17 +54,24 @@ import {
   serverMetadataOf,
 } from './oauth-wire.ts';
 import { MCP_PATH } from './mcp-protocols.ts';
-import { type CountRequest, createAddressCounter, type ProxyTrust } from './rate-limit.ts';
+import { type CountRequest, createAddressCounter, type ProxyTrust, rawClientIp, shareOfCopies } from './rate-limit.ts';
 import { cookieValue } from './sign-in.ts';
 
 const MINUTE_MS = 60_000;
 
-/** Each endpoint's own limit per client address (plan §1). */
+/** Each endpoint's own limit per client address (plan §1), across every `web` copy. */
 const LIMITS = {
   register: { most: 10, windowMs: 60 * MINUTE_MS },
   authorize: { most: 30, windowMs: MINUTE_MS },
   token: { most: 60, windowMs: MINUTE_MS },
 } as const;
+
+/** A counter of one endpoint's limit per client address: this copy's share of it across `copies` (6F1 G4). */
+const addressCounter = (
+  app: FastifyInstance,
+  { most, windowMs }: (typeof LIMITS)[keyof typeof LIMITS],
+  { trust, copies }: { readonly trust: ProxyTrust; readonly copies: number },
+): CountRequest => createAddressCounter(app, { most: shareOfCopies(most, copies), windowMs }, trust);
 
 /** The most a registration's body may be: five addresses of 2 KB each and the rest, with room to spare. */
 const REGISTER_BODY_LIMIT = 16_384;
@@ -227,15 +236,18 @@ export function registerOauth(
     capabilities,
     authorizing,
     trust,
+    copies,
   }: {
     readonly capabilities: Capabilities;
     readonly authorizing: OauthAuthorizing | undefined;
     readonly trust: ProxyTrust;
+    /** The API's `web` copies (AGENTX_WEB_COPIES): each counts its share of every limit. */
+    readonly copies: number;
   },
 ): void {
   app.decorateRequest('formRepeated', false);
-  const counted = (limit: { readonly most: number; readonly windowMs: number }): CountRequest =>
-    createAddressCounter(app, limit, trust);
+  const counted = (limit: (typeof LIMITS)[keyof typeof LIMITS]): CountRequest =>
+    addressCounter(app, limit, { trust, copies });
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
   for (const path of [OAUTH_PATHS.resourceMetadata, `${OAUTH_PATHS.resourceMetadata}${MCP_PATH}`]) {
@@ -276,7 +288,11 @@ export function registerOauth(
     },
     async (request, reply) => {
       if (authorizing === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-      const answer = await authorizing.authorize(request.query, cookieValue(request.headers.cookie, CONNECT_COOKIE));
+      const answer = await authorizing.authorize(
+        request.query,
+        cookieValue(request.headers.cookie, CONNECT_COOKIE),
+        rawClientIp(request, trust),
+      );
       if (answer.outcome === 'not_redirectable') {
         return reply.code(302).header('location', `${CONNECT_PATH}?problem=${answer.problem}`).send({});
       }
@@ -303,7 +319,7 @@ export function registerOauth(
     },
     async (request, reply) => {
       if (authorizing === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-      const answer = await authorizing.register(request.body, request.id);
+      const answer = await authorizing.register(request.body, request.id, rawClientIp(request, trust));
       if (answer.outcome === 'invalid') return sendOauthError(reply, 400, answer.error, answer.description);
       if (answer.outcome === 'capped') return sendErrorBody(reply, 429, 'RATE_LIMITED', request.id);
       const { client } = answer;
@@ -332,15 +348,17 @@ export function registerOauthForms(
     device,
     clock,
     trust,
+    copies,
   }: {
     readonly grants: OauthGrants | undefined;
     readonly device: OauthDevice | undefined;
     readonly clock: Clock;
     readonly trust: ProxyTrust;
+    readonly copies: number;
   },
 ): void {
-  const tokenLimit = createAddressCounter(scope, LIMITS.token, trust);
-  const deviceLimit = createAddressCounter(scope, LIMITS.authorize, trust);
+  const tokenLimit = addressCounter(scope, LIMITS.token, { trust, copies });
+  const deviceLimit = addressCounter(scope, LIMITS.authorize, { trust, copies });
   const forms = scope.withTypeProvider<ZodTypeProvider>();
   forms.post(
     OAUTH_PATHS.deviceAuthorization,
@@ -361,7 +379,7 @@ export function registerOauthForms(
     async (request, reply) => {
       if (device === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
-      const answer = await device.authorize(request.body, request.id);
+      const answer = await device.authorize(request.body, request.id, rawClientIp(request, trust));
       if (answer.outcome === 'refused') return sendOauthError(reply, answer.status, answer.error, answer.description);
       const { codes } = answer;
       return noStore(reply).code(200).send({
