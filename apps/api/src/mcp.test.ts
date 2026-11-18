@@ -793,6 +793,21 @@ describe('SEC-MCP-03 tool answers are typed, plain and never instructions', () =
     // Zero-width space, word joiner, soft hyphen, byte order mark, Arabic letter mark, and a tag character's letter.
     const hidden = String.fromCodePoint(0x200b, 0x2060, 0xad, 0xfeff, 0x61c, 0xe0041);
     expect(plainText(`pay${hidden}me`)).toBe('payme');
+    // Variation selectors (both blocks), Hangul fillers, the combining grapheme joiner, a Mongolian free variation
+    // selector, unassigned tag-block characters and a private-use one: all hide text, all out (6F1 G5 review).
+    const masked = String.fromCodePoint(
+      0xfe0f,
+      0xe0100,
+      0xe01ef,
+      0x3164,
+      0x115f,
+      0xffa0,
+      0x34f,
+      0x180b,
+      0xe0000,
+      0xe0002,
+    );
+    expect(plainText(`pay${masked}me${String.fromCodePoint(0xe000)}`)).toBe('payme');
     // Between two Latin letters a joiner changes nothing a person sees: out, as a visible name refuses it.
     expect(plainText(`a${zwj}b${zwnj}c`)).toBe('abc');
     // Persian's non-joiner between two Arabic letters, and Devanagari's joiner after a virama: kept.

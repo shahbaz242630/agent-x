@@ -370,11 +370,15 @@ export function checkedInput(
 export const MOST_TEXT = 500;
 
 /**
- * Characters that control a terminal, line and paragraph separators, and every format character (6F1 G5): those that
- * turn text's direction (Trojan Source) and those that hide text (zero-width, tag characters), as a visible name
- * refuses them (visible-name.ts). Its first group is the one exception, a joiner a script needs within a word, kept.
+ * Characters that control a terminal, line and paragraph separators, every format, private-use and unassigned
+ * character, and every default-ignorable one (6F1 G5): those that turn text's direction (Trojan Source) and those that
+ * hide text (zero-width, tags, variation selectors, fillers), as a visible name refuses them (visible-name.ts). Its
+ * first group is the one exception, a joiner a script needs within a word, kept.
  */
-const UNSAFE_CHARACTERS = new RegExp(`(${JOINER_IN_A_WORD_SOURCE})|[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]`, 'gu');
+const UNSAFE_CHARACTERS = new RegExp(
+  `(${JOINER_IN_A_WORD_SOURCE})|[\\p{C}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}]`,
+  'gu',
+);
 
 /** A text as a tool answers it: unsafe characters removed, cut to MOST_TEXT characters. */
 export function plainText(text: string): string {
