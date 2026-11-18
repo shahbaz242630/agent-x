@@ -19,12 +19,21 @@
 // its integrity check too, which ends it: asking again changes nothing.
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
-import { useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 
 import { isIntegrityFailed, isRefusal, isSignedOut, isUuid } from '../api.ts';
 import { HOLD_PATH, holdRefusal } from '../hold.ts';
 import { endSession } from '../session.tsx';
-import { confirm, forget, isUndecided, ownQuery, pendingFor, STEP_UP_FAILED, STEPPED } from '../step-up.ts';
+import {
+  confirm,
+  forget,
+  isUndecided,
+  ownQuery,
+  type PendingChange,
+  pendingFor,
+  STEP_UP_FAILED,
+  STEPPED,
+} from '../step-up.ts';
 import { t, type TextKey } from '../text.ts';
 import { KeyOnce, keyIn, linkIn } from './key-once.tsx';
 
@@ -164,13 +173,10 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
   }
   if (typeof sent === 'object') {
     return (
-      <section className="notice stepped" role="status">
+      <Ended onClose={close}>
         {sent.made === false && <p>{t('stepUp.notMade', { change: pending.label })}</p>}
         <p>{sent.said}</p>
-        <button type="button" className="secondary" onClick={close}>
-          {t('stepUp.close')}
-        </button>
-      </section>
+      </Ended>
     );
   }
   if (sent === 'done' || sent === 'refused' || sent === 'wordsChanged') {
@@ -183,28 +189,61 @@ function Stepped({ challenge, close }: { readonly challenge: string; readonly cl
       </section>
     );
   }
+  let said: string | undefined;
+  if (sent === 'failed' || sent === 'busy') said = t(sent === 'busy' ? 'stepUp.busy' : 'stepUp.failed');
+  return (
+    <ConfirmKept pending={pending} sending={sent === 'sending'} said={said} onSend={() => void send()} onDrop={close} />
+  );
+}
+
+/** A confirm that ended: what it said, and Close. */
+export function Ended({ onClose, children }: { readonly onClose: () => void; readonly children: ReactNode }) {
+  return (
+    <section className="notice stepped" role="status">
+      {children}
+      <button type="button" className="secondary" onClick={onClose}>
+        {t('stepUp.close')}
+      </button>
+    </section>
+  );
+}
+
+/** The change kept for a step-up, to confirm or not make: `said` what the last try met, if it is to be tried again. */
+export function ConfirmKept({
+  pending,
+  sending,
+  said,
+  onSend,
+  onDrop,
+}: {
+  readonly pending: PendingChange;
+  readonly sending: boolean;
+  readonly said: string | undefined;
+  readonly onSend: () => void;
+  readonly onDrop: () => void;
+}) {
   return (
     <section className="stepped" aria-labelledby="stepped-title">
       <h2 id="stepped-title">{t('stepUp.title')}</h2>
       <p>{pending.label}</p>
-      {(sent === 'failed' || sent === 'busy') && (
+      {said !== undefined && (
         <p className="notice" role="alert">
-          {t(sent === 'busy' ? 'stepUp.busy' : 'stepUp.failed')}
+          {said}
         </p>
       )}
       <div className="actions">
         <button
           type="button"
           className="secondary"
-          disabled={sent === 'sending'}
+          disabled={sending}
           onClick={() => {
             forget(pending.challenge);
-            close();
+            onDrop();
           }}
         >
           {t('stepUp.notNow')}
         </button>
-        <button type="button" className="primary" disabled={sent === 'sending'} onClick={() => void send()}>
+        <button type="button" className="primary" disabled={sending} onClick={onSend}>
           {t('stepUp.confirm')}
         </button>
       </div>
