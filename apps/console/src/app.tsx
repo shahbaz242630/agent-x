@@ -22,6 +22,7 @@ import { AuditLog } from './pages/audit-log.tsx';
 import { SecurityEvents } from './pages/security-events.tsx';
 import { BrakeList } from './pages/brakes.tsx';
 import { Choose, NoOrganization } from './pages/choose.tsx';
+import { CONNECT, Connect } from './pages/connect.tsx';
 import { Contacts } from './pages/contacts.tsx';
 import { EvidencePage } from './pages/evidence.tsx';
 import { Failed, Loading, NotFound } from './pages/failed.tsx';
@@ -88,6 +89,8 @@ function Root() {
   // An invitation's acceptance: signed in, perhaps a member of no organisation yet. Once the session is read, a
   // background re-read that fails never replaces it: the page holds the token in its memory alone, lost if unmounted.
   if (path === ACCEPT && session.data !== undefined) return <AcceptInvitation session={session.data} />;
+  // An MCP app asking to be connected (6E3b): the person picks the organisation on the page itself.
+  if (path === CONNECT && session.data !== undefined) return <Connect session={session.data} />;
   if (session.isPending) return <Loading />;
   if (session.isError) return <Failed onRetry={() => void session.refetch()} />;
   if (session.data === null) return <SignedOut ended={queries.getQueryData<boolean>(ENDED) === true} />;
@@ -235,6 +238,7 @@ const routes = root.addChildren([
   // Drawn by Root itself, before the shell (6D4b): named here so the router knows them.
   createRoute({ getParentRoute: () => root, path: RESET_CONFIRM, component: () => null }),
   createRoute({ getParentRoute: () => root, path: ACCEPT, component: () => null }),
+  createRoute({ getParentRoute: () => root, path: CONNECT, component: () => null }),
   createRoute({ getParentRoute: () => root, path: '/more/mandates', component: MandateList }),
   createRoute({ getParentRoute: () => root, path: '/more/mandates/new', component: DraftMandate }),
   createRoute({ getParentRoute: () => root, path: '/more/mandates/$id', component: MandateAt }),
