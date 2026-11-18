@@ -1,6 +1,7 @@
 // A client registering itself (RFC 7591; SEC-OAUTH-13): what it says of
 // itself, checked, before anything is kept. Public clients alone (decision 3:
-// `none`, no secret), the code flow alone, refresh tokens always. Its name is
+// `none`, no secret), the code flow or the device flow (6E3c), refresh
+// tokens always. Its name is
 // what it says it is, never proof of anything: the consent page shows it as
 // such, with the redirect address's host in bold. Its logo and its pages are
 // never fetched.
@@ -17,8 +18,11 @@ const MOST_NAME = 100;
 /** The most characters of a software ID or version. */
 const MOST_SOFTWARE = 255;
 
-/** The grant types a client may register: the code flow and its refresh tokens (device: 6E3c). */
-export const GRANT_TYPES = ['authorization_code', 'refresh_token'] as const;
+/** The device flow's grant type (RFC 8628 §3.4). */
+export const DEVICE_CODE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+
+/** The grant types a client may register: the code flow, its refresh tokens, and the device flow (6E3c). */
+export const GRANT_TYPES = ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT] as const;
 export type GrantType = (typeof GRANT_TYPES)[number];
 
 /** A client's registration, checked: what is kept. */
@@ -57,7 +61,7 @@ const invalid = (error: RegistrationError, description: string): RegistrationChe
   description,
 });
 
-const isGrantType = (value: string): value is GrantType => GRANT_TYPES.some((grant) => grant === value);
+export const isGrantType = (value: string): value is GrantType => GRANT_TYPES.some((grant) => grant === value);
 
 /** A short text the client may send, or null for none; undefined for one past its length. */
 const shortText = (value: string | undefined): string | null | undefined => {
@@ -88,8 +92,11 @@ export function checkRegistration(asked: RegistrationAsked): RegistrationChecked
     return invalid('invalid_client_metadata', 'the only response type is code');
   }
   const grants = asked.grant_types ?? ['authorization_code', 'refresh_token'];
-  if (grants.length === 0 || !grants.every(isGrantType) || !grants.includes('authorization_code')) {
-    return invalid('invalid_client_metadata', 'grant types are authorization_code, with refresh_token');
+  if (grants.length === 0 || !grants.every(isGrantType) || !grants.some((grant) => grant !== 'refresh_token')) {
+    return invalid(
+      'invalid_client_metadata',
+      'grant types are authorization_code or the device code, with refresh_token',
+    );
   }
   if (scopesAsked(asked.scope) === undefined) return invalid('invalid_client_metadata', 'a scope is not one there is');
   const [softwareId, softwareVersion] = [shortText(asked.software_id), shortText(asked.software_version)];

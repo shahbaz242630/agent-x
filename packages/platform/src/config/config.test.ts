@@ -1920,3 +1920,59 @@ describe('4D2e E3 where the chains’ anchors are kept', () => {
     expect(JSON.stringify(settings)).not.toContain(HEADER);
   });
 });
+
+describe('config: client ID metadata documents (6E3c, decision 2; SEC-OAUTH-09)', () => {
+  const ON: Env = { ...LOCAL, AGENTX_ENV: 'test', AGENTX_MCP_OAUTH: 'on' };
+  const originsOf = (env: Env) => loadConfig(env).http.oauthClientMetadataOrigins;
+
+  it('takes none while the OAuth server is off, whatever is set', () => {
+    expect(
+      originsOf({ ...LOCAL, AGENTX_ENV: 'test', AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://claude.ai' }),
+    ).toBeUndefined();
+  });
+
+  it('unset, takes the three known clients’ origins that are on the outbound allowlist, and only those', () => {
+    expect(originsOf(ON)).toEqual([]);
+    expect(
+      originsOf({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://claude.ai,https://chatgpt.com,https://other.example',
+      }),
+    ).toEqual(['https://chatgpt.com', 'https://claude.ai']);
+  });
+
+  it('set, takes exactly those, sorted; none for none', () => {
+    const allowed = 'https://claude.ai,https://nousresearch.github.io';
+    expect(
+      originsOf({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: allowed,
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://nousresearch.github.io,https://claude.ai',
+      }),
+    ).toEqual(['https://claude.ai', 'https://nousresearch.github.io']);
+    expect(
+      originsOf({ ...ON, AGENTX_OUTBOUND_ALLOWED_ORIGINS: allowed, AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'none' }),
+    ).toEqual([]);
+  });
+
+  it('refuses to start with one set that is not on the outbound allowlist, or not https', () => {
+    expect(problemsWith({ ...ON, AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'https://claude.ai' })).toEqual([
+      "AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: https://claude.ai must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; a client's document is fetched there",
+    ]);
+    expect(
+      problemsWith({
+        ...ON,
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://cimd.test',
+        AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'http://cimd.test',
+      }),
+    ).toEqual([expect.stringMatching(/^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: http:\/\/cimd\.test must be https/)]);
+    expect(problemsWith({ ...ON, AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: 'claude.ai' })).toEqual([
+      expect.stringMatching(/^AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: /),
+    ]);
+  });
+
+  it('keeps the origins in the fingerprint', () => {
+    const settings = fingerprintedSettings(loadConfig({ ...ON, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://claude.ai' }));
+    expect(settings.http).toMatchObject({ oauthClientMetadataOrigins: ['https://claude.ai'] });
+  });
+});

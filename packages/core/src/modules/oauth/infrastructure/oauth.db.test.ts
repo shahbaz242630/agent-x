@@ -1,12 +1,21 @@
-// SEC-OAUTH-04, -13 (6E3a): the OAuth server's global records on the real
-// migrated schema, as the app role: a client registered within the day's cap,
-// a flow decided once, its code used once, and both swept once past their use.
+// SEC-OAUTH-04, -09, -13 (6E3a, 6E3c): the OAuth server's global records on
+// the real migrated schema, as the app role: a client registered within the
+// day's cap, a flow decided once, its code used once, and both swept once past
+// their use; a device's flow claimed once and polled no sooner than its
+// interval; a client's metadata document kept a day.
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { checkRegistration, type ClientRegistration } from './client-metadata.ts';
+import {
+  CLIENT_METADATA_KEPT_MS,
+  keepClientMetadata,
+  keptClientMetadata,
+  sweepClientMetadata,
+} from './client-metadata-cache.ts';
+import { hashOf } from './codes.ts';
 import { challengeOf } from './pkce.ts';
 import {
   CLIENT_KEPT_DAYS,
@@ -20,11 +29,17 @@ import {
   CODE_SECONDS,
   codeHeld,
   codeUsed,
+  deviceClaimed,
+  deviceFlowOfCode,
+  deviceHeld,
+  devicePolled,
   flowOfCode,
   FLOW_SECONDS,
   flowById,
   flowDecided,
+  MOST_OPEN_FLOWS,
   openCodeFlow,
+  openDeviceFlow,
   sweepFlows,
 } from './flows.ts';
 import type { OauthTables } from './tables.ts';
@@ -224,5 +239,176 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
     await expect(
       admin.query("update oauth.flows set outcome = 'allowed', decided_at = now() where id = $1", [id]),
     ).rejects.toMatchObject({ code: '23514', constraint: 'allowed_names_its_connection' });
+  });
+});
+
+describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
+  let codes = 0;
+  /** A device's flow opened at `createdAt`, its two codes' hashes distinct from every other test's. */
+  const device = async (createdAt = NOW, userCodeHash?: string) => {
+    codes += 1;
+    const id = flowId();
+    const flow = {
+      id,
+      clientId: 'https://nousresearch.github.io/hermes/client.json',
+      scopesAsked: ['requests:read'] as const,
+      resource: 'https://app.agentx.example/v1/mcp',
+      deviceHash: hashOf(`device ${String(codes)}`),
+      userCodeHash: userCodeHash ?? hashOf(`user ${String(codes)}`),
+      intervalSeconds: 5,
+      createdAt,
+    };
+    return { flow, opened: await openDeviceFlow(app, flow) };
+  };
+  const BROWSER = 'b'.repeat(64);
+  const OTHER = 'c'.repeat(64);
+
+  it('opens a device’s flow with no browser, reads it by its device code, and draws again for a user code held', async () => {
+    const { flow, opened: outcome } = await device();
+    expect(outcome).toBe('opened');
+    expect(await deviceFlowOfCode(app, flow.deviceHash)).toEqual({
+      kind: 'device',
+      id: flow.id,
+      clientId: flow.clientId,
+      scopesAsked: ['requests:read'],
+      resource: flow.resource,
+      browserHash: null,
+      intervalSeconds: 5,
+      polledAt: null,
+      createdAt: NOW,
+      endsAt: new Date(NOW.getTime() + FLOW_SECONDS * 1000),
+      decided: null,
+      orgId: null,
+      keyId: null,
+      usedAt: null,
+    });
+    expect(await flowById(app, flow.id)).toMatchObject({ kind: 'device', id: flow.id });
+    expect(await flowOfCode(app, flow.deviceHash)).toBeUndefined();
+    expect(await deviceFlowOfCode(app, hashOf('no device'))).toBeUndefined();
+    const again = await device(NOW, flow.userCodeHash);
+    expect(again.opened).toBe('collided');
+    expect(await flowById(app, again.flow.id)).toBeUndefined();
+  });
+
+  it('is claimed once, by the first browser whose person types its code, and only while open and undecided', async () => {
+    const { flow } = await device();
+    expect(await deviceClaimed(app, flow.userCodeHash, BROWSER, NOW)).toBe(flow.id);
+    // The same browser again (a reload) finds it; another browser never does.
+    expect(await deviceClaimed(app, flow.userCodeHash, BROWSER, NOW)).toBe(flow.id);
+    expect(await deviceClaimed(app, flow.userCodeHash, OTHER, NOW)).toBeUndefined();
+    expect(await flowById(app, flow.id)).toMatchObject({ browserHash: BROWSER });
+    expect(await deviceClaimed(app, hashOf('typed wrong'), BROWSER, NOW)).toBeUndefined();
+    const ended = await device();
+    const end = new Date(NOW.getTime() + FLOW_SECONDS * 1000);
+    expect(await deviceClaimed(app, ended.flow.userCodeHash, BROWSER, end)).toBeUndefined();
+    const decided = await device();
+    expect(await flowDecided(app, decided.flow.id, { outcome: 'denied' }, NOW)).toBe(true);
+    expect(await deviceClaimed(app, decided.flow.userCodeHash, BROWSER, NOW)).toBeUndefined();
+  });
+
+  it('notes a poll no sooner than its interval, one at a time', async () => {
+    const { flow } = await device();
+    expect(await devicePolled(app, flow.id, NOW)).toBe(true);
+    expect(await devicePolled(app, flow.id, new Date(NOW.getTime() + 4999))).toBe(false);
+    expect(await deviceFlowOfCode(app, flow.deviceHash)).toMatchObject({ polledAt: NOW });
+    expect(await devicePolled(app, flow.id, new Date(NOW.getTime() + 5000))).toBe(true);
+    // A code flow is never a device's to poll.
+    expect(await devicePolled(app, await opened(), NOW)).toBe(false);
+  });
+
+  it('is decided with no code, and held for its tokens’ issue: a second poll waits, then finds it used', async () => {
+    const { flow } = await device();
+    const allowed = { outcome: 'allowed' as const, orgId: ORG, keyId: KEY, codeHash: null };
+    expect(await flowDecided(app, flow.id, allowed, NOW)).toBe(true);
+    expect(await deviceFlowOfCode(app, flow.deviceHash)).toMatchObject({ decided: 'allowed', orgId: ORG, keyId: KEY });
+    expect(await flowById(app, flow.id)).not.toHaveProperty('codeEndsAt');
+    const made = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const first = app.transaction().execute(async (tx) => {
+      const held = await deviceHeld(tx, flow.id);
+      await codeUsed(tx, flow.id, NOW);
+      made.resolve(undefined);
+      await letGo.promise;
+      return held?.usedAt;
+    });
+    await made.promise;
+    const second = app.transaction().execute(async (tx) => (await deviceHeld(tx, flow.id))?.usedAt);
+    await waitUntilQueued(database.as('admin'), 1);
+    letGo.resolve(undefined);
+    expect(await first).toBeNull();
+    expect(await second).toEqual(NOW);
+    expect(await app.transaction().execute(async (tx) => deviceHeld(tx, await opened()))).toBeUndefined();
+  });
+
+  it('holds a device flow’s shape in the database: no redirect, challenge, state or code', async () => {
+    const { flow } = await device();
+    const admin = database.as('admin');
+    await expect(admin.query("update oauth.flows set state = 'x' where id = $1", [flow.id])).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'a_device_flow_is_a_device',
+    });
+    await expect(
+      admin.query('update oauth.flows set code_hash = $2, code_ends_at = now() where id = $1', [
+        flow.id,
+        'f'.repeat(64),
+      ]),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'a_device_flow_is_a_device' });
+  });
+
+  it('counts device flows against the server’s cap of open flows', async () => {
+    const admin = database.as('admin');
+    const later = new Date('2027-01-01T09:00:00Z');
+    await admin.query(
+      `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, browser_hash, scopes_asked,
+         resource, created_at, ends_at)
+       select ('0199a0f0-0000-7000-9000-' || lpad(to_hex(n), 12, '0'))::uuid, 'code', 'c', 'https://a.example/cb',
+         $1, $2, 'requests:read', 'r', $3, $4
+       from generate_series(1, $5::int) as n`,
+      [challengeOf('v'.repeat(43)), 'e'.repeat(64), later, new Date(later.getTime() + 1000), MOST_OPEN_FLOWS],
+    );
+    expect((await device(later)).opened).toBe('full');
+    await admin.query("delete from oauth.flows where id::text like '0199a0f0-0000-7000-9000-%'");
+  });
+});
+
+describe(`SEC-OAUTH-09 client metadata documents kept a day (6E3c; Postgres ${server.version})`, () => {
+  const DOCUMENT = {
+    clientId: 'https://claude.ai/oauth/mcp-oauth-client-metadata',
+    name: 'Claude',
+    redirectUris: ['https://claude.ai/api/mcp/auth_callback'],
+    grantTypes: ['authorization_code', 'refresh_token'] as const,
+  };
+
+  it('keeps a document for a day, fetched again over its own row, and sweeps it once past its day', async () => {
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toBeUndefined();
+    await keepClientMetadata(app, DOCUMENT, NOW);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toEqual(DOCUMENT);
+    const dayOn = new Date(NOW.getTime() + CLIENT_METADATA_KEPT_MS);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toBeUndefined();
+    await keepClientMetadata(app, { ...DOCUMENT, name: 'Claude (new)' }, dayOn);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toMatchObject({ name: 'Claude (new)' });
+    expect(await sweepClientMetadata(app, new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS - 1), 10)).toBe(0);
+    expect(await sweepClientMetadata(app, new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS), 10)).toBe(1);
+    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toBeUndefined();
+    await expect(sweepClientMetadata(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('holds a document’s shape in the database: an https address, its addresses, a day ahead', async () => {
+    const admin = database.as('admin');
+    const insert = (clientId: string, uris: readonly string[], expires: Date) =>
+      admin.query(
+        `insert into oauth.client_metadata (client_id, name, redirect_uris, grant_types, fetched_at, expires_at)
+         values ($1, 'x', $2, '{authorization_code}', $3, $4)`,
+        [clientId, uris, NOW, expires],
+      );
+    const later = new Date(NOW.getTime() + 1000);
+    await expect(insert('http://claude.ai/x', ['https://a.example/cb'], later)).rejects.toMatchObject({
+      code: '23514',
+    });
+    await expect(insert('https://claude.ai/x', [], later)).rejects.toMatchObject({ code: '23514' });
+    await expect(insert('https://claude.ai/x', ['https://a.example/cb'], NOW)).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'kept_after_it_was_fetched',
+    });
   });
 });

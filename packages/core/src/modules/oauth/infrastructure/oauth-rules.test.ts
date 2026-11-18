@@ -1,19 +1,25 @@
 // SEC-OAUTH-02, -03, -08, -11, -13 (6E3a): the OAuth server's own rules, apart
 // from any database: PKCE S256 alone, redirect addresses matched exactly (a
 // loopback's port aside), scopes asked and narrowed, and a client's
-// registration checked before anything is kept.
+// registration checked before anything is kept. 6E3c (SEC-OAUTH-09): a
+// device's codes, and a client named by its metadata document.
 import { describe, expect, it } from 'vitest';
 
 import { SCOPES } from '../../agents/index.ts';
-import { checkRegistration } from './client-metadata.ts';
+import { checkRegistration, DEVICE_CODE_GRANT } from './client-metadata.ts';
+import { checkClientMetadataDocument, isMetadataClientId } from './client-metadata-document.ts';
 import {
   hashOf,
   isCodeText,
+  isDeviceCodeText,
   isFlowCookie,
   isRegisteredClientId,
   newClientId,
   newCode,
+  newDeviceCode,
   newFlowCookie,
+  newUserCode,
+  userCodeOf,
 } from './codes.ts';
 import { challengeOf, isCodeChallenge, isCodeVerifier, pkceMatches } from './pkce.ts';
 import { isLoopback, isRegisteredRedirect, redirectMatches, redirectProblems } from '../domain/redirects.ts';
@@ -195,5 +201,111 @@ describe('SEC-OAUTH-13 a client registering itself', () => {
     [{ ...asked, software_version: 'x'.repeat(256) }, 'invalid_client_metadata'],
   ])('refuses %j as %s', (registration, error) => {
     expect(checkRegistration(registration)).toMatchObject({ outcome: 'invalid', error });
+  });
+});
+
+describe('a device’s codes (6E3c, RFC 8628 §3.2, §6.1)', () => {
+  it('draws a device code as a secret, and a user code of eight consonants in two fours', () => {
+    const device = newDeviceCode();
+    expect(isDeviceCodeText(device)).toBe(true);
+    expect(isDeviceCodeText(device.replace('axd_', 'axc_'))).toBe(false);
+    expect(newDeviceCode()).not.toBe(device);
+    const drawn = Array.from({ length: 200 }, newUserCode);
+    for (const code of drawn) expect(code).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+    expect(new Set(drawn).size).toBeGreaterThan(195);
+  });
+
+  it('reads a user code as typed: any case, its dash or spaces, and nothing that can be no code', () => {
+    expect(userCodeOf('BCDF-GHJK')).toBe('BCDFGHJK');
+    expect(userCodeOf(' bcdf ghjk ')).toBe('BCDFGHJK');
+    expect(userCodeOf('bcdfghjk')).toBe('BCDFGHJK');
+    expect(userCodeOf('BCDF-GHJ')).toBeUndefined();
+    expect(userCodeOf('BCDF-GHJKL')).toBeUndefined();
+    // A vowel, a digit or a Y is never in a code.
+    expect(userCodeOf('ABCD-GHJK')).toBeUndefined();
+    expect(userCodeOf('BCD1-GHJK')).toBeUndefined();
+    expect(userCodeOf('BCDY-GHJK')).toBeUndefined();
+  });
+
+  it('registers a client for the device flow, with refresh tokens, and never one for refresh alone', () => {
+    const device = checkRegistration({
+      redirect_uris: ['http://127.0.0.1/callback'],
+      grant_types: [DEVICE_CODE_GRANT],
+    });
+    expect(device).toMatchObject({ outcome: 'valid', client: { grantTypes: [DEVICE_CODE_GRANT, 'refresh_token'] } });
+    expect(
+      checkRegistration({ redirect_uris: ['http://127.0.0.1/callback'], grant_types: ['refresh_token'] }),
+    ).toMatchObject({ outcome: 'invalid', error: 'invalid_client_metadata' });
+  });
+});
+
+describe('SEC-OAUTH-09 a client named by its metadata document (6E3c, CIMD)', () => {
+  const CLIENT_ID = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const DOCUMENT = {
+    client_id: CLIENT_ID,
+    client_name: 'Claude',
+    redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+    grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+
+  it.each([
+    [CLIENT_ID, true],
+    ['https://nousresearch.github.io/hermes/client.json?v=1', true],
+    ['http://claude.ai/oauth/x', false],
+    ['https://claude.ai', false],
+    ['https://claude.ai/', false],
+    ['https://claude.ai/a/../b', false],
+    ['https://claude.ai/a/./b', false],
+    ['https://claude.ai/x#frag', false],
+    ['https://user@claude.ai/x', false],
+    ['https://CLAUDE.ai/x', false],
+    ['https://claude.ai:443/x', false],
+    ['axcl_0123456789abcdef0123456789abcdef', false],
+    [`https://claude.ai/${'x'.repeat(2048)}`, false],
+  ])('takes %s as a document’s address: %s', (clientId, taken) => {
+    expect(isMetadataClientId(clientId)).toBe(taken);
+  });
+
+  it('keeps the document’s name, addresses and the grants it knows', () => {
+    expect(checkClientMetadataDocument(CLIENT_ID, DOCUMENT)).toEqual({
+      outcome: 'valid',
+      document: {
+        clientId: CLIENT_ID,
+        name: 'Claude',
+        redirectUris: ['https://claude.ai/api/mcp/auth_callback'],
+        grantTypes: ['authorization_code', 'refresh_token'],
+      },
+    });
+    const bare = { client_id: CLIENT_ID, redirect_uris: ['http://localhost:27890/callback'] };
+    expect(checkClientMetadataDocument(CLIENT_ID, bare)).toMatchObject({
+      outcome: 'valid',
+      document: { name: 'claude.ai', grantTypes: ['authorization_code'] },
+    });
+  });
+
+  it.each([
+    ['not an object', [], 'not_an_object'],
+    ['another client’s ID', { ...DOCUMENT, client_id: 'https://claude.ai/other' }, 'client_id_mismatch'],
+    ['no addresses', { ...DOCUMENT, redirect_uris: [] }, 'redirect_uris'],
+    [
+      'eleven addresses',
+      { ...DOCUMENT, redirect_uris: Array.from({ length: 11 }, (_, n) => `https://a.example/${String(n)}`) },
+      'redirect_uris',
+    ],
+    [
+      'an address twice',
+      { ...DOCUMENT, redirect_uris: ['https://a.example/cb', 'https://a.example/cb'] },
+      'redirect_uris',
+    ],
+    ['plain http elsewhere', { ...DOCUMENT, redirect_uris: ['http://a.example/cb'] }, 'redirect_uris'],
+    ['an address that is no text', { ...DOCUMENT, redirect_uris: [7] }, 'redirect_uris'],
+    ['a secret client', { ...DOCUMENT, token_endpoint_auth_method: 'private_key_jwt' }, 'not_public'],
+    ['a secret', { ...DOCUMENT, client_secret: 'shh' }, 'not_public'],
+    ['no code response', { ...DOCUMENT, response_types: ['token'] }, 'response_types'],
+    ['grant types that are no list', { ...DOCUMENT, grant_types: 'authorization_code' }, 'grant_types'],
+  ])('refuses %s', (_, document, reason) => {
+    expect(checkClientMetadataDocument(CLIENT_ID, document)).toEqual({ outcome: 'invalid', reason });
   });
 });

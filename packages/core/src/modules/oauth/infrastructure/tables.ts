@@ -1,7 +1,17 @@
-/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094), as Kysely sees them. */
+/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094, 0095), as Kysely sees them. */
 export interface OauthTables {
   'oauth.clients': ClientsTable;
   'oauth.flows': FlowsTable;
+  'oauth.client_metadata': ClientMetadataTable;
+}
+
+interface ClientMetadataTable {
+  client_id: string;
+  name: string;
+  redirect_uris: string[];
+  grant_types: string[];
+  fetched_at: Date;
+  expires_at: Date;
 }
 
 interface ClientsTable {
