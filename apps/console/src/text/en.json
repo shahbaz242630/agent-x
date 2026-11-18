@@ -1391,7 +1391,7 @@
   "connections.title": "Connected apps",
   "connections.intro": "Apps someone allowed to act as this agent. Each name is what the app says it is; the address is where Agent X sent them back to.",
   "connections.none": "No app is connected to this agent.",
-  "connections.viewOnly": "Only an admin or a developer can revoke a connection.",
+  "connections.viewOnly": "Only an admin can revoke a connection, or a developer on an agent they are responsible for.",
   "connections.made": "Allowed {time} by {who}",
   "connections.lastConnected": "Last connected {time}",
   "connections.neverConnected": "Not connected yet",

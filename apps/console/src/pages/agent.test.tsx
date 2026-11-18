@@ -580,8 +580,22 @@ describe('an agent’s connected apps (6E3b)', () => {
   it('shows an approver the apps and why there is nothing to press', async () => {
     as('approver', { connections: CONNECTIONS });
     open(page);
-    expect(await screen.findByText('Only an admin or a developer can revoke a connection.')).toBeDefined();
+    expect(await screen.findByText(/Only an admin can revoke a connection/)).toBeDefined();
     expect(screen.queryByRole('button', { name: /^Revoke the connection of/ })).toBeNull();
+  });
+
+  it('lets a developer revoke only on an agent they are responsible for', async () => {
+    as('developer', { owner: DEVELOPER, connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByText(/a developer on an agent they are responsible for/)).toBeDefined();
+    // The members read in (the owner named by role), so the rule is decided by now.
+    expect(await screen.findByText('Developer')).toBeDefined();
+    expect(screen.queryByRole('button', { name: /^Revoke the connection of/ })).toBeNull();
+    cleanup();
+
+    as('developer', { owner: MINE, connections: CONNECTIONS });
+    open(page);
+    expect(await screen.findByRole('button', { name: 'Revoke the connection of Claude Desktop' })).toBeDefined();
   });
 
   it('offers to read the apps again when they couldn’t be read', async () => {

@@ -422,6 +422,45 @@ describe('back from signing in again (6E3b)', () => {
     expect(sessionStorage.getItem(`agentx.step-up.${CHALLENGE}`)).toBeNull();
   });
 
+  it('never sends a kept tick the agent no longer holds', async () => {
+    as([ORG]);
+    keptConsent(['requests:read', 'requests:write']);
+    answer('GET /v1/agents', {
+      status: 200,
+      body: { agents: [{ ...AGENTS[0], scopes: ['requests:read', 'sources:read'] }], next: null, unchecked: [] },
+    });
+    answer(`POST ${at}/consent`, ASKED);
+    open(back);
+    await userEvent.click(await screen.findByRole('button', { name: "Don't make it" }));
+    expect((await pickedAgent()).value).toBe(AGENT);
+    expect(screen.queryByLabelText('Ask to pay suppliers')).toBeNull();
+    expect(box('See its own payment requests').checked).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    expect(sentTo('POST', `${at}/consent`)[0]?.body).toEqual({ agentId: AGENT, scopes: ['requests:read'] });
+  });
+
+  it('confirms nothing kept for another request', async () => {
+    const otherAt = '/v1/oauth/requests/0199a0f0-0000-7000-8000-0000000000e2';
+    as([ORG]);
+    sessionStorage.setItem(
+      `agentx.step-up.${CHALLENGE}`,
+      JSON.stringify({
+        challenge: CHALLENGE,
+        label: 'Connect Claude Desktop as Invoice agent',
+        confirmPath: `${otherAt}/consent/confirm`,
+        body: { agentId: AGENT, scopes: ['requests:read'] },
+        organization: ORG.id,
+        idempotencyKey: '0199a0f0-0000-7000-8000-0000000001d0',
+      }),
+    );
+    open(back);
+    expect(await screen.findByText(/can't be found in this window/)).toBeDefined();
+    expect(await pickedAgent()).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+    expect(sentTo('POST', `${at}/consent/confirm`)).toHaveLength(0);
+    expect(sentTo('POST', `${otherAt}/consent/confirm`)).toHaveLength(0);
+  });
+
   it('says a confirm made on an earlier try has no way back to the app', async () => {
     as([ORG]);
     keptConsent();

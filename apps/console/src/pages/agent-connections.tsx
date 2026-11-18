@@ -6,7 +6,7 @@
 // Suspending the agent stays the instant brake for every connection at once.
 import { useState } from 'react';
 
-import { type Agent, agentRefusal, KEY_CHANGING } from '../agents.ts';
+import { type Agent, agentRefusal } from '../agents.ts';
 import { Confirm } from '../confirm.tsx';
 import { type Connection, connectionsAt, useConnections } from '../connections.ts';
 import { timeText } from '../requests.ts';
@@ -70,19 +70,23 @@ function ConnectionRow({
   );
 }
 
-/** `named` names a member by their membership, as the agent's page names its owner. */
+/**
+ * `named` names a member by their membership, as the agent's page names its owner; `canRevoke` is an admin's, or the
+ * developer's who owns the agent (the API's rule for a connection, unlike a key's).
+ */
 export function Connections({
   agent,
   named,
+  canRevoke,
 }: {
   readonly agent: Agent;
   readonly named: (membershipId: string) => string;
+  readonly canRevoke: boolean;
 }) {
   const { organization } = useActing();
   const listed = useConnections(agent.id, organization.id);
   const { busy, said, run } = useChange(agentRefusal);
   const [revoking, setRevoking] = useState<Connection | undefined>(undefined);
-  const canRevoke = KEY_CHANGING.includes(organization.role);
   const close = () => {
     setRevoking(undefined);
   };

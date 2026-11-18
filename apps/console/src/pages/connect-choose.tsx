@@ -8,7 +8,7 @@
 // step-up from what it kept (`seed`), so a "don't make it" finds them as left.
 import { useState } from 'react';
 
-import { type Agent, KEY_CHANGING, REGISTERING, type Scope, SCOPES, useMembers } from '../agents.ts';
+import { type Agent, KEY_CHANGING, REGISTERING, type Scope, useMembers } from '../agents.ts';
 import { api, ApiError } from '../api.ts';
 import {
   type ConnectionRequest,
@@ -173,9 +173,12 @@ function AgentChoice({
   if (failed) return <Retry onRetry={retry} />;
   if (pending) return <Loading />;
   const agent = connectable.find((one) => one.id === agentId);
-  const ticked = agent === undefined ? [] : (ticks ?? startingTicks(request, agent));
+  // Kept ticks too are only what can be ticked now: a scope the agent lost over the step-up has no box, so is never sent.
+  const offered = agent === undefined ? [] : tickable(request.scopesAsked, agent.scopes);
+  const ticked =
+    agent === undefined ? [] : (ticks ?? startingTicks(request, agent)).filter((scope) => offered.includes(scope));
   // Sent in the API's own order, and only what can be ticked for this agent.
-  const scopes = agent === undefined ? [] : SCOPES.filter((scope) => ticked.includes(scope));
+  const scopes = offered.filter((scope) => ticked.includes(scope));
   const allow = () => {
     if (agent === undefined) return;
     if (scopes.length === 0) {

@@ -194,6 +194,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
   const owner = listed.find((member) => member.id === agent.owner);
   const role = organization.role;
   // Rotating is an admin's, or the developer's who owns it (agent-key-changes.ts mayRotate); revoking any of either.
+  // Revoking a connection goes as rotating does (connections.ts in the API).
   const canRevoke = KEY_CHANGING.includes(role);
   const canRotate = role === 'admin' || (canRevoke && owner?.userId.toLowerCase() === me);
   const close = () => {
@@ -251,6 +252,7 @@ function AgentShown({ agent, keys }: { readonly agent: Agent; readonly keys: rea
       </section>
       <Connections
         agent={agent}
+        canRevoke={canRotate}
         named={(membershipId) =>
           memberText(
             listed.find((member) => member.id === membershipId),
