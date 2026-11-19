@@ -2,6 +2,7 @@
 // written a batch at a time, refused whole when anything in the batch is
 // malformed, and swept once past the retention period, oldest first.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createKeyProvider } from '@agentx/platform/keys';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -22,6 +23,9 @@ let app: Database<SecurityEventsTables>;
 const START = new Date('2026-09-24T09:00:00Z');
 const RETENTION = 90;
 const ids = new SequentialIds(0x5ec0);
+const keys = createKeyProvider({ 'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) } }, [
+  'session-mac',
+]);
 
 const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
   kind: 'sign_in_failed',
@@ -34,7 +38,7 @@ const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
 });
 
 const at = (ms: number, retentionDays = RETENTION) =>
-  createSecurityEvents({ ids, clock: new FixedClock(new Date(ms)), retentionDays });
+  createSecurityEvents({ ids, clock: new FixedClock(new Date(ms)), keys, retentionDays });
 
 const all = () => app.selectFrom('security.events').selectAll().orderBy('created_at').orderBy('reason').execute();
 

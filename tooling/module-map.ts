@@ -29,7 +29,8 @@ const DEPENDENCIES = {
     'notifications',
   ],
   'platform-controls': [],
-  'security-events': [],
+  // S206 V6: its daily seals digest a day as the activity log's do.
+  'security-events': ['activity'],
   // 6E3a (ADR-016): the OAuth server's rules and records; a connection itself is an agent's key.
   oauth: ['agents'],
   activity: [],

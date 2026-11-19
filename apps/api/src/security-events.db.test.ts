@@ -36,7 +36,7 @@ const { world, quiet } = shared;
 
 /** One count of a refusal, tied to the organisation as the API ties it. */
 const noted = (w: World, about: { userId?: string; agentId?: string }, reason: string) =>
-  createSecurityEvents({ ids, clock: new FixedClock(NOW), retentionDays: 30 }).record(app, [
+  createSecurityEvents({ ids, clock: new FixedClock(NOW), keys, retentionDays: 30 }).record(app, [
     {
       kind: 'rate_limited',
       reason,

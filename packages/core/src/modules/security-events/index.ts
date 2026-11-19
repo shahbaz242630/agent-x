@@ -3,7 +3,8 @@
 // table (0012), kept in-country for the retention period the config names.
 // B2-5b gathers them from the API; B2-5a holds the table, the writes and the
 // retention sweep. 6E1b (CO7b) keeps those tied to an organisation in its own
-// walled table (0091), and reads them for its admins.
+// walled table (0091), and reads them for its admins. S206 V6: each row
+// carries a MAC, and each day of rows is sealed on an audit chain (0106).
 export {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
@@ -20,4 +21,17 @@ export {
   orgSecurityEventsPage,
   type OrgSecurityEvent,
 } from './infrastructure/org-events.ts';
+export {
+  brokenSecuritySeal,
+  firstCheckableDay,
+  nextDayWithRows,
+  rowsBetween,
+  SECURITY_EVENTS_SEALED,
+  SECURITY_LOG_SUBJECT,
+  SECURITY_SEAL_FORM,
+  securityCountOfDay,
+  securityDigestOfDay,
+  type SecurityLog,
+  securityLogAlarm,
+} from './infrastructure/event-seals.ts';
 export type { SecurityEventsTables } from './infrastructure/tables.ts';

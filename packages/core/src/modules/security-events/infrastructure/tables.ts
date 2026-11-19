@@ -14,6 +14,9 @@ interface EventsTable {
   window_start: Date;
   count: number;
   created_at: Date;
+  /** 0106: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
+  mac: Buffer | null;
+  mac_key_version: number | null;
 }
 
 /** An organisation's own events (0091): a tenant table, walled by row-level security. */
@@ -29,4 +32,7 @@ interface OrgEventsTable {
   window_start: Date;
   count: number;
   created_at: Date;
+  /** 0106: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
+  mac: Buffer | null;
+  mac_key_version: number | null;
 }

@@ -1310,6 +1310,22 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
+  'security_event_seal.failed': {
+    happened: 'The daily seal of the security records could not be made or checked this run.',
+    broke: 'A change to them is not caught until the next run, 30 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database and the audit chains.',
+  },
+  'security_event_seal.moved': {
+    happened: 'A day of the security records changed while it was being sealed.',
+    broke:
+      'That day and every later one stay unsealed. A closed day never changes: a server clock is far off, or this is tampering.',
+    next: "Check the servers' clocks and the database for changes made outside the app.",
+  },
+  'security_event_seal.run_failed': {
+    happened: 'A run of the security records seal stopped early on an error.',
+    broke: "Organisations' security records are not sealed or checked until the next run, 30 minutes later.",
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
   'spend_request.organisation_busy': {
     happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",
     broke: 'That one was turned away as busy and nothing was saved. Other organisations carried on.',

@@ -512,6 +512,7 @@ const EVERY_TIMER: [string, number][] = [
   ['activity_seal_check', 1_800_000],
   ['person_seal', 900_000],
   ['person_seal_check', 1_800_000],
+  ['security_seal', 1_800_000],
   ['org_work_rediscovery', 3_600_000],
   ...EACH_PROCESS,
 ];

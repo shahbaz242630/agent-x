@@ -368,6 +368,7 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
+    keys,
     retentionDays: config.securityEvents.retentionDays,
   });
   return {
