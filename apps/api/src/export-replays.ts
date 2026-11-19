@@ -56,11 +56,11 @@ export const downloaderOf = (member: { readonly orgId: string; readonly userId: 
  * Whether the record a download's key answered with is this admin's download of this kind (AG10): a key is a
  * person's own, so one naming anyone or anything else was changed past the app, and no file is built from it.
  */
-export const madeBy = (
-  event: { readonly event: { readonly action: string; readonly actor: AuditActor } } | undefined,
+export const madeBy = <Read extends { readonly event: { readonly action: string; readonly actor: AuditActor } }>(
+  event: Read | undefined,
   member: { readonly userId: string },
   action: string,
-): boolean =>
+): event is Read =>
   event?.event.action === action &&
   event.event.actor.type === 'user' &&
   event.event.actor.id.toLowerCase() === member.userId.toLowerCase();

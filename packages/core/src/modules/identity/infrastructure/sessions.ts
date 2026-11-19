@@ -146,7 +146,7 @@ export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: str
  * can't be opened past it. Taken after any of their sessions is locked (the sign-in's previous one ended), as an end
  * locks the sessions before the row.
  */
-export async function sessionsEndedAt(tx: Transaction<IdentityTables>, userId: string): Promise<Date | null> {
+export async function sessionsEndedAt(tx: Kysely<IdentityTables>, userId: string): Promise<Date | null> {
   const row = await tx
     .selectFrom('identity.users')
     .select('sessions_ended_at')

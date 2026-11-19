@@ -494,7 +494,6 @@ export function mandateWorld({
       await deactivateMembership(tx, states, {
         key,
         member: read.member,
-        state: read.state,
         grants,
         actor: OPERATOR,
         evidence: {},
