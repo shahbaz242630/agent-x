@@ -25,73 +25,17 @@ import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kyse
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type Scope, scopesOf, scopesText } from '../../agents/index.ts';
-import { type DecisionSeal, openSealed } from './flow-seals.ts';
+import type { AnyFlowRead, CodeFlow, DecisionSeal, DeviceFlowRead, FlowOutcome, FlowRead } from './flow-reads.ts';
+import { openSealed } from './flow-seals.ts';
 import type { OauthTables } from './tables.ts';
+
+export type { AnyFlowRead, CodeFlow, DeviceFlowRead, FlowRead } from './flow-reads.ts';
 
 /** How long a person has to sign in and decide (plan §3): long enough to register an agent first. */
 export const FLOW_SECONDS = 15 * 60;
 
 /** How long a code may wait to be exchanged (OAuth 2.1 §4.1.2: short). */
 export const CODE_SECONDS = 60;
-
-/** A browser's flow, as opened. */
-export interface CodeFlow {
-  readonly id: string;
-  readonly clientId: string;
-  readonly redirectUri: string;
-  /** The client's own `state`, sent back unchanged; null for none. */
-  readonly state: string | null;
-  readonly codeChallenge: string;
-  readonly scopesAsked: readonly Scope[];
-  readonly resource: string;
-  readonly browserHash: string;
-  readonly createdAt: Date;
-  readonly endsAt: Date;
-}
-
-/**
- * Whether a flow was decided, and how: when, the organisation and connection key an allowed one made, its decision's
- * seal (0101, flow-seals.ts), and its use.
- */
-interface FlowOutcome {
-  readonly decided: 'allowed' | 'denied' | null;
-  readonly decidedAt: Date | null;
-  readonly orgId: string | null;
-  readonly keyId: string | null;
-  readonly seal: DecisionSeal | null;
-  /** The seal it was opened with (0101, flow-seals.ts). */
-  readonly openSeal: DecisionSeal | null;
-  readonly usedAt: Date | null;
-}
-
-/** A browser's flow as read: opened, and whether it was decided and its code used. */
-export interface FlowRead extends CodeFlow, FlowOutcome {
-  readonly kind: 'code';
-  /** Its code's SHA-256, once allowed. */
-  readonly codeHash: string | null;
-  readonly codeEndsAt: Date | null;
-}
-
-/** A device's flow as read (6E3c): the browser that claimed it, if one did, and when the device last polled. */
-export interface DeviceFlowRead extends FlowOutcome {
-  readonly kind: 'device';
-  readonly id: string;
-  readonly clientId: string;
-  readonly scopesAsked: readonly Scope[];
-  readonly resource: string;
-  /** Its device code's SHA-256. */
-  readonly deviceHash: string;
-  readonly browserHash: string | null;
-  /** The SHA-256 of the person who claimed it with that browser (AG8), if one did. */
-  readonly personHash: string | null;
-  readonly intervalSeconds: number;
-  readonly polledAt: Date | null;
-  readonly createdAt: Date;
-  readonly endsAt: Date;
-}
-
-/** Either kind of flow, as the consent reads one by its ID. */
-export type AnyFlowRead = FlowRead | DeviceFlowRead;
 
 type Database = Kysely<OauthTables>;
 /** The database, or a transaction on it holding these tables among others (the consent's own). */
@@ -197,7 +141,7 @@ async function insertFlow(
   { source, network }: FlowSource,
 ): Promise<void> {
   const endsAt = flowEndsFrom(flow.createdAt);
-  const seal = openSealed(keys, { ...flow, kind: 'code', deviceHash: null, endsAt });
+  const seal = openSealed(keys, { ...flow, kind: 'code', deviceHash: null, userCodeHash: null, endsAt });
   await db
     .insertInto('oauth.flows')
     .values({
@@ -232,6 +176,7 @@ const COLUMNS = [
   'browser_hash',
   'person_hash',
   'device_hash',
+  'user_code_hash',
   'created_at',
   'ends_at',
   'decided_at',
@@ -272,7 +217,9 @@ const outcomeOf = (row: FlowRow): FlowOutcome => ({
 
 /** A device flow's row as read; undefined for a code flow's. */
 function deviceFlowOf(row: FlowRow | undefined): DeviceFlowRead | undefined {
-  if (row?.kind !== 'device' || row.interval_s === null || row.device_hash === null) return undefined;
+  if (row?.kind !== 'device' || row.interval_s === null || row.device_hash === null || row.user_code_hash === null) {
+    return undefined;
+  }
   return {
     kind: 'device',
     id: row.id,
@@ -280,6 +227,7 @@ function deviceFlowOf(row: FlowRow | undefined): DeviceFlowRead | undefined {
     scopesAsked: scopesOf(row.scopes_asked),
     resource: row.resource,
     deviceHash: row.device_hash,
+    userCodeHash: row.user_code_hash,
     browserHash: row.browser_hash,
     personHash: row.person_hash,
     intervalSeconds: row.interval_s,

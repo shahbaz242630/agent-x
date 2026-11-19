@@ -500,23 +500,26 @@ export function createConnectionConsents({
     },
 
     async deny(member, idempotent, named, correlationId) {
+      /** Where the browser goes back to, from the flow as read and checked in the deny's own transaction (S205). */
+      const deniedTo = (flow: AnyFlowRead): string | null =>
+        flow.kind === 'code'
+          ? backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer })
+          : null;
+      let sentBack: { readonly redirectTo: string | null } | undefined;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const now = clock.now();
         await work.memberIn(tx, states, member, CONNECTING_ROLES);
         const flow = await openFlow(tx, named, member.userId, now);
         if (!(await flowDecided(tx, flow.id, { outcome: 'denied' }, now))) throw new AgentRefused(404, 'NOT_FOUND');
+        sentBack = { redirectTo: deniedTo(flow) };
         return { status: 200, resourceId: flow.id };
       });
       if (isUnwritten(done)) return done;
+      if (sentBack !== undefined) return { outcome: 'denied', ...sentBack };
+      // A retry: the flow read again, believed only as its client opened it.
       const flow = await flowById(database, done.result.resourceId);
       if (flow === undefined) return { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
-      return {
-        outcome: 'denied',
-        redirectTo:
-          flow.kind === 'code'
-            ? backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer })
-            : null,
-      };
+      return { outcome: 'denied', redirectTo: pendingFlowSound(keys, logger, flow) ? deniedTo(flow) : null };
     },
   };
 }

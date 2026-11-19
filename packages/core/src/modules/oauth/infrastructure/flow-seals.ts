@@ -5,7 +5,8 @@
 //
 // - Opened (`oauth-flow-open-v1`): what the client asked for, as it asked: the
 //   flow's ID and kind, the client, its redirect address and PKCE challenge,
-//   or the device code hash its device polls with, the scopes asked, the
+//   or the device code hash its device polls with and the user code hash its
+//   person types, the scopes asked, the
 //   resource and when it ends. Checked wherever a pending flow is read for a
 //   person's consent (the request shown, the device's claim, the ask, the
 //   confirm), so what a person allows is what the client sent.
@@ -21,7 +22,7 @@ import type { KeyProvider, Message } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { pepperHeld, type Scope, scopesText } from '../../agents/index.ts';
-import type { AnyFlowRead } from './flows.ts';
+import type { AnyFlowRead, DecisionSeal } from './flow-reads.ts';
 import { PKCE_METHOD } from './pkce.ts';
 
 /** The labels, versioned: a change to a message is a new label. */
@@ -31,11 +32,7 @@ const DECISION_LABEL = 'oauth-flow-decision-v1';
 /** The pepper whose MAC a seal is, the version beside it for rotation. */
 const PEPPER = 'agent-key-pepper';
 
-/** A seal: its MAC, as hex, and the pepper's version it was made with. */
-export interface DecisionSeal {
-  readonly mac: string;
-  readonly keyVersion: number;
-}
+export type { DecisionSeal } from './flow-reads.ts';
 
 /** What a flow is as opened, all of it bound by its open seal. */
 export interface OpenedFields {
@@ -47,6 +44,8 @@ export interface OpenedFields {
   readonly codeChallenge: string | null;
   /** A device flow's device code's SHA-256; none for a code flow's. */
   readonly deviceHash: string | null;
+  /** A device flow's user code's SHA-256, which its person types to claim it; none for a code flow's. */
+  readonly userCodeHash: string | null;
   readonly scopesAsked: readonly Scope[];
   readonly resource: string;
   readonly endsAt: Date;
@@ -73,6 +72,7 @@ export const openedFieldsOf = (flow: AnyFlowRead): OpenedFields => ({
   redirectUri: flow.kind === 'code' ? flow.redirectUri : null,
   codeChallenge: flow.kind === 'code' ? flow.codeChallenge : null,
   deviceHash: flow.kind === 'device' ? flow.deviceHash : null,
+  userCodeHash: flow.kind === 'device' ? flow.userCodeHash : null,
   scopesAsked: flow.scopesAsked,
   resource: flow.resource,
   endsAt: flow.endsAt,
@@ -86,6 +86,7 @@ const openedParts = (opened: OpenedFields): string[] => [
   opened.redirectUri ?? NONE,
   opened.codeChallenge === null ? NONE : `${PKCE_METHOD}:${opened.codeChallenge}`,
   opened.deviceHash ?? NONE,
+  opened.userCodeHash ?? NONE,
   scopesText(opened.scopesAsked),
   opened.resource,
   opened.endsAt.toISOString(),

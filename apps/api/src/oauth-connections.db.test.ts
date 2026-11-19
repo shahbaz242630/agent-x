@@ -471,6 +471,19 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     });
   });
 
+  it('S205: answers a deny’s retry from the flow as sealed; one rewritten since sends the browser nowhere', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const flow = await opened();
+    const idempotent = keyed(admin, DENY_OPERATION, 'deny, then retried');
+    const first = await consents.deny(admin, idempotent, flow, CORRELATION);
+    expect(await consents.deny(admin, idempotent, flow, CORRELATION)).toEqual(first);
+    await database
+      .as('owner')
+      .query('update oauth.flows set redirect_uri = $2 where id = $1', [flow.flowId, 'https://attacker.example/cb']);
+    expect(await consents.deny(admin, idempotent, flow, CORRELATION)).toEqual({ outcome: 'denied', redirectTo: null });
+  });
+
   it(`keeps an agent to ${String(MOST_LIVE_CONNECTIONS)} live connections`, async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -2149,6 +2162,30 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
         expect.objectContaining({ level: 'error', check: 'oauth_flow', objectId: flow.flowId }),
       );
       expect(errorOf(await poll(ownDeviceCode))).toBe('authorization_pending');
+    });
+
+    it('a user code moved onto the owner’s own sealed flow: the person’s claim finds nothing, with the alarm', async () => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const persons = await codes();
+      const owners = await codes();
+      const [personsFlow, ownersFlow] = [await flowOfDevice(persons.deviceCode), await flowOfDevice(owners.deviceCode)];
+      const owner = database.as('owner');
+      const [row] = await owner.query<{ hash: string }>(
+        'select user_code_hash as hash from oauth.flows where id = $1',
+        [personsFlow],
+      );
+      const hash = row?.hash;
+      // The person's row parked under another code, for the unique key; the owner's flow given the person's code.
+      await owner.query('update oauth.flows set user_code_hash = $2 where id = $1', [personsFlow, 'f'.repeat(64)]);
+      await owner.query('update oauth.flows set user_code_hash = $2 where id = $1', [ownersFlow, hash]);
+      expect(await deviceOf().lookup(persons.userCode, undefined, admin.userId, CALLER.ip)).toEqual({
+        outcome: 'not_found',
+      });
+      expect(lines('audit.integrity_failed')).toContainEqual(
+        expect.objectContaining({ level: 'error', check: 'oauth_flow', objectId: ownersFlow }),
+      );
+      expect(errorOf(await poll(owners.deviceCode))).toBe('authorization_pending');
     });
 
     it('between the ask and its confirm: the confirm is refused, and the owner’s poll gets nothing', async () => {

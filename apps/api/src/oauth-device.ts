@@ -200,13 +200,21 @@ export function createOauthDevice({
             { browserHash: hashOf(browser), personHash: hashOf(userId) },
             clock.now(),
           );
-    if (claim.outcome === 'claimed') {
-      // S205: only a flow its device opened, as sealed; one rewritten since is no flow, and the alarm.
+    if (claim.outcome === 'claimed' && userCode !== undefined) {
+      // S205: only a flow its device opened, as sealed, for the code typed (a code moved onto another flow and back
+      // between the claim and this read is caught too); one rewritten is no flow, and the alarm.
       const flow = await flowById(database, claim.flowId);
-      if (flow !== undefined && pendingFlowSound(keys, logger, flow)) {
-        return { outcome: 'claimed', requestId: claim.flowId, cookie: browser };
+      if (flow?.kind !== 'device' || !pendingFlowSound(keys, logger, flow)) return { outcome: 'not_found' };
+      if (flow.userCodeHash !== hashOf(userCode)) {
+        logger.error('audit.integrity_failed', {
+          chain: 'oauth',
+          check: 'oauth_flow',
+          reason: 'user_code',
+          objectId: flow.id,
+        });
+        return { outcome: 'not_found' };
       }
-      return { outcome: 'not_found' };
+      return { outcome: 'claimed', requestId: claim.flowId, cookie: browser };
     }
     failedFrom(network);
     if (claim.outcome === 'contested') {

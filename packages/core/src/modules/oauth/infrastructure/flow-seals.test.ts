@@ -76,6 +76,7 @@ const openingDevice: DeviceFlowRead = {
   scopesAsked: ['requests:read'],
   resource: undecided.resource,
   deviceHash: 'd'.repeat(64),
+  userCodeHash: 'c'.repeat(64),
   browserHash: 'b'.repeat(64),
   personHash: 'e'.repeat(64),
   intervalSeconds: 5,
@@ -181,6 +182,7 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
 
   it('binds a device’s own code', () => {
     expect(openJudged(keys, { ...undecidedDevice, deviceHash: 'f'.repeat(64) })).toBe('tampered');
+    expect(openJudged(keys, { ...undecidedDevice, userCodeHash: 'f'.repeat(64) })).toBe('tampered');
   });
 
   it('shows, claims or decides only a pending flow sealed as opened: anything else is the alarm, an error or a warning', () => {

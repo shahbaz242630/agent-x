@@ -359,6 +359,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       scopesAsked: ['requests:read'],
       resource: flow.resource,
       deviceHash: flow.deviceHash,
+      userCodeHash: flow.userCodeHash,
       browserHash: null,
       personHash: null,
       intervalSeconds: 5,

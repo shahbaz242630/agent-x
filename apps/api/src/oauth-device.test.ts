@@ -21,7 +21,7 @@ import { capabilitiesOf } from './oauth-wire.ts';
 const opened = vi.hoisted(() => ({ answers: [] as (string | Error)[] }));
 const claims = vi.hoisted(() => ({ answers: [] as DeviceClaim[], asked: 0 }));
 /** Whether a claimed flow reads as its device opened it (S205): sealed, unless a case says otherwise. */
-const sealed = vi.hoisted(() => ({ sound: true }));
+const sealed = vi.hoisted(() => ({ sound: true, userCode: 'BCDFGHJK' }));
 
 vi.mock('@agentx/core/modules/oauth', async (original) => ({
   ...(await original<typeof import('@agentx/core/modules/oauth')>()),
@@ -33,7 +33,10 @@ vi.mock('@agentx/core/modules/oauth', async (original) => ({
     claims.asked += 1;
     return Promise.resolve(claims.answers.shift() ?? { outcome: 'not_found' });
   },
-  flowById: (_: unknown, id: string) => Promise.resolve({ kind: 'device', id }),
+  flowById: async (_: unknown, id: string) => {
+    const { hashOf } = await original<typeof import('@agentx/core/modules/oauth')>();
+    return { kind: 'device', id, userCodeHash: hashOf(sealed.userCode) };
+  },
   pendingFlowSound: () => sealed.sound,
 }));
 
@@ -42,6 +45,7 @@ afterEach(() => {
   claims.answers = [];
   claims.asked = 0;
   sealed.sound = true;
+  sealed.userCode = 'BCDFGHJK';
 });
 
 const CLIENT = 'axcl_0123456789abcdef0123456789abcdef';
@@ -77,6 +81,18 @@ describe('S205: a claimed flow is believed only as its device opened it', () => 
     claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
     sealed.sound = false;
     expect(await device().lookup('BCDF-GHJK', undefined, PERSON, '203.0.113.9')).toEqual({ outcome: 'not_found' });
+  });
+
+  it('answers a claimed flow, sound, but now for another user code, as nothing found, with the alarm', async () => {
+    claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
+    sealed.userCode = 'ZZZZZZZZ';
+    const capture = new LogCapture();
+    expect(await device(capture).lookup('BCDF-GHJK', undefined, PERSON, '203.0.113.9')).toEqual({
+      outcome: 'not_found',
+    });
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', reason: 'user_code', objectId: FLOW }),
+    ]);
   });
 });
 
