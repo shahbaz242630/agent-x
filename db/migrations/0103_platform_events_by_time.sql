@@ -1,0 +1,13 @@
+-- agentx: no transaction (concurrent index)
+-- S206 (V5, R-15): a sign-in checks the platform chain's events recorded since a little before
+-- its ID token's time, to believe the person's sessions' ends signed there
+-- (platform-chain.ts `checkPlatformStretch`). It finds where that stretch starts, the last event
+-- recorded before the moment, from this index: one entry, however long the chain. `recorded_at`
+-- is taken under the head's lock, so it rises with `seq`; `seq` breaks a tie within a millisecond.
+-- The platform chain is a global table, of no organisation (0003): no org_id to lead with, and no
+-- table, column or grant changes.
+--
+-- Built concurrently, outside a transaction (the first line; migrate.ts), as 0084's: events go on
+-- being recorded while it builds. A build that fails leaves the index not valid, which the guard
+-- reads as speed, not drift (schema-guard.ts), and the next run drops it and builds it again.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_events_by_recorded_at ON platform_controls.audit_events (recorded_at, seq);

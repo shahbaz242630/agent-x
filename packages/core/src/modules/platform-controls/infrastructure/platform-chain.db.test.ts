@@ -23,7 +23,14 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type PlatformEvent, PlatformEventRefused } from '../domain/event.ts';
-import { createPlatformChain, HEAD_WAIT_SECONDS } from './platform-chain.ts';
+import {
+  checkPlatformStretch,
+  type CheckedPlatformEvent,
+  createPlatformChain,
+  HEAD_WAIT_SECONDS,
+  type PlatformPoint,
+  type StretchStart,
+} from './platform-chain.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -961,5 +968,206 @@ describe("the operator's events, believed only signed with its own key (PL-57)",
     );
 
     expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 2n } });
+  });
+});
+
+describe('R-15 a stretch of the chain checked in place, from a moment or a place (S206)', () => {
+  /** Four events, each recorded a few milliseconds after the last, so each has its own time. */
+  async function four() {
+    const recorded = [];
+    for (const n of [1, 2, 3, 4]) {
+      recorded.push(...(await record(started(n))));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return recorded;
+  }
+  /** The check from `start`, with every event it gave, page by page. */
+  const stretch = async (start: StretchStart) => {
+    const pages: CheckedPlatformEvent[][] = [];
+    const found = await app
+      .transaction()
+      .execute((tx) => checkPlatformStretch(tx, keys, start, (events) => pages.push([...events])));
+    return { found, seqs: pages.flat().map((event) => event.seq), pages: pages.length };
+  };
+  /** A moment just after the event's own. */
+  const after = (event: { readonly recordedAt: Date }) => new Date(event.recordedAt.getTime() + 1);
+  /** The place an event stands at, as a check reaches it. */
+  const placeOf = async (seq: bigint): Promise<PlatformPoint> => {
+    // The attacker's connection reads a bigint as text.
+    const [row] = await attacker.query<{ seq: string; hash: Buffer; mac_key_version: number; recorded_at: Date }>(
+      'select seq, hash, mac_key_version, recorded_at from platform_controls.audit_events where seq = $1',
+      [seq],
+    );
+    if (row === undefined) throw new Error('no such event');
+    return { seq: BigInt(row.seq), hash: row.hash, macKeyVersion: row.mac_key_version, recordedAt: row.recorded_at };
+  };
+  const FAR = new Date('2100-01-01T00:00:00Z');
+
+  it('from a moment: the events past the last one recorded before it, through the head, with what each says', async () => {
+    const [, second, third] = await four();
+    if (second === undefined || third === undefined) throw new Error('four events were recorded');
+
+    const { found, seqs } = await stretch({ since: after(second) });
+    expect(seqs).toEqual([3n, 4n]);
+    // An event recorded at the very moment is past it, not before.
+    expect((await stretch({ since: third.recordedAt })).seqs).toEqual([3n, 4n]);
+    expect(found).toMatchObject({ kind: 'checked', reached: { seq: 4n } });
+    // From before the first: the whole chain, from its start. After the head's: none, the head reached.
+    expect((await stretch({ since: new Date(0) })).seqs).toEqual([1n, 2n, 3n, 4n]);
+    expect(await stretch({ since: FAR })).toMatchObject({ seqs: [], found: { kind: 'checked', reached: { seq: 4n } } });
+  });
+
+  it('from a place checked before: only the events past it', async () => {
+    await four();
+
+    expect((await stretch({ after: await placeOf(3n) })).seqs).toEqual([4n]);
+    expect((await stretch({ after: await placeOf(4n) })).seqs).toEqual([]);
+  });
+
+  it('checks a chain with no events yet as none, from a moment; from a place, its head gone is the chain wound back', async () => {
+    expect(await stretch({ since: new Date(0) })).toMatchObject({ found: { kind: 'checked', reached: undefined } });
+    await four();
+    const place = await placeOf(4n);
+    await tamper('truncate platform_controls.audit_events, platform_controls.audit_head');
+    expect((await stretch({ after: place })).found).toEqual({ kind: 'broken', problem: { reason: 'head', seq: 0n } });
+  });
+
+  it('reads any number of events, a page of a thousand at a time: their number never refuses', async () => {
+    await record(...Array.from({ length: 2100 }, (_, n) => started(n + 1)));
+
+    const { found, seqs, pages } = await stretch({ since: new Date(0) });
+    expect(found).toMatchObject({ kind: 'checked', reached: { seq: 2100n } });
+    expect(seqs).toHaveLength(2100);
+    expect(pages).toBe(3);
+  });
+
+  it('finds the head wound back behind a place checked before', async () => {
+    await record(started(1), started(2), started(3));
+    await tamper('create table public.head_then as select * from platform_controls.audit_head');
+    await record(started(4));
+    const place = await placeOf(4n);
+    // The newest deleted, and the head put back as it stood at the third: a head the app once wrote, its MAC whole.
+    await tamper(
+      'delete from platform_controls.audit_events where seq = 4',
+      'delete from platform_controls.audit_head',
+      'insert into platform_controls.audit_head select * from public.head_then',
+      'drop table public.head_then',
+    );
+
+    expect((await stretch({ after: place })).found).toEqual({ kind: 'broken', problem: { reason: 'head', seq: 3n } });
+  });
+
+  it('from a moment, through a place checked before: from the earlier, the place unchanged and not behind the head', async () => {
+    const [, second, third] = await four();
+    if (second === undefined || third === undefined) throw new Error('four events were recorded');
+    const [atTwo, atThree] = [await placeOf(2n), await placeOf(3n)];
+
+    // The place before the moment: walked from it. After it: walked through it.
+    expect((await stretch({ since: after(third), through: atTwo })).seqs).toEqual([3n, 4n]);
+    expect((await stretch({ since: after(second), through: atThree })).seqs).toEqual([3n, 4n]);
+    expect((await stretch({ since: after(second), through: { ...atThree, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    // Not the event checked there before, whichever the walk starts from: the place itself, or the moment's.
+    expect((await stretch({ since: after(third), through: { ...atTwo, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'link', seq: 3n },
+    });
+    expect((await stretch({ since: after(third), through: { ...atThree, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    expect((await stretch({ since: after(second), through: { ...atThree, seq: 5n } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'head', seq: 4n },
+    });
+  });
+
+  it('finds the chain grown again on a head wound back, to the same place as one checked before', async () => {
+    await record(started(1), started(2), started(3));
+    await tamper('create table public.head_then as select * from platform_controls.audit_head');
+    await record(started(4));
+    const place = await placeOf(4n);
+    // The fourth deleted, the head put back as it stood at the third, and another fourth recorded on it by the app.
+    await tamper(
+      'delete from platform_controls.audit_events where seq = 4',
+      'delete from platform_controls.audit_head',
+      'insert into platform_controls.audit_head select * from public.head_then',
+      'drop table public.head_then',
+    );
+    await record(started(5));
+
+    expect((await stretch({ after: place })).found).toEqual({ kind: 'broken', problem: { reason: 'head', seq: 4n } });
+  });
+
+  it.each([
+    [
+      'an event of the stretch deleted',
+      'delete from platform_controls.audit_events where seq = 3',
+      { reason: 'gap', seq: 3n },
+    ],
+    [
+      'its details edited',
+      `update platform_controls.audit_events set details = '{}' where seq = 3`,
+      { reason: 'hash', seq: 3n },
+    ],
+    [
+      'the newest deleted, the head left',
+      'delete from platform_controls.audit_events where seq = 4',
+      { reason: 'gap', seq: 4n },
+    ],
+    [
+      'the event before it edited',
+      `update platform_controls.audit_events set details = '{}' where seq = 2`,
+      { reason: 'mac', seq: 2n },
+    ],
+    [
+      'the head given another MAC',
+      'update platform_controls.audit_head set mac = mac || $$x$$::bytea',
+      { reason: 'head', seq: 0n },
+    ],
+    ['the head deleted, the events left', 'delete from platform_controls.audit_head', { reason: 'head', seq: 0n }],
+  ])('finds %s, now', async (_what, statement, problem) => {
+    const [, second] = await four();
+    if (second === undefined) throw new Error('four events were recorded');
+    await tamper(statement);
+
+    expect((await stretch({ since: after(second) })).found).toEqual({ kind: 'broken', problem });
+  });
+
+  it('finds an event deleted for a moment, which put back byte for byte leaves the chain whole again', async () => {
+    const [, second] = await four();
+    if (second === undefined) throw new Error('four events were recorded');
+    await tamper(
+      'create table public.held as select * from platform_controls.audit_events where seq = 3',
+      'delete from platform_controls.audit_events where seq = 3',
+    );
+
+    expect((await stretch({ since: after(second) })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'gap', seq: 3n },
+    });
+    await tamper('insert into platform_controls.audit_events select * from public.held', 'drop table public.held');
+    // Whole again: only a check made while it was gone could find it.
+    expect(await verify()).toMatchObject({ ok: true, seq: 4n });
+    expect((await stretch({ since: after(second) })).seqs).toEqual([3n, 4n]);
+  });
+
+  it("finds where a stretch starts by 0103's index, as the app role", async () => {
+    await four();
+    const asApp = await database.connect('app');
+    try {
+      // Four events are too few for the planner to prefer an index: as it would for a chain of any size.
+      await asApp.query('set enable_seqscan = off');
+      const plan = await asApp.query<{ 'QUERY PLAN': string }>(
+        `explain select seq from platform_controls.audit_events
+         where recorded_at < $1 and seq <= 4 order by recorded_at desc, seq desc limit 1`,
+        [FAR],
+      );
+      expect(plan.map((line) => line['QUERY PLAN']).join(' ')).toMatch(/audit_events_by_recorded_at/);
+    } finally {
+      await asApp.end();
+    }
   });
 });
