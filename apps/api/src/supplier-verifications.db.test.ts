@@ -12,8 +12,11 @@ import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
   addMembership,
+  createMembershipChanges,
   createSessions,
   createStepUpChallenges,
+  DEACTIVATE_CONFIRM_OPERATION,
+  DEACTIVATE_OPERATION,
   type IdentityTables,
   type Role,
   userForSubject,
@@ -28,6 +31,7 @@ import {
   MOST_VERIFICATIONS_READ,
   MOST_VERSIONS_TO_VERIFY,
   PAYEE_COOLING_OFF_MS,
+  registrationOf,
   SUPPLIERS,
   type SupplierDetails,
   supplierOf,
@@ -59,6 +63,7 @@ import {
   createSupplierPayees,
   PAYEE_CHECK_OPERATION,
   PAYEE_START_OPERATION,
+  registrationsOfLeaving,
   type SupplierPayees,
 } from './supplier-payees.ts';
 import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './supplier-registry.ts';
@@ -560,6 +565,142 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(again).toMatchObject({ outcome: 'changed', supplier: { status: 'VERIFIED' } });
     expect(await verifiedNotices(org)).toHaveLength(2);
     expect(await ask(signedBob, supplierId)).toEqual(refusedWith('SUPPLIER_NOT_UNVERIFIED', 409));
+  });
+});
+
+describe(`a member's removal ends the payee registrations they left open (AG7, 6F1; Postgres ${server.version})`, () => {
+  /** `admin` removes `gone` from the organisation, with step-up, ending what the payee registrations' leaving names. */
+  async function removed(adminPerson: Person, gone: Person) {
+    const admin = await signedIn(adminPerson);
+    const memberships = createMembershipChanges({
+      database: app,
+      keys,
+      ids,
+      challenges: challenges(),
+      outbox: createOutbox({ ids, clock }),
+      logger: testLogger(),
+      leaving: registrationsOfLeaving,
+    });
+    const change = { kind: 'deactivate' } as const;
+    const asked = await memberships.ask(
+      admin,
+      keyed(admin, DEACTIVATE_OPERATION),
+      gone.membershipId,
+      change,
+      CORRELATION,
+    );
+    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+    await stepUp(admin, asked.stepUpChallengeId);
+    return memberships.confirm(
+      admin,
+      keyed(admin, DEACTIVATE_CONFIRM_OPERATION),
+      gone.membershipId,
+      change,
+      asked.stepUpChallengeId,
+      CORRELATION,
+    );
+  }
+
+  /** The registration as its signed state stands. */
+  const registrationNow = (org: string, supplierId: string, id: string) =>
+    withSignedStates(app, org, quiet(), async (tx, states) => {
+      const read = await registrationOf(tx, states, { orgId: org, id }, supplierId, 'share');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      return read.registration;
+    });
+
+  /** The events ending registrations on a removal, by registration. */
+  const endedOnRemoval = (org: string) =>
+    withTenant(app, org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['subject_id', 'actor_id', 'details'])
+        .where('action', '=', 'beneficiary_registration.starter_removed')
+        .orderBy('seq')
+        .execute(),
+    );
+
+  it("ends the removed starter's open forms, whichever supplier's, and leaves everyone else's open", async () => {
+    const { org, alice } = await team();
+    const [bea, cara] = [await member(org, 'admin'), await member(org, 'admin')];
+    clock.advanceBy(15 * DAY_MS);
+    const [aliceIn, beaIn] = [await signedIn(alice), await signedIn(bea)];
+    const supplierBy = async () => {
+      const added = await registry.add(
+        aliceIn,
+        keyed(aliceIn, ADD_OPERATION),
+        { details: DETAILS, remittanceEmail: 'on' },
+        CORRELATION,
+      );
+      if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
+      return added.supplier.id;
+    };
+    const [first, second] = [await supplierBy(), await supplierBy()];
+    const startBy = async (who: SessionMember, supplierId: string) => {
+      const started = await payees.start(who, keyed(who, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
+      if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
+      return started;
+    };
+    const beasFirst = await startBy(beaIn, first);
+    const beasSecond = await startBy(beaIn, second);
+    const alicesFirst = await startBy(aliceIn, first);
+
+    expect(await removed(cara, bea)).toMatchObject({ outcome: 'written' });
+
+    const failedAsExpired = { status: 'FAILED', failure: 'expired', startedBy: bea.membershipId };
+    expect(await registrationNow(org, first, beasFirst.registration.id)).toMatchObject(failedAsExpired);
+    expect(await registrationNow(org, second, beasSecond.registration.id)).toMatchObject(failedAsExpired);
+    expect(await registrationNow(org, first, alicesFirst.registration.id)).toMatchObject({ status: 'STARTED' });
+    const ended = await endedOnRemoval(org);
+    expect(ended.map(({ subject_id: id }) => id).toSorted()).toEqual(
+      [beasFirst.registration.id, beasSecond.registration.id].toSorted(),
+    );
+    expect(ended.map(({ actor_id: actor, details }) => [actor, JSON.parse(details) as unknown])).toEqual(
+      ended.map(() => [cara.userId, expect.objectContaining({ membershipId: bea.membershipId }) as unknown]),
+    );
+
+    // Bea still holds her form's link, a bearer link: filled now, another admin's check keeps nothing of it.
+    await rail.bank.fillForm(org, beasFirst.form?.url ?? '', { name: HOLDER, iban: ibanOf(OTHER) });
+    const checked = await payees.check(
+      aliceIn,
+      keyed(aliceIn, PAYEE_CHECK_OPERATION),
+      first,
+      beasFirst.registration.id,
+      CORRELATION,
+    );
+    expect(checked).toMatchObject({ outcome: 'checked', registration: { status: 'FAILED' }, form: null });
+    expect(await supplierNow(org, first)).toMatchObject({ pendingVersionId: null });
+  });
+
+  it('refuses the removal INTEGRITY_FAILED for an open registration of theirs edited past the app, ending nothing', async () => {
+    const { org, alice } = await team();
+    const bea = await member(org, 'admin');
+    clock.advanceBy(15 * DAY_MS);
+    const beaIn = await signedIn(bea);
+    const added = await registry.add(
+      beaIn,
+      keyed(beaIn, ADD_OPERATION),
+      { details: DETAILS, remittanceEmail: 'on' },
+      CORRELATION,
+    );
+    if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
+    const started = await payees.start(
+      beaIn,
+      keyed(beaIn, PAYEE_START_OPERATION),
+      added.supplier.id,
+      'cancel',
+      CORRELATION,
+    );
+    if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
+    await database
+      .as('admin')
+      .query(`update suppliers.beneficiary_registrations set route = 'pass_through' where org_id = $1 and id = $2`, [
+        org,
+        started.registration.id,
+      ]);
+
+    expect(await removed(alice, bea)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
+    expect(await endedOnRemoval(org)).toHaveLength(0);
   });
 });
 

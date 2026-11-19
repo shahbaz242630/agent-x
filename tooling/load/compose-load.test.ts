@@ -170,7 +170,7 @@ describe('the load stack (compose.load.yaml)', () => {
       ).toMatchObject({ gateActive: 12, gatePerOrganisation: 3, gateWaitingPerOrganisation: 8, gateWaitMs: 2_000 });
       for (const bad of [
         ['--gate-active', '0'],
-        ['--gate-active', '21'],
+        ['--gate-active', '20'],
         ['--gate-active', '2.5'],
         ['--gate-per-org', '7'],
         ['--gate-waiting', '10001'],

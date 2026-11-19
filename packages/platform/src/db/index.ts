@@ -39,6 +39,7 @@ export {
   isStatementLimit,
   OrganisationBusy,
   PoolWaitRanOut,
+  gateActiveOf,
   organisationShareOf,
 } from './organisation-shares.ts';
 export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';

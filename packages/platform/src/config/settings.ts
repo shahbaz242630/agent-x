@@ -467,7 +467,8 @@ const SETTINGS = {
     default: '10',
   },
   // The fair gate before an agent's decision (4D2e C, PL-63), each a limit per API process. Wide until a load run
-  // sets the numbers: unset, as many decisions as connections, one organisation's as many as its share of them.
+  // sets the numbers: unset, one fewer decision than connections (AG10: set, it must stay below the pool), one
+  // organisation's as many as its share of them.
   AGENTX_DECISION_GATE_ACTIVE: { schema: wholeNumber({ min: 1, max: 100, unit: 'decisions' }).optional() },
   AGENTX_DECISION_GATE_PER_ORGANISATION: { schema: wholeNumber({ min: 1, max: 100, unit: 'decisions' }).optional() },
   AGENTX_DECISION_GATE_WAITING_PER_ORGANISATION: {

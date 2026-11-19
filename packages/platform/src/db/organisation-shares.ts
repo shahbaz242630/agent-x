@@ -30,6 +30,12 @@ const SHARE_WAIT_MS = 10_000;
 /** The connections one organisation may hold of a pool of `poolMax`: at least one, or it could do nothing. */
 export const organisationShareOf = (poolMax: number): number => Math.max(1, Math.floor(poolMax * SHARE_OF_THE_POOL));
 
+/**
+ * The fair gate's whole limit when none is set (AG10, 6F1): one below the pool, so decisions can never hold every
+ * connection and a person's request or a key's check beside them always finds one. A pool of one has no room below.
+ */
+export const gateActiveOf = (poolMax: number): number => Math.max(1, poolMax - 1);
+
 /** Postgres's `lock_not_available`: a lock's wait ran out, and its transaction is rolled back. */
 const LOCK_NOT_AVAILABLE = '55P03';
 
