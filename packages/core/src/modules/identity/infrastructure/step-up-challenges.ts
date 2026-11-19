@@ -47,13 +47,12 @@
 // tests can move them.
 import { createHash, randomBytes } from 'node:crypto';
 
-import { ChainBroken } from '@agentx/platform/audit-chain';
 import { limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
-import { type AuditTransaction, type CheckedEventFacts, eventsSinceChecked } from '../../audit/index.ts';
+import { type AuditTransaction, ChainBroken, type CheckedEventFacts, eventsSinceChecked } from '../../audit/index.ts';
 import { PASSKEY_METHOD } from '../domain/step-up.ts';
 import { SESSION_SEALED, sessionRowMessage } from './sessions.ts';
 import {

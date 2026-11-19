@@ -21,12 +21,11 @@ import {
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
-import { ChainBroken } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, createAuditTrail } from '../../audit/index.ts';
+import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
 import { createSessions } from './sessions.ts';
 import {
   createStepUpChallenges,
