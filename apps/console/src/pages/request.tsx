@@ -83,9 +83,14 @@ function Facts({ request }: { readonly request: RequestDetails }) {
       <dt>{t('request.supplier')}</dt>
       <dd>{request.supplier.name}</dd>
       <dt>{t('request.invoice')}</dt>
-      <dd className="mono">{request.agentWrote.orderReference}</dd>
+      {/* The agent's own words, each isolated (<bdi>): a right-to-left mark or override in them can't reorder the page around them. */}
+      <dd className="mono">
+        <bdi>{request.agentWrote.orderReference}</bdi>
+      </dd>
       <dt>{t('request.purpose')}</dt>
-      <dd>{request.agentWrote.purpose}</dd>
+      <dd>
+        <bdi>{request.agentWrote.purpose}</bdi>
+      </dd>
       <dt>{t('request.agent')}</dt>
       <dd>
         {request.agent.name} <span className="mono">{request.agent.id}</span>

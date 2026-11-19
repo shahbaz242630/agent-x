@@ -73,10 +73,11 @@ function Request({ evidence }: { readonly evidence: Evidence }) {
       <dl className="facts">
         <Fact label={t('evidence.status')} value={t(`status.${asked.status}`)} />
         <Fact label={t('request.supplier')} value={evidence.supplier.name} />
-        <Fact label={t('request.invoice')} value={asked.orderReference} mono />
-        <Fact label={t('request.purpose')} value={asked.purpose} />
+        {/* The agent's own words, each isolated (<bdi>): a right-to-left mark or override in them can't reorder the page around them. */}
+        <Fact label={t('request.invoice')} value={<bdi>{asked.orderReference}</bdi>} mono />
+        <Fact label={t('request.purpose')} value={<bdi>{asked.purpose}</bdi>} />
         <Fact label={t('request.bankReference')} value={asked.bankReference} mono />
-        <Fact label={t('evidence.idempotencyKey')} value={asked.idempotencyKey} mono />
+        <Fact label={t('evidence.idempotencyKey')} value={<bdi>{asked.idempotencyKey}</bdi>} mono />
         <Fact label={t('request.changed')} value={timeText(asked.changedAt)} />
         <Fact label={t('request.expires')} value={timeOrNone(asked.expiresAt)} />
         <Fact label={t('request.id')} value={asked.id} mono />

@@ -277,6 +277,26 @@ describe('one request’s page (6B1)', () => {
     expect(localStorage.getItem('agentx.organization')).toBe(OTHER.id);
   });
 
+  it('S206 V8 shows the agent’s words as text, never markup, each isolated so a direction override can’t reorder the page', async () => {
+    // Built here, so no file holds a raw control: a right-to-left override and a right-to-left isolate.
+    const override = String.fromCodePoint(0x20_2e);
+    const isolate = String.fromCodePoint(0x20_67);
+    const purpose = `<img src=x onerror="alert(1)">Toner ${override}gnp.exe`;
+    const orderReference = `INV-${isolate}<script>alert(2)</script>`;
+    signedIn();
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details({ agentWrote: { purpose, orderReference } }) });
+    open(`/approvals/${ID}`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    for (const written of [purpose, orderReference]) {
+      const shown = screen.getByText(written);
+      expect(shown.tagName).toBe('BDI');
+      expect(shown.textContent).toBe(written);
+      expect(shown.children).toHaveLength(0);
+      expect(shown.closest('dl')?.querySelector('img, script')).toBeNull();
+    }
+  });
+
   it('ignores a link’s organisation the person isn’t in', async () => {
     signedIn([ORG, OTHER]);
     open(`/approvals/${ID}?org=0199a0f0-0000-7000-8000-00000000cccc`);

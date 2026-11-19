@@ -307,6 +307,32 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('S206 V8 shows the agent’s words as text, never markup, each isolated so a direction override can’t reorder the page', async () => {
+    // Built here, so no file holds a raw control: a right-to-left override, a right-to-left isolate, a left-to-right one.
+    const [override, isolate, leftIsolate] = [0x20_2e, 0x20_67, 0x20_66].map((point) => String.fromCodePoint(point));
+    const written = {
+      purpose: `<img src=x onerror="alert(1)">Toner ${override}gnp.exe`,
+      orderReference: `INV-${isolate}<script>alert(2)</script>`,
+      idempotencyKey: `key-${leftIsolate}<b>bold</b>`,
+    };
+    const evidence = handedOff();
+    signedIn();
+    answer(`GET ${READ}`, {
+      status: 200,
+      body: { evidence: { ...evidence, spendRequest: { ...evidence.spendRequest, ...written } } },
+    });
+    open(`/approvals/${ID}/evidence`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    for (const text of Object.values(written)) {
+      const shown = screen.getByText(text);
+      expect(shown.tagName).toBe('BDI');
+      expect(shown.textContent).toBe(text);
+      expect(shown.children).toHaveLength(0);
+      expect(shown.closest('dl')?.querySelector('img, script, b')).toBeNull();
+    }
+  });
+
   it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
     signedIn();
     answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });
