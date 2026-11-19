@@ -80,6 +80,7 @@ export {
   type PresentedToken,
   REFRESH_IDLE_DAYS,
 } from './domain/connection.ts';
+export { CONNECTION_HEADS, type HeadCheck, headMoved, headOf, isHeadTaken } from './infrastructure/connection-heads.ts';
 export {
   addConnection,
   agentsOfLiveConnectionsMadeBy,
@@ -99,6 +100,8 @@ export {
 export {
   type IssuedTokens,
   issueTokens,
+  tokenGenuine,
+  type TokenProof,
   tokenProven,
   type TokenRow,
   sweepConnectionTokens,

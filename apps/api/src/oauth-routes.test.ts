@@ -45,6 +45,7 @@ const TOKENS: IssuedTokens = {
   accessToken: ACCESS_TEXT,
   refreshToken: `axr_${'1'.repeat(32)}_${'3'.repeat(32)}_${'b'.repeat(43)}`,
   accessTokenId: '0199a0f0-0000-7000-8000-0000000e3a14',
+  refreshTokenId: '0199a0f0-0000-7000-8000-0000000e3a15',
   // Far ahead: the answer counts at most an hour.
   accessExpiresAt: new Date('2099-12-28T09:00:00Z'),
   scopes: ['requests:read', 'suppliers:read'],

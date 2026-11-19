@@ -5,6 +5,7 @@
   "activity_exports.files",
   "agents.agent_keys",
   "agents.agents",
+  "agents.connection_heads",
   "agents.connection_tokens",
   "agents.connections",
   "audit.events",

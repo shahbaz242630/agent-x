@@ -47,6 +47,7 @@
   {"table":"agents.agents","name":"agents_name_check","expression":"((char_length(name) >= 1) AND (char_length(name) <= 100))"},
   {"table":"agents.agents","name":"agents_scopes_check","expression":"((char_length(scopes) <= 200) AND (scopes ~ '^[a-z]+:[a-z]+( [a-z]+:[a-z]+)*$'::text))"},
   {"table":"agents.agents","name":"agents_status_check","expression":"(status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))"},
+  {"table":"agents.connection_heads","name":"connection_heads_created_at_check","expression":"isfinite(created_at)"},
   {"table":"agents.connection_tokens","name":"connection_tokens_kind_check","expression":"(kind = ANY (ARRAY['access'::text, 'refresh'::text]))"},
   {"table":"agents.connection_tokens","name":"connection_tokens_scopes_check","expression":"((char_length(scopes) <= 200) AND (scopes ~ '^[a-z]+:[a-z]+( [a-z]+:[a-z]+)*$'::text))"},
   {"table":"agents.connection_tokens","name":"connection_tokens_secret_key_version_check","expression":"(secret_key_version >= 1)"},
