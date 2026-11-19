@@ -325,7 +325,7 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   }
   logger.info('api.start_recorded', { seq: recorded });
   // S205: people made before 0100 get their MAC, until its cutoff; a failure leaves them unable to sign in, nothing more.
-  // TODO(S205): delete this once USER_MAC_BACKFILL_UNTIL (2026-11-22) has passed, with backfillUserMacs.
+  // TODO(S205): delete this once USER_MAC_BACKFILL_UNTIL (2026-11-25) has passed, with backfillUserMacs.
   try {
     const given = await backfillUserMacs(database, { keys, clock: systemClock });
     if (given > 0) logger.info('identity.user_macs_given', { people: given });

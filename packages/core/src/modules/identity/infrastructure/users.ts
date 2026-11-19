@@ -124,7 +124,7 @@ export async function isUser(db: Handle, userId: string): Promise<boolean> {
  * one, and after this no row without a MAC is ever believed.
  * TODO(S205): delete backfillUserMacs, its call in the API's boot and this once it has passed.
  */
-export const USER_MAC_BACKFILL_UNTIL = new Date('2026-11-22T00:00:00Z');
+export const USER_MAC_BACKFILL_UNTIL = new Date('2026-11-25T00:00:00Z');
 
 /** How many people a backfill reads at a time. */
 const BACKFILL_BATCH = 500;

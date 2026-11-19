@@ -1011,7 +1011,7 @@ export const PLAIN_WORDS = {
     happened:
       'At its start, this copy of the API could not give their new integrity seal to people who joined before it.',
     broke: 'Those people cannot sign in until it succeeds; everyone else is fine.',
-    next: 'It is tried again at every start for two days after this release. Check the database, then restart the API.',
+    next: 'It is tried again at every start until 25 November. Check the database, then restart the API.',
   },
   'idp.impersonated': {
     happened: 'The login service recorded someone acting as another person, which Agent X never turns on.',

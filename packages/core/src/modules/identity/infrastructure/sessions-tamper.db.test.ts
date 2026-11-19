@@ -294,6 +294,20 @@ describe(`the owner can't verify a person's step-up (Postgres ${server.version})
     }
   });
 
+  it('a challenge genuinely verified with an app code, which the owner says was a passkey, is never consumed (S205 mutation pass)', async () => {
+    const { sessionId } = await signedIn();
+    const { binding, challengeId } = await opened(sessionId);
+    expect(
+      await challenges().recordEvidence(app, challengeId, sessionId, { ...EVIDENCE, amr: ['pwd', 'otp', 'mfa'] }),
+    ).toBe(true);
+    await asOwner("update identity.step_up_challenges set amr = '{pwd,user,mfa}' where id = $1", [challengeId]);
+
+    expect(await consumeFor(binding, challengeId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ check: 'step_up_challenge', reason: 'mac', rowId: challengeId }),
+    ]);
+  });
+
   it('a genuinely verified challenge the owner points at another change is never consumed for it', async () => {
     const { sessionId } = await signedIn();
     const { binding, challengeId } = await opened(sessionId);
