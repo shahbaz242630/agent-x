@@ -144,6 +144,25 @@ describe(`a supplier's remittance setting (0061, Postgres ${server.version})`, (
     expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
   });
 
+  it('put back to its older, validly signed setting past the app, is tampered with (FX-TAMPER rollback, S205)', async () => {
+    const org = await organization();
+    const id = await supplier(org, 'on');
+    const owner = database.as('owner');
+    await owner.query(ORG_NAMED, [org]);
+    const [saved] = await owner.query<{ row: string }>(
+      'select pg_catalog.to_jsonb(t)::text as row from suppliers.remittance_settings t where t.id = $1',
+      [id],
+    );
+    await set(org, id, 'off');
+    await owner.query(
+      `update suppliers.remittance_settings t set remittance_email = old.remittance_email
+         from pg_catalog.jsonb_populate_record(null::suppliers.remittance_settings, $2::jsonb) old where t.id = $1`,
+      [id, saved?.row],
+    );
+
+    expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
+  });
+
   it('lets the app neither delete a row, nor move its supplier or when it was made', async () => {
     const as = database.as('app');
     await expect(as.query('delete from suppliers.remittance_settings')).rejects.toThrow('permission denied');
