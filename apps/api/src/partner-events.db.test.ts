@@ -946,7 +946,7 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
   describe('the store’s caps, for every process together', () => {
     const body = Buffer.from('{}');
     const keep = (ip: string | undefined) => events().keepRefused(app, { reason: 'signature', ip, body });
-    /** The owner's first step: 0106's rule that every row written carries a MAC dropped, to plant one without. */
+    /** The owner's first step: 0105's rule that every row written carries a MAC dropped, to plant one without. */
     const DROP_EVIDENCE_RULE =
       'alter table security.partner_event_evidence drop constraint if exists evidence_mac_required';
 

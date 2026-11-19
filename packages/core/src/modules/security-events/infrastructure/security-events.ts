@@ -18,7 +18,7 @@
 //   transaction, never to the global one: a batch is one organisation's
 //   events or none's, so each write is whole. `sweepOrganisation` deletes one
 //   organisation's past their retention, inside its transaction too.
-// - Each row is written with its MAC (0106, S206 V6; event-seals.ts), made
+// - Each row is written with its MAC (0105, S206 V6; event-seals.ts), made
 //   here: the write stays one INSERT, with no lock beyond its own rows.
 //
 // Each runs in a transaction of its own whose statements give up after 10

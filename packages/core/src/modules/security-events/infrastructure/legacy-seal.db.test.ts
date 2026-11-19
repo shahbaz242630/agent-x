@@ -1,4 +1,4 @@
-// S206 V6: the security rows from before 0106 given their MACs at start, on
+// S206 V6: the security rows from before 0105 given their MACs at start, on
 // the real migrated schema as the app role. Each table's rows without a MAC
 // sealed once, the record of it on the platform chain, and a second start
 // doing nothing; then no row without a MAC is believed. A record deleted
@@ -41,7 +41,7 @@ const AT = new Date('2026-11-25T09:00:00.000Z');
 
 const owner = () => database.as('admin');
 
-/** 0106's rule that every row written carries a MAC, off: as before 0106, or as the database's owner can. */
+/** 0105's rule that every row written carries a MAC, off: as before 0105, or as the database's owner can. */
 const DROP_RULE = `
   alter table security.events drop constraint if exists event_mac_required;
   alter table security.org_events drop constraint if exists org_event_mac_required;
@@ -49,7 +49,7 @@ const DROP_RULE = `
 
 const ownerDropsRule = () => owner().query(DROP_RULE);
 
-/** Rows of every table as the release before wrote them: no MAC, marked from before 0106 as it marks them. */
+/** Rows of every table as the release before wrote them: no MAC, marked from before 0105 as it marks them. */
 async function legacyRows(): Promise<void> {
   for (let n = 0; n < 3; n += 1) {
     await owner().query(
@@ -126,7 +126,7 @@ afterEach(async () => {
   await database.drop();
 });
 
-describe('0106: every row written from now on carries a MAC (S206 V6)', () => {
+describe('0105: every row written from now on carries a MAC (S206 V6)', () => {
   it('refuses a row without one in every table, as the release before would write it during the roll-out', async () => {
     const at = new Date('2026-11-25T09:00:00.000Z');
     await expect(
@@ -173,7 +173,7 @@ describe('0106: every row written from now on carries a MAC (S206 V6)', () => {
   });
 });
 
-describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
+describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
   it('gives each row of every table its MAC, once, records it, and a second start does nothing', async () => {
     await legacyRows();
     expect(await unsealed()).toBe('5');
@@ -291,7 +291,7 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual(['seal_record_deleted']);
   });
 
-  it('takes no row written after 0106, with its MAC, for a sealing already done: the first sealing seals the rest', async () => {
+  it('takes no row written after 0105, with its MAC, for a sealing already done: the first sealing seals the rest', async () => {
     await legacyRows();
     // Written by this release as it serves, before the sealing in the background has run.
     await createSecurityEvents({ ids, clock: new FixedClock(AT), keys, retentionDays: 30 }).record(app, [

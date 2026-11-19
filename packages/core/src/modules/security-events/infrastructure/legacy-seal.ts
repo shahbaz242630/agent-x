@@ -1,9 +1,9 @@
-// The security rows from before 0106 given their MACs, once (S206 V6), as
+// The security rows from before 0105 given their MACs, once (S206 V6), as
 // 0100's people were (S205 backfillUserMacs). From then on a row with no MAC
 // is never believed, whatever its ID or dates: not shown, not counted, and
 // alarmed when met.
 //
-// The rows from before are the ones 0106 marked `before_macs`; every row
+// The rows from before are the ones 0105 marked `before_macs`; every row
 // after carries its MAC as it is written (the database refuses one without).
 // In the background once the API serves, never holding up or stopping a
 // start: if the platform chain says every row is sealed
@@ -27,7 +27,7 @@
 // wound back.
 //
 // TODO(S206 AT10-style): delete this, and its call at start, once the release
-// that brings 0106 has started everywhere and every environment holds
+// that brings 0105 has started everywhere and every environment holds
 // `all_sealed`, as 0100's people backfill goes.
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -194,7 +194,7 @@ async function sealTable(
   }
 }
 
-/** Whether any row of the table from before 0106 already carries a MAC: only a sealing gives one. */
+/** Whether any row of the table from before 0105 already carries a MAC: only a sealing gives one. */
 const anyMac = async (tx: Tx, legacy: LegacyTable): Promise<boolean> => {
   const { rows } = await sql`select 1 from ${legacy.table} where mac is not null and before_macs limit 1`.execute(tx);
   return rows.length > 0;
@@ -259,7 +259,7 @@ export async function sealLegacyRows(
 
   /**
    * Records that this start seals, unless one began meanwhile (its record then read): what the chain says, `deleted`
-   * when a row from before 0106 already carries a MAC, or no record when this start is to seal.
+   * when a row from before 0105 already carries a MAC, or no record when this start is to seal.
    */
   const begin = async () => {
     const signed = await anySigned();

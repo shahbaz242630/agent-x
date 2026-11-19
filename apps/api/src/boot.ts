@@ -362,7 +362,7 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
 }
 
 /**
- * S206 V6: the security rows from before 0106 given their MACs, once, in the background once the API serves
+ * S206 V6: the security rows from before 0105 given their MACs, once, in the background once the API serves
  * (legacy-seal.ts; its alarms are its own). It never holds up or stops a start: the rows written meanwhile carry their
  * MACs as they are written, and the rows from before stay unbelieved, not shown or counted, until sealed. A failure is
  * logged and the API serves on. Never rejects.

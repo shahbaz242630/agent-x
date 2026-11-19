@@ -129,7 +129,7 @@ vi.mock('./start-record.ts', () => ({
 }));
 
 /**
- * A stand-in for the start's sealing of the security rows from before 0106 (S206 V6), proven against a real database
+ * A stand-in for the start's sealing of the security rows from before 0105 (S206 V6), proven against a real database
  * in legacy-seal.db.test.ts. `result` is what it gives back.
  */
 const legacySeal = vi.hoisted(() => ({
@@ -1010,7 +1010,7 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     expect(startedLive()).toBe(false);
   });
 
-  it('serves on when the security rows from before 0106 could not be sealed: the failure logged (S206 V6)', async () => {
+  it('serves on when the security rows from before 0105 could not be sealed: the failure logged (S206 V6)', async () => {
     legacySeal.result = () => Promise.reject(new Error('the database went away'));
 
     const { host, server, capture } = await start();
@@ -1021,7 +1021,7 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     });
   });
 
-  it('serves before the sealing of the security rows from before 0106 ends, however long it takes (S206 V6)', async () => {
+  it('serves before the sealing of the security rows from before 0105 ends, however long it takes (S206 V6)', async () => {
     let called = 0;
     legacySeal.result = () => {
       called += 1;

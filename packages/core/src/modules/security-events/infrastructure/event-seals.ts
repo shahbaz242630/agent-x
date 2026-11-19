@@ -8,7 +8,7 @@
 //   INSERT, with no lock beyond its own rows: a flood of refusals from many
 //   addresses never queues on a shared head, as a chain written row by row
 //   would make it (an attacker spraying sign-ins could then slow everyone's).
-//   A row with no MAC is never believed: those from before 0106 were given
+//   A row with no MAC is never believed: those from before 0105 were given
 //   theirs at the first start on it (legacy-seal.ts). The admins' page shows
 //   only rows whose MAC holds and whose ID agrees with when they were written.
 // - Each closed UTC day of rows is digested and the digest sealed on an audit
@@ -144,7 +144,7 @@ export const evidenceMessage = (facts: EvidenceFacts): Message => [
 
 /**
  * Whether a security row's MAC holds for the message, with the version it names. A row with none never does: the rows
- * from before 0106 were each given theirs at the first start on it (legacy-seal.ts). A MAC or version made up (no such
+ * from before 0105 were each given theirs at the first start on it (legacy-seal.ts). A MAC or version made up (no such
  * key version) holds for nothing.
  */
 export function rowMacHolds(

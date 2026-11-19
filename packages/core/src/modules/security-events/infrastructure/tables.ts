@@ -16,10 +16,10 @@ interface EventsTable {
   window_start: Date;
   count: number;
   created_at: Date;
-  /** 0106: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
+  /** 0105: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
   mac: Buffer | null;
   mac_key_version: number | null;
-  /** 0106: a row from before it, which alone may have no MAC (and is never believed without one). */
+  /** 0105: a row from before it, which alone may have no MAC (and is never believed without one). */
   before_macs: Generated<boolean>;
 }
 
@@ -36,9 +36,9 @@ interface OrgEventsTable {
   window_start: Date;
   count: number;
   created_at: Date;
-  /** 0106: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
+  /** 0105: the row's MAC with `session-mac` (event-seals.ts), and its key's version; null on a row from before. */
   mac: Buffer | null;
   mac_key_version: number | null;
-  /** 0106: a row from before it, which alone may have no MAC (and is never believed without one). */
+  /** 0105: a row from before it, which alone may have no MAC (and is never believed without one). */
   before_macs: Generated<boolean>;
 }

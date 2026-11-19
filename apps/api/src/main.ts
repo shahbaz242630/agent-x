@@ -105,7 +105,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     if (started.server === undefined) return undefined;
   }
   if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
-  // S206 V6: the security rows from before 0106 sealed in the background, never holding up or stopping a start.
+  // S206 V6: the security rows from before 0105 sealed in the background, never holding up or stopping a start.
   if (!stopping()) void sealLegacyAfterStart(booted);
   return started.server;
 }
