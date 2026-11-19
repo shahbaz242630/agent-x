@@ -129,19 +129,6 @@ vi.mock('./start-record.ts', () => ({
 }));
 
 /**
- * A stand-in for the start's sealing of the security rows from before 0105 (S206 V6), proven against a real database
- * in legacy-seal.db.test.ts. `result` is what it gives back.
- */
-const legacySeal = vi.hoisted(() => ({
-  result: (): Promise<string> => Promise.resolve('sealed'),
-}));
-
-vi.mock('@agentx/core/modules/security-events', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@agentx/core/modules/security-events')>()),
-  sealLegacyRows: () => legacySeal.result(),
-}));
-
-/**
  * A stand-in for the anchor check, proven in anchor-check.test.ts: these tests
  * see only how it is set up, and when it starts and stops. Stopping takes a
  * moment, as it does when a run is in flight.
@@ -463,7 +450,6 @@ beforeEach(() => {
   lease.released = 0;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
-  legacySeal.result = () => Promise.resolve('sealed');
   anchorChecks.intervals.length = 0;
   anchorChecks.staleAfter.length = 0;
   anchorChecks.reachWithin.length = 0;
@@ -527,6 +513,7 @@ const EVERY_TIMER: [string, number][] = [
   ['person_seal', 900_000],
   ['person_seal_check', 1_800_000],
   ['security_seal', 1_800_000],
+  ['security_legacy_seal', 3_600_000],
   ['org_work_rediscovery', 3_600_000],
   ...EACH_PROCESS,
 ];
@@ -1008,74 +995,6 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.start_not_recorded' }));
     expect(host.exitCode).toBe(1);
     expect(startedLive()).toBe(false);
-  });
-
-  it('serves on when the security rows from before 0105 could not be sealed: the failure logged (S206 V6)', async () => {
-    legacySeal.result = () => Promise.reject(new Error('the database went away'));
-
-    const { host, server, capture } = await start();
-    expect(server).toBeDefined();
-    expect(host.exitCode).not.toBe(1);
-    await vi.waitFor(() => {
-      expect(capture.lines().map(({ event }) => event)).toContain('security.legacy_seal_failed');
-    });
-  });
-
-  it('serves before the sealing of the security rows from before 0105 ends, however long it takes (S206 V6)', async () => {
-    let called = 0;
-    const { promise: sealing, resolve: sealed } = Promise.withResolvers<string>();
-    legacySeal.result = () => {
-      called += 1;
-      return sealing;
-    };
-
-    const { server } = await start();
-    expect(server).toBeDefined();
-    expect(called).toBe(1);
-    // Ended only now, after the start: a stop waits for it a while before closing the pool.
-    sealed('sealed');
-  });
-
-  it('a stop waits for the sealing under way before closing the pool, and no longer than its bound (S206 V6)', async () => {
-    const { promise: sealing, resolve: sealed } = Promise.withResolvers<string>();
-    legacySeal.result = () => sealing;
-    const { host } = await start();
-    fake.steps.length = 0;
-
-    host.emit('SIGTERM', 'SIGTERM');
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    // Still sealing: the pool stays open.
-    expect(fake.steps).not.toContain('pool closed');
-    sealed('sealed');
-    await vi.waitFor(() => {
-      expect(fake.steps).toContain('pool closed');
-    });
-
-    // One that never ends holds the stop no longer than its bound.
-    legacySeal.result = () => new Promise(() => undefined);
-    const { host: second } = await start();
-    const asked = performance.now();
-    second.emit('SIGTERM', 'SIGTERM');
-    await vi.waitFor(
-      () => {
-        expect(second.exits).toEqual([0]);
-      },
-      { timeout: 15_000 },
-    );
-    expect(performance.now() - asked).toBeLessThan(14_000);
-  }, 30_000);
-
-  it('seals the security rows from before 0105 on the web side alone: a `jobs` process never does (S206 V6)', async () => {
-    let called = 0;
-    legacySeal.result = () => {
-      called += 1;
-      return Promise.resolve('sealed');
-    };
-
-    await start({ ...ENV, AGENTX_ROLE: 'jobs' });
-    expect(called).toBe(0);
-    await start({ ...ENV, AGENTX_ROLE: 'web' });
-    expect(called).toBe(1);
   });
 
   it('refuses to start live today: no partner adapter is built, so nothing goes live before Phase 5', async () => {

@@ -15,7 +15,7 @@
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { OauthTables } from '@agentx/core/modules/oauth';
 import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
-import { type DirectoryTables, listedOrganizations, markOrgWorkNow } from '@agentx/core/modules/directory';
+import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
   backfillUserMacs,
   createLoginFlows,
@@ -33,7 +33,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createProviderEvents, type ProviderEventsTables } from '@agentx/core/modules/provider-events';
-import { createSecurityEvents, sealLegacyRows, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import type { ActivityExportTables, ActivityTables } from '@agentx/core/modules/activity';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
@@ -359,28 +359,6 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
     // As the anchor check's own stale limit: what a chain may go unchecked before that is the alarm.
     notLeadingAfterMs: config.audit.anchorSeconds * 3 * 1000,
   });
-}
-
-/**
- * S206 V6: the security rows from before 0105 given their MACs, once, in the background once the API serves
- * (legacy-seal.ts; its alarms are its own). It never holds up or stops a start: the rows written meanwhile carry their
- * MACs as they are written, and the rows from before stay unbelieved, not shown or counted, until sealed. A failure is
- * logged and the API serves on. Never rejects.
- * TODO(S206 AT10-style): delete this, with sealLegacyRows, once every environment holds its `all_sealed` record.
- */
-export async function sealLegacyAfterStart({ keys, logger, database }: Booted): Promise<void> {
-  try {
-    const outcome = await sealLegacyRows(database, {
-      keys,
-      ids: uuidV7Ids,
-      clock: systemClock,
-      logger,
-      orgs: () => listedOrganizations(database),
-    });
-    logger.info('security.legacy_seal_done', { outcome });
-  } catch (error) {
-    logger.error('security.legacy_seal_failed', { err: error });
-  }
 }
 
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */

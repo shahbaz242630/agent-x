@@ -19,9 +19,12 @@ import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
-import { eventMacHolds } from './event-seals.ts';
+import { eventMac, eventMacHolds } from './event-seals.ts';
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import {
   ALL_SEALED,
+  type ChainPlace,
+  legacyManifest,
   SEALER_LOCK,
   SEALING_STARTED,
   SECURITY_SEAL_BACKFILL_UNTIL,
@@ -98,22 +101,75 @@ const records = async () =>
       .execute()
   ).map(({ action }) => action);
 
-const seal = (now = AT) =>
+/** The platform chain's head now, as the anchor check would anchor it; undefined for an empty chain. */
+const headNow = async (): Promise<ChainPlace | undefined> => {
+  const [head] = await owner().query<{ seq: string; hash: Buffer; mac_key_version: number }>(
+    'select seq, hash, mac_key_version from platform_controls.audit_head',
+  );
+  return head === undefined
+    ? undefined
+    : { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: head.mac_key_version };
+};
+
+const RETENTION = 30;
+
+/** The chain's head row as it stands, every column the owner would keep to put it back. */
+interface HeadRow {
+  readonly seq: string;
+  readonly hash: Buffer;
+  readonly mac: Buffer;
+  readonly mac_key_version: number;
+}
+const headRow = async (): Promise<HeadRow | undefined> =>
+  (await owner().query<HeadRow>('select seq, hash, mac, mac_key_version from platform_controls.audit_head'))[0];
+
+type Row = Readonly<Record<string, unknown>>;
+
+/** The MAC the app gives a global row from before 0105 as it seals it. */
+const eventMacOf = (row: Row | undefined) =>
+  eventMac(keys, {
+    id: String(row?.id),
+    orgId: null,
+    kind: String(row?.kind),
+    reason: String(row?.reason),
+    ip: typeof row?.ip === 'string' ? row.ip : null,
+    userId: null,
+    agentId: null,
+    windowStart: row?.window_start as Date,
+    count: Number(row?.count),
+    createdAt: row?.created_at as Date,
+  });
+
+/** The record each of the sealing's anchors was taken after, in order. */
+let anchoredAt: string[] = [];
+
+/** A sealing at `now`, the chain held to `anchor` (its head as the sealing reads it, unless named). */
+const seal = (now = AT, anchor: () => Promise<ChainPlace | undefined> = headNow) =>
   sealLegacyRows(app, {
     keys,
     ids,
     clock: new FixedClock(now),
     logger: testLogger(capture),
     orgs: () => Promise.resolve([ORG]),
+    retentionDays: RETENTION,
+    // Which record each anchor is taken after: the newest of them then.
+    anchorNow: async () => {
+      anchoredAt.push(String((await records()).at(-1)));
+    },
+    anchor,
   });
 
 /** An event of the app's on the platform chain, as another start records it. */
-const recorded = (action: string) =>
+const recorded = (action: string, details: Readonly<Record<string, string | number>> = {}) =>
   app
     .transaction()
     .execute((tx) =>
-      createPlatformChain({ keys, ids }).record(tx, { actor: { type: 'system', id: 'api' }, action, details: {} }),
+      createPlatformChain({ keys, ids }).record(tx, { actor: { type: 'system', id: 'api' }, action, details }),
     );
+
+/** The manifest a start would record as it began sealing at AT. */
+const manifestNow = () =>
+  legacyManifest(app, () => Promise.resolve([ORG]), new Date(AT.getTime() - (RETENTION - 2) * DAY_MS));
 
 const alarms = () =>
   capture
@@ -123,8 +179,11 @@ const alarms = () =>
 
 beforeEach(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
   capture = new LogCapture();
+  anchoredAt = [];
+  // A chain already under way, as every environment's is, for its head to be anchored.
+  await recorded('platform.started');
 });
 
 afterEach(async () => {
@@ -187,6 +246,10 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(await seal()).toBe('sealed');
     expect(await unsealed()).toBe('0');
     expect(await records()).toEqual([SEALING_STARTED, ALL_SEALED]);
+    // Anchored at once after each record, so deleting either is a chain wound back past an anchor.
+    expect(anchoredAt).toEqual([SEALING_STARTED, ALL_SEALED]);
+    // The sealer's lock given back.
+    expect(await owner().query("select 1 from pg_catalog.pg_locks where locktype = 'advisory'")).toEqual([]);
     // The MAC each was given is the one every reader checks.
     const [row] = await withTenant(app, ORG, (tx) => tx.selectFrom('security.org_events').selectAll().execute());
     expect(
@@ -217,7 +280,47 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual([]);
   });
 
-  it('its record deleted while rows carry MACs: nothing sealed again, nothing recorded, the alarm', async () => {
+  it('leaves a row within two days of the retention to the sweep, unsealed (never believed): it would go before a start took a sealing up again', async () => {
+    await legacyRows();
+    const old = new Date(AT.getTime() - (RETENTION - 1) * DAY_MS);
+    await owner().query(
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+       values ($1, 'sign_in_failed', 'state_mismatch', null, null, $2, 1, $2, true)`,
+      [ids.next(), old],
+    );
+
+    expect(await seal()).toBe('sealed');
+    expect(await unsealed()).toBe('1');
+  });
+
+  /** The owner's deletion of the sealing's records from the chain's tail, its head put back as `kept` left it. */
+  const deletedFromTail = async (kept: HeadRow | undefined) => {
+    await owner().query('delete from platform_controls.audit_events where action in ($1, $2)', [
+      SEALING_STARTED,
+      ALL_SEALED,
+    ]);
+    await owner().query('update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4', [
+      kept?.seq,
+      kept?.hash,
+      kept?.mac,
+      kept?.mac_key_version,
+    ]);
+  };
+
+  it('its records deleted from the tail before an anchor passed them, the head put back, while rows carry MACs: nothing sealed again, nothing recorded, the alarm', async () => {
+    await legacyRows();
+    const kept = await headRow();
+    await seal();
+    await deletedFromTail(kept);
+    await legacyRows();
+
+    expect(await seal()).toBe('deleted');
+    expect(await unsealed()).toBe('5');
+    expect(await records()).toEqual([]);
+    expect(alarms()).toEqual(['seal_record_deleted']);
+  });
+
+  it('its records deleted from the tail with the head left: the chain fails, nothing sealed, the alarm', async () => {
     await legacyRows();
     await seal();
     await owner().query('delete from platform_controls.audit_events where action in ($1, $2)', [
@@ -226,10 +329,9 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     ]);
     await legacyRows();
 
-    expect(await seal()).toBe('deleted');
+    expect(await seal()).toBe('unsealed');
     expect(await unsealed()).toBe('5');
-    expect(await records()).toEqual([]);
-    expect(alarms()).toEqual(['seal_record_deleted']);
+    expect(alarms()).toEqual(['seal_record_unsealed']);
   });
 
   const NULL_ORG_MACS = 'update security.org_events set mac = null, mac_key_version = null';
@@ -240,11 +342,9 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     ['an organisation’s', false],
   ])('its records deleted while only %s rows carry MACs: the alarm all the same', async (_which, globalKept) => {
     await legacyRows();
+    const kept = await headRow();
     await seal();
-    await owner().query('delete from platform_controls.audit_events where action in ($1, $2)', [
-      SEALING_STARTED,
-      ALL_SEALED,
-    ]);
+    await deletedFromTail(kept);
     await ownerDropsRule();
     await owner().query('update security.partner_event_evidence set mac = null, mac_key_version = null');
     if (globalKept) await owner().query(NULL_ORG_MACS);
@@ -256,18 +356,111 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
 
   it('a sealing begun and left part way (a stop) is taken up by the next start, from the rows still without a MAC', async () => {
     await legacyRows();
-    // Another start's record of its beginning, and the rows it reached sealed, as one stopped part way leaves them.
-    await recorded(SEALING_STARTED);
-    await legacyRows();
+    // Another start's record of its beginning, with its manifest, and one row it reached sealed, as a stop leaves them.
+    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
+    const [first] = await owner().query<Row>(
+      'select id, kind, reason, ip, user_id, window_start, count, created_at from security.events order by id limit 1',
+    );
+    const { mac, mac_key_version } = eventMacOf(first);
+    await app
+      .updateTable('security.events')
+      .set({ mac, mac_key_version })
+      .where('id', '=', String(first?.id))
+      .execute();
+    expect(await unsealed()).toBe('4');
+
     expect(await seal()).toBe('sealed');
     expect(await unsealed()).toBe('0');
     expect(await records()).toEqual([SEALING_STARTED, ALL_SEALED]);
     expect(alarms()).toEqual([]);
   });
 
+  it('a sealing begun and left, its end then deleted from the chain’s tail and the head put back, rows planted: the manifest no longer holds, nothing sealed, the alarm', async () => {
+    await legacyRows();
+    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
+    // The head as it stood with the beginning the last event, kept by the owner.
+    const [kept] = await owner().query<{ seq: string; hash: Buffer; mac: Buffer; mac_key_version: number }>(
+      'select seq, hash, mac, mac_key_version from platform_controls.audit_head',
+    );
+    await recorded(ALL_SEALED);
+    await owner().query('delete from platform_controls.audit_events where action = $1', [ALL_SEALED]);
+    await owner().query('update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4', [
+      kept?.seq,
+      kept?.hash,
+      kept?.mac,
+      kept?.mac_key_version,
+    ]);
+    await legacyRows();
+
+    expect(await seal()).toBe('manifest');
+    expect(await unsealed()).toBe('10');
+    expect(alarms()).toEqual(['seal_record_manifest']);
+  });
+
+  it('a chain wiped by the owner, its MAC’d rows gone and rows planted: the chain fails its last anchor, nothing sealed, the alarm', async () => {
+    await legacyRows();
+    await seal();
+    const anchored = await headNow();
+    await owner().query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await owner().query('delete from security.events');
+    await owner().query('delete from security.org_events');
+    await owner().query('delete from security.partner_event_evidence');
+    await legacyRows();
+
+    expect(await seal(AT, () => Promise.resolve(anchored))).toBe('unsealed');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('no anchor to hold the chain to: nothing sealed, the alarm', async () => {
+    await legacyRows();
+
+    expect(await seal(AT, () => Promise.resolve(undefined))).toBe('unanchored');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unanchored']);
+  });
+
+  it('a long sealing keeps its lock: no transaction left waiting for the idle limit to end, a second start busy meanwhile', async () => {
+    await legacyRows();
+    const { promise: reached, resolve: reachedNow } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    let asked = 0;
+    const long = sealLegacyRows(app, {
+      keys,
+      ids,
+      clock: new FixedClock(AT),
+      logger: testLogger(capture),
+      // The sealing held part way, as a long one is between steps.
+      orgs: async () => {
+        asked += 1;
+        if (asked === 1) {
+          reachedNow(undefined);
+          await gate;
+        }
+        return [ORG];
+      },
+      retentionDays: RETENTION,
+      anchorNow: () => Promise.resolve(),
+      anchor: headNow,
+    });
+    await reached;
+    try {
+      const waiting = await owner().query<{ state: string }>(
+        "select state from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database() and state = 'idle in transaction'",
+      );
+      expect(waiting).toEqual([]);
+      expect(await seal()).toBe('busy');
+    } finally {
+      open(undefined);
+    }
+    expect(await long).toBe('sealed');
+    expect(await unsealed()).toBe('0');
+    expect(alarms()).toEqual([]);
+  });
+
   it('past the cutoff, a sealing begun and left is not taken up: the alarm, the rows left unbelieved', async () => {
     await legacyRows();
-    await recorded(SEALING_STARTED);
+    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
 
     expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
     expect(await unsealed()).toBe('5');

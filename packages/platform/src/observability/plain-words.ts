@@ -1315,6 +1315,11 @@ export const PLAIN_WORDS = {
     broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
     next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
   },
+  'security.legacy_seal_unanchored': {
+    happened: 'A record of the older security records’ sealing could not be anchored at once.',
+    broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
+    next: 'Nothing to do if the next anchor check succeeds. If anchoring keeps failing, check the anchor store.',
+  },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',
     broke: 'A change to them is not caught until the next run, 30 minutes later.',

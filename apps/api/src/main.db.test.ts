@@ -7,6 +7,7 @@ import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import { type DirectoryTables, registerOrganization } from '@agentx/core/modules/directory';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { sealLegacyRows, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import { CHAIN_START } from '@agentx/platform/audit-chain';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, withTenant } from '@agentx/platform/db';
 import { API_PURPOSES, loadKeys } from '@agentx/platform/keys';
@@ -50,6 +51,19 @@ async function sealedAhead(): Promise<void> {
       clock: new FixedClock(new Date('2026-11-25T00:00:00.000Z')),
       logger: testLogger(),
       orgs: () => Promise.resolve([]),
+      retentionDays: 90,
+      anchorNow: () => Promise.resolve(),
+      // Held to the chain as it stands, as the anchor check would have anchored it.
+      anchor: async () => {
+        const [head] = await database
+          .as('admin')
+          .query<{ seq: string; hash: Buffer; mac_key_version: number }>(
+            'select seq, hash, mac_key_version from platform_controls.audit_head',
+          );
+        return head === undefined
+          ? CHAIN_START
+          : { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: head.mac_key_version };
+      },
     });
   } finally {
     await app.destroy();
@@ -118,18 +132,7 @@ async function start(env: Record<string, string>) {
 }
 
 /** Stops a started API as the platform would, with SIGTERM, and waits for it to exit. */
-async function stop(run: { readonly host: FakeProcess; readonly capture: LogCapture }): Promise<void> {
-  // Its sealing of the security rows, in the background on the web side, done first (S206 V6): each test's state
-  // then stands as it set it. A `jobs` process seals nothing.
-  const role = run.capture.lines().find(({ event }) => event === 'api.starting')?.role;
-  if (role !== 'jobs') {
-    await vi.waitFor(
-      () => {
-        expect(run.capture.lines().some(({ event }) => event === 'security.legacy_seal_done')).toBe(true);
-      },
-      { timeout: 20_000 },
-    );
-  }
+async function stop(run: { readonly host: FakeProcess }): Promise<void> {
   run.host.emit('SIGTERM', 'SIGTERM');
   await vi.waitFor(() => {
     expect(run.host.exits).toEqual([0]);
@@ -348,7 +351,13 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
 
     // The security rows' sealing recorded before (S206 V6), then each start, in order; neither start seals again.
     expect(rows).toEqual([
-      { seq: '1', actor_id: 'api', action: 'security_events.sealing_started', details: '{}' },
+      {
+        seq: '1',
+        actor_id: 'api',
+        action: 'security_events.sealing_started',
+        // Its manifest of the rows it began with: none here.
+        details: expect.stringContaining('"rows":0') as unknown,
+      },
       { seq: '2', actor_id: 'api', action: 'security_events.all_sealed', details: '{}' },
       {
         seq: '3',

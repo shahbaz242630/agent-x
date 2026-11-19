@@ -6,8 +6,6 @@
 // - `jobs`: the jobs, with no server
 // Whichever has the jobs runs them only while it holds their lease (background.ts).
 // Each first does what boot.ts says, then its own work, then stops as it says.
-import { setTimeout as sleep } from 'node:timers/promises';
-
 import { jobsBeating } from '@agentx/core/modules/platform-controls';
 import type { FastifyInstance } from 'fastify';
 
@@ -19,7 +17,6 @@ import {
   leadershipOf,
   onStopSignals,
   type RunOptions,
-  sealLegacyAfterStart,
   sharedParts,
   type SharedParts,
 } from './boot.ts';
@@ -59,12 +56,6 @@ function healthChecksOf(
  * Starts the role's work and returns its server, or nothing where it has none
  * (`jobs`), or nothing with a failed exit code when it can't start.
  */
-/** The most a stop waits for the security rows' sealing under way (S206 V6): a page ends well within it. */
-const SEAL_STOP_WAIT_MS = 10_000;
-
-/** That wait, never holding the process open on its own. */
-const sealWait = () => sleep(SEAL_STOP_WAIT_MS, undefined, { ref: false });
-
 export async function runApi(host: ApiProcess, options: RunOptions): Promise<FastifyInstance | undefined> {
   const booted = await boot(host, options);
   if (booted === undefined) return undefined;
@@ -81,8 +72,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const started: {
     server?: FastifyInstance | undefined;
     jobs?: ReturnType<typeof startJobs>;
-    /** The sealing of the security rows from before 0105, under way in the background (S206 V6); never rejects. */
-    legacySeal?: Promise<void>;
     stopped?: boolean;
   } = {};
   const stopping = (): boolean => started.stopped === true;
@@ -94,8 +83,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     {
       stop: async () => {
         started.stopped = true;
-        // The sealing's page under way given a moment to end before the pool closes; one cut off is taken up next start.
-        if (started.legacySeal !== undefined) await Promise.race([started.legacySeal, sealWait()]);
         // The lease last: another copy takes over only once this one's runs have ended.
         await started.jobs?.stop();
         await leadership?.stop();
@@ -117,9 +104,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     if (started.server === undefined) return undefined;
   }
   if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
-  // S206 V6: the security rows from before 0105 sealed in the background, never holding up or stopping a start; by the
-  // web side alone, so a process of each role never race for it.
-  if (!stopping() && role !== 'jobs') started.legacySeal = sealLegacyAfterStart(booted);
   return started.server;
 }
 
