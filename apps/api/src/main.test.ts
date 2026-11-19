@@ -1023,13 +1023,29 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
 
   it('serves before the sealing of the security rows from before 0105 ends, however long it takes (S206 V6)', async () => {
     let called = 0;
+    const { promise: sealing, resolve: sealed } = Promise.withResolvers<string>();
     legacySeal.result = () => {
       called += 1;
-      return new Promise(() => undefined);
+      return sealing;
     };
 
     const { server } = await start();
     expect(server).toBeDefined();
+    expect(called).toBe(1);
+    // Ended only now, after the start: a stop waits for it a while before closing the pool.
+    sealed('sealed');
+  });
+
+  it('seals the security rows from before 0105 on the web side alone: a `jobs` process never does (S206 V6)', async () => {
+    let called = 0;
+    legacySeal.result = () => {
+      called += 1;
+      return Promise.resolve('sealed');
+    };
+
+    await start({ ...ENV, AGENTX_ROLE: 'jobs' });
+    expect(called).toBe(0);
+    await start({ ...ENV, AGENTX_ROLE: 'web' });
     expect(called).toBe(1);
   });
 

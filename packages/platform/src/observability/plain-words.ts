@@ -1313,7 +1313,7 @@ export const PLAIN_WORDS = {
   'security.legacy_seal_failed': {
     happened: 'The API could not seal the security records from before this release.',
     broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
-    next: 'If no start has sealed them yet, the next start tries again; if one began, a developer finishes it by hand.',
+    next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
   },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',

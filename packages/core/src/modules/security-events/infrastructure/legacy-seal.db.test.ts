@@ -15,11 +15,18 @@ import {
   testLogger,
   within,
 } from '@agentx/testing';
+import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
 import { eventMacHolds } from './event-seals.ts';
-import { ALL_SEALED, SEALING_STARTED, SECURITY_SEAL_BACKFILL_UNTIL, sealLegacyRows } from './legacy-seal.ts';
+import {
+  ALL_SEALED,
+  SEALER_LOCK,
+  SEALING_STARTED,
+  SECURITY_SEAL_BACKFILL_UNTIL,
+  sealLegacyRows,
+} from './legacy-seal.ts';
 import { createSecurityEvents } from './security-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
@@ -91,14 +98,13 @@ const records = async () =>
       .execute()
   ).map(({ action }) => action);
 
-const seal = (waitForOtherMs = 0, now = AT) =>
+const seal = (now = AT) =>
   sealLegacyRows(app, {
     keys,
     ids,
     clock: new FixedClock(now),
     logger: testLogger(capture),
     orgs: () => Promise.resolve([ORG]),
-    waitForOtherMs,
   });
 
 /** An event of the app's on the platform chain, as another start records it. */
@@ -248,15 +254,44 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual(['seal_record_deleted']);
   });
 
-  it('sealing begun by another start that never ends it: never sealed here; the alarm once the wait is up', async () => {
+  it('a sealing begun and left part way (a stop) is taken up by the next start, from the rows still without a MAC', async () => {
     await legacyRows();
-    // Another start's record of its beginning, as one that died part way leaves it.
+    // Another start's record of its beginning, and the rows it reached sealed, as one stopped part way leaves them.
+    await recorded(SEALING_STARTED);
+    await legacyRows();
+    expect(await seal()).toBe('sealed');
+    expect(await unsealed()).toBe('0');
+    expect(await records()).toEqual([SEALING_STARTED, ALL_SEALED]);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('past the cutoff, a sealing begun and left is not taken up: the alarm, the rows left unbelieved', async () => {
+    await legacyRows();
     await recorded(SEALING_STARTED);
 
-    // Waiting no longer than its bound for the other start's end, then the alarm.
-    expect(await within(10_000, seal(2_500), 'the wait for the other start')).toBe('deleted');
+    expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
     expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual(['seal_record_deleted']);
+  });
+
+  it('a start that finds another sealing leaves it to that one, quietly: nothing sealed, no alarm', async () => {
+    await legacyRows();
+    const { promise: held, resolve: heldNow } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const sealer = app.transaction().execute(async (tx) => {
+      await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${SEALER_LOCK}, 0))`.execute(tx);
+      heldNow(undefined);
+      await gate;
+    });
+    await held;
+    try {
+      expect(await within(10_000, seal(), 'the start that finds the sealer at work')).toBe('busy');
+    } finally {
+      open(undefined);
+      await sealer;
+    }
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual([]);
   });
 
   it('its end deleted from the middle of the chain: the gap shows, nothing sealed again, the alarm', async () => {
@@ -285,7 +320,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     await owner().query('update security.org_events set mac = null, mac_key_version = null');
     await owner().query('update security.partner_event_evidence set mac = null, mac_key_version = null');
 
-    expect(await seal(0, new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
+    expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
     expect(await unsealed()).toBe('5');
     expect(await records()).toEqual([]);
     expect(alarms()).toEqual(['seal_record_deleted']);
@@ -307,18 +342,6 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
 
     expect(await seal()).toBe('sealed');
     expect(await unsealed()).toBe('0');
-    expect(alarms()).toEqual([]);
-  });
-
-  it('its end recorded meanwhile by the start that began it: this start waits for it and seals nothing', async () => {
-    await legacyRows();
-    await recorded(SEALING_STARTED);
-    const waiting = seal(60_000);
-    // The other start finishing: its record of the end written now.
-    await recorded(ALL_SEALED);
-
-    expect(await waiting).toBe('sealed');
-    expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual([]);
   });
 

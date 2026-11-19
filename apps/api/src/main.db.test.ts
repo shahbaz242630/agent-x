@@ -119,18 +119,17 @@ async function start(env: Record<string, string>) {
 
 /** Stops a started API as the platform would, with SIGTERM, and waits for it to exit. */
 async function stop(run: { readonly host: FakeProcess; readonly capture: LogCapture }): Promise<void> {
-  // Its sealing of the security rows, in the background, ended first (S206 V6): one cut off by the stop would leave
-  // its chain half written for the next test's start.
-  await vi.waitFor(
-    () => {
-      expect(
-        run.capture
-          .lines()
-          .some(({ event }) => event === 'security.legacy_seal_done' || event === 'security.legacy_seal_failed'),
-      ).toBe(true);
-    },
-    { timeout: 20_000 },
-  );
+  // Its sealing of the security rows, in the background on the web side, done first (S206 V6): each test's state
+  // then stands as it set it. A `jobs` process seals nothing.
+  const role = run.capture.lines().find(({ event }) => event === 'api.starting')?.role;
+  if (role !== 'jobs') {
+    await vi.waitFor(
+      () => {
+        expect(run.capture.lines().some(({ event }) => event === 'security.legacy_seal_done')).toBe(true);
+      },
+      { timeout: 20_000 },
+    );
+  }
   run.host.emit('SIGTERM', 'SIGTERM');
   await vi.waitFor(() => {
     expect(run.host.exits).toEqual([0]);
