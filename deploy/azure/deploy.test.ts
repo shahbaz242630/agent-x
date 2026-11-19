@@ -2454,9 +2454,8 @@ describe('deploy apps', () => {
     ];
     const done = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ before: held }) });
     expect(done.error).toMatchObject({
-      message: expect.stringMatching(
-        /^The vault doesn't hold zitadel-machine-config yet,.* run secrets --keys /,
-      ) as unknown,
+      message:
+        'The vault has no zitadel-machine-config, so no Zitadel copy could start and the API refuses its machine IDs: run secrets --keys first, then apps again.',
     });
     expect(done.az.deployment).toBeUndefined();
   });
