@@ -216,6 +216,13 @@ function splitTheApi(from: Snapshot): Snapshot {
   );
   containerOf(jobs).name = 'jobs';
   delete inside(jobs, 'properties', 'configuration').ingress;
+  // The jobs hand out no machine IDs (SA3e), so neither read Zitadel's machine-ID config (AG10).
+  containerOf(jobs).env = settingsOf(jobs).filter(({ name }) => !String(name).startsWith('AGENTX_MACHINE_IDS_'));
+  const configuration = inside(jobs, 'properties', 'configuration');
+  configuration.secrets = list(configuration.secrets).filter((item) => at(item, 'name') !== 'zitadel-machine-config');
+  for (const volume of list(at(jobs, 'properties', 'template', 'volumes')) as Mutable[]) {
+    volume.secrets = list(volume.secrets).filter((item) => at(item, 'secretRef') !== 'zitadel-machine-config');
+  }
   const kept = [...resources, jobs].filter(
     (resource) =>
       at(resource, 'properties', 'description') !== 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
@@ -562,6 +569,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'dbOperatorPassword',
       'dbZitadelPassword',
       'zitadelMasterKey',
+      'zitadelMachineConfig',
       'zitadelAdminPassword',
       'loginClientPrivateKey',
       'loginClientPublicKey',
@@ -883,6 +891,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `zitadel-our-actors ${givenOnly('ourActors')}`,
       `zitadel-our-service-users ${givenOnly('ourServiceUsers')}`,
       'zitadel-masterkey once',
+      // AG10: Zitadel's machine-ID config, whose header the API checks, created once as the master key is.
+      'zitadel-machine-config once',
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
@@ -926,6 +936,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'jobs reads zitadel-our-service-users',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
+        'zitadel-init reads zitadel-machine-config',
+        'zitadel-setup reads zitadel-machine-config',
+        'zitadel reads zitadel-machine-config',
+        'api reads zitadel-machine-config',
         'api reads acs-access-key',
         'jobs reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
@@ -956,23 +970,33 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(16);
+    expect(variables).toHaveLength(17);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
-    const everyRun = ['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY', 'AGENTX_AZURE_APP_KEYS'];
+    const everyRun = [
+      'AGENTX_AZURE_DB_APP_PASSWORD',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
+      'AGENTX_AZURE_APP_KEYS',
+    ];
     const kept = Object.fromEntries(variables.filter((name) => !everyRun.includes(name)).map((name) => [name, '']));
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
       // Sixteen written when given (our login lists among them, SA2b), each key, and the operator's keys' public
       // halves (PL-57, E11).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(16 + APP_KEYS.length + 2);
+      // And Zitadel's machine-ID config, created once like the master key (AG10).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(17 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MASTERKEY: '' })).toThrow(
         /minimum allowable length is 32/,
+      );
+      // So must Zitadel's machine-ID config (AG10).
+      expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MACHINE_CONFIG: '' })).toThrow(
+        /minimum allowable length is 1/,
       );
     });
   });
@@ -7368,6 +7392,42 @@ describe('SEC-OPS-09 each rule can fail', () => {
         workload,
         rules: ['zitadel-machine-ids'],
       });
+      // AG10: started without the config file that names the header the API checks, or with another file.
+      const args = (resource: Mutable): string[] => list(containerOf(resource).args).map(String);
+      for (const change of [
+        (given: string[]) => given.filter((arg, index) => arg !== '--config' && given[index - 1] !== '--config'),
+        (given: string[]) =>
+          given.map((arg) => arg.replace('/mnt/secrets/zitadel-machine-config', '/mnt/secrets/other')),
+        (given: string[]) => given.map((arg) => (arg === '--config' ? '--configs' : arg)),
+      ]) {
+        const rules = brokenRules(
+          changed(pick, (resource) => {
+            containerOf(resource).args = change(args(resource));
+          }),
+        );
+        expect({ workload, rules }).toEqual({ workload, rules: ['zitadel-machine-ids'] });
+      }
+    }
+    // AG10: the API not checking the header from the same mounted config: read from elsewhere, set in its
+    // environment, or not at all (it would refuse to start, the host being set).
+    for (const env of [
+      (kept: Mutable[]) => kept,
+      (kept: Mutable[]) => [...kept, { name: 'AGENTX_MACHINE_IDS_CONFIG_FILE', value: '/mnt/secrets/other' }],
+      (kept: Mutable[]) => [...kept, { name: 'AGENTX_MACHINE_IDS_CONFIG', value: '{}' }],
+      (kept: Mutable[]) => [
+        ...kept,
+        { name: 'AGENTX_MACHINE_IDS_CONFIG_FILE', value: '/mnt/secrets/zitadel-machine-config' },
+        { name: 'AGENTX_MACHINE_IDS_CONFIG', value: '{}' },
+      ],
+    ]) {
+      const rules = brokenRules(
+        changed(APP('api'), (app) => {
+          containerOf(app).env = env(
+            settingsOf(app).filter((entry) => !String(entry.name).startsWith('AGENTX_MACHINE_IDS_CONFIG')),
+          );
+        }),
+      );
+      expect(rules).toContain('zitadel-machine-ids');
     }
     // The API not handing them out on its internal host: every Zitadel process would ask in vain, and panic.
     for (const value of [undefined, 'app.example.invalid']) {
@@ -7633,8 +7693,13 @@ describe('what each job is told', () => {
     }
     const mounted = (workload: string): unknown =>
       at(first(at(staging.predictedResources.find(JOB(workload))?.properties, 'template', 'volumes')), 'secrets');
-    expect(mounted('zitadel-setup')).toEqual([{ secretRef: 'zitadel-masterkey', path: 'zitadel-masterkey' }]);
-    expect(mounted('zitadel-init')).toBeUndefined();
+    // And each its machine-ID config, the header it asks the API with (AG10), as a file too.
+    const machineConfig = { secretRef: 'zitadel-machine-config', path: 'zitadel-machine-config' };
+    expect(mounted('zitadel-setup')).toEqual([
+      { secretRef: 'zitadel-masterkey', path: 'zitadel-masterkey' },
+      machineConfig,
+    ]);
+    expect(mounted('zitadel-init')).toEqual([machineConfig]);
   });
 
   it('creates the first instance with a starting password and the rules of ADR-003 and ADR-005', () => {
@@ -7674,12 +7739,21 @@ describe('what each job is told', () => {
     expect(ran('migrate')).toEqual(['node', 'apps/migrate/src/main.ts']);
     // The compose stack's healthcheck proves this path on the same digest, and
     // splits `start-from-setup` into the two steps a deployment runs separately.
-    expect(ran('zitadel-init')).toEqual(['/app/zitadel', 'init', 'zitadel']);
+    // Each with the machine-ID config (AG10), which the compose stack's Zitadel, asking no webhook, goes without.
+    expect(ran('zitadel-init')).toEqual([
+      '/app/zitadel',
+      'init',
+      'zitadel',
+      '--config',
+      '/mnt/secrets/zitadel-machine-config',
+    ]);
     expect(ran('zitadel-setup')).toEqual([
       '/app/zitadel',
       'setup',
       '--masterkeyFile',
       '/mnt/secrets/zitadel-masterkey',
+      '--config',
+      '/mnt/secrets/zitadel-machine-config',
     ]);
   });
 });

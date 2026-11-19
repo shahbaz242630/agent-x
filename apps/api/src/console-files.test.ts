@@ -106,12 +106,14 @@ describe('the console’s files (6A1)', () => {
     // The shape that runs on Azure: the console layer in front, the route behind it, on the internal host.
     const app = await routeServer({
       consoleFiles: await readConsoleFiles(await build('machine-ids')),
-      machineIds: { host: '127.0.0.1', next: () => Promise.resolve(7) },
+      machineIds: { host: '127.0.0.1', key: '0f'.repeat(32), next: () => Promise.resolve(7) },
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const [address] = app.addresses().filter((each) => typeof each !== 'string');
     const base = `http://127.0.0.1:${String(address?.port)}`;
-    const answer = await createOutboundFetch([base])(base + MACHINE_ID_PATH);
+    const answer = await createOutboundFetch([base])(base + MACHINE_ID_PATH, {
+      headers: { 'X-Agentx-Machine-Key': '0f'.repeat(32) },
+    });
     const body = await answer.text();
     expect(answer.status).toBe(200);
     expect(answer.headers.get('content-type')).toMatch(/^application\/json/);

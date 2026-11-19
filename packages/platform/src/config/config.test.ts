@@ -138,15 +138,81 @@ describe("config: the API's internal host, where Zitadel's machine IDs are hande
   it('is off unless set, and takes a lower-case host name', () => {
     expect(loadConfig(MINIMAL).http.machineIdsHost).toBeUndefined();
     const host = 'ax-staging-api.internal.example.uaenorth.azurecontainerapps.io';
-    expect(loadConfig({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: host }).http.machineIdsHost).toBe(host);
+    expect(
+      loadConfig({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: host, AGENTX_MACHINE_IDS_CONFIG: machineConfig() }).http
+        .machineIdsHost,
+    ).toBe(host);
   });
 
   it.each(['https://api.internal.example', 'api.internal.example:443', 'API.internal.example', ''])(
     'refuses %j, which is no host name alone',
     (value) => {
-      expect(problemsWith({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: value })).toHaveLength(1);
+      expect(
+        problemsWith({ ...MINIMAL, AGENTX_MACHINE_IDS_HOST: value, AGENTX_MACHINE_IDS_CONFIG: machineConfig() }),
+      ).toHaveLength(1);
     },
   );
+});
+
+/** Zitadel's config file for its machine-ID webhook (AG10), as the vault holds it: the one header it asks with. */
+const machineConfig = (value: string = '0f'.repeat(32), name = 'X-Agentx-Machine-Key'): string =>
+  JSON.stringify({ Machine: { Identification: { Webhook: { Headers: { [name]: value } } } } });
+
+describe("config: the header Zitadel's processes ask for their machine IDs with (AG10)", () => {
+  const HOST = 'ax-staging-api.internal.example.uaenorth.azurecontainerapps.io';
+  const ON: Env = { ...MINIMAL, AGENTX_MACHINE_IDS_HOST: HOST, AGENTX_MACHINE_IDS_CONFIG: machineConfig() };
+
+  it("takes the header's value out of Zitadel's own config, set directly or as the vault mounts it", () => {
+    expect(loadConfig(MINIMAL).http.machineIdsKey).toBeUndefined();
+    expect(loadConfig(ON).http.machineIdsKey).toBe('0f'.repeat(32));
+    const folder = mkdtempSync(join(tmpdir(), 'agentx-config-'));
+    writeFileSync(join(folder, 'zitadel-machine-config'), machineConfig('a1'.repeat(32)));
+    const mounted = loadConfig({
+      ...ON,
+      AGENTX_MACHINE_IDS_CONFIG: undefined,
+      AGENTX_MACHINE_IDS_CONFIG_FILE: join(folder, 'zitadel-machine-config'),
+    });
+    expect(mounted.http.machineIdsKey).toBe('a1'.repeat(32));
+  });
+
+  it('needs both the host and the header, or neither: a host alone would hand IDs to any caller there', () => {
+    const half = [
+      'AGENTX_MACHINE_IDS_HOST and AGENTX_MACHINE_IDS_CONFIG: set both, or neither (machine IDs go only to a caller with the header the config names)',
+    ];
+    expect(problemsWith({ ...ON, AGENTX_MACHINE_IDS_CONFIG: undefined })).toEqual(half);
+    expect(problemsWith({ ...ON, AGENTX_MACHINE_IDS_HOST: undefined })).toEqual(half);
+  });
+
+  it.each([
+    ['not JSON', 'Machine: {}'],
+    ['a short value', machineConfig('0f'.repeat(16))],
+    ['an upper-case value', machineConfig('0F'.repeat(32))],
+    ['another header', machineConfig('0f'.repeat(32), 'X-Other')],
+    [
+      'a second header',
+      JSON.stringify({
+        Machine: {
+          Identification: { Webhook: { Headers: { 'X-Agentx-Machine-Key': '0f'.repeat(32), 'X-Other': 'a' } } },
+        },
+      }),
+    ],
+    [
+      'a second setting',
+      JSON.stringify({
+        Machine: {
+          Identification: {
+            Webhook: { Headers: { 'X-Agentx-Machine-Key': '0f'.repeat(32) }, Url: 'http://elsewhere' },
+          },
+        },
+      }),
+    ],
+    ['a second section', JSON.stringify({ ...JSON.parse(machineConfig()), Log: {} })],
+  ])('refuses %s, naming the setting and never its value', (_case, value) => {
+    const problems = problemsWith({ ...ON, AGENTX_MACHINE_IDS_CONFIG: value });
+    expect(problems).toEqual([
+      "AGENTX_MACHINE_IDS_CONFIG: must be Zitadel's config naming one webhook header, X-Agentx-Machine-Key, of 64 lower-case hex characters, and nothing else",
+    ]);
+  });
 });
 
 describe('config: a correct config loads', () => {

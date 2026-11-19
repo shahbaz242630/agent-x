@@ -37,6 +37,7 @@ import {
   allOk,
   type Checked,
   loginIdList,
+  machineIdsConfig,
   logLevelProblems,
   releaseProblems,
   setting,
@@ -75,6 +76,8 @@ export interface Config {
     readonly trustedProxies: readonly string[];
     /** SA3e: the API's internal host name, the only one Zitadel's machine IDs are handed out on; off when unset. */
     readonly machineIdsHost?: string | undefined;
+    /** AG10: the header value Zitadel's processes ask with, from their own config file; set exactly when the host is. */
+    readonly machineIdsKey?: string | undefined;
     /** ADR-011 §4: the most requests one client address may make per minute. */
     readonly rateLimitPerMinute: number;
     /** ADR-011 §4 (B2-5c): the most requests one signed-in person may make per minute, from any address. */
@@ -403,6 +406,19 @@ function ourLoginIds(
     : { ok: false, problem: `${name}: ${parsed.error.issues.map((issue) => issue.message).join('; ')}` };
 }
 
+/** AG10: the header value in Zitadel's machine-ID config, set directly or from the vault as `_FILE`; neither is none. */
+function machineIdsKeyOf(env: Env): Checked<string | undefined> {
+  const read = optionalSecretSetting(env, 'AGENTX_MACHINE_IDS_CONFIG');
+  if (!read.ok || read.value === undefined) return read;
+  const parsed = machineIdsConfig.safeParse(read.value);
+  return parsed.success
+    ? { ok: true, value: parsed.data }
+    : {
+        ok: false,
+        problem: `AGENTX_MACHINE_IDS_CONFIG: ${parsed.error.issues.map((issue) => issue.message).join('; ')}`,
+      };
+}
+
 /** Port 0 takes any free port, which suits a test; a deployed app must be where its ingress sends traffic. */
 function portProblems(environment: Environment, value: number): string[] {
   return value === 0 && !LOCAL_ONLY.includes(environment)
@@ -476,6 +492,7 @@ function readSettings(env: Env, location: LocationChecks) {
     origin: setting(env, 'AGENTX_PUBLIC_ORIGIN'),
     trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
     machineIdsHost: setting(env, 'AGENTX_MACHINE_IDS_HOST'),
+    machineIdsKey: machineIdsKeyOf(env),
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     rateLimitPerUser: setting(env, 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'),
     rateLimitPerAgent: setting(env, 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'),
@@ -705,6 +722,14 @@ function serviceRuleProblems(checks: Settings): string[] {
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
+    // AG10: the host alone would hand machine IDs to any caller that reaches it.
+    ...(checks.machineIdsHost.ok &&
+    checks.machineIdsKey.ok &&
+    (checks.machineIdsHost.value === undefined) !== (checks.machineIdsKey.value === undefined)
+      ? [
+          'AGENTX_MACHINE_IDS_HOST and AGENTX_MACHINE_IDS_CONFIG: set both, or neither (machine IDs go only to a caller with the header the config names)',
+        ]
+      : []),
     ...(checks.idpOurActors.ok &&
     checks.idpOurServiceUsers.ok &&
     (checks.idpOurActors.value === undefined) !== (checks.idpOurServiceUsers.value === undefined)
@@ -770,6 +795,7 @@ export function loadConfig(env: Env = process.env, built: PartnerDeclaration | u
       publicOrigin: checks.origin.value ?? LOCAL_PUBLIC_ORIGIN,
       trustedProxies: Object.freeze(checks.trustedProxies.value ?? []),
       machineIdsHost: checks.machineIdsHost.value,
+      machineIdsKey: checks.machineIdsKey.value,
       rateLimitPerMinute: checks.rateLimit.value,
       rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
       rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,

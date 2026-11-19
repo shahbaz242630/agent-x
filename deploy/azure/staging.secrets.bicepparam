@@ -19,6 +19,7 @@ param dbBackupPassword = readEnvironmentVariable('AGENTX_AZURE_DB_BACKUP_PASSWOR
 param dbOperatorPassword = readEnvironmentVariable('AGENTX_AZURE_DB_OPERATOR_PASSWORD')
 param dbZitadelPassword = readEnvironmentVariable('AGENTX_AZURE_DB_ZITADEL_PASSWORD')
 param zitadelMasterKey = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_MASTERKEY')
+param zitadelMachineConfig = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_MACHINE_CONFIG')
 param zitadelAdminPassword = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD')
 param loginClientPrivateKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY')
 param loginClientPublicKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY')
