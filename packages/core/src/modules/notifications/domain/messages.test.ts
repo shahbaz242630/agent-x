@@ -9,6 +9,7 @@ import {
   maskedEmail,
   messageFor,
   type PaidRemittance,
+  referenceShown,
   type ResetLink,
   type WaitingRequest,
 } from './messages.ts';
@@ -475,6 +476,30 @@ describe('a notice’s email (B5-1b)', () => {
       expect(told.text).toContain(
         ['Amount: AED 12,345,678.05', 'Payment reference: AGX INV-2026-0042 (as your bank shows it)', ''].join('\n'),
       );
+      expect(referenceShown({ ...paid, orderReference: phishing })).toBe('payment_reference');
+      expect(referenceShown(paid)).toBe('order_reference');
+    });
+
+    it('withholds a bank reference that isn’t invoice-shaped either: the rail carries : / . ? as typed (AG11)', () => {
+      const link = 'https://evil.com/pay';
+      const neither = { ...paid, orderReference: link, bankReference: link };
+      const withheld = messageFor(remittanceNotice, 'a@supplier.example.test', undefined, undefined, neither);
+
+      expect(withheld.text).not.toContain('evil');
+      expect(withheld.text).not.toContain('Invoice number');
+      expect(withheld.text).toContain(
+        ['Amount: AED 12,345,678.05', 'Payment reference: as shown on your bank statement', ''].join('\n'),
+      );
+      expect(referenceShown(neither)).toBe('withheld');
+
+      // An invoice-shaped order reference keeps its line; the bank's, not shaped, is withheld alone.
+      const bankOnly = { ...paid, bankReference: 'see evil.com' };
+      const invoice = messageFor(remittanceNotice, 'a@supplier.example.test', undefined, undefined, bankOnly);
+      expect(invoice.text).not.toContain('evil');
+      expect(invoice.text).toContain(
+        ['Invoice number: INV-2026-0042', 'Bank reference: as shown on your bank statement', ''].join('\n'),
+      );
+      expect(referenceShown(bankOnly)).toBe('order_reference');
     });
 
     it('carries nothing of ours to someone outside the organisation: no ID, no link, and it can change nothing', () => {

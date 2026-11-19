@@ -24,8 +24,8 @@ const DOT_NOT_BEFORE_DIGIT = /(?<![A-Za-z0-9])\.|\.(?!\d)/;
 /** Four dot-separated groups of 1 to 3 digits standing alone: an internet address (10.0.0.1). */
 const INTERNET_ADDRESS = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/;
 
-/** Which reference a supplier's remittance email showed, as its audit event keeps it (never the text itself). */
-export type RemittanceReference = 'order_reference' | 'payment_reference';
+/** Which reference named the payment in a supplier's remittance email, or `withheld`: as its audit event keeps it, never the text. */
+export type RemittanceReference = 'order_reference' | 'payment_reference' | 'withheld';
 
 /** Whether the order reference is invoice-shaped, and so may be shown to its supplier as the invoice number. */
 export function invoiceShaped(orderReference: string): boolean {

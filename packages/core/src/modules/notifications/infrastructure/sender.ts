@@ -160,7 +160,7 @@ export interface Remittances {
   remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
   /**
    * Records in the audit log that the payment's supplier was emailed, and which
-   * reference it showed (AG11: the order reference or ours, never the text).
+   * reference it showed (AG11: the order reference, the bank's, or neither; never the text).
    * Throws if it can't be recorded.
    */
   emailed(orgId: string, transactionId: string, reference: RemittanceReference): Promise<void>;

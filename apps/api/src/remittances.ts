@@ -14,8 +14,8 @@
 // or skip with its reason): a skip in the transaction that decides it
 // (`payment.remittance_skipped`, its reason), one sent once the email went
 // (`payment.remittance_emailed`, with which reference it showed: the order
-// reference or our own, never the text itself; AG11), one given up once the
-// outbox gave it up (`payment.remittance_failed`, the failure kept: gate H2). About the payment's transaction by a
+// reference, the bank's or neither, never the text itself; AG11), one given
+// up once the outbox gave it up (`payment.remittance_failed`, the failure kept: gate H2). About the payment's transaction by a
 // subject of its own (never the transaction's signed state), by the API; never
 // the address.
 import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
