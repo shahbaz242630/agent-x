@@ -128,6 +128,7 @@ export {
   STATEMENT_SECONDS,
   TenantContextError,
   sendTogether,
+  tenantOfTransaction,
   withTenant,
 } from './tenant.ts';
 export {

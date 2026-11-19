@@ -211,6 +211,16 @@ export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: strin
   }
 }
 
+/**
+ * The organisation the transaction is withTenant's for, in lower case, or
+ * undefined in any other: for a read that must know which chain it checks
+ * (the audit trail's eventsSinceChecked) without being told.
+ */
+export async function tenantOfTransaction<Schema>(tx: Transaction<Schema>): Promise<string | undefined> {
+  const tenant = tenantOf.get(tx) ?? (await settingOf(tx));
+  return UUID.test(tenant) ? tenant.toLowerCase() : undefined;
+}
+
 /** The transaction's organisation setting as the database holds it, or '' for none. */
 async function settingOf<Schema>(tx: Transaction<Schema>): Promise<string> {
   const { rows } = await sql<{ org_id: string | null }>`

@@ -22,6 +22,7 @@ import {
   createConnectionTokenCheck,
   MOST_LIVE_CONNECTIONS,
   type Scope,
+  scopesText,
 } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import {
@@ -2883,5 +2884,73 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
     );
     expect(write).toMatchObject({ outcome: 'refused' });
     expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
+  });
+
+  // SEC-OAUTH-15 (S206, R-15): the client's `state` goes back to it with its code, so both seals bind it (v2).
+  it('SEC-OAUTH-15 a pending flow’s state rewritten: never shown, never decided, the alarm', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const flow = await opened();
+    await owner().query('update oauth.flows set state = $2 where id = $1', [flow.flowId, 'the owner’s own']);
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
+    expect(await consent(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({
+      outcome: 'refused',
+      code: 'NOT_FOUND',
+    });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', check: 'oauth_flow', reason: 'open_seal', objectId: flow.flowId }),
+    );
+    expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
+  });
+
+  it('SEC-OAUTH-15 a pending flow’s state taken out: never shown, the alarm', async () => {
+    const admin = await member(await organization(), 'admin');
+    const flow = await opened();
+    await owner().query('update oauth.flows set state = null where id = $1', [flow.flowId]);
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'oauth_flow', objectId: flow.flowId }),
+    );
+  });
+
+  it('SEC-OAUTH-15 a real flow, once allowed, its state rewritten, is refused invalid_grant, with the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    await owner().query('update oauth.flows set state = $2 where id = $1', [flowId, 'the owner’s own']);
+    expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    alarmed(keyId);
+  });
+
+  it('SEC-OAUTH-15 a flow decided by the release before (sealed v1) is refused invalid_grant, with a warning, never the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    const flow = await flowById(app, flowId);
+    if (flow?.kind !== 'code' || flow.decidedAt === null || flow.codeEndsAt === null) throw new Error('decided');
+    // The v1 decision message, as the release before made it: all but the state.
+    const { mac, keyVersion } = keys.mac('agent-key-pepper', [
+      'oauth-flow-decision-v1',
+      flow.id,
+      'code',
+      flow.clientId,
+      flow.redirectUri,
+      `S256:${flow.codeChallenge}`,
+      '',
+      '',
+      scopesText(flow.scopesAsked),
+      flow.resource,
+      flow.endsAt.toISOString(),
+      String(flow.orgId).toLowerCase(),
+      keyId,
+      String(flow.codeHash),
+      flow.decidedAt.toISOString(),
+      flow.codeEndsAt.toISOString(),
+    ]);
+    await owner().query('update oauth.flows set decision_mac = $2, decision_key_version = $3 where id = $1', [
+      flowId,
+      mac.toString('hex'),
+      keyVersion,
+    ]);
+    expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('oauth.flow_seal_superseded')).toEqual([expect.objectContaining({ level: 'warn', flowId, keyId })]);
   });
 });
