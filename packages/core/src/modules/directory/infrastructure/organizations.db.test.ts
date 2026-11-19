@@ -65,6 +65,17 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     expect(await listed(id)).toEqual([]);
   });
 
+  it('AG10: never lists the nil ID, which the code reads as no organisation at all (0097)', async () => {
+    // Person-owned idempotency keys and the key checks' unknown-organisation reads stand on no organisation having it.
+    const nil = '00000000-0000-0000-0000-000000000000';
+
+    await expect(withTenant(app, nil, (tx) => registerOrganization(tx, nil))).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'orgs_not_the_nil_id',
+    });
+    expect(await listed(nil)).toEqual([]);
+  });
+
   it('gives every organisation listed, in lower case and in order, to work outside any tenant (B1d-2)', async () => {
     const [first, second] = [newId(), newId()];
     await withTenant(app, second, (tx) => registerOrganization(tx, second.toUpperCase()));
