@@ -671,6 +671,37 @@ describe(`a member's removal ends the payee registrations they left open (AG7, 6
     expect(checked).toMatchObject({ outcome: 'checked', registration: { status: 'FAILED' }, form: null });
     expect(await supplierNow(org, first)).toMatchObject({ pendingVersionId: null });
   });
+
+  it('refuses the removal INTEGRITY_FAILED for an open registration of theirs edited past the app, ending nothing', async () => {
+    const { org, alice } = await team();
+    const bea = await member(org, 'admin');
+    clock.advanceBy(15 * DAY_MS);
+    const beaIn = await signedIn(bea);
+    const added = await registry.add(
+      beaIn,
+      keyed(beaIn, ADD_OPERATION),
+      { details: DETAILS, remittanceEmail: 'on' },
+      CORRELATION,
+    );
+    if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
+    const started = await payees.start(
+      beaIn,
+      keyed(beaIn, PAYEE_START_OPERATION),
+      added.supplier.id,
+      'cancel',
+      CORRELATION,
+    );
+    if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
+    await database
+      .as('admin')
+      .query(`update suppliers.beneficiary_registrations set route = 'pass_through' where org_id = $1 and id = $2`, [
+        org,
+        started.registration.id,
+      ]);
+
+    expect(await removed(alice, bea)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
+    expect((await endedOnRemoval(org)).length).toBe(0);
+  });
 });
 
 describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
