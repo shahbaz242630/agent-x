@@ -81,7 +81,7 @@ describe('SEC-OAUTH-14 what a token’s MAC is taken over', () => {
     parentId: PARENT_ID.toUpperCase(),
   };
 
-  it('binds its kind, key, ID, expiry and scopes under a label of its own (version 1, before 0104)', () => {
+  it('binds its kind, key, ID, expiry and scopes under a label of its own (version 1, before 0102)', () => {
     const message = connectionTokenMessage(binding, RANDOM_PART, 1);
     expect(message).toEqual([
       'connection-token',

@@ -620,7 +620,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'agents.connection_tokens': {
       reason:
-        "An MCP connection's access and refresh tokens (0093, 6E3a): each a MAC of its secret over its kind, key, expiry and scopes. The app adds them and fills in a refresh token's use once; a second use revokes the connection. Since 0104 the MAC also covers the refresh token it replaced, so a use cleared is still found by its child, and a row deleted by its genuine token sent later (R-15). One deleted early refuses a working token",
+        "An MCP connection's access and refresh tokens (0093, 6E3a): each a MAC of its secret over its kind, key, expiry and scopes. The app adds them and fills in a refresh token's use once; a second use revokes the connection. Since 0102 the MAC also covers the refresh token it replaced, so a use cleared is still found by its child, and a row deleted by its genuine token sent later (R-15). One deleted early refuses a working token",
       columns: ['used_at'],
       // Past every token's life: an hour, 30 idle days, a connection's 90.
       sweptAfter: { column: 'created_at', days: 120 },

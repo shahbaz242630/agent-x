@@ -18,7 +18,7 @@
 //   reuse (decision 4: strict, no grace): the connection is revoked, the
 //   organisation's admins see a `connection_token_reused` event, and the
 //   answer is `invalid_grant`, as for every other refusal. Its use is judged
-//   from its family too (0104, R-15, S206), rows the database's owner can't
+//   from its family too (0102, R-15, S206), rows the database's owner can't
 //   rewrite unseen: a refresh token another names as its parent was used, its
 //   `used_at` cleared or not; one whose parent has another refresh child was
 //   split in two. A refresh token the app issued (its secret is the pepper's

@@ -9,7 +9,7 @@
 // - A refresh token is used once: usedNow fills in its use in one statement,
 //   only where none was, so two uses at once can't both rotate it; the second
 //   is a reuse, and its connection is revoked (the API's oauth-grants.ts).
-// - Its family as well (0104, R-15, S206): a refresh token another names as
+// - Its family as well (0102, R-15, S206): a refresh token another names as
 //   its parent was used, whatever its `used_at` says, and a parent with two
 //   refresh children was split in two (tokenLockedWithFamily). Each row's MAC
 //   covers its parent, and each token's secret is the pepper's own MAC of
@@ -82,7 +82,7 @@ export async function issueTokens(
   const kept = scopesText(scopes);
   const made = (['access', 'refresh'] as const).map((kind) => {
     const id = ids.next();
-    // The secret is the pepper's MAC of what the token is (0104): 256 bits no one without the pepper can make.
+    // The secret is the pepper's MAC of what the token is (0102): 256 bits no one without the pepper can make.
     const secret = keys.mac('agent-key-pepper', connectionTokenSecretMessage({ kind, keyId, tokenId: id })).mac;
     if (secret.length !== KEY_SECRET_BYTES) throw new Error("a token's secret is the pepper's 32-byte MAC");
     const expiresAt = tokenExpiresAt(kind, now, keyExpiresAt);
@@ -132,7 +132,7 @@ export interface TokenRow {
   readonly expiresAt: Date;
   readonly usedAt: Date | null;
   readonly parentId: string | null;
-  /** 1 or 2 as kept (0104). */
+  /** 1 or 2 as kept (0102). */
   readonly macVersion: number;
 }
 
@@ -197,7 +197,7 @@ export interface TokenFamily {
  * The refresh token's row locked for its use (lock level 3c, after its connection's 3b), in the caller's
  * transaction, and its family counted, on one trip: two
  * statements, the count's taken once the lock is held, so it sees a use that committed while this one waited. On
- * 0104's `connection_tokens_by_parent` alone. The parent counted is the locked row's, which the door proved sealed.
+ * 0102's `connection_tokens_by_parent` alone. The parent counted is the locked row's, which the door proved sealed.
  */
 export async function tokenLockedWithFamily(tx: AgentsTransaction, orgId: string, id: string): Promise<TokenFamily> {
   const org = orgId.toLowerCase();
@@ -319,9 +319,9 @@ export function tokenProven(keys: KeyProvider, row: TokenRow | undefined, presen
 }
 
 /**
- * Whether a token sent is one the app issued (0104): its secret the pepper's MAC of its kind, key and ID, under any
+ * Whether a token sent is one the app issued (0102): its secret the pepper's MAC of its kind, key and ID, under any
  * version of the pepper held. Asked only of a token its row doesn't prove, to tell a row deleted or changed (the
- * integrity alarm) from a token never issued. A token made before 0104, its secret random, never is.
+ * integrity alarm) from a token never issued. A token made before 0102, its secret random, never is.
  */
 export function tokenGenuine(keys: KeyProvider, presented: PresentedToken): boolean {
   const pepper = keys.describe().find(({ purpose }) => purpose === 'agent-key-pepper');

@@ -10,7 +10,7 @@
 //
 // Each holds its key's ID (public, ADR-011 §1: where to look), its own ID and
 // 256 bits of secret, kept as HMAC-SHA-256 with the agent-key pepper over
-// a label of its own, so no key's MAC is ever a token's. Since 0104 (R-15,
+// a label of its own, so no key's MAC is ever a token's. Since 0102 (R-15,
 // S206) the secret is itself the pepper's MAC of the token's kind, key and ID
 // (connectionTokenSecretMessage): a token can be shown to be one the app
 // issued with its row gone; and a refresh token's row seals the refresh token
@@ -106,7 +106,7 @@ export interface TokenBinding {
 }
 
 /**
- * How a token's MAC is taken (0104's `mac_version`): 1, the tokens made before 0104, parent not covered; 2, every token
+ * How a token's MAC is taken (0102's `mac_version`): 1, the tokens made before 0102, parent not covered; 2, every token
  * made since, its parent covered. A row moved to 1 no longer matches: its MAC was taken over version 2's message.
  */
 export type TokenMacVersion = 1 | 2;
@@ -135,7 +135,7 @@ export const connectionTokenMessage = (
 ];
 
 /**
- * What a token's secret is (0104): the agent-key pepper's MAC of this label, its kind, its key and its ID. So a token
+ * What a token's secret is (0102): the agent-key pepper's MAC of this label, its kind, its key and its ID. So a token
  * shows by itself that the app issued it, its row present or not; and only the app, holding the pepper, makes one.
  */
 export const connectionTokenSecretMessage = ({
