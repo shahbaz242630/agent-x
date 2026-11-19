@@ -487,11 +487,6 @@ export const PLAIN_WORDS = {
     broke: 'That app got no tokens; the person must connect it again.',
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
   },
-  'oauth.flow_seal_superseded': {
-    happened: "An MCP app's sign-in was turned away: it carried the older seal of the release before this one.",
-    broke: 'That app got no tokens; the person must connect it again.',
-    next: 'Expected for a few minutes after a release. At any other time, treat it as possible tampering with the database.',
-  },
   'oauth.registrations_capped': {
     happened: 'MCP apps registered more times today than Agent X allows in all, so this one was refused.',
     broke: 'No new app can register until the day rolls on; registered apps still connect.',

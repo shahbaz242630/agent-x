@@ -393,8 +393,8 @@ export function createOauthGrants({
   /**
    * Why the flow held for its tokens is not one this server decided for the organisation and key the transaction was
    * opened for, if it isn't (S205): a seal not its own, or none at all, raises the integrity alarm for that connection
-   * (the hold follows once the transaction ends); a pepper version no longer held is ours to fix, an error; a flow
-   * sealed v1 (S206), a warning.
+   * (the hold follows once the transaction ends), a v1 seal (S206) among them; a pepper version no longer held is ours
+   * to fix, an error.
    */
   const unsealed = (
     flow: AnyFlowRead,
@@ -406,8 +406,6 @@ export function createOauthGrants({
     if (judged === 'sound') return undefined;
     const log = logger.child({ correlationId: caller.correlationId, orgId });
     if (judged === 'tampered') states.mismatch(CONNECTIONS.subject, { orgId, id: keyId });
-    // Sealed v1 by the release before this one (S206), which didn't bind its `state`: refused, but no alarm.
-    else if (judged === 'superseded') log.warn('oauth.flow_seal_superseded', { flowId: flow.id, keyId });
     else log.error('oauth.seal_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
     return `decision_${judged}`;
   };

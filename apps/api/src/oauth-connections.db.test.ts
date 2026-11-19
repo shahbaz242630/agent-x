@@ -3291,7 +3291,7 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
     alarmed(keyId);
   });
 
-  it('SEC-OAUTH-15 a flow decided by the release before (sealed v1) is refused invalid_grant, with a warning, never the alarm', async () => {
+  it('SEC-OAUTH-15 a flow sealed v1, which doesn’t bind the state, is refused invalid_grant, with the alarm', async () => {
     const { flowId, code, keyId } = await decided();
     const flow = await flowById(app, flowId);
     if (flow?.kind !== 'code' || flow.decidedAt === null || flow.codeEndsAt === null) throw new Error('decided');
@@ -3320,7 +3320,6 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
       keyVersion,
     ]);
     expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
-    expect(lines('audit.integrity_failed')).toEqual([]);
-    expect(lines('oauth.flow_seal_superseded')).toEqual([expect.objectContaining({ level: 'warn', flowId, keyId })]);
+    alarmed(keyId);
   });
 });
