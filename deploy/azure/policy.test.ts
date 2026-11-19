@@ -6348,6 +6348,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'azure-policy',
       'apps',
     ]);
+    // AZ32: a second port open to the internet beside an internal main one is a public door all the same; another
+    // internal one is not (Azure's guardrail reads only the main port's external).
+    const extraPort = (external: unknown) => (app: Mutable) =>
+      (ingressOf(app).additionalPortMappings = [{ external, targetPort: 9090 }]);
+    for (const external of [true, 'true', undefined]) {
+      expect({ external, rules: brokenRules(changed(APP('api'), extraPort(external))) }).toEqual({
+        external,
+        rules: ['apps'],
+      });
+    }
+    expect(brokenRules(changed(APP('login'), extraPort(false)))).toEqual([]);
+    expect(
+      brokenRules(
+        changed(
+          APP('zitadel'),
+          (app) => (ingressOf(app).additionalPortMappings = [{ external: false }, { external: true }]),
+        ),
+      ),
+    ).toEqual(['apps']);
     // An ingress left out entirely is one Azure decides, not us.
     expect(
       brokenRules(

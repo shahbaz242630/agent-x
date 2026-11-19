@@ -44,6 +44,7 @@ import {
   main,
   type Makers,
   type Migrations,
+  type ZitadelSetup,
   DEAD_MAN_RULE,
   parseArguments,
   issuedMissing,
@@ -1241,6 +1242,45 @@ interface Scenario {
   readonly migrations?: RecordingMigrations | null;
   /** CI's approved infrastructure deploy (AZ5): a person at the terminal unless given. */
   readonly unattended?: Unattended;
+  /** Zitadel's version (AZ29): the app already running the pinned image unless given. */
+  readonly zitadel?: RecordingZitadel;
+}
+
+/** Zitadel's images, as the pinned parameters and the running app give them (AZ29). */
+const ZITADEL_OLD = `ghcr.io/zitadel/zitadel:v4.19.5@sha256:${'a'.repeat(64)}`;
+const ZITADEL_NEW = `ghcr.io/zitadel/zitadel:v4.20.3@sha256:${'b'.repeat(64)}`;
+
+/** A stand-in for Zitadel's setup ahead of the apps (AZ29): what the app runs, and when the setup ran, by Azure's calls so far. */
+class RecordingZitadel implements ZitadelSetup {
+  readonly asked: string[] = [];
+  /** How many Azure calls had been made when the setup ran: the deployment must come after. */
+  ranAfterCalls: number | undefined;
+  readonly az: RecordingAz;
+  readonly runs: string | undefined;
+  readonly fails: boolean;
+
+  constructor(az: RecordingAz, runs: string | undefined = ZITADEL_NEW, fails = false) {
+    this.az = az;
+    this.runs = runs;
+    this.fails = fails;
+  }
+
+  pinned(): Promise<string> {
+    return Promise.resolve(ZITADEL_NEW);
+  }
+
+  running(subscription: string): Promise<string | undefined> {
+    this.asked.push(`running ${subscription}`);
+    return Promise.resolve(this.runs);
+  }
+
+  runFirst(subscription: string, image: string, from: string): Promise<void> {
+    this.asked.push(`run first ${subscription} ${image} from ${from}`);
+    this.ranAfterCalls = this.az.calls.length;
+    return this.fails
+      ? Promise.reject(new Error('job-agentx-stg-zitadel-setup-x7k2p ended Failed: apps was not sent.'))
+      : Promise.resolve();
+  }
 }
 
 /** A stand-in for the migrations' reading and running (AZ6), answering as told and recording what it was asked. */
@@ -1297,6 +1337,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     ...(scenario.generation === undefined ? {} : { generation: scenario.generation }),
     ...(scenario.migrations === null ? {} : { migrations: scenario.migrations ?? new RecordingMigrations() }),
     ...(scenario.unattended === undefined ? {} : { unattended: scenario.unattended }),
+    zitadel: scenario.zitadel ?? new RecordingZitadel(az),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -2566,6 +2607,59 @@ describe('deploy apps', () => {
       const done = await apps(az);
       expect(done.status).toBe(1);
       expect(done.terminal.said.at(-1)).toContain('(Azure named no revision of the new image)');
+    });
+  });
+
+  describe("never rolls Zitadel's apps ahead of its setup (AZ29, S190)", () => {
+    it('on a new Zitadel image, asks, runs its setup at that image, and only then sends the deployment', async () => {
+      const az = new RecordingAz();
+      const zitadel = new RecordingZitadel(az, ZITADEL_OLD);
+      const done = await run(['apps'], { answers: [...answers, 'y'], images: recordingImages(), az, zitadel });
+      expect(done.status).toBe(0);
+      expect(zitadel.asked).toEqual([
+        `running ${SUBSCRIPTION}`,
+        `run first ${SUBSCRIPTION} ${ZITADEL_NEW} from ${ZITADEL_OLD}`,
+      ]);
+      const sent = az.calls.findIndex((call) => call.values !== undefined);
+      expect(zitadel.ranAfterCalls).toBeDefined();
+      expect(sent).toBeGreaterThanOrEqual(zitadel.ranAfterCalls ?? Number.POSITIVE_INFINITY);
+      expect(done.terminal.questions.at(-1)).toBe("Run Zitadel's setup at the new version now? [y/N] ");
+      expect(done.terminal.said.join('\n')).toContain(
+        `Zitadel moves from ${ZITADEL_OLD} to ${ZITADEL_NEW}: its setup job runs the new version first, and the apps roll only once it has succeeded.`,
+      );
+    });
+
+    it('sends nothing when the setup fails, and nothing runs on a no', async () => {
+      const az = new RecordingAz();
+      const failing = await run(['apps'], {
+        answers: [...answers, 'y'],
+        images: recordingImages(),
+        az,
+        zitadel: new RecordingZitadel(az, ZITADEL_OLD, true),
+      });
+      expect(failing.error).toEqual(new Error('job-agentx-stg-zitadel-setup-x7k2p ended Failed: apps was not sent.'));
+      expect(az.deployment).toBeUndefined();
+      const declinedAz = new RecordingAz();
+      const declined = new RecordingZitadel(declinedAz, ZITADEL_OLD);
+      const no = await run(['apps'], {
+        answers: [...answers, 'n'],
+        images: recordingImages(),
+        az: declinedAz,
+        zitadel: declined,
+      });
+      expect(no.error).toBeInstanceOf(Cancelled);
+      expect(declined.asked).toEqual([`running ${SUBSCRIPTION}`]);
+      expect(declinedAz.deployment).toBeUndefined();
+    });
+
+    it('runs no setup when Zitadel already runs the pinned image, nor on a first deploy, whose jobs run after it', async () => {
+      for (const runs of [ZITADEL_NEW, undefined]) {
+        const az = new RecordingAz();
+        const zitadel = new RecordingZitadel(az, runs);
+        const done = await run(['apps'], { answers, images: recordingImages(), az, zitadel });
+        expect(done.status).toBe(0);
+        expect(zitadel.asked).toEqual([`running ${SUBSCRIPTION}`]);
+      }
     });
   });
 
@@ -4281,6 +4375,46 @@ describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
         ).az,
       ),
     ).toEqual(['create']);
+  });
+
+  it('apps (AZ29): a plan says Zitadel’s setup would run and runs nothing; the approved deploy holds the what-if, runs it, then sends', async () => {
+    const planAz = new RecordingAz();
+    const plannedZitadel = new RecordingZitadel(planAz, ZITADEL_OLD);
+    const planned = await run(['apps', '--commit', COMMIT], {
+      unattended: planning,
+      images: recordingImages(),
+      az: planAz,
+      zitadel: plannedZitadel,
+    });
+    expect(planned.error).toBeUndefined();
+    expect(plannedZitadel.asked).toEqual([`running ${SUBSCRIPTION}`]);
+    expect(planned.terminal.said).toContainEqual(expect.stringContaining(`Zitadel moves from ${ZITADEL_OLD}`));
+    const az = new RecordingAz();
+    const zitadel = new RecordingZitadel(az, ZITADEL_OLD);
+    const done = await run(['apps', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      az,
+      zitadel,
+    });
+    expect(done.status).toBe(0);
+    expect(asked(done.terminal)).toEqual([]);
+    const interactive = az.calls.flatMap((call, index) => (call.values === undefined ? [] : [[call.args[2], index]]));
+    // The approved what-if held first, then the setup, then the deployment.
+    expect(interactive.map(([kind]) => kind)).toEqual(['what-if', 'create']);
+    expect(Number(interactive[0]?.[1])).toBeLessThan(zitadel.ranAfterCalls ?? -1);
+    expect(Number(interactive[1]?.[1])).toBeGreaterThanOrEqual(zitadel.ranAfterCalls ?? Number.POSITIVE_INFINITY);
+    const changedAz = new RecordingAz({ status: 1 });
+    const changed = new RecordingZitadel(changedAz, ZITADEL_OLD);
+    const held = await run(['apps', '--commit', COMMIT], {
+      unattended: deploying,
+      images: recordingImages(),
+      az: changedAz,
+      zitadel: changed,
+    });
+    expect(held.status).toBe(1);
+    expect(changed.asked).toEqual([`running ${SUBSCRIPTION}`]);
+    expect(held.terminal.said.at(-1)).toBe("Zitadel's setup did not run, and apps was not sent.");
   });
 
   it('apps: a plan says the migration would run, and runs nothing', async () => {

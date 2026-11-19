@@ -1063,6 +1063,8 @@ export interface Steps {
   readonly migrations?: Migrations;
   /** CI's approved infrastructure deploy (AZ5, infra.ts): no person at a prompt. Left out, every question is asked. */
   readonly unattended?: Unattended;
+  /** Zitadel's version, and its setup run ahead of the apps when the version moves (AZ29, zitadel-upgrade.ts). */
+  readonly zitadel?: ZitadelSetup;
 }
 
 /** What a person types at a prompt, which CI's infrastructure deploy takes from its GitHub environment's secrets. */
@@ -1089,6 +1091,16 @@ export interface Migrations {
   state(subscription: string, host: string, commit: string): Promise<MigrationState>;
   /** The migration job updated to the image and run to success, or an error saying what that left. */
   runFirst(subscription: string, commit: string, digest: string): Promise<void>;
+}
+
+/** Zitadel's version as apps sends it and as its app runs, and its setup run first when they differ (AZ29). */
+export interface ZitadelSetup {
+  /** The image staging.apps.bicepparam pins. */
+  pinned(): Promise<string>;
+  /** The image Zitadel's app runs, or undefined where there is no app yet (a first deploy). */
+  running(subscription: string): Promise<string | undefined>;
+  /** The setup job given `image` and run to success, or an error saying what that left. */
+  runFirst(subscription: string, image: string, from: string): Promise<void>;
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
@@ -1824,7 +1836,7 @@ const MAX_PAGES = 100;
  * may end with an empty one (the vault's secrets, three a page, S19), so every
  * page is read, and only while the links stay on Resource Manager.
  */
-function armList(steps: Steps, first: string, what: string): unknown[] {
+export function armList(steps: Pick<Steps, 'az'>, first: string, what: string): unknown[] {
   const items: unknown[] = [];
   let url = first;
   let page = 0;
@@ -2765,6 +2777,70 @@ async function migratedFirst(
   return true;
 }
 
+/**
+ * AZ29: whether Zitadel moves to another version, which its setup must reach before the apps roll (`zitadel start`
+ * runs no migrations; S190, sign-up and new organisations failed between the two). Nothing on a first deploy, whose
+ * jobs run after it, or when its app already runs the pinned image.
+ */
+async function zitadelMoves(
+  steps: Steps,
+  subscription: string,
+): Promise<{ readonly from: string; readonly to: string } | undefined> {
+  if (steps.zitadel === undefined) throw new Error("No way to read Zitadel's version was given.");
+  const to = await steps.zitadel.pinned();
+  const from = await steps.zitadel.running(subscription);
+  if (from === undefined || from === to) return undefined;
+  steps.terminal.say(
+    `Zitadel moves from ${from} to ${to}: its setup job runs the new version first, and the apps roll only once it has succeeded.`,
+  );
+  return { from, to };
+}
+
+/**
+ * AZ29: Zitadel's setup at the new version, once everything is asked and checked. Confirmed first (Rule Book §1.9:
+ * it changes Zitadel's database); unattended, the plan runs nothing, and the deploy holds the approved what-if
+ * first unless the migration already did (`held`). False, having said so, when it no longer holds.
+ */
+async function setUpFirst(
+  steps: Steps,
+  subscription: string,
+  { from, to }: { readonly from: string; readonly to: string },
+  { values, held }: { readonly values: Readonly<Record<string, string>>; readonly held: boolean },
+): Promise<boolean> {
+  if (steps.unattended?.mode === 'plan') return true;
+  if (steps.unattended?.mode === 'deploy' && !held && !stillApproved(steps, subscription, 'apps', values)) {
+    steps.terminal.say("Zitadel's setup did not run, and apps was not sent.");
+    return false;
+  }
+  if (
+    steps.unattended === undefined &&
+    !yes(await steps.terminal.ask("Run Zitadel's setup at the new version now? [y/N] "))
+  ) {
+    throw new Cancelled();
+  }
+  await steps.zitadel?.runFirst(subscription, to, from);
+  return true;
+}
+
+/**
+ * What runs before the deployment is sent, in this order: the migration (AZ6), then Zitadel's setup at its new
+ * version (AZ29). False, having said why, when either stopped short.
+ */
+async function firstRuns(
+  steps: Steps,
+  subscription: string,
+  first: {
+    readonly runFirst: boolean;
+    readonly upgrade: { readonly from: string; readonly to: string } | undefined;
+    readonly image: { readonly release: string; readonly digest: string };
+    readonly values: Readonly<Record<string, string>>;
+  },
+): Promise<boolean> {
+  const { runFirst, upgrade, image, values } = first;
+  if (runFirst && !(await migratedFirst(steps, subscription, image, values))) return false;
+  return upgrade === undefined || setUpFirst(steps, subscription, upgrade, { values, held: runFirst });
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2816,6 +2892,7 @@ async function deployApps(
     apiStopped: apiStopped === true,
     asked: migrateFirst === true,
   });
+  const upgrade = await zitadelMoves(steps, subscription);
   const loadDigest = loadRun ? await verifiedLoadImage(steps, images, release) : '';
   steps.terminal.say(
     keepRunning
@@ -2846,7 +2923,7 @@ async function deployApps(
     [RECORDS_VARIABLE]: records,
   };
   checkPolicy(steps, values);
-  if (runFirst && !(await migratedFirst(steps, subscription, { release, digest }, values))) return 1;
+  if (!(await firstRuns(steps, subscription, { runFirst, upgrade, image: { release, digest }, values }))) return 1;
   if (!(await sendApps(steps, subscription, values, apiStopped === true))) return 1;
   return afterApps(steps, subscription, { image, keepRunning, loadRun, apiStopped: apiStopped === true });
 }
@@ -2923,6 +3000,26 @@ function realMigrations(az: Az, say: (line: string) => void): Migrations {
   };
 }
 
+/** The real Zitadel version reading and setup run (AZ29), loaded when used as the migrations' are. */
+function realZitadel(az: Az, say: (line: string) => void): ZitadelSetup {
+  let module: typeof import('./zitadel-upgrade.ts') | undefined;
+  const loaded = async () => (module ??= await import('./zitadel-upgrade.ts'));
+  return {
+    pinned: async () => (await loaded()).pinnedZitadelImage(),
+    running: async (subscription) => (await loaded()).runningZitadelImage(az, subscription),
+    runFirst: async (subscription, image, from) => {
+      await (
+        await loaded()
+      ).runSetupFirst(
+        { az, say, now: () => new Date(), sleep: (ms: number) => sleepFor(ms) },
+        subscription,
+        image,
+        from,
+      );
+    },
+  };
+}
+
 /** Whether nothing GitHub publishes now could break a pull, by the refresher's own check (a removed range alone passes). */
 function rangesCurrent(): boolean {
   const done = spawnSync(process.execPath, [path.join(AZURE_DIR, 'github-ranges.ts')], {
@@ -2938,6 +3035,9 @@ export function realSteps(terminal: Terminal, az: Az): Steps {
     terminal,
     az,
     migrations: realMigrations(az, (line) => {
+      terminal.say(line);
+    }),
+    zitadel: realZitadel(az, (line) => {
       terminal.say(line);
     }),
     policy: (values) => policyCheck(values),

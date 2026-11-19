@@ -125,6 +125,32 @@ describe('whatIfShape and shapeHash', () => {
     ]);
   });
 
+  it("AZ29: drops a new Zitadel image on the setup job alone, which apps puts there first, and keeps the apps' own", () => {
+    const zitadel = (tag: string) => `ghcr.io/zitadel/zitadel:${tag}@sha256:${'f'.repeat(64)}`;
+    const SETUP = API.replace('containerApps/ca-agentx-stg-api', 'jobs/job-agentx-stg-zitadel-setup');
+    const ZITADEL_APP = API.replace('ca-agentx-stg-api', 'ca-agentx-stg-zitadel');
+    const moved = {
+      path: 'properties.template.containers.0.image',
+      before: zitadel('v4.19.5'),
+      after: zitadel('v4.20.3'),
+    };
+    // The plan, made before the setup's image moved, and the deploy's what-if after: one hash.
+    expect(shapeHash(whatIfShape(result(modify([moved], SETUP))))).toBe(shapeHash(whatIfShape(result())));
+    // The apps' move is still what the partner approves; and anything else on the setup job, or another image there, counts.
+    expect(whatIfShape(result(modify([moved], ZITADEL_APP)))).toEqual([
+      { resource: ZITADEL_APP, change: 'Modify', leaves: [moved] },
+    ]);
+    for (const other of [
+      { ...moved, after: `ghcr.io/someone/else:v1@sha256:${'e'.repeat(64)}` },
+      { ...moved, before: null },
+      { ...moved, path: 'properties.template.containers.0.args.0', before: 'setup', after: 'start' },
+    ]) {
+      expect(whatIfShape(result(modify([other], SETUP)))).toEqual([
+        { resource: SETUP, change: 'Modify', leaves: [other] },
+      ]);
+    }
+  });
+
   // S191 review: apps carries the records, so a record lost or moved is a real change the partner must see.
   it("keeps a hand deploy's record on the migration job when it changes, lost or moved, like any other tag", () => {
     const JOB = API.replace('containerApps/ca-agentx-stg-api', 'jobs/job-agentx-stg-migrate');
@@ -577,6 +603,9 @@ const SAID: ReadonlyMap<string, readonly string[]> = new Map(
 );
 
 /** An unattended run's pieces over a staging that runs OLD, with deploy.ts stood in for. */
+/** The vault the infrastructure plan reads the grants of (AZ32). */
+const GRANTS_VAULT = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.KeyVault/vaults/kv-agentx-stg-abcdef`;
+
 function infraOver(options: {
   readonly changed?: readonly string[];
   readonly role?: string;
@@ -587,6 +616,8 @@ function infraOver(options: {
   readonly running?: string;
   /** What changed since other commits than OLD (a record's). */
   readonly since?: Readonly<Record<string, readonly string[]>>;
+  /** The role assignments on the vault (AZ32): none unless given. */
+  readonly grants?: readonly { scope: string; principalId: string; roleDefinitionId: string }[];
 }) {
   const said: string[] = [];
   const requests: { request: Request; steps: Steps }[] = [];
@@ -594,7 +625,11 @@ function infraOver(options: {
     interactive: () => 0,
     run: (args) => {
       if (args.join(' ') === 'account show --output json') return ok({ id: SUBSCRIPTION });
+      if (args[0] === 'keyvault') return ok([GRANTS_VAULT]);
+      if (args[0] === 'identity') return ok([]);
       const url = args[args.indexOf('--url') + 1] ?? '';
+      if (url.includes('/roleAssignments'))
+        return ok({ value: (options.grants ?? []).map((properties) => ({ properties })) });
       const workload = url.includes('/jobs/') ? 'migrate' : 'api';
       return ok({
         properties: { template: { containers: [container(workload, options.running ?? OLD, options.role)] } },
@@ -788,15 +823,33 @@ describe('answers, the summary and main', () => {
       })),
     ).toBe(0);
     expect(written[0]).toEqual({ file: 'out', text: 'plan={"steps":[],"whatIf":{}}\nneeded=false\n' });
-    expect(written[1]).toEqual({
-      file: 'sum',
-      text: '```\nThis merge needs no infrastructure deploy: the release goes on by itself.\n```\n',
-    });
+    // The vault's grants are read first (AZ32): this stand-in's vault holds none, so each listed one is said lacking.
+    expect(written[1]?.file).toBe('sum');
+    expect(written[1]?.text).toMatch(
+      /^```\nThe vault lacks \d+ grants .*\nThe vault's grants: none beyond the repository's list \(GRANTS, policy\.ts\)\.\nThis merge needs no infrastructure deploy: the release goes on by itself\.\n```\n$/,
+    );
     const HASH = 'f'.repeat(64);
     const deploying = infraOver({});
     const PLAN = JSON.stringify({ steps: ['secrets'], whatIf: { secrets: HASH } });
     expect(await main(['deploy', 'secrets', NEW], outlets({ PLAN }), () => deploying.infra)).toBe(0);
     expect(deploying.requests[0]?.request).toEqual(requestFor('secrets', NEW));
+  });
+
+  it('AZ32: plans nothing, and ends red, while the vault holds a grant the repository does not list', async () => {
+    const written: { file: string; text: string }[] = [];
+    const outlets = {
+      env: { ...ENV, GITHUB_OUTPUT: 'out' },
+      append: (file: string, text: string) => written.push({ file, text }),
+    };
+    const stray = {
+      scope: `${GRANTS_VAULT}/secrets/db-owner-password`,
+      principalId: '33333333-3333-3333-3333-333333333333',
+      roleDefinitionId: '/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6',
+    };
+    const made = infraOver({ changed: ['deploy/azure/apps.bicep'], grants: [stray] });
+    expect(await main(['plan', NEW, DIGEST], outlets, (say) => ({ ...made.infra, say }))).toBe(1);
+    expect(written).toEqual([]);
+    expect(made.requests).toEqual([]);
   });
 
   it('refuses what it is not asked properly, and says an error as the run’s last word', async () => {
