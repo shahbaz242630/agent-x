@@ -23,6 +23,7 @@ import {
   issueTokens,
   keySecretMessage,
   ENDED_CONNECTIONS_SHOWN_DAYS,
+  createAgentKeyCheck,
   createConnectionTokenCheck,
   MOST_LIVE_CONNECTIONS,
   type Scope,
@@ -61,7 +62,15 @@ import {
 } from '@agentx/core/modules/oauth';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { DAY_MS, HOUR_MS } from '@agentx/core/shared-kernel';
-import { AGENT_BRAKE, createDatabase, type Database, type IdempotentRequest, lockName } from '@agentx/platform/db';
+import {
+  AGENT_BRAKE,
+  asAgentTraffic,
+  createDatabase,
+  type Database,
+  type IdempotentRequest,
+  lockName,
+  withTenant,
+} from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
@@ -75,9 +84,11 @@ import {
   waitUntilBlocked,
   waitUntilQueued,
 } from '@agentx/testing';
+import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { createAgentChanges, HAND_OVER_CONFIRM_OPERATION, HAND_OVER_OPERATION } from './agent-changes.ts';
+import { createCredentialCheck } from './credentials.ts';
 import { createAgentKeyChanges, REVOKE_OPERATION, ROTATE_OPERATION } from './agent-key-changes.ts';
 import type { AgentMember, AgentTables } from './agent-writes.ts';
 import {
@@ -100,7 +111,9 @@ import type { ClientMetadataFetch, MetadataFetched } from './oauth-client-metada
 import { createOauthClients, MOST_FETCHES_A_MINUTE, type OauthClients, REFUSED_FOR_MS } from './oauth-clients.ts';
 import { createOauthDevice } from './oauth-device.ts';
 import { createOauthGrants, type GrantAnswer, type OauthGrants } from './oauth-grants.ts';
-import { capabilitiesOf } from './oauth-wire.ts';
+import { capabilitiesOf, OAUTH_PATHS } from './oauth-wire.ts';
+import { MCP_PATH } from './mcp-protocols.ts';
+import { buildServer } from './server.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
 
 type Tables = AgentTables & OrganizationsTables & OauthTables;
@@ -3322,5 +3335,207 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
     expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
     expect(lines('audit.integrity_failed')).toEqual([]);
     expect(lines('oauth.flow_seal_superseded')).toEqual([expect.objectContaining({ level: 'warn', flowId, keyId })]);
+  });
+});
+
+describe(`SEC-OAUTH-14 V7 (PL-67) an outsider holding only a connection's IDs (Postgres ${server.version})`, () => {
+  /** Where the outsider sends from: its own address, apart from the client's. */
+  const OUTSIDER = '203.0.113.77';
+  const wrongSecret = Buffer.alloc(32, 0xee);
+
+  /** The whole server with the OAuth server on and the real checks; the agent's own limit as given. */
+  async function serverWith(perAgent: number): Promise<FastifyInstance> {
+    const logger = testLogger(capture);
+    const keyCheck = createAgentKeyCheck({ database: app, keys, ids, clock, logger });
+    const built = await buildServer({
+      config: {
+        http: {
+          host: '127.0.0.1',
+          port: 0,
+          publicOrigin: 'https://app.agentx.example',
+          trustedProxies: [],
+          rateLimitPerMinute: 1000,
+          rateLimitPerUserPerMinute: 1000,
+          rateLimitPerAgentPerMinute: perAgent,
+          rateLimitPerOrganisationPerMinute: perAgent,
+          webCopies: 1,
+          mcpOauth: true,
+        },
+        log: { level: 'info' as const, eventCapPerMinute: 10_000 },
+      },
+      logger,
+      ids: new SequentialIds(),
+      healthChecks: [],
+      checkAgentKey: createCredentialCheck({
+        keys: keyCheck,
+        connections: tokenCheck(),
+        resource: capabilities.resource,
+        logger,
+      }),
+      oauth: {
+        authorizing,
+        grants,
+        consents,
+        device: createOauthDevice({ database: app, keys, clock, ids, logger, capabilities, clients: oauthClients }),
+        clock,
+      },
+    });
+    await built.ready();
+    return built;
+  }
+
+  /** The texts an outsider can make from a connection's IDs: its token's ID with a guessed secret, a guessed token, a key not listed. */
+  const guesses = (token: string): string[] => {
+    const [prefix = '', keyHex = '', tokenHex = ''] = token.split('_');
+    const guessed = () => ids.next().replaceAll('-', '');
+    const secret = wrongSecret.toString('base64url');
+    return [
+      [prefix, keyHex, tokenHex, secret],
+      [prefix, keyHex, guessed(), secret],
+      [prefix, guessed(), guessed(), secret],
+    ].map((parts) => parts.join('_'));
+  };
+
+  /** An answer as a caller sees it, its correlation ID aside. */
+  const seen = (response: { statusCode: number; headers: Record<string, unknown>; body: string }) => ({
+    status: response.statusCode,
+    challenge: response.headers['www-authenticate'],
+    body: response.body.replace(/"correlationId":"[^"]+"/, ''),
+  });
+
+  const toolsList = (target: FastifyInstance, token: string, remoteAddress = '127.0.0.1') =>
+    target.inject({
+      method: 'POST',
+      url: MCP_PATH,
+      remoteAddress,
+      headers: { accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` },
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+
+  const refreshed = (target: FastifyInstance, token: string, remoteAddress = '127.0.0.1') =>
+    target.inject({
+      method: 'POST',
+      url: OAUTH_PATHS.exchange,
+      remoteAddress,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: token,
+        client_id: clientId,
+      }).toString(),
+    });
+
+  it('answers every guessed access token alike at the MCP endpoint, and the agent still gets its whole limit after a flood', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const pair = await connected(org, admin, await agent(org, admin));
+    const api = await serverWith(3);
+    try {
+      const flood = await Promise.all(
+        Array.from({ length: 18 }, (_, index) => {
+          const text = guesses(pair.accessToken)[index % 3] ?? '';
+          return toolsList(api, text, OUTSIDER).then(seen);
+        }),
+      );
+      expect(new Set(flood.map((answer) => JSON.stringify(answer))).size).toBe(1);
+      expect(flood[0]).toMatchObject({ status: 401 });
+
+      const own = [];
+      for (let request = 0; request < 4; request += 1) own.push((await toolsList(api, pair.accessToken)).statusCode);
+      // Its whole limit of three, then the limit's own answer: the limit is real, and none of it went to the flood.
+      expect(own).toEqual([200, 200, 200, 429]);
+    } finally {
+      await api.close();
+    }
+    expect(lines('db.organisation_busy')).toEqual([]);
+  });
+
+  it('answers every guessed refresh token alike at the token endpoint, and the client’s own refresh still works after a flood', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const pair = await connected(org, admin, await agent(org, admin));
+    const api = await serverWith(1000);
+    try {
+      const flood = await Promise.all(
+        Array.from({ length: 18 }, (_, index) => {
+          const text = guesses(pair.refreshToken)[index % 3] ?? '';
+          return refreshed(api, text, OUTSIDER).then(seen);
+        }),
+      );
+      expect(new Set(flood.map((answer) => JSON.stringify(answer))).size).toBe(1);
+      expect(flood[0]).toMatchObject({ status: 400 });
+      expect(JSON.parse(flood[0]?.body ?? '{}')).toMatchObject({ error: 'invalid_grant' });
+
+      // Nothing revoked or used up: the connection's own refresh token rotates, and its new access token acts.
+      const own = await refreshed(api, pair.refreshToken);
+      expect(own.statusCode).toBe(200);
+      const { access_token: next } = own.json<{ access_token: string }>();
+      expect(await accepted(next)).toMatchObject({ outcome: 'accepted' });
+    } finally {
+      await api.close();
+    }
+    expect(lines('oauth.refresh_reused')).toEqual([]);
+    expect(lines('oauth.grant_in_trouble')).toEqual([]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('refuses guessed refresh tokens while the organisation holds its whole share: none waits for a place (forced)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const pair = await connected(org, admin, await agent(org, admin));
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 8, organisationShare: 2 },
+      testLogger(capture),
+    );
+    const sharedGrants = createOauthGrants({
+      database: shared,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      capabilities,
+      securityEvents: { note: (event) => noted.push(event) },
+      clients: oauthClients,
+    });
+    const letGo = Promise.withResolvers<undefined>();
+    const opened = [Promise.withResolvers<undefined>(), Promise.withResolvers<undefined>()];
+    const held = opened.map(({ resolve }) =>
+      asAgentTraffic(() =>
+        withTenant(shared, org, async () => {
+          resolve(undefined);
+          await letGo.promise;
+        }),
+      ),
+    );
+    try {
+      await Promise.race([Promise.all(opened.map(({ promise }) => promise)), Promise.all(held)]);
+      // No deadline: a refresh that took a place would wait out the share's bound and be answered busy, not refused.
+      const answers = await Promise.all(
+        guesses(pair.refreshToken).map((refreshToken) =>
+          sharedGrants.refresh({ refreshToken, clientId, scope: undefined, resource: undefined }, CALLER),
+        ),
+      );
+      expect(answers.map((answer) => (answer.outcome === 'refused' ? answer.error : answer.outcome))).toEqual([
+        'invalid_grant',
+        'invalid_grant',
+        'invalid_grant',
+      ]);
+    } finally {
+      letGo.resolve(undefined);
+      await Promise.all(held);
+    }
+    try {
+      expect(
+        issued(
+          await sharedGrants.refresh(
+            { refreshToken: pair.refreshToken, clientId, scope: undefined, resource: undefined },
+            CALLER,
+          ),
+        ).scopes,
+      ).toEqual(['requests:read', 'suppliers:read']);
+    } finally {
+      await shared.destroy();
+    }
+    expect(lines('db.organisation_busy')).toEqual([]);
   });
 });
