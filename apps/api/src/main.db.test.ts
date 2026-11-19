@@ -691,7 +691,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ).toHaveLength(1);
   });
 
-  it('leaves the seal pass to the web side: `jobs` never runs it (S206 V4)', async () => {
+  it('runs the seal pass only where the anchor store is: `jobs`, never `web`, nor with no store set (S206 V4)', async () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
@@ -703,15 +703,32 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
          before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
       [id, orgId],
     );
+    const passLines = (run: Awaited<ReturnType<typeof start>>) =>
+      run.capture
+        .lines()
+        .filter(
+          (line) => String(line.event).startsWith('notification.legacy') || line.event === 'audit.anchor_store_not_set',
+        );
+    const anchorsDir = mkdtempSync(join(tmpdir(), 'v4-anchors-'));
     try {
-      const run = await start(envFor('app', { AGENTX_ROLE: 'jobs' }));
-      await vi.waitFor(() => {
-        expect(run.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
-      });
-      await stop(run);
-      expect(run.capture.lines().filter((line) => String(line.event).startsWith('notification.legacy'))).toEqual([]);
+      // `web` keeps no anchors: no pass, with a store set or not.
+      const web = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_AUDIT_ANCHORS_DIR: anchorsDir }));
+      expect((await web.api?.inject({ url: '/health' }))?.statusCode).toBeDefined();
+      await stop(web);
+      expect(passLines(web)).toEqual([]);
+      // No store set: no pass, and no word of a store missing.
+      const bare = await start(envFor('app'));
+      await stop(bare);
+      expect(passLines(bare)).toEqual([]);
       expect(await admin.query('select id from notifications.outbox where mac is null')).toEqual([{ id }]);
+      // `jobs`, with the store: the pass runs there.
+      const jobs = await start(envFor('app', { AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: anchorsDir }));
+      await vi.waitFor(() => {
+        expect(passLines(jobs).length).toBeGreaterThan(0);
+      });
+      await stop(jobs);
     } finally {
+      await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
       await admin.query('delete from notifications.outbox');
     }
   });

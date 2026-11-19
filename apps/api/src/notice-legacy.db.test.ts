@@ -315,4 +315,17 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
     expect(await passes()).toEqual([0]);
     expect(await sealedOf(planted ?? '')).toBe(false);
   });
+
+  it('says as an error when it can’t anchor past its record, which stands', async () => {
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+    await anchorCheck();
+    const failing: PlatformAnchors = { ...anchors, anchor: () => Promise.reject(new Error('the store is away')) };
+
+    await sealed(AT, failing);
+    expect(await passes()).toEqual([0]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'notification.legacy_seal_unanchored', level: 'error' }),
+    );
+    expect(capture.lines().filter(({ event }) => event === 'notification.legacy_seal_failed')).toEqual([]);
+  });
 });

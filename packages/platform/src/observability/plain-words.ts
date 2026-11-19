@@ -1131,6 +1131,11 @@ export const PLAIN_WORDS = {
     broke: 'Those notices wait unsent; the API itself carries on as usual.',
     next: 'The next start tries again. Any still unsent a day on raises the alarm.',
   },
+  'notification.legacy_seal_unanchored': {
+    happened: 'Old email notices were sealed, but the platform chain could not be anchored right after.',
+    broke: 'That record stays unanchored until the anchor check next succeeds.',
+    next: 'Look at the anchor store now: is it reachable and writable? The pass does not run again.',
+  },
   'notification.legacy_seal_no_anchor': {
     happened:
       'Old email notices were not sealed: the anchor store held no anchor of the platform chain to check it by.',

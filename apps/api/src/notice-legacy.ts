@@ -22,10 +22,11 @@
 // One with a `notice.queued` record was queued sealed: unsealed now, it had
 // its seal taken out, and stays so.
 //
-// Off the start's path, on the web side alone (not `jobs`), one replica at a
-// time (an advisory lock, only tried: the others leave it quietly): a long
-// chain's check never holds a start up past its probe, and nothing here can
-// stop the API. A pass that fails, or couldn't
+// Off the start's path, only where the anchor store is set (`jobs` when the
+// roles are split, `all` otherwise; never `web`), one replica at a time (an
+// advisory lock, only tried: the others leave it quietly): a long chain's
+// check never holds a start up past its probe, and nothing here can stop the
+// API. A pass that fails, or couldn't
 // read an organisation's records, says so (`notification.legacy_seal_failed`,
 // `notification.legacy_seal_incomplete`) and records nothing, so the next
 // start tries again. A complete pass records itself even with none sealed.
@@ -115,6 +116,30 @@ async function mayStillSeal(tx: DatabaseTransaction<LegacyTables>, now: Date): P
   return before === undefined;
 }
 
+/**
+ * Anchors the platform chain where it now stands, past the pass's record. A failure leaves the record unanchored until
+ * the anchor check's next run anchors it, and is said as an error: the record stands (no pass runs again), and the
+ * anchor store wants looking at.
+ */
+async function anchoredPast(
+  platform: ReturnType<typeof createPlatformChain>,
+  database: Database<LegacyTables>,
+  anchors: PlatformAnchors,
+  anchor: AnchorPoint,
+  logger: Logger,
+): Promise<void> {
+  try {
+    const reached = await platform.verifyAlone(database, anchor);
+    if (!reached.ok) {
+      logger.error('notification.legacy_seal_unanchored', { reason: reached.problem.reason });
+      return;
+    }
+    await anchors.anchor(reached);
+  } catch (error) {
+    logger.error('notification.legacy_seal_unanchored', { err: error });
+  }
+}
+
 /** Seals the notices from before seals, once ever, as above. Never throws: what went wrong is logged. */
 export async function sealLegacyNotices(
   {
@@ -161,8 +186,7 @@ export async function sealLegacyNotices(
     logger.info('notification.legacy_sealed', { notices: sealed });
     // Anchored at once past its record, as the anchor check would within minutes: deleting it, even as the chain's
     // newest, is then a chain wound back behind its anchor, which the next pass's check refuses.
-    const reached = await platform.verifyAlone(database, anchor);
-    if (reached.ok) await anchors.anchor(reached);
+    await anchoredPast(platform, database, anchors, anchor, logger);
   } catch (error) {
     logger.warn('notification.legacy_seal_failed', { err: error });
   }

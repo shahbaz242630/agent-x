@@ -127,10 +127,12 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     if (started.server === undefined) return undefined;
   }
   if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
-  // S206 V4: the notices from before seals sealed in the background, once it answers: off the start's own path, so a
+  // S206 V4: the notices from before seals sealed in the background, once it runs: off the start's own path, so a
   // long chain check never holds the start up; until then they wait unclaimed. It never throws.
   // TODO(S206 V4): delete with sealLegacyNotices once NOTICE_SEAL_BACKFILL_UNTIL has passed (Outstanding-Work AT10).
-  if (!stopping() && role !== 'jobs') {
+  // Where the anchor store is, the one kind of process that keeps anchors: `jobs` when the roles are split, `all` else.
+  const { directory, container } = booted.config.anchorStore;
+  if (!stopping() && role !== 'web' && (directory !== null || container !== null)) {
     const log = anchorLogOf(booted.config, {
       keys: booted.keys,
       logger: booted.logger,
