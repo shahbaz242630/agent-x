@@ -457,6 +457,20 @@ var machineIdsHostSetting = {
   value: apiInternalHost
 }
 
+// AG10: the header every Zitadel process asks for its machine ID with, so the API
+// needn't trust the host alone. Zitadel's webhook signs nothing but sends static
+// headers, which a config file of its own can add (`--config`, a global flag of the
+// pinned image, proven on it with the file mounted as here). A file, as its master
+// key is, never a setting: one vault secret holding that config, mounted by every
+// Zitadel container and by the API, which checks the header against the same file.
+var machineConfig = 'zitadel-machine-config'
+var machineConfigArgs = ['--config', '${secretsPath}/${machineConfig}']
+var machineConfigFile = {
+  reads: machineConfig
+  // Named on the command line (`machineConfigArgs`), not by a setting.
+  setting: ''
+}
+
 // What Zitadel writes, and what it must not send anywhere (ADR-013,
 // SEC-DATA-08): JSON lines at info level, which the workspace collects; no
 // daily report to zitadel.com (it carries every instance's domains and counts)
@@ -864,10 +878,10 @@ var jobs = concat([
     workload: 'zitadel-init'
     image: zitadelImage
     command: ['/app/zitadel']
-    args: ['init', 'zitadel']
+    args: concat(['init', 'zitadel'], machineConfigArgs)
     timeoutSeconds: 900
     evidence: false
-    files: []
+    files: [machineConfigFile]
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
     asksMachineId: true
@@ -882,7 +896,7 @@ var jobs = concat([
     // The master key from a file rather than the environment: `zitadel setup
     // --help` on the pinned image offers `--masterkeyFile`, and this key
     // encrypts every signing key and authenticator secret it writes.
-    args: ['setup', '--masterkeyFile', '${secretsPath}/zitadel-masterkey']
+    args: concat(['setup', '--masterkeyFile', '${secretsPath}/zitadel-masterkey'], machineConfigArgs)
     // Setup writes every step of a new instance, which takes longer than a
     // migration on the smallest server.
     timeoutSeconds: 1800
@@ -893,6 +907,7 @@ var jobs = concat([
         // Named on the command line above, not by a setting.
         setting: ''
       }
+      machineConfigFile
     ]
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
@@ -1546,7 +1561,13 @@ var apps = concat([
     cpu: apiSize.cpu
     memory: apiSize.memory
     probes: apiProbes
-    files: apiFiles
+    // And the config whose header it checks Zitadel's asks for machine IDs against (AG10).
+    files: concat(apiFiles, [
+      {
+        reads: machineConfig
+        setting: 'AGENTX_MACHINE_IDS_CONFIG_FILE'
+      }
+    ])
     settings: concat(
       appOurSettings,
       [
@@ -1585,7 +1606,7 @@ var apps = concat([
     command: ['/app/zitadel']
     // The master key from a file, as `setup` takes it: `zitadel start --help`
     // on the pinned image offers `--masterkeyFile` too.
-    args: ['start', '--masterkeyFile', '${secretsPath}/zitadel-masterkey']
+    args: concat(['start', '--masterkeyFile', '${secretsPath}/zitadel-masterkey'], machineConfigArgs)
     targetPort: 8080
     // Zitadel serves gRPC beside HTTP on the one port, as it does on the
     // compose stack.
@@ -1612,6 +1633,7 @@ var apps = concat([
         // Named by Path inside ZITADEL_SYSTEMAPIUSERS below.
         setting: ''
       }
+      machineConfigFile
     ]
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, [
       // The login pages' system user: the file its public half is in, and the

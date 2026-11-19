@@ -145,6 +145,48 @@ export const loginIdList = text.transform((raw, ctx): readonly string[] | undefi
   return z.NEVER;
 });
 
+/**
+ * AG10: the header Zitadel's processes ask for their machine IDs with. Its webhook can send static headers but
+ * signs nothing (`Machine.Identification.Webhook` in the pinned image's defaults: Url, JPath, Headers), so a shared
+ * value is the most it can prove.
+ */
+export const MACHINE_ID_HEADER = 'X-Agentx-Machine-Key';
+
+const MACHINE_ID_VALUE = /^[0-9a-f]{64}$/;
+
+/**
+ * Zitadel's own config file for its machine-ID webhook, as the vault holds it and both sides mount it: the one header
+ * and nothing else, so the file can change no other setting of Zitadel's. JSON, which Zitadel's YAML reader takes.
+ * Gives the header's value; a problem never repeats it.
+ */
+export const machineIdsConfig = text.transform((raw, ctx): string => {
+  const wrong = (): typeof z.NEVER => {
+    ctx.addIssue({
+      code: 'custom',
+      message: `must be Zitadel's config naming one webhook header, ${MACHINE_ID_HEADER}, of 64 lower-case hex characters, and nothing else`,
+    });
+    return z.NEVER;
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return wrong();
+  }
+  const read = z
+    .strictObject({
+      Machine: z.strictObject({
+        Identification: z.strictObject({
+          Webhook: z.strictObject({
+            Headers: z.strictObject({ [MACHINE_ID_HEADER]: z.string().regex(MACHINE_ID_VALUE) }),
+          }),
+        }),
+      }),
+    })
+    .safeParse(parsed);
+  return read.success ? read.data.Machine.Identification.Webhook.Headers[MACHINE_ID_HEADER] : wrong();
+});
+
 /** A folder the platform mounts: an absolute path, so it can't depend on where the process was started. */
 const mountedFolder = text.refine(isAbsolute, { error: 'must be an absolute path, such as /mnt/secrets' });
 
@@ -249,6 +291,10 @@ const SETTINGS = {
   // SA3e: the API's own internal host name, the one host Zitadel's processes ask for their
   // machine IDs on (apps/api/src/machine-ids.ts); unset, nobody gets one there.
   AGENTX_MACHINE_IDS_HOST: { schema: hostName.optional() },
+  // AG10: Zitadel's own config file for its machine-ID webhook (`--config`), from the vault: the one header its
+  // processes ask with, which the API checks too. With the host or not at all; read by machineIdsKeyOf (config.ts).
+  AGENTX_MACHINE_IDS_CONFIG: { schema: text },
+  AGENTX_MACHINE_IDS_CONFIG_FILE: { schema: text },
   AGENTX_RATE_LIMIT_PER_MINUTE: {
     schema: wholeNumber({
       min: 10,
@@ -531,6 +577,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_PUBLIC_ORIGIN',
       'AGENTX_TRUSTED_PROXIES',
       'AGENTX_MACHINE_IDS_HOST',
+      'AGENTX_MACHINE_IDS_CONFIG',
+      'AGENTX_MACHINE_IDS_CONFIG_FILE',
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',

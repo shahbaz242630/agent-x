@@ -698,6 +698,11 @@ export const PLAIN_WORDS = {
     broke: 'That copy restarts and serves no sign-ins until it gets one; running copies are fine.',
     next: 'Check the database is answering; the line carries its error. See the runbook.',
   },
+  'machine_ids.refused': {
+    happened: 'Something in our Azure network asked for a login service machine number without the shared header.',
+    broke: 'Nothing was handed out. A Zitadel copy that asked restarts until its header matches.',
+    next: 'Check Zitadel and the API mount the same zitadel-machine-config secret; else find who asked.',
+  },
   'hold_history.failed': {
     happened: 'The full history check for an organisation on an integrity hold failed.',
     broke: 'The hold cannot be cleared until this check finishes.',

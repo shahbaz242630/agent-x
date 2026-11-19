@@ -513,6 +513,10 @@ const TELEMETRY_SETTINGS = [
   'appInsightsConfiguration',
 ] as const;
 
+/** AG10: the vault secret holding Zitadel's machine-ID config, mounted where every container finds its secrets. */
+const MACHINE_CONFIG = 'zitadel-machine-config';
+const MACHINE_CONFIG_PATH = `/mnt/secrets/${MACHINE_CONFIG}`;
+
 /**
  * Who reads which secret, one grant a line as "<app or job> reads <secret>"
  * (ADR-002 Amendment G2c): the description secrets.bicep gives each role
@@ -576,6 +580,9 @@ const GRANTS: ReadonlySet<string> = new Set([
   'zitadel reads login-client-public-key',
   'zitadel-init reads db-zitadel-password',
   'zitadel-setup reads db-zitadel-password',
+  // AG10: Zitadel's config naming the header every one of its processes asks for a machine ID with, and the API
+  // that checks it.
+  ...['zitadel', 'zitadel-init', 'zitadel-setup', 'api'].map((reader) => `${reader} reads ${MACHINE_CONFIG}`),
   'zitadel-setup reads zitadel-masterkey',
   'zitadel-setup reads zitadel-admin-password',
   'login reads login-client-private-key',
@@ -1082,9 +1089,16 @@ const LONGEST_RUN_SECONDS = 3600;
 /**
  * Secrets created once and never written again: Zitadel can't read what it
  * encrypted with another master key, and what one of the app's keys sealed or
- * signed needs that key as it was (a rotation adds a version instead).
+ * signed needs that key as it was (a rotation adds a version instead). So is
+ * Zitadel's machine-ID config (AG10): the API and each Zitadel copy would take a
+ * new one in their own time, and a copy whose header the API lacks can't start.
  */
-const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS, ...PUBLIC_HALVES.values()]);
+const CREATED_ONCE: ReadonlySet<string> = new Set([
+  'zitadel-masterkey',
+  MACHINE_CONFIG,
+  ...APP_KEYS,
+  ...PUBLIC_HALVES.values(),
+]);
 
 /**
  * The secrets a run copies from an Azure service of this deployment on every
@@ -6470,9 +6484,35 @@ function machineIdProblems(settings: ReadonlyMap<string, unknown>, host: string 
     .filter((name) => /^ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_(?:JPATH|HEADERS)/.test(name))
     .map(
       (name) =>
-        `sets ${name}: the API's answer is hashed as its body, as it is written, and needs no header of ours (Zitadel's default Metadata-Flavor header is harmless) (SA3e)`,
+        `sets ${name}: the API's answer is hashed as its body, as it is written, and our one header comes from the vault-held config file (--config), never the deployment (SA3e, AG10)`,
     );
   return [...switches, ...where, ...reshaped];
+}
+
+/**
+ * AG10: a Zitadel process started without the config file that names the header the API checks (`--config`, the
+ * mounted secret): its asks would be refused, and it would never start.
+ */
+function machineConfigProblems(args: readonly unknown[]): string[] {
+  const named = args.indexOf('--config');
+  return named !== -1 && args[named + 1] === MACHINE_CONFIG_PATH
+    ? []
+    : [
+        `must start with --config ${MACHINE_CONFIG_PATH}, the config naming the header the API hands machine IDs out to (AG10)`,
+      ];
+}
+
+/** AG10: the API checking the header against anything but the mounted config every Zitadel process starts with. */
+function apiMachineConfigProblems(api: PredictedResource): string[] {
+  return containersOf(api).flatMap((container) => {
+    const settings = settingsIn(container);
+    return settings.get('AGENTX_MACHINE_IDS_CONFIG_FILE') === MACHINE_CONFIG_PATH &&
+      !settings.has('AGENTX_MACHINE_IDS_CONFIG')
+      ? []
+      : [
+          `must set AGENTX_MACHINE_IDS_CONFIG_FILE to ${MACHINE_CONFIG_PATH} alone, the config every Zitadel process starts with, whose header it checks (AG10)`,
+        ];
+  });
 }
 
 const zitadelMachineIds: Check = (snapshot, _expected, add) => {
@@ -6489,10 +6529,15 @@ const zitadelMachineIds: Check = (snapshot, _expected, add) => {
         "must set AGENTX_MACHINE_IDS_HOST to its own internal host (<app>.internal.<the environment's domain>), where Zitadel asks for its machine IDs (SA3e)",
     });
   }
+  if (api !== undefined && zitadels.length > 0) {
+    for (const message of apiMachineConfigProblems(api))
+      add({ rule: 'zitadel-machine-ids', resource: api.name, message });
+  }
   for (const workload of zitadels) {
-    for (const message of containersOf(workload).flatMap((container) =>
-      machineIdProblems(settingsIn(container), host),
-    )) {
+    for (const message of containersOf(workload).flatMap((container) => [
+      ...machineIdProblems(settingsIn(container), host),
+      ...machineConfigProblems(list(at(container, 'args'))),
+    ])) {
       add({ rule: 'zitadel-machine-ids', resource: workload.name, message });
     }
   }

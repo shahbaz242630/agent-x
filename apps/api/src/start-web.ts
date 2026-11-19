@@ -172,9 +172,9 @@ export async function startWeb(
     healthChecks,
     // Zitadel's machine IDs, on the API's internal host alone (SA3e).
     machineIds:
-      config.http.machineIdsHost === undefined
+      config.http.machineIdsHost === undefined || config.http.machineIdsKey === undefined
         ? undefined
-        : { host: config.http.machineIdsHost, next: () => nextMachineId(database) },
+        : { host: config.http.machineIdsHost, key: config.http.machineIdsKey, next: () => nextMachineId(database) },
     signIn:
       signIn === undefined
         ? undefined

@@ -7945,7 +7945,7 @@
     "/internal/zitadel-machine-id": {
       "get": {
         "summary": "A Zitadel process's machine ID",
-        "description": "Asked by Zitadel's processes at start, inside the environment only: anywhere else, and wherever it is off, the answer is 404.",
+        "description": "Asked by Zitadel's processes at start, inside the environment only and with the header their config file names: without it, anywhere else, and wherever it is off, the answer is 404.",
         "x-access": [
           "public"
         ],
@@ -8000,7 +8000,7 @@
       },
       "head": {
         "summary": "A Zitadel process's machine ID",
-        "description": "Asked by Zitadel's processes at start, inside the environment only: anywhere else, and wherever it is off, the answer is 404.",
+        "description": "Asked by Zitadel's processes at start, inside the environment only and with the header their config file names: without it, anywhere else, and wherever it is off, the answer is 404.",
         "x-access": [
           "public"
         ],

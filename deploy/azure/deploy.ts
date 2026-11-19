@@ -62,6 +62,7 @@ import {
   verifyImage,
 } from '../image/verify.ts';
 import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
+import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/settings.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
@@ -156,6 +157,18 @@ export const APPS_ENVIRONMENT = 'cae-agentx-staging';
 /** What the certificates deployment reads from the shell (staging.certificates.bicepparam): the apps' two hosts. */
 export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost: APP_VARIABLES.appHost } as const;
 
+/** AG10: the vault secret holding Zitadel's machine-ID config, which the API reads too (apps.bicep `machineConfig`). */
+const MACHINE_CONFIG = 'zitadel-machine-config';
+
+/**
+ * Zitadel's machine-ID config (AG10): its webhook's one header, 32 random bytes as hex, as JSON, which Zitadel's
+ * `--config` reads as YAML and the API's AGENTX_MACHINE_IDS_CONFIG checks (settings.ts machineIdsConfig).
+ */
+export const newMachineConfig = (random: Random): string =>
+  JSON.stringify({
+    Machine: { Identification: { Webhook: { Headers: { [MACHINE_ID_HEADER]: random(32).toString('hex') } } } },
+  });
+
 /**
  * Every secret the vault holds, by its name there, with the variable
  * staging.secrets.bicepparam reads it from and who makes it. A test holds this
@@ -163,7 +176,8 @@ export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost
  * - person: pasted from the password manager
  * - machine: a fresh login, made here
  * - pair: the login container's key pair, both halves made together
- * - once: Zitadel's master key; a fresh one goes every run, and Azure keeps only the first
+ * - once: Zitadel's master key, and its machine-ID config (AG10); a fresh one goes every run, and Azure
+ *   keeps only the first
  * - issued: given by a service we are a client of, pasted by a person, and
  *   written only by name (`--rotate`): it exists only once that service does,
  *   so a first `--all` can't have it (B2-6)
@@ -187,6 +201,8 @@ export const VAULT_SECRETS: Readonly<
   'login-client-private-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY', source: 'pair' },
   'login-client-public-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY', source: 'pair' },
   'zitadel-masterkey': { variable: 'AGENTX_AZURE_ZITADEL_MASTERKEY', source: 'once' },
+  // AG10: Zitadel's config file naming the header its processes ask the API for their machine IDs with.
+  [MACHINE_CONFIG]: { variable: 'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG', source: 'once' },
   'api-oidc-client-secret': { variable: 'AGENTX_AZURE_API_OIDC_CLIENT_SECRET', source: 'issued' },
   // B5-3: the token Zitadel gave the API's read-only service user, for the admins' addresses.
   'zitadel-directory-token': { variable: 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN', source: 'issued' },
@@ -487,7 +503,9 @@ function refuseUnrotatable(name: string): void {
   }
   if (secret.source === 'once') {
     throw new UsageError(
-      `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
+      name === MACHINE_CONFIG
+        ? `${name} is never rotated: the API and each Zitadel copy restart onto a new one in their own time, and a copy whose header the API doesn't hold yet can't start (AG10)`
+        : `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
     );
   }
 }
@@ -571,7 +589,7 @@ function secretValue(
       if (pair === undefined) return '';
       return name === 'login-client-private-key' ? pair.privatePem : pair.publicPem;
     case 'once':
-      return newMasterKey(random);
+      return name === MACHINE_CONFIG ? newMachineConfig(random) : newMasterKey(random);
   }
 }
 
@@ -2082,7 +2100,7 @@ function problemsOf(name: string): (value: string) => string[] {
 /** An --all run on a vault that holds secrets goes on only once the operator types that it rotates everything. */
 async function confirmRotateEverything(steps: Steps, held: number): Promise<void> {
   steps.terminal.say(
-    `The vault already holds ${String(held)} secrets. --all replaces every one but the master key: every login changes, so run the set-up job straight after.`,
+    `The vault already holds ${String(held)} secrets. --all replaces every one but the master key and Zitadel's machine-ID config: every login changes, so run the set-up job straight after.`,
   );
   if ((await steps.terminal.ask('Type "rotate everything" to go on: ')) !== 'rotate everything') {
     throw new Cancelled();

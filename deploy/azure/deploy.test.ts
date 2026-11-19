@@ -290,6 +290,8 @@ describe('parseArguments', () => {
       [['secrets', '--rotate', 'db-typo-password'], /isn't a secret the vault holds/],
       // Zitadel can't read what it encrypted with another master key.
       [['secrets', '--rotate', 'zitadel-masterkey'], /never rotated/],
+      // AG10: the API and a Zitadel copy restarting onto another header in their own time would disagree.
+      [['secrets', '--rotate', 'zitadel-machine-config'], /zitadel-machine-config is never rotated: .*header/],
     ] as const) {
       expect(() => parseArguments(argv)).toThrow(UsageError);
       expect(() => parseArguments(argv)).toThrow(reason);
@@ -350,7 +352,7 @@ describe('the secrets a run writes', () => {
     expect(peopleAskedFor(rotating('zitadel-admin-password'))).toEqual(['zitadel-admin-password']);
   });
 
-  it('writes all nine on a first run: the pasted two as pasted, the logins fresh and distinct, the pair together', () => {
+  it('writes all it makes or is given on a first run: the pasted two as pasted, the logins fresh and distinct, the pair together', () => {
     const adminPaste = aPaste();
     const zitadelPaste = aPaste();
     const values = secretValues(all, pasted(adminPaste, zitadelPaste), quickMakers());
@@ -365,6 +367,11 @@ describe('the secrets a run writes', () => {
     expect(new Set(logins).size).toBe(4);
     for (const login of logins) expect(login).toMatch(/^[0-9a-f]{32}aZ9!$/);
     expect(values[variableOf('zitadel-masterkey')]).toMatch(/^[0-9a-f]{32}$/);
+    // AG10: Zitadel's config naming its one header, 32 random bytes as hex, which the API's config reads back.
+    const machineConfig = values[variableOf('zitadel-machine-config')] ?? '';
+    expect(machineConfig).toMatch(
+      /^\{"Machine":\{"Identification":\{"Webhook":\{"Headers":\{"X-Agentx-Machine-Key":"[0-9a-f]{64}"\}\}\}\}\}$/,
+    );
     expect(values[variableOf('login-client-private-key')]).toBe('PRIVATE-HALF-PEM');
     expect(values[variableOf('login-client-public-key')]).toBe('PUBLIC-HALF-PEM');
   });
@@ -386,7 +393,9 @@ describe('the secrets a run writes', () => {
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
-    expect(written.toSorted()).toEqual([APP_KEYS_VARIABLE, variableOf('zitadel-masterkey')].toSorted());
+    expect(written.toSorted()).toEqual(
+      [APP_KEYS_VARIABLE, variableOf('zitadel-masterkey'), variableOf('zitadel-machine-config')].toSorted(),
+    );
     expect(peopleAskedFor(keysOnly)).toEqual([]);
   });
 
@@ -406,7 +415,12 @@ describe('the secrets a run writes', () => {
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
     expect(written.toSorted()).toEqual(
-      [variableOf('db-app-password'), variableOf('zitadel-masterkey'), APP_KEYS_VARIABLE].toSorted(),
+      [
+        variableOf('db-app-password'),
+        variableOf('zitadel-masterkey'),
+        variableOf('zitadel-machine-config'),
+        APP_KEYS_VARIABLE,
+      ].toSorted(),
     );
     const pair = secretValues(rotating('login-client-private-key', 'login-client-public-key'), {}, quickMakers());
     expect(pair[variableOf('login-client-private-key')]).toBe('PRIVATE-HALF-PEM');
@@ -432,6 +446,7 @@ describe('the secrets a run writes', () => {
       '  login-client-private-key: kept as the vault has it',
       '  login-client-public-key: kept as the vault has it',
       '  zitadel-masterkey: written only if the vault has none yet',
+      '  zitadel-machine-config: written only if the vault has none yet',
       '  api-oidc-client-secret: kept as the vault has it',
       '  zitadel-directory-token: kept as the vault has it',
       '  zitadel-reset-token: kept as the vault has it',
@@ -1915,11 +1930,11 @@ describe("what a secrets run did to the app's keys", () => {
 
 describe('deploy secrets', () => {
   /** What a first --all writes: every secret but the ones Zitadel issues, which only their names write (B2-6, B5-3). */
-  const nine = Object.keys(VAULT_SECRETS).filter(
+  const made = Object.keys(VAULT_SECRETS).filter(
     (name) => VAULT_SECRETS[name]?.source !== 'issued' && VAULT_SECRETS[name]?.source !== 'ids',
   );
-  /** Every secret a deployment leaves: the nine, our login lists as none (SA2b), the email key it copies (B5-3) and the app's keys. */
-  const everything = [...nine, ...OUR_LISTS, ...COPIED_SECRETS, ...CREATED_ONCE];
+  /** Every secret a deployment leaves: those a run makes or is given, our login lists as none (SA2b), the email key it copies (B5-3) and the app's keys. */
+  const everything = [...made, ...OUR_LISTS, ...COPIED_SECRETS, ...CREATED_ONCE];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -1994,7 +2009,7 @@ describe('deploy secrets', () => {
   it('on a vault that already has secrets, --all goes on only when the operator types the words', async () => {
     const declined = await run(['secrets', '--all'], {
       answers: ['y', 'yes'],
-      az: new RecordingAz({ before: nine }),
+      az: new RecordingAz({ before: made }),
     });
     expect(declined.error).toBeInstanceOf(Cancelled);
     expect(declined.terminal.hiddenQuestions).toEqual([]);
@@ -2004,7 +2019,7 @@ describe('deploy secrets', () => {
     const agreed = await run(['secrets', '--all'], {
       answers: ['y', 'rotate everything'],
       hidden: [admin, admin, zitadel, zitadel],
-      az: new RecordingAz({ before: nine, after: everything }),
+      az: new RecordingAz({ before: made, after: everything }),
     });
     expect(agreed.status).toBe(0);
   });
@@ -2012,10 +2027,10 @@ describe('deploy secrets', () => {
   it('reads every page of the vault, so a first page that happens to be empty still counts as secrets held', async () => {
     const declined = await run(['secrets', '--all'], {
       answers: ['y', 'yes'],
-      az: new RecordingAz({ before: nine, pages: { emptyFirst: true } }),
+      az: new RecordingAz({ before: made, pages: { emptyFirst: true } }),
     });
     expect(declined.error).toBeInstanceOf(Cancelled);
-    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 10 secrets\./));
+    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 11 secrets\./));
     expect(declined.az.deployment).toBeUndefined();
   });
 
@@ -2023,7 +2038,7 @@ describe('deploy secrets', () => {
     const elsewhere = 'https://example.invalid/secrets?$skiptoken=3';
     const outside = await run(['secrets', '--all'], {
       answers: ['y'],
-      az: new RecordingAz({ before: nine, pages: { nextLink: elsewhere } }),
+      az: new RecordingAz({ before: made, pages: { nextLink: elsewhere } }),
     });
     expect(outside.error).toMatchObject({
       message: expect.stringMatching(/outside Azure Resource Manager/) as unknown,
@@ -2032,7 +2047,7 @@ describe('deploy secrets', () => {
     expect(outside.az.deployment).toBeUndefined();
     const endless = await run(['secrets', '--all'], {
       answers: ['y'],
-      az: new RecordingAz({ before: nine, pages: { endless: true } }),
+      az: new RecordingAz({ before: made, pages: { endless: true } }),
     });
     expect(endless.error).toMatchObject({ message: expect.stringMatching(/went past 100 pages/) as unknown });
     expect(endless.az.sequence.filter((command) => command === 'rest --method get')).toHaveLength(100);
@@ -2059,7 +2074,12 @@ describe('deploy secrets', () => {
         .filter(([, value]) => value !== '')
         .map(([variable]) => variable)
         .sort(),
-    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET', 'AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    ).toEqual([
+      'AGENTX_AZURE_API_OIDC_CLIENT_SECRET',
+      'AGENTX_AZURE_APP_KEYS',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+    ]);
     expect(done.terminal.said.join('\n')).not.toContain(issued);
     expect(done.terminal.said.join('\n')).not.toMatch(/set-up job/);
   });
@@ -2078,6 +2098,7 @@ describe('deploy secrets', () => {
     expect(written).toEqual([
       'AGENTX_AZURE_APP_KEYS',
       'AGENTX_AZURE_DB_APP_PASSWORD',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
       'AGENTX_AZURE_ZITADEL_MASTERKEY',
     ]);
     expect(done.terminal.said.at(-1)).toMatch(/start the set-up job now/);
@@ -2086,7 +2107,7 @@ describe('deploy secrets', () => {
   it('SA2b: on a keys run where the vault lacks our login lists, writes each as none, so the apps can mount them', async () => {
     const done = await run(['secrets', '--keys'], {
       answers: ['y'],
-      az: new RecordingAz({ before: nine, after: everything }),
+      az: new RecordingAz({ before: made, after: everything }),
     });
     expect(done.status).toBe(0);
     expect(done.terminal.hiddenQuestions).toEqual([]);
@@ -2101,7 +2122,7 @@ describe('deploy secrets', () => {
     const done = await run(['secrets', '--rotate', 'zitadel-our-service-users'], {
       answers: ['y'],
       hidden: ['agentx-admin', actors, actors, serviceUsers, serviceUsers],
-      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+      az: new RecordingAz({ before: [...made, ...OUR_LISTS], after: everything }),
     });
     expect(done.status).toBe(0);
     expect(done.terminal.said).toContainEqual(
@@ -2118,7 +2139,7 @@ describe('deploy secrets', () => {
     const done = await run(['secrets', '--rotate', 'zitadel-our-actors'], {
       answers: ['y'],
       hidden: [actors, actors, NO_LOGIN_IDS, NO_LOGIN_IDS],
-      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+      az: new RecordingAz({ before: [...made, ...OUR_LISTS], after: everything }),
     });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(/go together: .*nothing was deployed\.$/) as unknown,
@@ -2132,7 +2153,7 @@ describe('deploy secrets', () => {
     const done = await run(['secrets', '--keys'], {
       answers: ['y'],
       az: new RecordingAz({
-        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        before: [...made, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
         after: everything,
       }),
     });
@@ -2152,7 +2173,7 @@ describe('deploy secrets', () => {
       answers: ['y'],
       hidden: [actors, actors, serviceUsers, serviceUsers],
       az: new RecordingAz({
-        before: [...nine, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
+        before: [...made, 'zitadel-our-actors', { name: 'zitadel-our-service-users', version: '1', disabled: true }],
         after: everything,
       }),
     });
@@ -2167,7 +2188,7 @@ describe('deploy secrets', () => {
     // Our login lists held already (SA2b): one the vault lacks would be written as none, as the next test shows.
     const done = await run(['secrets', '--keys'], {
       answers: ['y'],
-      az: new RecordingAz({ before: [...nine, ...OUR_LISTS], after: everything }),
+      az: new RecordingAz({ before: [...made, ...OUR_LISTS], after: everything }),
     });
     expect(done.status).toBe(0);
     expect(done.terminal.hiddenQuestions).toEqual([]);
@@ -2176,7 +2197,11 @@ describe('deploy secrets', () => {
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable)
       .sort();
-    expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    expect(written).toEqual([
+      'AGENTX_AZURE_APP_KEYS',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+    ]);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
       `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
@@ -2201,7 +2226,7 @@ describe('deploy secrets', () => {
   it('ends red when a key is missing after the run, since the API would refuse to start', async () => {
     const done = await run(['secrets', '--keys'], {
       answers: ['y'],
-      az: new RecordingAz({ before: nine, after: everything.filter((name) => name !== 'key-audit-anchor-v1') }),
+      az: new RecordingAz({ before: made, after: everything.filter((name) => name !== 'key-audit-anchor-v1') }),
     });
     expect(done.status).toBe(1);
     expect(done.terminal.said.at(-1)).toBe(
@@ -4044,7 +4069,12 @@ describe('the tool and the deployment agree', () => {
         .filter(([, value]) => value !== '')
         .map(([variable]) => variable)
         .sort(),
-    ).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    ).toEqual([
+      'AGENTX_AZURE_APP_KEYS',
+      'AGENTX_AZURE_DB_APP_PASSWORD',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+    ]);
     // The apps' values too, which are no secrets and pass through as given.
     const appValues = {
       [APP_VARIABLES.digest]: DIGEST,

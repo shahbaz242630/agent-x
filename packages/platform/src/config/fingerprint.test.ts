@@ -273,6 +273,15 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(JSON.stringify(fingerprintedSettings(loadConfig(SETTINGS)))).not.toContain(DB_LOGIN);
   });
 
+  it("ignores the header Zitadel asks for its machine IDs with (AG10), as it does the host's other secrets", () => {
+    const config = (value: string) =>
+      JSON.stringify({ Machine: { Identification: { Webhook: { Headers: { 'X-Agentx-Machine-Key': value } } } } });
+    const host = { ...SETTINGS, AGENTX_MACHINE_IDS_HOST: 'api.internal.example' };
+    expect(hashOf({ ...host, AGENTX_MACHINE_IDS_CONFIG: config('0f'.repeat(32)) })).toBe(
+      hashOf({ ...host, AGENTX_MACHINE_IDS_CONFIG: config('a1'.repeat(32)) }),
+    );
+  });
+
   it('names every setting one by one: everything in the config but the release and the secrets', () => {
     const config = loadConfig(WITH_EMAIL);
     const left = leaves(config).filter(
@@ -282,7 +291,8 @@ describe('SEC-OPS-05 the config fingerprint', () => {
         !leaf.startsWith('signIn.clientSecret: ') &&
         !leaf.startsWith('email.accessKey: ') &&
         !leaf.startsWith('email.directoryToken: ') &&
-        !leaf.startsWith('factorResets.token: '),
+        !leaf.startsWith('factorResets.token: ') &&
+        !leaf.startsWith('http.machineIdsKey: '),
     );
     expect(leaves(fingerprintedSettings(config)).toSorted()).toEqual(left.toSorted());
   });
