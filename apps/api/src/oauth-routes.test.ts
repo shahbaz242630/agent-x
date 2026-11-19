@@ -527,6 +527,17 @@ describe('the revocation endpoint (RFC 7009)', () => {
       error: 'invalid_request',
     });
   });
+
+  it('AG8: refuses a revocation that names no client, invalid_client, asking nothing of the token', async () => {
+    const { app, asked } = await oauthServer(true);
+    const response = await app.inject(form('/v1/oauth/revoke', 'token=axa_x'));
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({
+      error: 'invalid_client',
+      error_description: 'Name the client, as it registered: client_id.',
+    });
+    expect(asked).toEqual([]);
+  });
 });
 
 describe('busy: a database limit answered as OAuth’s temporarily_unavailable, never a failure', () => {
@@ -549,7 +560,7 @@ describe('busy: a database limit answered as OAuth’s temporarily_unavailable, 
 
   it('answers a revocation 503 with Retry-After', async () => {
     const { app } = await oauthServer(true, { revoked: BUSY });
-    const response = await app.inject(form('/v1/oauth/revoke', 'token=axa_x'));
+    const response = await app.inject(form('/v1/oauth/revoke', `token=axa_x&client_id=${CLIENT}`));
     expect(response.statusCode).toBe(503);
     expect(response.headers['retry-after']).toBeDefined();
   });

@@ -15,11 +15,13 @@
 //   per-address limit is in front.
 // - 6F1 G4: a flow is held to its source's own cap too (its client address,
 //   an IPv6 /64 as one), beside the server's: a browser sending no cookie is
-//   a fresh browser every time, so the browser's own cap never holds it.
+//   a fresh browser every time, so the browser's own cap never holds it. And
+//   to its network's (AG8: an IPv6 /48, a site holding 65,536 /64 sources).
 import {
   checkRegistration,
   type Client,
   type FlowOpened,
+  type FlowSource,
   isCodeChallenge,
   isFlowCookie,
   isRegisteredRedirect,
@@ -27,6 +29,7 @@ import {
   hashOf,
   type OauthTables,
   MOST_OPEN_FLOWS,
+  MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   openCodeFlow,
@@ -41,7 +44,7 @@ import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
 import type { OauthClients } from './oauth-clients.ts';
 import { backToClient, type Capabilities } from './oauth-wire.ts';
-import { clientKey, clientNetwork } from './rate-limit.ts';
+import { clientKey, clientNetwork, clientSite } from './rate-limit.ts';
 
 /** What an authorization request names (RFC 6749 §4.1.1, RFC 7636 §4.3, RFC 8707 §2). */
 interface AuthorizeAsked {
@@ -103,6 +106,12 @@ function requestRefusal(
   return undefined;
 }
 
+/** Where a flow comes from (6F1 G4, AG8): its client address's source (an IPv6 /64 as one) and network (a /48). */
+export const flowSourceOf = (ip: string | undefined): FlowSource => ({
+  source: clientKey(ip),
+  network: clientSite(ip),
+});
+
 /** How often a cap may warn, at most (lead's re-review): one line a minute, however many are refused. */
 const CAP_WARNING_EVERY_MS = 60_000;
 
@@ -150,7 +159,13 @@ export function createOauthAuthorizing({
   const flowsCapped = capWarning(logger, clock, 'oauth.flows_capped', { most: MOST_OPEN_FLOWS });
   const sourceFlowsCapped = capWarning(logger, clock, 'oauth.source_capped', {
     kind: 'flow',
+    per: 'source',
     most: MOST_OPEN_FLOWS_A_SOURCE,
+  });
+  const networkFlowsCapped = capWarning(logger, clock, 'oauth.source_capped', {
+    kind: 'flow',
+    per: 'network',
+    most: MOST_OPEN_FLOWS_A_NETWORK,
   });
   const networkRegistrationsCapped = capWarning(logger, clock, 'oauth.source_capped', {
     kind: 'registration',
@@ -161,7 +176,7 @@ export function createOauthAuthorizing({
   const notOpened = (opened: FlowOpened): string | undefined => {
     if (opened === 'opened') return undefined;
     if (opened === 'browser_full') return 'This browser has too many connections waiting; finish or wait for one.';
-    (opened === 'full' ? flowsCapped : sourceFlowsCapped)();
+    ({ full: flowsCapped, network_full: networkFlowsCapped, source_full: sourceFlowsCapped })[opened]();
     return 'Too many sign-ins are under way; try again in a few minutes.';
   };
 
@@ -185,7 +200,7 @@ export function createOauthAuthorizing({
     authorize(asked, cookie, ip) {
       // Once the client's address is proven, a busy answer goes back to it; before, to our own page.
       const back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer } = {};
-      return orBusy(back, () => authorized(asked, cookie, clientKey(ip), back));
+      return orBusy(back, () => authorized(asked, cookie, flowSourceOf(ip), back));
     },
 
     async register(asked, correlationId, ip) {
@@ -202,7 +217,7 @@ export function createOauthAuthorizing({
   async function authorized(
     asked: AuthorizeAsked,
     cookie: string | undefined,
-    source: string,
+    from: FlowSource,
     back: { redirectTo?: (error: string, description: string) => AuthorizeAnswer },
   ): Promise<AuthorizeAnswer> {
     const client = asked.client_id === undefined ? undefined : await clients.find(asked.client_id);
@@ -251,7 +266,7 @@ export function createOauthAuthorizing({
         browserHash: hashOf(browser),
         createdAt: clock.now(),
       },
-      source,
+      from,
     );
     const why = notOpened(opened);
     return why === undefined ? { outcome: 'opened', flowId, cookie: browser } : refused('temporarily_unavailable', why);

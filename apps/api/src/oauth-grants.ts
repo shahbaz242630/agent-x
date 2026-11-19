@@ -19,7 +19,11 @@
 //   organisation's admins see a `connection_token_reused` event, and the
 //   answer is `invalid_grant`, as for every other refusal.
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
-//   connection, by the client it was made for; the answer is always the same.
+//   connection, by the client it was made for, which must name itself
+//   (client_id, as at the token endpoint; AG8); the answer is always the
+//   same. A token past its time, or a refresh token already rotated, still
+//   revokes its own client's connection (AG8, RFC 7009 §2.1: the grant goes
+//   with it): an app disconnecting must never leave its connection alive.
 // - A device code (6E3c, RFC 8628 §3.4-§3.5), polled by the client it was
 //   given to: `authorization_pending` until the person decides, `slow_down`
 //   for a poll sooner than its interval, `access_denied` once told no,
@@ -135,9 +139,12 @@ export interface OauthGrants {
   exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer>;
   exchangeDevice(asked: DeviceExchange, caller: Caller): Promise<GrantAnswer>;
   refresh(asked: RefreshAsked, caller: Caller): Promise<GrantAnswer>;
-  /** Revokes the connection the token is for, if it is one and the client's own; nothing is answered of which, but busy. */
+  /**
+   * Revokes the connection the token is for, if it is one (in time or not, rotated or not) and the named client's own;
+   * nothing is answered of which, but busy.
+   */
   revoke(
-    asked: { readonly token: string; readonly clientId: string | undefined },
+    asked: { readonly token: string; readonly clientId: string },
     caller: Caller,
   ): Promise<{ readonly outcome: 'taken' } | Busy>;
 }
@@ -538,19 +545,17 @@ export function createOauthGrants({
       return INVALID_GRANT;
     },
 
-    async revoke(
-      asked: { readonly token: string; readonly clientId: string | undefined },
-      caller: Caller,
-    ): Promise<void> {
+    async revoke(asked: { readonly token: string; readonly clientId: string }, caller: Caller): Promise<void> {
       const presented =
         parseConnectionToken(asked.token, 'access') ?? parseConnectionToken(asked.token, 'refresh') ?? undefined;
       if (presented === undefined) return;
       const { orgId, door } = await proven(presented);
       if (orgId === undefined || door.outcome !== 'proven') return;
+      // Only the client the connection was made for (RFC 7009 §2.1); another's is answered the same, nothing done.
       const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
         actor: OAUTH_SERVER,
         reason: 'revoked_by_client',
-        ...(asked.clientId === undefined ? {} : { clientId: asked.clientId }),
+        clientId: asked.clientId,
       });
       logger
         .child({ correlationId: caller.correlationId, orgId })

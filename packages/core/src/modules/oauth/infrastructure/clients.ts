@@ -3,7 +3,7 @@
 // grants nothing: a connection is made only by a person's consent. So it is
 // held only against filling the table: a day's cap for the whole server and
 // one for each network (6F1 G4), counted under one lock (and each address's
-// own limit, in the API), and a
+// own limit, in the API), the network cleared once its day is past (AG8), and a
 // client that never connects is swept a day after it registered; one that
 // did, 90 days after it last connected (0094, 6E3b), when no connection of
 // its can be refreshed any more.
@@ -135,6 +135,31 @@ export async function sweepClients(db: Kysely<OauthTables>, now: Date, most: num
     await limitStatements(tx);
     const unused = tx.selectFrom('oauth.clients').select('client_id').where(clientUnused(now)).limit(most);
     const rows = await tx.deleteFrom('oauth.clients').where('client_id', 'in', unused).returning('client_id').execute();
+    return rows.length;
+  });
+}
+
+/**
+ * Clears the network up to `most` clients registered from, once their day is past at `now` (AG8): it is kept only for
+ * its network's day's count (MOST_REGISTRATIONS_A_NETWORK_A_DAY), and a client that connects lives on for months.
+ * Says how many, in a transaction of its own whose statement is limited to 10 seconds; the clients themselves stay.
+ */
+export async function sweepClientNetworks(db: Kysely<OauthTables>, now: Date, most: number): Promise<number> {
+  if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep clears at least one network at a time');
+  return db.transaction().execute(async (tx) => {
+    await limitStatements(tx);
+    const past = tx
+      .selectFrom('oauth.clients')
+      .select('client_id')
+      .where('network', 'is not', null)
+      .where('created_at', '<=', new Date(now.getTime() - DAY_MS))
+      .limit(most);
+    const rows = await tx
+      .updateTable('oauth.clients')
+      .set({ network: null })
+      .where('client_id', 'in', past)
+      .returning('client_id')
+      .execute();
     return rows.length;
   });
 }
