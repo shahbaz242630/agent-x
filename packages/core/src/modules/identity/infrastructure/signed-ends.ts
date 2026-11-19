@@ -101,8 +101,8 @@ export function createSignedEnds(keys: KeyProvider): SignedEnds {
     const was = reached;
     // From where it got to, if that covers `since` and is no older than it; otherwise afresh from `since`.
     const on = was?.point !== undefined && was.from <= since && was.point.recordedAt >= since ? was : undefined;
-    // Afresh, the ends checked before are kept, and the chain must still run through where it got to (R-15 review).
-    const ends = on?.ends ?? new Map(was?.ends);
+    // Afresh, nothing kept is needed: the walk reads every end since `since`, and must run through where it got to.
+    const ends = on?.ends ?? new Map<string, KeptEnd>();
     let start: StretchStart = { since };
     if (on?.point !== undefined) start = { after: on.point };
     else if (was?.point !== undefined) start = { since, through: was.point };
