@@ -36,10 +36,12 @@ describe('timing statements', () => {
     const times = noStatementTimes();
     await timingStatements(times, async () => {
       await timedLock('decisionRowsMs', () => new Promise((resolve) => setTimeout(resolve, 5)));
-      await expect(timedLock('headLockMs', () => Promise.reject(new Error('refused')))).rejects.toThrow('refused');
+      // A failed one waits too before it fails, so its time is seen apart from the first's, with no race between them.
+      const refusedLater = new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('refused')), 5));
+      await expect(timedLock('headLockMs', () => refusedLater)).rejects.toThrow('refused');
     });
     expect(times.decisionRowsMs).toBeGreaterThan(1);
-    expect(times.headLockMs).toBeLessThan(times.decisionRowsMs);
+    expect(times.headLockMs).toBeGreaterThan(1);
     expect(statementTimesForLog({ ...times, headLockMs: 1.26 }).headLockMs).toBe(1.3);
     await expect(timedLock('headLockMs', () => Promise.resolve('untimed'))).resolves.toBe('untimed');
   });
