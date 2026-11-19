@@ -80,7 +80,7 @@ const PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b01';
 const SUPPLIER_ADDRESS = 'accounts@gulf-office.example.test';
 const PAID: PaidRemittance = {
   payerName: 'Falcon Trading LLC',
-  invoiceNumber: 'INV-2026-0042',
+  orderReference: 'INV-2026-0042',
   bankReference: 'AGX INV-2026-0042',
   amountMinor: 1_250_000n,
   currency: 'AED',
@@ -252,7 +252,7 @@ const remittances = (
     to: SUPPLIER_ADDRESS,
     paid: PAID,
   }),
-  emailed: (transactionId: string) => Error | undefined = () => undefined,
+  emailed: (transactionId: string, reference: string) => Error | undefined = () => undefined,
   givenUp: (transactionId: string, why: string) => Error | undefined = () => undefined,
 ): Remittances => ({
   remittanceOf: (orgId, transactionId) => {
@@ -260,9 +260,9 @@ const remittances = (
     const found = lookup(transactionId);
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
   },
-  emailed: (orgId, transactionId) => {
+  emailed: (orgId, transactionId, reference) => {
     expect(orgId).toBe(ORG);
-    const failed = emailed(transactionId);
+    const failed = emailed(transactionId, reference);
     return failed === undefined ? Promise.resolve() : Promise.reject(failed);
   },
   givenUp: (orgId, transactionId, why) => {
@@ -909,15 +909,15 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses(),
       resetLinks(),
       waitingRequests(),
-      remittances(undefined, (id) => {
-        logged.push(id);
+      remittances(undefined, (id, reference) => {
+        logged.push(`${id} ${reference}`);
         return undefined;
       }),
     );
     await run.run();
 
-    // Kept in the organisation's audit log once the email went (partner S119).
-    expect(logged).toEqual([PAYMENT]);
+    // Kept in the organisation's audit log once the email went (partner S119), with which reference it showed (AG11).
+    expect(logged).toEqual([`${PAYMENT} order_reference`]);
     expect(sent).toHaveLength(1);
     const [message] = sent;
     expect(message?.to).toBe(SUPPLIER_ADDRESS);
@@ -957,10 +957,10 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
         (id) => ({
           outcome: 'send',
           to: SUPPLIER_ADDRESS,
-          paid: { ...PAID, invoiceNumber: id === PAYMENT ? 'INV-REFUSED' : 'INV-SENT' },
+          paid: { ...PAID, orderReference: id === PAYMENT ? 'INV-REFUSED' : 'pay.example.ae' },
         }),
-        (id) => {
-          logged.push(id);
+        (id, reference) => {
+          logged.push(`${id} ${reference}`);
           return new Error('the audit chain is held');
         },
         (id, why) => {
@@ -972,7 +972,9 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await run.run();
 
     expect(sent).toHaveLength(2);
-    expect(logged).toEqual([OTHER_PAYMENT]);
+    // The second's order reference is domain-shaped: our own payment reference shown, and kept as the one used (AG11).
+    expect(logged).toEqual([`${OTHER_PAYMENT} payment_reference`]);
+    expect(sent[1]?.text).not.toContain('pay.example.ae');
     expect(gaveUp).toEqual([[PAYMENT, 'address_refused']]);
     const kept = await app
       .selectFrom('notifications.outbox')
