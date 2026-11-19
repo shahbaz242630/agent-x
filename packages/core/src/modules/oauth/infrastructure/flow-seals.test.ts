@@ -255,6 +255,23 @@ describe('SEC-OAUTH-15 a flow’s state, bound by both seals (v2, S206)', () => 
     ]);
   };
 
+  it('seals the v2 messages, each under its own label, the state last of what the flow was opened with', () => {
+    expect(undecided.openSeal).toEqual(sealedAs(['oauth-flow-open-v2', ...v1Parts(undecided), 'xyz']));
+    const done = allowedCode();
+    expect(done.seal).toEqual(
+      sealedAs([
+        'oauth-flow-decision-v2',
+        ...v1Parts(undecided),
+        'xyz',
+        ORG.toLowerCase(),
+        KEY,
+        CODE_HASH,
+        DECIDED.toISOString(),
+        done.codeEndsAt?.toISOString() ?? '',
+      ]),
+    );
+  });
+
   it('never believes a v1 seal, which doesn’t bind the state: tampered, as opened and as decided', () => {
     expect(openJudged(keys, { ...undecided, openSeal: openedV1(undecided) })).toBe('tampered');
     expect(openJudged(keys, { ...undecided, state: 'abc', openSeal: openedV1(undecided) })).toBe('tampered');
