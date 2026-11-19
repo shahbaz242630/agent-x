@@ -133,6 +133,7 @@ export {
   openInvitation,
 } from './infrastructure/invitations.ts';
 export {
+  bothLeaving,
   createMembershipChanges,
   DEACTIVATE_CONFIRM_OPERATION,
   DEACTIVATE_OPERATION,

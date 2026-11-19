@@ -385,6 +385,36 @@ export async function recordFailed(
   found: FoundRegistration,
   { reason, ...change }: RegistrationChange & { readonly reason: RegistrationFailure },
 ): Promise<void> {
+  await failWith(tx, states, key, found, reason, 'beneficiary_registration.refused', change);
+}
+
+/**
+ * Ends a registration its starter left open when they are removed from the organisation (AG7, 6F1), in the caller's
+ * transaction, which read it with `change` (`found`): STARTED or UNKNOWN > FAILED, as a form not filled in time
+ * (`expired`), its event naming the removal. Its form is a bearer link that only its starter was given, and whoever
+ * fills it is recorded as entering the payee (SEC-PAY-03), so no one's check may keep what it brings once they are
+ * gone. One that may not fail is refused (RangeError) before any SQL runs.
+ */
+export async function recordStarterRemoved(
+  tx: RegistrationsTransaction,
+  states: SignedStates,
+  key: RegistrationKey,
+  found: FoundRegistration,
+  change: RegistrationChange,
+): Promise<void> {
+  await failWith(tx, states, key, found, 'expired', 'beneficiary_registration.starter_removed', change);
+}
+
+/** The reason recorded under `action`, then the move to FAILED; each refused (RangeError) before any SQL runs. */
+async function failWith(
+  tx: RegistrationsTransaction,
+  states: SignedStates,
+  key: RegistrationKey,
+  found: FoundRegistration,
+  reason: RegistrationFailure,
+  action: string,
+  change: RegistrationChange,
+): Promise<void> {
   if (!REGISTRATION_FAILURES.includes(reason)) throw new RangeError('Not a reason a registration fails for');
   mayMove(found.registration, 'failed');
   // The reason first: 0033's `failed_with_its_reason` holds a FAILED row to it.
@@ -394,7 +424,7 @@ export async function recordFailed(
     key,
     found.state,
     { failure: reason },
-    { actor: change.actor, action: 'beneficiary_registration.refused', details: { ...change.details, reason } },
+    { actor: change.actor, action, details: { ...change.details, reason } },
   );
   await move(tx, states, key, 'failed', change);
 }
@@ -481,6 +511,30 @@ export async function openRegistrationOf(
     .orderBy('created_at')
     .executeTakeFirst();
   return row?.id ?? null;
+}
+
+/**
+ * The registrations a member started that are still open (STARTED or UNKNOWN), any supplier's, by any route, with
+ * their suppliers, in order of ID, in one statement: where to look alone, for ending them when the member is removed
+ * (AG7). Each is then read through its signed state, for change, in this order, so two removals never lock them in a
+ * cycle. All of them, with no bound: one left open would be one a check could still keep (a start carries on with its
+ * own open one for a supplier, and the organisation's day's budget holds how fast any more are opened).
+ */
+export async function openRegistrationsStartedBy(
+  tx: RegistrationsTransaction,
+  orgId: string,
+  startedBy: string,
+): Promise<readonly { readonly id: string; readonly supplierId: string }[]> {
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each registration is then read through its signed state
+    .selectFrom(BENEFICIARY_REGISTRATIONS.table)
+    .select(['id', 'supplier_id'])
+    .where('org_id', '=', orgId)
+    .where('started_by', '=', startedBy)
+    .where('status', 'in', ['STARTED', 'UNKNOWN'])
+    .orderBy('id')
+    .execute();
+  return rows.map(({ id, supplier_id: supplierId }) => ({ id, supplierId }));
 }
 
 /**

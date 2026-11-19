@@ -140,6 +140,34 @@ export interface MemberLeaving<Theirs> {
   >;
 }
 
+/**
+ * Two modules' leavings as one (AG7: the MCP connections and the payee registrations): the first's brakes, then the
+ * second's (each its own order, the first's agents' brakes the only ones today); both read, a tampered read in either
+ * refusing the change; then both ended, in the same order.
+ */
+export const bothLeaving = <First extends object, Second extends object>(
+  first: MemberLeaving<First>,
+  second: MemberLeaving<Second>,
+): MemberLeaving<First & Second> => ({
+  async brakes(tx, leaving) {
+    const firstHeld = await first.brakes(tx, leaving);
+    return (await second.brakes(tx, leaving)) || firstHeld;
+  },
+  async read(tx, states, leaving) {
+    const firstRead = await first.read(tx, states, leaving);
+    if (firstRead.outcome === 'tampered') return firstRead;
+    const secondRead = await second.read(tx, states, leaving);
+    if (secondRead.outcome === 'tampered') return secondRead;
+    return {
+      outcome: 'read',
+      end: async (actor) => {
+        await firstRead.end(actor);
+        await secondRead.end(actor);
+      },
+    };
+  },
+});
+
 class ChangeRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
     super(`a membership's change refused: ${code}`, status, code);

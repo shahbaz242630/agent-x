@@ -10,6 +10,7 @@ import {
   createInvitationWrites,
   createHoldClearings,
   createHoldInvestigations,
+  bothLeaving,
   createMembershipChanges,
   createContactChanges,
   createContactConfirmations,
@@ -85,7 +86,7 @@ import { createSupplierDetailsChanges } from './supplier-details.ts';
 import { createSupplierRemittance } from './supplier-remittance.ts';
 import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
 import { createSupplierVerifications } from './supplier-verifications.ts';
-import { createSupplierPayees } from './supplier-payees.ts';
+import { createSupplierPayees, registrationsOfLeaving } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 import type { ApiTables, Booted, SharedParts } from './boot.ts';
 import type { HealthCheck } from './health.ts';
@@ -225,7 +226,8 @@ export async function startWeb(
       challenges,
       logger,
     }),
-    // Removing a member revokes the MCP connections they made (6E3b, decision 7).
+    // Removing a member revokes the MCP connections they made (6E3b, decision 7) and ends the payee registrations they
+    // left open (AG7, 6F1).
     membershipChanges: createMembershipChanges({
       database,
       keys,
@@ -233,7 +235,7 @@ export async function startWeb(
       challenges,
       outbox,
       logger,
-      leaving: connectionsOfLeaving(systemClock),
+      leaving: bothLeaving(connectionsOfLeaving(systemClock), registrationsOfLeaving),
     }),
     listContacts: registeredContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     contactChanges: createContactChanges({
