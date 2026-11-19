@@ -49,7 +49,7 @@ let clock: FixedClock;
 let exports: ActivityLogExports;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'activity-log-exports' });
-const { world, keyed, member } = shared;
+const { world, keyed, member, removed } = shared;
 
 const asked = (format: ActivityExportAsked['format'], actor?: ActivityExportAsked['actor']): ActivityExportAsked => ({
   ...EVER,
@@ -259,6 +259,27 @@ describe('downloading the activity log (L5, decision 26)', () => {
 
     expect(first.requests).toBe(1);
     expect(fileOf(await exports.export(w.admin, key, asked('csv'), CORRELATION))).toEqual(first);
+  });
+
+  it('AG10 answers a retry with its key only while its admin still may download, and five retries an hour', async () => {
+    const w = await world();
+    const key = keyed(w.admin, ACTIVITY_EXPORT_OPERATION);
+    const first = fileOf(await exports.export(w.admin, key, asked('ndjson'), CORRELATION));
+    for (let n = 0; n < 5; n += 1) {
+      expect(fileOf(await exports.export(w.admin, key, asked('ndjson'), CORRELATION))).toEqual(first);
+    }
+    expect(await exports.export(w.admin, key, asked('ndjson'), CORRELATION)).toEqual(
+      refused(409, 'ACTIVITY_EXPORTS_SPENT'),
+    );
+
+    const other = await world();
+    const otherKey = keyed(other.admin, ACTIVITY_EXPORT_OPERATION);
+    fileOf(await exports.export(other.admin, otherKey, asked('csv'), CORRELATION));
+    await removed(other.admin);
+    expect(await exports.export(other.admin, otherKey, asked('csv'), CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 403,
+    });
   });
 
   it('F1 G2 refuses a retry whose record was changed past the app, raising the alarm and the hold', async () => {

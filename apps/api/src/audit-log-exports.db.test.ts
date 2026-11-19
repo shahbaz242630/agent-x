@@ -50,7 +50,7 @@ let clock: FixedClock;
 let exports: AuditLogExports;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'audit-log-exports' });
-const { world, quiet, keyed, member } = shared;
+const { world, quiet, keyed, member, removed } = shared;
 
 const asked = (format: ExportAsked['format'], actions?: readonly string[], actor?: AuditActor): ExportAsked => ({
   ...EVER,
@@ -245,6 +245,28 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     await noted(w, { note: 'later' });
 
     expect(fileOf(await exports.export(w.admin, key, asked('ndjson'), CORRELATION))).toEqual(first);
+  });
+
+  it('AG10 answers a retry with its key only while its admin still may download, and five retries an hour', async () => {
+    const w = await world();
+    const key = keyed(w.admin, EXPORT_OPERATION);
+    const first = fileOf(await exports.export(w.admin, key, asked('ndjson'), CORRELATION));
+    // Each retry builds the file again, spending no budget: held to five an hour of its own, as my-activity's are.
+    for (let n = 0; n < 5; n += 1) {
+      expect(fileOf(await exports.export(w.admin, key, asked('ndjson'), CORRELATION))).toEqual(first);
+    }
+    expect(await exports.export(w.admin, key, asked('ndjson'), CORRELATION)).toEqual(
+      refused(409, 'AUDIT_EXPORTS_SPENT'),
+    );
+
+    const other = await world();
+    const otherKey = keyed(other.admin, EXPORT_OPERATION);
+    fileOf(await exports.export(other.admin, otherKey, asked('csv'), CORRELATION));
+    await removed(other.admin);
+    expect(await exports.export(other.admin, otherKey, asked('csv'), CORRELATION)).toMatchObject({
+      outcome: 'refused',
+      status: 403,
+    });
   });
 
   it('refuses a range past the cap with nothing logged, an admin’s sixth in an hour, and a member not an admin', async () => {
