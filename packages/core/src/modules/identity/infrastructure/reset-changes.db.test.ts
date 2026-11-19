@@ -74,7 +74,7 @@ const START = new Date('2026-09-27T09:00:00Z');
 let clock: FixedClock;
 let changes: ResetChanges;
 let capture: LogCapture;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
@@ -107,7 +107,13 @@ const newUser = async (): Promise<string> => {
 
 /** A session for the person, opened now. */
 async function signedIn(userId: string): Promise<string> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

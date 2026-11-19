@@ -161,7 +161,14 @@ export function mandateWorld({
       { issuer: 'https://auth.example.test', subject: `${name}-${String(people)}` },
       { ids, clock: clock() },
     );
-    const sessions = createSessions({ ids, clock: clock(), timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const sessions = createSessions({
+      ids,
+      clock: clock(),
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      // The stack's own keys in the tamper pass, so the API believes the session's MAC.
+      keys: keyring,
+      logger: testLogger(),
+    });
     const { sessionId, cookie } = await sessions.open(app(), userId, {
       idpSessionId: 'V1_1',
       authTime: clock().now(),
@@ -477,12 +484,17 @@ export function mandateWorld({
 
   /** The member signs in again for the step-up, by `amr`: a passkey unless named. */
   const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
-    createStepUpChallenges({ ids, clock: clock() }).recordEvidence(app(), challengeId, who.sessionId, {
-      authTime: clock().now(),
-      amr,
-      idpSessionId: 'V1_2',
-      idTokenHash: createHash('sha256').update('an ID token').digest(),
-    });
+    createStepUpChallenges({ ids, clock: clock(), keys: keyring, logger: testLogger() }).recordEvidence(
+      app(),
+      challengeId,
+      who.sessionId,
+      {
+        authTime: clock().now(),
+        amr,
+        idpSessionId: 'V1_2',
+        idTokenHash: createHash('sha256').update('an ID token').digest(),
+      },
+    );
 
   /** The member removed from their organisation by the operator, as membership-changes.ts records a removal. */
   const removed = (who: Member) =>

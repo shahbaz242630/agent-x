@@ -3,6 +3,7 @@
 // (SEC-HA-07, the store half), and ended.
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type SignInEvidence, SignInRefused } from '../domain/sign-in.ts';
@@ -20,6 +21,12 @@ const SECOND = 1000;
 const START = new Date('2026-09-24T09:00:00Z');
 
 const ids = new SequentialIds(0x200);
+/** Stand-in keys, one per purpose. The database's owner has none of them. */
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
 const evidence: SignInEvidence = {
   idpSessionId: 'V1_338719472394810051',
   authTime: new Date('2026-09-24T08:59:30Z'),
@@ -39,7 +46,13 @@ async function setUp(): Promise<{ userId: string; clock: FixedClock; sessions: S
   return {
     userId,
     clock,
-    sessions: createSessions({ ids, clock, timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE } }),
+    sessions: createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+      keys,
+      logger: testLogger(),
+    }),
   };
 }
 
@@ -92,6 +105,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       ids,
       clock: new FixedClock(new Date(end - SECOND)),
       timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+      keys,
+      logger: testLogger(),
     });
     expect(await late.use(app, cookie)).toMatchObject({ idleEndsAt: new Date(end) });
   });
@@ -169,6 +184,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
         ids,
         clock: new FixedClock(new Date(START.getTime() + 5 * SECOND)),
         timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+        keys,
+        logger: testLogger(),
       });
       expect(await behind.use(app, cookie)).toMatchObject({ lastSeenAt: clock.now() });
     });
@@ -257,6 +274,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
         ids,
         clock: new FixedClock(START),
         timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+        keys,
+        logger: testLogger(),
       });
       expect(await atStart.use(app, cookie)).toMatchObject({ sessionId });
     });
@@ -316,6 +335,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       created_at: START,
       last_seen_at: START,
       ends_at: new Date(START.getTime() + SECOND),
+      mac: Buffer.alloc(32, 1),
+      mac_key_version: 1,
     };
     const insert = (change: Partial<typeof row>) =>
       app
@@ -334,6 +355,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       { amr: [] },
       { amr: Array.from({ length: 17 }, () => 'otp') },
       { idp_session_id: '' },
+      { mac: Buffer.alloc(31, 9) },
+      { mac_key_version: 0 },
     ]) {
       await expect(insert({ cookie_hash: Buffer.alloc(32, 10), ...change })).rejects.toMatchObject({ code: '23514' });
     }
@@ -378,6 +401,8 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
       ids,
       clock: new FixedClock(new Date(ms)),
       timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+      keys,
+      logger: testLogger(),
     });
   /** Sets a session's last use, as a use at that moment would have. */
   const lastUsed = (sessionId: string, when: number) =>
@@ -429,7 +454,13 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
 
   it('refuses an idle timeout longer than the longest the sweep allows for', () => {
     const make = (idleSeconds: number) =>
-      createSessions({ ids, clock: new FixedClock(START), timeouts: { idleSeconds, absoluteSeconds: 24 * 60 * 60 } });
+      createSessions({
+        ids,
+        clock: new FixedClock(START),
+        timeouts: { idleSeconds, absoluteSeconds: 24 * 60 * 60 },
+        keys,
+        logger: testLogger(),
+      });
     expect(() => make(LONGEST_IDLE_SECONDS)).not.toThrow();
     expect(() => make(LONGEST_IDLE_SECONDS + 1)).toThrow(RangeError);
   });

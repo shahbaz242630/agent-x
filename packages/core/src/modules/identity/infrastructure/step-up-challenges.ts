@@ -18,19 +18,28 @@
 //    still in time, since some changes learn which only from a row they read;
 //    one past its time is the sweep's, never consumed. `consume` takes only a
 //    session held in its own transaction.
-// 5. `consume`: the change's own transaction deletes it and reads its
-//    evidence in one statement, only for the same session, action and change
-//    hash, verified and still in time: used once, and for nothing else
-//    (SEC-HA-03, 04). The evidence goes to the audit trail with the change.
+// 5. `consume`: the change's own transaction reads it and its evidence, then
+//    deletes it, only for the same session, action and change hash, verified
+//    and still in time: used once, and for nothing else (SEC-HA-03, 04). The
+//    hold keeps anything else from moving it in between. The evidence goes to
+//    the audit trail with the change.
 //    A change an admin or a finance approver makes asks for a passkey too
 //    (SEC-HA-12, ADR-012 §7; B3+-1): the fresh sign-in's `amr` must hold
 //    `user`, and one proved with an authenticator app alone is left unused.
 //
-// Each runs one statement on the handle it is given, so the caller decides
-// the transaction; `sweep` deletes challenges past their time a batch at a
-// time, in a transaction of its own with a statement timeout (hourly, from the
-// API). A challenge goes with its session. The times are the Clock's
-// (ADR-006 §3), so tests can move them.
+// Each challenge carries a MAC with `session-mac` (row-macs.ts, S205): over
+// what it is for when it opens, and over that and the evidence once verified.
+// `pending`, `recordEvidence` and `consume` take only a challenge whose MAC
+// holds; one planted or edited by something without the app's key, such as
+// the database's owner moving it to verified with a passkey, is none of them,
+// and raises the integrity alarm.
+//
+// Each runs on the handle it is given, so the caller decides the transaction:
+// `hold` one statement, the rest a read and then a write of only the row as it
+// was read. `sweep` deletes challenges past their time a batch at a time, in a
+// transaction of its own with a statement timeout (hourly, from the API). A
+// challenge goes with its session. The times are the Clock's (ADR-006 §3), so
+// tests can move them.
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
@@ -38,6 +47,15 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { PASSKEY_METHOD } from '../domain/step-up.ts';
+import {
+  type ChallengeFacts,
+  challengeMessage,
+  macHolds,
+  macOf,
+  type RowMacs,
+  rowForged,
+  type VerifiedFacts,
+} from './row-macs.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a person has to sign in again and confirm the change. */
@@ -219,6 +237,43 @@ interface PendingRow {
   readonly ends_at: Date;
 }
 
+/** The columns a challenge's MAC is kept in. */
+const MAC = ['mac', 'mac_key_version'] as const;
+/** The columns its evidence is kept in, once verified. */
+const EVIDENCE = ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'] as const;
+
+interface MacRow {
+  readonly mac: Buffer;
+  readonly mac_key_version: number;
+}
+
+interface EvidenceRow {
+  readonly verified_at: Date | null;
+  readonly auth_time: Date | null;
+  readonly amr: readonly string[] | null;
+  readonly idp_session_id: string | null;
+  readonly id_token_hash: Buffer | null;
+}
+
+const factsOf = (row: PendingRow, verified: VerifiedFacts | undefined): ChallengeFacts => ({
+  id: row.id,
+  sessionId: row.session_id,
+  userId: row.user_id,
+  action: row.action,
+  changeHash: row.change_hash,
+  nonce: row.nonce,
+  createdAt: row.created_at,
+  endsAt: row.ends_at,
+  verified,
+});
+
+/** The evidence a verified row holds, or undefined where any part is missing: the app always writes it whole. */
+function verifiedOf(row: EvidenceRow): VerifiedFacts | undefined {
+  const { verified_at: verifiedAt, auth_time: authTime, amr, idp_session_id: idpSessionId, id_token_hash } = row;
+  if (verifiedAt === null || authTime === null || amr === null || id_token_hash === null) return undefined;
+  return { verifiedAt, authTime, amr, idpSessionId, idTokenHash: id_token_hash };
+}
+
 const pendingOf = (row: PendingRow): PendingChallenge => ({
   challengeId: row.id,
   sessionId: row.session_id,
@@ -233,10 +288,30 @@ const pendingOf = (row: PendingRow): PendingChallenge => ({
 export function createStepUpChallenges({
   ids,
   clock,
-}: {
+  keys,
+  logger,
+}: RowMacs & {
   readonly ids: IdGenerator;
   readonly clock: Clock;
 }): StepUpChallenges {
+  /** Whether the row is the app's own, as it stands: a row whose MAC doesn't hold raises the alarm, and is no challenge. */
+  const genuine = (row: PendingRow & MacRow, verified: VerifiedFacts | undefined): boolean => {
+    if (macHolds(keys, challengeMessage(factsOf(row, verified)), row)) return true;
+    rowForged(logger, 'step_up_challenge', row);
+    return false;
+  };
+
+  /** The session's challenge not yet verified and still in time, whatever its MAC. */
+  const unverified = (db: Kysely<IdentityTables>, challengeId: string, sessionId: string, now: Date) =>
+    db
+      .selectFrom('identity.step_up_challenges')
+      .select([...PENDING, ...MAC])
+      .where('id', '=', challengeId)
+      .where('session_id', '=', sessionId)
+      .where('verified_at', 'is', null)
+      .where('ends_at', '>', now)
+      .executeTakeFirst();
+
   return {
     async open(db, binding) {
       refuse(bindingProblem(binding));
@@ -244,14 +319,36 @@ export function createStepUpChallenges({
       const id = ids.next();
       const nonce = randomBytes(32).toString('base64url');
       const endsAt = new Date(now.getTime() + STEP_UP_SECONDS * 1000);
-      // The person is the session's, read in the same statement; a session gone or ended opens nothing.
+      // The person is the session's: read first, for the MAC, and asked again of the session as the row is written.
+      const session = await db
+        .selectFrom('identity.sessions')
+        .select('user_id')
+        .where('id', '=', binding.sessionId)
+        .where('ends_at', '>', now)
+        .executeTakeFirst();
+      if (session === undefined) return undefined;
+      const { mac, mac_key_version: macKeyVersion } = macOf(
+        keys,
+        challengeMessage({
+          id,
+          sessionId: binding.sessionId,
+          userId: session.user_id,
+          action: binding.action,
+          changeHash: binding.changeHash,
+          nonce,
+          createdAt: now,
+          endsAt,
+          verified: undefined,
+        }),
+      );
+      // A session gone, ended or given to another person meanwhile opens nothing.
       const { rows } = await sql<PendingRow>`
         insert into identity.step_up_challenges
-          (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at)
+          (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at, mac, mac_key_version)
         select ${id}::uuid, s.id, s.user_id, ${binding.action}, ${binding.changeHash}::bytea, ${nonce},
-          ${now}::timestamptz, ${endsAt}::timestamptz
+          ${now}::timestamptz, ${endsAt}::timestamptz, ${mac}::bytea, ${macKeyVersion}::integer
         from identity.sessions as s
-        where s.id = ${binding.sessionId} and s.ends_at > ${now}
+        where s.id = ${binding.sessionId} and s.user_id = ${session.user_id} and s.ends_at > ${now}
         returning id, session_id, user_id, action, change_hash, nonce, created_at, ends_at
       `.execute(db);
       const [row] = rows;
@@ -260,21 +357,24 @@ export function createStepUpChallenges({
 
     async pending(db, challengeId, sessionId) {
       if (!isId(challengeId) || !isId(sessionId)) return undefined;
-      const row = await db
-        .selectFrom('identity.step_up_challenges')
-        .select(PENDING)
-        .where('id', '=', challengeId)
-        .where('session_id', '=', sessionId)
-        .where('verified_at', 'is', null)
-        .where('ends_at', '>', clock.now())
-        .executeTakeFirst();
-      return row === undefined ? undefined : pendingOf(row);
+      const row = await unverified(db, challengeId, sessionId, clock.now());
+      return row !== undefined && genuine(row, undefined) ? pendingOf(row) : undefined;
     },
 
     async recordEvidence(db, challengeId, sessionId, evidence) {
       refuse(evidenceProblem(evidence));
       if (!isId(challengeId) || !isId(sessionId)) return false;
       const now = clock.now();
+      const row = await unverified(db, challengeId, sessionId, now);
+      // Only a challenge whose MAC held is verified: the new MAC would make a forged one genuine.
+      if (row === undefined || !genuine(row, undefined)) return false;
+      const verified: VerifiedFacts = {
+        verifiedAt: now,
+        authTime: evidence.authTime,
+        amr: [...evidence.amr],
+        idpSessionId: evidence.idpSessionId,
+        idTokenHash: evidence.idTokenHash,
+      };
       const recorded = await db
         .updateTable('identity.step_up_challenges')
         .set({
@@ -283,11 +383,14 @@ export function createStepUpChallenges({
           amr: [...evidence.amr],
           idp_session_id: evidence.idpSessionId,
           id_token_hash: evidence.idTokenHash,
+          ...macOf(keys, challengeMessage(factsOf(row, verified))),
         })
         .where('id', '=', challengeId)
         .where('session_id', '=', sessionId)
         .where('verified_at', 'is', null)
         .where('ends_at', '>', now)
+        // Only the row as it was checked: written meanwhile by anyone else, it is left as it is.
+        .where('mac', '=', row.mac)
         .returning('id')
         .executeTakeFirst();
       return recorded !== undefined;
@@ -313,8 +416,10 @@ export function createStepUpChallenges({
       if (session.sessionId !== binding.sessionId) throw new RangeError("the challenges held are another session's");
       if (session.db !== db) throw new RangeError('the challenges were held in another transaction');
       if (!isId(challengeId)) return undefined;
+      // Read, then deleted: `hold` locked it in this transaction, so nothing moves it in between.
       const row = await db
-        .deleteFrom('identity.step_up_challenges')
+        .selectFrom('identity.step_up_challenges')
+        .select([...PENDING, ...EVIDENCE, ...MAC])
         .where('id', '=', challengeId)
         .where('session_id', '=', binding.sessionId)
         .where('action', '=', binding.action)
@@ -322,18 +427,27 @@ export function createStepUpChallenges({
         .where('verified_at', 'is not', null)
         .where('ends_at', '>', clock.now())
         .$if(passkeyRequired, (query) => query.where((eb) => eb(eb.val(PASSKEY_METHOD), '=', eb.fn.any('amr'))))
-        .returning([...PENDING, 'verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'])
         .executeTakeFirst();
       if (row === undefined) return undefined;
-      const { verified_at: verifiedAt, auth_time: authTime, amr, id_token_hash: idTokenHash } = row;
-      // The table holds the evidence whole or not at all (0013), and only a verified challenge is consumed.
-      if (verifiedAt === null || authTime === null || amr === null || idTokenHash === null) {
-        throw new Error("a consumed step-up challenge's evidence is incomplete, though the table holds it whole");
+      // The app writes the evidence whole (0013), so a part missing is a row it never wrote, as is a MAC that fails.
+      const verified = verifiedOf(row);
+      if (verified === undefined) {
+        rowForged(logger, 'step_up_challenge', row);
+        return undefined;
       }
+      if (!genuine(row, verified)) return undefined;
+      const deleted = await db
+        .deleteFrom('identity.step_up_challenges')
+        .where('id', '=', challengeId)
+        .where('mac', '=', row.mac)
+        .returning('id')
+        .executeTakeFirst();
+      if (deleted === undefined) return undefined;
+      const { verifiedAt, authTime, amr, idpSessionId, idTokenHash } = verified;
       return {
         ...pendingOf(row),
         verifiedAt,
-        evidence: { authTime, amr, idpSessionId: row.idp_session_id, idTokenHash },
+        evidence: { authTime, amr, idpSessionId, idTokenHash },
       };
     },
 

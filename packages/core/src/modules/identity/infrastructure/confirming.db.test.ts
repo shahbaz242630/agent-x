@@ -67,7 +67,7 @@ const ids = new SequentialIds(0xf000_0000_0000);
 const START = new Date('2026-09-25T09:00:00Z');
 let clock: FixedClock;
 let confirmations: AcceptanceConfirmations;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
@@ -83,7 +83,13 @@ async function signedIn(): Promise<{ userId: string; sessionId: string }> {
     { issuer: 'https://auth.example.test', subject: `confirming-${String(people)}` },
     { ids, clock },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

@@ -484,9 +484,12 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ] as const;
     for (const [id, fill, opened, used] of sessions) {
       await admin.query(
-        `insert into identity.sessions (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at)
+        // The sweep goes by the times alone, so a MAC of any 32 bytes will do: it never reads one.
+        `insert into identity.sessions
+           (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at, mac, mac_key_version)
          values ($1, $2, pg_catalog.decode(pg_catalog.repeat($3, 32), 'hex'), pg_catalog.now() - $4::interval, '{pwd,otp,mfa}',
-                 pg_catalog.now() - $4::interval, pg_catalog.now() - $5::interval, pg_catalog.now() - $4::interval + interval '12 hours')`,
+                 pg_catalog.now() - $4::interval, pg_catalog.now() - $5::interval, pg_catalog.now() - $4::interval + interval '12 hours',
+                 pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), 1)`,
         [id, userId, fill, opened, used],
       );
     }
@@ -513,9 +516,11 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       [userId],
     );
     await admin.query(
-      `insert into identity.sessions (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at)
+      `insert into identity.sessions
+         (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at, mac, mac_key_version)
        values ($1, $2, pg_catalog.decode(pg_catalog.repeat('31', 32), 'hex'), pg_catalog.now(), '{pwd,otp,mfa}',
-               pg_catalog.now(), pg_catalog.now(), pg_catalog.now() + interval '12 hours')`,
+               pg_catalog.now(), pg_catalog.now(), pg_catalog.now() + interval '12 hours',
+               pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), 1)`,
       [sessionId, userId],
     );
     const challenges = [
@@ -524,9 +529,12 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ] as const;
     for (const [id, age] of challenges) {
       await admin.query(
-        `insert into identity.step_up_challenges (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at)
+        // As the sessions' sweep: the challenges' goes by the times alone, never reading the MAC.
+        `insert into identity.step_up_challenges
+           (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at, mac, mac_key_version)
          values ($1, $2, $3, 'members.invite', pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex'), 'n',
-                 pg_catalog.now() - $4::interval, pg_catalog.now() - $4::interval + interval '5 minutes')`,
+                 pg_catalog.now() - $4::interval, pg_catalog.now() - $4::interval + interval '5 minutes',
+                 pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), 1)`,
         [id, sessionId, userId, age],
       );
     }

@@ -80,8 +80,8 @@ const logger = createLogger({
   destination: new LogCapture(),
 });
 const quiet = { keys, ids, logger };
-const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
-const challenges = () => createStepUpChallenges({ ids, clock });
+const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 }, keys, logger });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger });
 
 interface Person {
   readonly orgId: string;

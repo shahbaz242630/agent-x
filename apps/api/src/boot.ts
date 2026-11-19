@@ -363,8 +363,8 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
   });
   return {
     flows: createLoginFlows({ clock: systemClock }),
-    sessions: createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions }),
-    challenges: createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock }),
+    sessions: createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions, keys, logger }),
+    challenges: createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock, keys, logger }),
     // Where role grants write their notices (B5-1b), and the notices' sweep reads.
     outbox,
     directory,

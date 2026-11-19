@@ -42,6 +42,14 @@ export const KEY_PURPOSES = {
    * checks it with the public half: a foothold in the API can't move an anchor.
    */
   'audit-rebase': { kind: 'signing', rotates: true },
+  /**
+   * S205 tamper pass: the MAC on each console session and step-up challenge
+   * (identity/infrastructure/row-macs.ts), so a row the database's owner plants
+   * or edits signs no one in and verifies no change (ADR-012 §2). Rotated by a
+   * new version: a row is checked with the version it names, and a session
+   * lives at most a day, so an old version can go once its rows have ended.
+   */
+  'session-mac': { kind: 'mac', rotates: true },
 } as const satisfies Readonly<Record<string, { readonly kind: KeyKind; readonly rotates: boolean }>>;
 
 export type KeyPurpose = keyof typeof KEY_PURPOSES;

@@ -1880,7 +1880,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
         keys,
         ids,
         clock,
-        challenges: createStepUpChallenges({ ids, clock }),
+        challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
         outbox: createOutbox({ ids, clock }),
         logger: testLogger(capture),
       });
@@ -2607,7 +2607,7 @@ describe('over the mandate’s own limits: refuse, or an admin’s approval (E9,
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       outbox: createOutbox({ ids, clock }),
       logger: testLogger(new LogCapture()),
     });

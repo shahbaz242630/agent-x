@@ -58,8 +58,9 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xe200_0000_0000);
 const clock = new FixedClock(new Date('2026-09-26T09:00:00Z'));
-const challenges = () => createStepUpChallenges({ ids, clock });
-const sessions = () => createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
+const sessions = () =>
+  createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 }, keys, logger: testLogger() });
 let clearings: HoldClearings;
 /** What the clearings log. */
 const capture = new LogCapture();

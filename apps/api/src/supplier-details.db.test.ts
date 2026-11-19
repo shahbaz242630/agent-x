@@ -126,7 +126,7 @@ let payeeChanges: SupplierPayeeChanges;
 let verifications: SupplierVerifications;
 let detailsChanges: SupplierDetailsChanges;
 let changes: SupplierChanges;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
@@ -155,7 +155,13 @@ async function member(org: string, role: Role): Promise<Person> {
 
 /** The person signed in now, with a passkey. */
 async function signedIn(who: Person): Promise<SessionMember> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, who.userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

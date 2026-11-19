@@ -451,6 +451,8 @@ describe('SEC-OAUTH-01, -02, -05, -07, -10, -12, -13 a real MCP client connected
       ids: uuidV7Ids,
       clock,
       timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
     }).open(database, adminUser, { idpSessionId: 'V1_1', authTime: new Date(), amr: [...PASSKEY] });
     await withSignedStates(database, org, quiet(), (tx, states) =>
       addMembership(tx, states, {
@@ -478,7 +480,7 @@ describe('SEC-OAUTH-01, -02, -05, -07, -10, -12, -13 a real MCP client connected
     expect(asked.status).toBe(202);
     const { stepUpChallengeId } = (await asked.json()) as { stepUpChallengeId: string };
     expect(
-      await createStepUpChallenges({ ids: uuidV7Ids, clock }).recordEvidence(
+      await createStepUpChallenges({ ids: uuidV7Ids, clock, keys, logger: testLogger() }).recordEvidence(
         database,
         stepUpChallengeId,
         opened.sessionId,

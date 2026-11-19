@@ -137,7 +137,7 @@ let consents: ConnectionConsents;
 let clientId: string;
 let oauthClients: OauthClients;
 
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
 type Member = AgentMember & { readonly membershipId: string };
@@ -154,6 +154,8 @@ async function member(org: string, role: Role, amr: readonly string[] = PASSKEY)
     ids,
     clock,
     timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
   }).open(app, userId, { idpSessionId: 'V1_1', authTime: clock.now(), amr: [...amr] });
   const membershipId = ids.next();
   await withSignedStates(app, org, quiet(), (tx, states) =>

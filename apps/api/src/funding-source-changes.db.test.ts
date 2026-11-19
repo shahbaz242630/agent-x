@@ -167,7 +167,7 @@ const changesWith = (partner: FinancialRailAdapter | undefined) =>
     ids,
     clock,
     rail: partner,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger: testLogger(),
   });
 
@@ -306,7 +306,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       clock,
       rail: mixedUp,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: testLogger(capture),
     });
 
@@ -334,7 +334,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       clock,
       rail,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: testLogger(capture),
     });
 

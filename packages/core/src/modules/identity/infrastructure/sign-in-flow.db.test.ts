@@ -127,8 +127,14 @@ beforeEach(() => {
   client.subject = `sign-in-${String(subjects)}`;
   clock = new FixedClock(START);
   const ids = new SequentialIds(0x5000 + subjects * 0x100);
-  challenges = createStepUpChallenges({ ids, clock });
-  sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
+  sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   signIn = createSignIn({
     db: app,
     oidc: client,
