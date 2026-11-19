@@ -3,7 +3,7 @@
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { describe, expect, it } from 'vitest';
 
-import { endJudged, endSeal, type QueuedColumns, queuedJudged, queuedSeal, SEALED_FROM } from './notice-seals.ts';
+import { endJudged, endSeal, type QueuedColumns, queuedJudged, queuedSeal } from './notice-seals.ts';
 
 /** The app's keys, `audit-mac` at version `current` with every version up to it held; `fill` makes another app's. */
 const keysAt = (current: number, fill = 1): KeyProvider =>
@@ -78,14 +78,11 @@ describe('a notice sealed as it is queued (S206 V4)', () => {
     expect(sealed(QUEUED, newer).mac_key_version).toBe(2);
   });
 
-  it('takes a notice with no seal as one from before seals only when it was queued before the cut-over', () => {
-    const bare = { ...QUEUED, mac: null, mac_key_version: null };
-    expect(queuedJudged(keys, { ...bare, created_at: new Date(SEALED_FROM.getTime() - 1) })).toBe('legacy');
-    expect(queuedJudged(keys, { ...bare, created_at: SEALED_FROM })).toBe('tampered');
-    // Half a seal is no seal from before seals.
-    const half = { ...bare, created_at: new Date(SEALED_FROM.getTime() - 1) };
-    expect(queuedJudged(keys, { ...half, mac_key_version: 1 })).toBe('tampered');
-    expect(queuedJudged(keys, { ...half, mac: Buffer.alloc(32) })).toBe('tampered');
+  it('holds for no notice with no seal, or half of one, however old', () => {
+    const bare = { ...QUEUED, created_at: new Date('2020-01-01T00:00:00.000Z'), mac: null, mac_key_version: null };
+    expect(queuedJudged(keys, bare)).toBe('tampered');
+    expect(queuedJudged(keys, { ...bare, mac_key_version: 1 })).toBe('tampered');
+    expect(queuedJudged(keys, { ...bare, mac: Buffer.alloc(32) })).toBe('tampered');
   });
 });
 

@@ -390,6 +390,9 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'sent_at',
         'given_up_at',
         'last_failure',
+        // S206 V4 (0105): the end's seal, and the queued seal once ever, for the notices from before seals.
+        'mac',
+        'mac_key_version',
         'end_mac',
         'end_key_version',
       ],

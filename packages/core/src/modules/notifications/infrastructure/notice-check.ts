@@ -4,55 +4,87 @@
 // warning the database's owner deleted before it went, marked sent or given
 // up, moved to another person or contact, or held back, is found.
 //
-// For one organisation, it reads its records of the last NOTICE_DEADLINE_MS
-// and the `lookbackMs` before (the time between two of its visits, and more),
-// a page at a time through the signed states' logPageOf (each record believed
-// only whole; one that isn't raises the alarm and holds the organisation
-// itself), and each page's notices in one statement. A record's notice:
+// Each visit goes on from where the last one stopped, which it recorded on the
+// organisation's own chain (`notice_check.passed`: the place it reached, and
+// the notices it saw still to be sent): it walks the chain from there to the
+// head through the trail's ranged check (walkFrom: every event in its place,
+// linked, hashed and MACed, the stretch ending at the head's own hash), and
+// takes the `notice.queued` records that walk read. So every record is seen
+// once, by a walk that would fail at a gap: one deleted or edited, even for a
+// moment around that walk, is the chain's alarm then; one put back after its
+// walk has already been seen. A record of where it stopped can't be forged or
+// moved on past a notice, as it is a chained event; one taken off the top of
+// the chain only sends the next visit further back, to see more again.
 //
-// - gone (deleted: the outbox keeps a notice 30 days, past this window);
-// - sealed wrongly as queued (moved to another recipient, or rewritten);
+// The notices it saw, and those it carried, are judged, all in one read:
+//
+// - gone (deleted: the outbox keeps a notice 30 days);
+// - sealed wrongly as queued (moved to another recipient, rewritten, planted);
 // - ended without the app's end seal (marked sent or given up by another);
-// - given up because its tries were spent (`lease_expired`: its tries count
-//   is no seal's, so the owner can spend them; a real crash loop on one
-//   notice is worth a person's look as well);
-// - still unsent NOTICE_DEADLINE_MS on (its next try put off): every try and
+// - given up because its tries were spent (`lease_expired`: its tries count is
+//   no seal's, so the owner can spend them; a real crash loop on one notice is
+//   worth a person's look as well);
+// - still unsent NOTICE_DEADLINE_MS on, its next try put off: every try and
 //   wait of a notice ends within 15 hours.
 //
 // Each raises the integrity alarm (`audit.integrity_failed`, check `notice`,
-// the notice's ID and why) and the check goes on. A record removed from the
-// chain itself is the chain's check's to find (the anchor check walks every
-// event, DB-6); one hidden only while a page is read and put back after is
-// not seen by that read (R-15). Nothing is held: the alarm is the remedy, as
-// a notice's own sender can't be made to send what the owner took away.
+// the notice's ID and why) once. One still open, and not yet late, is carried
+// in the next record of where the check stopped; one ended soundly, or found
+// at fault, is not. Nothing is held: the alarm is the remedy, as a notice's own
+// sender can't be made to send what the owner took away.
+//
+// A first visit starts just before the organisation's oldest record (read as
+// it is: a wrong place fails the walk's first step); a record hidden at that
+// one moment is the one thing it can't see (R-15).
+import { CHAIN_START, type CheckedPoint } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { Kysely, Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
-import { type LogEvent, type SignedStates, withSignedStates } from '../../audit/index.ts';
-import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
+import { createAuditTrail, type WalkedEvent, withSignedStates } from '../../audit/index.ts';
+import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { endJudged, queuedJudged } from './notice-seals.ts';
 import { LEASE_EXPIRED, NOTICE_QUEUED, type OutboxTables } from './outbox.ts';
 
 /** How long a notice may stay unsent before the check calls it held back: its tries and waits end within 15 hours. */
 export const NOTICE_DEADLINE_MS = DAY_MS;
 
-/** How many records one page reads, and one statement's notices. */
-const PAGE = 500;
+/** The check's record of where it stopped, on the organisation's chain, about the organisation itself. */
+export const NOTICE_CHECK_PASSED = 'notice_check.passed';
+const CHECK_SUBJECT = 'notice_check';
 
-/** The most pages one organisation's visit reads: past it, the rest wait for its next visit, logged. */
-const MOST_PAGES = 10;
+/** Who records it. */
+const CHECK_ACTOR = { type: 'system', id: 'api' } as const;
 
-/** Why a recorded notice raised the alarm. */
+/** The most events one walk reads; a visit takes up to MOST_WALKS of them. */
+const WALK = 5_000;
+const MOST_WALKS = 4;
+
+/** The most notices carried open in one record: a detail holds 1,024 characters, 27 IDs and their spaces. */
+const MOST_CARRIED = 25;
+
+/** A walk past this many events records where it stopped, even with no notice in it, so the next walks less. */
+const RECORD_PAST = 50;
+
+/** A notice recorded longer ago than this may have been swept (30 days after it is done): a walk passes it by. */
+const JUDGED_WITHIN_MS = 20 * DAY_MS;
+
+/** Why a recorded notice raised the alarm (beside `chain`, a walk that failed, and `record`, a record of its own). */
 export type NoticeFault = 'gone' | 'seal' | 'end_seal' | 'tries_spent' | 'unsent';
 
-/** The widest window a visit reads: NOTICE_DEADLINE_MS and the lookback before it, up to now. */
-const windowOf = (now: Date, lookbackMs: number) => ({
-  from: new Date(now.getTime() - NOTICE_DEADLINE_MS - lookbackMs),
-  to: now,
-});
+/** Where the last visit stopped, and the notices it carried, as its record says. */
+interface Passed {
+  readonly from: CheckedPoint;
+  readonly carried: readonly Carried[];
+}
 
-/** The notices the records name, as the outbox keeps them, in one statement. */
+/** A notice seen still to be sent, and when it was recorded. */
+interface Carried {
+  readonly id: string;
+  readonly recordedAt: Date;
+}
+
+/** The notices, as the outbox keeps them, in one statement. */
 const noticesNamed = (tx: Transaction<OutboxTables>, ids: readonly string[]) =>
   tx
     .selectFrom('notifications.outbox')
@@ -81,18 +113,53 @@ const noticesNamed = (tx: Transaction<OutboxTables>, ids: readonly string[]) =>
 
 type NoticeRow = Awaited<ReturnType<typeof noticesNamed>>[number];
 
-/** What is wrong with a recorded notice, as read now, if anything. */
-function faultOf(keys: KeyProvider, record: LogEvent, row: NoticeRow | undefined, now: Date): NoticeFault | undefined {
+/** What is wrong with a notice, as read now; `open` for one still to be sent and not late; undefined for one done. */
+function judged(
+  keys: KeyProvider,
+  notice: Carried,
+  row: NoticeRow | undefined,
+  now: Date,
+): NoticeFault | 'open' | undefined {
   if (row === undefined) return 'gone';
-  // Its seal binds its organisation too: a notice moved to another is not this one's. None is from before seals.
+  // Its seal binds its organisation too: a notice moved to another is not this one's.
   if (queuedJudged(keys, row) !== 'sound') return 'seal';
   const end = endJudged(keys, row);
   if (end === 'tampered') return 'end_seal';
   if (end === 'sound')
     return row.given_up_at !== null && row.last_failure === LEASE_EXPIRED ? 'tries_spent' : undefined;
-  // Still to be sent: held back once its deadline is past and its next try is still to come.
-  const late = record.recordedAt.getTime() <= now.getTime() - NOTICE_DEADLINE_MS;
-  return late && row.next_attempt_at.getTime() > now.getTime() ? 'unsent' : undefined;
+  // Held back once its deadline is past and its next try is still to come; due now, the sender's backlog.
+  const late = notice.recordedAt.getTime() <= now.getTime() - NOTICE_DEADLINE_MS;
+  return late && row.next_attempt_at.getTime() > now.getTime() ? 'unsent' : 'open';
+}
+
+/**
+ * The place of the event at `seq` (the chain's start for 0), read as it stands: the walk from it holds it to the
+ * event's own seal first, so a place read wrong fails that walk, never passes.
+ */
+async function placeAt(tx: Transaction<OutboxTables>, orgId: string, seq: bigint): Promise<CheckedPoint> {
+  if (seq === 0n) return CHAIN_START;
+  const { rows } = await sql<{ hash: Buffer; mac_key_version: number }>`
+    select e.hash, e.mac_key_version from audit.events e where e.org_id = ${orgId} and e.seq = ${seq}
+  `.execute(tx);
+  const [row] = rows;
+  return { seq, hash: row?.hash ?? Buffer.alloc(32), macKeyVersion: row?.mac_key_version ?? 0 };
+}
+
+/** The record of where the last visit stopped, as its details say; undefined for details that don't read as one. */
+function passedOf(details: Readonly<Record<string, unknown>>): Passed | undefined {
+  const { seq, hash, keyVersion, carried } = details;
+  if (typeof seq !== 'string' || !/^\d+$/.test(seq) || typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash)) {
+    return undefined;
+  }
+  if (typeof keyVersion !== 'number' || typeof carried !== 'string') return undefined;
+  const notices = carried === '' ? [] : carried.split(' ').map((each) => each.split('@'));
+  if (notices.some(([id, at]) => id === undefined || !UUID.test(id) || at === undefined || !/^\d+$/.test(at))) {
+    return undefined;
+  }
+  return {
+    from: { seq: BigInt(seq), hash: Buffer.from(hash, 'hex'), macKeyVersion: keyVersion },
+    carried: notices.map(([id = '', at = '0']) => ({ id, recordedAt: new Date(Number(at)) })),
+  };
 }
 
 export interface NoticeCheck {
@@ -108,9 +175,7 @@ export function createNoticeCheck({
   ids,
   clock,
   logger,
-  lookbackMs,
-  page = PAGE,
-  mostPages = MOST_PAGES,
+  walk = WALK,
 }: {
   /** The organisations to check this run: job-list.ts's rotation. */
   readonly list: () => Promise<readonly string[]>;
@@ -121,56 +186,119 @@ export function createNoticeCheck({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
-  /** How far before the deadline a visit reads: more than the most time between two visits of one organisation. */
-  readonly lookbackMs: number;
-  /** PAGE and MOST_PAGES, but for the tests. */
-  readonly page?: number;
-  readonly mostPages?: number;
+  /** WALK, but for the tests. */
+  readonly walk?: number;
 }): NoticeCheck {
-  /** One page of the organisation's records, before `beforeSeq` when named, judged: undefined once one can't be believed. */
-  const pageOf = async (
-    tx: Transaction<OutboxTables>,
-    states: SignedStates,
-    orgId: string,
-    now: Date,
-    beforeSeq: bigint | undefined,
-  ) => {
-    const read = await states.logPageOf(tx, orgId, {
-      ...windowOf(now, lookbackMs),
-      actions: [NOTICE_QUEUED],
-      limit: page,
-      ...(beforeSeq === undefined ? {} : { beforeSeq }),
+  const trail = createAuditTrail({ keys, ids });
+
+  /**
+   * Where the last visit stopped: its record, the newest, believed only whole; with none, just before the oldest
+   * `notice.queued` record, read as it stands (a wrong place fails the walk); undefined for an organisation with none.
+   */
+  const startOf = (orgId: string, correlationId: string): Promise<Passed | 'unbelieved' | undefined> =>
+    withSignedStates(database, orgId, { keys, ids, logger, correlationId }, async (tx) => {
+      const read = await trail.recordedEvents(tx, orgId, {
+        subjectTypes: [CHECK_SUBJECT],
+        subjectId: orgId,
+        actions: [NOTICE_CHECK_PASSED],
+        newest: true,
+        limit: 1,
+      });
+      if (read.kind !== 'recorded') return 'unbelieved';
+      const [last] = read.events;
+      if (last !== undefined) return passedOf(last.event.details) ?? 'unbelieved';
+      const { rows } = await sql<{ seq: bigint }>`
+        select e.seq from audit.events e
+        where e.org_id = ${orgId} and e.action = ${NOTICE_QUEUED} order by e.seq limit 1
+      `.execute(tx);
+      const [oldest] = rows;
+      return oldest === undefined ? undefined : { from: await placeAt(tx, orgId, oldest.seq - 1n), carried: [] };
     });
-    // A record that can't be believed: the alarm raised and the hold set already.
-    if (read.outcome !== 'read') return undefined;
-    const named = read.events.map((record) => record.event.subject.id.toLowerCase());
-    const rows = named.length === 0 ? [] : await noticesNamed(tx, named);
-    const byId = new Map(rows.map((row) => [row.id.toLowerCase(), row]));
-    const faults = read.events.flatMap((record) => {
-      const id = record.event.subject.id.toLowerCase();
-      const fault = faultOf(keys, record, byId.get(id), now);
-      return fault === undefined ? [] : [{ noticeId: id, reason: fault }];
-    });
-    return { faults, next: read.next };
+
+  /** Walks on from `from`, a few walks at most: the notices recorded since, and where it reached; `broken` for none. */
+  const walked = async (orgId: string, from: CheckedPoint) => {
+    let at = from;
+    const seen: WalkedEvent[] = [];
+    for (let walks = 0; walks < MOST_WALKS; walks += 1) {
+      const { step, kept } = await trail.walkFrom(database, orgId, at, walk, [NOTICE_QUEUED]);
+      if (!step.ok) return { broken: step.problem } as const;
+      seen.push(...kept);
+      at = { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
+      if (step.seq >= step.to) break;
+    }
+    return { reached: at, seen } as const;
   };
 
-  /** Checks the organisation's recorded notices, a page at a time, raising the alarm for each at fault. */
+  /** Records where this visit stopped and the notices it carries. */
+  const passed = (orgId: string, correlationId: string, at: CheckedPoint, carried: readonly Carried[]) =>
+    withSignedStates(database, orgId, { keys, ids, logger, correlationId }, (tx) =>
+      trail.record(tx, orgId, {
+        actor: CHECK_ACTOR,
+        action: NOTICE_CHECK_PASSED,
+        subject: { type: CHECK_SUBJECT, id: orgId, version: 1 },
+        details: {
+          seq: at.seq.toString(),
+          hash: at.hash.toString('hex'),
+          keyVersion: at.macKeyVersion,
+          carried: carried.map(({ id, recordedAt }) => `${id}@${String(recordedAt.getTime())}`).join(' '),
+        },
+      }),
+    );
+
+  /** Checks the organisation's notices recorded since the last visit, and those it carried. */
   const checkFor = async (orgId: string): Promise<void> => {
     const correlationId = ids.next();
     const log = logger.child({ orgId, correlationId });
+    const alarm = (fields: Readonly<Record<string, unknown>>): void => {
+      log.error('audit.integrity_failed', { check: 'notice', ...fields });
+    };
     const now = clock.now();
-    let beforeSeq: bigint | undefined;
-    for (let pages = 0; pages < mostPages; pages += 1) {
-      const read = await withSignedStates(database, orgId, { keys, ids, logger, correlationId }, (tx, states) =>
-        pageOf(tx, states, orgId, now, beforeSeq),
-      );
-      if (read === undefined) return;
-      for (const fault of read.faults) log.error('audit.integrity_failed', { check: 'notice', ...fault });
-      if (read.next === null) return;
-      beforeSeq = read.next;
+    const start = await startOf(orgId, correlationId);
+    if (start === undefined) return;
+    // A record of its own that can't be believed, or reads as no record of where it stopped: nothing to go on from.
+    if (start === 'unbelieved') {
+      alarm({ reason: 'record' });
+      return;
     }
-    log.warn('notification.check_cut_short', { pages: mostPages });
+    const walk = await walked(orgId, start.from);
+    if ('broken' in walk) {
+      alarm({ reason: 'chain', seq: walk.broken.seq.toString(), problem: walk.broken.reason });
+      return;
+    }
+    const since = now.getTime() - JUDGED_WITHIN_MS;
+    const fresh = walk.seen
+      .filter(({ recordedAt }) => recordedAt.getTime() >= since)
+      .map(({ subjectId, recordedAt }) => ({ id: subjectId.toLowerCase(), recordedAt }));
+    const notices = [...start.carried, ...fresh];
+    const rows =
+      notices.length === 0
+        ? []
+        : await withSignedStates(database, orgId, { keys, ids, logger, correlationId }, (tx) =>
+            noticesNamed(
+              tx,
+              notices.map(({ id }) => id),
+            ),
+          );
+    const byId = new Map(rows.map((row) => [row.id.toLowerCase(), row]));
+    const open: Carried[] = [];
+    for (const notice of notices) {
+      const found = judged(keys, notice, byId.get(notice.id), now);
+      if (found === 'open') open.push(notice);
+      else if (found !== undefined) alarm({ noticeId: notice.id, reason: found });
+    }
+    // The oldest open first; past what a record carries, it stops just before the first it can't, to see it again.
+    const carried = open.slice(0, MOST_CARRIED);
+    const cut = fresh.find((notice) => open.indexOf(notice) >= MOST_CARRIED);
+    const cutAt = cut === undefined ? undefined : walk.seen.find(({ subjectId }) => subjectId.toLowerCase() === cut.id);
+    const reached = cutAt === undefined ? walk.reached : await placeBefore(orgId, cutAt.seq);
+    const moved = reached.seq - start.from.seq;
+    const changed = fresh.length > 0 || carried.length !== start.carried.length || moved > BigInt(RECORD_PAST);
+    if (changed) await passed(orgId, correlationId, reached, carried);
   };
+
+  /** The place just before the event at `seq`: its link names the event before, and a wrong one fails the next walk. */
+  const placeBefore = (orgId: string, seq: bigint): Promise<CheckedPoint> =>
+    withSignedStates(database, orgId, { keys, ids, logger }, (tx) => placeAt(tx, orgId, seq - 1n));
 
   return {
     async run(signal) {

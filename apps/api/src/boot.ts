@@ -76,8 +76,8 @@ import { backgroundDownloadsFrom, downloadStoreOf } from './background-downloads
 import { railFor } from './funding-source-links.ts';
 import { directoryNamesFrom } from './kept-names.ts';
 import { createJobWatch } from './job-watch.ts';
+import { recordStartSealingNotices } from './notice-legacy.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
-import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
 export type ApiTables = PlatformControlsTables &
@@ -307,7 +307,9 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
 
   let recorded: bigint;
   try {
-    recorded = await recordStart(database, keys, uuidV7Ids, {
+    // S206 V4: the first start with notice seals seals the notices from before them, in its own record's transaction.
+    // TODO(S206 V4): back to recordStart once a release has run it (Outstanding-Work AT10).
+    recorded = await recordStartSealingNotices(database, keys, uuidV7Ids, {
       configHash: fingerprint.configHash,
       release: config.release,
       gateRef: gateRefOf(config.partner),

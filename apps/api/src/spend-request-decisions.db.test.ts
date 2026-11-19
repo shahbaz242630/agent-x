@@ -998,6 +998,19 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
   });
 
+  it('counts a decision sent for approval, its notice told, as the allowed one and its notice alone (S206 V4)', async () => {
+    const { w, acting } = await ready({ terms: { approvalThreshold: AED(500_000n) } });
+    decidedOf(await ask(acting, asking(w)));
+    decidedOf(await ask(acting, asking(w, { orderReference: 'INV-WAITS-ONE-TRIP' })));
+    const line = capture
+      .lines()
+      .filter(({ event }) => event === 'spend_request.decided')
+      .at(-1);
+    expect(line?.decision ?? 'REQUIRE_APPROVAL').toBe('REQUIRE_APPROVAL');
+    // The allowed decision's 17 and one: the notice and its record on the chain, from the head the request's own left.
+    expect(line?.trips).toBe(18);
+  });
+
   it("makes an agent's first decision's zone after the supplier's lock, its trips all held", async () => {
     const { w, acting } = await ready();
     decidedOf(await ask(acting, asking(w)));

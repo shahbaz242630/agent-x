@@ -21,16 +21,19 @@
 -- - as a notice ends, sent or given up, the app MACs that end (`notice-end-v1`:
 --   its ID, how it ended and why: end_mac, end_key_version). A row marked sent
 --   by anyone else has none that holds.
--- - the API's notice check (apps/api/src/notice-check.ts) reads each
---   organisation's `notice.queued` records of the last day and more, and
---   raises the alarm for any whose notice is gone, sealed wrongly, ended
---   without the app's end seal, given up because its tries were spent, or
---   still unsent a day on.
+-- - the API's notice check (packages/core/.../notice-check.ts, job-list.ts)
+--   walks each organisation's chain from where it last stopped (its own
+--   chained record, `notice_check.passed`) to the head, through the trail's
+--   ranged check, and raises the alarm for any notice it walked past, or
+--   carried, that is gone, sealed wrongly, ended without the app's end seal,
+--   given up because its tries were spent, or still unsent a day on.
 --
 -- A notice queued before this migration, or by the release before while this
--- one rolls out, has no MAC and no record: it is sent as before, with a
--- warning, until the cut-over date the sender names (no backfill: an UPDATE
--- here would be the owner's, and no MAC can be made in SQL).
+-- one rolls out, has no MAC and no record. The API's first start seals those
+-- still to be sent, once ever, saying so in its start's record on the platform
+-- chain (apps/api/src/notice-legacy.ts); after that, one with no
+-- MAC is the owner's, refused unsent with the alarm. No backfill here: an
+-- UPDATE here would be the owner's, and no MAC can be made in SQL.
 
 ALTER TABLE notifications.outbox
   ADD COLUMN mac bytea CHECK (pg_catalog.octet_length(mac) = 32),
@@ -40,5 +43,6 @@ ALTER TABLE notifications.outbox
   ADD COLUMN end_key_version integer CHECK (end_key_version >= 1),
   ADD CONSTRAINT an_end_mac_with_its_version CHECK ((end_mac IS NULL) = (end_key_version IS NULL));
 
--- Written with the row (INSERT, granted already); only the end's seal moves, as the notice ends.
-GRANT UPDATE (end_mac, end_key_version) ON notifications.outbox TO agentx_app;
+-- Written with the row (INSERT, granted already); the end's seal as the notice ends; the queued seal only by the
+-- once-ever pass over the notices from before (sealLegacyNotices, over rows with none).
+GRANT UPDATE (mac, mac_key_version, end_mac, end_key_version) ON notifications.outbox TO agentx_app;

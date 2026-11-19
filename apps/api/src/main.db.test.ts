@@ -312,7 +312,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         seq: '1',
         actor_id: 'api',
         action: 'platform.started',
-        details: JSON.stringify({ configHash: logged[0], release: 'local' }),
+        // The first start with notice seals says how many notices from before them it sealed (S206 V4).
+        details: JSON.stringify({ configHash: logged[0], noticesSealed: 0, release: 'local' }),
       },
       {
         seq: '2',

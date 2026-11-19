@@ -22,12 +22,6 @@ const QUEUED_LABEL = 'notice-v1';
 const ENDED_LABEL = 'notice-end-v1';
 const KEY = 'audit-mac';
 
-/**
- * Notices queued before this date may carry no seal: queued before 0105, or by the release before while this one
- * rolled out. They are sent as before, with a warning; past it, a notice with no seal is one someone planted.
- */
-export const SEALED_FROM = new Date('2026-12-01T00:00:00.000Z');
-
 /** An absent field: never a value, as every kept one is a UUID or a word. */
 const NONE = '';
 
@@ -51,8 +45,11 @@ export interface NoticeSeal {
   readonly keyVersion: number;
 }
 
-/** How a notice's seal reads: as the app made it, missing on a notice from before seals (`legacy`), or not its own. */
-export type SealJudged = 'sound' | 'legacy' | 'tampered';
+/**
+ * How a notice's seal reads: as the app made it, or not its own. One with none is not its own either: the notices
+ * queued before seals were sealed once, as the first release with them started (apps/api/src/notice-legacy.ts).
+ */
+export type SealJudged = 'sound' | 'tampered';
 
 const queuedMessage = (row: QueuedColumns): Message => [
   QUEUED_LABEL,
@@ -102,15 +99,10 @@ function holds(keys: KeyProvider, message: Message, mac: unknown, version: unkno
 }
 
 /** Whether a notice, as read, is the one the app queued. */
-export function queuedJudged(
+export const queuedJudged = (
   keys: KeyProvider,
   row: QueuedColumns & { readonly mac: unknown; readonly mac_key_version: unknown },
-): SealJudged {
-  if (row.mac === null && row.mac_key_version === null && row.created_at.getTime() < SEALED_FROM.getTime()) {
-    return 'legacy';
-  }
-  return holds(keys, queuedMessage(row), row.mac, row.mac_key_version) ? 'sound' : 'tampered';
-}
+): SealJudged => (holds(keys, queuedMessage(row), row.mac, row.mac_key_version) ? 'sound' : 'tampered');
 
 /** A notice's end as read: its outcome's columns and its end seal. */
 export interface EndColumns {

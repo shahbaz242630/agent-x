@@ -251,6 +251,34 @@ const QUEUED_COLUMNS = [
 /** Thrown inside a transaction to roll it back: the notice it read is not one the app queued there. */
 class NotQueuedHere extends Error {}
 
+/**
+ * Seals, over what each says now, every notice still to be sent that has no seal, in the caller's transaction, which
+ * must record that it was done, once ever (apps/api/src/notice-legacy.ts). Says how many. Two statements.
+ *
+ * TODO(S206 V4): delete this with sealLegacyNotices once a release has run it (Outstanding-Work AT10).
+ */
+export async function sealNoticesFromBefore(tx: Transaction<NotificationsTables>, keys: KeyProvider): Promise<number> {
+  const open = await tx
+    .selectFrom('notifications.outbox')
+    .select(QUEUED_COLUMNS)
+    .where('mac', 'is', null)
+    .where('sent_at', 'is', null)
+    .where('given_up_at', 'is', null)
+    .forUpdate()
+    .execute();
+  if (open.length === 0) return 0;
+  const values = open.map((row) => {
+    const { mac, keyVersion } = queuedSeal(keys, row);
+    return sql`(${row.id}::uuid, ${mac}::bytea, ${keyVersion}::integer)`;
+  });
+  await sql`
+    update notifications.outbox o set mac = v.mac, mac_key_version = v.version
+    from (values ${sql.join(values)}) as v (id, mac, version)
+    where o.id = v.id and o.mac is null
+  `.execute(tx);
+  return open.length;
+}
+
 export function createOutbox({
   ids,
   clock,
@@ -313,11 +341,11 @@ export function createOutbox({
     `.execute(tx);
   };
 
-  /** Whether a notice read back is one the app queued in this organisation, or one from before seals. */
+  /** Whether a notice read back is one the app queued in this organisation. */
   const queuedHere = (
     orgId: string,
     row: QueuedColumns & { readonly mac: unknown; readonly mac_key_version: unknown },
-  ) => row.org_id.toLowerCase() === orgId.toLowerCase() && queuedJudged(keys, row) !== 'tampered';
+  ) => row.org_id.toLowerCase() === orgId.toLowerCase() && queuedJudged(keys, row) === 'sound';
 
   /** A new notice's row in the organisation, queued now. */
   const rowOf = (
@@ -328,8 +356,9 @@ export function createOutbox({
 
   /**
    * Writes the notices, each sealed and due at once, in the one statement that records each on the organisation's
-   * chain (recordAllAlong): a notice is written only with its record. The chain head's lock is taken here, and so
-   * comes last in a change that writes its notices last (ADR-006 §6).
+   * chain (recordAllAlong): a notice is written only with its record. A change that has recorded its own event holds
+   * the chain head's lock already, and this takes no other: so a change queues its notices after its own event, and
+   * the head's lock stays last (ADR-006 §6). One that records nothing else takes the head's lock here, last.
    */
   const queue = async (tx: Transaction<OutboxTables>, orgId: string, rows: readonly QueuedColumns[]) => {
     const events: AuditEvent[] = rows.map((row) => ({
@@ -352,7 +381,8 @@ export function createOutbox({
       select v.* from (values ${sql.join(values)}) as v where ${gate}
       returning 1 as written
     `;
-    const { along } = await trail.recordAllAlong(tx, orgId, events, insert);
+    // After the change's own event, from the head it left: no read of the head again, so no trip more (S206 V4).
+    const { along } = await trail.recordAllAlong(tx, orgId, events, insert, { headHeld: true });
     if (along?.length !== rows.length) throw new Error('the notices were not written with their records');
   };
 

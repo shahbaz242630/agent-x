@@ -53,7 +53,8 @@
 // - A notice is sent only as the app queued it (S206 V4): one whose seal
 //   doesn't hold, moved to another person or contact or planted by the
 //   database's owner, is given up unsent (`seal_failed`) and raises the
-//   integrity alarm; one queued before seals is sent, with a warning.
+//   integrity alarm; so is one with no seal (those queued before seals were
+//   sealed once, at the first start of the release that added them).
 // - A run stops between notices once its signal is aborted; a notice it had
 //   claimed and not reached is taken again once its lease runs out.
 // - A run never throws (review): the outbox away, or a statement past its
@@ -486,16 +487,11 @@ export function createNoticeSender({
   };
 
   /**
-   * Whether the notice is one the app queued (S206 V4, notice-seals.ts): one whose seal doesn't hold (moved to
-   * another person or contact, or planted) is given up unsent, with the integrity alarm; one from before seals is
-   * sent, with a warning.
+   * Whether the notice is one the app queued (S206 V4, notice-seals.ts): one whose seal doesn't hold, or that has
+   * none (moved to another person or contact, or planted), is given up unsent, with the integrity alarm.
    */
   const believed = async (notice: SealedClaim): Promise<boolean> => {
     if (notice.seal === 'sound') return true;
-    if (notice.seal === 'legacy') {
-      logger.warn('notification.unsealed', { noticeId: notice.id, kind: notice.kind });
-      return true;
-    }
     logger.child({ orgId: notice.orgId }).error('audit.integrity_failed', {
       check: 'notice',
       reason: 'seal',

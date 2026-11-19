@@ -127,9 +127,6 @@ const NOTICE_CHECK_EVERY_MS = 10 * 60_000;
 /** The notice check's rotation: six slots of its run's ten minutes, so each organisation once an hour. */
 const NOTICE_CHECK_SLOTS = 6;
 
-/** How far before its deadline a notice check's visit reads: two of its organisation's hours, so no visit leaves a gap. */
-const NOTICE_CHECK_LOOKBACK_MS = 2 * HOUR_MS;
-
 /**
  * The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
  * decision 2), each listing every one at its first run and visiting again next run any it didn't finish
@@ -640,12 +637,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       LONG_MS,
     ),
     // Each organisation's queued notices held to their records on its chain, once an hour (S206 V4, R-15).
-    job(
-      'notice_check',
-      createNoticeCheck({ ...clocked, ...passes.noticeCheck, lookbackMs: NOTICE_CHECK_LOOKBACK_MS }),
-      NOTICE_CHECK_EVERY_MS,
-      LONG_MS,
-    ),
+    job('notice_check', createNoticeCheck({ ...clocked, ...passes.noticeCheck }), NOTICE_CHECK_EVERY_MS, LONG_MS),
     // Each closed day of the person log sealed on the platform chain, and the seals checked again (6E1a, L8).
     job('person_seal', createPersonSeal(personLog), PERSON_SEAL_EVERY_MS, LONG_MS),
     job('person_seal_check', createPersonSealCheck(personLog), PERSON_SEAL_CHECK_EVERY_MS, LONG_MS),

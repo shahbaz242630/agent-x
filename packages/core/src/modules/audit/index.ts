@@ -69,6 +69,7 @@ export {
   type RecordedAuditEvent,
   TooManyEventsAboutObject,
   TooManyEventsToRead,
+  type WalkedEvent,
 } from './infrastructure/audit-trail.ts';
 export {
   type CheckedTable,

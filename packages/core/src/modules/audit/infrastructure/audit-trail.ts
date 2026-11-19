@@ -55,6 +55,7 @@ import {
   appendEvents,
   type Chain,
   type ChainBatchWriter,
+  ChainBroken,
   type ChainEdgeReader,
   type ChainEdges,
   type ChainHead,
@@ -234,6 +235,23 @@ export function subjectsAre(subjects: readonly AuditSubjectKey[]): RawBuilder<bo
   return sql<boolean>`(e.subject_type, e.subject_id) in (${sql.join(pairs)})`;
 }
 
+/** An event a walk read (walkFrom): its place, time, subject and details as sealed. */
+export interface WalkedEvent {
+  readonly seq: bigint;
+  readonly recordedAt: Date;
+  readonly subjectId: string;
+  /** Its details, as the exact JSON text that was sealed. */
+  readonly details: string;
+}
+
+/** The event a walk read, if it is of `actions`: its content's labelled parts (eventContent) name what it is. */
+function walkedOf(entry: StoredEntry | undefined, actions: readonly string[]): WalkedEvent | undefined {
+  const [, , , , action, , , subjectId, , , details] = entry?.content ?? [];
+  if (entry === undefined || typeof action !== 'string' || !actions.includes(action)) return undefined;
+  if (typeof subjectId !== 'string' || typeof details !== 'string') return undefined;
+  return { seq: entry.seq, recordedAt: entry.recordedAt, subjectId, details };
+}
+
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
 export interface LogEvent extends ReadEvent {
   readonly hash: string;
@@ -328,6 +346,18 @@ export interface AuditTrail {
    */
   checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<ChainStep>;
   /**
+   * checkFromAnchor from a place a check of the organisation's own reached (S206 V4: the notice check's), keeping the
+   * events of `actions` its walk read. They are given only for a step that holds, each then in its place in one
+   * unbroken stretch from `from`: an event deleted, edited or planted there, even for a moment, fails the step.
+   */
+  walkFrom(
+    db: Kysely<AuditTables>,
+    orgId: string,
+    from: CheckedPoint,
+    most: number,
+    actions: readonly string[],
+  ): Promise<{ readonly step: ChainStep; readonly kept: readonly WalkedEvent[] }>;
+  /**
    * One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's,
    * each trip's answer limited as verifyAlone's: the anchor check runs it (E7).
    */
@@ -386,6 +416,11 @@ export interface AuditTrail {
     orgId: string,
     events: readonly AuditEvent[],
     statement: (lastEventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+    /**
+     * `headHeld` (S206 V4): where this transaction has already moved the chain's head, go on from the head it left,
+     * with no read of the head of its own: one trip, not two, for events that follow a change's own (a notice's record).
+     */
+    options?: { readonly headHeld?: boolean },
   ): Promise<{
     readonly recorded: readonly RecordedAuditEvent[];
     readonly along: readonly Readonly<Record<string, unknown>>[] | undefined;
@@ -898,6 +933,20 @@ interface EventToWrite {
   readonly details: string;
 }
 
+/** A head this transaction moved, and the time read when its lock was taken. */
+interface HeadMoved {
+  readonly head: ChainHead;
+  readonly now: Date;
+}
+
+/**
+ * The head each transaction last moved, by organisation (S206 V4). The lock it took on the head row stays held to the
+ * transaction's end, so no one else moves the head meanwhile: a later record in the same transaction that asks
+ * (`headHeld`) goes on from it with no read of its own. Its move still holds only from that head, so one gone stale
+ * (a savepoint rolled back past it) moves nothing, and is read again (recordAllAs).
+ */
+const headsMoved = new WeakMap<object, Map<string, HeadMoved>>();
+
 /** Recording's steps over the audit tables, for one organisation and the events recorded together, in their order. */
 function writerFor(
   tx: AuditTransaction,
@@ -905,9 +954,25 @@ function writerFor(
   orgId: string,
   toWrite: readonly EventToWrite[],
   along?: Along,
+  headHeld = false,
 ): ChainBatchWriter {
+  let lockedAt: Date | undefined;
+  /** Whether the move took; one that did is the head this transaction goes on from. */
+  const moved = (took: boolean, head: ChainHead): boolean => {
+    if (took && lockedAt !== undefined) {
+      const byOrg = headsMoved.get(tx) ?? new Map<string, HeadMoved>();
+      byOrg.set(orgId, { head, now: lockedAt });
+      headsMoved.set(tx, byOrg);
+    }
+    return took;
+  };
   return {
     async lockHead() {
+      const held = headHeld ? headsMoved.get(tx)?.get(orgId) : undefined;
+      if (held !== undefined) {
+        lockedAt = held.now;
+        return held;
+      }
       // The clock in the outer select, which reads a row only once the inner one has locked it.
       const { rows } = await timedLock('headLockMs', () =>
         sql<Record<string, unknown>>`
@@ -920,7 +985,9 @@ function writerFor(
       `.execute(tx),
       );
       const row = rows[0];
-      return row === undefined ? undefined : { head: headFields(row), now: clockOf(row) };
+      if (row === undefined) return undefined;
+      lockedAt = clockOf(row);
+      return { head: headFields(row), now: lockedAt };
     },
 
     async start(head) {
@@ -991,10 +1058,10 @@ function writerFor(
         `.execute(tx);
         const [row] = rows;
         along.rows = rowsAlong({ row_json: row?.along });
-        return row?.written === allWritten;
+        return moved(row?.written === allWritten, head);
       }
       const written = await sql`with moved as (${move})${sign} ${insert}`.execute(tx);
-      return written.numAffectedRows === allWritten;
+      return moved(written.numAffectedRows === allWritten, head);
     },
   };
 }
@@ -1207,15 +1274,26 @@ export function createAuditTrail({
     orgId: string,
     inputs: readonly AuditEvent[],
     along?: Along,
+    headHeld = false,
   ): Promise<readonly RecordedAuditEvent[]> => {
     const events = inputs.map((input) => checkedToWrite(hold, input));
     const chain = chainOf(orgId);
-    const sealed = await appendEvents(
-      keys,
-      chain,
-      writerFor(tx, keys, chain.orgId, events, along),
-      events.map(({ event, details }) => ({ nextId: () => ids.next(), content: eventContent(event, details) })),
-    );
+    const append = (reuse: boolean) =>
+      appendEvents(
+        keys,
+        chain,
+        writerFor(tx, keys, chain.orgId, events, along, reuse),
+        events.map(({ event, details }) => ({ nextId: () => ids.next(), content: eventContent(event, details) })),
+      );
+    let sealed: Awaited<ReturnType<typeof append>>;
+    try {
+      sealed = await append(headHeld);
+    } catch (error) {
+      // A head gone on from stale moves nothing: read under the lock again, and only that answer stands.
+      if (!headHeld || !(error instanceof ChainBroken)) throw error;
+      headsMoved.get(tx)?.delete(chain.orgId);
+      sealed = await append(false);
+    }
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));
   };
 
@@ -1388,9 +1466,10 @@ export function createAuditTrail({
       orgId: string,
       events: readonly AuditEvent[],
       statement: (lastEventId: string, gate: RawBuilder<unknown>) => RawBuilder<unknown>,
+      options?: { readonly headHeld?: boolean },
     ) {
       const along: Along = { statement };
-      const recorded = await recordAllAs(false, tx, orgId, events, along);
+      const recorded = await recordAllAs(false, tx, orgId, events, along, options?.headHeld === true);
       return Object.freeze({ recorded, along: along.rows });
     },
 
@@ -1417,6 +1496,39 @@ export function createAuditTrail({
         (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId, keys), from, most),
         JOB_LIMITS,
       );
+    },
+
+    async walkFrom(
+      db: Kysely<AuditTables>,
+      orgId: string,
+      from: CheckedPoint,
+      most: number,
+      actions: readonly string[],
+    ) {
+      const chain = chainOf(orgId);
+      const kept: WalkedEvent[] = [];
+      const step = await withTenant(
+        db,
+        chain.orgId,
+        (tx) => {
+          const reader = readerFor(tx, chain.orgId, keys);
+          // The walk's own reads, each event it read looked at as it goes: no read of their own.
+          const keeping: ChainReader & ChainEdgeReader = {
+            ...reader,
+            async events(after, upTo, limit) {
+              const batch = await reader.events(after, upTo, limit);
+              for (const entry of batch) {
+                const walked = walkedOf(entry, actions);
+                if (walked !== undefined) kept.push(walked);
+              }
+              return batch;
+            },
+          };
+          return verifyFromAnchor(keys, chain, keeping, from, most);
+        },
+        JOB_LIMITS,
+      );
+      return { step, kept: step.ok ? kept : [] };
     },
 
     async passStep(

@@ -5,8 +5,17 @@
 // tries spent raises the integrity alarm from the notice check (or the
 // sender), and a moved one is never sent to the new address; a notice sent on
 // time, fanned out to the admins, or given up by the app raises nothing.
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import {
+  createTestDatabase,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
+import { createDatabase, type Database, noStatementTimes, timingStatements, withTenant } from '@agentx/platform/db';
+import { CHAIN_START } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -14,8 +23,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import type { NoticeMessage } from '../domain/messages.ts';
 import type { Notice, NoticeRole } from '../domain/notice.ts';
-import { createNoticeCheck } from './notice-check.ts';
-import { SEALED_FROM } from './notice-seals.ts';
+import { createAuditTrail } from '../../audit/index.ts';
+import { createNoticeCheck, NOTICE_CHECK_PASSED } from './notice-check.ts';
 import { createOutbox, MOST_ATTEMPTS, type OutboxTables } from './outbox.ts';
 import { createNoticeSender, type Notifier } from './sender.ts';
 
@@ -157,7 +166,6 @@ const check = (
     ids,
     clock,
     logger: testLogger(capture),
-    lookbackMs: 2 * HOUR_MS,
     ...pages,
   });
 
@@ -280,25 +288,17 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: id, reason: 'seal' }]);
   });
 
-  it('never sends a notice planted with no seal once seals are kept, and sends one from before them with a warning', async () => {
-    const plant = (id: string, at: Date) =>
-      asOwner(
-        `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
-          next_attempt_at) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4)`,
-        [id, org, OTHER, at],
-      );
-    const old = ids.next();
-    // Queued before the cut-over and due now.
-    await plant(old, new Date(Math.min(SEALED_FROM.getTime(), START.getTime()) - DAY_MS));
-    expect(await send()).toEqual(['other@example.test']);
-    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'notification.unsealed', noticeId: old }));
-
-    // Later than both the cut-over and the real time, so the planted notice is due.
-    clock.set(new Date(Math.max(SEALED_FROM.getTime(), START.getTime()) + HOUR_MS));
+  it('never sends a notice planted with no seal, however long ago it says it was queued', async () => {
     const planted = ids.next();
-    await plant(planted, SEALED_FROM);
+    await asOwner(
+      `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
+        next_attempt_at) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4)`,
+      [planted, org, OTHER, new Date('2020-01-01T00:00:00Z')],
+    );
+
     expect(await send()).toEqual([]);
     expect(alarms()).toEqual([expect.objectContaining({ reason: 'seal', noticeId: planted })]);
+    expect(await rowOf(planted)).toMatchObject({ sent_at: null, last_failure: 'seal_failed' });
   });
 
   it('alarms for a notice held back past its deadline, and not before', async () => {
@@ -335,29 +335,126 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     expect(written).toEqual([]);
   });
 
-  it('reads the records a page at a time, and says when one visit cuts them short', async () => {
-    const first = await queued();
-    await queued();
-    const last = await queued();
+  it('goes on from where it stopped, its walks a few at a time, and judges each notice once', async () => {
+    const queuedIds: string[] = [];
+    for (let n = 0; n < 6; n += 1) queuedIds.push(await queued());
+    const [first, , , , , last] = queuedIds;
     await asOwner('delete from notifications.outbox where id = any($1)', [[first, last]]);
 
-    expect(await checkAt(later(HOUR_MS), { page: 2 })).toEqual([
-      { noticeId: last, reason: 'gone' },
-      { noticeId: first, reason: 'gone' },
-    ]);
-    expect(await checkAt(later(HOUR_MS), { page: 1, mostPages: 2 })).toEqual([{ noticeId: last, reason: 'gone' }]);
-    expect(capture.lines()).toContainEqual(
-      expect.objectContaining({ event: 'notification.check_cut_short', pages: 2, orgId: org }),
+    // Four walks of one event: the first four records.
+    expect(await checkAt(later(HOUR_MS), { walk: 1 })).toEqual([{ noticeId: first, reason: 'gone' }]);
+    // On from there: the last two, and the record of where it stopped.
+    expect(await checkAt(later(HOUR_MS), { walk: 1 })).toEqual([{ noticeId: last, reason: 'gone' }]);
+    expect(await checkAt(later(HOUR_MS))).toEqual([]);
+    const stops = await withTenant(app, org, (tx) =>
+      tx.selectFrom('audit.events').select('details').where('action', '=', NOTICE_CHECK_PASSED).execute(),
     );
+    // Four notices still to be sent, carried in each record of where it stopped; none new since, none recorded.
+    expect(stops).toHaveLength(2);
   });
 
-  it('raises the chain’s own alarm for a record the owner edited, and none of its own from it', async () => {
+  it('raises the alarm at a record the owner edited, at the walk that reaches it', async () => {
     const id = await queued();
+    const after = await queued();
     await asOwner(`update audit.events set details = '{"kind":"role_granted"}' where subject_id = $1`, [id], org);
-    await asOwner('delete from notifications.outbox where id = $1', [id]);
 
+    expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: undefined, reason: 'chain' }]);
+    // The walk gives none of the records it read on a stretch that doesn't hold, not even the sound one after.
+    const walk = await createAuditTrail({ keys, ids }).walkFrom(app, org, CHAIN_START, 10, ['notice.queued']);
+    expect(walk).toMatchObject({ step: { ok: false }, kept: [] });
+    expect(after).not.toBe(id);
+  });
+
+  it('finds a record deleted around its walk and put back after: the gap then, the notice gone at the next', async () => {
+    await queued();
+    await send();
+    // A visit before, so the next goes on from its record of where it stopped.
     expect(await checkAt(later(HOUR_MS))).toEqual([]);
-    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'audit.integrity_failed', orgId: org }));
+    const id = await queued();
+    await queued();
+    await asOwner('delete from notifications.outbox where id = $1', [id]);
+    const owner = await database.connect('owner');
+    try {
+      await owner.query('begin');
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, true)", [org]);
+      const [kept] = await owner.query<{ row: unknown }>(
+        'select pg_catalog.row_to_json(e) as row from audit.events e where e.subject_id = $1',
+        [id],
+      );
+      await owner.query('delete from audit.events where subject_id = $1', [id]);
+      await owner.query('commit');
+
+      expect(await checkAt(later(2 * HOUR_MS))).toEqual([{ noticeId: undefined, reason: 'chain' }]);
+
+      await owner.query('begin');
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, true)", [org]);
+      await owner.query(
+        'insert into audit.events select * from pg_catalog.json_populate_record(null::audit.events, $1)',
+        [kept?.row],
+      );
+      await owner.query('commit');
+    } finally {
+      await owner.end();
+    }
+    expect(await checkAt(later(3 * HOUR_MS))).toEqual([{ noticeId: id, reason: 'gone' }]);
+  });
+
+  it('queues a notice after its change’s event in one trip, taking no lock of its own', async () => {
+    const trail = createAuditTrail({ keys, ids });
+    // A row of the change's own, which it locks first.
+    const own = await queued();
+    const holder = await database.connect('admin');
+    try {
+      // Someone holds the organisation's chain head: the change's own event waits for it, its row already locked.
+      await withTenant(app, org, (tx) =>
+        trail.record(tx, org, {
+          actor: { type: 'system', id: 'api' },
+          action: 'probe.started',
+          subject: { type: 'probe', id: org, version: 1 },
+          details: {},
+        }),
+      );
+      await holder.query('begin');
+      await holder.query('select 1 from audit.heads where org_id = $1 for no key update', [org]);
+      const times = noStatementTimes();
+      const change = within(
+        20_000,
+        timingStatements(times, () =>
+          withTenant(app, org, async (tx) => {
+            await tx.selectFrom('notifications.outbox').select('id').where('id', '=', own).forNoKeyUpdate().execute();
+            await trail.record(tx, org, {
+              actor: { type: 'system', id: 'api' },
+              action: 'probe.changed',
+              subject: { type: 'probe', id: org, version: 2 },
+              details: {},
+            });
+            const before = times.trips;
+            await outbox.add(tx, [warning()]);
+            return times.trips - before;
+          }),
+        ),
+        'the change',
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      // Waiting on the head alone, its own row held first: the head comes last.
+      await expect(
+        database.as('admin').query('select 1 from notifications.outbox where id = $1 for update nowait', [own]),
+      ).rejects.toMatchObject({ code: '55P03' });
+      await holder.query('commit');
+      expect(await change).toBe(1);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    const actions = await withTenant(app, org, (tx) =>
+      tx.selectFrom('audit.events').select('action').orderBy('seq').execute(),
+    );
+    expect(actions.map(({ action }) => action)).toEqual([
+      'notice.queued',
+      'probe.started',
+      'probe.changed',
+      'notice.queued',
+    ]);
   });
 
   it('goes on past an organisation it fails to check, says which, and never throws', async () => {
@@ -383,5 +480,51 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     stopped.abort();
     await check(undefined, {}, (done) => finished.push(done)).run(stopped.signal);
     expect(finished).toEqual([org]);
+  });
+
+  it('carries at most 25 notices still to be sent, stopping before the first it can’t, and alarms for all once late', async () => {
+    const held: string[] = [];
+    for (let n = 0; n < 27; n += 1) held.push(await queued());
+    await asOwner('update notifications.outbox set next_attempt_at = $1', [later(30 * DAY_MS)]);
+
+    expect(await checkAt(later(HOUR_MS))).toEqual([]);
+    const late = await checkAt(later(DAY_MS + HOUR_MS));
+    expect(late.map(({ noticeId }) => noticeId).toSorted()).toEqual(held.toSorted());
+    expect(new Set(late.map(({ reason }) => reason))).toEqual(new Set(['unsent']));
+  });
+
+  it('raises the alarm for a record of where it stopped that the owner edited, and goes no further', async () => {
+    await queued();
+    expect(await checkAt(later(HOUR_MS))).toEqual([]);
+    await asOwner(
+      `update audit.events set details = '{"carried":"","hash":"00","keyVersion":1,"seq":"1"}' where action = $1`,
+      [NOTICE_CHECK_PASSED],
+      org,
+    );
+
+    expect(await checkAt(later(2 * HOUR_MS))).toEqual([{ noticeId: undefined, reason: 'record' }]);
+  });
+
+  it('goes on from the head a change before it really left, once a savepoint took that one back', async () => {
+    const trail = createAuditTrail({ keys, ids });
+    const event = (action: string) => ({
+      actor: { type: 'system', id: 'api' } as const,
+      action,
+      subject: { type: 'probe', id: org, version: 1 },
+      details: {},
+    });
+    await withTenant(app, org, async (tx) => {
+      await trail.record(tx, org, event('probe.kept'));
+      await sql`savepoint probe`.execute(tx);
+      await trail.record(tx, org, event('probe.taken_back'));
+      await sql`rollback to savepoint probe`.execute(tx);
+      await outbox.add(tx, [warning()]);
+    });
+
+    const actions = await withTenant(app, org, (tx) =>
+      tx.selectFrom('audit.events').select('action').orderBy('seq').execute(),
+    );
+    expect(actions.map(({ action }) => action)).toEqual(['probe.kept', 'notice.queued']);
+    expect(await checkAt(later(HOUR_MS))).toEqual([]);
   });
 });

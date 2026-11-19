@@ -1106,11 +1106,6 @@ export const PLAIN_WORDS = {
     broke: 'No database update was made, so the release did not put the new version live.',
     next: 'Fix the settings the log lists, then run the release again.',
   },
-  'notification.check_cut_short': {
-    happened: 'One organisation had more queued emails than one visit of the notice check reads.',
-    broke: 'The oldest were not compared this time, so a deleted warning there may be found late.',
-    next: 'Its next visit, within the hour, compares them. If it repeats, look why it sends so many emails.',
-  },
   'notification.check_failed': {
     happened: "The notice check could not compare one organisation's queued emails with what was sent.",
     broke: 'A warning email deleted or held back there is not found until a later visit succeeds.',
@@ -1146,11 +1141,6 @@ export const PLAIN_WORDS = {
     happened: 'The run that sends email notices stopped early.',
     broke: 'Notices it had not sent are waiting and are not lost.',
     next: 'A later run picks them up once their hold runs out. If it repeats, check the database.',
-  },
-  'notification.unsealed': {
-    happened: 'An email notice queued before notices were sealed was sent without a seal to check.',
-    broke: 'Nothing: it went to the recipient it names, as before.',
-    next: 'Expected only for notices queued before the release that added seals, up to the first of December. After that one is refused as tampered.',
   },
   'notifications.notice_sweep_failed': {
     happened: 'The hourly clean-up of old notices failed.',
