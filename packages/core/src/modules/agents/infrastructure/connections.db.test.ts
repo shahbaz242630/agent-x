@@ -318,6 +318,35 @@ describe(`SEC-OAUTH-06, -14 rows tampered with (Postgres ${server.version})`, ()
     ]);
   });
 
+  it.each<[string, (owner: Awaited<ReturnType<typeof tamperAsOwner>>, keyId: string) => Promise<void>]>([
+    ['its events stripped of their seals', (owner, keyId) => owner.stripSeals(keyId)],
+    [
+      'handed to another client',
+      async (owner, keyId) => {
+        await owner.query('alter table agents.connections disable trigger made_once');
+        try {
+          await owner.setColumn(keyId, 'client_id', 'axcl_ffffffffffffffffffffffffffffffff');
+        } finally {
+          await owner.query('alter table agents.connections enable trigger made_once');
+        }
+      },
+    ],
+  ])('refuses a token whose connection had %s, raising the alarm (S205)', async (_name, tamper) => {
+    const keyId = await connect(await newAgent());
+    const { accessToken } = await tokens(keyId);
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    try {
+      await tamper(owner, keyId);
+    } finally {
+      await owner.end();
+    }
+
+    await refusedFor(accessToken, 'tampered');
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', subjectType: 'connection', objectId: keyId, orgId: org }),
+    ]);
+  });
+
   it('keeps a connection made once: the app can never change one after its first signed state', async () => {
     const keyId = await connect(await newAgent());
     await expect(
