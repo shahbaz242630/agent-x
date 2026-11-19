@@ -27,7 +27,10 @@ import path from 'node:path';
 
 import { type ActivityTables, addBackgroundExport } from '@agentx/core/modules/activity';
 import { SCOPES } from '@agentx/core/modules/agents';
+import { holdOrganisation } from '@agentx/core/modules/audit';
+import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { challengeOf, type OauthTables } from '@agentx/core/modules/oauth';
 // The tamper pass's own drafts (tooling/e2e/tamper.e2e.test.ts), shared: core keeps the draft makers to itself.
 import { tamperIdentityFixtures } from '../../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -50,7 +53,11 @@ import { createHandoff, handoffDatabaseGate } from './handoff.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from './handoff-world.helper.test.ts';
 import { type ApiProcess, runApi } from './main.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { keys, type World } from './mandate-world.helper.test.ts';
+import { keys, type Member, type World } from './mandate-world.helper.test.ts';
+import { CONSENT_CONFIRM_OPERATION, CONSENT_OPERATION, createConnectionConsents } from './connection-consents.ts';
+import { createOauthAuthorizing } from './oauth-authorizing.ts';
+import { createOauthClients } from './oauth-clients.ts';
+import { capabilitiesOf } from './oauth-wire.ts';
 import { createRailHealth } from './rail-health.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
@@ -60,12 +67,15 @@ import { worded } from './statement-words.helper.test.ts';
 const server = inject('postgres');
 let database: TestDatabase;
 /** With the access log's own tables, which a background export's rows sit beside. */
-let app: Database<HandoffWorldTables & ActivityTables>;
+let app: Database<HandoffWorldTables & ActivityTables & OauthTables>;
 let operator: Database<HandoffWorldTables>;
 let api: FastifyInstance | undefined;
 let keyFolder: string;
+/** What the API writes: a server failure's own line is shown with the answer that failed. */
+const apiLog = new LogCapture();
 
 const ORIGIN = 'https://app.agentx.example';
+const CORRELATION = '0199a0f0-0000-7000-8000-000000005208';
 const ids = new SequentialIds(0x5206_0800_0000);
 let clock: FixedClock;
 let registry: MandateRegistry;
@@ -94,6 +104,8 @@ interface Operation {
   readonly route: string;
   readonly access: readonly string[];
   readonly body?: Schema;
+  /** Its query's parameters, by name, with their schemas. */
+  readonly query: Readonly<Record<string, Schema>>;
 }
 
 interface Schema {
@@ -114,6 +126,8 @@ interface Theirs {
   readonly member: string;
   readonly mandate: string;
   readonly keyId: string;
+  /** An MCP connection A's admin made for A's agent: its key's ID, as the connection routes name it. */
+  readonly connection: string;
   readonly request: string;
   readonly payment: string;
   readonly registration: string;
@@ -124,6 +138,8 @@ interface Theirs {
   readonly identity: { readonly invitation: string; readonly contact: string; readonly reset: string };
   /** A's own admin's headers: the own-ID control, which proves each ID real. */
   readonly admin: Readonly<Record<string, string>>;
+  /** A's own admin as a person: an actor in A's audit and access logs. */
+  readonly adminUser: string;
 }
 
 /** Organisation B's own: its admin and agent, as each sends, and records its bodies name. */
@@ -174,6 +190,12 @@ const NOT_FOUND_AS: Readonly<Record<string, { readonly status: number; readonly 
     },
   };
 
+/** The writes that answer even A's own admin not-found with A's IDs, each with its reason: none of theirs proven so. */
+const NOT_FOUND_FOR_A: Readonly<Record<string, string>> = {
+  '/v1/access-log/background-exports/{id}/files/{month}/downloads':
+    'No file of the export is built in this test, so none is ready to download; the export itself is proven by A’s own GET of /v1/access-log/background-exports/{id}.',
+};
+
 /** Organisation A's ID for each path parameter of a route, by the first prefix the route starts with. */
 function theirIds(route: string): Readonly<Record<string, string>> | undefined {
   const t = theirs;
@@ -183,6 +205,8 @@ function theirIds(route: string): Readonly<Record<string, string>> | undefined {
     ['/v1/agent/spend-requests/', { id: t.request }],
     ['/v1/spend-requests/', { id: t.request }],
     ['/v1/payments/', { id: t.payment }],
+    // A connection's key before any agent key: the connection routes name their own kind.
+    ['/v1/agents/{id}/connections/', { id: t.world.agent, keyId: t.connection }],
     ['/v1/agents/', { id: t.world.agent, keyId: t.keyId }],
     ['/v1/funding-sources/link-sessions/', { linkId: t.link }],
     ['/v1/funding-sources/', { id: t.world.source }],
@@ -276,12 +300,114 @@ type Reference = (typeof REFERENCES)[number];
 const BODY_EXEMPT: Readonly<Record<string, string>> = {
   stepUpChallengeId:
     'A step-up challenge is found only as the caller’s own session’s: another’s is refused as none is (step-up-challenges, the role matrix).',
-  investigationId:
-    'An investigation exists only while its own organisation is held, and is read in the caller’s organisation alone (integrity-hold.ts); A is not held here.',
   versionId:
     'A mandate’s draft is accepted only as its own mandate’s pending version, read with the path’s mandate (mandate-acceptance), which the path sweep covers.',
   accountId: 'An account at the fake bank, not a record of an organisation’s: its sessions are swept by path.',
 };
+
+/** Body fields swept by a test of their own: an investigation exists only while its organisation is held. */
+const SWEPT_APART: readonly string[] = ['investigationId'];
+
+/**
+ * The query parameters naming a record (by name or as a UUID): each a filter over the caller's own organisation's
+ * records, or a page's cursor among them. Swept with A's IDs below, unless named here with its reason.
+ */
+const QUERY_EXEMPT: Readonly<Record<string, string>> = {
+  challenge:
+    'A step-up challenge is found only as the caller’s own session’s: another’s is refused as none is (step-up-challenges, sign-in-flow.db.test.ts).',
+  client_id:
+    'A registered MCP client is no organisation’s (OAuth dynamic registration is public); its flows are the browser’s own (EXEMPT).',
+};
+
+/** Whether a query parameter names a record: an ID by its name, or a UUID by its schema. */
+const namesRecord = (name: string, schema: Schema): boolean => /(Id|_id)$/.test(name) || schema.format === 'uuid';
+
+/** A's ID for a query parameter: the filter's person or subject, or a cursor's record of the list's own kind. */
+function theirQueryValue(route: string, name: string): Readonly<Record<string, string>> | undefined {
+  const t = theirs;
+  if (name === 'actorId') return { actorType: 'user', actorId: t.adminUser };
+  if (name === 'subjectId') return { subjectType: 'mandate', subjectId: t.mandate };
+  const cursors: readonly (readonly [string, string])[] = [
+    ['/v1/spend-requests', t.request],
+    ['/v1/approvals', t.request],
+    ['/v1/payments', t.payment],
+    ['/v1/agents', t.world.agent],
+    ['/v1/agent/funding-sources', t.world.source],
+    ['/v1/funding-sources', t.world.source],
+    ['/v1/agent/suppliers', t.world.suppliers[0] ?? ''],
+    ['/v1/suppliers', t.world.suppliers[0] ?? ''],
+    ['/v1/mandates', t.mandate],
+    ['/v1/access-log/background-exports', t.exportId],
+  ];
+  const cursor = cursors.find(([prefix]) => route === prefix || route.startsWith(`${prefix}/`))?.[1];
+  return cursor === undefined ? undefined : { [name]: cursor };
+}
+
+/** Every ID of A's this file holds: none may appear in an answer to B. */
+const everyIdOfTheirs = (): string[] => [
+  theirs.world.org,
+  theirs.world.agent,
+  theirs.world.source,
+  ...theirs.world.suppliers,
+  theirs.member,
+  theirs.adminUser,
+  theirs.mandate,
+  theirs.keyId,
+  theirs.request,
+  theirs.payment,
+  theirs.registration,
+  theirs.link,
+  theirs.exportId,
+  ...Object.values(theirs.identity),
+];
+
+/** Every operation and query parameter naming a record, but those exempted with their reason. */
+const queryCases = () =>
+  operations.flatMap((op) =>
+    Object.entries(op.query)
+      .filter(([name, schema]) => namesRecord(name, schema) && QUERY_EXEMPT[name] === undefined)
+      .map(([name]) => ({ op, name })),
+  );
+
+/** An answer's body without its correlation ID, which every answer has its own of. */
+const withoutCorrelation = (body: string): string => body.replaceAll(/"correlationId":"[^"]*"/g, '');
+
+/**
+ * One query parameter sent by B with A's ID and with a made-up one: what was wrong (A's shown, a server failure, the
+ * two answered apart), and for a filter the address A's own admin then reads it at, as the control.
+ */
+async function queryChecked(op: Operation, name: string) {
+  const asked = theirQueryValue(op.route, name) ?? {};
+  // A log's window, where it takes one: the last day, holding every row of this file's.
+  const window =
+    op.query.from === undefined
+      ? {}
+      : { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date().toISOString() };
+  const url = (values: Readonly<Record<string, string>>) =>
+    `${op.route}?${new URLSearchParams({ ...window, ...values }).toString()}`;
+  const caller = callerOf(op);
+  const real = await send(caller, op.method, url(asked));
+  const absent = await send(caller, op.method, url({ ...asked, [name]: randomUUID() }));
+  const label = `${op.method} ${op.route}?${name}`;
+  const wrong: string[] = [];
+  const shown = everyIdOfTheirs().filter((id) => real.body.includes(id));
+  if (shown.length > 0) wrong.push(`${label}: shows A's ${shown.join(', ')}`);
+  if (real.statusCode >= 500 || real.statusCode !== absent.statusCode) {
+    const failed = apiLog
+      .lines()
+      .filter((line) => line.level === 'error')
+      .map((line) => [line.event, line.err]);
+    wrong.push(
+      `${label}: A's ${String(real.statusCode)}, absent ${String(absent.statusCode)} ${JSON.stringify(failed)}`,
+    );
+  }
+  // A filter, unlike a cursor (whose page starts where its ID sorts), answers exactly as a made-up one.
+  const filter = name.endsWith('Id');
+  if (filter && withoutCorrelation(real.body) !== withoutCorrelation(absent.body)) {
+    wrong.push(`${label}: A's filter answered otherwise than a made-up one`);
+  }
+  return { wrong, control: filter ? url(asked) : undefined };
+}
 
 /** B's own ID for each path parameter of a route whose body is swept. */
 function ourIds(route: string): Readonly<Record<string, string>> {
@@ -327,6 +453,64 @@ function summaryOf(response: LightMyRequestResponse) {
   };
   const decided = decidedOf();
   return { status, code, decision: decided.decision, reasons: decided.reasons?.map((reason) => reason.code) };
+}
+
+/**
+ * An MCP connection `owner` makes for the agent, as the consent's use cases make one (oauth-connections.db.test.ts): a
+ * client registered, its flow opened, the consent asked, stepped up and confirmed. Its key's ID.
+ */
+async function connectionOf(owner: Member, agentId: string): Promise<string> {
+  const logger = testLogger();
+  const capabilities = capabilitiesOf(ORIGIN);
+  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  const authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
+  const consents = createConnectionConsents({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock, keys, logger }),
+    logger,
+    issuer: capabilities.issuer,
+    clients,
+  });
+  const redirect = 'https://chatgpt.com/connector/oauth/cb';
+  const registered = await authorizing.register(
+    { redirect_uris: [redirect], client_name: 'ChatGPT' },
+    CORRELATION,
+    '192.0.2.81',
+  );
+  if (registered.outcome !== 'registered') throw new Error(`not registered: ${registered.outcome}`);
+  const flow = await authorizing.authorize(
+    {
+      response_type: 'code',
+      client_id: registered.client.clientId,
+      redirect_uri: redirect,
+      state: 'sweep',
+      code_challenge: challengeOf('v'.repeat(43)),
+      code_challenge_method: 'S256',
+      resource: capabilities.resource,
+      scope: 'requests:write',
+    },
+    undefined,
+    '192.0.2.82',
+  );
+  if (flow.outcome !== 'opened') throw new Error(`not opened: ${flow.outcome}`);
+  const opened = { flowId: flow.flowId, cookie: flow.cookie };
+  const asked = { agentId, scopes: ['requests:write' as const] };
+  const consent = await consents.consent(owner, spend.keyed(owner, CONSENT_OPERATION), opened, asked, CORRELATION);
+  if (consent.outcome !== 'asked') throw new Error(`not asked: ${consent.outcome}`);
+  await spend.stepUp(owner, consent.stepUpChallengeId);
+  const confirmed = await consents.confirm(
+    owner,
+    spend.keyed(owner, CONSENT_CONFIRM_OPERATION),
+    opened,
+    asked,
+    consent.stepUpChallengeId,
+    CORRELATION,
+  );
+  if (confirmed.outcome !== 'connected') throw new Error(`not connected: ${confirmed.outcome}`);
+  return confirmed.connection.keyId;
 }
 
 let keysUsed = 0;
@@ -393,7 +577,7 @@ const withPathIds = () => operations.filter(({ route }) => route.includes('{'));
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<HandoffWorldTables & ActivityTables>(
+  app = createDatabase<HandoffWorldTables & ActivityTables & OauthTables>(
     { ...database.connection('app'), maxConnections: 6 },
     testLogger(),
   );
@@ -408,7 +592,6 @@ beforeAll(async () => {
     writeFileSync(path.join(keyFolder, `key-${purpose}-v1`), `${material}\n`);
   }
   const connection = database.connection('app');
-  const startLog = new LogCapture();
   const started = await runApi(new FakeProcess(), {
     env: {
       AGENTX_ENV: 'test',
@@ -434,9 +617,9 @@ beforeAll(async () => {
       AGENTX_RATE_LIMIT_PER_ORGANISATION_PER_MINUTE: '50000',
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: '100000',
     },
-    destination: startLog,
+    destination: apiLog,
   });
-  if (started === undefined) throw new Error(`the API did not start: ${JSON.stringify(startLog.lines().at(-1))}`);
+  if (started === undefined) throw new Error(`the API did not start: ${JSON.stringify(apiLog.lines().at(-1))}`);
   api = started;
   const paths = started.swagger().paths ?? {};
   operations = Object.entries(paths).flatMap(([route, item]) =>
@@ -445,11 +628,15 @@ beforeAll(async () => {
       .map(([method, operation]) => {
         const body = (operation.requestBody as { content?: Record<string, { schema?: Schema }> } | undefined)
           ?.content?.['application/json']?.schema;
+        const parameters = (operation.parameters ?? []) as { in: string; name: string; schema?: Schema }[];
         return {
           method: method.toUpperCase(),
           route,
           access: operation['x-access'] as string[],
           ...(body !== undefined && { body }),
+          query: Object.fromEntries(
+            parameters.filter((one) => one.in === 'query').map((one) => [one.name, one.schema ?? {}]),
+          ),
         };
       }),
   );
@@ -528,6 +715,7 @@ beforeAll(async () => {
     member: other.membershipId,
     mandate: await spend.mandateIdOf(a),
     keyId: acting.keyId,
+    connection: await connectionOf(aAdmin, a.agent),
     request: waiting.id,
     payment: made.transaction.id,
     registration,
@@ -537,6 +725,7 @@ beforeAll(async () => {
     month,
     identity,
     admin: aHeaders,
+    adminUser: aAdmin.userId,
   };
 
   // Organisation B: its own admin and agent, a mandate in force, and an agent with none, for its bodies to name.
@@ -622,6 +811,73 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
     expect(await theirRows()).toEqual(before);
   }, 120_000);
 
+  it('sweeps every body field naming a record, or names why not', () => {
+    const named = operations.flatMap((op) =>
+      Object.keys(op.body?.properties ?? {})
+        .filter((field) => /Ids?$/.test(field) || field === 'owner')
+        .filter(
+          (field) =>
+            !(REFERENCES as readonly string[]).includes(field) &&
+            !SWEPT_APART.includes(field) &&
+            BODY_EXEMPT[field] === undefined,
+        )
+        .map((field) => `${op.method} ${op.route}: ${field}`),
+    );
+    expect(named).toEqual([]);
+  });
+
+  it('sweeps every query parameter naming a record, or names why not', () => {
+    const unswept = queryCases()
+      .filter(({ op, name }) => theirQueryValue(op.route, name) === undefined)
+      .map(({ op, name }) => `${op.method} ${op.route}?${name}`);
+    expect(unswept).toEqual([]);
+    // Never vacuous: the logs' filters and the lists' cursors.
+    expect(queryCases().length).toBeGreaterThan(10);
+  });
+
+  it('answers a query naming A’s person, subject or record as one naming none, showing B nothing of A’s', async () => {
+    const before = await theirRows();
+    const wrong: string[] = [];
+    const controls: { readonly method: string; readonly url: string }[] = [];
+    for (const { op, name } of queryCases()) {
+      const checked = await queryChecked(op, name);
+      wrong.push(...checked.wrong);
+      if (checked.control !== undefined) controls.push({ method: op.method, url: checked.control });
+    }
+    expect(wrong).toEqual([]);
+    expect(await theirRows()).toEqual(before);
+    // The control, after the check (A's own reads are logged in A's access log): A's own admin, filtering on the same,
+    // finds A's own rows. Never vacuous: the audit log's person and subject, and the access log's person.
+    let foundByA = 0;
+    for (const { method, url } of controls) {
+      const own = await send(theirs.admin, method, url);
+      if (own.statusCode === 200 && everyIdOfTheirs().some((id) => own.body.includes(id))) foundByA += 1;
+    }
+    expect(foundByA).toBeGreaterThanOrEqual(3);
+  }, 120_000);
+
+  // After the sweep, as it changes A's records (a cancel, a decline, a suspension): a write's ID read by no GET (an
+  // invitation, a contact, a reset, a key, a registration, a link, a bank session) is proven real by A's own admin
+  // being answered anything but not-found with it, so B's not-found above is for the organisation alone.
+  it('proves each write’s IDs of A’s real: A’s own admin is never answered not-found', async () => {
+    const wrong: string[] = [];
+    const sent: string[] = [];
+    const writes = withPathIds().filter(
+      ({ method, route, access }) => method !== 'GET' && EXEMPT[route] === undefined && access.includes('admin'),
+    );
+    for (const op of writes) {
+      const answer = answerOf(
+        await send(theirs.admin, op.method, filled(op.route, theirIds(op.route) ?? {}), sample(op.body ?? {})),
+      );
+      sent.push(op.route);
+      if (answer.status === 404 && NOT_FOUND_FOR_A[op.route] === undefined) {
+        wrong.push(`${op.method} ${op.route}: ${JSON.stringify(answer)}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(sent.length).toBeGreaterThan(60);
+  }, 120_000);
+
   it('answers a body naming A’s agent, funding source, suppliers or member exactly as one naming none, and changes nothing of A’s', async () => {
     const before = await theirRows();
     const cases = referenceCases();
@@ -645,13 +901,61 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
     expect(await theirRows()).toEqual(before);
   }, 120_000);
 
-  it('sweeps every body field naming a record, or names why not', () => {
-    const named = operations.flatMap((op) =>
-      Object.keys(op.body?.properties ?? {})
-        .filter((field) => /Ids?$/.test(field) || field === 'owner')
-        .filter((field) => !(REFERENCES as readonly string[]).includes(field) && BODY_EXEMPT[field] === undefined)
-        .map((field) => `${op.method} ${op.route}: ${field}`),
-    );
-    expect(named).toEqual([]);
+  // A bug the sweep found (S206 V8): an agent's ask naming a supplier its organisation doesn't have is recorded as
+  // DENIED, as asks are, but the organisation's request list then fails (500: suppliersNamed throws for a supplier a
+  // row names that is missing). Marked as failing until it is fixed, so the fix flips it; the body sweep below makes
+  // such asks, so the lists are swept above it.
+  it.fails('lists an organisation’s requests after its agent asked to pay a supplier it doesn’t have', async () => {
+    const asked = await send(ours.agent, 'POST', '/v1/spend-requests', {
+      ...(sample(
+        operations.find(({ method, route }) => method === 'POST' && route === '/v1/spend-requests')?.body ?? {},
+      ) as object),
+      supplierId: randomUUID(),
+    });
+    expect(asked.statusCode, asked.body).toBeLessThan(500);
+    const listed = await send(ours.admin, 'GET', '/v1/spend-requests');
+    expect(listed.statusCode, listed.body).toBe(200);
+  });
+
+  // Last: it puts both organisations on hold, which stops their other work.
+  it('refuses B to clear its hold by an investigation of A’s, as by one never recorded, showing nothing of A’s', async () => {
+    const quiet = { keys, ids, logger: testLogger() };
+    await holdOrganisation(app, theirs.world.org, quiet, 'test');
+    await holdOrganisation(app, ours.world.org, quiet, 'test');
+    const investigated = async (headers: Readonly<Record<string, string>>) => {
+      const recorded = await send(headers, 'POST', '/v1/integrity-hold/investigations', {
+        conclusion: 'NO_TAMPERING',
+        reference: 'INC-S206-V8',
+      });
+      expect(recorded.statusCode, recorded.body).toBe(201);
+      return (JSON.parse(recorded.body) as { investigation: { id: string } }).investigation.id;
+    };
+    const theirInvestigation = await investigated(theirs.admin);
+    const ourInvestigation = await investigated(ours.admin);
+    const before = await theirRows();
+
+    // The control: B's own investigation is taken, so each refusal below is for the ID alone.
+    const own = await send(ours.admin, 'POST', '/v1/integrity-hold/clear', { investigationId: ourInvestigation });
+    expect(own.statusCode, own.body).toBe(202);
+    const wrong: string[] = [];
+    for (const route of ['/v1/integrity-hold/clear', '/v1/integrity-hold/clear/confirm']) {
+      const asked = async (investigationId: string) =>
+        answerOf(
+          await send(ours.admin, 'POST', route, {
+            investigationId,
+            ...(route.endsWith('/confirm') && { stepUpChallengeId: randomUUID() }),
+          }),
+        );
+      const real = await asked(theirInvestigation);
+      const absent = await asked(randomUUID());
+      if (JSON.stringify(real) !== JSON.stringify(absent) || real.status < 400 || real.status >= 500) {
+        wrong.push(`${route}: A's ${JSON.stringify(real)}, absent ${JSON.stringify(absent)}`);
+      }
+    }
+    const shown = await send(ours.admin, 'GET', '/v1/integrity-hold');
+    expect(shown.statusCode).toBe(200);
+    expect([theirInvestigation, ...everyIdOfTheirs()].filter((id) => shown.body.includes(id))).toEqual([]);
+    expect(wrong).toEqual([]);
+    expect(await theirRows()).toEqual(before);
   });
 });
