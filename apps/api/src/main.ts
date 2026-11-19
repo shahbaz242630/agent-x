@@ -24,7 +24,8 @@ import {
 import { HEARTBEAT_STALE_MS } from './handoff.ts';
 import { type HealthCheck, heartbeatChecks, sharedHeartbeat } from './health.ts';
 import { eachProcessJobs, oneCopyJobs } from './job-list.ts';
-import { sealLegacyNotices } from './notice-legacy.ts';
+import { anchorLogOf } from './anchor-store.ts';
+import { platformAnchorsOf, sealLegacyNotices } from './notice-legacy.ts';
 import { keepAlive, startJobs } from './start-jobs.ts';
 import { startWeb } from './start-web.ts';
 
@@ -129,7 +130,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // S206 V4: the notices from before seals sealed in the background, once it answers: off the start's own path, so a
   // long chain check never holds the start up; until then they wait unclaimed. It never throws.
   // TODO(S206 V4): delete with sealLegacyNotices once NOTICE_SEAL_BACKFILL_UNTIL has passed (Outstanding-Work AT10).
-  if (!stopping() && role !== 'jobs') started.sealing = sealLegacyNotices(booted, { now: systemClock.now() });
+  if (!stopping() && role !== 'jobs') {
+    const log = anchorLogOf(booted.config, {
+      keys: booted.keys,
+      logger: booted.logger,
+      clock: systemClock,
+      alertAfterMs: booted.config.audit.anchorSeconds * 3 * 1000,
+    });
+    started.sealing = sealLegacyNotices(booted, {
+      now: systemClock.now(),
+      anchors: log && platformAnchorsOf(log, booted.keys, systemClock),
+    });
+  }
   return started.server;
 }
 

@@ -1131,6 +1131,12 @@ export const PLAIN_WORDS = {
     broke: 'Those notices wait unsent; the API itself carries on as usual.',
     next: 'The next start tries again. Any still unsent a day on raises the alarm.',
   },
+  'notification.legacy_seal_no_anchor': {
+    happened:
+      'Old email notices were not sealed: the anchor store held no anchor of the platform chain to check it by.',
+    broke: 'Those notices wait unsent, and the next start tries again.',
+    next: 'Check the anchor store is set and readable. Any still unsent a day on raises the alarm.',
+  },
   'notification.legacy_seal_incomplete': {
     happened: 'At start, some old email notices could not be sealed: an organisation’s records could not be read.',
     broke: 'Those notices wait unsent, and the next start tries again.',

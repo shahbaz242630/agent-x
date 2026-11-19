@@ -2,6 +2,9 @@
 // app's role, the role check refuses the migration role, a wrong login is
 // reported without the login, and a stop closes every connection.
 import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import { type DirectoryTables, registerOrganization } from '@agentx/core/modules/directory';
@@ -314,10 +317,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[0], release: 'local' }),
       },
-      // The first start's pass over the notices from before seals, once ever, with none to seal (S206 V4).
-      { seq: '2', actor_id: 'api', action: 'notice.legacy_sealed', details: JSON.stringify({ notices: 0 }) },
       {
-        seq: '3',
+        seq: '2',
         actor_id: 'api',
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[1], release: 'r-second' }),
@@ -334,7 +335,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
         ok: true,
-        seq: 3n,
+        seq: 2n,
       });
     } finally {
       await reader.destroy();
@@ -655,14 +656,33 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       [id, orgId],
     );
 
-    const run = await start(envFor('app'));
-    expect((await run.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
+    // An anchor store: the pass checks the platform chain by its anchor, which the jobs' first run takes.
+    const env = envFor('app', { AGENTX_AUDIT_ANCHORS_DIR: mkdtempSync(join(tmpdir(), 'v4-anchors-')) });
+    const first = await start(env);
+    expect((await first.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
     await vi.waitFor(() => {
-      expect(run.capture.lines().find((line) => line.event === 'notification.legacy_sealed')).toEqual(
-        expect.objectContaining({ level: 'info', notices: 1 }),
-      );
+      expect(first.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
     });
-    await stop(run);
+    await stop(first);
+    // The first start's pass may have run before its jobs anchored: then it sealed nothing, said so, and the next does.
+    const sealedBy = [first];
+    if (!first.capture.lines().some((line) => line.event === 'notification.legacy_sealed')) {
+      expect(first.capture.lines()).toContainEqual(
+        expect.objectContaining({ event: 'notification.legacy_seal_no_anchor' }),
+      );
+      const second = await start(env);
+      await vi.waitFor(() => {
+        expect(second.capture.lines().find((line) => line.event === 'notification.legacy_sealed')).toBeDefined();
+      });
+      await stop(second);
+      sealedBy.push(second);
+    }
+    expect(
+      sealedBy
+        .at(-1)
+        ?.capture.lines()
+        .find((line) => line.event === 'notification.legacy_sealed'),
+    ).toEqual(expect.objectContaining({ level: 'info', notices: 1 }));
     expect(await admin.query('select id from notifications.outbox where id = $1 and mac is not null', [id])).toEqual([
       { id },
     ]);
@@ -700,9 +720,17 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
-    await stop(await start(envFor('app')));
-    await stop(await start(envFor('app')));
-    await admin.query('delete from platform_controls.audit_events where seq = 1');
+    const env = envFor('app', { AGENTX_AUDIT_ANCHORS_DIR: mkdtempSync(join(tmpdir(), 'v4-anchors-')) });
+    const anchoring = await start(env);
+    await vi.waitFor(() => {
+      expect(anchoring.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
+    });
+    await stop(anchoring);
+    await stop(await start(env));
+    // The first start's record gone, and the pass's own if one ran: a gap behind the chain's anchor.
+    await admin.query('delete from platform_controls.audit_events where seq = 1 or action = $1', [
+      'notice.legacy_sealed',
+    ]);
     const orgId = '0199a0f0-0000-7000-8000-0000000b5206';
     const id = '0199a0f0-0000-7000-8000-0000000b5207';
     await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
@@ -712,7 +740,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       [id, orgId],
     );
     try {
-      const run = await start(envFor('app'));
+      const run = await start(env);
       await vi.waitFor(() => {
         expect(
           run.capture.lines().find((line) => line.event === 'audit.integrity_failed' && line.check === 'start_record'),

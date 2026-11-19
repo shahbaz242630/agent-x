@@ -11,9 +11,14 @@
 // - before NOTICE_SEAL_BACKFILL_UNTIL;
 // - no notice written by this release yet (before_seals false): once the app
 //   has queued one, every notice from before had its chance;
-// - the platform chain checks out whole, from its start to its head, and holds
-//   no `notice.legacy_sealed`: one deleted shows as a gap, and nothing is
-//   sealed, with the integrity alarm (check `start_record`).
+// - the platform chain holds no `notice.legacy_sealed` (read first: a pass
+//   done ends there), and checks out whole, from its start to its head, still
+//   holding its last anchor, read from the anchor store outside the database:
+//   a record of a pass deleted shows as a gap, or, as the chain's newest,
+//   under a head wound back past the anchor taken right after it was written;
+//   a chain wiped fails its anchor. Each seals nothing, with the integrity
+//   alarm (check `start_record`); no anchor to be read seals nothing either,
+//   with a warning (`notification.legacy_seal_no_anchor`).
 // One with a `notice.queued` record was queued sealed: unsealed now, it had
 // its seal taken out, and stays so.
 //
@@ -37,7 +42,8 @@ import {
   tookLegacySealPass,
 } from '@agentx/core/modules/notifications';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type Clock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { type AnchorLog, type AnchorPoint, type CheckedPoint, signAnchor } from '@agentx/platform/audit-chain';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -50,30 +56,63 @@ export const NOTICE_SEAL_BACKFILL_UNTIL = new Date('2026-12-07T00:00:00Z');
 
 type LegacyTables = NotificationsTables & PlatformControlsTables & AuditTables;
 
-/** Whether this pass may seal: `yes`, `no`, or `unbelieved` for a platform chain that fails its whole check. */
-async function maySeal(
-  tx: DatabaseTransaction<LegacyTables>,
-  keys: KeyProvider,
-  now: Date,
-): Promise<'yes' | 'no' | 'unbelieved'> {
-  if (now.getTime() >= NOTICE_SEAL_BACKFILL_UNTIL.getTime()) return 'no';
+/** The platform chain's anchors, as the pass reads and moves them: the anchor log's (`platformAnchorsOf`), a fake in tests. */
+export interface PlatformAnchors {
+  /** The chain's last anchor, from the store read whole; undefined if it can't be read whole, or holds none. */
+  latest(): Promise<AnchorPoint | undefined>;
+  /** Anchors the chain at `point`, signed now, and writes it to the store. Throws if it can't. */
+  anchor(point: CheckedPoint): Promise<void>;
+}
+
+const PLATFORM = { kind: 'platform' } as const;
+
+/**
+ * The anchor log's platform anchors (ADR-012 §2, ANC-1): a write-once store outside the database (Azure blob storage,
+ * version-level immutability; a folder locally), which the API only adds to and the database's owner can't reach.
+ */
+export function platformAnchorsOf(log: AnchorLog, keys: KeyProvider, clock: Clock): PlatformAnchors {
+  const pinned = async <T>(work: () => T | Promise<T>): Promise<T | undefined> => {
+    await log.read();
+    if (log.state() !== 'read') return undefined;
+    const release = await log.pin(PLATFORM);
+    if (release === undefined) return undefined;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  };
+  return {
+    latest: () => pinned(() => log.latest(PLATFORM)),
+    async anchor(point) {
+      const kept = await pinned(() => {
+        log.keep(signAnchor(keys, PLATFORM, point, clock.now(), log.epoch));
+        return true;
+      });
+      if (kept !== true) throw new Error("the anchor store can't be read whole, so nothing is anchored");
+      await log.flush();
+    },
+  };
+}
+
+/** Whether this pass may seal, before any chain is read: `no` past the cutoff, once the app has queued a notice, or once one did. */
+async function mayStillSeal(tx: DatabaseTransaction<LegacyTables>, now: Date): Promise<boolean> {
+  if (now.getTime() >= NOTICE_SEAL_BACKFILL_UNTIL.getTime()) return false;
   const written = await tx
     .selectFrom('notifications.outbox')
     .select('id')
     .where('before_seals', '=', false)
     .limit(1)
     .executeTakeFirst();
-  if (written !== undefined) return 'no';
-  // Whole, in this transaction: a record of it deleted, even the newest under a head wound back to it, is a gap.
-  const report = await createPlatformChain({ keys, ids: uuidV7Ids }).verify(tx, undefined);
-  if (!report.ok) return 'unbelieved';
+  if (written !== undefined) return false;
+  // Its record first, the cheap read: a pass done ends it here, before any chain is checked.
   const before = await tx
     .selectFrom('platform_controls.audit_events')
     .select('seq')
     .where('action', '=', LEGACY_SEALED)
     .limit(1)
     .executeTakeFirst();
-  return before === undefined ? 'yes' : 'no';
+  return before === undefined;
 }
 
 /** Seals the notices from before seals, once ever, as above. Never throws: what went wrong is logged. */
@@ -83,29 +122,47 @@ export async function sealLegacyNotices(
     keys,
     logger,
   }: { readonly database: Database<LegacyTables>; readonly keys: KeyProvider; readonly logger: Logger },
-  { now }: { readonly now: Date },
+  { now, anchors }: { readonly now: Date; readonly anchors: PlatformAnchors | undefined },
 ): Promise<void> {
+  const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   try {
-    await limitedTransaction(database, async (tx) => {
+    if (!(await limitedTransaction(database, (tx) => mayStillSeal(tx, now)))) return;
+    const anchor = await anchors?.latest();
+    if (anchors === undefined || anchor === undefined) {
+      logger.warn('notification.legacy_seal_no_anchor');
+      return;
+    }
+    const sealed = await limitedTransaction(database, async (tx) => {
       // Another replica of the web side has it under way: it is that one's, quietly.
-      if (!(await tookLegacySealPass(tx))) return;
-      const may = await maySeal(tx, keys, now);
-      if (may === 'unbelieved') logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
-      if (may !== 'yes') return;
-      const { sealed, complete } = await sealNoticesFromBefore(tx, database, keys);
-      if (!complete) {
-        logger.warn('notification.legacy_seal_incomplete', { notices: sealed });
-        return;
+      if (!(await tookLegacySealPass(tx))) return undefined;
+      if (!(await mayStillSeal(tx, now))) return undefined;
+      // Whole, in this transaction, and still holding its anchor: a record of the pass deleted, mid-chain or under a
+      // head wound back past the anchor, or the chain wiped, is refused.
+      const report = await platform.verify(tx, anchor);
+      if (!report.ok) {
+        logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
+        return undefined;
+      }
+      const pass = await sealNoticesFromBefore(tx, database, keys);
+      if (!pass.complete) {
+        logger.warn('notification.legacy_seal_incomplete', { notices: pass.sealed });
+        return undefined;
       }
       // Recorded even with none sealed: from then on no start seals anything, whatever is planted later.
       // The platform head's lock last.
-      await createPlatformChain({ keys, ids: uuidV7Ids }).record(tx, {
+      await platform.record(tx, {
         actor: { type: 'system', id: 'api' },
         action: LEGACY_SEALED,
-        details: { notices: sealed },
+        details: { notices: pass.sealed },
       });
-      logger.info('notification.legacy_sealed', { notices: sealed });
+      return pass.sealed;
     });
+    if (sealed === undefined) return;
+    logger.info('notification.legacy_sealed', { notices: sealed });
+    // Anchored at once past its record, as the anchor check would within minutes: deleting it, even as the chain's
+    // newest, is then a chain wound back behind its anchor, which the next pass's check refuses.
+    const reached = await platform.verifyAlone(database, anchor);
+    if (reached.ok) await anchors.anchor(reached);
   } catch (error) {
     logger.warn('notification.legacy_seal_failed', { err: error });
   }

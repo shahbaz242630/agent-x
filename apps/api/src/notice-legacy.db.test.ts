@@ -6,13 +6,14 @@
 // rest. Any notice with no seal after that stays without one (never claimed).
 import type { AuditTables } from '@agentx/core/modules/audit';
 import { createNoticeCheck, type NotificationsTables } from '@agentx/core/modules/notifications';
-import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import type { CheckedPoint } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { LEGACY_SEALED, NOTICE_SEAL_BACKFILL_UNTIL, sealLegacyNotices } from './notice-legacy.ts';
+import { LEGACY_SEALED, NOTICE_SEAL_BACKFILL_UNTIL, type PlatformAnchors, sealLegacyNotices } from './notice-legacy.ts';
 import { recordStart } from './start-record.ts';
 
 const server = inject('postgres');
@@ -56,10 +57,38 @@ const passes = async () =>
       .execute()
   ).map(({ details }) => (JSON.parse(details) as { notices: number }).notices);
 
-/** A start recorded, as boot records it, then the pass, as main.ts runs it after; at `now`, before the cutoff. */
+/** The anchor store, outside the database and out of the owner's reach: here, the platform chain's last anchor kept. */
+let anchored: CheckedPoint | undefined;
+const anchors: PlatformAnchors = {
+  latest: () => Promise.resolve(anchored),
+  anchor: (point) => {
+    anchored = point;
+    return Promise.resolve();
+  },
+};
+
+/** The anchor check's run: the chain checked from its last anchor and anchored at its head. */
+async function anchorCheck(): Promise<void> {
+  const report = await createPlatformChain({ keys, ids }).verifyAlone(app, anchored);
+  if (!report.ok) throw new Error('the platform chain failed its check');
+  anchored = report;
+}
+
+/** The pass, as main.ts runs it once the API answers. */
+const sealed = (now = AT, with_: PlatformAnchors | undefined = anchors) =>
+  sealLegacyNotices({ database: app, keys, logger: testLogger(capture) }, { now, anchors: with_ });
+
+/** A start recorded and the pass, with no anchor check between: as after the owner's change, which it would find. */
+const restarted = async () => {
+  await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+  await sealed();
+};
+
+/** A start recorded, as boot records it, the anchor check's run, then the pass; at `now`, before the cutoff. */
 const startedThenSealed = async (now = AT) => {
   await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
-  await sealLegacyNotices({ database: app, keys, logger: testLogger(capture) }, { now });
+  await anchorCheck();
+  await sealed(now);
 };
 
 const startAlarm = () =>
@@ -79,6 +108,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   capture = new LogCapture();
+  anchored = undefined;
   await database
     .as('admin')
     .query('truncate platform_controls.audit_events, platform_controls.audit_head, notifications.outbox');
@@ -116,14 +146,15 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
       .as('admin')
       .query(`update platform_controls.audit_events set details = '{"notices":0}' where action = $1`, [LEGACY_SEALED]);
     const planted = await unsealed();
-    await startedThenSealed();
+    // Edited, it is there all the same: the pass ends at it (the anchor check finds the edit).
+    await restarted();
+    expect(await sealedOf(planted)).toBe(false);
+
+    // Deleted, a start after it: a gap in the chain checked from its anchor.
+    await database.as('admin').query('delete from platform_controls.audit_events where action = $1', [LEGACY_SEALED]);
+    await restarted();
     expect(await sealedOf(planted)).toBe(false);
     expect(startAlarm()).toHaveLength(1);
-
-    await database.as('admin').query('delete from platform_controls.audit_events where action = $1', [LEGACY_SEALED]);
-    await startedThenSealed();
-    expect(await sealedOf(planted)).toBe(false);
-    expect(startAlarm()).toHaveLength(2);
   });
 
   it('leaves it for the next pass when an organisation’s records can’t be read, which then seals them', async () => {
@@ -165,7 +196,7 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
     const admin = database.as('admin');
     await admin.query('revoke select on platform_controls.audit_head from agentx_app');
     try {
-      await sealLegacyNotices({ database: app, keys, logger: testLogger(capture) }, { now: AT });
+      await sealed();
     } finally {
       await admin.query('grant select on platform_controls.audit_head to agentx_app');
     }
@@ -217,5 +248,71 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
         noticeId: planted,
       }),
     );
+  });
+
+  it('seals nothing, with the alarm, on a platform chain wiped and begun again, a row planted', async () => {
+    await startedThenSealed();
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox where not before_seals');
+    const planted = await unsealed();
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+
+    await sealed();
+    expect(await sealedOf(planted)).toBe(false);
+    expect(startAlarm()).toHaveLength(1);
+  });
+
+  it('anchors at once past its record, so deleting it as the chain’s newest is refused, a row planted', async () => {
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+    await anchorCheck();
+    const admin = database.as('admin');
+    const [head] = await admin.query('select * from platform_controls.audit_head');
+    await sealed();
+    expect(await passes()).toEqual([0]);
+    expect(anchored?.seq).toBe(2n);
+
+    // The record deleted and the head put back as it was before it: no gap, but behind the anchor.
+    await admin.query('delete from platform_controls.audit_events where action = $1', [LEGACY_SEALED]);
+    await admin.query('update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4', [
+      head?.seq,
+      head?.hash,
+      head?.mac,
+      head?.mac_key_version,
+    ]);
+    const planted = await unsealed();
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+
+    await sealed();
+    expect(await sealedOf(planted)).toBe(false);
+    expect(startAlarm()).toHaveLength(1);
+  });
+
+  it('seals nothing, with a warning, with no anchor to check the chain by', async () => {
+    const waiting = await unsealed();
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+    await sealed();
+    await sealed(AT, undefined);
+    expect(await sealedOf(waiting)).toBe(false);
+    expect(capture.lines().filter(({ event }) => event === 'notification.legacy_seal_no_anchor')).toHaveLength(2);
+  });
+
+  it('seals nothing more when another replica finished the pass while this one read its anchor', async () => {
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+    await anchorCheck();
+    let planted: string | undefined;
+    const racing: PlatformAnchors = {
+      ...anchors,
+      // The other replica's whole pass lands between this one's first look and its own transaction; a row planted after.
+      latest: async () => {
+        await sealed();
+        planted = await unsealed();
+        return anchored;
+      },
+    };
+
+    await sealed(AT, racing);
+    expect(await passes()).toEqual([0]);
+    expect(await sealedOf(planted ?? '')).toBe(false);
   });
 });
