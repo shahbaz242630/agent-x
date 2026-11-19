@@ -62,7 +62,7 @@ import {
   verifyImage,
 } from '../image/verify.ts';
 import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
-import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/settings.ts';
+import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/machine-id-header.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */

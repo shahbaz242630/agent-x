@@ -23,6 +23,7 @@ import {
   type LogLevel,
 } from './common.ts';
 import { readLoginIds } from './login-ids.ts';
+import { MACHINE_ID_HEADER } from './machine-id-header.ts';
 import { databaseHost, hostName, identifier, text, tlsMode, wholeNumber } from './primitives.ts';
 import { refusedProxyEntries } from './proxies.ts';
 
@@ -144,13 +145,6 @@ export const loginIdList = text.transform((raw, ctx): readonly string[] | undefi
   ctx.addIssue({ code: 'custom', message: read.problem });
   return z.NEVER;
 });
-
-/**
- * AG10: the header Zitadel's processes ask for their machine IDs with. Its webhook can send static headers but
- * signs nothing (`Machine.Identification.Webhook` in the pinned image's defaults: Url, JPath, Headers), so a shared
- * value is the most it can prove.
- */
-export const MACHINE_ID_HEADER = 'X-Agentx-Machine-Key';
 
 const MACHINE_ID_VALUE = /^[0-9a-f]{64}$/;
 
