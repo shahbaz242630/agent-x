@@ -13,7 +13,10 @@
 // The other (Phase 4 C2b, 0062): the email telling a paid supplier, someone
 // outside the organisation, carries the payment's own facts, read at send
 // time: who paid, the invoice number, the bank reference and the amount
-// (partner decisions 8 and 34a). Nothing else, and no ID of ours.
+// (partner decisions 8 and 34a). Nothing else, and no ID of ours. The invoice
+// number is the agent's order reference, shown only when it is invoice-shaped;
+// otherwise the bank reference stands in its place, itself shown only when
+// invoice-shaped, else the supplier is pointed to its bank statement (AG11).
 //
 // And one more (0087, OR2; partner S186): our team's reset of a person's
 // second factor names the person by the name Agent X keeps and their address
@@ -35,6 +38,7 @@ import {
   RESET_LINK_KIND,
   SUPPORT_RESET_KIND,
 } from './notice.ts';
+import { invoiceShaped, type RemittanceReference } from './invoice-shape.ts';
 
 /** An email as the notifier sends it. */
 export interface NoticeMessage {
@@ -115,7 +119,8 @@ function personLine(id: string, person: ResetPerson | undefined): string {
  */
 export interface PaidRemittance {
   readonly payerName: string;
-  readonly invoiceNumber: string;
+  /** The agent's own text: shown as the invoice number only when invoice-shaped (`referenceShown`). */
+  readonly orderReference: string;
   readonly bankReference: string;
   readonly amountMinor: bigint;
   readonly currency: string;
@@ -590,10 +595,30 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
 }
 
 /**
+ * Which reference names the payment in the supplier's email (AG11): the order
+ * reference when invoice-shaped, else the bank reference when it is (it is
+ * made from the order reference, and the rail carries `: / . ?` as typed),
+ * else neither, withheld.
+ */
+export function referenceShown(paid: PaidRemittance): RemittanceReference {
+  if (invoiceShaped(paid.orderReference)) return 'order_reference';
+  return invoiceShaped(paid.bankReference) ? 'payment_reference' : 'withheld';
+}
+
+/**
  * The email telling a supplier it was paid (Phase 4 C2b): the payment's four
  * facts alone, plain text, no link; never the organisation's or anyone's ID.
+ * An order or bank reference that isn't invoice-shaped is never shown: the
+ * supplier is pointed to its bank statement in its place (AG11).
  */
 function remittanceMessage(notice: ClaimedNotice, to: string, paid: PaidRemittance): NoticeMessage {
+  const bankReference = invoiceShaped(paid.bankReference)
+    ? `${paid.bankReference} (as your bank shows it)`
+    : 'as shown on your bank statement';
+  const references =
+    referenceShown(paid) === 'order_reference'
+      ? [`Invoice number: ${paid.orderReference}`, `Bank reference: ${bankReference}`]
+      : [`Payment reference: ${bankReference}`];
   return {
     id: notice.id,
     to,
@@ -602,8 +627,7 @@ function remittanceMessage(notice: ClaimedNotice, to: string, paid: PaidRemittan
       `${paid.payerName} sent you a payment through Agent X.`,
       '',
       `Amount: ${amountText(paid.amountMinor, paid.currency)}`,
-      `Invoice number: ${paid.invoiceNumber}`,
-      `Bank reference: ${paid.bankReference} (as your bank shows it)`,
+      ...references,
       '',
       `If you didn't expect this payment, contact ${paid.payerName} by a way you already trust, never by replying to this email.`,
       '',
