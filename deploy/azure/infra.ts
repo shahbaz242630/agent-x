@@ -56,6 +56,7 @@ import {
 } from './deploy.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { checkGrants } from './grants.ts';
+import { pinnedZitadelImage } from './zitadel-upgrade.ts';
 import {
   azureRefusal,
   behindRecords,
@@ -127,12 +128,16 @@ const zitadelImage = (value: unknown): boolean =>
 const SETUP_JOB = /\/jobs\/job-agentx-[a-z]+-zitadel-setup$/i;
 
 /**
- * AZ29: a Zitadel image moving on the setup job alone, from one of Zitadel's to another. apps puts it there and runs
- * the setup before it sends the deployment, so the plan, made before, shows it and the deploy's what-if, after, can't:
- * dropped from both, so the two match. The Zitadel and login apps' own move stays what the partner approves.
+ * AZ29: a Zitadel image moving on the setup job alone, from one of Zitadel's to the very one apps pins. apps puts it
+ * there and runs the setup before it sends the deployment, so the plan, made before, shows it and the deploy's
+ * what-if, after, can't: dropped from both, so the two match. Any other image there counts, and the Zitadel and login
+ * apps' own move stays what the partner approves.
  */
 const movedBySetupFirst = (resource: string, leaf: Leaf): boolean =>
-  SETUP_JOB.test(resource) && IMAGE_PATH.test(leaf.path) && zitadelImage(leaf.before) && zitadelImage(leaf.after);
+  SETUP_JOB.test(resource) &&
+  IMAGE_PATH.test(leaf.path) &&
+  zitadelImage(leaf.before) &&
+  leaf.after === pinnedZitadelImage();
 
 const absentOr = (value: unknown, test: (value: unknown) => boolean): boolean =>
   value === undefined || value === null || test(value);

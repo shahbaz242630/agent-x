@@ -2790,10 +2790,32 @@ async function zitadelMoves(
   const to = await steps.zitadel.pinned();
   const from = await steps.zitadel.running(subscription);
   if (from === undefined || from === to) return undefined;
+  const problem = zitadelBackwards(from, to);
+  if (problem !== undefined) throw new Error(problem);
   steps.terminal.say(
     `Zitadel moves from ${from} to ${to}: its setup job runs the new version first, and the apps roll only once it has succeeded.`,
   );
   return { from, to };
+}
+
+/** A Zitadel image's version (`:v4.20.3@`), as numbers to compare, or undefined for a tag that isn't one. */
+const zitadelVersionOf = (image: string): readonly number[] | undefined =>
+  /:v(\d+)\.(\d+)\.(\d+)@sha256:/.exec(image)?.slice(1).map(Number);
+
+/**
+ * AZ29: why Zitadel can't move from `from` to `to`, or nothing: a version older than the one running (its setup has
+ * already moved the database on, and an older `start` on it is a roll-back Zitadel doesn't offer), or either version
+ * unreadable, so which way it moves can't be told. Each is a person's call, never the tool's.
+ */
+function zitadelBackwards(from: string, to: string): string | undefined {
+  const [was, will] = [zitadelVersionOf(from), zitadelVersionOf(to)];
+  const name = (image: string): string => /:(v[^@]+)@/.exec(image)?.[1] ?? image;
+  if (was === undefined || will === undefined) {
+    return `Zitadel's versions (${name(from)} running, ${name(to)} pinned) can't be told apart as older or newer, so its setup wasn't run: pin a released version (vX.Y.Z) in staging.apps.bicepparam. Nothing was run or deployed.`;
+  }
+  const index = will.findIndex((part, at) => part !== was[at]);
+  if (index === -1 || (will[index] ?? 0) > (was[index] ?? 0)) return undefined;
+  return `The pinned Zitadel ${name(to)} is older than ${name(from)}, which Zitadel runs: its setup has moved the database on, and Zitadel offers no way back, so neither its setup nor the apps were sent. Pin ${name(from)} or newer in staging.apps.bicepparam; a real roll-back is a restore (playbook L). Nothing was run or deployed.`;
 }
 
 /**

@@ -14,6 +14,29 @@ import { GRANTS } from './policy.ts';
 /** The one role a grant of ours gives (built in, the same ID in every tenant). */
 const VAULT_READ_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
 
+/**
+ * Key Vault's built-in roles that reach its data or who may (Microsoft's list of built-in roles, read 19 Nov 2026):
+ * each, given above the vault, reaches every secret, key or certificate in it. Its Reader and Contributor, and the
+ * rest of Azure's, read or change no secret. Each as a pair, ID first (the secret scanner reads a role's name beside
+ * the next line's ID as a key).
+ */
+const DATA_ROLES: ReadonlyMap<string, string> = new Map([
+  [VAULT_READ_ROLE, 'Key Vault Secrets User'],
+  ['b86a8fe4-44ce-4948-aee5-eccb2c155cd7', 'Key Vault Secrets Officer'],
+  ['00482a5a-887f-4fb3-b363-3b7fe8e74483', 'Key Vault Administrator'],
+  ['8b54135c-b56d-4d72-a534-26097cfdc8d8', 'Key Vault Data Access Administrator'],
+  ['14b46e9e-c2b7-41b4-b07b-48a6ebf60603', 'Key Vault Crypto Officer'],
+  ['12338af0-0e69-4776-bea7-57ae8d297424', 'Key Vault Crypto User'],
+  ['e147488a-f6f5-4113-8e2d-b22465e65bf6', 'Key Vault Crypto Service Encryption User'],
+  ['08bbd89e-9f13-488c-ac41-acfcb10c90ab', 'Key Vault Crypto Service Release User'],
+  ['a4417e6f-fecd-4de8-b567-7b0420556985', 'Key Vault Certificates Officer'],
+  ['db79e9a7-68ee-4b58-9aeb-b90e7c24fcba', 'Key Vault Certificate User'],
+]);
+
+/** A role assignment's role by its name, where it is one of Key Vault's data roles; undefined otherwise. */
+const dataRoleOf = (roleDefinitionId: string): string | undefined =>
+  DATA_ROLES.get(roleDefinitionId.toLowerCase().split('/').at(-1) ?? '');
+
 /** The role assignments API this reads with. */
 const ASSIGNMENTS_API = '2022-04-01';
 
@@ -70,7 +93,7 @@ export function readLiveGrants(az: Az, subscription: string): LiveGrants {
       identities.set(text(identity.principalId), workload);
   }
   // With no filter, Resource Manager lists the assignments at, above and below the scope (Microsoft): those above
-  // are dropped by scope in grantLines.
+  // count in grantLines only where their role reaches the vault's data.
   const assignments = armList(
     { az },
     `${ARM}${vault.slice(1)}/providers/Microsoft.Authorization/roleAssignments?api-version=${ASSIGNMENTS_API}`,
@@ -87,26 +110,33 @@ export function readLiveGrants(az: Az, subscription: string): LiveGrants {
 }
 
 /**
- * Each assignment at the vault or under it, as a line: "<workload> reads <secret>" for Key Vault Secrets User on one
- * secret given to one of our identities, the form GRANTS takes; anything else said as what it is, in names alone.
+ * Each assignment that reaches the vault's data, as a line: "<workload> reads <secret>" for Key Vault Secrets User on
+ * one secret given to one of our identities, the form GRANTS takes; anything else at the vault or under it, and any of
+ * Key Vault's data roles above it (its resource group or subscription), said as what it is, in names alone.
  */
 export function grantLines({ vault, assignments, identities }: LiveGrants): string[] {
-  const under = `${vault.toLowerCase()}/`;
-  return assignments
-    .filter((each) => each.scope.toLowerCase() === vault.toLowerCase() || each.scope.toLowerCase().startsWith(under))
-    .map((each) => {
-      const who = identities.get(each.principalId) ?? 'an identity not of this deployment';
-      const secret = each.scope.toLowerCase().startsWith(`${under}secrets/`)
-        ? each.scope.slice(under.length + 'secrets/'.length)
-        : undefined;
-      const role = each.roleDefinitionId.toLowerCase().endsWith(`/${VAULT_READ_ROLE}`)
-        ? 'Key Vault Secrets User'
-        : 'another role';
-      if (secret === undefined) return `${who} holds ${role} on the whole vault`;
-      return role === 'Key Vault Secrets User' && identities.has(each.principalId)
+  const at = vault.toLowerCase();
+  const under = `${at}/`;
+  return assignments.flatMap((each) => {
+    const scope = each.scope.toLowerCase();
+    const who = identities.get(each.principalId) ?? 'an identity not of this deployment';
+    const dataRole = dataRoleOf(each.roleDefinitionId);
+    // Above the vault: its group or subscription, a scope the vault's ID starts with.
+    if (scope !== at && under.startsWith(`${scope}/`)) {
+      return dataRole === undefined
+        ? []
+        : [`${who} holds ${dataRole} over the whole vault, from above it (its resource group or subscription)`];
+    }
+    if (scope !== at && !scope.startsWith(under)) return [];
+    const role = dataRole ?? 'another role';
+    if (!scope.startsWith(`${under}secrets/`)) return [`${who} holds ${role} on the whole vault`];
+    const secret = each.scope.slice(under.length + 'secrets/'.length);
+    return [
+      role === DATA_ROLES.get(VAULT_READ_ROLE) && identities.has(each.principalId)
         ? `${who} reads ${secret}`
-        : `${who} holds ${role} on ${secret}`;
-    });
+        : `${who} holds ${role} on ${secret}`,
+    ];
+  });
 }
 
 /** The live lines against GRANTS: each one more than the list (the failure), and each of the list Azure lacks. */

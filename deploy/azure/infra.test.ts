@@ -1,5 +1,6 @@
 // CI's approved infrastructure deploy (AZ5): what a merge needs, the what-if
 // reduced and hashed, the plan held to on deploy, and the deployers' Bicep.
+import { pinnedZitadelImage } from './zitadel-upgrade.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -132,7 +133,8 @@ describe('whatIfShape and shapeHash', () => {
     const moved = {
       path: 'properties.template.containers.0.image',
       before: zitadel('v4.19.5'),
-      after: zitadel('v4.20.3'),
+      // The image apps pins, and so puts there: nothing else.
+      after: pinnedZitadelImage(),
     };
     // The plan, made before the setup's image moved, and the deploy's what-if after: one hash.
     expect(shapeHash(whatIfShape(result(modify([moved], SETUP))))).toBe(shapeHash(whatIfShape(result())));
@@ -142,6 +144,8 @@ describe('whatIfShape and shapeHash', () => {
     ]);
     for (const other of [
       { ...moved, after: `ghcr.io/someone/else:v1@sha256:${'e'.repeat(64)}` },
+      // Another Zitadel image than the pinned one is no move of apps' own making.
+      { ...moved, after: zitadel('v4.99.0') },
       { ...moved, before: null },
       { ...moved, path: 'properties.template.containers.0.args.0', before: 'setup', after: 'start' },
     ]) {

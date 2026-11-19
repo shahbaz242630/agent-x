@@ -2652,6 +2652,27 @@ describe('deploy apps', () => {
       expect(declinedAz.deployment).toBeUndefined();
     });
 
+    it('refuses to move Zitadel back to an older version, or one whose version it cannot read, before anything is asked or run', async () => {
+      for (const [runs, why] of [
+        [`ghcr.io/zitadel/zitadel:v4.21.0@sha256:${'c'.repeat(64)}`, 'is older than v4.21.0, which Zitadel runs'],
+        [`ghcr.io/zitadel/zitadel:v5.0.0@sha256:${'c'.repeat(64)}`, 'is older than v5.0.0, which Zitadel runs'],
+        [`ghcr.io/zitadel/zitadel:latest@sha256:${'c'.repeat(64)}`, "can't be told apart"],
+      ] as const) {
+        const az = new RecordingAz();
+        const zitadel = new RecordingZitadel(az, runs);
+        const done = await run(['apps'], { answers: [...answers, 'y'], images: recordingImages(), az, zitadel });
+        const message = (done.error as Error).message;
+        expect({ runs, message }).toEqual({ runs, message: expect.stringContaining(why) as unknown });
+        expect(message).toMatch(/Nothing was run or deployed\.$/);
+        expect(zitadel.asked).toEqual([`running ${SUBSCRIPTION}`]);
+        expect(az.deployment).toBeUndefined();
+      }
+      // A newer patch, minor or major goes ahead: v4.19.5 to v4.20.3 (the other tests), and v4.9.9 to it too.
+      const older = new RecordingZitadel(new RecordingAz(), `ghcr.io/zitadel/zitadel:v4.9.9@sha256:${'c'.repeat(64)}`);
+      const ahead = await run(['apps'], { answers: [...answers, 'y'], images: recordingImages(), zitadel: older });
+      expect(ahead.status).toBe(0);
+    });
+
     it('runs no setup when Zitadel already runs the pinned image, nor on a first deploy, whose jobs run after it', async () => {
       for (const runs of [ZITADEL_NEW, undefined]) {
         const az = new RecordingAz();

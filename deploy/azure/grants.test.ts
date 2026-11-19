@@ -8,6 +8,11 @@ const SUB = '00000000-0000-0000-0000-000000000001';
 const VAULT = `/subscriptions/${SUB}/resourceGroups/rg-agentx-staging/providers/Microsoft.KeyVault/vaults/kv-agentx-stg-abcdef`;
 const USER = `/subscriptions/${SUB}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6`;
 const OTHER_ROLE = `/subscriptions/${SUB}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7`;
+const GROUP = `/subscriptions/${SUB}/resourceGroups/rg-agentx-staging`;
+/** Built-in roles by ID (Microsoft's list): Reader reads no secret; Crypto Officer is one of Key Vault's data roles. */
+const READER = 'acdd72a7-3385-48ef-bd42-f606fba81ae7';
+const CRYPTO_OFFICER = '14b46e9e-c2b7-41b4-b07b-48a6ebf60603';
+const role = (id: string): string => `/subscriptions/${SUB}/providers/Microsoft.Authorization/roleDefinitions/${id}`;
 const API = '11111111-1111-1111-1111-111111111111';
 const LOGIN = '22222222-2222-2222-2222-222222222222';
 const STRANGER = '33333333-3333-3333-3333-333333333333';
@@ -33,12 +38,14 @@ describe("the vault's grants against GRANTS (AZ32)", () => {
       live([
         on('db-app-password', API),
         on('login-client-private-key', LOGIN),
-        // A grant above the vault (the group's Reader, say) is no grant of the vault's.
-        {
-          scope: `/subscriptions/${SUB}/resourceGroups/rg-agentx-staging`,
-          principalId: STRANGER,
-          roleDefinitionId: USER,
-        },
+        // Above the vault, a role that reads no secret (the group's Reader) is no grant of the vault's; one that reads
+        // or manages its data (any of Key Vault's data roles), on the group or the subscription, reaches every secret.
+        { scope: GROUP, principalId: STRANGER, roleDefinitionId: role(READER) },
+        { scope: GROUP, principalId: STRANGER, roleDefinitionId: USER },
+        { scope: `/subscriptions/${SUB}`, principalId: API, roleDefinitionId: role(CRYPTO_OFFICER.toUpperCase()) },
+        // Another group, its name a part of this one's, is not above this vault; nor one named longer.
+        { scope: GROUP.slice(0, -3), principalId: STRANGER, roleDefinitionId: USER },
+        { scope: `${GROUP}2`, principalId: STRANGER, roleDefinitionId: USER },
         // A vault that merely starts with this one's name is another vault.
         { scope: `${VAULT}2/secrets/db-app-password`, principalId: STRANGER, roleDefinitionId: USER },
         { scope: VAULT, principalId: API, roleDefinitionId: USER },
@@ -50,10 +57,16 @@ describe("the vault's grants against GRANTS (AZ32)", () => {
     expect(lines).toEqual([
       'api reads db-app-password',
       'login reads login-client-private-key',
+      'an identity not of this deployment holds Key Vault Secrets User over the whole vault, from above it (its resource group or subscription)',
+      'api holds Key Vault Crypto Officer over the whole vault, from above it (its resource group or subscription)',
       'api holds Key Vault Secrets User on the whole vault',
       'an identity not of this deployment holds Key Vault Secrets User on db-owner-password',
-      'login holds another role on db-app-password',
+      'login holds Key Vault Secrets Officer on db-app-password',
       'api reads db-app-password',
+    ]);
+    // A role no list names, on a secret, is said as another.
+    expect(grantLines(live([on('db-app-password', API, role(READER))]))).toEqual([
+      'api holds another role on db-app-password',
     ]);
     expect(lines.join(' ')).not.toMatch(/[0-9a-f]{8}-/);
   });
