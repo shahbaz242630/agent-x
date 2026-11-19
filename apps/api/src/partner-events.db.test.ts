@@ -81,7 +81,15 @@ const { ready, paymentOf } = handoffWorld({
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 const STEP = 60_000;
 
-const events = () => createProviderEvents({ keys, ids, clock, retentionDays: 30 });
+const events = () =>
+  createProviderEvents({
+    keys,
+    ids,
+    clock,
+    logger: testLogger(capture),
+    macsFrom: () => Promise.resolve(0),
+    retentionDays: 30,
+  });
 
 const handoffOf = (w: World) =>
   createHandoff({
@@ -971,6 +979,57 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
       expect(answers.filter((answer) => answer !== 'capped')).toHaveLength(5);
       expect(answers.filter((answer) => answer === 'first')).toHaveLength(1);
       expect(await kept()).toHaveLength(5);
+    });
+
+    it('counts no row the database’s owner planted or edited: dated ahead, with no MAC, or changed (S206 V6)', async () => {
+      const owner = database.as('admin');
+      const plant = (receivedAt: Date) =>
+        owner.query(
+          `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+           values ($1, 'signature', '203.0.113.7', $2, 1, 2, $3)`,
+          [ids.next(), Buffer.alloc(40, 1), receivedAt],
+        );
+      // Ahead of now (an hour's cap for good, never swept), and inside the hour with no MAC.
+      for (let n = 0; n < 6; n += 1) await plant(new Date('2200-01-01T00:00:00.000Z'));
+      for (let n = 0; n < 6; n += 1) await plant(clock.now());
+
+      // Neither caps the network, nor quiets its first alert.
+      expect(await keep('203.0.113.7')).toBe('first');
+      // A kept row edited past the app counts for nothing either.
+      await owner.query("update security.partner_event_evidence set reason = 'stale' where mac is not null");
+      expect(await keep('203.0.113.7')).toBe('first');
+      const alarms = capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed' && line.check === 'partner_event_evidence');
+      // One line a message, the planted rows counted in it: the six inside the hour, then the edited one too.
+      expect(alarms.map(({ rows }) => rows)).toEqual([6, 7]);
+    });
+
+    it('counts no row from before the MACs that the owner dated ahead, and none whose body was swapped', async () => {
+      const owner = database.as('admin');
+      // Every row without a MAC from before the boundary, as the rows of the release before are.
+      const before = createProviderEvents({
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        macsFrom: () => Promise.resolve(Number.POSITIVE_INFINITY),
+        retentionDays: 30,
+      });
+      for (let n = 0; n < 6; n += 1) {
+        await owner.query(
+          `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+           values ($1, 'signature', '203.0.113.7', $2, 1, 2, '2200-01-01T00:00:00Z')`,
+          [ids.next(), Buffer.alloc(40, 1)],
+        );
+      }
+      expect(await before.keepRefused(app, { reason: 'signature', ip: '203.0.113.7', body })).toBe('first');
+
+      // A kept row's body swapped for another's: its MAC no longer holds.
+      await owner.query('update security.partner_event_evidence set body_ciphertext = $1 where mac is not null', [
+        Buffer.alloc(40, 2),
+      ]);
+      expect(await keep('203.0.113.7')).toBe('first');
     });
 
     it('keeps again an hour on', async () => {

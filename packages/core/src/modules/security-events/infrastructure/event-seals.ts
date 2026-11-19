@@ -8,36 +8,49 @@
 //   INSERT, with no lock beyond its own rows: a flood of refusals from many
 //   addresses never queues on a shared head, as a chain written row by row
 //   would make it (an attacker spraying sign-ins could then slow everyone's).
+//   A row with no MAC is believed only if written before the boundary
+//   (mac-boundary.ts); the admins' page shows only rows whose MAC holds.
 // - Each closed UTC day of rows is digested and the digest sealed on an audit
-//   chain after the fact (the activity log's daily seal, reused: its digest,
-//   its days by UUIDv7 ID, its grace and its steps): the global table's days on
-//   the platform chain, an organisation's on its own chain. Only a day holding
+//   chain after the fact (the activity log's daily seal, reused: its days by
+//   UUIDv7 ID, its grace and its steps): the global table's days on the
+//   platform chain, an organisation's on its own chain. Only a day holding
 //   rows is sealed: most organisations have none most days, and a day emptied
 //   after its seal shows by its digest, one with rows slipped in between two
 //   seals by the check between them.
+// - A row whose ID was made far from when it says it was written (`misdated`:
+//   the activity log's bounds) is left out of its day's digest and count, its
+//   alarm raised as the day is sealed, so one such row never stops the seal.
+//   Which rows are left out follows from each row alone, so none can be left
+//   out to hide another: a sealed row edited into one changes the digest.
+// - A row the seal can never reach (its ID before the days still checked, or
+//   after tomorrow, while it says it was written recently) raises the alarm
+//   on the next run (outOfRange).
 // - When a day is sealed, a row whose MAC doesn't hold (planted, or edited
 //   before the seal) raises the integrity alarm, then the day is sealed as it
 //   stands, so that alarm is raised once. When a seal is checked, a row
 //   deleted, edited or slipped in since shows as the day's digest no longer
 //   holding, or as rows in a day between two seals that has none.
 //
-// What this doesn't catch: rows deleted before their day is sealed (at most a
-// day and a quarter of hour after they were written), which R-15 keeps as the
-// owner's residual power. Every one needs the owner login, which raises DB-3's
-// alert.
+// Rows deleted before their day is sealed are not in any digest; each run
+// logs the count of every day not yet sealed (tallyFrom), and an alert holds
+// the count sealed to the highest logged, off the database (R-15's residual).
 //
 // Rows are swept once past their retention, so a seal is checked only while
 // every row of its day is well inside it (firstCheckableDay): an older seal's
 // day may be part swept, which is no tampering.
+import { createHash } from 'node:crypto';
+
 import { KeyError, type KeyProvider, type Message } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
-import { type DayDigest, dayOfId, digestRows, idsOfDay, nextDay, sealHolds } from '../../activity/index.ts';
+import { type DayDigest, dayOfId, idsOfDay, nextDay, sealHolds, v7Floor } from '../../activity/index.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 type SealTx = Transaction<SecurityEventsTables>;
+
+const HOUR_MS = 60 * 60_000;
 
 /** The action a day's seal records: on the platform chain for the global table, on an organisation's own for its. */
 export const SECURITY_EVENTS_SEALED = 'security_events.sealed';
@@ -47,13 +60,6 @@ export const SECURITY_LOG_SUBJECT = 'security_log';
 
 /** The form of the seal's lines, recorded with each seal so a later form can't be confused with this one. */
 export const SECURITY_SEAL_FORM = 1;
-
-/**
- * Rows written before 0106 have no MAC and none can be made for them. One without a MAC is believed only if its ID
- * was made before this; they are all swept within the retention period after it. Move it on if the release that
- * brings 0106 reaches a database later than this.
- */
-export const MAC_REQUIRED_FROM = Date.parse('2026-12-10T00:00:00.000Z');
 
 /** Which table: the global one (0012), or one organisation's rows of 0091. */
 export type SecurityLog = { readonly orgId: string } | 'global';
@@ -78,7 +84,7 @@ const GLOBAL_LABEL = 'agentx/security.event/v1';
 const ORG_LABEL = 'agentx/security.org-event/v1';
 
 /** An absent value apart from any present one. */
-const maybe = (value: string | null): string[] => (value === null ? ['none'] : ['some', value]);
+export const maybe = (value: string | null): string[] => (value === null ? ['none'] : ['some', value]);
 
 /**
  * An address in one form, however it was written: the API's text and Postgres's `inet` output of it read alike
@@ -87,6 +93,7 @@ const maybe = (value: string | null): string[] => (value === null ? ['none'] : [
 export const ipForm = (ip: string): string =>
   ip.includes(':') ? new URL(`http://[${ip}]/`).hostname : ip.split('.').map(Number).join('.');
 
+/** What a row's MAC is made over: its table's label, then every column. */
 const eventMessage = (facts: EventFacts): Message => [
   facts.orgId === null ? GLOBAL_LABEL : ORG_LABEL,
   facts.id.toLowerCase(),
@@ -101,41 +108,66 @@ const eventMessage = (facts: EventFacts): Message => [
   String(facts.createdAt.getTime()),
 ];
 
-/** The row's MAC with the current `session-mac` key, as its columns keep it. */
-export function eventMac(
+/** A row's MAC with the current `session-mac` key, as its columns keep it. */
+export function rowMac(
   keys: KeyProvider,
-  facts: EventFacts,
+  message: Message,
 ): { readonly mac: Buffer; readonly mac_key_version: number } {
-  const { mac, keyVersion } = keys.mac('session-mac', eventMessage(facts));
+  const { mac, keyVersion } = keys.mac('session-mac', message);
   return { mac, mac_key_version: keyVersion };
 }
+
+/** The row's MAC, made over every column. */
+export const eventMac = (keys: KeyProvider, facts: EventFacts) => rowMac(keys, eventMessage(facts));
 
 /** The instant a UUIDv7 was made, in milliseconds. */
 const msOfId = (id: string): number => Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
 
 /**
- * Whether the row's MAC holds with the version it names; a row with none only if written before MAC_REQUIRED_FROM.
- * A MAC or version made up (no such key version) holds for nothing, as a wrong one.
+ * Whether a security row's MAC holds for the message, with the version it names; a row with none only if its ID was
+ * made before `macsFrom` (mac-boundary.ts). A MAC or version made up (no such key version) holds for nothing.
  */
-export function eventMacHolds(
+export function rowMacHolds(
   keys: KeyProvider,
-  facts: EventFacts,
+  message: Message,
+  id: string,
   row: { readonly mac: unknown; readonly mac_key_version: unknown },
+  macsFrom: number,
 ): boolean {
   const { mac, mac_key_version: version } = row;
-  if (mac === null && version === null) return msOfId(facts.id) < MAC_REQUIRED_FROM;
+  if (mac === null && version === null) return msOfId(id) < macsFrom;
   if (!Buffer.isBuffer(mac) || typeof version !== 'number' || !Number.isSafeInteger(version)) return false;
   try {
-    return keys.verifyMac('session-mac', version, eventMessage(facts), mac);
+    return keys.verifyMac('session-mac', version, message, mac);
   } catch (error) {
     if (error instanceof KeyError) return false;
     throw error;
   }
 }
 
+/** Whether the event row's MAC holds (rowMacHolds). */
+export const eventMacHolds = (
+  keys: KeyProvider,
+  facts: EventFacts,
+  row: { readonly mac: unknown; readonly mac_key_version: unknown },
+  macsFrom: number,
+): boolean => rowMacHolds(keys, eventMessage(facts), facts.id, row, macsFrom);
+
 /** A time to the microsecond, in UTC, as text, so a tampered microsecond shows in the digest. */
 const microText = (column: string) =>
   sql<string>`pg_catalog.to_char(${sql.ref(column)} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+/** A row's ID's time, in ms, as Postgres reads its UUIDv7 bits. */
+const ID_MS = sql<string>`('x' || pg_catalog.substr(pg_catalog.replace(id::text, '-', ''), 1, 12))::bit(48)::bigint`;
+
+/** When it says it was written, in ms. */
+const WRITTEN_MS = sql<string>`(pg_catalog.date_part('epoch', created_at) * 1000)::bigint`;
+
+/**
+ * Whether the row's ID was made when it says it was written: from 5 seconds before to 6 hours after, the activity
+ * log's bounds (a server clock stepped back makes IDs late until it catches up). Any other is `misdated`.
+ */
+const DATED = sql<boolean>`(${ID_MS} between ${WRITTEN_MS} - 5000 and ${WRITTEN_MS} + 21600000)`;
 
 /** The log's table, the condition that keeps a read to its rows, and its organisation and agent columns. */
 const scopeOf = (log: SecurityLog) =>
@@ -148,11 +180,11 @@ const scopeOf = (log: SecurityLog) =>
         agent: sql`agent_id`,
       };
 
-/** A row as the seal reads it: its columns, and its times both as the MAC and as the digest read them. */
+/** A row as the seal reads it: its columns, its times as the MAC and as the digest read them, and whether it is dated. */
 interface SealedRow {
   readonly id: string;
   readonly at: string;
-  readonly duration_ms: number;
+  readonly dated: boolean;
   readonly org_id: string | null;
   readonly kind: string;
   readonly reason: string;
@@ -178,9 +210,8 @@ async function rowsOfDay(
   const { from, to } = idsOfDay(day);
   const { table, own, org, agent } = scopeOf(log);
   const past: RawBuilder<boolean> = after === undefined ? sql<boolean>`true` : sql<boolean>`id > ${after}::uuid`;
-  // The row's own time is when it was written: an ID made then, within the activity log's bounds (`misdated`).
   const { rows } = await sql<SealedRow>`
-    select id, ${microText('created_at')} as at, 0 as duration_ms, ${org} as org_id, kind, reason, ip, user_id,
+    select id, ${microText('created_at')} as at, ${DATED} as dated, ${org} as org_id, kind, reason, ip, user_id,
       ${agent} as agent_id, window_start, ${microText('window_start')} as window_text, count, created_at, mac,
       mac_key_version
     from ${table}
@@ -219,34 +250,50 @@ const factsOf = (row: SealedRow): EventFacts => ({
   createdAt: row.created_at,
 });
 
-/** A day's digest, and its first row whose MAC doesn't hold (null for none). */
+/** A day's digest of its dated rows (its `misdated` always null: they are left out), its first row whose MAC doesn't hold, and its first left out. */
 export interface SecurityDayDigest extends DayDigest {
   readonly forged: string | null;
+  readonly leftOut: string | null;
 }
 
-/** The log's digest of `day`, read `batch` rows at a time, each batch in a transaction `read` opens; each row's MAC checked. */
+/**
+ * The log's digest of `day`: SHA-256 over one line a dated row, by ID, each the JSON of lineOf and a newline, read
+ * `batch` rows at a time, each batch in a transaction `read` opens; each row's MAC checked as it passes.
+ */
 export async function securityDigestOfDay(
   read: <T>(work: (tx: SealTx) => Promise<T>) => Promise<T>,
-  keys: KeyProvider,
+  { keys, macsFrom }: { readonly keys: KeyProvider; readonly macsFrom: number },
   log: SecurityLog,
   day: string,
   batch: number,
 ): Promise<SecurityDayDigest> {
+  const hash = createHash('sha256');
+  let requests = 0;
+  let idFrom: string | null = null;
+  let idTo: string | null = null;
   let forged: string | null = null;
-  const digest = await digestRows(
-    day,
-    batch,
-    async (after, limit) => {
-      const rows = await read((tx) => rowsOfDay(tx, log, day, after, limit));
-      forged ??= rows.find((row) => !eventMacHolds(keys, factsOf(row), row))?.id ?? null;
-      return rows;
-    },
-    lineOf,
-  );
-  return { ...digest, forged };
+  let leftOut: string | null = null;
+  let after: string | undefined;
+  for (;;) {
+    const rows = await read((tx) => rowsOfDay(tx, log, day, after, batch));
+    for (const row of rows) {
+      if (!row.dated) {
+        leftOut ??= row.id;
+        continue;
+      }
+      hash.update(`${JSON.stringify(lineOf(row))}\n`);
+      requests += 1;
+      idFrom ??= row.id;
+      idTo = row.id;
+      if (forged === null && !eventMacHolds(keys, factsOf(row), row, macsFrom)) forged = row.id;
+    }
+    after = rows.at(-1)?.id ?? after;
+    if (rows.length < batch) break;
+  }
+  return { day, requests, digest: hash.digest('hex'), idFrom, idTo, misdated: null, forged, leftOut };
 }
 
-/** The log's day's count and last ID, read in one statement, to check a digest still stands before it is sealed. */
+/** The log's day's count of dated rows and their last ID, in one statement, to check a digest still stands before it is sealed. */
 export async function securityCountOfDay(
   tx: SealTx,
   log: SecurityLog,
@@ -257,7 +304,7 @@ export async function securityCountOfDay(
   // A UUID's text in lower case sorts as the UUID does; Postgres has no max() of uuid itself.
   const { rows } = await sql<{ requests: number; id_to: string | null }>`
     select pg_catalog.count(*)::int as requests, pg_catalog.max(id::text) as id_to from ${table}
-    where ${own} and id >= ${from}::uuid and id < ${to}::uuid
+    where ${own} and id >= ${from}::uuid and id < ${to}::uuid and ${DATED}
   `.execute(tx);
   return { requests: rows[0]?.requests ?? 0, idTo: rows[0]?.id_to ?? null };
 }
@@ -280,6 +327,65 @@ export async function rowsBetween(tx: SealTx, log: SecurityLog, older: string, n
     where ${own} and id >= ${idsOfDay(nextDay(older)).from}::uuid and id < ${idsOfDay(newer).from}::uuid limit 1
   `.execute(tx);
   return rows.length > 0;
+}
+
+/**
+ * Whether the organisation has a row, or a seal on its chain (one deleted past the app fails the chain's own check):
+ * one with neither has nothing to seal, check or tally. One statement in its transaction.
+ */
+export async function anythingToSeal(tx: SealTx, orgId: string): Promise<boolean> {
+  const org = orgId.toLowerCase();
+  const { rows } = await sql<{ found: boolean }>`
+    select exists (select 1 from security.org_events where org_id = ${org}::uuid)
+      or exists (select 1 from audit.events where org_id = ${org}::uuid and action = ${SECURITY_EVENTS_SEALED}) as found
+  `.execute(tx);
+  return rows[0]?.found === true;
+}
+
+/** A day not yet sealed, as the tally logs it: its dated rows' count and last ID. */
+export interface DayTally {
+  readonly day: string;
+  readonly rows: number;
+  readonly idTo: string;
+}
+
+/** The dated rows of each day from `day` on, by day (one statement, on the ID's index): what the tally line logs. */
+export async function tallyFrom(tx: SealTx, log: SecurityLog, day: string): Promise<readonly DayTally[]> {
+  const { table, own } = scopeOf(log);
+  const { rows } = await sql<{ day: string; rows: number; id_to: string }>`
+    select pg_catalog.to_char(pg_catalog.to_timestamp(${ID_MS} / 1000.0) at time zone 'UTC', 'YYYY-MM-DD') as day,
+      pg_catalog.count(*)::int as rows, pg_catalog.max(id::text) as id_to
+    from ${table}
+    where ${own} and id >= ${idsOfDay(day).from}::uuid and ${DATED}
+    group by 1 order by 1
+  `.execute(tx);
+  return rows.map((row) => ({ day: row.day, rows: row.rows, idTo: row.id_to }));
+}
+
+/**
+ * The first row the seal can never reach though it says it was written recently, or undefined: its ID after
+ * tomorrow, or before `checkableFrom` (the first day sealed or checked) while it says it was written or counted
+ * well after that day began. An honest row's ID is made within moments of its time written, never so far off.
+ * One statement, on the ID's index.
+ */
+export async function outOfRange(
+  tx: SealTx,
+  log: SecurityLog,
+  now: Date,
+  checkableFrom: string,
+): Promise<string | undefined> {
+  const { table, own } = scopeOf(log);
+  const floor = idsOfDay(checkableFrom).from;
+  const recent = new Date(Date.parse(`${checkableFrom}T00:00:00.000Z`) + HOUR_MS);
+  const { rows } = await sql<{ id: string }>`
+    select id from ${table}
+    where ${own} and (
+      id >= ${v7Floor(now.getTime() + DAY_MS)}::uuid
+      or (id < ${floor}::uuid and (created_at >= ${recent} or window_start >= ${recent}))
+    )
+    order by id limit 1
+  `.execute(tx);
+  return rows[0]?.id;
 }
 
 /**
@@ -324,8 +430,8 @@ export async function brokenSecuritySeal(
   return undefined;
 }
 
-/** Why the log's seal can't be believed: a seal or record, a row's MAC, a row misdated, or a seal broken. */
-type SecurityLogBroken = 'unsealed' | 'mac' | 'misdated' | SecuritySealBroken;
+/** Why the log can't be believed: a seal or record, a row's MAC, a row misdated or out of the seal's reach, or a seal broken. */
+type SecurityLogBroken = 'unsealed' | 'mac' | 'misdated' | 'out_of_range' | SecuritySealBroken;
 
 /**
  * Raises the integrity alarm for the log (`check: 'security_event'`), naming the day and the row where one is known.

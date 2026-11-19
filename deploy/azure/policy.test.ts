@@ -32,6 +32,7 @@ import {
   LOAD_RUN,
   LOGIN_COPIES,
   MCP_ALERTS,
+  SECURITY_SEAL_SHORTFALL_LINES,
   ZITADEL_COPIES,
 } from './policy.ts';
 import {
@@ -418,6 +419,7 @@ const LOGIN_SERVICE_ALERT = named(/^alert-agentx-.+-login-service$/);
 const PLATFORM_FULL_ALERT = named(/^alert-agentx-.+-platform-full$/);
 const ANCHOR_STORE_ALERT = named(/^alert-agentx-.+-anchor-store$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
+const SECURITY_SEAL_ALERT = named(/^alert-agentx-.+-security-seal$/);
 const RECORDS_FILLING_ALERT = named(/^alert-agentx-.+-records-filling$/);
 const DAILY_CHECK_ALERT = named(/^alert-agentx-.+-daily-check$/);
 const FULL_PASS_ALERT = named(/^alert-agentx-.+-full-pass$/);
@@ -733,6 +735,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-daily-check',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-full-pass',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-security-seal',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-records-filling',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-anchor-stopped',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-jobs-stopped',
@@ -3405,6 +3408,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [PLATFORM_FULL_ALERT, 'platform-full-alert'],
       [ANCHOR_STORE_ALERT, 'anchor-store-alert'],
       [INTEGRITY_RUNS_ALERT, 'integrity-runs-alert'],
+      [SECURITY_SEAL_ALERT, 'security-seal-alert'],
       [RECORDS_FILLING_ALERT, 'records-filling-alert'],
       [ANCHOR_STOPPED_ALERT, 'dead-man-alerts'],
       [JOBS_STOPPED_ALERT, 'dead-man-alerts'],
@@ -4860,6 +4864,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(String(at(staging.predictedResources.find(INTEGRITY_RUNS_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section O\.$/,
     );
+  });
+
+  it('security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    expect(brokenRules(without(SECURITY_SEAL_ALERT))).toEqual(['security-seal-alert']);
+    for (const change of [
+      // Another event, or a day short of its own count, or none sealed counted too.
+      edited('"security_seal.tally", ', ''),
+      edited('Tallied > Sealed', 'Tallied >= Sealed'),
+      edited('Seals > 0 and ', ''),
+      edited('by Chain = tostring(Line.orgId), ', 'by '),
+      (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT6H'),
+      (alert: Mutable) => (properties(alert).severity = 2),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 2),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(SECURITY_SEAL_ALERT, change))).toContain('security-seal-alert');
+    }
+    // Its runbook is the playbook's section H, the integrity alarm's.
+    expect(String(at(staging.predictedResources.find(SECURITY_SEAL_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section H\.$/,
+    );
+  });
+
+  it('security-seal-alert: its query finds a day sealed with fewer rows than tallied, per log, and nothing else', () => {
+    // The query's stages as the alert holds them, the table and the final count around them.
+    const stages = kqlStages(
+      String(criterion(staging.predictedResources.find(SECURITY_SEAL_ALERT) as unknown as Mutable).query),
+    );
+    expect(stages.slice(1, -1)).toEqual([...SECURITY_SEAL_SHORTFALL_LINES]);
+    expect(stages.at(-1)).toBe('summarize Shortfalls = count()');
   });
 
   it('identities: one usable in any region', () => {

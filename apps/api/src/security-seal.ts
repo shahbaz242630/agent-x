@@ -9,15 +9,21 @@
 //   inside the retention, for none or one older), each closed day holding rows,
 //   in order, at most MOST_DAYS_A_RUN, by the activity log's steps
 //   (seal-days.ts sealDay: digested in batches, then recorded under the seal's
-//   lock only if the newest seal and the day's count still stand). A day
-//   holding a row whose MAC doesn't hold raises the alarm, then is sealed as
-//   it stands; one holding a row misdated (an ID far from its time written) is
-//   never sealed, the alarm raised.
+//   lock only if the newest seal and the day's count still stand). A row whose
+//   MAC doesn't hold raises the alarm, then its day is sealed as it stands; a
+//   row misdated (an ID far from its time written) is left out of its day,
+//   the alarm raised, and the day sealed without it.
 // - Checks: the newest two seals and a few older from a point picked at
 //   random, each day digested again and held to its seal, and no row in a day
 //   between two seals (core's brokenSecuritySeal), while the day is well inside
 //   the retention. Nothing is kept between runs: over runs every seal inside
 //   the retention is checked, the newest every visit.
+// - Reach: a row the seal can never reach though it says it was written
+//   recently (core's outOfRange) raises the alarm.
+// - Tally: each day not yet sealed is logged (`security_seal.tally`: its day,
+//   its dated rows and last ID), as each day sealed is (`security_events.sealed`).
+//   The log is off the database: an alert fires when a day is sealed with
+//   fewer rows than a tally of it counted, so rows deleted before their seal show.
 //
 // A seal or a chain that can't be believed raises the alarm (the platform
 // chain's here, an organisation's by its signed states, which hold it, as any
@@ -26,7 +32,8 @@
 // grant nothing.
 //
 // The write path is untouched: a security event stays one INSERT, and the
-// seal's lock is taken by this job alone, never by a writer.
+// seal's lock is taken by this job alone, never by a writer. An organisation
+// with no rows and no seals costs one short read, not its chain's.
 //
 // Organisations are listed by the activity seal check's rotation (each every
 // 6 hours), so an organisation's deleted or edited sealed rows are found
@@ -40,8 +47,11 @@ import { personSealsPage } from '@agentx/core/modules/evidence';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import {
   brokenSecuritySeal,
+  anythingToSeal,
   firstCheckableDay,
+  macBoundary,
   nextDayWithRows,
+  outOfRange,
   rowsBetween,
   SECURITY_EVENTS_SEALED,
   SECURITY_LOG_SUBJECT,
@@ -51,9 +61,16 @@ import {
   type SecurityEventsTables,
   type SecurityLog,
   securityLogAlarm,
+  tallyFrom,
 } from '@agentx/core/modules/security-events';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import { type Database, type DatabaseTransaction, holdTransactionLock, limitedTransaction } from '@agentx/platform/db';
+import {
+  type Database,
+  type DatabaseTransaction,
+  holdTransactionLock,
+  limitedTransaction,
+  withTenant,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -108,6 +125,13 @@ interface OrgHeld {
   readonly states: SignedStates;
 }
 
+/** What one run reads by: its time, the first day still checked, and when the rows' MACs began. */
+interface RunMoment {
+  readonly now: Date;
+  readonly checkableFrom: string;
+  readonly macsFrom: number;
+}
+
 export interface SecuritySeal {
   /** Seals and checks the global table's days, then the listed organisations', until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
@@ -144,6 +168,7 @@ export function createSecuritySeal({
   readonly pick?: (below: bigint) => bigint;
 }): SecuritySeal {
   const platform = createPlatformChain({ keys, ids });
+  const boundary = macBoundary(keys, logger);
 
   /** The global table's chain: the platform's. */
   const globalChain = (log: Logger): SealChain<SealTx> => ({
@@ -197,6 +222,13 @@ export function createSecuritySeal({
     };
   };
 
+  /**
+   * Whether the organisation has anything to seal or check: a row, or a seal on its chain (one deleted past the app
+   * fails the chain's own check). One statement in its transaction, so a quiet organisation costs no more.
+   */
+  const anythingFor = (orgId: string) =>
+    withTenant(database, orgId, (tx) => anythingToSeal(tx, orgId), { limited: true });
+
   /** A reader of the log's rows, each read in a transaction of its own. */
   const readerOf =
     <Held>(chain: SealChain<Held>) =>
@@ -215,20 +247,25 @@ export function createSecuritySeal({
     return { day: typeof day === 'string' ? day : null };
   };
 
-  /** The day's digest, a row whose MAC doesn't hold raising the alarm (the day is sealed as it stands). */
-  const digestOf = async <Held>(chain: SealChain<Held>, day: string) => {
-    const digest = await securityDigestOfDay(readerOf(chain), keys, chain.log, day, batch);
+  /** The day's digest; a row whose MAC doesn't hold, or one left out misdated, raising the alarm (the day is sealed). */
+  const digestOf = async <Held>(chain: SealChain<Held>, day: string, moment: RunMoment) => {
+    const digest = await securityDigestOfDay(
+      readerOf(chain),
+      { keys, macsFrom: moment.macsFrom },
+      chain.log,
+      day,
+      batch,
+    );
     if (digest.forged !== null) securityLogAlarm(chain.logger, chain.log, 'mac', day, digest.forged);
+    if (digest.leftOut !== null) securityLogAlarm(chain.logger, chain.log, 'misdated', day, digest.leftOut);
     return digest;
   };
 
   /** The log's seal, its steps on its own chain under its own lock (seal-days.ts). */
-  const sealingOf = <Held>(chain: SealChain<Held>): DaySealing<Held> => ({
-    digest: (day) => digestOf(chain, day),
-    misdated: (day) => {
-      securityLogAlarm(chain.logger, chain.log, 'misdated', day);
-      return Promise.resolve();
-    },
+  const sealingOf = <Held>(chain: SealChain<Held>, moment: RunMoment): DaySealing<Held> => ({
+    digest: (day) => digestOf(chain, day, moment),
+    // Never asked: a misdated row is left out of its day's digest (core's securityDigestOfDay), not a reason to stop.
+    misdated: () => Promise.resolve(),
     locked: (work) =>
       chain.inChain(async (held) => {
         await chain.lock(held);
@@ -242,27 +279,36 @@ export function createSecuritySeal({
     lines: { moved: 'security_event_seal.moved', sealed: 'security_events.sealed' },
   });
 
-  /** Seals the log's closed days holding rows, oldest first, up to MOST_DAYS_A_RUN: whether it is finished. */
-  const seal = async <Held>(chain: SealChain<Held>, signal: AbortSignal | undefined): Promise<boolean> => {
+  /**
+   * Seals the log's closed days holding rows, oldest first, up to MOST_DAYS_A_RUN; then logs each day not yet sealed.
+   * Whether it is finished.
+   */
+  const seal = async <Held>(chain: SealChain<Held>, moment: RunMoment, signal: AbortSignal | undefined) => {
     const newest = await chain.inChain((held) => newestIn(chain, held));
     if (newest === undefined) return true;
-    const now = clock.now();
     // A day older than the retention allows is never sealed: the sweep may be part way through it.
-    const floor = firstCheckableDay(now, retentionDays);
-    let from = newest.day === null || nextDay(newest.day) < floor ? floor : nextDay(newest.day);
-    const sealing = sealingOf(chain);
-    for (let sealed = 0; sealed < MOST_DAYS_A_RUN; sealed += 1) {
-      if (signal?.aborted === true) return false;
+    const { checkableFrom, now } = moment;
+    let from = newest.day === null || nextDay(newest.day) < checkableFrom ? checkableFrom : nextDay(newest.day);
+    const sealing = sealingOf(chain, moment);
+    let finished = false;
+    for (let sealed = 0; sealed < MOST_DAYS_A_RUN && signal?.aborted !== true; sealed += 1) {
       const day = await readerOf(chain)((tx) => nextDayWithRows(tx, chain.log, from));
-      if (day === undefined || !sealable(day, now)) return true;
-      if (!(await sealDay(sealing, day))) return false;
+      if (day === undefined || !sealable(day, now)) {
+        finished = true;
+        break;
+      }
+      if (!(await sealDay(sealing, day))) break;
       from = nextDay(day);
     }
-    return false;
+    // The days left unsealed, as they stand: an alert holds each day's seal to the highest count logged of it.
+    for (const tally of await readerOf(chain)((tx) => tallyFrom(tx, chain.log, from))) {
+      chain.logger.info('security_seal.tally', { day: tally.day, rows: tally.rows, idTo: tally.idTo });
+    }
+    return finished;
   };
 
   /** Checks the newest two seals, then a few older ones from a point picked at random. */
-  const check = async <Held>(chain: SealChain<Held>): Promise<void> => {
+  const check = async <Held>(chain: SealChain<Held>, moment: RunMoment): Promise<void> => {
     // The newest two: rows slipped into a day between them show.
     const newest = await pageOf(chain, 2);
     const first = newest?.seals[0];
@@ -270,9 +316,10 @@ export function createSecuritySeal({
     const older = await pageOf(chain, olderARun, pick(first.seq));
     if (older === undefined) return;
     const rules = {
-      digest: (day: string) => securityDigestOfDay(readerOf(chain), keys, chain.log, day, batch),
+      digest: (day: string) =>
+        securityDigestOfDay(readerOf(chain), { keys, macsFrom: moment.macsFrom }, chain.log, day, batch),
       between: (from: string, to: string) => readerOf(chain)((tx) => rowsBetween(tx, chain.log, from, to)),
-      checkableFrom: firstCheckableDay(clock.now(), retentionDays),
+      checkableFrom: moment.checkableFrom,
     };
     const detailsOf = (page: SealsPage) => page.seals.map(({ details }) => details);
     const found =
@@ -280,18 +327,28 @@ export function createSecuritySeal({
     if (found !== undefined) securityLogAlarm(chain.logger, chain.log, found.why, found.day);
   };
 
-  /** Seals, then checks, the log: whether its sealing is finished. */
-  const visit = async <Held>(chain: SealChain<Held>, signal: AbortSignal | undefined): Promise<boolean> => {
-    const finished = await seal(chain, signal);
-    await check(chain);
+  /** Seals, then checks, the log, and looks for a row out of the seal's reach: whether its sealing is finished. */
+  const visit = async <Held>(chain: SealChain<Held>, moment: RunMoment, signal: AbortSignal | undefined) => {
+    const finished = await seal(chain, moment, signal);
+    await check(chain, moment);
+    const stray = await readerOf(chain)((tx) => outOfRange(tx, chain.log, moment.now, moment.checkableFrom));
+    if (stray !== undefined) securityLogAlarm(chain.logger, chain.log, 'out_of_range', null, stray);
     return finished;
   };
 
   return {
     async run(signal) {
       const log = logger.child({ correlationId: ids.next() });
+      let moment: RunMoment;
       try {
-        await visit(globalChain(log), signal);
+        const now = clock.now();
+        moment = { now, checkableFrom: firstCheckableDay(now, retentionDays), macsFrom: await boundary(database) };
+      } catch (error) {
+        log.error('security_event_seal.run_failed', { err: error });
+        return;
+      }
+      try {
+        await visit(globalChain(log), moment, signal);
       } catch (error) {
         log.error('security_event_seal.failed', { err: error });
       }
@@ -299,7 +356,8 @@ export function createSecuritySeal({
         for (const orgId of await list()) {
           if (signal?.aborted === true) return;
           try {
-            if (await visit(orgChain(orgId, ids.next()), signal)) done(orgId);
+            // A quiet organisation is finished at once: nothing to seal, check or tally.
+            if (!(await anythingFor(orgId)) || (await visit(orgChain(orgId, ids.next()), moment, signal))) done(orgId);
           } catch (error) {
             logger.child({ orgId }).error('security_event_seal.failed', { err: error });
           }

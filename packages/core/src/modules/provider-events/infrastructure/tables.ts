@@ -23,5 +23,8 @@ export interface ProviderEventsTables {
     body_key_version: number;
     body_bytes: number;
     received_at: Date;
+    /** 0106 (S206 V6): its MAC with `session-mac`, and the key's version; null on a row from before. */
+    mac: Buffer | null;
+    mac_key_version: number | null;
   };
 }

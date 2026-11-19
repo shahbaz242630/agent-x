@@ -29,8 +29,8 @@ const DEPENDENCIES = {
     'notifications',
   ],
   'platform-controls': [],
-  // S206 V6: its daily seals digest a day as the activity log's do.
-  'security-events': ['activity'],
+  // S206 V6: its daily seals digest a day as the activity log's do; its MACs' boundary is on the platform chain.
+  'security-events': ['activity', 'platform-controls'],
   // 6E3a (ADR-016): the OAuth server's rules and records; a connection itself is an agent's key.
   oauth: ['agents'],
   activity: [],
@@ -52,7 +52,8 @@ const DEPENDENCIES = {
     'suppliers',
     'directory',
   ],
-  'provider-events': ['providers', 'directory'],
+  // S206 V6: the refused messages kept as evidence carry the security rows' MACs.
+  'provider-events': ['providers', 'directory', 'security-events'],
   // Every move of a payment is locked and settled here, the operator's mark failed among them (Phase 4 E1c):
   // its instruction read, the supplier's remittance and the admins' notice queued, both chains signed.
   outcomes: [

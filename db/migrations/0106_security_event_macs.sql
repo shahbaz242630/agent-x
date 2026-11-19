@@ -15,11 +15,17 @@
 -- The write stays one INSERT with no lock beyond its own rows: the MAC is
 -- made in the app, and the chaining happens after the fact, a day at a time.
 --
+-- The partner's refused messages kept as evidence (0063) get a MAC too, over
+-- every column and their encrypted body's hash: the hour's caps count only
+-- rows whose MAC holds and that are dated no later than now, so rows planted
+-- ahead can't stop evidence being kept (provider-events.ts).
+--
 -- The rows already here have no MAC, and none can be made for them here: the
 -- key isn't the database's. They stay, the columns nullable: a row without one
--- is believed only if its ID was made before a fixed cutoff in the code
--- (event-seals.ts MAC_REQUIRED_FROM), and they are all swept within the
--- retention period. Both columns are set together, or neither.
+-- is believed only if its ID was made before the boundary the first API on
+-- this migration records, sealed, on the platform chain (mac-boundary.ts), and
+-- they are all swept within the retention period. Both columns are set
+-- together, or neither.
 --
 -- The app writes the MAC with the row, as INSERT already allows; it never
 -- changes one.
@@ -33,3 +39,8 @@ ALTER TABLE security.org_events
   ADD COLUMN mac bytea CHECK (pg_catalog.octet_length(mac) = 32),
   ADD COLUMN mac_key_version integer CHECK (mac_key_version >= 1),
   ADD CONSTRAINT org_event_mac_whole CHECK ((mac IS NULL) = (mac_key_version IS NULL));
+
+ALTER TABLE security.partner_event_evidence
+  ADD COLUMN mac bytea CHECK (pg_catalog.octet_length(mac) = 32),
+  ADD COLUMN mac_key_version integer CHECK (mac_key_version >= 1),
+  ADD CONSTRAINT evidence_mac_whole CHECK ((mac IS NULL) = (mac_key_version IS NULL));

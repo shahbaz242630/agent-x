@@ -31,7 +31,9 @@ import {
   type OrgEventCursor,
   type OrgEventsToRead,
   type OrgSecurityEvent,
+  macBoundary,
 } from '@agentx/core/modules/security-events';
+import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -73,7 +75,7 @@ export function createSecurityEventPages({
   logger,
   directory,
 }: {
-  readonly database: Database<SecurityEventsReadTables>;
+  readonly database: Database<SecurityEventsReadTables & PlatformControlsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -81,10 +83,14 @@ export function createSecurityEventPages({
   readonly directory: DirectoryNames | undefined;
 }): SecurityEventPages {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: SecurityEventsRefused });
+  // When the rows' MACs began (S206 V6): read once, then kept, so a page costs no more trips.
+  const boundary = macBoundary(keys, logger);
   return {
     async page(orgId, asked, correlationId) {
+      const macsFrom = await boundary(database);
+      const checked = { keys, macsFrom, logger: logger.child({ correlationId }) };
       const read = await work.answered(orgId, correlationId, async (tx, states) => {
-        const page = await heldSecurityEventsPage(tx, states, keys, orgId, asked);
+        const page = await heldSecurityEventsPage(tx, states, keys, orgId, asked, checked);
         if (page === 'tampered') throw new SecurityEventsRefused(503, 'INTEGRITY_FAILED');
         return { outcome: 'page' as const, ...page };
       });

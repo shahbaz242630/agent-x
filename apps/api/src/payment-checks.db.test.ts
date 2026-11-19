@@ -1312,7 +1312,14 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       logger: testLogger(capture),
       health: breaker(),
       databaseGate: handoffDatabaseGate(6),
-      events: createProviderEvents({ keys, ids, clock: moving, retentionDays: 30 }),
+      events: createProviderEvents({
+        keys,
+        ids,
+        clock: moving,
+        logger: testLogger(),
+        macsFrom: () => Promise.resolve(0),
+        retentionDays: 30,
+      }),
       runBudgetMs: 2_000,
     }).run();
 

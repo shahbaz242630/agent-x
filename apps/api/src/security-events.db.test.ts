@@ -4,6 +4,7 @@
 // each person and agent named; and an agent that can't be believed refusing
 // the page, the organisation held, as on the logs.
 import { withSignedStates } from '@agentx/core/modules/audit';
+import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -21,7 +22,7 @@ import { createSecurityEventPages, type SecurityEventPages } from './security-ev
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<MandateWorldTables & SecurityEventsTables>;
+let app: Database<MandateWorldTables & SecurityEventsTables & PlatformControlsTables>;
 
 const ids = new SequentialIds(0x5ec7_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000a15b0';
@@ -51,7 +52,7 @@ const noted = (w: World, about: { userId?: string; agentId?: string }, reason: s
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<MandateWorldTables & SecurityEventsTables>(
+  app = createDatabase<MandateWorldTables & SecurityEventsTables & PlatformControlsTables>(
     { ...database.connection('app'), maxConnections: 4 },
     testLogger(),
   );

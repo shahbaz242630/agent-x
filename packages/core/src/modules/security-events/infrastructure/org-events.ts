@@ -7,8 +7,16 @@
 // one is named, newest first by (window start, ID) on 0091's index; `next`
 // names the last row's window start and ID, where the next page starts
 // before.
+//
+// S206 V6: each row's MAC is checked as the page is read (at most a page of
+// them). A row whose MAC doesn't hold, planted or edited by the database's
+// owner, is left off the page and raises the integrity alarm, one line a row;
+// the page's `next` is still where the rows read end, so no row is read twice.
+import type { KeyProvider } from '@agentx/platform/keys';
+import type { Logger } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 
+import { eventMacHolds, securityLogAlarm } from './event-seals.ts';
 import { ORG_EVENT_KINDS } from './security-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
@@ -60,15 +68,39 @@ const actorOf = (userId: string | null, agentId: string | null): OrgEventActor |
   return agentId === null ? null : { type: 'agent', id: agentId };
 };
 
-/** A page of the organisation's security events, newest first, and where the next starts before (null at the end). */
+/** What a page's rows are checked with: the MAC key, the boundary before which a row may have none, and the alarm's logger. */
+export interface OrgEventsChecked {
+  readonly keys: KeyProvider;
+  readonly macsFrom: number;
+  readonly logger: Logger;
+}
+
+/**
+ * A page of the organisation's security events, newest first, and where the next starts before (null at the end):
+ * only rows whose MAC holds, each other raising the alarm.
+ */
 export async function orgSecurityEventsPage(
   tx: Transaction<SecurityEventsTables>,
   orgId: string,
   asked: OrgEventsToRead,
+  { keys, macsFrom, logger }: OrgEventsChecked,
 ): Promise<{ readonly rows: readonly OrgSecurityEvent[]; readonly next: OrgEventCursor | null }> {
   let query = tx
     .selectFrom('security.org_events')
-    .select(['id', 'kind', 'reason', 'ip', 'user_id', 'agent_id', 'window_start', 'count'])
+    .select([
+      'org_id',
+      'id',
+      'kind',
+      'reason',
+      'ip',
+      'user_id',
+      'agent_id',
+      'window_start',
+      'count',
+      'created_at',
+      'mac',
+      'mac_key_version',
+    ])
     .where('org_id', '=', orgId.toLowerCase())
     .where('window_start', '>=', asked.from)
     .where('window_start', '<', asked.to);
@@ -81,7 +113,25 @@ export async function orgSecurityEventsPage(
     .orderBy('id', 'desc')
     .limit(asked.limit + 1)
     .execute();
-  const rows = found.slice(0, asked.limit).map((row): OrgSecurityEvent => ({
+  const read = found.slice(0, asked.limit);
+  const believed = read.filter((row) => {
+    const facts = {
+      id: row.id,
+      orgId: row.org_id,
+      kind: row.kind,
+      reason: row.reason,
+      ip: row.ip,
+      userId: row.user_id,
+      agentId: row.agent_id,
+      windowStart: row.window_start,
+      count: row.count,
+      createdAt: row.created_at,
+    };
+    if (eventMacHolds(keys, facts, row, macsFrom)) return true;
+    securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
+    return false;
+  });
+  const rows = believed.map((row): OrgSecurityEvent => ({
     id: row.id,
     kind: kindOf(row.kind),
     reason: row.reason,
@@ -90,9 +140,10 @@ export async function orgSecurityEventsPage(
     windowStart: row.window_start,
     count: row.count,
   }));
-  const last = rows.at(-1);
+  // Where the rows read end, believed or not: a row left off is never read again on the next page.
+  const last = read.at(-1);
   return {
     rows,
-    next: found.length > asked.limit && last !== undefined ? { at: last.windowStart, id: last.id } : null,
+    next: found.length > asked.limit && last !== undefined ? { at: last.window_start, id: last.id } : null,
   };
 }

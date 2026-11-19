@@ -4,7 +4,8 @@
 // B2-5b gathers them from the API; B2-5a holds the table, the writes and the
 // retention sweep. 6E1b (CO7b) keeps those tied to an organisation in its own
 // walled table (0091), and reads them for its admins. S206 V6: each row
-// carries a MAC, and each day of rows is sealed on an audit chain (0106).
+// carries a MAC, and each day of rows is sealed on an audit chain (0106); the
+// partner's refused messages kept as evidence use its MACs too.
 export {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
@@ -17,14 +18,21 @@ export {
 } from './infrastructure/security-events.ts';
 export {
   type OrgEventCursor,
+  type OrgEventsChecked,
   type OrgEventsToRead,
   orgSecurityEventsPage,
   type OrgSecurityEvent,
 } from './infrastructure/org-events.ts';
 export {
+  anythingToSeal,
   brokenSecuritySeal,
   firstCheckableDay,
+  ipForm,
+  maybe,
   nextDayWithRows,
+  outOfRange,
+  rowMac,
+  rowMacHolds,
   rowsBetween,
   SECURITY_EVENTS_SEALED,
   SECURITY_LOG_SUBJECT,
@@ -33,5 +41,7 @@ export {
   securityDigestOfDay,
   type SecurityLog,
   securityLogAlarm,
+  tallyFrom,
 } from './infrastructure/event-seals.ts';
+export { type MacBoundary, macBoundary, recordMacBoundary } from './infrastructure/mac-boundary.ts';
 export type { SecurityEventsTables } from './infrastructure/tables.ts';

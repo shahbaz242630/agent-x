@@ -33,7 +33,12 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createProviderEvents, type ProviderEventsTables } from '@agentx/core/modules/provider-events';
-import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import {
+  createSecurityEvents,
+  macBoundary,
+  recordMacBoundary,
+  type SecurityEventsTables,
+} from '@agentx/core/modules/security-events';
 import type { ActivityExportTables, ActivityTables } from '@agentx/core/modules/activity';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
@@ -324,6 +329,15 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     return undefined;
   }
   logger.info('api.start_recorded', { seq: recorded });
+  // S206 V6: when the security rows' MACs began, recorded once on the platform chain by the first start on 0106.
+  try {
+    const boundary = await recordMacBoundary(database, { keys, ids: uuidV7Ids, clock: systemClock });
+    if (boundary === 'unsealed') {
+      logger.error('audit.integrity_failed', { chain: 'platform', check: 'security_event', reason: 'boundary' });
+    }
+  } catch (error) {
+    logger.error('security.mac_boundary_not_recorded', { err: error });
+  }
   // S205: people made before 0100 get their MAC, until its cutoff; a failure leaves them unable to sign in, nothing more.
   // TODO(S205): delete this once USER_MAC_BACKFILL_UNTIL (2026-11-25) has passed, with backfillUserMacs.
   try {
@@ -365,6 +379,8 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
 export function sharedParts({ config, keys, logger, database }: Booted, leadership: Leadership | undefined) {
   const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
+  // When the security rows' MACs began (S206 V6): read once from the platform chain, then kept.
+  const securityMacsFrom = macBoundary(keys, logger);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
@@ -407,6 +423,9 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
       keys,
       ids: uuidV7Ids,
       clock: systemClock,
+      logger,
+      // When the security rows' MACs began (S206 V6).
+      macsFrom: () => securityMacsFrom(database),
       retentionDays: config.securityEvents.retentionDays,
     }),
   };

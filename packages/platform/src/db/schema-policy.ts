@@ -403,7 +403,17 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'security.partner_event_evidence': {
       reason:
         "The partner's refused messages kept as security evidence (0063, SEC-PTR-01): refused before any organisation is known, the body encrypted, the address kept in-country, here alone",
-      columns: ['id', 'reason', 'ip', 'body_ciphertext', 'body_key_version', 'body_bytes', 'received_at'],
+      columns: [
+        'id',
+        'reason',
+        'ip',
+        'body_ciphertext',
+        'body_key_version',
+        'body_bytes',
+        'received_at',
+        'mac',
+        'mac_key_version',
+      ],
       // Added (the first few an hour per address), read, and deleted once past the security events' retention.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
     },
