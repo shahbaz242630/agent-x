@@ -40,6 +40,7 @@ import {
 } from '@agentx/core/modules/oauth';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger, ProblemEvent } from '@agentx/platform/observability';
 
 import type { OauthClients } from './oauth-clients.ts';
@@ -142,6 +143,7 @@ const MOST_STATE = 512;
 
 export function createOauthAuthorizing({
   database,
+  keys,
   clock,
   ids,
   logger,
@@ -149,6 +151,8 @@ export function createOauthAuthorizing({
   clients,
 }: {
   readonly database: Database<OauthTables>;
+  /** Seals each flow as it opens (S205, oauth/flow-seals.ts). */
+  readonly keys: KeyProvider;
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -255,6 +259,7 @@ export function createOauthAuthorizing({
     const flowId = ids.next();
     const opened = await openCodeFlow(
       database,
+      keys,
       {
         id: flowId,
         clientId: client.clientId,

@@ -31,6 +31,13 @@
 //   once, as a code's is (its flow's `used_at`, in the organisation's own
 //   transaction), and a poll after that is `invalid_grant`. A device code
 //   never travels through a browser, so a second use revokes nothing.
+// - Either kind, before anything else is believed of it (tamper pass S205,
+//   SEC-OAUTH-13): the flow held must be the one its organisation's
+//   transaction was opened for, and its decision's seal its own
+//   (oauth/flow-seals.ts), made with a key the database never holds. A
+//   flow planted or changed in the database is refused as any other code is,
+//   revokes nothing (the connection it names is not its), and raises the
+//   integrity alarm for that connection, which puts its organisation on hold.
 //
 // Every refusal of a grant is one of OAuth's errors with a fixed description,
 // never why in detail: that goes to the log, with the key's and token's IDs
@@ -41,6 +48,7 @@ import {
   agentKeyOf,
   agentOf,
   type AgentsTables,
+  CONNECTIONS,
   connectionOf,
   credentialAt,
   type IssuedTokens,
@@ -61,6 +69,7 @@ import {
   DEVICE_CODE_GRANT,
   codeHeld,
   codeUsed,
+  decisionJudged,
   deviceFlowOfCode,
   type DeviceFlowRead,
   deviceHeld,
@@ -365,6 +374,28 @@ export function createOauthGrants({
     return (await devicePolled(database, known.id, now)) ? DEVICE_WAITING.pending : DEVICE_WAITING.slowDown;
   };
 
+  /**
+   * Why the flow held for its tokens is not one this server decided for the organisation and key the transaction was
+   * opened for, if it isn't (S205): a seal not its own raises the integrity alarm for that connection (the hold
+   * follows once the transaction ends); a pepper version no longer held is ours to fix, an error; a flow with no seal,
+   * decided before 0101 or by the release before while this one rolls out, a warning.
+   */
+  const unsealed = (
+    flow: AnyFlowRead,
+    { orgId, keyId }: { readonly orgId: string; readonly keyId: string },
+    states: SignedStates,
+    caller: Caller,
+  ): string | undefined => {
+    const judged = flow.orgId === orgId && flow.keyId === keyId ? decisionJudged(keys, flow) : 'tampered';
+    if (judged === 'sound') return undefined;
+    const log = logger.child({ correlationId: caller.correlationId, orgId });
+    if (judged === 'tampered') states.mismatch(CONNECTIONS.subject, { orgId, id: keyId });
+    // Never the alarm: the release before this one decides flows unsealed until it is swapped out (0101).
+    else if (judged === 'unsealed') log.warn('oauth.decision_unsealed', { flowId: flow.id, keyId });
+    else log.error('oauth.seal_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
+    return `decision_${judged}`;
+  };
+
   const grants = {
     async exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer> {
       if (!isCodeText(asked.code)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
@@ -381,6 +412,9 @@ export function createOauthGrants({
       const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
         const flow = await codeHeld(tx, codeHash);
         if (flow === undefined) return { outcome: 'unknown' as const };
+        // Before its use is believed, or revokes anything: a planted flow's reuse is no reuse.
+        const notOurs = unsealed(flow, { orgId, keyId }, states, caller);
+        if (notOurs !== undefined) return { outcome: 'unsealed' as const, flow, reason: notOurs };
         if (flow.usedAt !== null) return { outcome: 'reused' as const, flow };
         // Used once this commits, whatever comes next: a code is tried once.
         await codeUsed(tx, flow.id, now);
@@ -408,6 +442,9 @@ export function createOauthGrants({
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'unknown') return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
+      if (answer.outcome === 'unsealed') {
+        return refusedFor(caller, answer.reason, { clientId: asked.clientId, flowId: answer.flow.id, keyId });
+      }
       if (answer.outcome === 'reused') {
         await codeReused(answer.flow, caller);
         return refusedFor(caller, 'code_used', { clientId: asked.clientId, flowId: answer.flow.id });
@@ -436,6 +473,8 @@ export function createOauthGrants({
       const answer = await inOrganisation(orgId, caller.correlationId, async (tx, states) => {
         const flow = await deviceHeld(tx, known.id);
         if (flow?.usedAt !== null) return { outcome: 'used' as const };
+        const notOurs = unsealed(flow, { orgId, keyId }, states, caller);
+        if (notOurs !== undefined) return { outcome: 'unsealed' as const, reason: notOurs };
         // Used once this commits, whatever comes next: an allowed flow past its end is spent, never collected.
         await codeUsed(tx, flow.id, now);
         if (flow.endsAt.getTime() <= now.getTime()) return { outcome: 'expired' as const };
@@ -460,6 +499,9 @@ export function createOauthGrants({
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'used') return refusedFor(caller, 'device_used', { clientId: known.clientId });
+      if (answer.outcome === 'unsealed') {
+        return refusedFor(caller, answer.reason, { clientId: known.clientId, flowId: known.id, keyId });
+      }
       if (answer.outcome === 'expired') {
         // Allowed but never collected, and now never can be: its connection goes (as a code spent unused does).
         await codeSpent(known, caller, 'device_expired');

@@ -16,10 +16,12 @@
 //   again; the agent, ACTIVE; the scopes; room for one more connection (10
 //   live an agent, 100 in all, 20 made an organisation a day); a challenge
 //   bound to the organisation, the flow, the agent, the scopes, the client,
-//   its redirect address and the resource, so it makes exactly that
-//   connection. The confirm: the organisation's lock for issuing keys; the
-//   same reads and checks; the challenge consumed; the flow decided, once;
-//   then a key for the agent, its secret random and thrown away (no `axk_`
+//   its redirect address, the resource and the PKCE challenge, so it makes
+//   exactly that connection. The confirm: the organisation's lock for issuing
+//   keys; the same reads and checks; the challenge consumed; the flow decided,
+//   once, its decision sealed with a key the database never holds (S205,
+//   oauth/flow-seals.ts), so the token endpoint believes no flow planted or
+//   changed in the database; then a key for the agent, its secret random and thrown away (no `axk_`
 //   text can work for it), and its connection; the code, shown this once in
 //   the address the browser goes back to, its hash kept on the flow for 60 s.
 // - `deny`: the flow decided denied, and the browser sent back with
@@ -60,9 +62,12 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import {
   type AnyFlowRead,
+  codeEndsFrom,
+  decisionSealed,
   flowById,
   flowDecided,
   hashOf,
+  pendingFlowSound,
   isFlowCookie,
   isLoopback,
   newCode,
@@ -200,6 +205,9 @@ const consentHash = (orgId: string, flow: AnyFlowRead, asked: ConsentAsked): Buf
     // A device's has none: its kind, where the address would be, so neither can stand for the other.
     flow.kind === 'code' ? flow.redirectUri : 'device',
     flow.resource,
+    // S205: its PKCE challenge, or a device's device code hash, too: never shown, so one changed between the ask and
+    // the confirm is never decided.
+    flow.kind === 'code' ? flow.codeChallenge : flow.deviceHash,
   ]);
 
 /**
@@ -257,11 +265,16 @@ export function createConnectionConsents({
    * The flow named, open and this browser's (a device's, this person's too): NOT_FOUND for any other, which says
    * nothing of whether it exists.
    */
+  /** Open, this browser's and person's, and as its client opened it (S205: sealed); none else is shown or decided. */
+  const shown = (flow: AnyFlowRead | undefined, cookie: string | undefined, userId: string, now: Date) =>
+    flow !== undefined &&
+    isOpen(flow, now) &&
+    fromItsBrowser(flow, cookie, userId) &&
+    pendingFlowSound(keys, logger, flow);
+
   const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, userId: string, now: Date): Promise<AnyFlowRead> => {
     const flow = await flowById(tx, flowId);
-    if (flow === undefined || !isOpen(flow, now) || !fromItsBrowser(flow, cookie, userId)) {
-      throw new AgentRefused(404, 'NOT_FOUND');
-    }
+    if (flow === undefined || !shown(flow, cookie, userId, now)) throw new AgentRefused(404, 'NOT_FOUND');
     return flow;
   };
 
@@ -344,9 +357,7 @@ export function createConnectionConsents({
   return {
     async request(named, userId) {
       const flow = await flowById(database, named.flowId);
-      if (flow === undefined || !isOpen(flow, clock.now()) || !fromItsBrowser(flow, named.cookie, userId)) {
-        return undefined;
-      }
+      if (flow === undefined || !shown(flow, named.cookie, userId, clock.now())) return undefined;
       const client = await clients.find(flow.clientId);
       const redirectUri = flow.kind === 'code' ? flow.redirectUri : null;
       return {
@@ -410,11 +421,21 @@ export function createConnectionConsents({
           const keyId = ids.next();
           // A device's flow has no code: its device code, polling, takes the tokens (oauth-grants.ts).
           const code = flow.kind === 'code' ? newCode() : null;
+          const codeHash = code === null ? null : hashOf(code);
+          // Sealed over the flow as read here, the one the step-up was bound to (S205): a row changed by anyone
+          // without the app's keys, before or after, is never exchanged (oauth-grants.ts).
+          const seal = decisionSealed(keys, flow, {
+            orgId: member.orgId,
+            keyId,
+            codeHash,
+            decidedAt: now,
+            codeEndsAt: codeEndsFrom(now, codeHash),
+          });
           // Decided first, by one UPDATE of an undecided flow in time: a second confirm of it finds none, and rolls back.
           const decided = await flowDecided(
             tx,
             flow.id,
-            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash: code === null ? null : hashOf(code) },
+            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash, seal },
             now,
           );
           if (!decided) throw new AgentRefused(404, 'NOT_FOUND');
@@ -479,23 +500,26 @@ export function createConnectionConsents({
     },
 
     async deny(member, idempotent, named, correlationId) {
+      /** Where the browser goes back to, from the flow as read and checked in the deny's own transaction (S205). */
+      const deniedTo = (flow: AnyFlowRead): string | null =>
+        flow.kind === 'code'
+          ? backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer })
+          : null;
+      let sentBack: { readonly redirectTo: string | null } | undefined;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const now = clock.now();
         await work.memberIn(tx, states, member, CONNECTING_ROLES);
         const flow = await openFlow(tx, named, member.userId, now);
         if (!(await flowDecided(tx, flow.id, { outcome: 'denied' }, now))) throw new AgentRefused(404, 'NOT_FOUND');
+        sentBack = { redirectTo: deniedTo(flow) };
         return { status: 200, resourceId: flow.id };
       });
       if (isUnwritten(done)) return done;
+      if (sentBack !== undefined) return { outcome: 'denied', ...sentBack };
+      // A retry: the flow read again, believed only as its client opened it.
       const flow = await flowById(database, done.result.resourceId);
       if (flow === undefined) return { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
-      return {
-        outcome: 'denied',
-        redirectTo:
-          flow.kind === 'code'
-            ? backToClient(flow.redirectUri, { error: 'access_denied', state: flow.state, iss: issuer })
-            : null,
-      };
+      return { outcome: 'denied', redirectTo: pendingFlowSound(keys, logger, flow) ? deniedTo(flow) : null };
     },
   };
 }

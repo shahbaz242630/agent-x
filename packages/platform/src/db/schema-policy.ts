@@ -494,7 +494,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'oauth.flows': {
       reason:
-        "The OAuth authorization flows under way (0093, 6E3a): a client sends a person's browser here before anyone is signed in or any organisation chosen. A flow names the organisation and connection key it was allowed with by ID alone, and its code's SHA-256; a token is issued only once that organisation's own signed rows are read. Stated trade: it keeps the client's `state` until it ends, as OAuth sends it back unchanged, and the address that opened it (an IPv6 /64 as one) and its network (an IPv6 /48), for each source's and network's own cap (0096, 6F1 G4; 0099, AG8). A device's flow keeps the SHA-256 of the person who claimed it (0099)",
+        "The OAuth authorization flows under way (0093, 6E3a): a client sends a person's browser here before anyone is signed in or any organisation chosen. A flow names the organisation and connection key it was allowed with by ID alone, and its code's SHA-256; a token is issued only once that organisation's own signed rows are read. Stated trade: it keeps the client's `state` until it ends, as OAuth sends it back unchanged, and the address that opened it (an IPv6 /64 as one) and its network (an IPv6 /48), for each source's and network's own cap (0096, 6F1 G4; 0099, AG8). A device's flow keeps the SHA-256 of the person who claimed it (0099). A flow keeps the MAC of what it was opened with and, once allowed, of its decision, with a key the database never holds, each with that key's version (0101, tamper pass S205): a row planted or changed by anyone without the app's keys is never shown, decided or exchanged",
       columns: [
         'id',
         'kind',
@@ -522,9 +522,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'network_key',
         'person_hash',
         'failed_claims',
+        'open_mac',
+        'open_key_version',
+        'decision_mac',
+        'decision_key_version',
       ],
       // Opened, a device's claimed once by a browser and its person (0095, 0099), anyone else's claims counted (0099),
-      // decided once, its code used once, and swept a day after it ends; never moved to another client.
+      // decided once and sealed (0101), its code used once, swept a day after it ends; never moved to another client.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
       appMayUpdate: [
         'browser_hash',
@@ -538,6 +542,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'code_ends_at',
         'used_at',
         'polled_at',
+        'decision_mac',
+        'decision_key_version',
       ],
     },
     'oauth.client_metadata': {

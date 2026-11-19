@@ -289,7 +289,7 @@ beforeAll(async () => {
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, logger);
   const services = { database: app, keys, ids, clock, logger };
   const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
-  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
+  authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
   const registered = await authorizing.register(
     { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
     CORRELATION,
@@ -338,7 +338,7 @@ beforeAll(async () => {
         issuer: capabilities.issuer,
         clients,
       }),
-      device: createOauthDevice({ database: app, clock, ids, logger, capabilities, clients }),
+      device: createOauthDevice({ database: app, keys, clock, ids, logger, capabilities, clients }),
       clock,
     },
   });

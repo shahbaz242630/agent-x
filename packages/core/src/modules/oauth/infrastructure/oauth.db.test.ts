@@ -5,6 +5,7 @@
 // interval; a client's metadata document kept a day.
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
@@ -17,6 +18,7 @@ import {
   sweepClientMetadata,
 } from './client-metadata-cache.ts';
 import { hashOf } from './codes.ts';
+import { openJudged } from './flow-seals.ts';
 import { challengeOf } from './pkce.ts';
 import {
   CLIENT_KEPT_DAYS,
@@ -57,6 +59,14 @@ let app: Database<OauthTables>;
 const NOW = new Date('2026-11-18T09:00:00Z');
 const ORG = '0199a0f0-0000-7000-8000-0000000e3a01';
 const KEY = '0199a0f0-0000-7000-8000-0000000e3a02';
+/** A decision's seal, as the consent makes one: kept and read back here, judged in flow-seals.test.ts. */
+const SEAL = { mac: 'e'.repeat(64), keyVersion: 1 };
+/** The keys a flow is sealed with as it opens (S205). */
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 7)]]) }]),
+  ),
+);
 let next = 0;
 const flowId = () => {
   next += 1;
@@ -84,6 +94,7 @@ const opened = async (createdAt = NOW, source = fresh(), browserHash = 'a'.repea
   const id = flowId();
   const outcome = await openCodeFlow(
     app,
+    keys,
     {
       id,
       clientId: 'axcl_0123456789abcdef0123456789abcdef',
@@ -231,7 +242,7 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
 
   it('decides a flow once and only in time', async () => {
     const id = await opened();
-    const allowed = { outcome: 'allowed' as const, orgId: ORG, keyId: KEY, codeHash: 'c'.repeat(64) };
+    const allowed = { outcome: 'allowed' as const, orgId: ORG, keyId: KEY, codeHash: 'c'.repeat(64), seal: SEAL };
     expect(await flowDecided(app, id, allowed, new Date(NOW.getTime() + 1000))).toBe(true);
     expect(await flowDecided(app, id, { outcome: 'denied' }, new Date(NOW.getTime() + 2000))).toBe(false);
     expect(await flowById(app, id)).toMatchObject({
@@ -239,6 +250,7 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
       orgId: ORG,
       keyId: KEY,
       codeEndsAt: new Date(NOW.getTime() + 1000 + CODE_SECONDS * 1000),
+      seal: SEAL,
     });
     const late = await opened();
     expect(await flowDecided(app, late, { outcome: 'denied' }, new Date(NOW.getTime() + FLOW_SECONDS * 1000))).toBe(
@@ -252,7 +264,7 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
   it('holds a code for its use: a second exchange waits, then finds it used; a use rolled back is no use', async () => {
     const id = await opened();
     const codeHash = 'd'.repeat(64);
-    await flowDecided(app, id, { outcome: 'allowed', orgId: ORG, keyId: KEY, codeHash }, NOW);
+    await flowDecided(app, id, { outcome: 'allowed', orgId: ORG, keyId: KEY, codeHash, seal: SEAL }, NOW);
     expect(await flowOfCode(app, codeHash)).toMatchObject({ id, orgId: ORG, keyId: KEY, usedAt: null });
     // A use whose transaction rolls back (a busy) leaves the code unused.
     await expect(
@@ -323,7 +335,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       intervalSeconds: 5,
       createdAt,
     };
-    return { flow, opened: await openDeviceFlow(app, flow, { source, network }) };
+    return { flow, opened: await openDeviceFlow(app, keys, flow, { source, network }) };
   };
   const BROWSER = 'b'.repeat(64);
   const OTHER = 'c'.repeat(64);
@@ -334,12 +346,20 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   it('opens a device’s flow with no browser, reads it by its device code, and draws again for a user code held', async () => {
     const { flow, opened: outcome } = await device();
     expect(outcome).toBe('opened');
-    expect(await deviceFlowOfCode(app, flow.deviceHash)).toEqual({
+    const read = await deviceFlowOfCode(app, flow.deviceHash);
+    if (read === undefined) throw new Error('read');
+    // Sealed as it opened (S205): sound, with the pepper's version.
+    const { openSeal, ...rest } = read;
+    expect(openSeal?.keyVersion).toBe(1);
+    expect(openJudged(keys, read)).toBe('sound');
+    expect(rest).toEqual({
       kind: 'device',
       id: flow.id,
       clientId: flow.clientId,
       scopesAsked: ['requests:read'],
       resource: flow.resource,
+      deviceHash: flow.deviceHash,
+      userCodeHash: flow.userCodeHash,
       browserHash: null,
       personHash: null,
       intervalSeconds: 5,
@@ -347,8 +367,10 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       createdAt: NOW,
       endsAt: new Date(NOW.getTime() + FLOW_SECONDS * 1000),
       decided: null,
+      decidedAt: null,
       orgId: null,
       keyId: null,
+      seal: null,
       usedAt: null,
     });
     expect(await flowById(app, flow.id)).toMatchObject({ kind: 'device', id: flow.id });
@@ -417,7 +439,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
 
   it('is decided with no code, and held for its tokens’ issue: a second poll waits, then finds it used', async () => {
     const { flow } = await device();
-    const allowed = { outcome: 'allowed' as const, orgId: ORG, keyId: KEY, codeHash: null };
+    const allowed = { outcome: 'allowed' as const, orgId: ORG, keyId: KEY, codeHash: null, seal: SEAL };
     expect(await flowDecided(app, flow.id, allowed, NOW)).toBe(true);
     expect(await deviceFlowOfCode(app, flow.deviceHash)).toMatchObject({ decided: 'allowed', orgId: ORG, keyId: KEY });
     expect(await flowById(app, flow.id)).not.toHaveProperty('codeEndsAt');
