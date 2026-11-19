@@ -1862,7 +1862,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
 
   /** The device's request, claimed by a browser whose person (`who`) typed its code. */
   async function claimed(userCode: string, who: AgentMember, cookie?: string) {
-    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie, who.userId);
+    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie, who.userId, CALLER.ip);
     if (found.outcome !== 'claimed') throw new Error('not claimed');
     return { flowId: found.requestId, cookie: found.cookie };
   }
@@ -1932,7 +1932,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(errorOf(await poll(given.deviceCode))).toBe('slow_down');
     const flow = await claimed(given.userCode, admin);
     // Another browser typing the same code finds nothing.
-    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), admin.userId)).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), admin.userId, CALLER.ip)).toEqual({
+      outcome: 'not_found',
+    });
     expect(await consents.request(flow, admin.userId)).toMatchObject({
       via: 'device',
       client: { id: clientId, name: 'ChatGPT', verifiedBy: null },
@@ -1974,7 +1976,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(errorOf(await poll(other.deviceCode, 'axcl_ffffffffffffffffffffffffffffffff'))).toBe('invalid_grant');
     clock.advanceBy(15 * 60_000);
     expect(errorOf(await poll(other.deviceCode))).toBe('expired_token');
-    expect(await deviceOf().lookup(other.userCode, undefined, admin.userId)).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(other.userCode, undefined, admin.userId, CALLER.ip)).toEqual({
+      outcome: 'not_found',
+    });
   });
 
   it('AG8: a device claimed is its person’s alone: another person on the same browser can’t read, allow or deny it', async () => {
@@ -1995,7 +1999,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       await consents.deny(colleague, keyed(colleague, DENY_OPERATION, 'deny-theirs'), flow, CORRELATION),
     ).toMatchObject({ outcome: 'refused', status: 404 });
     // Nor claim it again for themselves on that browser: a failed claim, counted on the flow.
-    expect(await deviceOf().lookup(given.userCode, flow.cookie, colleague.userId)).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(given.userCode, flow.cookie, colleague.userId, CALLER.ip)).toEqual({
+      outcome: 'not_found',
+    });
     expect(lines('oauth.device_code_contested')).toEqual([
       expect.objectContaining({ level: 'warn', flowId: flow.flowId, failedClaims: 1, denied: false }),
     ]);
@@ -2011,7 +2017,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     const given = await codes();
     const flow = await claimed(given.userCode, admin);
     for (let tried = 0; tried < MOST_FAILED_CLAIMS_A_FLOW; tried += 1) {
-      expect(await deviceOf().lookup(given.userCode, undefined, stranger.userId)).toEqual({ outcome: 'not_found' });
+      expect(await deviceOf().lookup(given.userCode, undefined, stranger.userId, CALLER.ip)).toEqual({
+        outcome: 'not_found',
+      });
     }
     expect(lines('oauth.device_code_contested').at(-1)).toMatchObject({
       failedClaims: MOST_FAILED_CLAIMS_A_FLOW,
@@ -2111,14 +2119,16 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   it('mutation V4: a lookup with no cookie gets one; the same browser finds it again; another browser never', async () => {
     const person = await member(await organization(), 'admin');
     const given = await codes();
-    const first = await deviceOf().lookup(given.userCode, undefined, person.userId);
+    const first = await deviceOf().lookup(given.userCode, undefined, person.userId, CALLER.ip);
     if (first.outcome !== 'claimed') throw new Error('not claimed');
-    expect(await deviceOf().lookup(given.userCode, first.cookie, person.userId)).toEqual({
+    expect(await deviceOf().lookup(given.userCode, first.cookie, person.userId, CALLER.ip)).toEqual({
       outcome: 'claimed',
       requestId: first.requestId,
       cookie: first.cookie,
     });
-    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), person.userId)).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), person.userId, CALLER.ip)).toEqual({
+      outcome: 'not_found',
+    });
   });
 
   it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
@@ -2141,7 +2151,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
         fresh(),
       ),
     ).toMatchObject({ error: 'invalid_target' });
-    expect(await device.lookup('AEIO-UUUU', undefined, 'someone')).toEqual({ outcome: 'not_found' });
+    expect(await device.lookup('AEIO-UUUU', undefined, 'someone', CALLER.ip)).toEqual({ outcome: 'not_found' });
   });
 });
 
@@ -2374,7 +2384,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
     const given = await device.authorize({ client_id: HERMES }, CORRELATION, fresh());
     if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
-    const found = await device.lookup(given.codes.userCode, undefined, 'a person');
+    const found = await device.lookup(given.codes.userCode, undefined, 'a person', CALLER.ip);
     if (found.outcome !== 'claimed') throw new Error('not claimed');
     const shown = createConnectionConsents({
       database: app,

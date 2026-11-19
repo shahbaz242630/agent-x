@@ -53,8 +53,8 @@ async function consentServer(
   const calls: unknown[] = [];
   const device: OauthDevice = {
     authorize: () => Promise.reject(new Error('no')),
-    lookup: (typed, cookie, userId) => {
-      calls.push({ typed, cookie, userId });
+    lookup: (typed, cookie, userId, ip) => {
+      calls.push({ typed, cookie, userId, ip });
       return Promise.resolve(found);
     },
   };
@@ -228,7 +228,8 @@ describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
     expect(response.headers['set-cookie']).toBe(
       `${CONNECT_COOKIE}=${BROWSER}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400`,
     );
-    expect(calls).toEqual([{ typed: 'bcdf-ghjk', cookie: BROWSER, userId: LIVE.userId }]);
+    // The person, and the address its network is counted by (AG8).
+    expect(calls).toEqual([{ typed: 'bcdf-ghjk', cookie: BROWSER, userId: LIVE.userId, ip: '127.0.0.1' }]);
   });
 
   it('AG8: answers 429 with Retry-After while every lookup is held, setting no cookie', async () => {

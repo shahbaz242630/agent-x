@@ -1,7 +1,7 @@
 // 6E3c (RFC 8628): a device's codes when the flows can't be opened: every
 // flow at the server's cap, a user code drawn three times already held, or
 // the database busy, each answered as OAuth's own error, never a failure.
-// AG8: failed user-code lookups held server-wide, and a claimed flow's code
+// AG8: failed user-code lookups held per network and watched server-wide, and a claimed flow's code
 // typed by someone else warned of. The flow on the real schema is
 // oauth-connections.db.test.ts.
 import { DEVICE_CODE_GRANT, type DeviceClaim, newFlowCookie, type OauthTables } from '@agentx/core/modules/oauth';
@@ -10,7 +10,11 @@ import { FixedClock, LogCapture, SequentialIds, testLogger } from '@agentx/testi
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { OauthClients } from './oauth-clients.ts';
-import { createOauthDevice, MOST_FAILED_LOOKUPS_A_MINUTE } from './oauth-device.ts';
+import {
+  createOauthDevice,
+  MOST_FAILED_LOOKUPS_A_MINUTE,
+  MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE,
+} from './oauth-device.ts';
 import { capabilitiesOf } from './oauth-wire.ts';
 
 const opened = vi.hoisted(() => ({ answers: [] as (string | Error)[] }));
@@ -61,35 +65,78 @@ function device(capture = new LogCapture(), clock = new FixedClock(new Date('202
 const PERSON = '0199a0f0-0000-7000-8000-00000000a801';
 const FLOW = '0199a0f0-0000-7000-8000-00000000a802';
 
-describe('AG8: failed user-code lookups, held server-wide and on each flow', () => {
-  it(`refuses every lookup for the rest of the minute after ${String(MOST_FAILED_LOOKUPS_A_MINUTE)} failed ones, saying so once`, async () => {
+describe('AG8: failed user-code lookups, held per network, watched server-wide, and on each flow', () => {
+  const HOME = '203.0.113.9';
+  const SITE = '2001:db8:a8:1::7';
+  const NEIGHBOUR = '2001:db8:a8:ffff::1';
+
+  it(`holds a network to ${String(MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE)} failed lookups a minute; no other network waits`, async () => {
     const capture = new LogCapture();
     const clock = new FixedClock(new Date('2026-11-18T09:00:00Z'));
     const at = device(capture, clock);
-    for (let tried = 0; tried < MOST_FAILED_LOOKUPS_A_MINUTE; tried += 1) {
-      expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'not_found' });
+    for (let tried = 0; tried < MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE; tried += 1) {
+      expect(await at.lookup('BCDF-GHJK', undefined, PERSON, SITE)).toEqual({ outcome: 'not_found' });
     }
-    // Held: not even looked for, a right code too, so the codes can't be walked from many accounts at once.
+    // Held: not even looked for, a right code too, from any /64 of that /48.
     claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'held' });
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'held' });
-    expect(claims.asked).toBe(MOST_FAILED_LOOKUPS_A_MINUTE);
-    expect(capture.lines().filter((line) => line.event === 'oauth.device_lookups_capped')).toEqual([
-      expect.objectContaining({ level: 'warn', most: MOST_FAILED_LOOKUPS_A_MINUTE, refused: 1 }),
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, NEIGHBOUR)).toEqual({ outcome: 'held' });
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, SITE)).toEqual({ outcome: 'held' });
+    expect(claims.asked).toBe(MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE);
+    expect(capture.lines().filter((line) => line.event === 'oauth.device_lookups_network_held')).toEqual([
+      expect.objectContaining({ level: 'warn', most: MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE, refused: 1 }),
     ]);
-    // The next minute, lookups are made again.
+    // Never the address itself in a log line (ADR-011 §7).
+    expect(JSON.stringify(capture.lines())).not.toContain('2001:db8');
+    // Another network is looked up as ever.
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toMatchObject({ outcome: 'claimed' });
+    // The next minute, that network is looked up again.
     clock.advanceBy(60_000);
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toMatchObject({ outcome: 'claimed', requestId: FLOW });
+    claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, SITE)).toMatchObject({
+      outcome: 'claimed',
+      requestId: FLOW,
+    });
   });
 
-  it('counts a code no user code could be, and holds each copy to its share of the server’s count', async () => {
-    const at = device(new LogCapture(), undefined, 4);
-    const share = Math.ceil(MOST_FAILED_LOOKUPS_A_MINUTE / 4);
-    for (let tried = 0; tried < share; tried += 1) {
-      expect(await at.lookup('not a code', undefined, PERSON)).toEqual({ outcome: 'not_found' });
+  it(`only warns, never holds anyone, past ${String(MOST_FAILED_LOOKUPS_A_MINUTE)} failed a minute server-wide`, async () => {
+    const capture = new LogCapture();
+    const clock = new FixedClock(new Date('2026-11-18T09:00:00Z'));
+    const at = device(capture, clock);
+    // Each failure from a network of its own: no network comes near its own limit.
+    for (let tried = 0; tried < MOST_FAILED_LOOKUPS_A_MINUTE + 5; tried += 1) {
+      expect(
+        await at.lookup('BCDF-GHJK', undefined, PERSON, `198.51.${String(tried >> 8)}.${String(tried % 256)}`),
+      ).toEqual({
+        outcome: 'not_found',
+      });
     }
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'held' });
+    claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toMatchObject({ outcome: 'claimed' });
+    expect(capture.lines().filter((line) => line.event === 'oauth.device_lookups_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', most: MOST_FAILED_LOOKUPS_A_MINUTE }),
+    ]);
+    // Said again the next minute it is passed, not before.
+    clock.advanceBy(59_999);
+    await at.lookup('BCDF-GHJK', undefined, PERSON, '192.0.2.1');
+    expect(capture.lines().filter((line) => line.event === 'oauth.device_lookups_capped')).toHaveLength(1);
+  });
+
+  it('counts a code no user code could be, and holds each copy to its share of each count', async () => {
+    const capture = new LogCapture();
+    const at = device(capture, undefined, 4);
+    const share = Math.ceil(MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE / 4);
+    for (let tried = 0; tried < share; tried += 1) {
+      expect(await at.lookup('not a code', undefined, PERSON, HOME)).toEqual({ outcome: 'not_found' });
+    }
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toEqual({ outcome: 'held' });
     expect(claims.asked).toBe(0);
+    const serverShare = Math.ceil(MOST_FAILED_LOOKUPS_A_MINUTE / 4);
+    for (let tried = share; tried < serverShare; tried += 1) {
+      await at.lookup('not a code', undefined, PERSON, `198.51.100.${String(tried)}`);
+    }
+    expect(capture.lines().filter((line) => line.event === 'oauth.device_lookups_capped')).toEqual([
+      expect.objectContaining({ most: serverShare }),
+    ]);
   });
 
   it('answers a code another browser or person claimed as nothing found, with its warning, and counts it failed', async () => {
@@ -99,30 +146,33 @@ describe('AG8: failed user-code lookups, held server-wide and on each flow', () 
       { outcome: 'contested', flowId: FLOW, failedClaims: 1, denied: false },
       { outcome: 'contested', flowId: FLOW, failedClaims: 3, denied: true },
     ];
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'not_found' });
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'not_found' });
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toEqual({ outcome: 'not_found' });
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toEqual({ outcome: 'not_found' });
     expect(capture.lines().filter((line) => line.event === 'oauth.device_code_contested')).toEqual([
       expect.objectContaining({ level: 'warn', flowId: FLOW, failedClaims: 1, denied: false }),
       expect.objectContaining({ level: 'warn', flowId: FLOW, failedClaims: 3, denied: true }),
     ]);
-    for (let tried = 2; tried < MOST_FAILED_LOOKUPS_A_MINUTE; tried += 1)
-      await at.lookup('BCDF-GHJK', undefined, PERSON);
-    expect(await at.lookup('BCDF-GHJK', undefined, PERSON)).toEqual({ outcome: 'held' });
+    for (let tried = 2; tried < MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE; tried += 1) {
+      await at.lookup('BCDF-GHJK', undefined, PERSON, HOME);
+    }
+    expect(await at.lookup('BCDF-GHJK', undefined, PERSON, HOME)).toEqual({ outcome: 'held' });
   });
 
   it('claims for this browser’s cookie, or a new one, and never counts a claim as failed', async () => {
     const at = device();
     const cookie = newFlowCookie();
-    claims.answers = Array.from({ length: MOST_FAILED_LOOKUPS_A_MINUTE + 1 }, () => ({
+    claims.answers = Array.from({ length: MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE + 1 }, () => ({
       outcome: 'claimed' as const,
       flowId: FLOW,
     }));
-    expect(await at.lookup('bcdf ghjk', cookie, PERSON)).toEqual({ outcome: 'claimed', requestId: FLOW, cookie });
-    const fresh = await at.lookup('BCDF-GHJK', 'not a cookie', PERSON);
+    expect(await at.lookup('bcdf ghjk', cookie, PERSON, HOME)).toEqual({ outcome: 'claimed', requestId: FLOW, cookie });
+    const fresh = await at.lookup('BCDF-GHJK', 'not a cookie', PERSON, HOME);
     expect(fresh).toMatchObject({ outcome: 'claimed', requestId: FLOW });
     expect(fresh.outcome === 'claimed' && fresh.cookie !== 'not a cookie').toBe(true);
-    for (let tried = 2; tried <= MOST_FAILED_LOOKUPS_A_MINUTE; tried += 1) await at.lookup('BCDF-GHJK', cookie, PERSON);
-    expect(claims.asked).toBe(MOST_FAILED_LOOKUPS_A_MINUTE + 1);
+    for (let tried = 2; tried <= MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE; tried += 1) {
+      await at.lookup('BCDF-GHJK', cookie, PERSON, HOME);
+    }
+    expect(claims.asked).toBe(MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE + 1);
   });
 });
 

@@ -15,10 +15,14 @@
 //   then asks and decides it as a browser's (connection-consents.ts), by that
 //   person alone. A code typed wrong, ended, decided or claimed by anyone
 //   else: nothing found, and nothing said of which.
-// - AG8 (6F1 audit): failed lookups are held server-wide too, each copy its
-//   share of MOST_FAILED_LOOKUPS_A_MINUTE, every lookup held for the rest of
-//   the minute past it; and a claimed flow's code typed by anyone else is
-//   counted on the flow (flows.ts deviceClaimed), and warned of.
+// - AG8 (6F1 audit): failed lookups are held per network too (an IPv4
+//   address, an IPv6 /48), each copy its share of
+//   MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE, that network's every lookup held
+//   for the rest of the minute past it, and no other network's; server-wide
+//   they are only watched (MOST_FAILED_LOOKUPS_A_MINUTE, a warning), so a few
+//   accounts can never hold every organisation's people from their devices.
+//   And a claimed flow's code typed by anyone else is counted on the flow
+//   (flows.ts deviceClaimed), and warned of.
 //
 // The console's `/device` page may be opened from the device's
 // verification_uri_complete, with the code filled in; it never looks it up by
@@ -49,15 +53,22 @@ import { capWarning, flowSourceOf } from './oauth-authorizing.ts';
 import type { OauthClients } from './oauth-clients.ts';
 import type { OauthError } from './oauth-errors.ts';
 import type { Capabilities } from './oauth-wire.ts';
-import { shareOfCopies } from './rate-limit.ts';
+import { clientSite, shareOfCopies } from './rate-limit.ts';
 
 /** How often a device may poll, in seconds (RFC 8628 §3.2's default). */
 const DEVICE_INTERVAL_SECONDS = 5;
 
 /**
- * The most user-code lookups that may fail in a minute, every person together (AG8, the 6F1 audit). Each person has 5
- * tries a minute, so many accounts at once could still walk the 20^8 codes; past this, every lookup is held for the
- * rest of the minute, a right code too, as nothing tells a guess from a slip. Far above a real minute's typing errors.
+ * The most user-code lookups that may fail in a minute from one network (AG8, the 6F1 audit): an IPv4 address, or an
+ * IPv6 /48. Each person has 5 tries a minute, so many accounts on one network could still walk the 20^8 codes; past
+ * this, that network's every lookup is held for the rest of the minute, a right code too, as nothing tells a guess from
+ * a slip. Room for an office's people mistyping at once.
+ */
+export const MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE = 30;
+
+/**
+ * Failed lookups in a minute, every network together, past which Agent X warns (AG8): never a refusal, which a few
+ * accounts could turn on every organisation's people. Far above a real minute's typing errors.
  */
 export const MOST_FAILED_LOOKUPS_A_MINUTE = 120;
 
@@ -95,7 +106,7 @@ export type DeviceAnswer =
 
 /**
  * The flow claimed for this browser and person: its ID, for the consent page, and the browser's cookie, set again; or
- * none found; or every lookup held for the rest of the minute (AG8).
+ * none found; or every lookup from this network held for the rest of the minute (AG8).
  */
 export type LookupAnswer =
   | { readonly outcome: 'claimed'; readonly requestId: string; readonly cookie: string }
@@ -105,8 +116,8 @@ export type LookupAnswer =
 export interface OauthDevice {
   /** `ip`: the client's address as the trust rule reads it, undefined when it can't be read (rate-limit.ts). */
   authorize(asked: DeviceAsked, correlationId: string, ip: string | undefined): Promise<DeviceAnswer>;
-  /** `userId`: the signed-in person typing the code. */
-  lookup(typed: string, cookie: string | undefined, userId: string): Promise<LookupAnswer>;
+  /** `userId`: the signed-in person typing the code; `ip`: their address, as for `authorize`. */
+  lookup(typed: string, cookie: string | undefined, userId: string, ip: string | undefined): Promise<LookupAnswer>;
 }
 
 const refused = (status: 400 | 401 | 503, error: OauthError, description: string): DeviceAnswer => ({
@@ -152,17 +163,27 @@ export function createOauthDevice({
     else (cap === 'network_full' ? networkCapped : sourceCapped)();
   };
   const mostFailed = shareOfCopies(MOST_FAILED_LOOKUPS_A_MINUTE, copies);
-  const lookupsCapped = capWarning(logger, clock, 'oauth.device_lookups_capped', { most: mostFailed });
-  // This copy's failed lookups in the minute that began at `since`, counted in memory as every other limit is.
-  const failed = { since: Number.NEGATIVE_INFINITY, count: 0 };
-  const failedThisMinute = (): number => {
+  const mostFromNetwork = shareOfCopies(MOST_FAILED_LOOKUPS_A_NETWORK_A_MINUTE, copies);
+  const networkHeld = capWarning(logger, clock, 'oauth.device_lookups_network_held', { most: mostFromNetwork });
+  // This copy's failed lookups in the minute that began at `since`, in all and per network, counted in memory as every
+  // other limit is. The map holds only the networks heard from this minute, emptied as the next begins.
+  const failed = { since: Number.NEGATIVE_INFINITY, total: 0, byNetwork: new Map<string, number>() };
+  const minuteNow = (): void => {
     const now = clock.now().getTime();
-    if (now - failed.since >= LOOKUP_WINDOW_MS) Object.assign(failed, { since: now, count: 0 });
-    return failed.count;
+    if (now - failed.since < LOOKUP_WINDOW_MS) return;
+    failed.since = now;
+    failed.total = 0;
+    failed.byNetwork.clear();
+  };
+  /** A failed lookup counted for `network`, and server-wide: warned of once a minute past the server's mark, held never. */
+  const failedFrom = (network: string): void => {
+    failed.byNetwork.set(network, (failed.byNetwork.get(network) ?? 0) + 1);
+    failed.total += 1;
+    if (failed.total === mostFailed) logger.warn('oauth.device_lookups_capped', { most: mostFailed });
   };
 
   /** The flow claimed for `userId` on this browser, or why not: a claim of anyone else's flow warned of. */
-  const claimFor = async (typed: string, browser: string, userId: string): Promise<LookupAnswer> => {
+  const claimFor = async (typed: string, browser: string, userId: string, network: string): Promise<LookupAnswer> => {
     const userCode = userCodeOf(typed);
     const claim =
       userCode === undefined
@@ -174,7 +195,7 @@ export function createOauthDevice({
             clock.now(),
           );
     if (claim.outcome === 'claimed') return { outcome: 'claimed', requestId: claim.flowId, cookie: browser };
-    failed.count += 1;
+    failedFrom(network);
     if (claim.outcome === 'contested') {
       const { flowId, failedClaims, denied } = claim;
       logger.warn('oauth.device_code_contested', { flowId, failedClaims, denied });
@@ -249,13 +270,15 @@ export function createOauthDevice({
       }
     },
 
-    lookup(typed, cookie, userId) {
-      if (failedThisMinute() >= mostFailed) {
-        lookupsCapped();
+    lookup(typed, cookie, userId, ip) {
+      minuteNow();
+      const network = clientSite(ip);
+      if ((failed.byNetwork.get(network) ?? 0) >= mostFromNetwork) {
+        networkHeld();
         return Promise.resolve({ outcome: 'held' });
       }
       const browser = cookie !== undefined && isFlowCookie(cookie) ? cookie : newFlowCookie();
-      return claimFor(typed, browser, userId);
+      return claimFor(typed, browser, userId, network);
     },
   };
 }

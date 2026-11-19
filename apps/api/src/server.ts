@@ -633,7 +633,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     });
     done();
   });
-  registerOauthRequests(app, { consents: options.oauth?.consents, device: options.oauth?.device });
+  registerOauthRequests(app, { consents: options.oauth?.consents, device: options.oauth?.device, trust });
   // Last: its tools read their twins, every one added by now (mcp.ts, 6E2).
   registerMcp(app, {
     useCases: {

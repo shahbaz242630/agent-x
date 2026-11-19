@@ -15,8 +15,8 @@
 //   page, claims that device's request for this browser and this person
 //   (oauth-device.ts, AG8); the request is then read and decided as above, by
 //   that person alone. Five tries a minute a person, beside every other
-//   limit, and every lookup held for a minute (429) once too many failed
-//   server-wide: the code is all that guards it.
+//   limit, and a network's every lookup held for a minute (429) once too
+//   many failed from it: the code is all that guards it.
 import { SCOPES } from '@agentx/core/modules/agents';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -37,7 +37,7 @@ import { sendErrorBody } from './errors.ts';
 import { answerAsked, idempotentRequest } from './idempotent-writes.ts';
 import type { OauthDevice } from './oauth-device.ts';
 import { CONNECT_COOKIE, connectCookie, OAUTH_PATHS } from './oauth-wire.ts';
-import { createRoutePersonCounter } from './rate-limit.ts';
+import { createRoutePersonCounter, type ProxyTrust, rawClientIp } from './rate-limit.ts';
 import { NOTHING, NOTHING_BODY_LIMIT, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 import { cookieValue } from './sign-in.ts';
 
@@ -121,7 +121,7 @@ const DEVICE_LOOKUP_OPERATION = 'connections.device-lookup';
 /** A person's tries at a user code (6E3 plan §1): 5 a minute, so 20^8 codes can't be walked. */
 const LOOKUP_LIMIT = { most: 5, windowMs: 60_000 } as const;
 
-/** How long to wait when every lookup is held (AG8): at most the rest of the failed lookups' minute. */
+/** How long to wait when a network's lookups are held (AG8): at most the rest of the failed lookups' minute. */
 const LOOKUP_HELD_SECONDS = 60;
 
 const LOOKUP = z
@@ -158,7 +158,16 @@ function answerConsent(written: ConsentWrite, request: FastifyRequest, reply: Fa
 
 export function registerOauthRequests(
   app: FastifyInstance,
-  { consents, device }: { readonly consents: ConnectionConsents | undefined; readonly device: OauthDevice | undefined },
+  {
+    consents,
+    device,
+    trust,
+  }: {
+    readonly consents: ConnectionConsents | undefined;
+    readonly device: OauthDevice | undefined;
+    /** The trust rule for the client's address (rate-limit.ts): a lookup's failures are held per network (AG8). */
+    readonly trust: ProxyTrust;
+  },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
@@ -170,7 +179,7 @@ export function registerOauthRequests(
         description:
           'The request becomes this browser’s and this person’s: read it, then allow or deny it, as a browser’s. A ' +
           'code typed wrong, ended, decided or already claimed by anyone else is a 404, which says nothing of which; ' +
-          'once too many lookups failed across Agent X this minute, every lookup is a 429 with Retry-After.',
+          'once too many lookups failed from one network this minute, its every lookup is a 429 with Retry-After.',
         body: LOOKUP,
         response: { 200: LOOKED_UP },
       },
@@ -183,9 +192,10 @@ export function registerOauthRequests(
         request.body.userCode,
         cookieValue(request.headers.cookie, CONNECT_COOKIE),
         personOf(request),
+        rawClientIp(request, trust),
       );
       if (found.outcome === 'not_found') return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
-      // AG8: too many lookups failed server-wide this minute; the person tries again in a minute.
+      // AG8: too many lookups failed from this network this minute; the person tries again in a minute.
       if (found.outcome === 'held') {
         return sendErrorBody(reply.header('retry-after', LOOKUP_HELD_SECONDS), 429, 'RATE_LIMITED', request.id);
       }

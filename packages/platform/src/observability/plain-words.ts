@@ -498,9 +498,14 @@ export const PLAIN_WORDS = {
     next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
   },
   'oauth.device_lookups_capped': {
-    happened: 'Too many device codes typed into the console failed in the last minute, so lookups were paused.',
-    broke: 'Everyone connecting a device by its code was told to wait up to a minute; connected apps carry on.',
-    next: 'Someone may be guessing codes from many accounts. If it repeats, find which accounts send them.',
+    happened: 'Many device codes typed into the console failed in the last minute, across all networks.',
+    broke: 'Nothing was stopped by it: each network is held to its own share, so no one else waits.',
+    next: 'Someone may be guessing codes from many networks and accounts. If it repeats, find who sends them.',
+  },
+  'oauth.device_lookups_network_held': {
+    happened: 'Too many device codes typed from one network failed in the last minute, so its lookups were paused.',
+    broke: 'Only people on that network were told to wait up to a minute; everyone else connects as usual.',
+    next: 'Nothing if rare: an office can share an address. If it goes on, block that network at the front door.',
   },
   'oauth.device_code_contested': {
     happened: 'A device’s code was typed by someone other than the person who already claimed it.',
