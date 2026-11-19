@@ -1311,9 +1311,9 @@ export const PLAIN_WORDS = {
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
   'security.legacy_seal_failed': {
-    happened: 'At start, the API could not give the older security records their tamper seals.',
-    broke: 'This copy of the API did not start; the others go on as before.',
-    next: 'The next start tries again. If it repeats, check the database and the platform audit chain.',
+    happened: 'The API could not seal the security records from before this release.',
+    broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
+    next: 'If no start has sealed them yet, the next start tries again; if one began, a developer finishes it by hand.',
   },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',

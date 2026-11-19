@@ -324,24 +324,6 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     return undefined;
   }
   logger.info('api.start_recorded', { seq: recorded });
-  // S206 V6: the security rows from before 0106 given their MACs, once, before this process writes one (legacy-seal.ts;
-  // its alarms are its own). A start that can't finish it doesn't serve: rows written with MACs before the record of
-  // it would read as that record deleted at the next start.
-  // TODO(S206 AT10-style): delete this, with sealLegacyRows, once every environment holds its `all_sealed` record.
-  try {
-    await sealLegacyRows(database, {
-      keys,
-      ids: uuidV7Ids,
-      logger,
-      orgs: () => listedOrganizations(database),
-    });
-  } catch (error) {
-    logger.error('security.legacy_seal_failed', { err: error });
-    await database.destroy();
-    logger.flush();
-    host.exitCode = 1;
-    return undefined;
-  }
   // S205: people made before 0100 get their MAC, until its cutoff; a failure leaves them unable to sign in, nothing more.
   // TODO(S205): delete this once USER_MAC_BACKFILL_UNTIL (2026-11-25) has passed, with backfillUserMacs.
   try {
@@ -377,6 +359,28 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
     // As the anchor check's own stale limit: what a chain may go unchecked before that is the alarm.
     notLeadingAfterMs: config.audit.anchorSeconds * 3 * 1000,
   });
+}
+
+/**
+ * S206 V6: the security rows from before 0106 given their MACs, once, in the background once the API serves
+ * (legacy-seal.ts; its alarms are its own). It never holds up or stops a start: the rows written meanwhile carry their
+ * MACs as they are written, and the rows from before stay unbelieved, not shown or counted, until sealed. A failure is
+ * logged and the API serves on. Never rejects.
+ * TODO(S206 AT10-style): delete this, with sealLegacyRows, once every environment holds its `all_sealed` record.
+ */
+export async function sealLegacyAfterStart({ keys, logger, database }: Booted): Promise<void> {
+  try {
+    const outcome = await sealLegacyRows(database, {
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+      orgs: () => listedOrganizations(database),
+    });
+    logger.info('security.legacy_seal_done', { outcome });
+  } catch (error) {
+    logger.error('security.legacy_seal_failed', { err: error });
+  }
 }
 
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */

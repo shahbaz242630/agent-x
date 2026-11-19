@@ -6,12 +6,21 @@
 // that finds sealing begun waits for its end and never seals a row itself.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+  within,
+} from '@agentx/testing';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
 import { eventMacHolds } from './event-seals.ts';
-import { ALL_SEALED, SEALING_STARTED, sealLegacyRows } from './legacy-seal.ts';
+import { ALL_SEALED, SEALING_STARTED, SECURITY_SEAL_BACKFILL_UNTIL, sealLegacyRows } from './legacy-seal.ts';
+import { createSecurityEvents } from './security-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 type Tables = SecurityEventsTables & PlatformControlsTables;
@@ -82,8 +91,23 @@ const records = async () =>
       .execute()
   ).map(({ action }) => action);
 
-const seal = (waitForOtherMs = 0) =>
-  sealLegacyRows(app, { keys, ids, logger: testLogger(capture), orgs: () => Promise.resolve([ORG]), waitForOtherMs });
+const seal = (waitForOtherMs = 0, now = AT) =>
+  sealLegacyRows(app, {
+    keys,
+    ids,
+    clock: new FixedClock(now),
+    logger: testLogger(capture),
+    orgs: () => Promise.resolve([ORG]),
+    waitForOtherMs,
+  });
+
+/** An event of the app's on the platform chain, as another start records it. */
+const recorded = (action: string) =>
+  app
+    .transaction()
+    .execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, { actor: { type: 'system', id: 'api' }, action, details: {} }),
+    );
 
 const alarms = () =>
   capture
@@ -224,39 +248,77 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual(['seal_record_deleted']);
   });
 
-  it('sealing begun but its end not recorded: never sealed again, whoever began it; the alarm once the wait is up', async () => {
+  it('sealing begun by another start that never ends it: never sealed here; the alarm once the wait is up', async () => {
+    await legacyRows();
+    // Another start's record of its beginning, as one that died part way leaves it.
+    await recorded(SEALING_STARTED);
+
+    // Waiting no longer than its bound for the other start's end, then the alarm.
+    expect(await within(10_000, seal(2_500), 'the wait for the other start')).toBe('deleted');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_deleted']);
+  });
+
+  it('its end deleted from the middle of the chain: the gap shows, nothing sealed again, the alarm', async () => {
     await legacyRows();
     await seal();
-    // Its end removed for one start, the owner's rows tampered with and their MACs taken off, to be sealed afresh.
+    // Later events past it, then the record of its end deleted from between them, the owner's rows put back unsealed.
+    await recorded('platform.started');
     await owner().query('delete from platform_controls.audit_events where action = $1', [ALL_SEALED]);
     await ownerDropsRule();
-    await owner().query(
-      "update security.events set mac = null, mac_key_version = null, reason = 'callback_incomplete'",
-    );
+    await owner().query('update security.events set mac = null, mac_key_version = null');
 
-    expect(await seal(0)).toBe('deleted');
+    expect(await seal()).toBe('unsealed');
     expect(await unsealed()).toBe('3');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('past the cutoff no sealing runs: records deleted and rows without MACs planted, the alarm', async () => {
+    await legacyRows();
+    await seal();
+    await owner().query('delete from platform_controls.audit_events where action in ($1, $2)', [
+      SEALING_STARTED,
+      ALL_SEALED,
+    ]);
+    await ownerDropsRule();
+    await owner().query('update security.events set mac = null, mac_key_version = null');
+    await owner().query('update security.org_events set mac = null, mac_key_version = null');
+    await owner().query('update security.partner_event_evidence set mac = null, mac_key_version = null');
+
+    expect(await seal(0, new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
+    expect(await unsealed()).toBe('5');
+    expect(await records()).toEqual([]);
     expect(alarms()).toEqual(['seal_record_deleted']);
+  });
+
+  it('takes no row written after 0106, with its MAC, for a sealing already done: the first sealing seals the rest', async () => {
+    await legacyRows();
+    // Written by this release as it serves, before the sealing in the background has run.
+    await createSecurityEvents({ ids, clock: new FixedClock(AT), keys, retentionDays: 30 }).record(app, [
+      {
+        kind: 'sign_in_failed',
+        reason: 'state_mismatch',
+        ip: '203.0.113.9',
+        userId: undefined,
+        windowStart: AT,
+        count: 1,
+      },
+    ]);
+
+    expect(await seal()).toBe('sealed');
+    expect(await unsealed()).toBe('0');
+    expect(alarms()).toEqual([]);
   });
 
   it('its end recorded meanwhile by the start that began it: this start waits for it and seals nothing', async () => {
     await legacyRows();
-    await seal();
-    await owner().query('delete from platform_controls.audit_events where action = $1', [ALL_SEALED]);
+    await recorded(SEALING_STARTED);
     const waiting = seal(60_000);
     // The other start finishing: its record of the end written now.
-    await ownerDropsRule();
-    await owner().query('update security.events set mac = null, mac_key_version = null');
-    await app.transaction().execute((tx) =>
-      createPlatformChain({ keys, ids }).record(tx, {
-        actor: { type: 'system', id: 'api' },
-        action: ALL_SEALED,
-        details: {},
-      }),
-    );
+    await recorded(ALL_SEALED);
 
     expect(await waiting).toBe('sealed');
-    expect(await unsealed()).toBe('3');
+    expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual([]);
   });
 
@@ -267,9 +329,9 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     await ownerDropsRule();
     await owner().query('update security.events set mac = null, mac_key_version = null');
 
-    expect(await seal(0)).toBe('deleted');
+    expect(await seal()).toBe('unsealed');
     expect(await unsealed()).toBe('3');
-    expect(alarms()).toEqual(['seal_record_deleted']);
+    expect(alarms()).toEqual(['seal_record_unsealed']);
   });
 
   it('a record the owner rewrote is never believed: the alarm, nothing sealed', async () => {

@@ -3,22 +3,23 @@
 // is never believed, whatever its ID or dates: not shown, not counted, and
 // alarmed when met.
 //
-// At start, before the API writes a security row: if the platform chain says
-// every row is sealed (`security_events.all_sealed`), nothing is done. If not:
-// 1. Unless a start already began sealing (`security_events.sealing_started`),
-//    every table is searched for a row that already carries a MAC. Before
-//    sealing begins none can: this release writes MACs only after this step.
-//    One found means the chain's record was deleted past the app: the alarm,
-//    and nothing sealed again, so no row the owner planted since is blessed.
+// The rows from before are the ones 0106 marked `before_macs`; every row
+// after carries its MAC as it is written (the database refuses one without).
+// In the background once the API serves, never holding up or stopping a
+// start: if the platform chain says every row is sealed
+// (`security_events.all_sealed`), nothing is done. If not:
+// 1. Every table is searched for a marked row that already carries a MAC. Before
+//    sealing begins none can; one found means the chain's record was deleted
+//    past the app: the alarm, and nothing sealed again, so no row the owner
+//    planted or tampered with since is blessed.
 // 2. The start records `sealing_started` (under its lock, so of starts at once
-//    one records it and every other joins), then gives each row without a MAC
-//    its MAC, a page at a time, each update only to a row still without one,
-//    so starts at once do the work once. Then it records `all_sealed`.
+//    one records it and every other joins), then gives each marked row without
+//    a MAC its MAC, a page at a time. Then it records `all_sealed`.
 // 3. A start that finds sealing begun but not finished never seals a row: it
 //    waits for the other start's `all_sealed` (two starting at once), and
-//    without it, in WAIT_FOR_OTHER_MS, raises the alarm (that start died, or
-//    the record was deleted). The rows left then stay unbelieved, as owner-
-//    planted ones: a stop, never a grant.
+//    without it, in WAIT_FOR_OTHER_MS, raises the alarm (that start died part
+//    way, or the record was deleted). The rows left then stay unbelieved, as
+//    owner-planted ones: a stop, never a grant; the API serves on.
 // Both records are read only through the platform chain's checked read: one
 // edited (for one start, say, to have sealing run again over rows tampered
 // with) fails its MAC, and nothing is sealed: the alarm. A deleted record is
@@ -35,7 +36,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
-import type { IdGenerator } from '../../../shared-kernel/index.ts';
+import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import {
   createPlatformChain,
   type PlatformControlsTables,
@@ -49,8 +50,15 @@ import type { SecurityEventsTables } from './tables.ts';
 export const SEALING_STARTED = 'security_events.sealing_started';
 export const ALL_SEALED = 'security_events.all_sealed';
 
+/**
+ * After this, no sealing runs at all (as 0100's people backfill had USER_MAC_BACKFILL_UNTIL): the release has started
+ * everywhere well before, so a sealing record missing by then was deleted. A later commit removes the sealing, tracked
+ * with AT10.
+ */
+export const SECURITY_SEAL_BACKFILL_UNTIL = Date.parse('2026-12-07T00:00:00.000Z');
+
 /** How long a start waits for another's sealing to finish before taking its missing record as deleted. */
-const WAIT_FOR_OTHER_MS = 10 * 60_000;
+const WAIT_FOR_OTHER_MS = 60_000;
 
 /** How often it looks while it waits. */
 const WAIT_STEP_MS = 2_000;
@@ -66,16 +74,30 @@ type Tx = Transaction<Tables>;
 /** What the sealing found: every row sealed; its record deleted past the app; or a record that can't be believed. */
 export type LegacySealing = 'sealed' | 'deleted' | 'unsealed';
 
-/** The records on the platform chain: when sealing began, if it did, and whether it finished; `unsealed` if any can't be believed. */
-async function recordsIn(
-  tx: Tx,
-  keys: KeyProvider,
-): Promise<{ readonly started: boolean; readonly sealed: boolean } | 'unsealed'> {
+/** A place on the platform chain, its event's MAC checked. */
+interface ChainPlace {
+  readonly seq: bigint;
+  readonly hash: Buffer;
+  readonly macKeyVersion: number;
+}
+
+/** The records on the platform chain, each sealed: where sealing began, if it did, and where it finished, if it did. */
+interface Records {
+  readonly started: ChainPlace | undefined;
+  readonly sealedAt: bigint | undefined;
+}
+
+/** The records as their rows stand, each one's MAC checked; `unsealed` if any can't be believed. */
+async function recordsIn(tx: Tx, keys: KeyProvider): Promise<Records | 'unsealed'> {
   const rows = await platformEventsSigned(tx).where('e.action', 'in', [SEALING_STARTED, ALL_SEALED]).execute();
   if (!rows.every((row) => platformEventSealed(keys, row))) return 'unsealed';
+  const started = rows.find((row) => row.action === SEALING_STARTED);
   return {
-    started: rows.some((row) => row.action === SEALING_STARTED),
-    sealed: rows.some((row) => row.action === ALL_SEALED),
+    started:
+      started === undefined
+        ? undefined
+        : { seq: started.seq, hash: started.hash, macKeyVersion: started.mac_key_version },
+    sealedAt: rows.find((row) => row.action === ALL_SEALED)?.seq,
   };
 }
 
@@ -137,7 +159,7 @@ const EVIDENCE: LegacyTable = {
 /** Seals the table's next page of rows without a MAC, after `after`: the last ID it read, or undefined at the end. */
 async function sealPage(tx: Tx, keys: KeyProvider, legacy: LegacyTable, after: string): Promise<string | undefined> {
   const { rows } = await sql<Row>`
-    select ${legacy.columns} from ${legacy.table} where mac is null and id > ${after}::uuid order by id limit ${PAGE}
+    select ${legacy.columns} from ${legacy.table} where mac is null and before_macs and id > ${after}::uuid order by id limit ${PAGE}
   `.execute(tx);
   const last = rows.at(-1);
   if (last === undefined) return undefined;
@@ -172,9 +194,9 @@ async function sealTable(
   }
 }
 
-/** Whether any row of the table already carries a MAC. */
+/** Whether any row of the table from before 0106 already carries a MAC: only a sealing gives one. */
 const anyMac = async (tx: Tx, legacy: LegacyTable): Promise<boolean> => {
-  const { rows } = await sql`select 1 from ${legacy.table} where mac is not null limit 1`.execute(tx);
+  const { rows } = await sql`select 1 from ${legacy.table} where mac is not null and before_macs limit 1`.execute(tx);
   return rows.length > 0;
 };
 
@@ -183,12 +205,15 @@ export async function sealLegacyRows(
   {
     keys,
     ids,
+    clock,
     logger,
     orgs,
     waitForOtherMs = WAIT_FOR_OTHER_MS,
   }: {
     readonly keys: KeyProvider;
     readonly ids: IdGenerator;
+    /** Read against SECURITY_SEAL_BACKFILL_UNTIL. */
+    readonly clock: Clock;
     readonly logger: Logger;
     /** Every organisation, whose own rows are sealed inside its transaction. */
     readonly orgs: () => Promise<readonly string[]>;
@@ -217,9 +242,24 @@ export async function sealLegacyRows(
     return false;
   };
 
+  const platform = createPlatformChain({ keys, ids });
+
+  /**
+   * The records, read and then held to the chain itself: from where sealing began, every event after it checked in
+   * number, link and MAC (the anchor check's own walk), as far as the record of its end at least. So a record deleted
+   * from the middle of the chain shows as the gap it leaves, not only as a record missing. `unsealed` if any fails.
+   */
+  const records = async (): Promise<Records | 'unsealed'> => {
+    const found = await plain((tx) => recordsIn(tx, keys));
+    if (found === 'unsealed' || found.started === undefined) return found;
+    const step = await platform.checkFromAnchor(db, found.started);
+    if (!step.ok) return 'unsealed';
+    return found.sealedAt !== undefined && step.seq < found.sealedAt ? 'unsealed' : found;
+  };
+
   /**
    * Records that this start seals, unless one began meanwhile (its record then read): what the chain says, `deleted`
-   * when a row already carries a MAC, or `{ started: false }` when this start is to seal.
+   * when a row from before 0106 already carries a MAC, or no record when this start is to seal.
    */
   const begin = async () => {
     const signed = await anySigned();
@@ -227,9 +267,9 @@ export async function sealLegacyRows(
     return plain(async (tx) => {
       await holdTransactionLock(tx, SEALING_STARTED);
       const now = await recordsIn(tx, keys);
-      if (now === 'unsealed' || now.sealed || now.started) return now;
+      if (now === 'unsealed' || now.sealedAt !== undefined || now.started !== undefined) return now;
       if (signed) return 'deleted' as const;
-      await createPlatformChain({ keys, ids }).record(tx, { actor: ACTOR, action: SEALING_STARTED, details: {} });
+      await platform.record(tx, { actor: ACTOR, action: SEALING_STARTED, details: {} });
       return now;
     });
   };
@@ -241,29 +281,31 @@ export async function sealLegacyRows(
   const awaitOther = async (): Promise<LegacySealing> => {
     const until = performance.now() + waitForOtherMs;
     for (;;) {
-      const now = await plain((tx) => recordsIn(tx, keys));
+      const now = await records();
       if (now === 'unsealed') return alarm('unsealed');
-      if (now.sealed) return 'sealed';
+      if (now.sealedAt !== undefined) return 'sealed';
       if (performance.now() >= until) return alarm('deleted');
       await sleep(WAIT_STEP_MS);
     }
   };
 
-  const found = await plain((tx) => recordsIn(tx, keys));
+  const found = await records();
   if (found === 'unsealed') return alarm('unsealed');
-  if (found.sealed) return 'sealed';
+  if (found.sealedAt !== undefined) return 'sealed';
+  // Past the cutoff no sealing runs, whatever the chain shows: one missing by then is a record deleted.
+  if (clock.now().getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return alarm('deleted');
   const begun = await begin();
   if (begun === 'unsealed' || begun === 'deleted') return alarm(begun);
-  if (begun.sealed) return 'sealed';
-  if (begun.started) return awaitOther();
+  if (begun.sealedAt !== undefined) return 'sealed';
+  if (begun.started !== undefined) return awaitOther();
   await sealTable(plain, keys, GLOBAL_EVENTS);
   await sealTable(plain, keys, EVIDENCE);
   for (const orgId of await orgs()) await sealTable(inOrg(orgId), keys, ORG_EVENTS);
   await plain(async (tx) => {
     await holdTransactionLock(tx, SEALING_STARTED);
     const now = await recordsIn(tx, keys);
-    if (now !== 'unsealed' && !now.sealed) {
-      await createPlatformChain({ keys, ids }).record(tx, { actor: ACTOR, action: ALL_SEALED, details: {} });
+    if (now !== 'unsealed' && now.sealedAt === undefined) {
+      await platform.record(tx, { actor: ACTOR, action: ALL_SEALED, details: {} });
     }
   });
   return 'sealed';

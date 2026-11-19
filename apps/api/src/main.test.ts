@@ -1010,13 +1010,27 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     expect(startedLive()).toBe(false);
   });
 
-  it('refuses to start when the security rows from before 0106 could not be sealed (S206 V6)', async () => {
+  it('serves on when the security rows from before 0106 could not be sealed: the failure logged (S206 V6)', async () => {
     legacySeal.result = () => Promise.reject(new Error('the database went away'));
 
-    const { host, booted, capture } = await bootLive(PARTNER);
-    expect(booted).toBeUndefined();
-    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'security.legacy_seal_failed' }));
-    expect(host.exitCode).toBe(1);
+    const { host, server, capture } = await start();
+    expect(server).toBeDefined();
+    expect(host.exitCode).not.toBe(1);
+    await vi.waitFor(() => {
+      expect(capture.lines().map(({ event }) => event)).toContain('security.legacy_seal_failed');
+    });
+  });
+
+  it('serves before the sealing of the security rows from before 0106 ends, however long it takes (S206 V6)', async () => {
+    let called = 0;
+    legacySeal.result = () => {
+      called += 1;
+      return new Promise(() => undefined);
+    };
+
+    const { server } = await start();
+    expect(server).toBeDefined();
+    expect(called).toBe(1);
   });
 
   it('refuses to start live today: no partner adapter is built, so nothing goes live before Phase 5', async () => {
@@ -1200,7 +1214,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     const serversBefore = built.length;
     const { host, server, events } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
     expect(server).toBeUndefined();
-    expect(host.exitCode).toBeUndefined();
+    expect(host.exitCode).not.toBe(1);
     expect(built).toHaveLength(serversBefore);
     expect(events()).toEqual([
       'api.starting',
