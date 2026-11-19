@@ -6,7 +6,7 @@ import type { AuditActor } from '@agentx/core/modules/audit';
 import { type Clock, HOUR_MS } from '@agentx/core/shared-kernel';
 
 /** The most retries one person's downloads are answered from their keys in an hour: as many as their downloads. */
-export const MOST_REPLAYS_AN_HOUR = 5;
+const MOST_REPLAYS_AN_HOUR = 5;
 
 export interface ReplayCount {
   /** Counts a retry of `who`'s answered from its key: true when it is past their hour's count, so refused, uncounted. */
