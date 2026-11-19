@@ -1065,6 +1065,12 @@ export const PLAIN_WORDS = {
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
   },
+  'notification.recipient_not_member': {
+    happened:
+      'An email was due to a person who, by the time it was sent, was no longer a member of the organisation, or no longer held the role it was for.',
+    broke: 'That email was not sent, so nothing about the organisation reached someone who no longer belongs to it.',
+    next: 'Nothing to do: it is expected after a removal or a role change. Many at once may mean the member lists are wrong.',
+  },
   'notification.remittance_failure_unrecorded': {
     happened: "A supplier's paid email was given up, but that couldn't be written into its organisation's audit log.",
     broke: "The audit log won't show that this supplier was never emailed about its payment.",

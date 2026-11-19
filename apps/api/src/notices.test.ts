@@ -41,13 +41,18 @@ const logger = createLogger({ service: 'api', config: loadConfig(BASE), destinat
 /** The sender a config gives, with stand-ins for what it reaches. */
 function senderWith(
   env: Record<string, string>,
-  parts: { readonly db?: unknown; readonly outbox?: unknown; readonly fetch?: OutboundFetch } = {},
+  parts: {
+    readonly db?: unknown;
+    readonly outbox?: unknown;
+    readonly fetch?: OutboundFetch;
+    readonly listMembers?: (orgId: string) => Promise<MembersList>;
+  } = {},
 ) {
   return noticeSenderFrom({
     config: loadConfig(env),
     db: (parts.db ?? {}) as never,
     outbox: (parts.outbox ?? {}) as never,
-    listMembers: () => Promise.reject(new Error('not asked')),
+    listMembers: parts.listMembers ?? (() => Promise.reject(new Error('not asked'))),
     listContacts: () => Promise.reject(new Error('not asked')),
     listCountingContacts: () => Promise.reject(new Error('not asked')),
     contactAddress: () => Promise.reject(new Error('not asked')),
@@ -102,7 +107,11 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     await expect(audience.membersOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m4', 'user-m5', 'user-m6']);
     // B3a: the active admins and approvers, a mandate's audience.
     await expect(audience.adminsAndApproversOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m6']);
-    expect(asked).toEqual([ORG, ORG, ORG]);
+    // AG10: one person's role, by their user ID in any case; none for one removed, or never a member.
+    await expect(audience.roleOf(ORG, 'USER-M3')).resolves.toBe('approver');
+    await expect(audience.roleOf(ORG, 'user-m2')).resolves.toBeUndefined();
+    await expect(audience.roleOf(ORG, 'user-m9')).resolves.toBeUndefined();
+    expect(asked).toEqual([ORG, ORG, ORG, ORG, ORG, ORG]);
   });
 
   it('throws for memberships that failed their check, so the notice waits and names nobody', async () => {
@@ -115,6 +124,7 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     await expect(audience.adminsOf(ORG)).rejects.toThrow(AudienceTampered);
     await expect(audience.membersOf(ORG)).rejects.toThrow(AudienceTampered);
     await expect(audience.adminsAndApproversOf(ORG)).rejects.toThrow(AudienceTampered);
+    await expect(audience.roleOf(ORG, 'user-m1')).rejects.toThrow(AudienceTampered);
   });
 
   it("B6-1b gives an organisation's ACTIVE contacts, and E2-2b those that count, as identity lists them", async () => {
@@ -184,9 +194,12 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
       }),
     };
     const sent: { url: string; body: unknown }[] = [];
+    // The recipient still an active admin as it is sent (AG10).
+    const recipient = { ...member('e1', 'admin', 'ACTIVE'), userId: notice.recipientUserId ?? '' };
     const sender = senderWith(EMAIL, {
       db: users,
       outbox,
+      listMembers: () => Promise.resolve({ outcome: 'listed', members: [recipient] }),
       fetch: (url, init = {}) => {
         asked.push(String(url));
         if (String(url) === `${ISSUER}/v2/users/${SUBJECT}`) {

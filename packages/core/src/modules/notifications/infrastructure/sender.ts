@@ -38,6 +38,11 @@
 //   so the log can then hold both: given up, then emailed.
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
+// - A notice to a person is sent only while they hold a role it needs in its
+//   organisation, read as it is sent (AG10, 6F1): one removed, or moved to a
+//   lesser role, after it was written (directly, or by a fan-out) gives it up
+//   at once (`not_a_member`); a role that can't be read leaves it to be tried
+//   again (`audience_unavailable`).
 // - A recipient with no address gives the notice up at once (`no_address`);
 //   an address book that can't be reached leaves it to be tried again
 //   (`address_unavailable`).
@@ -70,7 +75,9 @@ import {
   isAboutAPerson,
   isToAdminsAndApprovers,
   isToEveryMember,
+  type NoticeRole,
   REMITTANCE_KIND,
+  rolesToReceive,
   REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
   SUPPORT_RESET_KIND,
@@ -192,6 +199,11 @@ export interface Audience {
   contactsOf(orgId: string): Promise<readonly string[]>;
   /** Those of them that count now (E2-2b), each verified. Throws if they can't be read, or can't be believed. */
   countingContactsOf(orgId: string): Promise<readonly string[]>;
+  /**
+   * The role the person's active membership holds, verified; undefined for none (AG10). Throws if it can't be read,
+   * or can't be believed.
+   */
+  roleOf(orgId: string, userId: string): Promise<NoticeRole | undefined>;
 }
 
 /** How many notices a run takes at a time. */
@@ -335,8 +347,28 @@ export function createNoticeSender({
     return {};
   };
 
+  /**
+   * Whether the person a notice names still holds a role it needs in its organisation (AG10, rolesToReceive), read as
+   * it is sent: written before they were removed or moved to a lesser role, it is given up at once, logged; a role
+   * that can't be read leaves it to be tried again. A contact is no member, and its own row decides (`contactAddresses`).
+   */
+  const stillReceives = async (notice: ClaimedNotice, userId: string): Promise<boolean> => {
+    let role: NoticeRole | undefined;
+    try {
+      role = await audience.roleOf(notice.orgId, userId);
+    } catch {
+      await failed(notice, 'audience_unavailable', false);
+      return false;
+    }
+    if (role !== undefined && rolesToReceive(notice).includes(role)) return true;
+    const became = await outbox.failed(db, notice.id, 'not_a_member', true);
+    logger.warn('notification.recipient_not_member', { noticeId: notice.id, kind: notice.kind, outcome: became });
+    return false;
+  };
+
   /** Sends one notice to its recipient and records how it went. */
   const sendOne = async (notice: ClaimedNotice): Promise<void> => {
+    if (notice.recipientUserId !== null && !(await stillReceives(notice, notice.recipientUserId))) return;
     let address: string | undefined;
     try {
       address =

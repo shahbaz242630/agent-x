@@ -15,7 +15,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { NoticeMessage, PaidRemittance, ResetLink, WaitingRequest } from '../domain/messages.ts';
-import type { Notice } from '../domain/notice.ts';
+import type { Notice, NoticeRole } from '../domain/notice.ts';
 import { createOutbox, MOST_ATTEMPTS } from './outbox.ts';
 import {
   type AddressBook,
@@ -155,6 +155,13 @@ const group =
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
   };
 
+/** The role each person holds now, as a send asks it (AG10): the admins', the approver's and the viewer's. */
+const ROLES = new Map<string, NoticeRole>([
+  ...ADMINS.map(({ userId }) => [userId, 'admin'] as const),
+  [APPROVER, 'approver'],
+  [VIEWER, 'viewer'],
+]);
+
 const audience = (
   admins: () => readonly Admin[] | Error = () => ADMINS,
   contacts: () => readonly string[] | Error = () => [CONTACT, OTHER_CONTACT],
@@ -162,12 +169,14 @@ const audience = (
   // Of the two ACTIVE contacts, only the first counts yet.
   counting: () => readonly string[] | Error = () => [CONTACT],
   deciders: () => readonly string[] | Error = () => [ADMIN, APPROVER],
+  roles: (userId: string) => NoticeRole | undefined | Error = (userId) => ROLES.get(userId),
 ): Audience => ({
   adminsAndApproversOf: group(deciders),
   adminsOf: group(admins),
   contactsOf: group(contacts),
   membersOf: group(members),
   countingContactsOf: group(counting),
+  roleOf: (orgId, userId) => group(() => roles(userId))(orgId),
 });
 
 const resetLinks = (
@@ -442,6 +451,67 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(sent).toEqual([]);
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, sent_at: null, given_up_at: null, last_failure: 'audience_unavailable' },
+    ]);
+  });
+
+  it('AG10 gives up a notice to someone no longer holding the role it needs as it is sent, direct or fanned out', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    // Direct to the admin, now gone; fanned out to the admins (the member it is about left out), the admin gone and the
+    // other one now only a viewer, so neither is told; a mandate's to its admins and approvers, the approver still one.
+    await app.transaction().execute((tx) =>
+      outbox.add(tx, [
+        notice(ADMIN),
+        notice(null),
+        {
+          orgId: ORG,
+          recipientUserId: APPROVER,
+          kind: 'mandate_revoked',
+          membershipId: null,
+          role: null,
+          aboutId: MANDATE,
+        },
+      ]),
+    );
+    const { sent, service } = notifier();
+    const roles = new Map<string, NoticeRole>([
+      [OTHER_ADMIN, 'viewer'],
+      [APPROVER, 'approver'],
+    ]);
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, (userId) => roles.get(userId)),
+    );
+
+    await run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['approver@example.test']);
+    const ended = (await rows()).filter(({ last_failure }) => last_failure === 'not_a_member');
+    expect(ended.map(({ recipient_user_id: id }) => id).sort()).toEqual([ADMIN, ADMIN, OTHER_ADMIN].sort());
+    expect(ended.every(({ given_up_at, sent_at }) => given_up_at !== null && sent_at === null)).toBe(true);
+    const givenUp = expect.objectContaining({ level: 'warn', kind: 'role_granted', outcome: 'given_up' }) as unknown;
+    expect(capture.lines().filter(({ event }) => event === 'notification.recipient_not_member')).toEqual([
+      givenUp,
+      givenUp,
+      givenUp,
+    ]);
+  });
+
+  it('AG10 tries a notice to one person again when their role cannot be read as it is sent', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    const { sent, service } = notifier();
+    const away = () => new Error('tampered');
+
+    await sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, away),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: ADMIN, sent_at: null, given_up_at: null, last_failure: 'audience_unavailable' },
     ]);
   });
 
