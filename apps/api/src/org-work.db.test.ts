@@ -540,7 +540,8 @@ describe('the hourly look', () => {
     expect(await marksOf(w)).toEqual(near);
     expect(lines('org_work.unmarked')).toEqual([]);
 
-    await admin().query(`update directory.org_work set due_at = 'tomorrow' where org_id = $1`, [w.org]);
+    // A day on from the server's now, not 'tomorrow': that is the next midnight, under a minute away at 23:59 (CQ10).
+    await admin().query(`update directory.org_work set due_at = now() + interval '1 day' where org_id = $1`, [w.org]);
     await rediscoveryOf(w.org).run();
     expect((await marksOf(w)).hand_off?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
     expect(lines('org_work.unmarked')).toEqual([expect.objectContaining({ job: 'hand_off', late: true })]);
