@@ -487,16 +487,6 @@ export const PLAIN_WORDS = {
     broke: 'That app got no tokens; the person must connect it again.',
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
   },
-  'oauth.decision_unsealed': {
-    happened: "An MCP app's sign-in was turned away: the person's consent it named carried no seal from this server.",
-    broke: 'That app got no tokens; the person must connect it again.',
-    next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
-  },
-  'oauth.flow_unsealed': {
-    happened: "An MCP app's sign-in under way carried no seal from this server, so it was not shown.",
-    broke: 'The person was told it was not found; they must connect the app again.',
-    next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
-  },
   'oauth.flow_seal_superseded': {
     happened: "An MCP app's sign-in was turned away: it carried the older seal of the release before this one.",
     broke: 'That app got no tokens; the person must connect it again.',

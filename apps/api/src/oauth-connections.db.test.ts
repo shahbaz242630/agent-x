@@ -3063,13 +3063,13 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
 
   /**
    * What the owner plants as the decision's seal, and what it raises: a MAC made up, the integrity alarm; one naming a
-   * pepper version not held, our fault's error; none at all, as a flow decided before 0101 (or by the release before,
-   * while this one rolls out) has, a warning. Each refused all the same.
+   * pepper version not held, our fault's error; none at all, the alarm too (S206 AT11: every flow is sealed since
+   * 0101). Each refused all the same.
    */
   const SEALS = [
     ['a seal made up', { mac: 'e'.repeat(64), version: 1 }, 'audit.integrity_failed'],
     ['a seal of a pepper version not held', { mac: 'e'.repeat(64), version: 9 }, 'oauth.seal_key_not_held'],
-    ['no seal', null, 'oauth.decision_unsealed'],
+    ['no seal', null, 'audit.integrity_failed'],
   ] as const;
 
   /** The one line a planted flow raised: the alarm for the connection it named, or its own. */

@@ -138,15 +138,15 @@ export const decisionSealed = (keys: KeyProvider, flow: AnyFlowRead, allowed: Al
   sealOf(keys, decisionMessage(DECISION_LABEL, openedParts(openedFieldsOf(flow)), allowed));
 
 /**
- * Whether a flow, as read, is as the app sealed it: `sound`; `unsealed`, sealed before seals were kept (0101), by the
- * release before while this one rolls out, or its seal taken out; `superseded`, sealed v1 by the release before this
- * one (S206), whose seal doesn't bind its `state`; `key_not_held`, sealed with a pepper version this process no longer
- * holds; or `tampered`, its seal not its own. Only `sound` is believed.
+ * Whether a flow, as read, is as the app sealed it: `sound`; `superseded`, sealed v1 by the release before this one
+ * (S206), whose seal doesn't bind its `state`; `key_not_held`, sealed with a pepper version this process no longer
+ * holds; or `tampered`, its seal not its own, or none at all (S206 AT11: every flow has been opened sealed since 0101,
+ * and flows live minutes, so a flow with no seal had it taken out). Only `sound` is believed.
  */
-export type DecisionJudged = 'sound' | 'unsealed' | 'superseded' | 'key_not_held' | 'tampered';
+export type DecisionJudged = 'sound' | 'superseded' | 'key_not_held' | 'tampered';
 
 function judged(keys: KeyProvider, seal: DecisionSeal | null, messages: Versions): DecisionJudged {
-  if (seal === null) return 'unsealed';
+  if (seal === null) return 'tampered';
   if (!pepperHeld(keys, seal.keyVersion)) return 'key_not_held';
   const mac = Buffer.from(seal.mac, 'hex');
   if (keys.verifyMac(PEPPER, seal.keyVersion, messages.now(), mac)) return 'sound';
@@ -180,8 +180,9 @@ export function decisionJudged(keys: KeyProvider, flow: AnyFlowRead): DecisionJu
 /**
  * Whether a pending flow may be shown, claimed or decided (S205): only one its client opened, as sealed. Anything else
  * is answered as no flow at all, and logged: one not its own is the integrity alarm (a flow comes before any
- * organisation, so no organisation is held for it: none is decided); a pepper version no longer held, ours to fix; one
- * with no seal, or sealed v1 (S206), opened by the release before while this one rolls out, a warning.
+ * organisation, so no organisation is held for it: none is decided), one with its seal taken out among them; a pepper
+ * version no longer held, ours to fix; one sealed v1 (S206), opened by the release before while this one rolls out, a
+ * warning.
  */
 export function pendingFlowSound(keys: KeyProvider, logger: Logger, flow: AnyFlowRead): boolean {
   const open = openJudged(keys, flow);
@@ -192,8 +193,7 @@ export function pendingFlowSound(keys: KeyProvider, logger: Logger, flow: AnyFlo
       reason: 'open_seal',
       objectId: flow.id,
     });
-  } else if (open === 'unsealed') logger.warn('oauth.flow_unsealed', { flowId: flow.id });
-  else if (open === 'superseded') logger.warn('oauth.flow_seal_superseded', { flowId: flow.id });
+  } else if (open === 'superseded') logger.warn('oauth.flow_seal_superseded', { flowId: flow.id });
   else if (open === 'key_not_held') {
     logger.error('oauth.seal_key_not_held', { flowId: flow.id, keyVersion: flow.openSeal?.keyVersion });
   }

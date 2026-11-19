@@ -151,8 +151,9 @@ describe('SEC-OAUTH-13 a flow decision’s seal', () => {
     }
   });
 
-  it('tells a flow with no seal (decided before 0101), and one sealed with a pepper version no longer held', () => {
-    expect(decisionJudged(keys, { ...allowedCode(), seal: null })).toBe('unsealed');
+  it('holds a flow with no seal tampered (every flow is sealed since 0101), and tells one sealed with a pepper version no longer held', () => {
+    expect(decisionJudged(keys, { ...allowedCode(), seal: null })).toBe('tampered');
+    expect(decisionJudged(keys, { ...allowedDevice(), seal: null })).toBe('tampered');
     expect(decisionJudged(keys, { ...allowedCode(), seal: { mac: 'a'.repeat(64), keyVersion: 2 } })).toBe(
       'key_not_held',
     );
@@ -187,7 +188,7 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
     expect(openJudged(keys, { ...undecidedDevice, userCodeHash: 'f'.repeat(64) })).toBe('tampered');
   });
 
-  it('shows, claims or decides only a pending flow sealed as opened: anything else is the alarm, an error or a warning', () => {
+  it('shows, claims or decides only a pending flow sealed as opened: one changed or with no seal is the alarm', () => {
     const capture = new LogCapture();
     const logger = testLogger(capture);
     expect(pendingFlowSound(keys, logger, undecided)).toBe(true);
@@ -199,10 +200,15 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
     );
     expect(capture.lines().map(({ level, event }) => [level, event])).toEqual([
       ['error', 'audit.integrity_failed'],
-      ['warn', 'oauth.flow_unsealed'],
+      ['error', 'audit.integrity_failed'],
       ['error', 'oauth.seal_key_not_held'],
     ]);
-    expect(capture.lines()[0]).toMatchObject({ check: 'oauth_flow', objectId: undecidedDevice.id });
+    expect(capture.lines()[0]).toMatchObject({
+      check: 'oauth_flow',
+      reason: 'open_seal',
+      objectId: undecidedDevice.id,
+    });
+    expect(capture.lines()[1]).toMatchObject({ check: 'oauth_flow', reason: 'open_seal', objectId: opening.id });
   });
 });
 
