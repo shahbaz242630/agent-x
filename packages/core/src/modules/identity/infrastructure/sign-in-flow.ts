@@ -36,6 +36,10 @@
 // service gave them, are kept for the person too, in the same transaction
 // (user-contacts.ts), for the audit log to say who did what.
 //
+// S206 V8: a sign-in starts only while its flows are under their caps
+// (login-flows.ts): every network's together, and the network it comes from.
+// Past either it is SignInBusy, and no flow is kept.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -117,9 +121,22 @@ export class StepUpFailed extends Error {
   }
 }
 
+/** A sign-in not started: too many are under way, every network's together (`full`) or this network's (S206 V8). */
+export class SignInBusy extends Error {
+  override readonly name = 'SignInBusy';
+  readonly cap: 'full' | 'network_full';
+  constructor(cap: 'full' | 'network_full') {
+    super(`sign-in not started: too many under way (${cap})`);
+    this.cap = cap;
+  }
+}
+
 export interface SignIn {
-  /** Starts a sign-in that sends the browser back to `returnTo` (our home page if none). Throws RangeError for a path that isn't ours. */
-  begin(returnTo?: string): Promise<SignInBegun>;
+  /**
+   * Starts a sign-in from `network` (its client's, as login-flows.ts counts it) that sends the browser back to
+   * `returnTo` (our home page if none). Throws RangeError for a path that isn't ours, SignInBusy past a cap.
+   */
+  begin(returnTo: string | undefined, network: string): Promise<SignInBegun>;
   /**
    * Starts a step-up for the session's own pending challenge, sending the
    * browser back to `returnTo` after. Throws StepUpFailed `challenge_missing`
@@ -219,13 +236,14 @@ export function createSignIn({
   }
 
   return {
-    async begin(returnTo = HOME_PATH) {
+    async begin(returnTo = HOME_PATH, network) {
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
       // Always a fresh sign-in (the S68 audit): signing out of Agent X leaves the login service's own
       // session, and on a shared computer that would sign the next person straight back in.
       const { url, flow } = await oidc.start({ prompt: 'login' });
-      const flowId = await limited((tx) => flows.save(tx, flow, returnTo));
-      return { url, flowId };
+      const started = await limited((tx) => flows.start(tx, flow, returnTo, network));
+      if (started.outcome !== 'started') throw new SignInBusy(started.outcome);
+      return { url, flowId: started.flowId };
     },
 
     async beginStepUp(sessionId, challengeId, returnTo = HOME_PATH) {

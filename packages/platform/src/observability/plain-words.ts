@@ -406,6 +406,16 @@ export const PLAIN_WORDS = {
     broke: 'The person was not signed in and was asked to try again shortly.',
     next: 'It usually clears once the login service wakes up. If it keeps happening, check the login service is up.',
   },
+  'auth.sign_ins_capped': {
+    happened: 'So many sign-ins were under way at once that Agent X refused new ones.',
+    broke: 'People signing in were asked to try again shortly; anyone signed in already carries on.',
+    next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
+  },
+  'auth.sign_ins_network_capped': {
+    happened: 'One address or network started more sign-ins at once than its share.',
+    broke: 'Only people on that network were asked to try again shortly; everyone else signs in as usual.',
+    next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
+  },
   'auth.step_up_failed': {
     happened: "A person's check of who they are, before a sensitive change, failed.",
     broke: 'The change was refused; they stay signed in, and it was noted as a security event.',

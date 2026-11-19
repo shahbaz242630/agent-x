@@ -14,12 +14,12 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
-import { createLoginFlows } from './login-flows.ts';
+import { createLoginFlows, MOST_OPEN_SIGN_INS_A_NETWORK } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
 import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
 import { createSessions, endSessionsOf, lockSessionsOf, type Sessions, sessionsEndedAt } from './sessions.ts';
-import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
+import { createSignIn, type SignIn, SignInBusy, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { contactData } from './user-contacts.ts';
@@ -30,6 +30,8 @@ let app: Database<IdentityTables>;
 
 const START = new Date('2026-09-24T09:00:00Z');
 const ISSUER = 'https://auth.example.test';
+/** The network every sign-in here starts from (S206 V8), as the API counts a client's (rate-limit.ts clientSite). */
+const NETWORK = '192.0.2.1';
 const evidence: SignInEvidence = {
   idpSessionId: 'V1_338719472394810051',
   // As the flow begins: every sign-in asks for a fresh one (the S68 audit).
@@ -157,7 +159,7 @@ beforeEach(() => {
 
 /** Begins a sign-in and comes back with the flow's own state. */
 async function roundTrip(returnTo?: string, previousCookie?: string) {
-  const { url, flowId } = await signIn.begin(returnTo);
+  const { url, flowId } = await signIn.begin(returnTo, NETWORK);
   const state = new URL(url).searchParams.get('state') ?? '';
   return signIn.complete({ flowId, code: 'a-code', state, previousCookie });
 }
@@ -188,7 +190,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('refuses a sign-in made before the flow began, beyond 5 seconds, opening no session (the S68 audit)', async () => {
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_001) };
 
@@ -216,7 +218,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
 
   it('AG10 refuses a sign-in made before the person’s sessions were last ended, opening none; a later one is taken', async () => {
     const first = await roundTrip();
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     // At the login service, the person signs in as the flow begins; before they are back, every session of theirs is
     // ended (a removal, a factor reset, a change at the login service), a minute on.
@@ -243,7 +245,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
 
   it('AG10 waits for an end committing as it signs in, then reads it: no session opened past it (ADR-006 §6)', async () => {
     const first = await roundTrip();
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     // The end, its row written, held open before it commits.
     const holder = await database.connect('admin');
@@ -321,7 +323,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_000) };
 
@@ -343,7 +345,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
       keys,
       logger: testLogger(),
     });
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_000) };
 
@@ -357,8 +359,26 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('refuses to begin one that would send the browser elsewhere, starting no flow', async () => {
-    await expect(signIn.begin('//evil.example')).rejects.toThrow(RangeError);
+    await expect(signIn.begin('//evil.example', NETWORK)).rejects.toThrow(RangeError);
     expect(client.started).toBe(0);
+  });
+
+  it('S206 V8 refuses to begin one while its network holds its share, as SignInBusy, keeping no flow', async () => {
+    // A network of its own, so the file's other sign-ins (NETWORK's) are never held by it.
+    const network = '198.51.100.9';
+    const kept = () =>
+      app.selectFrom('identity.login_flows').select('cookie_hash').where('network_key', '=', network).execute();
+    for (let open = 0; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) await signIn.begin(undefined, network);
+
+    await expect(signIn.begin('/agents', network)).rejects.toThrow(SignInBusy);
+    await expect(signIn.begin('/agents', network)).rejects.toMatchObject({ cap: 'network_full' });
+    expect(await kept()).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
+    // Another network still begins, and comes back signed in.
+    const { url, flowId } = await signIn.begin('/agents', '198.51.100.10');
+    const state = new URL(url).searchParams.get('state') ?? '';
+    expect(await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined })).toMatchObject({
+      returnTo: '/agents',
+    });
   });
 
   it('opens a new session each time, for the same person, and ends the one the browser brought', async () => {
@@ -378,7 +398,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('uses a flow once: the same callback again finds no flow, and calls the login service no more', async () => {
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
 
@@ -389,7 +409,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('finds no flow without its cookie, or with another one', async () => {
-    await signIn.begin();
+    await signIn.begin(undefined, NETWORK);
 
     for (const flowId of [undefined, 'A'.repeat(43), 'not-a-flow']) {
       await expect(
@@ -400,7 +420,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it('opens no session when the login service refuses, and the flow is used up all the same', async () => {
-    const { url, flowId } = await signIn.begin();
+    const { url, flowId } = await signIn.begin(undefined, NETWORK);
     const state = new URL(url).searchParams.get('state') ?? '';
     client.failWith = new SignInFailed('code_rejected', 'test');
 
@@ -419,7 +439,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
 
   it('keeps the session the browser brought when the sign-in fails', async () => {
     const first = await roundTrip();
-    const { flowId } = await signIn.begin();
+    const { flowId } = await signIn.begin(undefined, NETWORK);
 
     await expect(
       signIn.complete({ flowId, code: 'a-code', state: 'another-state', previousCookie: first.cookie }),
@@ -477,8 +497,8 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
   });
 
   it("gives each browser its own flow: one's callback can't finish another's", async () => {
-    const mine = await signIn.begin();
-    const theirs = await signIn.begin();
+    const mine = await signIn.begin(undefined, NETWORK);
+    const theirs = await signIn.begin(undefined, NETWORK);
     const theirState = new URL(theirs.url).searchParams.get('state') ?? '';
 
     await expect(
@@ -702,7 +722,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
   });
 
   it('refuses a sign-in sent back without one as it always was, its flow taken, nowhere to go back to', async () => {
-    const { flowId } = await signIn.begin('/approvals');
+    const { flowId } = await signIn.begin('/approvals', NETWORK);
 
     await expect(
       signIn.complete({ flowId, previousCookie: undefined, refused: 'callback_incomplete' }),

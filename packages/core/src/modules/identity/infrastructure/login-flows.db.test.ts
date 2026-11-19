@@ -3,7 +3,12 @@ import { createTestDatabase, FixedClock, type TestDatabase, testLogger } from '@
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLoginFlows, LOGIN_FLOW_SECONDS } from './login-flows.ts';
+import {
+  createLoginFlows,
+  LOGIN_FLOW_SECONDS,
+  MOST_OPEN_SIGN_INS,
+  MOST_OPEN_SIGN_INS_A_NETWORK,
+} from './login-flows.ts';
 import type { LoginFlow } from './oidc-client.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -197,6 +202,8 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
       { return_to: '' },
       { state: '' },
       { ends_at: START },
+      { network_key: '' },
+      { network_key: 'n'.repeat(65) },
     ]) {
       await expect(
         app
@@ -204,6 +211,75 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
           .values({ ...row, ...change })
           .execute(),
       ).rejects.toMatchObject({ code: '23514' });
+    }
+  });
+});
+
+// S206 V8 (0106): anyone can start a sign-in with an anonymous GET, so its flows are held to a cap, every network's
+// together and each network's own, as the OAuth flows are. A step-up's flow is never counted. Each test at a time of
+// its own, after every other test's flows have ended, so each count is its own.
+describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server.version})`, () => {
+  const openFrom = (network: string) =>
+    app
+      .selectFrom('identity.login_flows')
+      .select(['network_key', 'step_up_challenge_id'])
+      .where('network_key', '=', network)
+      .execute();
+
+  it(`holds one network to ${String(MOST_OPEN_SIGN_INS_A_NETWORK)} sign-ins under way, keeping none past it`, async () => {
+    const clock = new FixedClock(new Date('2027-01-01T09:00:00Z'));
+    const store = createLoginFlows({ clock });
+    const network = '198.51.100.7';
+    for (let open = 1; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
+      expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    }
+    // A step-up's flow is never counted: it needs a live session, and a flood of sign-ins must never stop it.
+    await store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c2');
+    const last = await store.start(app, newFlow(), '/agents', network);
+    if (last.outcome !== 'started') throw new Error(`not started: ${last.outcome}`);
+    expect(await store.take(app, last.flowId)).toMatchObject({ returnTo: '/agents' });
+    // Taken at its callback, its place is free again.
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+
+    expect(await store.start(app, newFlow(), '/', network)).toEqual({ outcome: 'network_full' });
+    expect(await openFrom(network)).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
+    expect((await openFrom(network)).every((row) => row.step_up_challenge_id === null)).toBe(true);
+    // Another network is not held by it; a step-up still starts; once its flows end, this one isn't held either.
+    expect(await store.start(app, newFlow(), '/', '198.51.100.8')).toMatchObject({ outcome: 'started' });
+    await expect(
+      store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c3'),
+    ).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
+    clock.advanceBy(LOGIN_FLOW_SECONDS * 1000);
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+  });
+
+  it(`refuses every new sign-in while ${String(MOST_OPEN_SIGN_INS)} are under way, from any network, keeping none`, async () => {
+    const at = new Date('2027-02-01T09:00:00Z');
+    const store = createLoginFlows({ clock: new FixedClock(at) });
+    const admin = database.as('admin');
+    // One short of the cap, each from a network of its own, so no network comes near its own cap: the server's cap
+    // alone holds them. Beside them, step-ups' flows, which are never counted.
+    const added = (count: number, stepUp: boolean) =>
+      admin.query(
+        `insert into identity.login_flows
+           (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at, network_key, step_up_challenge_id)
+         select pg_catalog.sha256(('s206-v8-' || $4::text || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/',
+           $1, $2, 'net-' || n,
+           case when $4::boolean then ('0199a0f0-0000-7000-8000-' || pg_catalog.lpad(n::text, 12, '0'))::uuid end
+         from pg_catalog.generate_series(1, $3::int) as n`,
+        [at, new Date(at.getTime() + 1000), count, stepUp],
+      );
+    await added(MOST_OPEN_SIGN_INS - 1, false);
+    await added(5, true);
+    try {
+      expect(await store.start(app, newFlow(), '/', '203.0.113.9')).toMatchObject({ outcome: 'started' });
+      expect(await store.start(app, newFlow(), '/', '203.0.113.10')).toEqual({ outcome: 'full' });
+      expect(await openFrom('203.0.113.10')).toEqual([]);
+      // Ended, they hold nothing: the cap counts only the sign-ins under way.
+      const later = createLoginFlows({ clock: new FixedClock(new Date(at.getTime() + 1000)) });
+      expect(await later.start(app, newFlow(), '/', '203.0.113.10')).toMatchObject({ outcome: 'started' });
+    } finally {
+      await admin.query("delete from identity.login_flows where network_key like 'net-%'");
     }
   });
 });

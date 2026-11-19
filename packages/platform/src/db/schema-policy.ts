@@ -325,6 +325,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'created_at',
         'ends_at',
         'step_up_challenge_id',
+        // The network a sign-in came from, counted against its cap (S206 V8, 0106); never in a log line.
+        'network_key',
       ],
       // Added, and taken once (deleted as it is read); never changed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
