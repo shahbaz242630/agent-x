@@ -248,8 +248,12 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(await records()).toEqual([SEALING_STARTED, ALL_SEALED]);
     // Anchored at once after each record, so deleting either is a chain wound back past an anchor.
     expect(anchoredAt).toEqual([SEALING_STARTED, ALL_SEALED]);
-    // The sealer's lock given back.
-    expect(await owner().query("select 1 from pg_catalog.pg_locks where locktype = 'advisory'")).toEqual([]);
+    // The sealer's lock given back (this database's alone: other tests share the server).
+    expect(
+      await owner().query(
+        "select 1 from pg_catalog.pg_locks l join pg_catalog.pg_database d on d.oid = l.database where l.locktype = 'advisory' and d.datname = pg_catalog.current_database()",
+      ),
+    ).toEqual([]);
     // The MAC each was given is the one every reader checks.
     const [row] = await withTenant(app, ORG, (tx) => tx.selectFrom('security.org_events').selectAll().execute());
     expect(
