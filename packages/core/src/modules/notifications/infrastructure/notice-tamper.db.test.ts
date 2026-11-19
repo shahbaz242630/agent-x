@@ -25,7 +25,8 @@ import type { NoticeMessage } from '../domain/messages.ts';
 import type { Notice, NoticeRole } from '../domain/notice.ts';
 import { createAuditTrail } from '../../audit/index.ts';
 import { createNoticeCheck, NOTICE_CHECK_PASSED } from './notice-check.ts';
-import { createOutbox, MOST_ATTEMPTS, type OutboxTables } from './outbox.ts';
+import { queuedSeal } from './notice-seals.ts';
+import { createOutbox, MOST_ATTEMPTS, type OutboxTables, sealNoticesFromBefore } from './outbox.ts';
 import { createNoticeSender, type Notifier } from './sender.ts';
 
 const server = inject('postgres');
@@ -174,6 +175,8 @@ async function checkAt(at: Date, pages = {}): Promise<{ noticeId: unknown; reaso
   clock.set(at);
   const before = alarms().length;
   await check(undefined, pages).run();
+  // A visit that failed says nothing of its notices: never taken for a clean one.
+  expect(capture.lines().filter(({ event }) => event === 'notification.check_failed')).toEqual([]);
   return alarms()
     .slice(before)
     .map(({ noticeId, reason }) => ({ noticeId, reason }));
@@ -261,8 +264,11 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
   });
 
   it.each([
-    ['marked sent', 'update notifications.outbox set sent_at = $2 where id = $1'],
-    ['given up', "update notifications.outbox set given_up_at = $2, last_failure = 'no_address' where id = $1"],
+    ['marked sent', 'update notifications.outbox set sent_at = $2, before_seals = true where id = $1'],
+    [
+      'given up',
+      "update notifications.outbox set given_up_at = $2, last_failure = 'no_address', before_seals = true where id = $1",
+    ],
   ])('alarms for a notice the owner %s, and sends it never', async (_done, statement) => {
     const id = await queued();
     await asOwner(statement, [id, START]);
@@ -283,22 +289,26 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
 
   it('alarms for a notice whose seal was taken out, as though it were from before seals', async () => {
     const id = await queued();
-    await asOwner('update notifications.outbox set mac = null, mac_key_version = null where id = $1', [id]);
+    await asOwner(
+      'update notifications.outbox set mac = null, mac_key_version = null, before_seals = true where id = $1',
+      [id],
+    );
+    // Never claimed, so never sent: no seal to judge.
+    expect(await send()).toEqual([]);
 
     expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: id, reason: 'seal' }]);
   });
 
-  it('never sends a notice planted with no seal, however long ago it says it was queued', async () => {
+  it('never sends, nor even claims, a notice planted with no seal, however long ago it says it was queued', async () => {
     const planted = ids.next();
     await asOwner(
       `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
-        next_attempt_at) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4)`,
+        next_attempt_at, before_seals) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4, true)`,
       [planted, org, OTHER, new Date('2020-01-01T00:00:00Z')],
     );
 
     expect(await send()).toEqual([]);
-    expect(alarms()).toEqual([expect.objectContaining({ reason: 'seal', noticeId: planted })]);
-    expect(await rowOf(planted)).toMatchObject({ sent_at: null, last_failure: 'seal_failed' });
+    expect(await rowOf(planted)).toEqual({ sent_at: null, given_up_at: null, last_failure: null });
   });
 
   it('alarms for a notice held back past its deadline, and not before', async () => {
@@ -482,7 +492,7 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     expect(finished).toEqual([org]);
   });
 
-  it('carries at most 25 notices still to be sent, stopping before the first it can’t, and alarms for all once late', async () => {
+  it('carries at most 19 notices still to be sent, stopping before the first it can’t, and alarms for all once late', async () => {
     const held: string[] = [];
     for (let n = 0; n < 27; n += 1) held.push(await queued());
     await asOwner('update notifications.outbox set next_attempt_at = $1', [later(30 * DAY_MS)]);
@@ -526,5 +536,108 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     );
     expect(actions.map(({ action }) => action)).toEqual(['probe.kept', 'notice.queued']);
     expect(await checkAt(later(HOUR_MS))).toEqual([]);
+  });
+
+  it('alarms a day on for a notice the owner holds locked, so no sender can take it', async () => {
+    const id = await queued();
+    const owner = await database.connect('owner');
+    try {
+      await owner.query('begin');
+      await owner.query('select 1 from notifications.outbox where id = $1 for update', [id]);
+      expect(await send()).toEqual([]);
+      expect(await checkAt(later(HOUR_MS))).toEqual([]);
+      expect(await checkAt(later(DAY_MS + HOUR_MS))).toEqual([{ noticeId: id, reason: 'unsent' }]);
+    } finally {
+      await owner.query('rollback');
+      await owner.end();
+    }
+  });
+
+  it('alarms for a notice not as its record says, though a seal over it holds (sealed after a change)', async () => {
+    const id = await queued();
+    const row = await app.selectFrom('notifications.outbox').selectAll().where('id', '=', id).executeTakeFirstOrThrow();
+    // A seal the app would make over the row moved to another person: as a start's sealing of a stripped row would.
+    const moved = { ...row, recipient_user_id: OTHER };
+    const { mac, keyVersion } = queuedSeal(keys, moved);
+    await asOwner(
+      'update notifications.outbox set recipient_user_id = $2, mac = $3, mac_key_version = $4 where id = $1',
+      [id, OTHER, mac, keyVersion],
+    );
+
+    expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: id, reason: 'not_as_recorded' }]);
+  });
+
+  it('seals at a start only a notice with no seal and no record: one stripped of its seal stays refused', async () => {
+    const recorded = await queued();
+    const legacy = ids.next();
+    await asOwner(
+      `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
+        next_attempt_at, before_seals) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4, true)`,
+      [legacy, org, VICTIM, START],
+    );
+    await asOwner(
+      'update notifications.outbox set mac = null, mac_key_version = null, before_seals = true where id = $1',
+      [recorded],
+    );
+
+    // Records that can't be read say nothing of which notices have none: none is sealed.
+    const admin = database.as('admin');
+    await admin.query('revoke select on audit.events from agentx_app');
+    try {
+      expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toBe(0);
+    } finally {
+      await admin.query('grant select on audit.events to agentx_app');
+    }
+    expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toBe(1);
+    const sealed = await app.selectFrom('notifications.outbox').select(['id', 'mac']).orderBy('id').execute();
+    expect(sealed.map(({ id, mac }) => [id, mac !== null])).toEqual(
+      [
+        [recorded, false],
+        [legacy, true],
+      ].toSorted(([a], [b]) => String(a).localeCompare(String(b))),
+    );
+  });
+
+  it('refuses the release before’s notice with no seal, and its mark sent with no end seal, each whole', async () => {
+    const id = await queued();
+    await expect(
+      app
+        .insertInto('notifications.outbox')
+        .values({
+          id: ids.next(),
+          org_id: org,
+          recipient_user_id: VICTIM,
+          kind: 'second_factor_added',
+          membership_id: null,
+          role: null,
+          about_id: VICTIM,
+          created_at: START,
+          attempts: 0,
+          next_attempt_at: START,
+        })
+        .execute(),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'a_notice_is_sealed' });
+    // The release before's sender: its mark sent fails, and the notice stays due for this release's.
+    await expect(
+      app.updateTable('notifications.outbox').set({ sent_at: START }).where('id', '=', id).execute(),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'an_end_is_sealed' });
+    expect(await rowOf(id)).toEqual({ sent_at: null, given_up_at: null, last_failure: null });
+    expect(await send()).toEqual(['victim@example.test']);
+  });
+
+  it('writes no record of where it stopped on a visit held where the last one stopped, carrying the same', async () => {
+    for (let n = 0; n < 27; n += 1) await queued();
+    await asOwner('update notifications.outbox set next_attempt_at = $1', [later(30 * DAY_MS)]);
+    const stops = async () =>
+      (
+        await withTenant(app, org, (tx) =>
+          tx.selectFrom('audit.events').select('seq').where('action', '=', NOTICE_CHECK_PASSED).execute(),
+        )
+      ).length;
+
+    expect(await checkAt(later(HOUR_MS))).toEqual([]);
+    expect(await stops()).toBe(1);
+    expect(await checkAt(later(2 * HOUR_MS))).toEqual([]);
+    expect(await stops()).toBe(1);
   });
 });

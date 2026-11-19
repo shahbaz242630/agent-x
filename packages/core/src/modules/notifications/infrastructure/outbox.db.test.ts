@@ -104,9 +104,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   clock.set(new Date(START.getTime() + 10_000 * DAY_MS));
-  await sql`update notifications.outbox set given_up_at = ${START}, last_failure = 'test_reset'
-    where sent_at is null and given_up_at is null`.execute(app);
-  await outbox.sweep(app, 1_000_000);
+  // Every notice of the test before gone: none can be marked given up here, with no end seal (0105).
+  await sql`delete from notifications.outbox`.execute(app);
   expect(await rows()).toEqual([]);
   clock.set(START);
 });
@@ -235,6 +234,9 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
           created_at: START,
           attempts: 0,
           next_attempt_at: START,
+          // Some seal, so the rule the case is about is the one that refuses it (0105 refuses a notice with none).
+          mac: Buffer.alloc(32),
+          mac_key_version: 1,
           ...values,
         } as never)
         .execute(),
@@ -360,10 +362,10 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       ).rejects.toThrow('a remittance goes to its supplier alone');
     }
     await expect(
-      sql`insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts, next_attempt_at)
-        values (${ids.next()}, ${ORG}, ${ADMIN}, 'payment_remittance', ${OTHER_PAYMENT}, ${START}, 0, ${START})`.execute(
-        app,
-      ),
+      sql`insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts, next_attempt_at,
+          mac, mac_key_version)
+        values (${ids.next()}, ${ORG}, ${ADMIN}, 'payment_remittance', ${OTHER_PAYMENT}, ${START}, 0, ${START},
+          ${Buffer.alloc(32)}, 1)`.execute(app),
     ).rejects.toMatchObject({ code: '23514', constraint: 'remittance_to_its_supplier' });
     expect(await rows()).toHaveLength(1);
   });

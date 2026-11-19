@@ -1,18 +1,22 @@
 // S206 V4: the notices queued before seals, sealed by the first start of the
 // release with seals, in its own record's transaction, which says how many;
-// any notice with no seal after that stays without one (the sender refuses it).
-import { createDatabase, type Database } from '@agentx/platform/db';
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
+// any notice with no seal after that stays without one (never claimed). A
+// start record the owner edited to hide that it sealed them is not believed:
+// nothing is sealed, with the integrity alarm.
+import type { AuditTables } from '@agentx/core/modules/audit';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { recordStartSealingNotices } from './notice-legacy.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<NotificationsTables & PlatformControlsTables>;
+let app: Database<NotificationsTables & PlatformControlsTables & AuditTables>;
+let capture: LogCapture;
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -24,25 +28,14 @@ const ORG = '0199a0f0-0000-7000-8000-0000005206c1';
 const PERSON = '0199a0f0-0000-7000-8000-0000005206c2';
 const AT = new Date('2026-11-19T09:00:00Z');
 
-/** Writes a notice with no seal, as the release before did; `done` for one already sent. */
+/** Writes a notice with no seal, as the release before did before 0105 (a row it found then); `done` for one sent. */
 async function unsealed(done = false): Promise<string> {
   const id = ids.next();
-  await app
-    .insertInto('notifications.outbox')
-    .values({
-      id,
-      org_id: ORG,
-      recipient_user_id: PERSON,
-      kind: 'second_factor_added',
-      membership_id: null,
-      role: null,
-      about_id: PERSON,
-      created_at: AT,
-      attempts: 0,
-      next_attempt_at: AT,
-      sent_at: done ? AT : null,
-    })
-    .execute();
+  await database.as('admin').query(
+    `insert into notifications.outbox (id, org_id, recipient_user_id, kind, about_id, created_at, attempts,
+      next_attempt_at, sent_at, before_seals) values ($1, $2, $3, 'second_factor_added', $3, $4, 0, $4, $5, true)`,
+    [id, ORG, PERSON, AT, done ? AT : null],
+  );
   return id;
 }
 
@@ -56,7 +49,13 @@ const starts = async () =>
   );
 
 const started = (release: string, gateRef?: string) =>
-  recordStartSealingNotices(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release, gateRef });
+  recordStartSealingNotices(
+    app,
+    keys,
+    ids,
+    { configHash: `sha256:${'0'.repeat(64)}`, release, gateRef },
+    testLogger(capture),
+  );
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -68,6 +67,13 @@ beforeAll(async () => {
       "insert into identity.users (id, issuer, subject, created_at) values ($1, 'https://auth.example.test', 'legacy', $2)",
       [PERSON, AT],
     );
+});
+
+beforeEach(async () => {
+  capture = new LogCapture();
+  await database
+    .as('admin')
+    .query('truncate platform_controls.audit_events, platform_controls.audit_head, notifications.outbox');
 });
 
 afterAll(async () => {
@@ -89,5 +95,19 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
     expect(await started('r-second', `LMG-v3-sha256:${'ab'.repeat(32)}`)).toBe(2n);
     expect(await sealedOf(planted)).toBe(false);
     expect((await starts()).map((details) => details.noticesSealed)).toEqual([2, undefined]);
+  });
+
+  it('seals nothing, with the alarm, once a start’s record has been edited to hide that it sealed them', async () => {
+    expect(await started('r-first')).toBe(1n);
+    await database
+      .as('admin')
+      .query(`update platform_controls.audit_events set details = '{"release":"r-first"}' where seq = 1`);
+    const planted = await unsealed();
+
+    expect(await started('r-second')).toBe(2n);
+    expect(await sealedOf(planted)).toBe(false);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.integrity_failed', chain: 'platform', check: 'start_record' }),
+    );
   });
 });

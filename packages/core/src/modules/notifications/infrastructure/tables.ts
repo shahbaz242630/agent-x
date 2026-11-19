@@ -26,4 +26,6 @@ interface OutboxTable {
   mac_key_version: number | null;
   end_mac: Buffer | null;
   end_key_version: number | null;
+  /** A row from before 0105, which its checks let stand with no seal. */
+  before_seals: Generated<boolean>;
 }

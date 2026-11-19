@@ -24,8 +24,11 @@
 // - given up because its tries were spent (`lease_expired`: its tries count is
 //   no seal's, so the owner can spend them; a real crash loop on one notice is
 //   worth a person's look as well);
-// - still unsent NOTICE_DEADLINE_MS on, its next try put off: every try and
-//   wait of a notice ends within 15 hours.
+// - not as its record says (kind, recipient): a notice from before seals
+//   sealed at a start over a row the owner changed first;
+// - still unsent NOTICE_DEADLINE_MS on, whatever its next try says (put off,
+//   or its row held locked so no sender can take it): every try and wait of a
+//   notice ends within 15 hours.
 //
 // Each raises the integrity alarm (`audit.integrity_failed`, check `notice`,
 // the notice's ID and why) once. One still open, and not yet late, is carried
@@ -44,7 +47,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 import { createAuditTrail, type WalkedEvent, withSignedStates } from '../../audit/index.ts';
 import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { endJudged, queuedJudged } from './notice-seals.ts';
-import { LEASE_EXPIRED, NOTICE_QUEUED, type OutboxTables } from './outbox.ts';
+import { LEASE_EXPIRED, NOTICE_QUEUED, type OutboxTables, recipientOf } from './outbox.ts';
 
 /** How long a notice may stay unsent before the check calls it held back: its tries and waits end within 15 hours. */
 export const NOTICE_DEADLINE_MS = DAY_MS;
@@ -60,8 +63,8 @@ const CHECK_ACTOR = { type: 'system', id: 'api' } as const;
 const WALK = 5_000;
 const MOST_WALKS = 4;
 
-/** The most notices carried open in one record: a detail holds 1,024 characters, 27 IDs and their spaces. */
-const MOST_CARRIED = 25;
+/** The most notices carried open in one record: a detail holds 1,024 characters, 19 of `ID@time` (51) and spaces. */
+const MOST_CARRIED = 19;
 
 /** A walk past this many events records where it stopped, even with no notice in it, so the next walks less. */
 const RECORD_PAST = 50;
@@ -70,7 +73,7 @@ const RECORD_PAST = 50;
 const JUDGED_WITHIN_MS = 20 * DAY_MS;
 
 /** Why a recorded notice raised the alarm (beside `chain`, a walk that failed, and `record`, a record of its own). */
-export type NoticeFault = 'gone' | 'seal' | 'end_seal' | 'tries_spent' | 'unsent';
+export type NoticeFault = 'gone' | 'seal' | 'not_as_recorded' | 'end_seal' | 'tries_spent' | 'unsent';
 
 /** Where the last visit stopped, and the notices it carried, as its record says. */
 interface Passed {
@@ -78,10 +81,28 @@ interface Passed {
   readonly carried: readonly Carried[];
 }
 
-/** A notice seen still to be sent, and when it was recorded. */
+/** A notice seen still to be sent, and when it was recorded; as its record names it, when it was just walked past. */
 interface Carried {
   readonly id: string;
   readonly recordedAt: Date;
+  readonly recorded?: string;
+}
+
+/**
+ * Whether the notice is to whom and of what its record says (S206 V4 review): its record is the chain's, its seal the
+ * outbox's, and a notice from before seals sealed at a start (notice-legacy.ts) would hold a seal over a row changed
+ * first; the record can't be.
+ */
+function asRecorded(recorded: string, row: NoticeRow): boolean {
+  let said: unknown;
+  try {
+    said = JSON.parse(recorded);
+  } catch {
+    return false;
+  }
+  const { recipient, recipientId } = recipientOf(row);
+  const { kind: saidKind, recipient: saidRecipient, recipientId: saidId } = (said ?? {}) as Record<string, unknown>;
+  return saidKind === row.kind && saidRecipient === recipient && saidId === recipientId;
 }
 
 /** The notices, as the outbox keeps them, in one statement. */
@@ -123,13 +144,13 @@ function judged(
   if (row === undefined) return 'gone';
   // Its seal binds its organisation too: a notice moved to another is not this one's.
   if (queuedJudged(keys, row) !== 'sound') return 'seal';
+  if (notice.recorded !== undefined && !asRecorded(notice.recorded, row)) return 'not_as_recorded';
   const end = endJudged(keys, row);
   if (end === 'tampered') return 'end_seal';
   if (end === 'sound')
     return row.given_up_at !== null && row.last_failure === LEASE_EXPIRED ? 'tries_spent' : undefined;
-  // Held back once its deadline is past and its next try is still to come; due now, the sender's backlog.
-  const late = notice.recordedAt.getTime() <= now.getTime() - NOTICE_DEADLINE_MS;
-  return late && row.next_attempt_at.getTime() > now.getTime() ? 'unsent' : 'open';
+  // Still unsent past its deadline, whatever its next try says: one held locked by someone, or put off, never goes.
+  return notice.recordedAt.getTime() <= now.getTime() - NOTICE_DEADLINE_MS ? 'unsent' : 'open';
 }
 
 /**
@@ -268,7 +289,7 @@ export function createNoticeCheck({
     const since = now.getTime() - JUDGED_WITHIN_MS;
     const fresh = walk.seen
       .filter(({ recordedAt }) => recordedAt.getTime() >= since)
-      .map(({ subjectId, recordedAt }) => ({ id: subjectId.toLowerCase(), recordedAt }));
+      .map(({ subjectId, recordedAt, details }) => ({ id: subjectId.toLowerCase(), recordedAt, recorded: details }));
     const notices = [...start.carried, ...fresh];
     const rows =
       notices.length === 0
@@ -287,13 +308,17 @@ export function createNoticeCheck({
       else if (found !== undefined) alarm({ noticeId: notice.id, reason: found });
     }
     // The oldest open first; past what a record carries, it stops just before the first it can't, to see it again.
-    const carried = open.slice(0, MOST_CARRIED);
+    const carried = open.slice(0, MOST_CARRIED).map(({ id, recordedAt }) => ({ id, recordedAt }));
     const cut = fresh.find((notice) => open.indexOf(notice) >= MOST_CARRIED);
     const cutAt = cut === undefined ? undefined : walk.seen.find(({ subjectId }) => subjectId.toLowerCase() === cut.id);
     const reached = cutAt === undefined ? walk.reached : await placeBefore(orgId, cutAt.seq);
     const moved = reached.seq - start.from.seq;
-    const changed = fresh.length > 0 || carried.length !== start.carried.length || moved > BigInt(RECORD_PAST);
-    if (changed) await passed(orgId, correlationId, reached, carried);
+    const carriedNow = carried.map(({ id }) => id).join(' ');
+    const carriedChanged = carriedNow !== start.carried.map(({ id }) => id).join(' ');
+    // Written only when it says something new: a visit held where the last stopped, carrying the same, writes nothing.
+    if (carriedChanged || (moved > 0n && (fresh.length > 0 || moved > BigInt(RECORD_PAST)))) {
+      await passed(orgId, correlationId, reached, carried);
+    }
   };
 
   /** The place just before the event at `seq`: its link names the event before, and a wrong one fails the next walk. */

@@ -8,33 +8,53 @@
 // with the integrity alarm, whatever its dates say. A start whose record fails
 // seals nothing either, as its transaction rolls back; it doesn't start.
 //
-// What it can't tell: a notice the owner changed before that start is sealed
-// as it stands, as S205's people were. Notices the release before writes while
-// this one rolls out (minutes) have no seal and are refused, with the alarm.
+// The starts before are read through the platform chain's own check of each
+// (platformEventSealed): one edited to hide that it sealed them is no start
+// that didn't, and seals nothing, with the integrity alarm. And it seals only a
+// notice with no `notice.queued` record: one with a record was queued sealed,
+// so one unsealed now had its seal taken out, and stays refused.
+//
+// What it can't tell: a notice from before seals the owner changed before that
+// start is sealed as it stands, as S205's people were. While this release
+// rolls out, the release before can neither write a notice nor end one: 0105
+// refuses either with no seal (its change fails whole, and is tried again).
 //
 // TODO(S206 V4): once a release has run it, go back to recordStart alone in boot.ts and delete this (Outstanding-Work AT10).
 import { type NotificationsTables, sealNoticesFromBefore } from '@agentx/core/modules/notifications';
-import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import {
+  createPlatformChain,
+  platformEventSealed,
+  platformEventsSigned,
+  type PlatformControlsTables,
+} from '@agentx/core/modules/platform-controls';
+import type { AuditTables } from '@agentx/core/modules/audit';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
+import type { Logger } from '@agentx/platform/observability';
 
 import type { StartFacts } from './start-record.ts';
 
 /** The start record's detail that says the notices from before seals were sealed then, and how many. */
 export const NOTICES_SEALED = 'noticesSealed';
 
-type LegacyTables = NotificationsTables & PlatformControlsTables;
+type LegacyTables = NotificationsTables & PlatformControlsTables & AuditTables;
 
-/** Whether a start before this one sealed them: its record names how many. */
-const sealedBefore = async (tx: DatabaseTransaction<LegacyTables>): Promise<boolean> =>
-  (await tx
-    .selectFrom('platform_controls.audit_events')
-    .select('seq')
-    .where('action', '=', 'platform.started')
-    .where('details', 'like', `%"${NOTICES_SEALED}":%`)
-    .limit(1)
-    .executeTakeFirst()) !== undefined;
+/**
+ * Whether a start before this one sealed them, its record naming how many: every start read and believed only as
+ * the chain sealed it. `unbelieved` for a start record that isn't: nothing is sealed, and the caller raises the alarm.
+ */
+async function sealedBefore(tx: DatabaseTransaction<LegacyTables>, keys: KeyProvider): Promise<boolean | 'unbelieved'> {
+  const starts = await platformEventsSigned(tx).where('e.action', '=', 'platform.started').execute();
+  let sealed = false;
+  for (const start of starts) {
+    if (!platformEventSealed(keys, start)) return 'unbelieved';
+    if (typeof start.details === 'string' && Object.hasOwn(JSON.parse(start.details) as object, NOTICES_SEALED)) {
+      sealed = true;
+    }
+  }
+  return sealed;
+}
 
 /**
  * recordStart, and with the first start of the release with seals, the notices from before them sealed in the same
@@ -45,9 +65,12 @@ export async function recordStartSealingNotices(
   keys: KeyProvider,
   ids: IdGenerator,
   facts: StartFacts,
+  logger: Logger,
 ): Promise<bigint> {
   const recorded = await limitedTransaction(database, async (tx) => {
-    const sealed = (await sealedBefore(tx)) ? undefined : await sealNoticesFromBefore(tx, keys);
+    const before = await sealedBefore(tx, keys);
+    if (before === 'unbelieved') logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
+    const sealed = before === false ? await sealNoticesFromBefore(tx, database, keys) : undefined;
     // The platform head's lock last.
     return createPlatformChain({ keys, ids }).record(tx, {
       actor: { type: 'system', id: 'api' },

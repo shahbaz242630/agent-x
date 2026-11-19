@@ -620,9 +620,11 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ] as const;
     for (const [id, age, sent] of notices) {
       await admin.query(
-        `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at)
+        // Rows from before 0105's seals (before_seals), which only the sweep touches here.
+        `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at,
+           before_seals)
          values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now() - $3::interval, 1,
-                 pg_catalog.now() + interval '1 day', case when $4 then pg_catalog.now() - $3::interval end)`,
+                 pg_catalog.now() + interval '1 day', case when $4 then pg_catalog.now() - $3::interval end, true)`,
         [id, orgId, age, sent],
       );
     }

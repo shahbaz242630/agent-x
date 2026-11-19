@@ -380,6 +380,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'mac_key_version',
         'end_mac',
         'end_key_version',
+        // True only for the rows 0105 found, which its checks let stand with no seal; never written by the app.
+        'before_seals',
       ],
       // Added, read, and deleted once done and past its retention; changed
       // only in its tries and outcome, and its end's seal, never in whom or what it tells of.

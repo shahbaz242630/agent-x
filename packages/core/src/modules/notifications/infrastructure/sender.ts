@@ -53,8 +53,9 @@
 // - A notice is sent only as the app queued it (S206 V4): one whose seal
 //   doesn't hold, moved to another person or contact or planted by the
 //   database's owner, is given up unsent (`seal_failed`) and raises the
-//   integrity alarm; so is one with no seal (those queued before seals were
-//   sealed once, at the first start of the release that added them).
+//   integrity alarm. One with no seal is never claimed at all (those queued
+//   before seals were sealed once, at the first start of the release that
+//   added them); the notice check alarms for any with a record.
 // - A run stops between notices once its signal is aborted; a notice it had
 //   claimed and not reached is taken again once its lease runs out.
 // - A run never throws (review): the outbox away, or a statement past its

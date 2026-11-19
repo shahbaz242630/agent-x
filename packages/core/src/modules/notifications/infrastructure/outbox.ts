@@ -45,7 +45,7 @@
 // Each but `add` runs in a transaction of its own whose statements give up
 // after 10 seconds, a wait for a lock included: `fanOut` and `passOn` under
 // the organisation's wall, as their records need. The times are the Clock's.
-import { limitStatements, withTenant } from '@agentx/platform/db';
+import { limitStatements, readEachTenant, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
@@ -78,15 +78,20 @@ export const MOST_ATTEMPTS = 8;
 /** How long a claimed notice is left to its sender before it is due again. */
 export const CLAIM_LEASE_MS = 10 * 60_000;
 
-/** Gives up the notices whose last try's lease ran out by `now`; the caller picks which kinds. */
+/**
+ * The notices whose last try's lease ran out by `now`, locked to be given up; the caller picks which kinds. Read
+ * first, as each is given up with its own end seal in the one write (0105 refuses an end with none).
+ */
 const leaseEnded = (tx: Kysely<NotificationsTables>, now: Date) =>
   tx
-    .updateTable('notifications.outbox')
-    .set({ given_up_at: now, last_failure: LEASE_EXPIRED })
+    .selectFrom('notifications.outbox')
+    .select(['id', 'org_id', 'about_id'])
     .where('sent_at', 'is', null)
     .where('given_up_at', 'is', null)
     .where('next_attempt_at', '<=', now)
-    .where('attempts', '>=', MOST_ATTEMPTS);
+    .where('attempts', '>=', MOST_ATTEMPTS)
+    .where('mac', 'is not', null)
+    .forUpdate();
 
 /** The waits after each failed try but the last: a minute, then longer, to six hours. */
 const BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, HOUR_MS, 2 * HOUR_MS, 4 * HOUR_MS, 6 * HOUR_MS];
@@ -226,7 +231,7 @@ function subjectProblem(notice: Notice): string | undefined {
 const backoffAfter = (tries: number): number => BACKOFF_MS[tries - 1] ?? 0;
 
 /** Whom a notice's record names: a person, a contact, or a group found as it is sent (the contacts, or the admins). */
-function recipientOf(row: QueuedColumns): { readonly recipient: string; readonly recipientId: string | null } {
+export function recipientOf(row: QueuedColumns): { readonly recipient: string; readonly recipientId: string | null } {
   if (row.recipient_user_id !== null) return { recipient: 'person', recipientId: row.recipient_user_id };
   if (row.recipient_contact_id !== null) return { recipient: 'contact', recipientId: row.recipient_contact_id };
   return { recipient: row.to_contacts ? 'contacts' : 'admins', recipientId: null };
@@ -252,20 +257,30 @@ const QUEUED_COLUMNS = [
 class NotQueuedHere extends Error {}
 
 /**
- * Seals, over what each says now, every notice still to be sent that has no seal, in the caller's transaction, which
- * must record that it was done, once ever (apps/api/src/notice-legacy.ts). Says how many. Two statements.
+ * Seals, over what each says now, every notice still to be sent that has no seal and no `notice.queued` record, in
+ * the caller's transaction, which must record that it was done, once ever (apps/api/src/notice-legacy.ts). A notice
+ * with a record was queued sealed: one with no seal now had it taken out, and stays unsealed, to be refused. Its
+ * organisations' records are read under each one's wall (readEachTenant, on `db`), one with a read that failed
+ * counted as recorded. Says how many it sealed.
  *
  * TODO(S206 V4): delete this with sealLegacyNotices once a release has run it (Outstanding-Work AT10).
  */
-export async function sealNoticesFromBefore(tx: Transaction<NotificationsTables>, keys: KeyProvider): Promise<number> {
-  const open = await tx
+export async function sealNoticesFromBefore(
+  tx: Transaction<NotificationsTables>,
+  db: Kysely<OutboxTables>,
+  keys: KeyProvider,
+): Promise<number> {
+  const unsealed = await tx
     .selectFrom('notifications.outbox')
     .select(QUEUED_COLUMNS)
     .where('mac', 'is', null)
+    .where('before_seals', '=', true)
     .where('sent_at', 'is', null)
     .where('given_up_at', 'is', null)
     .forUpdate()
     .execute();
+  const recorded = await recordedNotices(db, unsealed);
+  const open = unsealed.filter((row) => !recorded.has(row.id.toLowerCase()));
   if (open.length === 0) return 0;
   const values = open.map((row) => {
     const { mac, keyVersion } = queuedSeal(keys, row);
@@ -277,6 +292,33 @@ export async function sealNoticesFromBefore(tx: Transaction<NotificationsTables>
     where o.id = v.id and o.mac is null
   `.execute(tx);
   return open.length;
+}
+
+/** Which of these notices their organisations' chains record as queued: one statement an organisation, one trip. */
+async function recordedNotices(
+  db: Kysely<OutboxTables>,
+  rows: readonly { readonly id: string; readonly org_id: string }[],
+): Promise<ReadonlySet<string>> {
+  const byOrg = new Map<string, string[]>();
+  for (const row of rows) byOrg.set(row.org_id.toLowerCase(), [...(byOrg.get(row.org_id.toLowerCase()) ?? []), row.id]);
+  const reads = await readEachTenant(
+    db,
+    [...byOrg].map(([orgId, ids]) => ({ orgId, ids })),
+    ({ orgId, ids }) =>
+      db
+        .selectFrom('audit.events')
+        .select('subject_id')
+        .where('org_id', '=', orgId)
+        .where('subject_type', '=', NOTICE_SUBJECT)
+        .where('subject_id', 'in', ids),
+  );
+  const recorded = new Set<string>();
+  for (const { item, read } of reads) {
+    // A read that failed can't say a notice has no record: none of its organisation's is sealed.
+    const found = 'rows' in read ? read.rows.map(({ subject_id: id }) => id) : item.ids;
+    for (const id of found) recorded.add(id.toLowerCase());
+  }
+  return recorded;
 }
 
 export function createOutbox({
@@ -327,18 +369,24 @@ export function createOutbox({
     return { end_mac: mac, end_key_version: keyVersion };
   };
 
-  /** Seals the end of these notices, each given up as its last try's lease ran out: one statement. */
-  const sealLeaseEnds = async (tx: Kysely<NotificationsTables>, given: readonly { readonly id: string }[]) => {
-    if (given.length === 0) return;
+  /** Gives up these notices, each as its last try's lease ran out, with its end's seal: one statement. */
+  const giveUpLeaseEnds = async <Row extends { readonly id: string }>(
+    tx: Kysely<NotificationsTables>,
+    given: readonly Row[],
+    now: Date,
+  ): Promise<readonly Row[]> => {
+    if (given.length === 0) return given;
     const values = given.map(({ id }) => {
       const { end_mac: mac, end_key_version: version } = ended(id, { outcome: 'given_up', failure: LEASE_EXPIRED });
       return sql`(${id}::uuid, ${mac}::bytea, ${version}::integer)`;
     });
     await sql`
-      update notifications.outbox o set end_mac = v.mac, end_key_version = v.version
+      update notifications.outbox o
+      set given_up_at = ${now}, last_failure = ${LEASE_EXPIRED}, end_mac = v.mac, end_key_version = v.version
       from (values ${sql.join(values)}) as v (id, mac, version)
       where o.id = v.id
     `.execute(tx);
+    return given;
   };
 
   /** Whether a notice read back is one the app queued in this organisation. */
@@ -428,10 +476,7 @@ export function createOutbox({
       return limited(db, async (tx) => {
         // A notice due again after its last try: that try's lease ran out, its sender gone.
         // A remittance is left to endRemittanceLeases, which says which it gave up (gate H2).
-        await sealLeaseEnds(
-          tx,
-          await leaseEnded(tx, now).where('kind', '!=', REMITTANCE_KIND).returning('id').execute(),
-        );
+        await giveUpLeaseEnds(tx, await leaseEnded(tx, now).where('kind', '!=', REMITTANCE_KIND).execute(), now);
         const due = tx
           .selectFrom('notifications.outbox')
           .select('id')
@@ -439,6 +484,8 @@ export function createOutbox({
           .where('given_up_at', 'is', null)
           .where('next_attempt_at', '<=', now)
           .where('attempts', '<', MOST_ATTEMPTS)
+          // Only a notice with a seal to judge: one with none is the owner's, never sent, and 0105 refuses its claim.
+          .where('mac', 'is not', null)
           .orderBy('next_attempt_at')
           .orderBy('id')
           .limit(most)
@@ -480,14 +527,9 @@ export function createOutbox({
 
     async endRemittanceLeases(db) {
       const now = clock.now();
-      const rows = await limited(db, async (tx) => {
-        const given = await leaseEnded(tx, now)
-          .where('kind', '=', REMITTANCE_KIND)
-          .returning(['id', 'org_id', 'about_id'])
-          .execute();
-        await sealLeaseEnds(tx, given);
-        return given;
-      });
+      const rows = await limited(db, async (tx) =>
+        giveUpLeaseEnds(tx, await leaseEnded(tx, now).where('kind', '=', REMITTANCE_KIND).execute(), now),
+      );
       return rows.map((row) => ({ id: row.id, orgId: row.org_id, aboutId: row.about_id }));
     },
 

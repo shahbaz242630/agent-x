@@ -309,11 +309,17 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
   try {
     // S206 V4: the first start with notice seals seals the notices from before them, in its own record's transaction.
     // TODO(S206 V4): back to recordStart once a release has run it (Outstanding-Work AT10).
-    recorded = await recordStartSealingNotices(database, keys, uuidV7Ids, {
-      configHash: fingerprint.configHash,
-      release: config.release,
-      gateRef: gateRefOf(config.partner),
-    });
+    recorded = await recordStartSealingNotices(
+      database,
+      keys,
+      uuidV7Ids,
+      {
+        configHash: fingerprint.configHash,
+        release: config.release,
+        gateRef: gateRefOf(config.partner),
+      },
+      logger,
+    );
   } catch (error) {
     // The platform chain refused the event or the database did: either way no
     // one could later account for this start. A broken chain is tampering, or a

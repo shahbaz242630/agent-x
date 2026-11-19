@@ -1006,7 +1006,8 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .lines()
       .filter(({ event }) => event === 'spend_request.decided')
       .at(-1);
-    expect(line?.decision ?? 'REQUIRE_APPROVAL').toBe('REQUIRE_APPROVAL');
+    expect(line).toBeDefined();
+    expect(await waitingNotices(w.org)).toHaveLength(2);
     // The allowed decision's 17 and one: the notice and its record on the chain, from the head the request's own left.
     expect(line?.trips).toBe(18);
   });
