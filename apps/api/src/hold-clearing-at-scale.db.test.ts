@@ -130,7 +130,7 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xf130_0000_0000);
 const clock = new FixedClock(new Date('2026-11-03T09:00:00Z'));
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 const services = () => ({ keys, ids, logger: testLogger() });
 const capture = new LogCapture();
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
@@ -154,12 +154,14 @@ async function member(org: string, role: 'admin' | 'viewer'): Promise<ClearingAd
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `at-scale-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId } = await createSessions({
     ids,
     clock,
     timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
   }).open(app, userId, { idpSessionId: 'V1_1', authTime: clock.now(), amr: ['pwd', 'user', 'mfa'] });
   const membershipId = ids.next();
   await withSignedStates(app, org, services(), (tx, states) =>

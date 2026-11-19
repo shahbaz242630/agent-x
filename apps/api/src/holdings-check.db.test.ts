@@ -532,7 +532,7 @@ describe('the holdings check (E1)', () => {
     );
     if (written.outcome !== 'written') throw new Error(`not recorded: ${JSON.stringify(written)}`);
     const investigationId = written.investigation.id;
-    const challenges = createStepUpChallenges({ ids, clock });
+    const challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
     // As start-web.ts builds it: the real check on what the hold names.
     const clearings = createHoldClearings({
       database: app,

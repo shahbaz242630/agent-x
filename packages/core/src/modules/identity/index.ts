@@ -259,4 +259,11 @@ export {
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
 export { type KeptPerson, keptPeopleOf, keptPersonReader } from './infrastructure/user-contacts.ts';
-export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';
+export {
+  backfillUserMacs,
+  isUser,
+  subjectOfUser,
+  userForSubject,
+  userOfSubject,
+  UserUnbelieved,
+} from './infrastructure/users.ts';

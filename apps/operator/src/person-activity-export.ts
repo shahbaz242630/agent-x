@@ -52,7 +52,7 @@ import {
   personNdjsonLine,
   personSealsPage,
 } from '@agentx/core/modules/evidence';
-import { type IdentityTables, subjectOfUser } from '@agentx/core/modules/identity';
+import { type IdentityTables, isUser } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -148,7 +148,7 @@ function record(
   return limitedTransaction(database, async (tx) => {
     const before = await earlierRecord(tx, services, request);
     if (before !== undefined) return before;
-    if ((await subjectOfUser(tx, userId)) === undefined) throw new CaseExportRefused('no person has this user ID');
+    if (!(await isUser(tx, userId))) throw new CaseExportRefused('no person has this user ID');
     const range = await personInRange(tx, userId, { from, to });
     if (range.rows > mostRequests) {
       throw new CaseExportRefused(

@@ -65,6 +65,8 @@ function senderWith(
     },
     personOf: () => Promise.reject(new Error('not asked')),
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
+    // The person's row's MAC (S205) is the identity module's to test (sessions-tamper.db.test.ts): here every one holds.
+    keys: { verifyMac: () => true } as never,
     logger,
   });
 }
@@ -187,11 +189,19 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
         return Promise.resolve('retry' as const);
       },
     };
-    // The one row the address book reads: the user's issuer and subject.
+    // The one row the address book reads: the user's issuer and subject, with its MAC.
+    const row = {
+      id: notice.recipientUserId,
+      issuer: ISSUER,
+      subject: SUBJECT,
+      created_at: new Date(0),
+      mac: Buffer.alloc(32),
+      mac_key_version: 1,
+    };
     const users = {
       selectFrom: () => ({
         select: () => ({
-          where: () => ({ executeTakeFirst: () => Promise.resolve({ issuer: ISSUER, subject: SUBJECT }) }),
+          where: () => ({ executeTakeFirst: () => Promise.resolve(row) }),
         }),
       }),
     };

@@ -141,7 +141,7 @@ beforeEach(async () => {
   adminUser = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `tamper-inviter-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   await withSignedStates(app, org, { keys, ids, logger: testLogger() }, async (tx, states) => {
     await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
@@ -188,7 +188,7 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
         userId: await userForSubject(
           app,
           { issuer: 'https://auth.example.test', subject: `tamper-other-${String(subjects)}` },
-          { ids, clock },
+          { ids, clock, keys, logger: testLogger() },
         ),
         role: 'admin',
         joinedAt: clock.now(),
@@ -238,12 +238,12 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
     const person = await userForSubject(
       app,
       { issuer: 'https://auth.example.test', subject: `tamper-accepter-${String(subjects)}` },
-      { ids, clock },
+      { ids, clock, keys, logger: testLogger() },
     );
     const other = await userForSubject(
       app,
       { issuer: 'https://auth.example.test', subject: `tamper-other-accepter-${String(subjects)}` },
-      { ids, clock },
+      { ids, clock, keys, logger: testLogger() },
     );
     await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),
@@ -259,7 +259,7 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
     const person = await userForSubject(
       app,
       { issuer: 'https://auth.example.test', subject: `tamper-waiting-${String(subjects)}` },
-      { ids, clock },
+      { ids, clock, keys, logger: testLogger() },
     );
     await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),

@@ -127,8 +127,14 @@ beforeEach(() => {
   client.subject = `sign-in-${String(subjects)}`;
   clock = new FixedClock(START);
   const ids = new SequentialIds(0x5000 + subjects * 0x100);
-  challenges = createStepUpChallenges({ ids, clock });
-  sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
+  sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   signIn = createSignIn({
     db: app,
     oidc: client,
@@ -138,6 +144,7 @@ beforeEach(() => {
     ids,
     clock,
     keys,
+    logger: testLogger(),
   });
 });
 
@@ -183,6 +190,21 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     );
     const users = await app.selectFrom('identity.users').select('id').where('subject', '=', client.subject).execute();
     expect(users).toEqual([]);
+  });
+
+  it("S205 refuses a sign-in as a person whose row the owner moved to the signer's subject, opening no session", async () => {
+    // The admin first signs in as themselves; then the owner moves their row onto the subject the next sign-in proves.
+    const admin = await roundTrip();
+    client.subject = `${client.subject}-owner`;
+    const owner = await database.connect('owner');
+    try {
+      await owner.query('update identity.users set subject = $2 where id = $1', [admin.userId, client.subject]);
+    } finally {
+      await owner.end();
+    }
+
+    await expect(roundTrip()).rejects.toThrow(expect.objectContaining({ failure: 'account_unbelieved' }));
+    expect(await sessionsOf(admin.userId)).toHaveLength(1);
   });
 
   it('AG10 refuses a sign-in made before the person’s sessions were last ended, opening none; a later one is taken', async () => {
@@ -312,6 +334,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
       ids: new SequentialIds(0x5000 + subjects * 0x100 + 0x80),
       clock,
       keys,
+      logger: testLogger(),
     });
     const { url, flowId } = await signIn.begin();
     const state = new URL(url).searchParams.get('state') ?? '';

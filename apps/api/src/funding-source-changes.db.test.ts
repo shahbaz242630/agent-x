@@ -91,7 +91,7 @@ async function member(org: string, role: Role): Promise<LinkingMember> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `funding-changes-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id: ids.next(), userId, role, joinedAt: clock.now(), actor: OPERATOR }),
@@ -167,7 +167,7 @@ const changesWith = (partner: FinancialRailAdapter | undefined) =>
     ids,
     clock,
     rail: partner,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger: testLogger(),
   });
 
@@ -306,7 +306,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       clock,
       rail: mixedUp,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: testLogger(capture),
     });
 
@@ -334,7 +334,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       clock,
       rail,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: testLogger(capture),
     });
 

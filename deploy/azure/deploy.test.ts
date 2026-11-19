@@ -2054,8 +2054,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Twenty-four secrets, three a page, and the empty page Azure ends with.
-      ...Array<string>(9).fill('rest --method get'),
+      // Every secret, three a page, and the page Azure ends with: one past the last full page.
+      ...Array<string>(Math.floor(everything.length / 3) + 1).fill('rest --method get'),
       ...RECORDING,
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);

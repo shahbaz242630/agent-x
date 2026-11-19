@@ -118,7 +118,9 @@ export type SignInFailure =
   /** The login service sent the browser back saying no (`error=`: the person cancelled, or was refused there). */
   | 'provider_refused'
   /** The browser came back with no code or no state: the address cut short. */
-  | 'callback_incomplete';
+  | 'callback_incomplete'
+  /** The person's own row failed its MAC (S205): written by something without the app's key, so no one signs in as it. */
+  | 'account_unbelieved';
 
 export class SignInFailed extends Error {
   override readonly name = 'SignInFailed';

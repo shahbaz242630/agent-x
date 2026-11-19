@@ -63,7 +63,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let acceptance: MandateAcceptance;
 
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-acceptance' });
 const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, stepUp, movedPastTheUseCase } = shared;
 

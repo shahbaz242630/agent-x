@@ -203,7 +203,7 @@ async function superseding(w: World, mandateId: string): Promise<Press> {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     outbox: createOutbox({ ids, clock }),
     logger: logger(),
   });
@@ -239,7 +239,7 @@ const services = () => ({
   keys,
   ids,
   clock,
-  challenges: createStepUpChallenges({ ids, clock }),
+  challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
   outbox: createOutbox({ ids, clock }),
   logger: logger(),
 });
@@ -307,7 +307,7 @@ const approvals = () =>
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger: logger(),
   });
 
@@ -606,7 +606,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: logger() });
   const outbox = createOutbox({ ids, clock });
   decisions = createSpendRequestDecisions({ database: app, outbox, keys, ids, clock, logger: logger() });
-  const challenges = createStepUpChallenges({ ids, clock });
+  const challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
   agents = createAgentChanges({ database: app, keys, ids, clock, challenges, outbox, logger: logger() });
   moves = createMandateMoves({ database: app, keys, ids, clock, challenges, outbox, logger: logger() });
   payeeRail = createFakeRail({ clock, ids });
@@ -905,7 +905,13 @@ describe('a payee registration’s choice for the supplier’s pending requests 
    * session): the confirm's answer.
    */
   const verifiedAgain = async (world: World) => {
-    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const sessions = createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
+    });
     const { sessionId } = await sessions.open(app, world.admin.userId, {
       idpSessionId: 'V1_2',
       authTime: clock.now(),

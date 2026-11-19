@@ -83,7 +83,7 @@ async function member(org: string, role: Role): Promise<LinkingMember & { readon
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `funding-links-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const membershipId = ids.next();
   await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>

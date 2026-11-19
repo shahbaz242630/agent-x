@@ -13,6 +13,7 @@ import {
   within,
 } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createSessions } from './sessions.ts';
@@ -33,6 +34,12 @@ let app: Database<IdentityTables>;
 const SECOND = 1000;
 const START = new Date('2026-09-24T09:00:00Z');
 const ids = new SequentialIds(0x300);
+/** Stand-in keys, one per purpose. The database's owner has none of them. */
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
 
 const hashOf = (text: string): Buffer => createHash('sha256').update(text).digest();
 
@@ -70,9 +77,15 @@ async function setUp(): Promise<{
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `step-up-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId, cookie } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: START,
@@ -83,7 +96,7 @@ async function setUp(): Promise<{
     sessionId,
     cookie,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     binding: { sessionId, action: 'members.invite', changeHash: hashOf(`invite ${String(people)}`) },
   };
 }
@@ -384,7 +397,13 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
   it('goes with its session, which ends by being deleted', async () => {
     const { cookie, clock, challenges, binding } = await setUp();
     await challenges.open(app, binding);
-    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const sessions = createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
+    });
     expect(await sessions.end(app, cookie)).toBeDefined();
     expect(await rowsFor(binding.sessionId)).toEqual([]);
   });

@@ -572,6 +572,14 @@ describe(`FX-TAMPER as the owner on a payee registration: denied by the row chec
     await registrationDenied(id, supplierId, 'seal');
   });
 
+  it('handed to another admin while started: its starter is sealed, so the form never opens to them (SEC-PAY-03, S205)', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    await ownerOfRegistrations.setColumn(id, 'started_by', ids.next());
+
+    await registrationDenied(id, supplierId, 'seal');
+  });
+
   it('moved to another supplier of the organisation', async () => {
     const { id: supplierId } = await addedSupplier();
     const other = await addedSupplier();

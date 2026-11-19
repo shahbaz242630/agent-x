@@ -82,7 +82,7 @@ let clock: FixedClock;
 let rail: FakeRail;
 let links: FundingSourceLinks;
 let changes: FundingSourceChanges;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
@@ -94,9 +94,15 @@ async function member(org: string, role: Role): Promise<SessionMember & { readon
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `funding-suspension-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),
@@ -409,7 +415,13 @@ describe(`reactivating a suspended source, with an admin’s passkey step-up (D2
     changedOf(await suspend(admin, source.id));
     const challengeId = askedFor(await reactivate(admin, source.id));
     await stepUp(admin, challengeId);
-    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const sessions = createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
+    });
     const { sessionId } = await sessions.open(app, admin.userId, {
       idpSessionId: 'V1_3',
       authTime: clock.now(),

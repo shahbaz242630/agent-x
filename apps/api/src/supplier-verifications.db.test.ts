@@ -118,7 +118,7 @@ let registry: SupplierRegistry;
 let payees: SupplierPayees;
 let payeeChanges: SupplierPayeeChanges;
 let verifications: SupplierVerifications;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
@@ -136,7 +136,7 @@ async function member(org: string, role: Role): Promise<Person> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `supplier-verifications-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const membershipId = ids.next();
   await withSignedStates(app, org, quiet(), (tx, states) =>
@@ -147,7 +147,13 @@ async function member(org: string, role: Role): Promise<Person> {
 
 /** The person signed in now, with a passkey. */
 async function signedIn(who: Person): Promise<SessionMember> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, who.userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

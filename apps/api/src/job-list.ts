@@ -509,6 +509,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         // The name and address Agent X keeps of the person our team's reset is about (0049, 0087).
         personOf: keptPersonReader(database, keys),
         fetch: outboundFetch,
+        keys,
         logger,
       }),
       NOTICES_EVERY_MS,

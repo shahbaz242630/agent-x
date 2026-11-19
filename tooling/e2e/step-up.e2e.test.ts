@@ -1,21 +1,28 @@
 // SEC-HA-03 to 06, 12 and SEC-HA-07 end to end (B3-3b): a signed-in person
 // steps up through the API, in a real Chrome, against the compose stack's
 // login service. A change's own route will open the challenge (B4); here the
-// test opens one for the person's session in the database, as the database's
-// admin, as that route would through the identity module. The API then sends
+// test opens one for the person's session through the identity module, with
+// the stack's own keys (its MAC, S205), as that route would. The API then sends
 // the browser to sign in again (`prompt=login`, the challenge's nonce), checks
 // the fresh sign-in against the challenge, records its evidence there and
 // gives the session a new cookie ID. Two people: one with an authenticator
 // app, and one who registers a security key (Chrome's virtual authenticator)
 // at their first sign-in, whose step-up then shows `user` in `amr` (SEC-HA-12,
 // ADR-012 §7).
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
 
 import { type Browser, type BrowserContext, chromium, type Cookie, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { createStepUpChallenges, type IdentityTables } from '../../packages/core/src/modules/identity/index.ts';
+import { systemClock, uuidV7Ids } from '../../packages/core/src/shared-kernel/index.ts';
+import { createDatabase } from '../../packages/platform/src/db/index.ts';
+import { API_PURPOSES, loadKeys, OPERATOR_ONLY } from '../../packages/platform/src/keys/index.ts';
+import { testLogger } from '../../packages/testing/src/index.ts';
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
-import { adminQuery as sql, API_ORIGIN, serviceLogs } from './compose.ts';
+import { APP_KEYS } from '../../deploy/compose/prepare.ts';
+import { adminQuery as sql, API_ORIGIN, localLogin, SECRETS_DIR, serviceLogs } from './compose.ts';
 import type { TestUser } from './global-setup.ts';
 import { loginDriver, where } from './login-pages.ts';
 
@@ -47,18 +54,36 @@ async function sessionOf(user: TestUser): Promise<string> {
   return ids[0] ?? '';
 }
 
-/** Opens a challenge for the person's session, as a change's route will (B4), and gives its ID. */
+/** The stack's database as the API reaches it, and the API's keys, so the challenge's MAC is one the API believes. */
+const database = createDatabase<IdentityTables>(
+  {
+    host: '127.0.0.1',
+    port: 56541,
+    database: 'agentx',
+    user: 'agentx_app',
+    password: localLogin('AGENTX_LOCAL_DB_APP_PASSWORD'),
+    tls: 'disable',
+    applicationName: 'agentx-step-up-e2e',
+  },
+  testLogger(),
+);
+const challenges = createStepUpChallenges({
+  ids: uuidV7Ids,
+  clock: systemClock,
+  keys: loadKeys({ directory: path.join(SECRETS_DIR, APP_KEYS), current: {} }, API_PURPOSES, OPERATOR_ONLY),
+  logger: testLogger(),
+});
+
+/** Opens a challenge for the person's session, as a change's route does (B4), and gives its ID. */
 async function openChallenge(user: TestUser): Promise<string> {
   const sessionId = await sessionOf(user);
-  if (!/^[0-9a-f-]{36}$/.test(sessionId)) throw new Error('the session ID is not a UUID');
-  // The nonce as the identity module makes them: 32 random bytes in base64url, which the OIDC client checks.
-  const nonce = randomBytes(32).toString('base64url');
-  return sql(
-    'INSERT INTO identity.step_up_challenges (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at) ' +
-      `SELECT pg_catalog.gen_random_uuid(), s.id, s.user_id, 'members.invite', ` +
-      `pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex'), '${nonce}', pg_catalog.now(), pg_catalog.now() + interval '5 minutes' ` +
-      `FROM identity.sessions s WHERE s.id = '${sessionId}' RETURNING id`,
-  );
+  const opened = await challenges.open(database, {
+    sessionId,
+    action: 'members.invite',
+    changeHash: createHash('sha256').update('a pending invitation').digest(),
+  });
+  if (opened === undefined) throw new Error("the person's session is not live");
+  return opened.challengeId;
 }
 
 /** The challenge's evidence as recorded: whether verified, the methods, and auth_time against when it was made. */
@@ -100,6 +125,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser.close();
+  await database.destroy();
 });
 
 /** Starts a sign-in at the API, and gives the page once the login sends it on. */
