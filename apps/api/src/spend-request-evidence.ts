@@ -282,9 +282,11 @@ async function paymentObjectsOf(tx: EvidenceTx, orgId: string, requestId: string
 async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: string, request: RequestPart) {
   const { fundingSourceId, supplierId, id } = request.shown.request;
   const source = await sourceOf(tx, states, { orgId, id: fundingSourceId }, 'share');
-  // A source none of the organisation's (none at all, or another's) is named only by a request denied for it (S206
-  // V8): nothing of it to show. A row of the organisation's gone while its events stay reads as tampered, never missing.
-  const noneOfOurs = source.outcome === 'missing' && request.shown.request.status === 'DENIED';
+  // A source none of the organisation's (none at all, or another's) is named only by a request its decision denied
+  // as unusable (S206 V8), by its sealed decision and reasons, never its status now (a reject or a void is DENIED
+  // too): nothing of it to show. A row of the organisation's gone while its events stay reads as tampered.
+  // (SOURCE_NOT_USABLE fails a decision, so its request was DENIED from the start: never approved, rejected or voided.)
+  const noneOfOurs = source.outcome === 'missing' && request.shown.request.reasons.includes('SOURCE_NOT_USABLE');
   if (source.outcome !== 'found' && !noneOfOurs) throw integrityFailed();
   // A request names no version only for a supplier not the organisation's (0039): denied for it, it has none to show,
   // as requestInOrder found (S206 V8).

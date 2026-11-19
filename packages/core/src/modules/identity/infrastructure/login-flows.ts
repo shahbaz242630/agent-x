@@ -151,10 +151,11 @@ export function createLoginFlows({
 
     async start(db, flow, returnTo, network) {
       const now = clock.now();
-      if (await signInsAt(db, MOST_OPEN_SIGN_INS_A_NETWORK, now, network)) return { outcome: 'network_full' };
-      // Past the backstop, a quiet network still gets in: only the busy ones wait.
-      if ((await signInsAt(db, mostOpen, now)) && (await signInsAt(db, QUIET_NETWORK_SIGN_INS, now, network))) {
-        return { outcome: 'full' };
+      // A quiet network gets in on its own count of a few: a flood across many networks never makes each start count
+      // every network's. Only a busy one is counted further, against its own cap and then the backstop.
+      if (await signInsAt(db, QUIET_NETWORK_SIGN_INS, now, network)) {
+        if (await signInsAt(db, MOST_OPEN_SIGN_INS_A_NETWORK, now, network)) return { outcome: 'network_full' };
+        if (await signInsAt(db, mostOpen, now)) return { outcome: 'full' };
       }
       return { outcome: 'started', flowId: await kept(db, flow, returnTo, now, { network }) };
     },

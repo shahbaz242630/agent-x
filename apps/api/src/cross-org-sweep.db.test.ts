@@ -1102,8 +1102,25 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
     const asked = await send(ours.agent, 'POST', '/v1/spend-requests', base);
     const { id, status } = JSON.parse(asked.body) as { id: string; status: string };
     expect(status).toBe('DENIED');
-    const evidenceOf = async () => answerOf(await send(ours.admin, 'GET', `/v1/spend-requests/${id}/evidence`));
+    const evidenceOf = async (of = id) => answerOf(await send(ours.admin, 'GET', `/v1/spend-requests/${of}/evidence`));
     expect((await evidenceOf()).status).toBe(200);
+    // And one denied as an unusable source, its own: the source suspended by B's admin first.
+    const suspend = operations.find(
+      ({ method, route }) => method === 'POST' && route === '/v1/funding-sources/{id}/suspend',
+    );
+    const suspended = await send(
+      ours.admin,
+      'POST',
+      `/v1/funding-sources/${ours.world.source}/suspend`,
+      sample(suspend?.body ?? {}),
+    );
+    expect(suspended.statusCode, suspended.body).toBeLessThan(300);
+    const unusable = JSON.parse((await send(ours.agent, 'POST', '/v1/spend-requests', base)).body) as {
+      id: string;
+      reasons: { code: string }[];
+    };
+    expect(unusable.reasons.map(({ code }) => code)).toContain('SOURCE_NOT_USABLE');
+    expect((await evidenceOf(unusable.id)).status).toBe(200);
     const admin = await database.connect('admin');
     try {
       await admin.query('begin');
@@ -1115,6 +1132,23 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
       await admin.query('commit');
     } finally {
       await admin.end();
+    }
+    expect(await evidenceOf()).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
+    // Its source's row gone while its events stay is tampered with, never one none of B's, whatever it was denied for.
+    expect(await evidenceOf(unusable.id)).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
+    // Its events gone too, the source reads as missing; still refused: the request was denied for another reason
+    // (its supplier), never as an unusable source, so its source was the organisation's.
+    const events = await database.connect('admin');
+    try {
+      await events.query('begin');
+      await events.query("select pg_catalog.set_config('session_replication_role', 'replica', true)");
+      await events.query(
+        "delete from audit.events where org_id = $1 and subject_type = 'funding_source' and subject_id = $2",
+        [ours.world.org, ours.world.source],
+      );
+      await events.query('commit');
+    } finally {
+      await events.end();
     }
     expect(await evidenceOf()).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
   });

@@ -298,6 +298,30 @@ describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server
     }
   });
 
+  it('counts a quiet network’s start on its own few alone, never every network’s; a busy one’s against each cap', async () => {
+    const at = new Date('2027-03-01T09:00:00Z');
+    const store = createLoginFlows({ clock: new FixedClock(at) });
+    // Every statement the store sends, by its kind: a count is a select.
+    const sent: string[] = [];
+    const counting = app.withPlugin({
+      transformQuery: (args) => {
+        sent.push(args.node.kind);
+        return args.node;
+      },
+      transformResult: (args) => Promise.resolve(args.result),
+    });
+    const network = '198.51.100.30';
+    const selects = () => sent.filter((kind) => kind === 'SelectQueryNode').length;
+
+    expect(await store.start(counting, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    expect(selects()).toBe(1);
+    for (let open = 1; open < QUIET_NETWORK_SIGN_INS; open += 1) await store.start(app, newFlow(), '/', network);
+    sent.length = 0;
+    expect(await store.start(counting, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    // Busy now: its own few, its cap, then the backstop.
+    expect(selects()).toBe(3);
+  });
+
   it('counts the sign-ins under way from the partial indexes alone, never reading the rows', async () => {
     // The very statements the caps run, planned as the app role on one connection, so its settings hold for both:
     // no scan of the table, nor a bitmap over it, to fall back on.
