@@ -673,7 +673,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       expect(api).toBeUndefined();
       expect(host.exitCode).toBe(1);
       expect(events()).toEqual(['api.starting', 'api.partner', 'api.database_connected', 'api.start_not_recorded']);
-      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed')).toEqual(
+      // The start's own alarm (the notices' seal pass, S206 V4, raises its own first: check start_record).
+      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed' && line.check === 'start')).toEqual(
         expect.objectContaining({ level: 'error', chain: 'platform', check: 'start' }),
       );
       await expectNoApiConnections();

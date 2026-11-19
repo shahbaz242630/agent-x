@@ -36,12 +36,17 @@
 // at fault, is not. Nothing is held: the alarm is the remedy, as a notice's own
 // sender can't be made to send what the owner took away.
 //
+// And each run, across every organisation: a notice with no seal still unsent
+// a day on (`unsealed`), never claimed and with no record to walk: one from
+// before seals a start couldn't seal, or one the owner wrote.
+//
 // A first visit starts just before the organisation's oldest record (read as
 // it is: a wrong place fails the walk's first step); a record hidden at that
 // one moment is the one thing it can't see (R-15).
 import { CHAIN_START, type CheckedPoint } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+import { limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { createAuditTrail, type WalkedEvent, withSignedStates } from '../../audit/index.ts';
@@ -68,6 +73,9 @@ const MOST_CARRIED = 19;
 
 /** A walk past this many events records where it stopped, even with no notice in it, so the next walks less. */
 const RECORD_PAST = 50;
+
+/** The most notices with no seal one run raises the alarm for. */
+const UNSEALED_A_RUN = 100;
 
 /** A notice recorded longer ago than this may have been swept (30 days after it is done): a walk passes it by. */
 const JUDGED_WITHIN_MS = 20 * DAY_MS;
@@ -325,9 +333,34 @@ export function createNoticeCheck({
   const placeBefore = (orgId: string, seq: bigint): Promise<CheckedPoint> =>
     withSignedStates(database, orgId, { keys, ids, logger }, (tx) => placeAt(tx, orgId, seq - 1n));
 
+  /**
+   * The integrity alarm for each notice with no seal still unsent NOTICE_DEADLINE_MS on (S206 V4 review): never claimed
+   * and with no record to walk, so nothing else would ever say so. A notice from before seals a start couldn't seal,
+   * or one the owner wrote. One statement across every organisation, the oldest first, at most UNSEALED_A_RUN.
+   */
+  const unsealedLate = async (): Promise<void> => {
+    const due = new Date(clock.now().getTime() - NOTICE_DEADLINE_MS);
+    const rows = await limitedTransaction(database, (tx) =>
+      tx
+        .selectFrom('notifications.outbox')
+        .select(['id', 'org_id'])
+        .where('mac', 'is', null)
+        .where('sent_at', 'is', null)
+        .where('given_up_at', 'is', null)
+        .where('created_at', '<=', due)
+        .orderBy('created_at')
+        .limit(UNSEALED_A_RUN)
+        .execute(),
+    );
+    for (const { id, org_id: orgId } of rows) {
+      logger.child({ orgId }).error('audit.integrity_failed', { check: 'notice', reason: 'unsealed', noticeId: id });
+    }
+  };
+
   return {
     async run(signal) {
       try {
+        await unsealedLate();
         for (const orgId of await list()) {
           if (signal?.aborted === true) return;
           try {

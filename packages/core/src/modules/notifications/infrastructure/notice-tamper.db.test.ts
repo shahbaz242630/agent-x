@@ -309,6 +309,8 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
 
     expect(await send()).toEqual([]);
     expect(await rowOf(planted)).toEqual({ sent_at: null, given_up_at: null, last_failure: null });
+    // No record to walk, never claimed: the check still says so, once it is a day old.
+    expect(await checkAt(later(HOUR_MS))).toEqual([{ noticeId: planted, reason: 'unsealed' }]);
   });
 
   it('alarms for a notice held back past its deadline, and not before', async () => {
@@ -584,11 +586,17 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     const admin = database.as('admin');
     await admin.query('revoke select on audit.events from agentx_app');
     try {
-      expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toBe(0);
+      expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toEqual({
+        sealed: 0,
+        complete: false,
+      });
     } finally {
       await admin.query('grant select on audit.events to agentx_app');
     }
-    expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toBe(1);
+    expect(await app.transaction().execute((tx) => sealNoticesFromBefore(tx, app, keys))).toEqual({
+      sealed: 1,
+      complete: true,
+    });
     const sealed = await app.selectFrom('notifications.outbox').select(['id', 'mac']).orderBy('id').execute();
     expect(sealed.map(({ id, mac }) => [id, mac !== null])).toEqual(
       [

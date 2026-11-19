@@ -1126,6 +1126,11 @@ export const PLAIN_WORDS = {
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
   },
+  'notification.legacy_seal_incomplete': {
+    happened: 'At start, some old email notices could not be sealed: an organisation’s records could not be read.',
+    broke: 'Those notices wait unsent, and the next start tries again.',
+    next: 'Restart the API once the database is quiet. Any still unsent a day on raises the alarm.',
+  },
   'notification.recipient_not_member': {
     happened: 'An email was due to someone who had left the organisation, or lost the role it was for.',
     broke: 'That email was not sent, so they were not told what the organisation now holds.',
