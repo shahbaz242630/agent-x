@@ -1077,13 +1077,12 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
     });
 
     const ended = { status: 'FAILED', failure: 'expired', started_by: gone.membershipId };
-    expect(await statuses()).toEqual(
-      expect.arrayContaining([
-        { route: 'hosted', ...ended },
-        { route: 'pass_through', ...ended },
-        { route: 'hosted', status: 'STARTED', failure: null, started_by: staying.membershipId },
-      ]),
-    );
+    // Ordered by route, then by starter: the two starters' hosted ones in the order of their memberships' IDs.
+    const hosted = [
+      { route: 'hosted', ...ended },
+      { route: 'hosted', status: 'STARTED', failure: null, started_by: staying.membershipId },
+    ].toSorted((a, b) => (a.started_by < b.started_by ? -1 : 1));
+    expect(await statuses()).toEqual([...hosted, { route: 'pass_through', ...ended }]);
     expect(theirs.registration.startedBy).toBe(staying.membershipId);
   });
 
