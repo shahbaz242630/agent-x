@@ -189,18 +189,14 @@ describe(`the owner can't sign in as a person (Postgres ${server.version})`, () 
         [victim.sessionId, other.sessionId],
       );
     } else {
-      const assignments: Record<string, string> = {
-        cookie_hash: 'cookie_hash = $2',
-        user_id: 'user_id = $2',
-        amr: 'amr = $2',
-        ends_at: 'ends_at = $2',
-        mac_key_version: 'mac_key_version = $2',
+      const statements: Record<string, string> = {
+        cookie_hash: 'update identity.sessions set cookie_hash = $2 where id = $1',
+        user_id: 'update identity.sessions set user_id = $2 where id = $1',
+        amr: 'update identity.sessions set amr = $2 where id = $1',
+        ends_at: 'update identity.sessions set ends_at = $2 where id = $1',
+        mac_key_version: 'update identity.sessions set mac_key_version = $2 where id = $1',
       };
-      // eslint-disable-next-line agentx/no-string-built-sql -- The column comes from the fixed list above; the value is bound.
-      await asOwner(`update identity.sessions set ${String(assignments[column])} where id = $1`, [
-        victim.sessionId,
-        values[column],
-      ]);
+      await asOwner(String(statements[column]), [victim.sessionId, values[column]]);
     }
 
     expect(await sessions().use(app, column === 'cookie_hash' ? theirs : victim.cookie)).toBeUndefined();
