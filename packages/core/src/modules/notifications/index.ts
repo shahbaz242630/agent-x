@@ -1,8 +1,9 @@
 // The notifications module (ADR-004, ADR-003 §10; Phase 1 B5): notices to
 // people, written to the outbox in the change's own transaction (0021), then
 // sent by the API's sender through a notifier, to the address the login
-// service gives at send time. It depends on no other module: a module whose
-// change tells people (identity) calls it.
+// service gives at send time. It depends on no other module but the audit
+// sink, where each notice queued is recorded (S206 V4): a module whose change
+// tells people (identity) calls it.
 export {
   maskedEmail,
   messageFor,
@@ -33,9 +34,12 @@ export {
   MOST_ATTEMPTS,
   MOST_NOTICES_A_BATCH,
   MOST_RECIPIENTS,
+  NOTICE_QUEUED,
   type Outbox,
   OUTBOX_RETENTION_DAYS,
+  type OutboxTables,
 } from './infrastructure/outbox.ts';
+export { createNoticeCheck, NOTICE_DEADLINE_MS, type NoticeCheck } from './infrastructure/notice-check.ts';
 export {
   type AddressBook,
   type Admin,

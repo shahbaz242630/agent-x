@@ -50,6 +50,10 @@
 //   but a short constant, or by the outbox's own LEASE_EXPIRED, is counted as
 //   a failed try (`send_error`, `send_failed`), never lost: the next notice
 //   is still sent (review).
+// - A notice is sent only as the app queued it (S206 V4): one whose seal
+//   doesn't hold, moved to another person or contact or planted by the
+//   database's owner, is given up unsent (`seal_failed`) and raises the
+//   integrity alarm; one queued before seals is sent, with a warning.
 // - A run stops between notices once its signal is aborted; a notice it had
 //   claimed and not reached is taken again once its lease runs out.
 // - A run never throws (review): the outbox away, or a statement past its
@@ -84,8 +88,7 @@ import {
   RESET_LINK_KIND,
   SUPPORT_RESET_KIND,
 } from '../domain/notice.ts';
-import { LEASE_EXPIRED, type LeaseEnded, type Outbox } from './outbox.ts';
-import type { NotificationsTables } from './tables.ts';
+import { LEASE_EXPIRED, type LeaseEnded, type Outbox, type OutboxTables, type SealedClaim } from './outbox.ts';
 
 /** How a send went, as the notifier tells it. */
 export type SendOutcome =
@@ -217,6 +220,9 @@ export const NOTICES_A_RUN = 20;
 
 const FAILURE = /^[a-z][a-z_]{0,63}$/;
 
+/** Why a notice whose seal doesn't hold was given up unsent (S206 V4). */
+export const SEAL_FAILED = 'seal_failed';
+
 export interface NoticeSender {
   /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. Never throws: says if it failed. */
   run(signal?: AbortSignal): Promise<'ran' | 'skipped'>;
@@ -235,7 +241,7 @@ export function createNoticeSender({
   audience,
   logger,
 }: {
-  readonly db: Kysely<NotificationsTables>;
+  readonly db: Kysely<OutboxTables>;
   readonly outbox: Outbox;
   readonly notifier: Notifier;
   readonly addresses: AddressBook;
@@ -294,7 +300,7 @@ export function createNoticeSender({
       await failed(notice, 'audience_unavailable', false);
       return;
     }
-    const written = await outbox.fanOut(db, notice.id, recipients);
+    const written = await outbox.fanOut(db, notice.orgId, notice.id, recipients);
     // Not open: another sender turned it first, or it was given up for good meanwhile.
     if (written === 'not_open') return;
     logger.info('notification.fanned_out', { noticeId: notice.id, kind: notice.kind, notices: written });
@@ -470,7 +476,7 @@ export function createNoticeSender({
       return false;
     }
     if (read.outcome === 'no_email') {
-      const passed = await outbox.passOn(db, notice.id, REMITTANCE_NO_EMAIL_KIND, 'no_address');
+      const passed = await outbox.passOn(db, notice.orgId, notice.id, REMITTANCE_NO_EMAIL_KIND, 'no_address');
       logger.info('notification.remittance_skipped', { noticeId: notice.id, why: 'no_email', passedOn: passed });
       return passed;
     }
@@ -478,6 +484,30 @@ export function createNoticeSender({
     logger.info('notification.remittance_skipped', { noticeId: notice.id, why: read.outcome, outcome: became });
     return false;
   };
+
+  /**
+   * Whether the notice is one the app queued (S206 V4, notice-seals.ts): one whose seal doesn't hold (moved to
+   * another person or contact, or planted) is given up unsent, with the integrity alarm; one from before seals is
+   * sent, with a warning.
+   */
+  const believed = async (notice: SealedClaim): Promise<boolean> => {
+    if (notice.seal === 'sound') return true;
+    if (notice.seal === 'legacy') {
+      logger.warn('notification.unsealed', { noticeId: notice.id, kind: notice.kind });
+      return true;
+    }
+    logger.child({ orgId: notice.orgId }).error('audit.integrity_failed', {
+      check: 'notice',
+      reason: 'seal',
+      noticeId: notice.id,
+    });
+    await outbox.failed(db, notice.id, SEAL_FAILED, true);
+    return false;
+  };
+
+  /** Delivers the notice only if it is one the app queued; says whether it wrote notices due now. */
+  const deliverBelieved = async (notice: SealedClaim): Promise<boolean> =>
+    (await believed(notice)) ? deliver(notice) : false;
 
   /** Fans out a notice to no one in particular, or sends one to its recipient; says whether it wrote notices due now. */
   const deliver = async (notice: ClaimedNotice): Promise<boolean> => {
@@ -514,7 +544,7 @@ export function createNoticeSender({
       let wroteMore = false;
       for (const notice of due) {
         if (stopped()) return;
-        if (await deliver(notice)) wroteMore = true;
+        if (await deliverBelieved(notice)) wroteMore = true;
       }
       // A full batch may have left more due, and a fan-out or a notice passed on has just made some.
       if (due.length < NOTICES_A_RUN && !wroteMore) return;

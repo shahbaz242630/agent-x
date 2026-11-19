@@ -441,7 +441,7 @@ describe(`SEC-OPS-04 a restricted admin keeps only a developer's powers on share
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger,
     });
     // Reactivating is an admin's alone: the admin, marked as the hook marks a restricted one, is a developer here.

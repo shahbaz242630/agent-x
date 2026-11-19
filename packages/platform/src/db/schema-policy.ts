@@ -375,11 +375,24 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'recipient_contact_id',
         'to_contacts',
         'about_id',
+        // S206 V4 (0105): its seal as queued and as it ended, with a key the database never holds.
+        'mac',
+        'mac_key_version',
+        'end_mac',
+        'end_key_version',
       ],
       // Added, read, and deleted once done and past its retention; changed
-      // only in its tries and outcome, never in whom or what it tells of.
+      // only in its tries and outcome, and its end's seal, never in whom or what it tells of.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['attempts', 'next_attempt_at', 'sent_at', 'given_up_at', 'last_failure'],
+      appMayUpdate: [
+        'attempts',
+        'next_attempt_at',
+        'sent_at',
+        'given_up_at',
+        'last_failure',
+        'end_mac',
+        'end_key_version',
+      ],
     },
     'security.events': {
       reason:

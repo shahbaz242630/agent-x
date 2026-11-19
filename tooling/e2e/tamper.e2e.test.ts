@@ -150,7 +150,7 @@ const shared = mandateWorld({ app: () => database, clock: () => clock, ids: uuid
 const registry = createMandateRegistry({ database, keys, ids: uuidV7Ids, clock, logger: testLogger() });
 const decisions = createSpendRequestDecisions({
   database,
-  outbox: createOutbox({ ids: uuidV7Ids, clock }),
+  outbox: createOutbox({ ids: uuidV7Ids, clock, keys }),
   keys,
   ids: uuidV7Ids,
   clock,
@@ -506,7 +506,7 @@ async function seedPayment(): Promise<string> {
     await createHandoff({
       list: () => Promise.resolve([w.org]),
       database,
-      outbox: createOutbox({ ids: uuidV7Ids, clock }),
+      outbox: createOutbox({ ids: uuidV7Ids, clock, keys }),
       rail: w.rail,
       keys,
       ids: uuidV7Ids,

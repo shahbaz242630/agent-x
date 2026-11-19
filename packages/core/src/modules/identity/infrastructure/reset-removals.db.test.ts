@@ -262,7 +262,7 @@ const removalsWith = (factors: SecondFactorRemover) => {
     ids,
     clock,
     issuer: ISSUER,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
 };
@@ -295,6 +295,8 @@ const lastEvent = async (org: string) => {
     tx
       .selectFrom('audit.events')
       .select(['action', 'actor_id', 'details'])
+      // The change's own, not the record of a notice it queued (S206 V4).
+      .where('action', '!=', 'notice.queued')
       .orderBy('seq', 'desc')
       .limit(1)
       .executeTakeFirstOrThrow(),
@@ -465,7 +467,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
         ids,
         clock,
         challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         logger: testLogger(),
       });
       const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
@@ -614,7 +616,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       ids,
       clock,
       challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
     const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
@@ -735,7 +737,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       ids,
       clock,
       challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
     const admin = { orgId: first.org, userId: first.admin.userId, sessionId: first.admin.sessionId };

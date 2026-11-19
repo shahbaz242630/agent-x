@@ -314,7 +314,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -678,7 +678,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     });
     decisions = createSpendRequestDecisions({
       database: counted,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -1622,7 +1622,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     const { w, acting } = await ready();
     decisions = createSpendRequestDecisions({
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -1645,7 +1645,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     // Sent again with the same key once its turn comes: decided, as a first ask.
     decisions = createSpendRequestDecisions({
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -1658,7 +1658,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
   const decisionsThrough = (entry: DecisionEntry, logSample?: LogSample) => {
     decisions = createSpendRequestDecisions({
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -1904,7 +1904,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
         ids,
         clock,
         challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         logger: testLogger(capture),
       });
       const member = { orgId: calm.w.org, userId: calm.w.admin.userId, sessionId: calm.w.admin.sessionId };
@@ -1949,7 +1949,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
       let attempts = 0;
       decisions = createSpendRequestDecisions({
         database: app,
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         keys,
         ids,
         clock: {
@@ -1972,7 +1972,7 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     const { w, acting } = await ready();
     decisions = createSpendRequestDecisions({
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -2631,7 +2631,7 @@ describe('over the mandate’s own limits: refuse, or an admin’s approval (E9,
       ids,
       clock,
       challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(new LogCapture()),
     });
     const challengeId = askedFor(

@@ -109,7 +109,7 @@ const services = () => ({
   ids,
   clock,
   challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-  outbox: createOutbox({ ids, clock }),
+  outbox: createOutbox({ ids, clock, keys }),
   logger: testLogger(capture),
 });
 
@@ -441,8 +441,9 @@ describe('the freeze', () => {
     const w = await world();
     const times = noStatementTimes();
     await timingStatements(times, () => frozen(w));
-    // 16 before the brake, its answer's read included.
-    expect(times.trips).toBe(17);
+    // 16 before the brake, its answer's read included; and since S206 V4 one for the freeze notice's record, the head
+    // locked again before the notice and its record are written in one statement.
+    expect(times.trips).toBe(18);
   });
 });
 

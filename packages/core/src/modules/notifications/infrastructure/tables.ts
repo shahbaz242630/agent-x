@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The notifications schema's table (db/migrations/0021_notifications_outbox.sql, 0023_outbox_contacts.sql), as Kysely sees it. */
+/** The notifications schema's table (db/migrations/0021_notifications_outbox.sql, 0023_outbox_contacts.sql, 0105_outbox_seals.sql), as Kysely sees it. */
 export interface NotificationsTables {
   'notifications.outbox': OutboxTable;
 }
@@ -21,4 +21,9 @@ interface OutboxTable {
   recipient_contact_id: string | null;
   to_contacts: Generated<boolean>;
   about_id: string | null;
+  /** The notice's seal as queued, and as it ended (0105); none on a notice queued before. */
+  mac: Buffer | null;
+  mac_key_version: number | null;
+  end_mac: Buffer | null;
+  end_key_version: number | null;
 }

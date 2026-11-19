@@ -1178,7 +1178,7 @@ describe(`a connection revoked (Postgres ${server.version})`, () => {
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
     const asked = await changes.handOver(
@@ -1254,7 +1254,7 @@ async function removalAsked(admin: Member, gone: Member, leavingAt: FixedClock =
     ids,
     clock,
     challenges: challenges(),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
     leaving: connectionsOfLeaving(leavingAt),
   });
@@ -1825,7 +1825,7 @@ describe(`mutation pass (6E3b): what each survivor showed untested (Postgres ${s
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
       leaving: connectionsOfLeaving(clock),
     });

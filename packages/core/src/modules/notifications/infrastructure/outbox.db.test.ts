@@ -5,7 +5,8 @@
 // once; marked sent, or tried again further off each time and given up,
 // also when the last try's lease runs out; a notice to the admins turned
 // into one to each, once; swept once done and past the retention.
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -19,13 +20,13 @@ import {
   MOST_NOTICES_A_BATCH,
   MOST_RECIPIENTS,
   OUTBOX_RETENTION_DAYS,
+  type OutboxTables,
 } from './outbox.ts';
 import { type Notice, NOTICE_KINDS } from '../domain/notice.ts';
-import type { NotificationsTables } from './tables.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<NotificationsTables>;
+let app: Database<OutboxTables>;
 
 const START = new Date('2026-09-26T09:00:00Z');
 const MINUTE = 60_000;
@@ -54,7 +55,12 @@ const clock = {
     this.at = to;
   },
 };
-const outbox = createOutbox({ ids, clock });
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
+const outbox = createOutbox({ ids, clock, keys });
 
 const notice = (change: Partial<Notice> = {}): Notice => ({
   orgId: ORG,
@@ -80,7 +86,7 @@ const rows = () => app.selectFrom('notifications.outbox').selectAll().orderBy('c
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<NotificationsTables>({ ...database.connection('app'), maxConnections: 3 }, testLogger());
+  app = createDatabase<OutboxTables>({ ...database.connection('app'), maxConnections: 3 }, testLogger());
   await sql`insert into directory.orgs (org_id) values (${ORG})`.execute(app);
   for (const [id, subject] of [
     [ADMIN, 'outbox-admin'],
@@ -107,7 +113,7 @@ beforeEach(async () => {
 
 describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   it('writes each notice due at once, with no tries, on the transaction it is given', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
 
     expect(await rows()).toMatchObject([
       {
@@ -137,7 +143,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   it('rolls a notice back with the change it tells of', async () => {
     const refusal = new Error('the change was refused');
     await expect(
-      app.transaction().execute(async (tx) => {
+      withTenant(app, ORG, async (tx) => {
         await outbox.add(tx, [notice()]);
         throw refusal;
       }),
@@ -158,9 +164,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ['B6-1b a person and the contacts both', { toContacts: true }],
     ['B6-1b a contact and the contacts both', { recipientUserId: null, recipientContactId: CONTACT, toContacts: true }],
   ])('refuses the whole batch for %s, writing nothing', async (_what, change) => {
-    await expect(app.transaction().execute((tx) => outbox.add(tx, [notice(), notice(change)]))).rejects.toThrow(
-      RangeError,
-    );
+    await expect(withTenant(app, ORG, (tx) => outbox.add(tx, [notice(), notice(change)]))).rejects.toThrow(RangeError);
     expect(await rows()).toEqual([]);
   });
 
@@ -171,7 +175,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ['a role too', { role: 'admin' as Notice['role'] }],
   ])('B6-1b refuses a notice about a contact with %s, writing nothing', async (_what, change) => {
     await expect(
-      app.transaction().execute((tx) => outbox.add(tx, [aboutAContact(), aboutAContact(change)])),
+      withTenant(app, ORG, (tx) => outbox.add(tx, [aboutAContact(), aboutAContact(change)])),
     ).rejects.toThrow(RangeError);
     expect(await rows()).toEqual([]);
   });
@@ -238,21 +242,19 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('B6-2a writes a notice about a person’s sign-in, to the person and to the admins, about their user ID', async () => {
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          aboutAContact({ kind: 'second_factor_removed', aboutId: ADMIN, recipientUserId: ADMIN }),
-          aboutAContact({ kind: 'sign_in_blocked', aboutId: ADMIN }),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        aboutAContact({ kind: 'second_factor_removed', aboutId: ADMIN, recipientUserId: ADMIN }),
+        aboutAContact({ kind: 'sign_in_blocked', aboutId: ADMIN }),
+      ]),
+    );
 
     expect(await rows()).toMatchObject([
       { recipient_user_id: ADMIN, kind: 'second_factor_removed', about_id: ADMIN, membership_id: null, role: null },
       { recipient_user_id: null, kind: 'sign_in_blocked', about_id: ADMIN },
     ]);
     await expect(
-      app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'password_changed', aboutId: null })])),
+      withTenant(app, ORG, (tx) => outbox.add(tx, [aboutAContact({ kind: 'password_changed', aboutId: null })])),
     ).rejects.toThrow(RangeError);
   });
 
@@ -262,9 +264,9 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ['the contacts', { toContacts: true }],
   ])('B6-3b refuses a reset’s link to %s: its email carries one contact’s own link', async (_to, change) => {
     await expect(
-      app
-        .transaction()
-        .execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, ...change })])),
+      withTenant(app, ORG, (tx) =>
+        outbox.add(tx, [aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, ...change })]),
+      ),
     ).rejects.toThrow(RangeError);
     expect(await rows()).toEqual([]);
   });
@@ -278,14 +280,12 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       'supplier_verified',
       'supplier_suspended',
     ] as const;
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          ...told.map((kind) => aboutAContact({ kind, aboutId: supplier })),
-          ...told.map((kind) => aboutAContact({ kind, aboutId: supplier, toContacts: true })),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        ...told.map((kind) => aboutAContact({ kind, aboutId: supplier })),
+        ...told.map((kind) => aboutAContact({ kind, aboutId: supplier, toContacts: true })),
+      ]),
+    );
 
     const written = await rows();
     expect(written).toHaveLength(told.length * 2);
@@ -301,15 +301,13 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       'factor_reset_expired',
       'factor_reset_completed',
     ] as const;
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, recipientContactId: CONTACT }),
-          ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, recipientUserId: ADMIN })),
-          ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, toContacts: true })),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, recipientContactId: CONTACT }),
+        ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, recipientUserId: ADMIN })),
+        ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, toContacts: true })),
+      ]),
+    );
 
     const written = await rows();
     expect(written).toHaveLength(11);
@@ -318,15 +316,13 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('B6-1b writes a notice about a contact, to the admins, a contact or the contacts, and takes each back as written', async () => {
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          aboutAContact(),
-          aboutAContact({ recipientContactId: CONTACT.toUpperCase(), kind: 'contact_removed' }),
-          aboutAContact({ toContacts: true }),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        aboutAContact(),
+        aboutAContact({ recipientContactId: CONTACT.toUpperCase(), kind: 'contact_removed' }),
+        aboutAContact({ toContacts: true }),
+      ]),
+    );
 
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, recipient_contact_id: null, to_contacts: false, kind: 'contact_added' },
@@ -347,20 +343,20 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
 
   it('C2b writes a remittance to its supplier alone, about its payment, and one a payment (0062)', async () => {
     const remittance = aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT });
-    await app.transaction().execute((tx) => outbox.add(tx, [remittance]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [remittance]));
 
     expect(await rows()).toMatchObject([
       { kind: 'payment_remittance', recipient_user_id: null, recipient_contact_id: null, to_contacts: false },
     ]);
     // A second for the same payment, as a bug or a replay would write it: the table refuses it, and its change with it.
-    await expect(app.transaction().execute((tx) => outbox.add(tx, [remittance]))).rejects.toMatchObject({
+    await expect(withTenant(app, ORG, (tx) => outbox.add(tx, [remittance]))).rejects.toMatchObject({
       code: '23505',
       constraint: 'one_remittance_a_payment',
     });
     // Never to a person, a contact or the contacts: the module refuses it, and the table too.
     for (const to of [{ recipientUserId: ADMIN }, { recipientContactId: CONTACT }, { toContacts: true }]) {
       await expect(
-        app.transaction().execute((tx) => outbox.add(tx, [{ ...remittance, aboutId: OTHER_PAYMENT, ...to }])),
+        withTenant(app, ORG, (tx) => outbox.add(tx, [{ ...remittance, aboutId: OTHER_PAYMENT, ...to }])),
       ).rejects.toThrow('a remittance goes to its supplier alone');
     }
     await expect(
@@ -373,13 +369,13 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('C2b passes a remittance on to the admins once, in one transaction, its own given up with why', async () => {
-    await app
-      .transaction()
-      .execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT })]));
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT })]),
+    );
     const [claimed] = await outbox.claimDue(app, 1);
 
-    expect(await outbox.passOn(app, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
-    expect(await outbox.passOn(app, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    expect(await outbox.passOn(app, ORG, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
+    expect(await outbox.passOn(app, ORG, claimed?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
     expect(await rows()).toMatchObject([
       { kind: 'payment_remittance', sent_at: null, given_up_at: START, last_failure: 'no_address' },
       {
@@ -398,18 +394,16 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     // The admins' notice is due at once, and fans out as any other to the admins.
     const [passed] = await outbox.claimDue(app, 1);
     expect(passed).toMatchObject({ kind: 'payment_remittance_no_email', aboutId: PAYMENT });
-    expect(await outbox.fanOut(app, passed?.id ?? '', [ADMIN, OTHER_ADMIN])).toBe(2);
+    expect(await outbox.fanOut(app, ORG, passed?.id ?? '', [ADMIN, OTHER_ADMIN])).toBe(2);
   });
 
   it('C2b passes on a remittance whose last try was only slow past its lease, never one sent, and no ID not a UUID', async () => {
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
-          aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
+        aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
+      ]),
+    );
     const [slow, sent] = await outbox.claimDue(app, 2);
     expect(await outbox.sent(app, sent?.id ?? '')).toBe(true);
     for (let tries = 1; tries < MOST_ATTEMPTS; tries += 1) {
@@ -420,9 +414,9 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(await outbox.claimDue(app, 10)).toEqual([]);
     expect(await outbox.endRemittanceLeases(app)).toHaveLength(1);
 
-    expect(await outbox.passOn(app, slow?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
-    expect(await outbox.passOn(app, sent?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
-    expect(await outbox.passOn(app, 'not-a-uuid', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    expect(await outbox.passOn(app, ORG, slow?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(true);
+    expect(await outbox.passOn(app, ORG, sent?.id ?? '', 'payment_remittance_no_email', 'no_address')).toBe(false);
+    expect(await outbox.passOn(app, ORG, 'not-a-uuid', 'payment_remittance_no_email', 'no_address')).toBe(false);
     const passed = (await rows()).filter(({ kind }) => kind === 'payment_remittance_no_email');
     expect(passed).toMatchObject([{ about_id: PAYMENT }]);
   });
@@ -430,23 +424,23 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   it('C2b refuses to pass a notice on as a kind not to the admins, or with a reason not its own', async () => {
     const id = ids.next();
     for (const kind of ['payment_remittance', 'factor_reset_link', 'role_granted', 'no_such_kind'] as const) {
-      await expect(outbox.passOn(app, id, kind as never, 'no_address')).rejects.toThrow(RangeError);
+      await expect(outbox.passOn(app, ORG, id, kind as never, 'no_address')).rejects.toThrow(RangeError);
     }
     for (const failure of ['lease_expired', 'No Address', '']) {
-      await expect(outbox.passOn(app, id, 'payment_remittance_no_email', failure)).rejects.toThrow(RangeError);
+      await expect(outbox.passOn(app, ORG, id, 'payment_remittance_no_email', failure)).rejects.toThrow(RangeError);
     }
   });
 
   it(`refuses more than ${String(MOST_NOTICES_A_BATCH)} notices at a time`, async () => {
     const many = Array.from({ length: MOST_NOTICES_A_BATCH + 1 }, () => notice());
-    await expect(app.transaction().execute((tx) => outbox.add(tx, many))).rejects.toThrow(RangeError);
+    await expect(withTenant(app, ORG, (tx) => outbox.add(tx, many))).rejects.toThrow(RangeError);
     expect(await rows()).toEqual([]);
   });
 
   it('takes the due notices soonest first, holds each for the lease, and takes none again until it runs out', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     clock.set(new Date(START.getTime() + MINUTE));
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: OTHER_ADMIN })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: OTHER_ADMIN })]));
 
     const first = await outbox.claimDue(app, 1);
     expect(first).toMatchObject([{ recipientUserId: ADMIN, attempts: 0, createdAt: START }]);
@@ -459,16 +453,16 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('never takes a notice not yet due', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     clock.set(new Date(START.getTime() - 1));
     expect(await outbox.claimDue(app, 10)).toEqual([]);
   });
 
   it('hands the notices it takes over oldest first, whatever order the table gives', async () => {
     clock.set(new Date(START.getTime() + MINUTE));
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     clock.set(START);
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: OTHER_ADMIN })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: OTHER_ADMIN })]));
     // Both due at once; the newer one comes first by ID and in the table.
     await sql`update notifications.outbox set next_attempt_at = ${START}`.execute(app);
 
@@ -479,7 +473,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('FX-RACE lets two senders at once take different notices, never the same one', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
 
     const [one, two] = await Promise.all([outbox.claimDue(app, 1), outbox.claimDue(app, 1)]);
 
@@ -489,7 +483,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('marks a notice sent once, and takes it no more', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
 
@@ -501,7 +495,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('tries a failed notice again further off each time, then gives it up after the last try', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const waits: number[] = [];
     let outcome = '';
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
@@ -528,7 +522,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it("counts a try whose sender died as a try, and gives the notice up once its last try's lease runs out (review)", async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
       const [claimed] = await outbox.claimDue(app, 1);
       expect(claimed?.attempts, `try ${String(tries + 1)}`).toBe(tries);
@@ -543,14 +537,12 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('H2 leaves a remittance whose last try’s lease ran out to endRemittanceLeases, which gives it up and says so once', async () => {
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [
-          aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
-          aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
-        ]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [
+        aboutAContact({ kind: 'payment_remittance', aboutId: PAYMENT }),
+        aboutAContact({ kind: 'payment_remittance', aboutId: OTHER_PAYMENT }),
+      ]),
+    );
     expect(await outbox.endRemittanceLeases(app)).toEqual([]);
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
       const claimed = await outbox.claimDue(app, 2);
@@ -571,7 +563,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('still marks sent a last try only slow past its lease, given up meanwhile (confirmation review)', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     let last = '';
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
       const [claimed] = await outbox.claimDue(app, 1);
@@ -588,7 +580,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('gives a notice up after its last try, however its tries ended: failed, or its sender gone', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
       const [claimed] = await outbox.claimDue(app, 1);
       if (claimed === undefined) throw new Error(`nothing due at try ${String(tries + 1)}`);
@@ -608,7 +600,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('never marks sent a notice given up for any reason but its lease, and refuses that reason from a caller (review)', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     await expect(outbox.failed(app, claimed.id, LEASE_EXPIRED, false)).rejects.toThrow(RangeError);
@@ -619,7 +611,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('still fans out a notice to the admins whose last try was only slow past its lease (review)', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
     let last = '';
     for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
       const [claimed] = await outbox.claimDue(app, 1);
@@ -628,7 +620,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     }
     expect(await outbox.claimDue(app, 10)).toEqual([]);
 
-    expect(await outbox.fanOut(app, last, [ADMIN])).toBe(1);
+    expect(await outbox.fanOut(app, ORG, last, [ADMIN])).toBe(1);
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, sent_at: clock.now(), given_up_at: null },
       { recipient_user_id: ADMIN, sent_at: null, given_up_at: null },
@@ -636,19 +628,19 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('refuses a notice to the admins turned into more than it may write', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     const many = Array.from({ length: MOST_RECIPIENTS + 1 }, () => ADMIN);
 
-    await expect(outbox.fanOut(app, claimed.id, many)).rejects.toThrow(RangeError);
+    await expect(outbox.fanOut(app, ORG, claimed.id, many)).rejects.toThrow(RangeError);
     expect(await rows()).toHaveLength(1);
     // As many as it may write is taken, each person once.
-    expect(await outbox.fanOut(app, claimed.id, many.slice(1))).toBe(1);
+    expect(await outbox.fanOut(app, ORG, claimed.id, many.slice(1))).toBe(1);
   });
 
   it('gives a notice up at once for a failure no retry can mend', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
 
@@ -657,7 +649,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('leaves a notice already sent or given up as it is', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     await outbox.sent(app, claimed.id);
@@ -673,14 +665,14 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('writes a notice to the admins with no recipient, and turns it into one to each admin found, once', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     expect(claimed.recipientUserId).toBeNull();
 
     clock.set(new Date(START.getTime() + MINUTE));
-    expect(await outbox.fanOut(app, claimed.id, [ADMIN, OTHER_ADMIN.toUpperCase(), ADMIN])).toBe(2);
-    expect(await outbox.fanOut(app, claimed.id, [ADMIN])).toBe('not_open');
+    expect(await outbox.fanOut(app, ORG, claimed.id, [ADMIN, OTHER_ADMIN.toUpperCase(), ADMIN])).toBe(2);
+    expect(await outbox.fanOut(app, ORG, claimed.id, [ADMIN])).toBe('not_open');
 
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, sent_at: new Date(START.getTime() + MINUTE), attempts: 1 },
@@ -702,26 +694,24 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('marks a notice to the admins sent when no admin is found, writing none', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
 
-    expect(await outbox.fanOut(app, claimed.id, [])).toBe(0);
+    expect(await outbox.fanOut(app, ORG, claimed.id, [])).toBe(0);
     expect(await rows()).toMatchObject([{ recipient_user_id: null, sent_at: START }]);
   });
 
   it('B6-1b turns a notice to the contacts into one to each contact found, once, never one to a contact', async () => {
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [aboutAContact({ toContacts: true }), aboutAContact({ recipientContactId: CONTACT })]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [aboutAContact({ toContacts: true }), aboutAContact({ recipientContactId: CONTACT })]),
+    );
     const [toContacts, toContact] = await outbox.claimDue(app, 2);
     if (toContacts === undefined || toContact === undefined) throw new Error('nothing claimed');
 
-    expect(await outbox.fanOut(app, toContact.id, [OTHER_CONTACT])).toBe('not_open');
-    expect(await outbox.fanOut(app, toContacts.id, [CONTACT, OTHER_CONTACT.toUpperCase(), CONTACT])).toBe(2);
-    expect(await outbox.fanOut(app, toContacts.id, [CONTACT])).toBe('not_open');
+    expect(await outbox.fanOut(app, ORG, toContact.id, [OTHER_CONTACT])).toBe('not_open');
+    expect(await outbox.fanOut(app, ORG, toContacts.id, [CONTACT, OTHER_CONTACT.toUpperCase(), CONTACT])).toBe(2);
+    expect(await outbox.fanOut(app, ORG, toContacts.id, [CONTACT])).toBe('not_open');
 
     const written = await app
       .selectFrom('notifications.outbox')
@@ -742,17 +732,17 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('turns only a notice to the admins, never one to a person, and refuses a recipient not a UUID', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: null })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(), notice({ recipientUserId: null })]));
     const [toPerson, toAdmins] = await rows();
     if (toPerson === undefined || toAdmins === undefined) throw new Error('not written');
 
-    expect(await outbox.fanOut(app, toPerson.id, [OTHER_ADMIN])).toBe('not_open');
-    await expect(outbox.fanOut(app, toAdmins.id, ['someone@example.test'])).rejects.toThrow(RangeError);
+    expect(await outbox.fanOut(app, ORG, toPerson.id, [OTHER_ADMIN])).toBe('not_open');
+    await expect(outbox.fanOut(app, ORG, toAdmins.id, ['someone@example.test'])).rejects.toThrow(RangeError);
     expect(await rows()).toHaveLength(2);
   });
 
   it('sweeps a notice given up once past the retention too', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     await outbox.failed(app, claimed.id, 'no_address', true);
@@ -763,7 +753,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
   });
 
   it('sweeps notices done and past the retention, oldest first, and never one still to send', async () => {
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
     const [claimed] = await outbox.claimDue(app, 1);
     if (claimed === undefined) throw new Error('nothing claimed');
     await outbox.sent(app, claimed.id);

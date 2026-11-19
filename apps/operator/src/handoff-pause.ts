@@ -100,7 +100,7 @@ function tell(
   { paused, reason, eventId }: HandoffPauseRequest,
 ): Promise<boolean> {
   const trail = createAuditTrail({ keys: services.keys, ids: services.ids });
-  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
+  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock, keys: services.keys });
   return withSignedStates(database, orgId, services, async (tx, states) => {
     const subject = { type: SUBJECT_TYPE, id: eventId };
     // Through the signed states: a record that can't be believed raises the alarm and the hold, and fails this one.
