@@ -354,6 +354,59 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
       ['unlisted', false],
     ]);
   });
+
+  it('V7: leaves the whole share to the organisation’s agents while wrong secrets are held mid-check at the door (forced)', async () => {
+    const agent = await newAgent();
+    const { id } = await issue(agent);
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 8, organisationShare: 2 },
+      testLogger(capture),
+    );
+    // Every door read waits on the keys' table, so the outsider's checks are certainly in flight, not done.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table agents.agent_keys in access exclusive mode');
+    const checker = createAgentKeyCheck({ database: shared, keys, ids, clock, logger: testLogger(capture) });
+    const wrong = Buffer.alloc(32, 0xee);
+    const outsider = [id, id, ids.next(), ids.next()].map((keyId) =>
+      checker.check(agentKeyText(keyId, wrong), '0199a0f0-0000-7000-8000-00000000c017'),
+    );
+    const letGo = Promise.withResolvers<undefined>();
+    const places: Promise<unknown>[] = [];
+    try {
+      await waitUntilQueued(database.as('admin'), 4);
+      // Both of the share's places, taken at once by the organisation's own work while all four wait at the door: a
+      // check holding a place would leave the second to wait out the share's 10 s.
+      const opened = [Promise.withResolvers<undefined>(), Promise.withResolvers<undefined>()];
+      places.push(
+        ...opened.map(({ resolve }) =>
+          asAgentTraffic(() =>
+            withTenant(shared, org, async () => {
+              resolve(undefined);
+              await letGo.promise;
+            }),
+          ),
+        ),
+      );
+      await within(3_000, Promise.all(opened.map(({ promise }) => promise)), 'both places in the share');
+    } finally {
+      letGo.resolve(undefined);
+      await Promise.all(places);
+      await holder.query('rollback');
+      await holder.end();
+    }
+    try {
+      expect(await Promise.all(outsider)).toEqual(Array.from({ length: 4 }, () => ({ outcome: 'refused' })));
+    } finally {
+      await shared.destroy();
+    }
+    expect(
+      lines('agent_key.refused')
+        .map(({ reason }) => String(reason))
+        .sort(),
+    ).toEqual(['unlisted', 'unlisted', 'wrong_secret', 'wrong_secret']);
+    expect(lines('db.organisation_busy')).toEqual([]);
+  });
 });
 
 describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`, () => {
