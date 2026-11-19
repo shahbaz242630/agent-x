@@ -17,7 +17,11 @@ import {
   agentKeysOf,
   AGENT_KEYS,
   AGENTS,
+  addConnection,
   CONNECTIONS,
+  headMoved,
+  issueTokens,
+  keySecretMessage,
   ENDED_CONNECTIONS_SHOWN_DAYS,
   createConnectionTokenCheck,
   MOST_LIVE_CONNECTIONS,
@@ -1078,6 +1082,136 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     expect(await headIn(rotated)).toBe(idOf(third.refreshToken));
     expect(await accepted(third.accessToken)).toMatchObject({ outcome: 'accepted' });
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('makes a new connection’s signed head at its exchange, naming its first refresh token', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const first = await connected(org, admin, await agent(org, admin));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    const [made] = await owner.query<{ refresh_id: string; state_version: number }>(
+      "select replace(refresh_id::text, '-', '') as refresh_id, state_version from agents.connection_heads where id = $1",
+      [first.keyId],
+    );
+    expect(made).toEqual({ refresh_id: idOf(first.refreshToken), state_version: 1 });
+    issued(
+      await grants.refresh(
+        { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined },
+        CALLER,
+      ),
+    );
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  /** A signed-state finding on the head: refused, the connection revoked, and the signed state's own alarm. */
+  async function headRefused(rotated: Rotated, refreshToken: string) {
+    expect(await refreshWith(rotated, refreshToken)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('oauth.refresh_reused')).toEqual([expect.objectContaining({ revoked: true, orgId: rotated.org })]);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', subjectType: 'connection_head' }),
+    );
+  }
+
+  it('the signed head’s row deleted: refused, the connection revoked, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rotated.owner.query('delete from agents.connection_heads where id = $1', [rotated.keyId]);
+    await headRefused(rotated, rotated.second.refreshToken);
+  });
+
+  it('the signed head rolled back to its older signed state: the stolen token is refused, revoking, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    const [older] = await rotated.owner.query<{ json: string }>(
+      'select pg_catalog.to_jsonb(h)::text as json from agents.connection_heads h where id = $1',
+      [rotated.keyId],
+    );
+    issued(await refreshWith(rotated, rotated.second.refreshToken));
+    await rotated.owner.query(
+      `update agents.connection_heads h set refresh_id = o.refresh_id, state_version = o.state_version,
+         state_event_id = o.state_event_id
+       from pg_catalog.jsonb_populate_record(null::agents.connection_heads, $2::jsonb) o where h.id = $1`,
+      [rotated.keyId, older?.json],
+    );
+    await usedAtCleared(rotated, idOf(rotated.second.refreshToken));
+    await headRefused(rotated, rotated.second.refreshToken);
+  });
+
+  it('two live refresh tokens of a connection made before 0102: the second to make its head is a reuse', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    // Made as before 0102: a key, its connection and two pairs, and no head.
+    const keyId = ids.next();
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, randomBytes(32)));
+      const expiresAt = new Date(clock.now().getTime() + 90 * DAY_MS);
+      const scopes = ['requests:read'] as const;
+      await addAgentKey(tx, states, {
+        orgId: org,
+        id: keyId,
+        agentId,
+        scopes,
+        secretMac: mac,
+        secretKeyVersion: keyVersion,
+        expiresAt,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      });
+      await addConnection(tx, states, {
+        orgId: org,
+        keyId,
+        agentId,
+        clientId,
+        clientName: 'ChatGPT',
+        resource: capabilities.resource,
+        redirectUri: REDIRECT,
+        via: 'code',
+        madeBy: admin.userId,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    const pair = () =>
+      withSignedStates(app, org, quiet(), (tx) =>
+        issueTokens(
+          tx,
+          { keys, ids },
+          {
+            orgId: org,
+            keyId,
+            scopes: ['requests:read'],
+            now: clock.now(),
+            keyExpiresAt: new Date(clock.now().getTime() + 90 * DAY_MS),
+          },
+        ),
+      );
+    const [one, two] = [await pair(), await pair()];
+    // The first refresh's head made and held uncommitted, so the second's waits on the table's key.
+    const made = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const first = withSignedStates(app, org, quiet(), async (tx, states) => {
+      await headMoved(
+        tx,
+        states,
+        { outcome: 'unset' },
+        { orgId: org, id: keyId, refreshId: one.refreshTokenId, at: clock.now() },
+      );
+      made.resolve(undefined);
+      await letGo.promise;
+    });
+    await made.promise;
+    const second = grants.refresh(
+      { refreshToken: two.refreshToken, clientId, scope: undefined, resource: undefined },
+      CALLER,
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    letGo.resolve(undefined);
+    await first;
+    expect(await second).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(one.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, check: 'refresh_token', reason: 'not_head' }),
+    ]);
   });
 
   it('its use cleared: not the signed head, so a reuse, the connection revoked, with the alarm', async () => {
@@ -2209,6 +2343,14 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
       connections: [{ keyId: write.connection.keyId, via: 'device', redirectHost: null, status: 'ACTIVE' }],
     });
+    // R-15: its signed head made with the pair, naming its refresh token (0102).
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    expect(
+      await owner.query(
+        "select replace(refresh_id::text, '-', '') as refresh_id from agents.connection_heads where id = $1",
+        [write.connection.keyId],
+      ),
+    ).toEqual([{ refresh_id: tokens.refreshToken.split('_')[2] }]);
   });
 
   it('answers a denied device access_denied, an unknown or another client’s code invalid_grant, an ended one expired_token', async () => {

@@ -20,8 +20,10 @@
 -- connection's ID (`id_is_its_connection`), as a supplier's remittance
 -- setting is its supplier's (0061).
 --
--- A connection made before this migration has no row until its next refresh,
--- which adds it (its token then judged by `used_at` alone, as before).
+-- A connection's row is made with its first pair (the code's or device's
+-- exchange). One made before this migration has none until its next refresh,
+-- which adds it (its token then judged by `used_at` alone, as before; two of
+-- its refreshes adding it at once is a reuse, the second refused by the key).
 --
 -- Each token's secret is, from this release, the agent-key pepper's MAC of
 -- its kind, key and ID (no column: the secret is never kept), so a token sent

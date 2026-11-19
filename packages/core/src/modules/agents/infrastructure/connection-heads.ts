@@ -7,8 +7,10 @@
 // lock order (ADR-006 §6: 3b, after the connection). Its row's ID is its
 // connection's (its key's).
 //
-// A connection made before 0102 has no row (`unset`) until its next refresh
-// adds it; every refresh after moves it to the refresh token it issued.
+// A connection gets its row as it is made, naming its first refresh token
+// (the code's or device's exchange); each refresh moves it to the refresh
+// token it issued. One made before 0102 has none (`unset`) until its next
+// refresh adds it.
 import type { SignedStateTable } from '@agentx/platform/db';
 
 import type { SignedStates, StateCheck, TamperSign, VerifiedState } from '../../audit/index.ts';
@@ -78,3 +80,13 @@ export async function headMoved(
     .execute();
   await states.record(tx, CONNECTION_HEADS, { orgId, id }, 'new', fields, change);
 }
+
+/**
+ * Whether a write failed because the connection's head was made by another transaction first: two refreshes of a
+ * connection that had none (made before 0102) at once, the second's insert refused by the table's key.
+ */
+export const isHeadTaken = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  (error as { code?: unknown }).code === '23505' &&
+  (error as { constraint?: unknown }).constraint === 'connection_heads_pkey';

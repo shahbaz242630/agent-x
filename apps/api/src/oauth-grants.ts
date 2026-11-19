@@ -63,6 +63,7 @@ import {
   type HeadCheck,
   headMoved,
   headOf,
+  isHeadTaken,
   type IssuedTokens,
   issueTokens,
   parseConnectionToken,
@@ -414,6 +415,29 @@ export function createOauthGrants({
   };
 
   /**
+   * A pair issued, and the connection's signed head moved to its refresh token (0102), in the caller's transaction,
+   * after the head was read with headOf: last, as the head's record takes the chain head's lock (ADR-006 §6). A head
+   * tampered with is left as it is: its alarm is raised, and every refresh after is refused.
+   */
+  const pairAndHead = async (
+    tx: Tx,
+    states: SignedStates,
+    head: HeadCheck,
+    issue: Parameters<typeof issueTokens>[2],
+  ): Promise<IssuedTokens> => {
+    const tokens = await issueTokens(tx, { keys, ids }, issue);
+    if (head.outcome !== 'tampered') {
+      await headMoved(tx, states, head, {
+        orgId: issue.orgId,
+        id: issue.keyId,
+        refreshId: tokens.refreshTokenId,
+        at: issue.now,
+      });
+    }
+    return tokens;
+  };
+
+  /**
    * The connection's key as its signed state says, before anything here revokes it: `ended` (revoked or past its
    * time), `live`, or `absent`: no such key in this organisation, whose listing then names the wrong one.
    */
@@ -561,18 +585,15 @@ export function createOauthGrants({
         });
         if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, flow, reason: checked.reason };
         // The client's connection noted on the pair's own trip (0094): the sweep keeps a client in use.
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId,
-            scopes: checked.key.scopes,
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            alongside: clientSeen(tx, flow.clientId, now),
-          },
-        );
+        // The connection's signed head made with its first refresh token (0102): no connection runs without one.
+        const tokens = await pairAndHead(tx, states, await headOf(tx, states, { orgId, id: keyId }), {
+          orgId,
+          keyId,
+          scopes: checked.key.scopes,
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          alongside: clientSeen(tx, flow.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'unknown') return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
@@ -618,18 +639,15 @@ export function createOauthGrants({
           clientId: flow.clientId,
         });
         if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, reason: checked.reason };
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId,
-            scopes: checked.key.scopes,
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            alongside: clientSeen(tx, flow.clientId, now),
-          },
-        );
+        // The connection's signed head made with its first refresh token (0102): no connection runs without one.
+        const tokens = await pairAndHead(tx, states, await headOf(tx, states, { orgId, id: keyId }), {
+          orgId,
+          keyId,
+          scopes: checked.key.scopes,
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          alongside: clientSeen(tx, flow.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'used') return refusedFor(caller, 'device_used', { clientId: known.clientId });
@@ -693,25 +711,22 @@ export function createOauthGrants({
         if (!(await usedNow(tx, orgId, presented.tokenId, now))) {
           return { outcome: 'reused' as const, forgot: undefined };
         }
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId: presented.keyId,
-            scopes: checked.key.scopes.filter((scope) => scopes.includes(scope)),
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            parentId: presented.tokenId,
-            // The connection's own client (credentialAt held it to the connection's): noted on the pair's trip.
-            alongside: clientSeen(tx, asked.clientId, now),
-          },
-        );
-        // Last, as its record takes the chain head's lock (ADR-006 §6): the head moves to the token just issued.
-        if (head.outcome !== 'tampered') {
-          await headMoved(tx, states, head, { orgId, id: presented.keyId, refreshId: tokens.refreshTokenId, at: now });
-        }
+        const tokens = await pairAndHead(tx, states, head, {
+          orgId,
+          keyId: presented.keyId,
+          scopes: checked.key.scopes.filter((scope) => scopes.includes(scope)),
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          parentId: presented.tokenId,
+          // The connection's own client (credentialAt held it to the connection's): noted on the pair's trip.
+          alongside: clientSeen(tx, asked.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
+      }).catch((error: unknown) => {
+        // Another refresh of the same head-less connection (one made before 0102) made its head first: two of its
+        // refresh tokens were live at once, so one was used by someone else. A reuse, as any other.
+        if (isHeadTaken(error)) return { outcome: 'reused' as const, forgot: 'not_head' as const };
+        throw error;
       });
       if (answer.outcome === 'issued') return answer;
       if (answer.outcome === 'refused') return refusedFor(caller, answer.reason, named);
