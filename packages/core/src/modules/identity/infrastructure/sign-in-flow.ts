@@ -50,6 +50,7 @@ import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
+import { createSignedEnds } from './signed-ends.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
@@ -161,6 +162,8 @@ export function createSignIn({
   readonly logger: Logger;
 }): SignIn {
   const macs = { keys, logger };
+  /** The people's sessions' ends this process has checked on the platform chain, shared by its sign-ins (R-15). */
+  const ends = { logger, signedEnds: createSignedEnds(keys) };
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
     db.transaction().execute(async (tx) => {
@@ -273,13 +276,10 @@ export function createSignIn({
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
         // AG10: a sign-in made before the person's sessions were last all ended (a removal, a factor reset, a change
         // at the login service) opens none, though its flow began before that end.
-        const ended = await sessionsEndedAt(tx, userId, macs, evidence.authTime);
-        // R-15: the platform chain's record of the ends couldn't be believed (the alarm raised), or checked: no session.
+        const ended = await sessionsEndedAt(tx, userId, ends, evidence.authTime);
+        // R-15: the platform chain's record of the ends can't be believed (the alarm raised): no session.
         if (ended.kind === 'tampered') {
           throw new SignInFailed('account_unbelieved', "the person's sessions' ends can't be believed");
-        }
-        if (ended.kind === 'unchecked') {
-          throw new SignInFailed('provider_unavailable', "the person's sessions' ends couldn't be checked now");
         }
         const { endedAt } = ended;
         if (endedAt !== null && evidence.authTime.getTime() < endedAt.getTime()) {

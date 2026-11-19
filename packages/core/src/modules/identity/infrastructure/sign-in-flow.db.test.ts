@@ -35,6 +35,7 @@ import {
   sessionsEndedEvent,
 } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
+import { createSignedEnds } from './signed-ends.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { contactData } from './user-contacts.ts';
@@ -127,6 +128,8 @@ let clock: FixedClock;
 let subjects = 0;
 /** What the sign-in logged since the test began. */
 let capture: LogCapture;
+/** What sessionsEndedAt is given beside the transaction: a logger, and ends checked by a process just started. */
+const endsOf = (logger = testLogger()) => ({ logger, signedEnds: createSignedEnds(keys) });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -284,9 +287,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     const { userId } = await roundTrip();
     const [earlier, later] = [new Date(START.getTime() + 60_000), new Date(START.getTime() + 120_000)];
     for (const at of [later, earlier]) await app.transaction().execute((tx) => endSessionsOf(tx, userId, at));
-    expect(
-      await app.transaction().execute((tx) => sessionsEndedAt(tx, userId, { keys, logger: testLogger() }, START)),
-    ).toEqual({
+    expect(await app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(), START))).toEqual({
       kind: 'read',
       endedAt: later,
     });
@@ -297,7 +298,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [userId, latest]);
     const reading = within(
       20_000,
-      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, { keys, logger: testLogger() }, START)),
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(), START)),
       'the read',
     );
     await waitUntilQueued(database.as('admin'), 1);
@@ -313,7 +314,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
     // The sign-in, its read of the last end taken (FOR SHARE), held before it opens its session.
     const signingIn = app.transaction().execute(async (tx) => {
-      await sessionsEndedAt(tx, userId, { keys, logger: testLogger() }, START);
+      await sessionsEndedAt(tx, userId, endsOf(), START);
       hasRead(undefined);
       await gate;
       await sessions.open(tx, userId, evidence);
@@ -1116,7 +1117,7 @@ describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres
     const read = async (signedInAt: Date) => {
       const ended = await app
         .transaction()
-        .execute((tx) => sessionsEndedAt(tx, userId, { keys, logger: testLogger(capture) }, signedInAt));
+        .execute((tx) => sessionsEndedAt(tx, userId, endsOf(testLogger(capture)), signedInAt));
       return ended.kind === 'read' ? ended.endedAt : ended.kind;
     };
     const [checked, indexed] = [START, new Date('2100-01-01T00:00:00Z')];
@@ -1176,7 +1177,7 @@ describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres
     await holder.query('update identity.users set sessions_ended_at = null where id = $1', [userId]);
     const reading = within(
       20_000,
-      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, { keys, logger: testLogger(capture) }, START)),
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(testLogger(capture)), START)),
       'the read',
     );
     // The read's first statement waits for the row on its snapshot, the record missing; the record is put back.
@@ -1188,6 +1189,148 @@ describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres
 
     expect(await reading).toEqual({ kind: 'read', endedAt: new Date(START.getTime() + MINUTE) });
     expect(alarms()).toEqual(rolledBack(userId));
+  });
+
+  /**
+   * The database's own clock, which records the platform chain's events: a sign-in made now by it, as in production,
+   * is checked from where the process got to, not afresh from the test clock's far past.
+   */
+  const databaseNow = async (): Promise<Date> => {
+    const [row] = await database.as('admin').query<{ now: Date }>('select now() as now');
+    if (row === undefined) throw new Error('the database gave no time');
+    return row.now;
+  };
+
+  it('keeps an end it checked: its record deleted after, with the column emptied, still refuses, with the alarm', async () => {
+    const now = await databaseNow();
+    client.proves = { ...evidence, authTime: now };
+    const { userId } = await roundTrip();
+    const begun = async () => {
+      const { url, flowId } = await signIn.begin();
+      return { flowId, state: new URL(url).searchParams.get('state') ?? '' };
+    };
+    const [first, second] = [await begun(), await begun()];
+    const ended = await endSigned(userId, new Date(now.getTime() + MINUTE));
+    const finish = ({ flowId, state }: { flowId: string; state: string }) =>
+      signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined }).then(
+        () => 'opened',
+        (error: unknown) => (error instanceof SignInFailed ? error.failure : 'other'),
+      );
+    // The first sign-in back checks the end's record, and is refused by it.
+    expect(await finish(first)).toBe('stale_authentication');
+    const admin = database.as('admin');
+    await admin.query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+      ended.seq,
+    ]);
+    await asOwner('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+    await asOwner('update identity.users set sessions_ended_at = null where id = $1', [userId]);
+    try {
+      // Checked already, before where the next check starts: the process keeps it.
+      expect(await finish(second)).toBe('stale_authentication');
+      expect(alarms()).toEqual(rolledBack(userId));
+    } finally {
+      await admin.query('insert into platform_controls.audit_events select * from public.held_r15');
+      await admin.query('drop table public.held_r15');
+    }
+  });
+
+  it('checks any number of platform events: thousands recorded since are read once, never a refusal', async () => {
+    const since = new Date((await databaseNow()).getTime() - 2 * MINUTE);
+    const { userId } = await roundTrip();
+    await app.transaction().execute(async (tx) => {
+      for (let n = 0; n < 2500; n += 1) {
+        await platform.record(tx as unknown as PlatformTransaction, {
+          actor: { type: 'system', id: 'api' },
+          action: 'platform.started',
+          details: { release: `r-${String(n)}` },
+        });
+      }
+    });
+    const ends = createSignedEnds(keys);
+    const check = () => app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+
+    // A process just started reads them all once, a page at a time; then only what was recorded since.
+    const cold = await check();
+    expect(cold).toMatchObject({ kind: 'checked' });
+    expect(cold.kind === 'checked' && cold.read).toBeGreaterThanOrEqual(2500);
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    expect(await check()).toMatchObject({ kind: 'checked', read: 1 });
+    expect(await check()).toMatchObject({ kind: 'checked', read: 0 });
+    // And a sign-in through it all, its process just started, is taken.
+    client.proves = { ...evidence, authTime: new Date(START.getTime() + MINUTE) };
+    expect((await roundTrip()).userId).toBe(userId);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('shares one check between sign-ins arriving while one runs: the chain is read once, not once each', async () => {
+    const since = new Date((await databaseNow()).getTime() - 2 * MINUTE);
+    const { userId } = await roundTrip();
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    const checks = await Promise.all(
+      [1, 2, 3].map(() => app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since))),
+    );
+
+    const reads = checks.map((one) => (one.kind === 'checked' ? one.read : -1));
+    expect(Math.max(...reads)).toBeGreaterThan(0);
+    expect(reads.reduce((sum, read) => sum + read, 0)).toBe(Math.max(...reads));
+  });
+
+  it("keeps each person's latest signed end, from records of ends alone, and checks afresh for a moment before it", async () => {
+    // An event recorded a moment before the check's own moment, which only a check from before that reads.
+    const { userId } = await roundTrip();
+    await endSigned(userId, START);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const now = await databaseNow();
+    const ends = createSignedEnds(keys);
+    const check = (since: Date) =>
+      app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+    await check(now);
+    const minutesOn = (minutes: number) => new Date(now.getTime() + minutes * MINUTE);
+    const [first, second, notAnEnd] = [minutesOn(2), minutesOn(1), minutesOn(3)];
+    // Recorded later, but the earlier end: the latest end is kept, whatever the order of their records.
+    await endSigned(userId, first);
+    await endSigned(userId, second);
+    // Another record naming the person and a later time is no end of theirs.
+    await platform.recordAlone(app as unknown as Kysely<PlatformControlsTables>, {
+      actor: { type: 'system', id: 'api' },
+      action: 'idp.event_copied',
+      details: { person: userId, at: notAnEnd.toISOString() },
+    });
+
+    const tail = await check(now);
+    expect(tail).toMatchObject({ kind: 'checked', read: 3 });
+    expect(tail.kind === 'checked' && tail.ends.get(userId)?.at).toEqual(first);
+    // Asked from before where it began: checked afresh from there, not only from where it got to.
+    const afresh = await check(new Date(now.getTime() - 60 * MINUTE));
+    expect(afresh.kind === 'checked' && afresh.read).toBeGreaterThan(3);
+  });
+
+  it('starts the shared check from the earliest moment its sign-ins asked for, and once one before it failed', async () => {
+    const now = await databaseNow();
+    const { userId } = await roundTrip();
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    // A transaction whose database has gone: its check fails.
+    const gone = {
+      selectFrom: () => {
+        throw new Error('the database went away');
+      },
+    } as unknown as PlatformTransaction;
+    await app.transaction().execute(async (tx) => {
+      const on = tx as unknown as PlatformTransaction;
+      const failing = ends.check(gone, now);
+      const [later, earlier] = [ends.check(on, now), ends.check(on, new Date(now.getTime() - 60 * MINUTE))];
+
+      // The two that came while it ran share the next one, which runs all the same, from the earlier moment.
+      expect(later).toBe(earlier);
+      await expect(failing).rejects.toThrow('the database went away');
+      const shared = await later;
+      expect(shared).toMatchObject({ kind: 'checked' });
+      expect(shared.kind === 'checked' && shared.ends.get(userId)).toBeTruthy();
+      // From the earlier moment: the events recorded before `now` by the tests before this one too, not its end alone.
+      expect(shared.kind === 'checked' && shared.read).toBeGreaterThan(1);
+    });
   });
 
   it(`signs the end as ${SESSIONS_ENDED}, naming the person in lower case and the moment as toISOString writes it`, () => {

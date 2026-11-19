@@ -892,6 +892,32 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
   });
 
+  it("R-15 ends a person's sessions once a run, however many of their changes it copies: one signed end, not one each", async () => {
+    const who = await person();
+    await organization(who.userId);
+    await signIn(who.userId);
+    // Each of these ends sessions on its own (as above): one person's burst of them at the login service.
+    const burst = ['user.human.mfa.otp.removed', 'user.human.password.changed', 'user.locked'].map((type) =>
+      event(type, who.subject),
+    );
+
+    await copierWith(feedOf(() => burst).feed, holding(FIRST_KEY)).run();
+
+    expect(await sessionsOf(who.userId)).toBe(0);
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
+    const copies = await Promise.all(burst.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+    expect(copies.flat().filter((copy) => 'signInsEnded' in copy)).toEqual([
+      expect.objectContaining({ signInsEnded: 1 }),
+    ]);
+    // A later run's change ends them again, its own end signed: once a run, not once ever.
+    await signIn(who.userId);
+    clock.advanceBy(60_000);
+    await copierWith(feedOf(() => [event('user.locked', who.subject)]).feed, holding(FIRST_KEY)).run();
+    expect(await sessionsOf(who.userId)).toBe(0);
+    expect((await endsKept(app, who.userId)).signed).toEqual([endedAt, clock.now().toISOString()]);
+  });
+
   it('ends no session on a login unlocked or a token issued', async () => {
     const who = await person();
     await organization(who.userId);

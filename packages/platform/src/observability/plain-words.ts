@@ -1305,12 +1305,6 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
-  'sign_in.ends_unchecked': {
-    happened:
-      "A sign-in could not check whether the person's sessions were ended while they signed in: the platform recorded too many events in the last few minutes to check them all.",
-    broke: 'That sign-in was refused and opened no session. The person can try again.',
-    next: 'If it repeats, find what is recording so many platform events and why; raise the limit only once that is understood.',
-  },
   'spend_request.organisation_busy': {
     happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",
     broke: 'That one was turned away as busy and nothing was saved. Other organisations carried on.',

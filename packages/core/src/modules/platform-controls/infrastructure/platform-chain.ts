@@ -330,7 +330,7 @@ function readerFor(tx: PlatformTransaction, keys: KeyProvider): ChainReader & Ch
  */
 export const HEAD_WAIT_SECONDS = 9;
 
-/** A platform event read back and checked in place: what recentPlatformEvents gives. */
+/** A platform event read back and checked in place: what checkPlatformStretch gives. */
 export interface CheckedPlatformEvent {
   readonly seq: bigint;
   readonly recordedAt: Date;
@@ -338,6 +338,25 @@ export interface CheckedPlatformEvent {
   /** Its details, as the exact JSON text that was sealed. */
   readonly details: string;
 }
+
+/** A place on the platform chain already checked, with when its event was recorded. */
+export interface PlatformPoint extends CheckedPoint {
+  readonly recordedAt: Date;
+}
+
+/** Where a stretch's check starts: from the last event recorded before a moment, or after a place checked before. */
+export type StretchStart = { readonly since: Date } | { readonly after: PlatformPoint };
+
+/** What checkPlatformStretch found: the stretch whole up to the head (none for a chain never started), or a problem. */
+export type StretchCheck =
+  | { readonly kind: 'checked'; readonly reached: PlatformPoint | undefined }
+  | { readonly kind: 'broken'; readonly problem: ChainProblem };
+
+/** How many events one statement of a stretch's check reads. */
+const STRETCH_PAGE = 1000;
+
+/** Before the chain's first event. */
+const START_POINT: PlatformPoint = Object.freeze({ ...CHAIN_START, recordedAt: new Date(0) });
 
 /**
  * The chain's head, its MAC checked: `none` for a chain never started (no head, and no event either), undefined for
@@ -354,79 +373,93 @@ async function sealedHead(tx: PlatformTransaction, keys: KeyProvider): Promise<C
 }
 
 /**
- * The first problem in a stretch of events, oldest first, after `from` (sealed itself; the chain's start if none)
- * and up to the head: each must follow the last in number and link, and be sealed, and the last be the head's, so an
- * event missing at the top, under a head left where it was, shows too.
+ * Where a stretch from `since` starts: the last event recorded before it, by 0103's index (one entry), which must be
+ * sealed itself; the chain's start if there is none. For one that isn't sealed, its place.
  */
-function stretchProblem(
-  keys: KeyProvider,
-  from: Readonly<Record<string, unknown>> | undefined,
-  stretch: readonly Readonly<Record<string, unknown>>[],
-  head: ChainHead,
-): ChainProblem | undefined {
-  const start = from === undefined ? CHAIN_START : sealedSigned(keys, CHAIN, from);
-  if (from !== undefined && (start === undefined || !platformEventSealed(keys, from))) {
-    return { reason: 'mac', seq: typeof from.seq === 'bigint' ? from.seq : 0n };
-  }
-  const walker = createChainWalker(keys, CHAIN, start);
-  for (const row of stretch) {
-    const sealed = sealedSigned(keys, CHAIN, row);
-    const content = contentOf(row);
-    const problem =
-      sealed === undefined || content === undefined ? walker.unreadable() : walker.check({ ...sealed, content });
-    if (problem !== undefined) return problem;
-  }
-  const reached = walker.reached();
-  if (!reached.ok) return reached.problem;
-  return reached.seq === head.seq && reached.hash.equals(head.hash) ? undefined : { reason: 'head', seq: head.seq };
-}
-
-/**
- * The platform chain's events recorded since `since`, each checked in the caller's transaction (R-15, S206):
- * - `checked`: every event from the last one recorded before `since` (sealed itself) through the head, in order, each
- *   following the last in number and link, hashing to its hash with its MAC (operator's signature too), the last one
- *   the head's, whose own MAC holds. So an event of the stretch deleted, edited or planted, even for a moment and put
- *   back afterwards, shows now, not only at the chain's next check.
- * - `broken`: one of those doesn't hold: the problem, for the alarm.
- * - `too_many`: more than `most` events since: not checked, so not believed.
- * The head is read first, then the events up to it, so an event committed between the two is past it and left out.
- * What this can't see: the newest events deleted and the head wound back to an older one, whose MAC still holds; the
- * anchor check finds that once an anchor has passed the events, and only then.
- */
-export async function recentPlatformEvents(
+async function pointBefore(
   tx: PlatformTransaction,
   keys: KeyProvider,
   since: Date,
-  most: number,
-): Promise<
-  | { readonly kind: 'checked'; readonly events: readonly CheckedPlatformEvent[] }
-  | { readonly kind: 'broken'; readonly problem: ChainProblem }
-  | { readonly kind: 'too_many' }
-> {
-  const head = await sealedHead(tx, keys);
-  if (head === 'none') return { kind: 'checked', events: [] };
-  if (head === undefined) return { kind: 'broken', problem: { reason: 'head', seq: 0n } };
-  // Newest first, from the head down: at most `most` of them, and the one before.
-  const newest = await platformEventsSigned(tx)
+  head: ChainHead,
+): Promise<PlatformPoint | bigint> {
+  const row = await platformEventsSigned(tx)
+    .where('e.recorded_at', '<', since)
     .where('e.seq', '<=', head.seq)
+    .orderBy('e.recorded_at', 'desc')
     .orderBy('e.seq', 'desc')
-    .limit(most + 1)
-    .execute();
-  const before = newest.findIndex((row) => row.recorded_at.getTime() < since.getTime());
-  const reachedStart = newest.length <= most && newest.at(-1)?.seq === 1n;
-  if (before === -1 && !reachedStart && head.seq > 0n) return { kind: 'too_many' };
-  const stretch = (before === -1 ? newest : newest.slice(0, before)).toReversed();
-  const problem = stretchProblem(keys, before === -1 ? undefined : newest[before], stretch, head);
-  if (problem !== undefined) return { kind: 'broken', problem };
-  return {
-    kind: 'checked',
-    events: stretch.map((row) => ({
-      seq: row.seq,
-      recordedAt: row.recorded_at,
-      action: row.action,
-      details: row.details,
-    })),
-  };
+    .limit(1)
+    .executeTakeFirst();
+  if (row === undefined) return START_POINT;
+  const sealed = sealedSigned(keys, CHAIN, row);
+  if (sealed === undefined || !platformEventSealed(keys, row)) return row.seq;
+  return { seq: sealed.seq, hash: sealed.hash, macKeyVersion: sealed.macKeyVersion, recordedAt: row.recorded_at };
+}
+
+/**
+ * Walks the events after `from` up to the head, a page at a time, giving `seen` each page once it holds: the place
+ * reached, the head's, or the first problem. The last event must be the head's: an event missing at the top, under a
+ * head left where it was, shows too.
+ */
+async function walkToHead(
+  tx: PlatformTransaction,
+  keys: KeyProvider,
+  from: PlatformPoint,
+  head: ChainHead,
+  seen: (events: readonly CheckedPlatformEvent[]) => void,
+): Promise<PlatformPoint | ChainProblem> {
+  const walker = createChainWalker(keys, CHAIN, from);
+  let reached = from;
+  while (reached.seq < head.seq) {
+    const rows = await platformEventsSigned(tx)
+      .where('e.seq', '>', reached.seq)
+      .where('e.seq', '<=', head.seq)
+      .orderBy('e.seq')
+      .limit(STRETCH_PAGE)
+      .execute();
+    const events: CheckedPlatformEvent[] = [];
+    for (const row of rows) {
+      const sealed = sealedSigned(keys, CHAIN, row);
+      const content = contentOf(row);
+      const problem =
+        sealed === undefined || content === undefined ? walker.unreadable() : walker.check({ ...sealed, content });
+      if (problem !== undefined) return problem;
+      events.push({ seq: row.seq, recordedAt: row.recorded_at, action: row.action, details: row.details });
+      reached = { seq: row.seq, hash: row.hash, macKeyVersion: row.mac_key_version, recordedAt: row.recorded_at };
+    }
+    seen(events);
+    // A page short of the head: the events between are missing.
+    if (rows.length < STRETCH_PAGE) break;
+  }
+  if (reached.seq === head.seq) return reached.hash.equals(head.hash) ? reached : { reason: 'head', seq: head.seq };
+  return { reason: 'gap', seq: reached.seq + 1n };
+}
+
+/**
+ * Checks the platform chain from `start` through its head, in the caller's transaction (R-15, S206), a page at a time,
+ * giving `seen` each page's events once they hold: each following the last in number and link, hashing to its hash
+ * with its MAC (an operator's signature too), the last one the head's, whose own MAC holds. So an event of the
+ * stretch deleted, edited or planted, even for a moment and put back after, shows while it is so. From `since`: from
+ * the last event recorded before that moment (recorded_at rises with seq, taken under the head's lock). From `after`:
+ * from a place checked before, whose events the caller keeps; a head behind it is the chain wound back. The head is
+ * read first, then the events up to it, so one committed meanwhile is past it and left for the next check.
+ * What this can't see: the newest events deleted and the head wound back to an older one, whose MAC still holds,
+ * before anyone checked past it; the anchor check finds that once an anchor has passed the events.
+ */
+export async function checkPlatformStretch(
+  tx: PlatformTransaction,
+  keys: KeyProvider,
+  start: StretchStart,
+  seen: (events: readonly CheckedPlatformEvent[]) => void,
+): Promise<StretchCheck> {
+  const head = await sealedHead(tx, keys);
+  if (head === 'none' && !('after' in start)) return { kind: 'checked', reached: undefined };
+  if (head === 'none' || head === undefined) return { kind: 'broken', problem: { reason: 'head', seq: 0n } };
+  if ('after' in start && head.seq < start.after.seq)
+    return { kind: 'broken', problem: { reason: 'head', seq: head.seq } };
+  const from = 'after' in start ? start.after : await pointBefore(tx, keys, start.since, head);
+  if (typeof from === 'bigint') return { kind: 'broken', problem: { reason: 'mac', seq: from } };
+  const walked = await walkToHead(tx, keys, from, head, seen);
+  return 'reason' in walked ? { kind: 'broken', problem: walked } : { kind: 'checked', reached: walked };
 }
 
 /**
