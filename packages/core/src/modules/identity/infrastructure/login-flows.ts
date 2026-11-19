@@ -83,9 +83,12 @@ export interface LoginFlows {
 const FLOW_ID = /^[A-Za-z0-9_-]{43}$/;
 const hashOf = (flowId: string): Buffer => createHash('sha256').update(flowId, 'ascii').digest();
 
-/** Whether the sign-ins not ended at `now` (a network's, when named) are at `most`, the count stopping there. */
-async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, network?: string): Promise<boolean> {
-  const { flows } = await db
+/**
+ * The count of sign-ins not ended at `now` (a network's, when named), stopping at `most`: the statement itself, so a
+ * test can read the plan of the very query the caps run (login-flows.db.test.ts).
+ */
+export const signInsUnderWay = (db: Kysely<IdentityTables>, most: number, now: Date, network?: string) =>
+  db
     .selectFrom((inner) => {
       const open = inner
         .selectFrom('identity.login_flows')
@@ -95,8 +98,11 @@ async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, ne
         .where('step_up_challenge_id', 'is', null);
       return (network === undefined ? open : open.where('network_key', '=', network)).limit(most).as('open');
     })
-    .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
-    .executeTakeFirstOrThrow();
+    .select(sql<number>`pg_catalog.count(*)::int`.as('flows'));
+
+/** Whether the sign-ins not ended at `now` (a network's, when named) are at `most`, the count stopping there. */
+async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, network?: string): Promise<boolean> {
+  const { flows } = await signInsUnderWay(db, most, now, network).executeTakeFirstOrThrow();
   return flows >= most;
 }
 

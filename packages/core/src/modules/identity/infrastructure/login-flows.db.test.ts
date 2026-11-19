@@ -1,6 +1,7 @@
 // B2-3a-1: the sign-in flows under way (0011), on the real migrated schema, as the app role.
 import { createTestDatabase, FixedClock, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -8,6 +9,7 @@ import {
   LOGIN_FLOW_SECONDS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
   QUIET_NETWORK_SIGN_INS,
+  signInsUnderWay,
 } from './login-flows.ts';
 import type { LoginFlow } from './oidc-client.ts';
 import type { IdentityTables } from './tables.ts';
@@ -297,33 +299,17 @@ describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server
   });
 
   it('counts the sign-ins under way from the partial indexes alone, never reading the rows', async () => {
-    // One connection, so its settings hold for its plans: no scan of the table, nor a bitmap over it, to fall back on.
-    const client = await database.connect('app');
-    const planOf = async (explained: Promise<{ readonly 'QUERY PLAN': string }[]>) =>
-      (await explained).map((row) => row['QUERY PLAN']).join(' ');
-    try {
-      await client.query('set enable_seqscan = off');
-      await client.query('set enable_bitmapscan = off');
-      // As login-flows.ts counts them: every network's, then one network's.
-      expect(
-        await planOf(
-          client.query(
-            `explain select pg_catalog.count(*) from (select 1 from identity.login_flows
-               where ends_at > now() and step_up_challenge_id is null limit 100) as open`,
-          ),
-        ),
-      ).toMatch(/Index Only Scan using login_flows_(sign_ins_open|by_network)/);
-      expect(
-        await planOf(
-          client.query(
-            `explain select pg_catalog.count(*) from (select 1 from identity.login_flows
-               where ends_at > now() and step_up_challenge_id is null and network_key = $1 limit 100) as open`,
-            ['203.0.113.9'],
-          ),
-        ),
-      ).toMatch(/Index Only Scan using login_flows_by_network/);
-    } finally {
-      await client.end();
-    }
+    // The very statements the caps run, planned as the app role on one connection, so its settings hold for both:
+    // no scan of the table, nor a bitmap over it, to fall back on.
+    await app.connection().execute(async (db) => {
+      await sql`set enable_seqscan = off`.execute(db);
+      await sql`set enable_bitmapscan = off`.execute(db);
+      const planOf = async (network?: string) =>
+        (await signInsUnderWay(db, 100, START, network).explain()).map((row) => String(row['QUERY PLAN'])).join(' ');
+      expect(await planOf()).toMatch(/Index Only Scan using login_flows_(sign_ins_open|by_network)/);
+      expect(await planOf('203.0.113.9')).toMatch(/Index Only Scan using login_flows_by_network/);
+      await sql`reset enable_seqscan`.execute(db);
+      await sql`reset enable_bitmapscan`.execute(db);
+    });
   });
 });
