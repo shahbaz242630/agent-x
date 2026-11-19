@@ -700,7 +700,7 @@ describe(`a member's removal ends the payee registrations they left open (AG7, 6
       ]);
 
     expect(await removed(alice, bea)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
-    expect((await endedOnRemoval(org)).length).toBe(0);
+    expect(await endedOnRemoval(org)).toHaveLength(0);
   });
 });
 
