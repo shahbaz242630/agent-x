@@ -23,7 +23,7 @@
 // stop the API. A pass that fails, or couldn't
 // read an organisation's records, says so (`notification.legacy_seal_failed`,
 // `notification.legacy_seal_incomplete`) and records nothing, so the next
-// start tries again. A pass that sealed none records nothing either.
+// start tries again. A complete pass records itself even with none sealed.
 //
 // What it can't tell: a notice from before seals the owner changed before
 // that pass is sealed as it stands, as S205's people were.
@@ -93,8 +93,11 @@ export async function sealLegacyNotices(
       if (may === 'unbelieved') logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
       if (may !== 'yes') return;
       const { sealed, complete } = await sealNoticesFromBefore(tx, database, keys);
-      if (!complete) logger.warn('notification.legacy_seal_incomplete', { notices: sealed });
-      if (!complete || sealed === 0) return;
+      if (!complete) {
+        logger.warn('notification.legacy_seal_incomplete', { notices: sealed });
+        return;
+      }
+      // Recorded even with none sealed: from then on no start seals anything, whatever is planted later.
       // The platform head's lock last.
       await createPlatformChain({ keys, ids: uuidV7Ids }).record(tx, {
         actor: { type: 'system', id: 'api' },

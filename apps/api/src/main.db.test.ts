@@ -314,8 +314,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[0], release: 'local' }),
       },
+      // The first start's pass over the notices from before seals, once ever, with none to seal (S206 V4).
+      { seq: '2', actor_id: 'api', action: 'notice.legacy_sealed', details: JSON.stringify({ notices: 0 }) },
       {
-        seq: '2',
+        seq: '3',
         actor_id: 'api',
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[1], release: 'r-second' }),
@@ -332,7 +334,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
         ok: true,
-        seq: 2n,
+        seq: 3n,
       });
     } finally {
       await reader.destroy();

@@ -5,7 +5,7 @@
 // read an organisation's records records nothing, so the next one seals the
 // rest. Any notice with no seal after that stays without one (never claimed).
 import type { AuditTables } from '@agentx/core/modules/audit';
-import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import { createNoticeCheck, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -189,5 +189,33 @@ describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server
     expect(capture.lines().filter(({ level }) => level === 'warn' || level === 'error')).toEqual([]);
     await startedThenSealed();
     expect(await sealedOf(waiting)).toBe(true);
+  });
+
+  it('records a pass with none to seal, so a row planted later is never sealed, and the check alarms for it', async () => {
+    await startedThenSealed();
+    expect(await passes()).toEqual([0]);
+
+    const planted = await unsealed();
+    await startedThenSealed();
+    expect(await sealedOf(planted)).toBe(false);
+    expect(await passes()).toEqual([0]);
+
+    const later = new Date(AT.getTime() + 2 * 24 * 60 * 60_000);
+    await createNoticeCheck({
+      list: () => Promise.resolve([]),
+      database: app,
+      keys,
+      ids,
+      clock: { now: () => later },
+      logger: testLogger(capture),
+    }).run();
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        check: 'notice',
+        reason: 'unsealed',
+        noticeId: planted,
+      }),
+    );
   });
 });
