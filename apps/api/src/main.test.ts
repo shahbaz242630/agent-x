@@ -1036,6 +1036,35 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     sealed('sealed');
   });
 
+  it('a stop waits for the sealing under way before closing the pool, and no longer than its bound (S206 V6)', async () => {
+    const { promise: sealing, resolve: sealed } = Promise.withResolvers<string>();
+    legacySeal.result = () => sealing;
+    const { host } = await start();
+    fake.steps.length = 0;
+
+    host.emit('SIGTERM', 'SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Still sealing: the pool stays open.
+    expect(fake.steps).not.toContain('pool closed');
+    sealed('sealed');
+    await vi.waitFor(() => {
+      expect(fake.steps).toContain('pool closed');
+    });
+
+    // One that never ends holds the stop no longer than its bound.
+    legacySeal.result = () => new Promise(() => undefined);
+    const { host: second } = await start();
+    const asked = performance.now();
+    second.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(
+      () => {
+        expect(second.exits).toEqual([0]);
+      },
+      { timeout: 15_000 },
+    );
+    expect(performance.now() - asked).toBeLessThan(14_000);
+  }, 30_000);
+
   it('seals the security rows from before 0105 on the web side alone: a `jobs` process never does (S206 V6)', async () => {
     let called = 0;
     legacySeal.result = () => {
