@@ -70,7 +70,11 @@ resource allowed 'Microsoft.Network/dnsResolverDomainLists@2025-05-01' = {
   location: location
   tags: tags
   properties: {
-    domains: map(loadJsonContent('../dns-allowed.json', 'domains'), entry => entry.domain)
+    // The reviewed names, then each MCP client's host (AG5, mcp-clients.json), where the API fetches its document.
+    domains: concat(
+      map(loadJsonContent('../dns-allowed.json', 'domains'), entry => entry.domain),
+      map(loadJsonContent('../mcp-clients.json', 'clients'), client => '${split(client.metadata, '/')[2]}.')
+    )
   }
 }
 

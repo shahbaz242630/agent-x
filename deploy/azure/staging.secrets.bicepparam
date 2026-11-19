@@ -27,4 +27,5 @@ param directoryToken = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_DIRECTORY_T
 param resetToken = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_RESET_TOKEN')
 param ourActors = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_OUR_ACTORS')
 param ourServiceUsers = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS')
+param loginCookieSecret = readEnvironmentVariable('AGENTX_AZURE_LOGIN_COOKIE_SECRET')
 param appKeyValues = readEnvironmentVariable('AGENTX_AZURE_APP_KEYS')

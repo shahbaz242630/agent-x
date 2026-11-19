@@ -170,11 +170,18 @@ export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost
  * - ids: login service user IDs a person pastes (SA2b), written only by name
  *   like an issued one; any run writes `none` (off) for one the vault lacks, so
  *   the apps always have it to mount and the feature stays off until then
+ * - seeded: made here like a machine login, and also by any run the vault lacks
+ *   it on (`--keys`, the Approve path's, among them), so the app that mounts it
+ *   always finds it; a new one signs everyone out of the login pages once, and
+ *   the API's own sessions stay (SA5)
  */
 export const VAULT_SECRETS: Readonly<
   Record<
     string,
-    { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' | 'ids' }
+    {
+      readonly variable: string;
+      readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' | 'ids' | 'seeded';
+    }
   >
 > = {
   'db-admin-password': { variable: 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', source: 'person' },
@@ -196,6 +203,9 @@ export const VAULT_SECRETS: Readonly<
   // (AGENTX_IDP_OUR_*). Kept in the vault, never the public repository: the list tells an attacker which to aim at.
   'zitadel-our-actors': { variable: 'AGENTX_AZURE_ZITADEL_OUR_ACTORS', source: 'ids' },
   'zitadel-our-service-users': { variable: 'AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS', source: 'ids' },
+  // SA5: the key the login pages sign their sessions cookie with (ZITADEL_SESSION_COOKIE_SECRET), apart from their
+  // login key, so rotating that key no longer signs everyone out of the pages.
+  'login-cookie-secret': { variable: 'AGENTX_AZURE_LOGIN_COOKIE_SECRET', source: 'seeded' },
 };
 
 /** SA2b: the two lists go together, both or neither (config.ts), so a run that writes one writes both. */
@@ -539,10 +549,18 @@ export function secretValues(
   const values: Record<string, string> = {};
   for (const [name, secret] of Object.entries(VAULT_SECRETS)) {
     const written = planIncludes(plan, name);
+    const lacking = !written && !held.includes(name);
     values[secret.variable] =
-      secret.source === 'ids' && !written && !held.includes(name)
+      secret.source === 'ids' && lacking
         ? NO_LOGIN_IDS
-        : secretValue(name, secret.source, written, people, pair, makers.random);
+        : secretValue(
+            name,
+            secret.source,
+            written || (secret.source === 'seeded' && lacking),
+            people,
+            pair,
+            makers.random,
+          );
   }
   values[APP_KEYS_VARIABLE] = newAppKeys(makers.random);
   return values;
@@ -566,6 +584,7 @@ function secretValue(
       return written ? (given ?? '') : '';
     }
     case 'machine':
+    case 'seeded':
       return written ? newPassword(random) : '';
     case 'pair':
       if (pair === undefined) return '';
@@ -581,6 +600,9 @@ export function describePlan(plan: SecretPlan): string[] {
     if (secret.source === 'once') return `  ${name}: written only if the vault has none yet`;
     if (secret.source === 'ids' && !planIncludes(plan, name)) {
       return `  ${name}: kept as the vault has it, or written as ${NO_LOGIN_IDS} (off) if it has none yet`;
+    }
+    if (secret.source === 'seeded' && !planIncludes(plan, name)) {
+      return `  ${name}: kept as the vault has it, or made fresh if it has none yet`;
     }
     if (!planIncludes(plan, name)) return `  ${name}: kept as the vault has it`;
     return pasted(secret.source)
@@ -2034,16 +2056,19 @@ function vaultIn(steps: Steps, subscription: string): string {
 }
 
 /**
- * The issued secrets and our login ID lists the vault doesn't hold yet (B2-6, SA2b), and the copied ones
- * (B5-3). An app reads each by its URL, so a deployment without one leaves
+ * The issued secrets, our login ID lists and the seeded ones the vault doesn't hold yet (B2-6, SA2b, SA5), and the
+ * copied ones (B5-3). An app reads each by its URL, so a deployment without one leaves
  * that app unable to start; each issued one is issued by a service already
- * running, then written by name, and any secrets run copies the rest and
- * writes `none` for a list of our login IDs it lacks (SA2b).
+ * running, then written by name, and any secrets run copies the rest, makes a
+ * seeded one and writes `none` for a list of our login IDs it lacks (SA2b).
  */
 export function issuedMissing(held: readonly string[]): string[] {
   return [
     ...Object.entries(VAULT_SECRETS)
-      .filter(([name, secret]) => (secret.source === 'issued' || secret.source === 'ids') && !held.includes(name))
+      .filter(
+        ([name, secret]) =>
+          (secret.source === 'issued' || secret.source === 'ids' || secret.source === 'seeded') && !held.includes(name),
+      )
       .map(([name]) => name),
     ...COPIED_SECRETS.filter((name) => !held.includes(name)),
   ];
@@ -2786,7 +2811,7 @@ async function deployApps(
     confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
   }
-  // Before anything else is asked: the API reads its client secret from the vault.
+  // Before anything else is asked: the API reads its client secret from the vault, the login pages their cookie key.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
   const missing = issuedMissing(
     secretsInVault(steps, subscription, vaultIn(steps, subscription))
@@ -2795,7 +2820,7 @@ async function deployApps(
   );
   if (missing.length > 0) {
     throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API or the login pages read, so they couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, makes the login pages' cookie key if the vault lacks it, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
   const records = await carriedRecords(steps, subscription);

@@ -300,7 +300,42 @@ describe('parseArguments', () => {
 /** SA2b: our two lists of login IDs, as the vault names them. */
 const OUR_LISTS = ['zitadel-our-actors', 'zitadel-our-service-users'] as const;
 
+/** SA5: the login pages' cookie key, as the vault names it. */
+const COOKIE = 'login-cookie-secret';
+
+/** What a vault already holds that a run makes when it lacks it: our two lists and the login pages' cookie key. */
+const SEEDED = [...OUR_LISTS, COOKIE] as const;
+
 describe('the secrets a run writes', () => {
+  it('SA5: makes the login pages’ cookie key fresh on any run whose vault lacks it, and on --all or by name; keeps one it holds', () => {
+    for (const plan of [all, keysOnly, rotating('db-app-password')]) {
+      const made = secretValues(plan, pasted(aPaste(), aPaste()), quickMakers(), [...OUR_LISTS]);
+      // 36 characters, past the 32 the login pages require, and no comma, which would split it into two keys.
+      expect(made[variableOf(COOKIE)]).toMatch(/^[0-9a-f]{32}aZ9!$/);
+    }
+    expect(secretValues(keysOnly, {}, quickMakers(), [...SEEDED])[variableOf(COOKIE)]).toBe('');
+    expect(secretValues(rotating('db-app-password'), {}, quickMakers(), [...SEEDED])[variableOf(COOKIE)]).toBe('');
+    // A rotation by name, or everything, writes a new one: every sign-in under way starts again.
+    expect(secretValues(rotating(COOKIE), {}, quickMakers(), [...SEEDED])[variableOf(COOKIE)]).toMatch(/aZ9!$/);
+    expect(secretValues(all, pasted(aPaste(), aPaste()), quickMakers(), [...SEEDED])[variableOf(COOKIE)]).toMatch(
+      /aZ9!$/,
+    );
+    expect(peopleAskedFor(rotating(COOKIE))).toEqual([]);
+    expect(describePlan(keysOnly)).toContain(`  ${COOKIE}: kept as the vault has it, or made fresh if it has none yet`);
+    expect(describePlan(rotating(COOKIE))).toContain(`  ${COOKIE}: written, made fresh by this run`);
+    // The apps refuse until a run has made it; any secrets run does, so the one that writes nothing else.
+    expect(
+      issuedMissing([
+        'api-oidc-client-secret',
+        'zitadel-directory-token',
+        'zitadel-reset-token',
+        'acs-access-key',
+        ...OUR_LISTS,
+      ]),
+    ).toEqual([COOKIE]);
+    expect(secretsRunFor([COOKIE])).toBe('secrets --keys');
+  });
+
   it('SA2b: writes none (off) for a list of our login IDs the vault lacks, on every kind of run, and keeps one it holds', () => {
     for (const plan of [all, keysOnly, rotating('db-app-password')]) {
       const values = secretValues(plan, pasted(aPaste(), aPaste()), quickMakers());
@@ -382,7 +417,7 @@ describe('the secrets a run writes', () => {
   });
 
   it('writes nothing but the keys and the master key on a keys run, and asks nobody', () => {
-    const values = secretValues(keysOnly, {}, quickMakers(), OUR_LISTS);
+    const values = secretValues(keysOnly, {}, quickMakers(), SEEDED);
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
@@ -401,7 +436,7 @@ describe('the secrets a run writes', () => {
   });
 
   it('on a rotation, writes the named secrets and a fresh master key, and leaves every other one empty', () => {
-    const values = secretValues(rotating('db-app-password'), {}, quickMakers(), OUR_LISTS);
+    const values = secretValues(rotating('db-app-password'), {}, quickMakers(), SEEDED);
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
@@ -437,6 +472,7 @@ describe('the secrets a run writes', () => {
       '  zitadel-reset-token: kept as the vault has it',
       '  zitadel-our-actors: kept as the vault has it, or written as none (off) if it has none yet',
       '  zitadel-our-service-users: kept as the vault has it, or written as none (off) if it has none yet',
+      '  login-cookie-secret: kept as the vault has it, or made fresh if it has none yet',
       // B5-3: copied from the email service on every run, whatever the run writes.
       '  acs-access-key: copied from its Azure service, as every run does',
       ...CREATED_ONCE.map((key) => `  ${key}: written only if the vault has none yet`),
@@ -1202,6 +1238,8 @@ class RecordingAz implements Az {
       // SA2b: our login ID lists, which any secrets run writes as none until the partner's.
       'zitadel-our-actors',
       'zitadel-our-service-users',
+      // SA5: the login pages' cookie key, which any secrets run makes when the vault lacks it.
+      'login-cookie-secret',
     ];
     const pages = this.options.pages ?? {};
     const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
@@ -2015,7 +2053,9 @@ describe('deploy secrets', () => {
       az: new RecordingAz({ before: nine, pages: { emptyFirst: true } }),
     });
     expect(declined.error).toBeInstanceOf(Cancelled);
-    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 10 secrets\./));
+    expect(declined.terminal.said).toContainEqual(
+      expect.stringMatching(new RegExp(`^The vault already holds ${String(nine.length)} secrets\\.`)),
+    );
     expect(declined.az.deployment).toBeUndefined();
   });
 
@@ -2410,7 +2450,7 @@ describe('deploy apps', () => {
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, zitadel-our-actors, zitadel-our-service-users, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too, and writes none \(off\) for any of our login ID lists the vault lacks.*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, zitadel-our-actors, zitadel-our-service-users, login-cookie-secret, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too, makes the login pages' cookie key if the vault lacks it, and writes none \(off\) for any of our login ID lists the vault lacks.*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
@@ -2434,7 +2474,7 @@ describe('deploy apps', () => {
       'api-oidc-client-secret',
       'zitadel-directory-token',
       'zitadel-reset-token',
-      ...OUR_LISTS,
+      ...SEEDED,
       'acs-access-key',
     ]);
     const held = [
@@ -2443,7 +2483,7 @@ describe('deploy apps', () => {
       'zitadel-directory-token',
       'zitadel-reset-token',
       'acs-access-key',
-      ...OUR_LISTS,
+      ...SEEDED,
     ];
     // SA2b: our lists alone, before the first secrets run after them: any run writes them as none.
     expect(issuedMissing(held.filter((name) => !name.startsWith('zitadel-our-')))).toEqual([...OUR_LISTS]);
@@ -4034,9 +4074,9 @@ describe('the tool and the deployment agree', () => {
     expect(Object.keys(standIns).toSorted()).toEqual([...CREATED_ONCE].toSorted());
     for (const key of APP_KEYS) expect(standIns[key]).not.toBe(given[key]);
     expect(shaped.AGENTX_AZURE_ALERT_EMAIL).toBe('ops@example.invalid');
-    // Our login lists held (SA2b), so the rotation writes nothing of them.
+    // Our login lists and the cookie key held (SA2b, SA5), so the rotation writes nothing of them.
     const rotation = shapedForPolicy(
-      secretValues(rotating('db-app-password'), {}, quickMakers(), [...OUR_LISTS]),
+      secretValues(rotating('db-app-password'), {}, quickMakers(), [...SEEDED]),
       randomBytes,
     );
     expect(

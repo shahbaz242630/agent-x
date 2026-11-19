@@ -300,27 +300,52 @@ var zitadelOrigins = [
   }
 ]
 
+// Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on in staging
+// first, off in production until its own sign-off.
+var mcpOauth = environment == 'staging'
+
+// The MCP clients whose metadata documents the API fetches where that server is
+// on (AG5, 6E3c): each entry as the setting takes it, and the origin it is
+// fetched on (every entry is https: its host, the third `/`-separated part),
+// each once. One list, mcp-clients.json, which the foundation's way out and DNS
+// names read too.
+var mcpClients = loadJsonContent('mcp-clients.json', 'clients')
+var mcpClientOrigins = union(map(mcpClients, client => 'https://${sys.split(client.metadata, '/')[2]}'), [])
+
 // What an app that sends the admins' notices is told (B5-3), known only once
 // the deployment reads the email resources, so added to its container
-// alone, as Zitadel's address is: the two origins it may call out to, where
+// alone, as Zitadel's address is: the origins it may call out to, where
 // each notice is sent, and the address it is sent from, Azure's own
 // domain's DoNotReply. The API is the one app that both reaches Zitadel
 // inside the environment and sends email, so its allowlist lives here: an app
-// that reached Zitadel without sending email would need its own.
-var emailSettings = [
-  {
-    name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
-    value: '${zitadelInternalUrl},${emailEndpoint}'
-  }
-  {
-    name: 'AGENTX_EMAIL_ENDPOINT'
-    value: emailEndpoint
-  }
-  {
-    name: 'AGENTX_EMAIL_SENDER'
-    value: 'DoNotReply@${emailDomain.properties.mailFromSenderDomain}'
-  }
-]
+// that reached Zitadel without sending email would need its own. Where the
+// OAuth server is on, the MCP clients' origins join the allowlist and their
+// entries are what it trusts (AG5); any other client registers itself.
+var emailSettings = concat(
+  [
+    {
+      name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
+      // One interpolated text, which the release's drift check reads (drift.ts: format, never join).
+      value: '${zitadelInternalUrl},${emailEndpoint}${mcpOauth ? ',${join(mcpClientOrigins, ',')}' : ''}'
+    }
+    {
+      name: 'AGENTX_EMAIL_ENDPOINT'
+      value: emailEndpoint
+    }
+    {
+      name: 'AGENTX_EMAIL_SENDER'
+      value: 'DoNotReply@${emailDomain.properties.mailFromSenderDomain}'
+    }
+  ],
+  mcpOauth
+    ? [
+        {
+          name: 'AGENTX_OAUTH_CLIENT_METADATA_ORIGINS'
+          value: join(map(mcpClients, client => client.metadata), ',')
+        }
+      ]
+    : []
+)
 
 // What every container of ours is told, wherever it runs: which environment
 // this is, which build it is, and where the database is. Each job adds the
@@ -1343,11 +1368,10 @@ var signInAndPartnerSettings = [
     name: 'AGENTX_PARTNER_MODE'
     value: partnerMode
   }
-  // Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on in staging first, off in production until its
-  // own sign-off.
+  // Agent X's own OAuth server for MCP connections (`mcpOauth`).
   {
     name: 'AGENTX_MCP_OAUTH'
-    value: environment == 'staging' ? 'on' : 'off'
+    value: mcpOauth ? 'on' : 'off'
   }
 ]
 
@@ -1673,6 +1697,14 @@ var apps = concat([
       {
         name: 'NEXT_PUBLIC_BASE_PATH'
         value: '/ui/v2/login'
+      }
+      // The key the pages sign their sessions cookie with (SA5), apart from their
+      // login key: rotating that key no longer signs everyone out. A value, not a
+      // file: the pinned image reads only the setting (a comma-separated list, the
+      // first signing, every one checked, for a rotation without sign-outs).
+      {
+        name: 'ZITADEL_SESSION_COOKIE_SECRET'
+        secretRef: 'login-cookie-secret'
       }
       // The pages carry an OpenTelemetry SDK that starts by default and exports
       // to an OTLP endpoint. Off, so nothing is gathered to be sent anywhere

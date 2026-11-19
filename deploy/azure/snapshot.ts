@@ -101,6 +101,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_ZITADEL_RESET_TOKEN: standIn(24),
     AGENTX_AZURE_ZITADEL_OUR_ACTORS: standIn(24),
     AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS: standIn(24),
+    AGENTX_AZURE_LOGIN_COOKIE_SECRET: standIn(24),
     AGENTX_AZURE_APP_KEYS: newAppKeys(),
   };
 }
@@ -130,6 +131,7 @@ const BICEP_READS: ReadonlySet<string> = new Set([
   'github-ranges.json',
   'app-keys.json',
   'dns-allowed.json',
+  'mcp-clients.json',
   'database-generation.json',
 ]);
 

@@ -315,6 +315,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     mcpRefusalsAlertName: 'alert-agentx-${short}-mcp-refusals'
     mcpUnknownProtocolAlertName: 'alert-agentx-${short}-mcp-unknown-protocol'
     mcpKeysRefusedAlertName: 'alert-agentx-${short}-mcp-keys-refused'
+    oauthSourceCappedAlertName: 'alert-agentx-${short}-oauth-source-capped'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     loginServiceAlertName: 'alert-agentx-${short}-login-service'

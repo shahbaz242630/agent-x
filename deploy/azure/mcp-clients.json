@@ -1,0 +1,33 @@
+{
+  "about": "The MCP clients whose client ID metadata documents (CIMD, the MCP spec's Client ID Metadata Documents; 6E3c, AG5) the API fetches, in one place: the foundation opens the apps subnet's way out to each one's addresses on 443 (network.bicep) and lets the network look up its host (dns-policy.bicep), and the apps deployment puts its origin on the API's outbound allowlist and its entry on AGENTX_OAUTH_CLIENT_METADATA_ORIGINS wherever Agent X's OAuth server is on (apps.bicep). Adding a client is one entry here: `metadata` is what the API trusts, written as the setting takes it (an origin, a path prefix ending in `/`, or one document's exact address; https, lowercase, as the URL parser prints it); `prefixes` are the IPv4 ranges its host answers from, as its owner publishes them, with `source` saying where; the host's name is read from `metadata`. Any client not listed registers itself (RFC 7591, DCR), as every client could before. The API's own guards stay as they are (oauth-client-metadata.ts): only listed addresses fetched, only origins on its allowlist, no redirect followed, 3 seconds and 16 KB at most. A range shared by many sites (Cloudflare's) lets the subnet reach those sites by address, as Front Door's tag does for email: the API's exact origins and the DNS policy's names are the real limit. Checked by mcp-clients.test.ts and the policy's apps-egress and dns-allow rules.",
+  "clients": [
+    {
+      "client": "Claude",
+      "metadata": "https://claude.ai",
+      "prefixes": ["160.79.104.0/23", "153.61.224.0/22"],
+      "source": "Anthropic's published inbound addresses, which claude.ai answers from: https://platform.claude.com/docs/en/api/ip-addresses (checked 19 Nov 2026)"
+    },
+    {
+      "client": "ChatGPT",
+      "metadata": "https://chatgpt.com",
+      "prefixes": [
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22"
+      ],
+      "source": "chatgpt.com answers from Cloudflare; Cloudflare's published IPv4 ranges: https://www.cloudflare.com/ips-v4 (checked 19 Nov 2026)"
+    }
+  ]
+}

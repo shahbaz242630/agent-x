@@ -42,6 +42,14 @@ var endpointsPrefix = cidrSubnet(addressSpace, 24, 2)
 var githubRegistry = loadJsonContent('../github-ranges.json', 'registry.prefixes')
 var githubDownloads = loadJsonContent('../github-ranges.json', 'downloads.prefixes')
 
+// The MCP clients whose metadata documents the API fetches (AG5,
+// mcp-clients.json, the one list): their published addresses, each once.
+var mcpClientPrefixes = reduce(
+  map(loadJsonContent('../mcp-clients.json', 'clients'), client => client.prefixes),
+  [],
+  (kept, prefixes) => union(kept, prefixes)
+)
+
 // Microsoft's inbound list for a workload profiles environment. The apps take
 // public traffic through the environment's public IP, which Microsoft says
 // doesn't pass through the subnet, so these rules can't filter it (the route
@@ -306,6 +314,24 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           sourceAddressPrefix: appsPrefix
           sourcePortRange: '*'
           destinationAddressPrefix: 'Storage.${location}'
+          destinationPortRange: '443'
+        }
+      }
+      {
+        // No service tag names them, so these are their owners' published
+        // addresses (mcp-clients.json). Cloudflare's ranges, where ChatGPT
+        // answers, carry many sites: as with Front Door's tag above, the API's
+        // exact origins and the DNS policy's names are the real limit.
+        name: 'allow-out-mcp-clients'
+        properties: {
+          description: 'The MCP clients\' metadata documents (CIMD), which the API fetches to know a client: their published addresses (mcp-clients.json).'
+          priority: 320
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefixes: mcpClientPrefixes
           destinationPortRange: '443'
         }
       }

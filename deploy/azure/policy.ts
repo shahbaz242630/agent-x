@@ -18,6 +18,7 @@ import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
+import { mcpNames, mcpPrefixes, readMcpClients } from './mcp-clients.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
 import {
@@ -460,6 +461,13 @@ export const MCP_ALERTS = [
     lines: [`where tostring(parse_json(Log).route) == "${MCP_PATH}"`, 'where toint(parse_json(Log).status) == 401'],
     threshold: 30,
   },
+  // AG9: one address or network past its share of the OAuth sign-ins or registrations (6F1 G4), at most a line a
+  // minute a copy (capWarning), so any line is news.
+  {
+    what: 'any oauth.source_capped line',
+    lines: ['where tostring(parse_json(Log).event) == "oauth.source_capped"'],
+    threshold: 0,
+  },
 ] as const;
 
 /**
@@ -579,6 +587,8 @@ const GRANTS: ReadonlySet<string> = new Set([
   'zitadel-setup reads zitadel-masterkey',
   'zitadel-setup reads zitadel-admin-password',
   'login reads login-client-private-key',
+  // SA5: the key the login pages sign their sessions cookie with.
+  'login reads login-cookie-secret',
 ]);
 
 const GRANT = / reads /;
@@ -1025,6 +1035,12 @@ const SECRETS_IN_ENVIRONMENT: readonly {
     settings: /^ZITADEL_(?:DATABASE_POSTGRES_(?:USER|ADMIN)_PASSWORD|FIRSTINSTANCE_ORG_HUMAN_PASSWORD)$/,
     reason: 'Zitadel offers no file form for a database login or its first admin’s password',
   },
+  {
+    images: ZITADEL_LOGIN_IMAGE,
+    settings: /^ZITADEL_SESSION_COOKIE_SECRET$/,
+    // Read from the pinned image's own code (SA5, S204): process.env alone, no _FILE form, unlike its login key.
+    reason: 'the login pages read their cookie key from the setting alone, with no file form',
+  },
 ];
 
 /**
@@ -1072,6 +1088,9 @@ const WORKLOAD_PROFILE = 'Consumption';
  * has drifted from the refresher's file fails the check.
  */
 const GITHUB_RANGES = readRanges();
+
+/** The MCP clients whose documents the API fetches (AG5), from the file network.bicep and dns-policy.bicep compile. */
+const MCP_CLIENTS = readMcpClients();
 
 /** Azure's own DNS, which Microsoft says an environment stops working without. */
 const AZURE_DNS = '168.63.129.16';
@@ -2015,7 +2034,8 @@ const doorOf = (rule: unknown): string =>
  * which Azure keeps current; then GitHub's published addresses, two sets,
  * which nothing keeps current but the refresher (github-ranges.ts); and two
  * more service tags for the apps' own outbound calls: email (B5) and the
- * activity downloads' store (L5c), in this region alone.
+ * activity downloads' store (L5c), in this region alone; last the MCP clients'
+ * published addresses, for their metadata documents (AG5, mcp-clients.json).
  */
 const egressDoors = (
   region: string,
@@ -2044,6 +2064,11 @@ const egressDoors = (
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
   // Every account in the region, not ours alone: the store's own network rule is the limit.
   [`Tcp to Storage.${region} on 443`, "the API's activity downloads, to their store"],
+  // Cloudflare's ranges among them carry many sites: the API's exact origins and the DNS names are the real limit.
+  [
+    `Tcp to ${[...mcpPrefixes(MCP_CLIENTS)].sort().join(' ')} on 443`,
+    "the MCP clients' metadata documents, which the API fetches (mcp-clients.json)",
+  ],
 ];
 
 /**
@@ -2207,14 +2232,18 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** The names the network may look up, reviewed one by one (dns-allowed.json, which dns-policy.bicep compiles into its Allow rule). */
-export const DNS_ALLOWED: ReadonlySet<string> = new Set(
-  (
+/**
+ * The names the network may look up, reviewed one by one (dns-allowed.json), then each MCP client's host
+ * (mcp-clients.json, AG5): dns-policy.bicep compiles both into its Allow rule.
+ */
+export const DNS_ALLOWED: ReadonlySet<string> = new Set([
+  ...(
     JSON.parse(readFileSync(new URL('./dns-allowed.json', import.meta.url), 'utf8')) as {
       readonly domains: readonly { readonly domain: string }[];
     }
   ).domains.map((entry) => entry.domain),
-);
+  ...mcpNames(MCP_CLIENTS),
+]);
 
 /**
  * A DNS rule that allows lets its names through before the rule that alerts

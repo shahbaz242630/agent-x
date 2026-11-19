@@ -101,6 +101,10 @@ param ourActors string
 @secure()
 param ourServiceUsers string
 
+@description('The key the login pages sign their sessions cookie with (SA5; ZITADEL_SESSION_COOKIE_SECRET), 32 characters or more, made by the deploy tool: given when a run makes it (when the vault lacks it, or by name), empty otherwise.')
+@secure()
+param loginCookieSecret string
+
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
 @secure()
@@ -190,6 +194,12 @@ var secrets = [
     name: 'zitadel-our-service-users'
     value: ourServiceUsers
     readers: ['api', 'jobs']
+  }
+  // SA5: the login pages sign their sessions cookie with it, apart from their login key.
+  {
+    name: 'login-cookie-secret'
+    value: loginCookieSecret
+    readers: ['login']
   }
 ]
 
