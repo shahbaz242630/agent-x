@@ -5,6 +5,7 @@ import {
   clientAddress,
   clientKey,
   clientNetwork,
+  clientSite,
   createCounter,
   createOrganisationCounter,
   proxyTrust,
@@ -51,6 +52,22 @@ describe('6F1 G4 the network an OAuth registration is counted under', () => {
   it('puts an address it can’t read in the one shared bucket', () => {
     expect(clientNetwork(undefined)).toBe(UNREADABLE_ADDRESS);
     expect(clientNetwork('unknown')).toBe(UNREADABLE_ADDRESS);
+  });
+});
+
+describe('AG8 the network an OAuth flow is counted under beside its source', () => {
+  it.each([
+    ['an IPv4 address, alone: its own source', '203.0.113.9', '203.0.113.9'],
+    ['an IPv4-mapped address', '::ffff:198.51.100.7', '198.51.100.7'],
+    ['an IPv6 address, by its /48', '2001:db8:1:2:aaaa::1', '2001:db8:1::'],
+    ['another /64 of the same /48', '[2001:db8:1:ffff::7]:443', '2001:db8:1::'],
+  ])('keys %s', (_what, ip, expected) => {
+    expect(clientSite(ip)).toBe(expected);
+  });
+
+  it('puts an address it can’t read in the one shared bucket', () => {
+    expect(clientSite(undefined)).toBe(UNREADABLE_ADDRESS);
+    expect(clientSite('unknown')).toBe(UNREADABLE_ADDRESS);
   });
 });
 

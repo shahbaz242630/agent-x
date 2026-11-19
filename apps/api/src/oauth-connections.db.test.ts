@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  ACCESS_TOKEN_SECONDS,
   addAgent,
   addAgentKey,
   agentKeysOf,
@@ -42,8 +43,10 @@ import {
   DEVICE_CODE_GRANT,
   deviceFlowOfCode,
   flowById,
+  MOST_FAILED_CLAIMS_A_FLOW,
   MOST_OPEN_FLOWS,
   MOST_OPEN_FLOWS_A_BROWSER,
+  MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   keepClientMetadata,
@@ -348,7 +351,7 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);
     const flow = await opened('requests:read requests:write suppliers:read offline_access');
-    expect(await consents.request(flow)).toMatchObject({
+    expect(await consents.request(flow, admin.userId)).toMatchObject({
       id: flow.flowId,
       client: { id: clientId, name: 'ChatGPT' },
       redirectHost: 'chatgpt.com',
@@ -366,7 +369,7 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
       expect(await agentKeysOf(tx, states, org, agentId)).toEqual({ outcome: 'listed', keys: [] });
     });
     // Decided: the request is gone for its browser too.
-    expect(await consents.request(flow)).toBeUndefined();
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
   });
 
   it('shows and decides a flow for its own browser alone', async () => {
@@ -375,7 +378,7 @@ describe(`SEC-OAUTH-10 the consent (Postgres ${server.version})`, () => {
     const agentId = await agent(org, admin);
     const flow = await opened();
     for (const cookie of [undefined, newFlowCookie(), 'not a cookie']) {
-      expect(await consents.request({ ...flow, cookie })).toBeUndefined();
+      expect(await consents.request({ ...flow, cookie }, admin.userId)).toBeUndefined();
       expect(await consent(admin, { ...flow, cookie }, { agentId, scopes: ['requests:read'] })).toEqual({
         outcome: 'refused',
         status: 404,
@@ -672,6 +675,46 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       clients: oauthClients,
     });
     expect(await after.authorize({ ...asked, client_id: clientId }, undefined, '2001:db8:6f1:4::1')).toMatchObject({
+      outcome: 'opened',
+    });
+  });
+
+  it(`AG8: holds one IPv6 /48 to ${String(MOST_OPEN_FLOWS_A_NETWORK)} open flows, whatever /64 in it each comes from`, async () => {
+    // A /64 of its own each, a flow each: no source comes near its own cap; the site they share does.
+    const fromSite = (n: number) => `2001:db8:a8:${n.toString(16)}::1`;
+    for (let open = 0; open < MOST_OPEN_FLOWS_A_NETWORK; open += 1) {
+      expect(await authorizing.authorize({ ...asked, client_id: clientId }, undefined, fromSite(open))).toMatchObject({
+        outcome: 'opened',
+      });
+    }
+    const full = await authorizing.authorize({ ...asked, client_id: clientId }, undefined, fromSite(0xfff));
+    if (full.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(full)}`);
+    expect(new URL(full.redirectTo).searchParams.get('error')).toBe('temporarily_unavailable');
+    expect(lines('oauth.source_capped')).toEqual([
+      expect.objectContaining({ level: 'warn', kind: 'flow', per: 'network', most: MOST_OPEN_FLOWS_A_NETWORK }),
+    ]);
+    const device = createOauthDevice({
+      database: app,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients: oauthClients,
+    });
+    const asDevice = await authorizing.register(
+      { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
+      CORRELATION,
+      fresh(),
+    );
+    if (asDevice.outcome !== 'registered') throw new Error('registered');
+    expect(await device.authorize({ client_id: asDevice.client.clientId }, CORRELATION, fromSite(0xffe))).toMatchObject(
+      {
+        outcome: 'refused',
+        status: 503,
+      },
+    );
+    // The next /48 is another site.
+    expect(await authorizing.authorize({ ...asked, client_id: clientId }, undefined, '2001:db8:a9::1')).toMatchObject({
       outcome: 'opened',
     });
   });
@@ -1079,7 +1122,31 @@ describe(`a connection revoked (Postgres ${server.version})`, () => {
     expect(await accepted(first.accessToken)).toEqual({ outcome: 'refused' });
     // Nothing is answered of a token that is none, or already revoked.
     await grants.revoke({ token: 'nonsense', clientId }, CALLER);
-    await grants.revoke({ token: first.accessToken, clientId: undefined }, CALLER);
+    await grants.revoke({ token: first.accessToken, clientId }, CALLER);
+  });
+
+  it('AG8: never by a token rotated or past its time, which can act no more: answered the same, nothing revoked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const first = await connected(org, admin, await agent(org, admin));
+    const refreshing = (refreshToken: string) =>
+      grants.refresh({ refreshToken, clientId, scope: undefined, resource: undefined }, CALLER);
+    // Rotated: the refresh token used once is spent, and whoever finds it later can't end the connection with it.
+    const second = issued(await refreshing(first.refreshToken));
+    await grants.revoke({ token: first.refreshToken, clientId }, CALLER);
+    expect(await accepted(second.accessToken)).toMatchObject({ outcome: 'accepted' });
+    // Past its time: the first access token, an hour on.
+    clock.advanceBy(ACCESS_TOKEN_SECONDS * 1000);
+    await grants.revoke({ token: first.accessToken, clientId }, CALLER);
+    expect(lines('oauth.revoke_ignored')).toEqual([
+      expect.objectContaining({ level: 'info', reason: 'rotated', keyId: first.keyId }),
+      expect.objectContaining({ level: 'info', reason: 'expired', keyId: first.keyId }),
+    ]);
+    expect(lines('oauth.connection_revoked')).toEqual([]);
+    // The connection stands: its live refresh token still rotates, and revokes it.
+    const third = issued(await refreshing(second.refreshToken));
+    await grants.revoke({ token: third.refreshToken, clientId }, CALLER);
+    expect(await accepted(third.accessToken)).toEqual({ outcome: 'refused' });
   });
 
   it('by a hand-over, which revokes every connection key of the agent, as it does every key', async () => {
@@ -1793,9 +1860,9 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     return answer.codes;
   }
 
-  /** The device's request, claimed by a browser whose person typed its code. */
-  async function claimed(userCode: string, cookie?: string) {
-    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie);
+  /** The device's request, claimed by a browser whose person (`who`) typed its code. */
+  async function claimed(userCode: string, who: AgentMember, cookie?: string) {
+    const found = await deviceOf().lookup(userCode.toLowerCase(), cookie, who.userId);
     if (found.outcome !== 'claimed') throw new Error('not claimed');
     return { flowId: found.requestId, cookie: found.cookie };
   }
@@ -1863,10 +1930,10 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     // Before anyone decides: pending, then too soon.
     expect(errorOf(await poll(given.deviceCode))).toBe('authorization_pending');
     expect(errorOf(await poll(given.deviceCode))).toBe('slow_down');
-    const flow = await claimed(given.userCode);
+    const flow = await claimed(given.userCode, admin);
     // Another browser typing the same code finds nothing.
-    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
-    expect(await consents.request(flow)).toMatchObject({
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), admin.userId)).toEqual({ outcome: 'not_found' });
+    expect(await consents.request(flow, admin.userId)).toMatchObject({
       via: 'device',
       client: { id: clientId, name: 'ChatGPT', verifiedBy: null },
       redirectUri: null,
@@ -1897,7 +1964,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const denied = await codes();
-    const flow = await claimed(denied.userCode);
+    const flow = await claimed(denied.userCode, admin);
     const write = await consents.deny(admin, keyed(admin, DENY_OPERATION, 'deny-device'), flow, CORRELATION);
     expect(write).toEqual({ outcome: 'denied', redirectTo: null });
     expect(errorOf(await poll(denied.deviceCode))).toBe('access_denied');
@@ -1907,7 +1974,51 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(errorOf(await poll(other.deviceCode, 'axcl_ffffffffffffffffffffffffffffffff'))).toBe('invalid_grant');
     clock.advanceBy(15 * 60_000);
     expect(errorOf(await poll(other.deviceCode))).toBe('expired_token');
-    expect(await deviceOf().lookup(other.userCode, undefined)).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(other.userCode, undefined, admin.userId)).toEqual({ outcome: 'not_found' });
+  });
+
+  it('AG8: a device claimed is its person’s alone: another person on the same browser can’t read, allow or deny it', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const colleague = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes();
+    const flow = await claimed(given.userCode, admin);
+    // A shared browser: the same cookie, signed in as someone else.
+    expect(await consents.request(flow, colleague.userId)).toBeUndefined();
+    expect(await consent(colleague, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({
+      outcome: 'refused',
+      status: 404,
+      code: 'NOT_FOUND',
+    });
+    expect(
+      await consents.deny(colleague, keyed(colleague, DENY_OPERATION, 'deny-theirs'), flow, CORRELATION),
+    ).toMatchObject({ outcome: 'refused', status: 404 });
+    // Nor claim it again for themselves on that browser: a failed claim, counted on the flow.
+    expect(await deviceOf().lookup(given.userCode, flow.cookie, colleague.userId)).toEqual({ outcome: 'not_found' });
+    expect(lines('oauth.device_code_contested')).toEqual([
+      expect.objectContaining({ level: 'warn', flowId: flow.flowId, failedClaims: 1, denied: false }),
+    ]);
+    // The person who claimed it still decides it.
+    expect(await allowed(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({ outcome: 'connected' });
+  });
+
+  it(`AG8: a device whose code ${String(MOST_FAILED_CLAIMS_A_FLOW)} others typed after its claim is denied, so no one finishes it`, async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const stranger = await member(await organization(), 'admin');
+    const agentId = await agent(org, admin);
+    const given = await codes();
+    const flow = await claimed(given.userCode, admin);
+    for (let tried = 0; tried < MOST_FAILED_CLAIMS_A_FLOW; tried += 1) {
+      expect(await deviceOf().lookup(given.userCode, undefined, stranger.userId)).toEqual({ outcome: 'not_found' });
+    }
+    expect(lines('oauth.device_code_contested').at(-1)).toMatchObject({
+      failedClaims: MOST_FAILED_CLAIMS_A_FLOW,
+      denied: true,
+    });
+    expect(errorOf(await poll(given.deviceCode))).toBe('access_denied');
+    expect(await consent(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({ status: 404 });
   });
 
   it('revokes a connection allowed but never collected once its codes end', async () => {
@@ -1915,7 +2026,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);
     const given = await codes();
-    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    const write = await allowed(admin, await claimed(given.userCode, admin), { agentId, scopes: ['requests:read'] });
     if (write.outcome !== 'connected') throw new Error('connected');
     clock.advanceBy(15 * 60_000);
     expect(errorOf(await poll(given.deviceCode))).toBe('expired_token');
@@ -1927,7 +2038,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   /** A device allowed as `agentId` by an admin of `org`: its codes, and the connection made. */
   async function deviceAllowed(org: string, admin: Member, agentId: string) {
     const given = await codes();
-    const write = await allowed(admin, await claimed(given.userCode), { agentId, scopes: ['requests:read'] });
+    const write = await allowed(admin, await claimed(given.userCode, admin), { agentId, scopes: ['requests:read'] });
     if (write.outcome !== 'connected') throw new Error('connected');
     return { given, keyId: write.connection.keyId };
   }
@@ -1998,15 +2109,16 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   });
 
   it('mutation V4: a lookup with no cookie gets one; the same browser finds it again; another browser never', async () => {
+    const person = await member(await organization(), 'admin');
     const given = await codes();
-    const first = await deviceOf().lookup(given.userCode, undefined);
+    const first = await deviceOf().lookup(given.userCode, undefined, person.userId);
     if (first.outcome !== 'claimed') throw new Error('not claimed');
-    expect(await deviceOf().lookup(given.userCode, first.cookie)).toEqual({
+    expect(await deviceOf().lookup(given.userCode, first.cookie, person.userId)).toEqual({
       outcome: 'claimed',
       requestId: first.requestId,
       cookie: first.cookie,
     });
-    expect(await deviceOf().lookup(given.userCode, newFlowCookie())).toEqual({ outcome: 'not_found' });
+    expect(await deviceOf().lookup(given.userCode, newFlowCookie(), person.userId)).toEqual({ outcome: 'not_found' });
   });
 
   it('refuses codes for a client unknown, a scope there is not, or another resource; a code typed wrong finds nothing', async () => {
@@ -2029,7 +2141,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
         fresh(),
       ),
     ).toMatchObject({ error: 'invalid_target' });
-    expect(await device.lookup('AEIO-UUUU', undefined)).toEqual({ outcome: 'not_found' });
+    expect(await device.lookup('AEIO-UUUU', undefined, 'someone')).toEqual({ outcome: 'not_found' });
   });
 });
 
@@ -2262,7 +2374,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
     const given = await device.authorize({ client_id: HERMES }, CORRELATION, fresh());
     if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
-    const found = await device.lookup(given.codes.userCode, undefined);
+    const found = await device.lookup(given.codes.userCode, undefined, 'a person');
     if (found.outcome !== 'claimed') throw new Error('not claimed');
     const shown = createConnectionConsents({
       database: app,
@@ -2274,7 +2386,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
       issuer: capabilities.issuer,
       clients,
     });
-    expect(await shown.request({ flowId: found.requestId, cookie: found.cookie })).toMatchObject({
+    expect(await shown.request({ flowId: found.requestId, cookie: found.cookie }, 'a person')).toMatchObject({
       via: 'device',
       client: { id: HERMES, name: 'Claude', verifiedBy: null },
     });

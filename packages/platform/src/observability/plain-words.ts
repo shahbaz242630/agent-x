@@ -497,6 +497,21 @@ export const PLAIN_WORDS = {
     broke: 'Only that address or network was told to wait; everyone else connects as usual.',
     next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
   },
+  'oauth.device_lookups_capped': {
+    happened: 'Too many device codes typed into the console failed in the last minute, so lookups were paused.',
+    broke: 'Everyone connecting a device by its code was told to wait up to a minute; connected apps carry on.',
+    next: 'Someone may be guessing codes from many accounts. If it repeats, find which accounts send them.',
+  },
+  'oauth.device_code_contested': {
+    happened: 'A device’s code was typed by someone other than the person who already claimed it.',
+    broke: 'Nothing was given away. After three such tries the device’s request is refused and must be started again.',
+    next: 'Nothing if rare: a person may have used a second browser. If often, the codes may be seen or shared.',
+  },
+  'oauth.client_network_sweep_failed': {
+    happened: 'The clean-up that forgets which network an MCP app registered from, a day on, failed.',
+    broke: 'Those networks are kept a little longer; nothing a person or app does is affected.',
+    next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
+  },
   'oauth.grant_in_trouble': {
     happened: 'An OAuth token or revocation request hit a database limit or lost a deadlock.',
     broke: 'That one request was told to try again shortly; nothing of it was kept.',

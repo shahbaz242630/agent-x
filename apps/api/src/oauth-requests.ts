@@ -12,15 +12,17 @@
 // - `POST /v1/oauth/requests/:id/deny`: the client told no.
 // - `POST /v1/oauth/device/lookup` (6E3c, RFC 8628 §3.3): the user code a
 //   device showed, typed by a signed-in person on the console's `/device`
-//   page, claims that device's request for this browser (oauth-device.ts);
-//   the request is then read and decided as above. Five tries a minute a
-//   person, beside every other limit: the code is all that guards it.
+//   page, claims that device's request for this browser and this person
+//   (oauth-device.ts, AG8); the request is then read and decided as above, by
+//   that person alone. Five tries a minute a person, beside every other
+//   limit, and every lookup held for a minute (429) once too many failed
+//   server-wide: the code is all that guards it.
 import { SCOPES } from '@agentx/core/modules/agents';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { memberInSessionOf, need } from './access.ts';
+import { memberInSessionOf, need, personOf } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import {
   CONNECTING_ROLES,
@@ -119,6 +121,9 @@ const DEVICE_LOOKUP_OPERATION = 'connections.device-lookup';
 /** A person's tries at a user code (6E3 plan §1): 5 a minute, so 20^8 codes can't be walked. */
 const LOOKUP_LIMIT = { most: 5, windowMs: 60_000 } as const;
 
+/** How long to wait when every lookup is held (AG8): at most the rest of the failed lookups' minute. */
+const LOOKUP_HELD_SECONDS = 60;
+
 const LOOKUP = z
   .strictObject({ userCode: z.string().min(1).max(32).describe('The code the device shows, as typed: `BCDF-GHJK`.') })
   .describe('A device’s user code.');
@@ -163,8 +168,9 @@ export function registerOauthRequests(
       schema: {
         summary: 'Find the device asking to be connected, by the code it shows',
         description:
-          'The request becomes this browser’s: read it, then allow or deny it, as a browser’s. A code typed wrong, ' +
-          'ended, decided or already claimed by another browser is a 404, which says nothing of which.',
+          'The request becomes this browser’s and this person’s: read it, then allow or deny it, as a browser’s. A ' +
+          'code typed wrong, ended, decided or already claimed by anyone else is a 404, which says nothing of which; ' +
+          'once too many lookups failed across Agent X this minute, every lookup is a 429 with Retry-After.',
         body: LOOKUP,
         response: { 200: LOOKED_UP },
       },
@@ -176,8 +182,13 @@ export function registerOauthRequests(
       const found = await need(device).lookup(
         request.body.userCode,
         cookieValue(request.headers.cookie, CONNECT_COOKIE),
+        personOf(request),
       );
       if (found.outcome === 'not_found') return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      // AG8: too many lookups failed server-wide this minute; the person tries again in a minute.
+      if (found.outcome === 'held') {
+        return sendErrorBody(reply.header('retry-after', LOOKUP_HELD_SECONDS), 429, 'RATE_LIMITED', request.id);
+      }
       // Set again every time, its day starting now, as the authorize endpoint does.
       void reply.header('set-cookie', connectCookie(found.cookie));
       return { requestId: found.requestId };
@@ -191,7 +202,7 @@ export function registerOauthRequests(
       config: { access: ['person'], oauth: true },
     },
     async (request, reply) => {
-      const shown = await need(consents).request(namedBy(request));
+      const shown = await need(consents).request(namedBy(request), personOf(request));
       if (shown === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       return { ...shown, scopesAsked: [...shown.scopesAsked], endsAt: shown.endsAt.toISOString() };
     },

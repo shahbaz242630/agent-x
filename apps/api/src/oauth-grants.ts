@@ -19,7 +19,10 @@
 //   organisation's admins see a `connection_token_reused` event, and the
 //   answer is `invalid_grant`, as for every other refusal.
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
-//   connection, by the client it was made for; the answer is always the same.
+//   connection, by the client it was made for, which must name itself
+//   (client_id, as at the token endpoint; AG8); the answer is always the
+//   same. A token past its time, or a refresh token already rotated, can act
+//   no more, so it revokes nothing either (AG8).
 // - A device code (6E3c, RFC 8628 §3.4-§3.5), polled by the client it was
 //   given to: `authorization_pending` until the person decides, `slow_down`
 //   for a poll sooner than its interval, `access_denied` once told no,
@@ -46,6 +49,7 @@ import {
   revokeKey,
   scopesOf,
   tokenAtTheDoor,
+  type TokenRow,
   tokenRowLocked,
   usedNow,
 } from '@agentx/core/modules/agents';
@@ -135,9 +139,12 @@ export interface OauthGrants {
   exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer>;
   exchangeDevice(asked: DeviceExchange, caller: Caller): Promise<GrantAnswer>;
   refresh(asked: RefreshAsked, caller: Caller): Promise<GrantAnswer>;
-  /** Revokes the connection the token is for, if it is one and the client's own; nothing is answered of which, but busy. */
+  /**
+   * Revokes the connection the token is for, if it is one, still able to act, and the named client's own; nothing is
+   * answered of which, but busy.
+   */
   revoke(
-    asked: { readonly token: string; readonly clientId: string | undefined },
+    asked: { readonly token: string; readonly clientId: string },
     caller: Caller,
   ): Promise<{ readonly outcome: 'taken' } | Busy>;
 }
@@ -200,6 +207,12 @@ const DEVICE_WAITING = {
 
 /** What revokes a connection that a reused code or token gives away: the server itself. */
 const OAUTH_SERVER: AuditActor = { type: 'system', id: 'oauth-server' };
+
+/** Why a token proven at the door may no longer revoke its connection at `now` (AG8): past its time, or rotated. */
+const revokeRefusal = (row: TokenRow, now: Date): 'expired' | 'rotated' | undefined => {
+  if (row.expiresAt.getTime() <= now.getTime()) return 'expired';
+  return row.usedAt === null ? undefined : 'rotated';
+};
 
 /** Why a code's flow refuses this exchange, for the log alone; none if it may go on. */
 /** `resource` is optional (RFC 8707): some clients send none, and the flow keeps our own MCP endpoint's either way. */
@@ -538,19 +551,26 @@ export function createOauthGrants({
       return INVALID_GRANT;
     },
 
-    async revoke(
-      asked: { readonly token: string; readonly clientId: string | undefined },
-      caller: Caller,
-    ): Promise<void> {
+    async revoke(asked: { readonly token: string; readonly clientId: string }, caller: Caller): Promise<void> {
       const presented =
         parseConnectionToken(asked.token, 'access') ?? parseConnectionToken(asked.token, 'refresh') ?? undefined;
       if (presented === undefined) return;
       const { orgId, door } = await proven(presented);
       if (orgId === undefined || door.outcome !== 'proven') return;
+      // AG8: only a token that can still act ends its connection. One past its time, or a refresh token already
+      // rotated, is an invalid token (RFC 7009 §2.2: answered 200, nothing done): whoever finds an old one can't use it.
+      const spent = revokeRefusal(door.row, clock.now());
+      if (spent !== undefined) {
+        logger
+          .child({ correlationId: caller.correlationId, orgId })
+          .info('oauth.revoke_ignored', { reason: spent, keyId: presented.keyId });
+        return;
+      }
+      // Only the client the connection was made for (RFC 7009 §2.1); another's is answered the same, nothing done.
       const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
         actor: OAUTH_SERVER,
         reason: 'revoked_by_client',
-        ...(asked.clientId === undefined ? {} : { clientId: asked.clientId }),
+        clientId: asked.clientId,
       });
       logger
         .child({ correlationId: caller.correlationId, orgId })

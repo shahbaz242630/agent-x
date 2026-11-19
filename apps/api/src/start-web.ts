@@ -332,6 +332,7 @@ export async function startWeb(
         logger,
         capabilities,
         clients: oauthClients,
+        copies: config.http.webCopies,
       }),
       grants: createOauthGrants({
         database,

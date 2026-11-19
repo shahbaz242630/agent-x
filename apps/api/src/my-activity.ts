@@ -62,11 +62,11 @@ import {
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { need } from './access.ts';
+import { need, personOf } from './access.ts';
 import { CLIENT_CLUES, cursorOf, cursorText } from './activity-log.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { BUSY_RETRY_SECONDS } from './errors.ts';
@@ -400,12 +400,6 @@ export function createMyActivity({
     },
   };
 }
-
-/** The session's person: the access hook lets no one else through, so a route that runs without one is a bug. */
-const personOf = (request: FastifyRequest): string => {
-  if (request.person === null) throw new Error("a person's own route ran without a person");
-  return request.person.userId;
-};
 
 const MY_ACTIVITY_ROW = z
   .object({
