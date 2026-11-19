@@ -102,7 +102,10 @@ export {
   tokenProven,
   type TokenRow,
   sweepConnectionTokens,
-  tokenRowLocked,
+  type TokenFamily,
+  tokenGenuine,
+  tokenLockedWithFamily,
+  type TokenProof,
   usedNow,
 } from './infrastructure/connection-tokens.ts';
 export {

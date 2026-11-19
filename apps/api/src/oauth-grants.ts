@@ -17,7 +17,17 @@
 //   issued with the scopes asked, which may only narrow. Used before, it is a
 //   reuse (decision 4: strict, no grace): the connection is revoked, the
 //   organisation's admins see a `connection_token_reused` event, and the
-//   answer is `invalid_grant`, as for every other refusal.
+//   answer is `invalid_grant`, as for every other refusal. Its use is judged
+//   from its family too (0104, R-15, S206), rows the database's owner can't
+//   rewrite unseen: a refresh token another names as its parent was used, its
+//   `used_at` cleared or not; one whose parent has another refresh child was
+//   split in two. A refresh token the app issued (its secret is the pepper's
+//   own MAC) whose row is gone, or no longer matches, was hidden. Each is a
+//   reuse, and where the rows disagree, the integrity alarm (check
+//   `refresh_token`). As any rotation's reuse detection, a use hidden by
+//   deleting the child row too is caught at the other holder's next refresh,
+//   which sends a genuine token with no row: the connection goes, and the
+//   tokens of whoever used it with it.
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
 //   connection, by the client it was made for, which must name itself
 //   (client_id, as at the token endpoint; AG8); the answer is always the
@@ -58,7 +68,11 @@ import {
   revokeKey,
   scopesOf,
   tokenAtTheDoor,
-  tokenRowLocked,
+  type TokenFamily,
+  tokenGenuine,
+  tokenLockedWithFamily,
+  type TokenProof,
+  type TokenRow,
   usedNow,
 } from '@agentx/core/modules/agents';
 import { type AuditActor, type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
@@ -398,6 +412,65 @@ export function createOauthGrants({
     return `decision_${judged}`;
   };
 
+  /**
+   * SEC-OAUTH-05: a refresh token used twice, so someone else holds it. The connection goes; its organisation's admins
+   * see it. `forgot`: how the rows hid the first use (R-15), which is the integrity alarm: a child naming it with its
+   * `used_at` cleared, its parent split in two (`branch`), its row changed (`row`) or gone (`row_gone`). A row gone
+   * raises it only if the connection was still live: the sweep deletes rows 120 days on, past every connection's life.
+   */
+  const refreshReused = async (
+    orgId: string,
+    presented: PresentedToken,
+    caller: Caller,
+    forgot: 'used_at' | 'branch' | 'row' | 'row_gone' | undefined,
+  ): Promise<GrantAnswer> => {
+    const named = { keyId: presented.keyId, tokenId: presented.tokenId };
+    const log = logger.child({ correlationId: caller.correlationId, orgId });
+    const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
+      actor: OAUTH_SERVER,
+      reason: 'refresh_reused',
+    });
+    if (forgot !== undefined && (forgot !== 'row_gone' || revoked !== undefined)) {
+      log.error('audit.integrity_failed', {
+        chain: 'organisation',
+        check: 'refresh_token',
+        reason: forgot,
+        objectId: presented.tokenId,
+        keyId: presented.keyId,
+      });
+    }
+    log.warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
+    securityEvents.note({
+      kind: 'connection_token_reused',
+      reason: 'refresh_reused',
+      ip: caller.ip,
+      orgId,
+      ...(revoked === undefined ? {} : { agentId: revoked.agentId }),
+    });
+    return INVALID_GRANT;
+  };
+
+  /**
+   * A refresh token the app issued (its secret the pepper's own MAC) whose row is gone (`row_gone`), or no longer
+   * matches it (`row`): the database's owner hid it, or its use (R-15). Undefined for anything else, a token never
+   * issued among them, which is refused as before.
+   */
+  const rowHidden = (outcome: TokenProof['outcome'], presented: PresentedToken): 'row_gone' | 'row' | undefined => {
+    if (outcome !== 'unread' && outcome !== 'wrong_secret') return undefined;
+    if (!tokenGenuine(keys, presented)) return undefined;
+    return outcome === 'unread' ? 'row_gone' : 'row';
+  };
+
+  /**
+   * What a locked refresh token's family says of its use (R-15): its parent with another refresh child, a family
+   * split in two (`branch`); a refresh child of its own, a use, its `used_at` cleared if it says none. Undefined: none.
+   */
+  const usedByFamily = (row: TokenRow, { children, siblings }: Pick<TokenFamily, 'children' | 'siblings'>) => {
+    if (siblings > 0) return { outcome: 'reused' as const, forgot: 'branch' as const };
+    if (children === 0) return undefined;
+    return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('used_at' as const) : undefined };
+  };
+
   const grants = {
     async exchangeCode(asked: CodeExchange, caller: Caller): Promise<GrantAnswer> {
       if (!isCodeText(asked.code)) return refusedFor(caller, 'malformed', { clientId: asked.clientId });
@@ -522,6 +595,8 @@ export function createOauthGrants({
         return { outcome: 'refused', status: 400, error: 'invalid_target', description: 'The resource is not ours.' };
       }
       const { orgId, door } = await proven(presented);
+      const hidden = orgId === undefined ? undefined : rowHidden(door.outcome, presented);
+      if (hidden !== undefined && orgId !== undefined) return refreshReused(orgId, presented, caller, hidden);
       if (orgId === undefined || door.outcome !== 'proven') {
         if (door.outcome === 'key_not_held') {
           logger.child({ correlationId: caller.correlationId }).error('connection_token.refused', {
@@ -549,10 +624,14 @@ export function createOauthGrants({
           clientId: asked.clientId,
         });
         if (checked.outcome !== 'accepted') return checked;
-        // Locked after its connection (3c), and used in one statement where it was not: two at once can't both rotate.
-        const row = await tokenRowLocked(tx, orgId, presented.tokenId);
-        if (row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
-        if (!(await usedNow(tx, orgId, presented.tokenId, now))) return { outcome: 'reused' as const };
+        // Locked after its connection (3c), its family read on the same trip, and used in one statement where it was
+        // not: two at once can't both rotate.
+        const family = await tokenLockedWithFamily(tx, orgId, presented.tokenId);
+        if (family.row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
+        const used = usedByFamily(family.row, family);
+        if (used !== undefined) return used;
+        if (!(await usedNow(tx, orgId, presented.tokenId, now)))
+          return { outcome: 'reused' as const, forgot: undefined };
         const tokens = await issueTokens(
           tx,
           { keys, ids },
@@ -571,22 +650,7 @@ export function createOauthGrants({
       });
       if (answer.outcome === 'issued') return answer;
       if (answer.outcome === 'refused') return refusedFor(caller, answer.reason, named);
-      // SEC-OAUTH-05: used twice, so someone else holds it. The connection goes; its organisation's admins see it.
-      const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
-        actor: OAUTH_SERVER,
-        reason: 'refresh_reused',
-      });
-      logger
-        .child({ correlationId: caller.correlationId, orgId })
-        .warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
-      securityEvents.note({
-        kind: 'connection_token_reused',
-        reason: 'refresh_reused',
-        ip: caller.ip,
-        orgId,
-        ...(revoked === undefined ? {} : { agentId: revoked.agentId }),
-      });
-      return INVALID_GRANT;
+      return refreshReused(orgId, presented, caller, answer.forgot);
     },
 
     async revoke(asked: { readonly token: string; readonly clientId: string }, caller: Caller): Promise<void> {

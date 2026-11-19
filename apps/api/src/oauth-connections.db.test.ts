@@ -1016,6 +1016,150 @@ describe(`SEC-OAUTH-05, -08 a refresh token rotated, used once (Postgres ${serve
   });
 });
 
+describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner (Postgres ${server.version})`, () => {
+  /** A connection whose first refresh token (the one stolen) was used once by its app: that token, and the pair. */
+  async function rotatedOnce() {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const first = await connected(org, admin, agentId);
+    const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+    const second = issued(await grants.refresh(refresh, CALLER));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    return {
+      org,
+      agentId,
+      refresh,
+      second,
+      owner,
+      usedId: idOf(first.refreshToken),
+      childId: idOf(second.refreshToken),
+    };
+  }
+  type Rotated = Awaited<ReturnType<typeof rotatedOnce>>;
+
+  /** A token's own ID, as its text holds it (32 hex digits, which Postgres takes as a uuid). */
+  const idOf = (token: string): string => token.split('_')[2] ?? '';
+
+  const usedAtCleared = ({ owner, usedId }: Rotated) =>
+    owner.query('update agents.connection_tokens set used_at = null where id = $1', [usedId]);
+
+  /** A row deleted by the owner, who first dates it past 0093's retention policy, the only rows it deletes. */
+  const rowDeleted = async ({ owner }: Rotated, id: string) => {
+    await owner.query("update agents.connection_tokens set created_at = now() - interval '200 days' where id = $1", [
+      id,
+    ]);
+    expect(await owner.query('delete from agents.connection_tokens where id = $1 returning id', [id])).toHaveLength(1);
+  };
+
+  const refreshWith = (rotated: Rotated, refreshToken: string) =>
+    grants.refresh({ ...rotated.refresh, refreshToken }, CALLER);
+
+  /** What a reuse the rows tried to hide shows: refused, the connection gone, its organisation told, the alarm. */
+  async function caughtAsReuse(rotated: Rotated, refreshToken: string, reason: string, accessToken: string) {
+    expect(await refreshWith(rotated, refreshToken)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('oauth.refresh_reused')).toEqual([
+      expect.objectContaining({ level: 'warn', revoked: true, orgId: rotated.org }),
+    ]);
+    expect(noted).toContainEqual(
+      expect.objectContaining({ kind: 'connection_token_reused', orgId: rotated.org, agentId: rotated.agentId }),
+    );
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: rotated.org, check: 'refresh_token', reason }),
+    ]);
+  }
+
+  it('seals each new row at version 2, the child naming its parent; rotation goes on as before', async () => {
+    const rotated = await rotatedOnce();
+    const [child] = await rotated.owner.query<{ names_it: boolean; mac_version: number }>(
+      'select parent_id = $1::uuid as names_it, mac_version from agents.connection_tokens where id = $2',
+      [rotated.usedId, rotated.childId],
+    );
+    expect(child).toEqual({ names_it: true, mac_version: 2 });
+    const third = issued(await refreshWith(rotated, rotated.second.refreshToken));
+    expect(await accepted(third.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('its use cleared: the child names it, so it is a reuse, the connection revoked, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await usedAtCleared(rotated);
+    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'used_at', rotated.second.accessToken);
+  });
+
+  it('its use cleared and its child deleted: the thief’s refresh goes through, and the app’s next one ends it all', async () => {
+    const rotated = await rotatedOnce();
+    await usedAtCleared(rotated);
+    await rowDeleted(rotated, rotated.childId);
+    // Detection waits for the other holder's next use, as any rotation's reuse detection does.
+    const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
+    await caughtAsReuse(rotated, rotated.second.refreshToken, 'row_gone', thiefs.accessToken);
+  });
+
+  it('the used row deleted: the stolen token, genuine with no row, is a reuse, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rowDeleted(rotated, rotated.usedId);
+    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'row_gone', rotated.second.accessToken);
+  });
+
+  it('the child hidden while the thief refreshes, then put back: the family split in two is a reuse', async () => {
+    const rotated = await rotatedOnce();
+    const [saved] = await rotated.owner.query<{ json: string }>(
+      'select pg_catalog.to_jsonb(t)::text as json from agents.connection_tokens t where id = $1',
+      [rotated.childId],
+    );
+    await rowDeleted(rotated, rotated.childId);
+    await usedAtCleared(rotated);
+    const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
+    await rotated.owner.query(
+      'insert into agents.connection_tokens select * from pg_catalog.jsonb_populate_record(null::agents.connection_tokens, $1::jsonb)',
+      [saved?.json],
+    );
+    await caughtAsReuse(rotated, rotated.second.refreshToken, 'branch', thiefs.accessToken);
+  });
+
+  it.each([
+    [
+      'moved off its parent',
+      ({ owner, childId }: Rotated) =>
+        owner.query('update agents.connection_tokens set parent_id = gen_random_uuid() where id = $1', [childId]),
+    ],
+    [
+      'moved back to MAC version 1',
+      ({ owner, childId }: Rotated) =>
+        owner.query('update agents.connection_tokens set mac_version = 1 where id = $1', [childId]),
+    ],
+  ] as const)(
+    'the child %s: the app’s genuine token no longer matches its row, a reuse, with the alarm',
+    async (_how, change) => {
+      const rotated = await rotatedOnce();
+      await change(rotated);
+      await caughtAsReuse(rotated, rotated.second.refreshToken, 'row', rotated.second.accessToken);
+    },
+  );
+
+  it('a genuine token whose row is gone after its connection ended (the sweep’s case) is refused, with no alarm', async () => {
+    const rotated = await rotatedOnce();
+    await grants.revoke({ token: rotated.second.refreshToken, clientId }, CALLER);
+    await rowDeleted(rotated, rotated.usedId);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a token of a real ID with a guessed secret is refused, row or none, and revokes nothing', async () => {
+    const rotated = await rotatedOnce();
+    const guessed = (token: string) =>
+      [...token.split('_').slice(0, 3), randomBytes(32).toString('base64url')].join('_');
+    expect(await refreshWith(rotated, guessed(rotated.second.refreshToken))).toMatchObject({ error: 'invalid_grant' });
+    await rowDeleted(rotated, rotated.usedId);
+    expect(await refreshWith(rotated, guessed(rotated.refresh.refreshToken))).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('oauth.refresh_reused')).toEqual([]);
+  });
+});
+
 describe(`refusals on the way (Postgres ${server.version})`, () => {
   it('refuses a code whose agent was suspended after the consent', async () => {
     const org = await organization();

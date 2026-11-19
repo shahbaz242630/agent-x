@@ -68,4 +68,6 @@ interface ConnectionTokensTable {
   created_at: Date;
   parent_id: string | null;
   used_at: Date | null;
+  /** How its MAC was taken (0104): 1 before, 2 its parent covered. */
+  mac_version: Generated<number>;
 }

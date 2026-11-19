@@ -6,6 +6,7 @@ import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { keySecretMessage } from './agent.ts';
 import {
   connectionTokenMessage,
+  connectionTokenSecretMessage,
   connectionTokenText,
   parseConnectionToken,
   REFRESH_IDLE_DAYS,
@@ -14,6 +15,7 @@ import {
 
 const KEY_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const TOKEN_ID = '0199a0f0-0000-7000-8000-0000000000b2';
+const PARENT_ID = '0199a0f0-0000-7000-8000-0000000000c3';
 const RANDOM_PART = Buffer.alloc(32, 7);
 
 describe('a connection token as text', () => {
@@ -69,15 +71,21 @@ describe('a token’s life', () => {
 });
 
 describe('SEC-OAUTH-14 what a token’s MAC is taken over', () => {
-  it('binds its kind, key, ID, expiry and scopes under a label of its own', () => {
-    const expiresAt = new Date('2026-11-18T10:00:00Z');
-    const message = connectionTokenMessage(
-      { kind: 'access', keyId: KEY_ID.toUpperCase(), tokenId: TOKEN_ID, expiresAt, scopes: 'requests:read' },
-      RANDOM_PART,
-    );
+  const expiresAt = new Date('2026-11-18T10:00:00Z');
+  const binding = {
+    kind: 'refresh' as const,
+    keyId: KEY_ID.toUpperCase(),
+    tokenId: TOKEN_ID,
+    expiresAt,
+    scopes: 'requests:read',
+    parentId: PARENT_ID.toUpperCase(),
+  };
+
+  it('binds its kind, key, ID, expiry and scopes under a label of its own (version 1, before 0104)', () => {
+    const message = connectionTokenMessage(binding, RANDOM_PART, 1);
     expect(message).toEqual([
       'connection-token',
-      'access',
+      'refresh',
       KEY_ID,
       TOKEN_ID,
       '2026-11-18T10:00:00.000Z',
@@ -85,5 +93,23 @@ describe('SEC-OAUTH-14 what a token’s MAC is taken over', () => {
       RANDOM_PART,
     ]);
     expect(message[0]).not.toBe(keySecretMessage(KEY_ID, RANDOM_PART)[0]);
+  });
+
+  it('R-15: binds the refresh token it replaced too, under a label of version 2, none as empty', () => {
+    expect(connectionTokenMessage(binding, RANDOM_PART)).toEqual([
+      'connection-token-v2',
+      'refresh',
+      KEY_ID,
+      TOKEN_ID,
+      '2026-11-18T10:00:00.000Z',
+      'requests:read',
+      PARENT_ID,
+      RANDOM_PART,
+    ]);
+    expect(connectionTokenMessage({ ...binding, parentId: null }, RANDOM_PART)[6]).toBe('');
+  });
+
+  it('R-15: makes a token’s secret from its kind, key and ID under a label of its own', () => {
+    expect(connectionTokenSecretMessage(binding)).toEqual(['connection-token-secret', 'refresh', KEY_ID, TOKEN_ID]);
   });
 });
