@@ -14,7 +14,14 @@
 // step-up, the organisation's alone and always.
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { policyOf, type PolicyRules, policyVersionOf, POLICIES, setPolicy } from '@agentx/core/modules/mandates';
+import {
+  policyOf,
+  type PolicyRules,
+  policyVersionOf,
+  POLICIES,
+  POLICY_VERSIONS,
+  setPolicy,
+} from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
@@ -354,6 +361,45 @@ describe('the organisation’s policy (C3, decision 5)', () => {
         'with gone as (delete from mandates.policies where id = $1) delete from mandates.policy_versions where policy_id = $1',
         [w.org],
       );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await ask(w.admin, ORGANIZATION, rules(1n))).toEqual(refused(503, 'INTEGRITY_FAILED'));
+  });
+
+  it('a version’s cap raised past the app, its made-once guard switched off: INTEGRITY_FAILED, never read as the looser cap (FX-TAMPER, S205)', async () => {
+    const w = await world();
+    changedOf(await changed(w, ORGANIZATION, rules(1_000n)));
+    const owner = await tamperAsOwner(database, POLICY_VERSIONS, w.org);
+    try {
+      const [policy] = await owner.query<{ version: string }>(
+        'select current_version_id as version from mandates.policies where id = $1',
+        [w.org],
+      );
+      await owner.query('alter table mandates.policy_versions disable trigger made_once');
+      try {
+        await owner.setColumn(policy?.version ?? '', 'monthly_cap_minor', '900000000');
+      } finally {
+        await owner.query('alter table mandates.policy_versions enable trigger made_once');
+      }
+    } finally {
+      await owner.end();
+    }
+
+    // A new ask reads only the policy, never the old version's rules; the decision refuses it (spend-request-decisions.db).
+    expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+  });
+
+  it('a policy pointed back at its older, looser version (a signed row put back): INTEGRITY_FAILED (FX-TAMPER, S205)', async () => {
+    const w = await world();
+    changedOf(await changed(w, ORGANIZATION, rules(9_000_000n)));
+    const owner = await tamperAsOwner(database, POLICIES, w.org);
+    try {
+      const looser = await owner.saveRow(w.org);
+      changedOf(await changed(w, ORGANIZATION, rules(1_000n)));
+      await owner.restoreRow(looser);
     } finally {
       await owner.end();
     }

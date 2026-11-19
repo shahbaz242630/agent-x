@@ -34,6 +34,7 @@ import {
   MANDATES,
   policyOf,
   type PolicyRules,
+  POLICY_VERSIONS,
   setPolicy,
 } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
@@ -813,6 +814,28 @@ describe('deciding a spend request and reserving it (D4)', () => {
       await owner.setColumn(versionId, 'monthly_limit_minor', '99000000');
     } finally {
       await owner.query('alter table mandates.versions enable trigger made_once');
+      await owner.end();
+    }
+
+    expect(await ask(acting, asking(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('refuses the organisation policy’s cap raised past the app, making nothing (FX-TAMPER, SEC-DB-03, S205)', async () => {
+    const { w, acting } = await ready();
+    const owner = await tamperAsOwner(database, POLICY_VERSIONS, w.org);
+    try {
+      const [policy] = await owner.query<{ version: string }>(
+        'select current_version_id as version from mandates.policies where id = $1',
+        [w.org],
+      );
+      await owner.query('alter table mandates.policy_versions disable trigger made_once');
+      try {
+        await owner.setColumn(policy?.version ?? '', 'monthly_cap_minor', '900000000');
+      } finally {
+        await owner.query('alter table mandates.policy_versions enable trigger made_once');
+      }
+    } finally {
       await owner.end();
     }
 
