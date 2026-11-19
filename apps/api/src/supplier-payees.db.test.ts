@@ -48,6 +48,7 @@ import {
   PAYEE_PASS_THROUGH_OPERATION,
   PAYEE_START_OPERATION,
   type PayeeWrite,
+  registrationsOfLeaving,
   type SupplierPayees,
 } from './supplier-payees.ts';
 import type { SupplierMember } from './supplier-work.ts';
@@ -1039,6 +1040,51 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
       answered(await passThrough(admin, id, { key: 'one-key', using: refusing }), 'started').registration,
     ).toMatchObject({ id: refused.registration.id, status: 'FAILED' });
     expect(await passThrough(admin, id, { key: 'one-key', iban: ibanOf(OTHER) })).toEqual({ outcome: 'conflict' });
+  });
+
+  it('AG7 a removal ends its starter’s registrations left UNKNOWN, a form’s and one passed through, and no one else’s', async () => {
+    const org = await organization();
+    const [gone, staying] = [await member(org, 'admin'), await member(org, 'admin')];
+    const id = await added(gone);
+    // A form's start whose answer was lost, and a pass-through never done: both UNKNOWN, both still open.
+    expect(await start(gone, id, undefined, payeesWith(failingOnce(true)))).toMatchObject({
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect(await passThrough(gone, id, { using: payeesWith(failingOnce(false)) })).toMatchObject({
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    const theirs = answered(await start(staying, id), 'started');
+    const statuses = () =>
+      withTenant(app, org, (tx) =>
+        tx
+          .selectFrom('suppliers.beneficiary_registrations')
+          .select(['route', 'status', 'failure', 'started_by'])
+          .where('supplier_id', '=', id)
+          .orderBy('route')
+          .orderBy('started_by')
+          .execute(),
+      );
+    expect((await statuses()).filter(({ started_by: by }) => by === gone.membershipId)).toEqual([
+      { route: 'hosted', status: 'UNKNOWN', failure: null, started_by: gone.membershipId },
+      { route: 'pass_through', status: 'UNKNOWN', failure: null, started_by: gone.membershipId },
+    ]);
+
+    // What the removal's transaction runs of the suppliers module's, after the memberships (membership-changes.ts).
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const read = await registrationsOfLeaving.read(tx, states, { orgId: org, membershipId: gone.membershipId });
+      if (read.outcome !== 'read') throw new Error('tampered');
+      await read.end({ type: 'user', id: staying.userId });
+    });
+
+    const ended = { status: 'FAILED', failure: 'expired', started_by: gone.membershipId };
+    expect(await statuses()).toEqual(
+      expect.arrayContaining([
+        { route: 'hosted', ...ended },
+        { route: 'pass_through', ...ended },
+        { route: 'hosted', status: 'STARTED', failure: null, started_by: staying.membershipId },
+      ]),
+    );
+    expect(theirs.registration.startedBy).toBe(staying.membershipId);
   });
 
   it('never carries on with another request’s registration still open, nor a form’s with one passed through', async () => {

@@ -200,10 +200,10 @@ export interface Audience {
   /** Those of them that count now (E2-2b), each verified. Throws if they can't be read, or can't be believed. */
   countingContactsOf(orgId: string): Promise<readonly string[]>;
   /**
-   * The role the person's active membership holds, verified; undefined for none (AG10). Throws if it can't be read,
-   * or can't be believed.
+   * The role each active member holds, by their user ID in lower case, verified (AG10): read once an organisation
+   * a run. Throws if they can't be read, or can't be believed.
    */
-  roleOf(orgId: string, userId: string): Promise<NoticeRole | undefined>;
+  rolesOf(orgId: string): Promise<ReadonlyMap<string, NoticeRole>>;
 }
 
 /** How many notices a run takes at a time. */
@@ -347,6 +347,17 @@ export function createNoticeSender({
     return {};
   };
 
+  // Each organisation's members' roles as this run read them (AG10): one read an organisation a run, however many of
+  // its people it tells, never kept past the run, so a later one reads them afresh. One that failed is not kept.
+  let rolesThisRun = new Map<string, ReadonlyMap<string, NoticeRole>>();
+  const rolesIn = async (orgId: string): Promise<ReadonlyMap<string, NoticeRole>> => {
+    const kept = rolesThisRun.get(orgId);
+    if (kept !== undefined) return kept;
+    const read = await audience.rolesOf(orgId);
+    rolesThisRun.set(orgId, read);
+    return read;
+  };
+
   /**
    * Whether the person a notice names still holds a role it needs in its organisation (AG10, rolesToReceive), read as
    * it is sent: written before they were removed or moved to a lesser role, it is given up at once, logged; a role
@@ -355,7 +366,7 @@ export function createNoticeSender({
   const stillReceives = async (notice: ClaimedNotice, userId: string): Promise<boolean> => {
     let role: NoticeRole | undefined;
     try {
-      role = await audience.roleOf(notice.orgId, userId);
+      role = (await rolesIn(notice.orgId)).get(userId.toLowerCase());
     } catch {
       await failed(notice, 'audience_unavailable', false);
       return false;
@@ -468,6 +479,7 @@ export function createNoticeSender({
 
   return {
     async run(signal) {
+      rolesThisRun = new Map();
       try {
         await runBatches(signal);
         return 'ran';
