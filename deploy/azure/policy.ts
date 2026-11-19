@@ -2246,18 +2246,21 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
   }
 };
 
-/**
- * The names the network may look up, reviewed one by one (dns-allowed.json), then each MCP client's host
- * (mcp-clients.json, AG5): dns-policy.bicep compiles both into its Allow rule.
- */
-export const DNS_ALLOWED: ReadonlySet<string> = new Set([
-  ...(
+/** The names the network may look up, reviewed one by one (dns-allowed.json, which dns-policy.bicep compiles into its Allow rule). */
+export const DNS_ALLOWED: ReadonlySet<string> = new Set(
+  (
     JSON.parse(readFileSync(new URL('./dns-allowed.json', import.meta.url), 'utf8')) as {
       readonly domains: readonly { readonly domain: string }[];
     }
   ).domains.map((entry) => entry.domain),
-  ...mcpNames(MCP_CLIENTS),
-]);
+);
+
+/**
+ * The names an environment's network may look up: the reviewed ones, then, where the OAuth server is on, each MCP
+ * client's host (mcp-clients.json, AG5), as dns-policy.bicep compiles them on main.bicep's switch.
+ */
+export const dnsAllowedIn = (environment: Expectations['environment']): ReadonlySet<string> =>
+  new Set([...DNS_ALLOWED, ...(mcpOauthOn(environment) ? mcpNames(MCP_CLIENTS) : [])]);
 
 /**
  * A DNS rule that allows lets its names through before the rule that alerts
@@ -2267,8 +2270,9 @@ export const DNS_ALLOWED: ReadonlySet<string> = new Set([
  * list is one this deployment creates (a list the snapshot doesn't hold can't
  * be read, so it is refused).
  */
-const dnsAllow: Check = (snapshot, _expected, add) => {
+const dnsAllow: Check = (snapshot, expected, add) => {
   const lists = new Map(ofType(snapshot, TYPES.dnsDomainList).map((names) => [names.id, names]));
+  const allowed = dnsAllowedIn(expected.environment);
   for (const rule of ofType(snapshot, TYPES.dnsPolicyRule)) {
     if (dnsActionOf(rule) !== 'allow' || !dnsRuleOn(rule)) continue;
     const refused = list(at(rule.properties, 'dnsResolverDomainLists')).flatMap((reference) => {
@@ -2277,13 +2281,13 @@ const dnsAllow: Check = (snapshot, _expected, add) => {
       if (names === undefined) return [`a list it doesn't create (${id})`];
       return list(at(names.properties, 'domains'))
         .map(String)
-        .filter((domain) => !DNS_ALLOWED.has(domain));
+        .filter((domain) => !allowed.has(domain));
     });
     if (refused.length > 0) {
       add({
         rule: 'dns-allow',
         resource: rule.name,
-        message: `allows names outside the reviewed list (dns-allowed.json): ${refused.join(', ')}`,
+        message: `allows names outside the reviewed list (dns-allowed.json; mcp-clients.json where the OAuth server is on): ${refused.join(', ')}`,
       });
     }
   }

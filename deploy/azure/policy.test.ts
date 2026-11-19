@@ -15,6 +15,7 @@ import {
   describeProblem,
   ALLOWED_TYPES,
   DNS_ALLOWED,
+  dnsAllowedIn,
   DNS_EXPECTED_LEFTOVERS,
   type Expectations,
   kqlStages,
@@ -250,6 +251,15 @@ function twoSignInCopies(snapshotted: Snapshot): void {
   }
 }
 
+/** Production's OAuth server is off, so its foundation opens no way out to the MCP clients, nor looks up their hosts (AG5, main.bicep). */
+function withoutMcpClients(resource: Mutable): void {
+  if (APPS_RULES(resource as unknown as PredictedResource)) dropRule(resource, 'allow-out-mcp-clients');
+  if (ALLOWED_NAMES(resource as unknown as PredictedResource)) {
+    const names = inside(resource, 'properties');
+    names.domains = (names.domains as string[]).filter((name) => !mcpNames(readMcpClients()).includes(name));
+  }
+}
+
 /**
  * Staging's resources as production's would name them: their tags and CI's
  * identity (where it is and whom its role is given to), and (unless a test
@@ -274,8 +284,7 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       }
     }
     guardrailsForProduction(resource);
-    // Production's OAuth server is off, so its foundation opens no way out to the MCP clients (AG5, main.bicep).
-    if (APPS_RULES(resource as unknown as PredictedResource)) dropRule(resource, 'allow-out-mcp-clients');
+    withoutMcpClients(resource);
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
     if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
       inside(resource, 'sku').name = 'Standard_ZRS';
@@ -3516,7 +3525,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ])
       expect(tooBroad(narrow), narrow).toBe(false);
     const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
-    expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
+    expect(at(allowedList?.properties, 'domains')).toEqual([...dnsAllowedIn('staging')]);
   });
 
   it("dns-block-alert (AZ1): no alert on a lookup the catch-all blocks, or one that counts another list, hides more than the expected leftovers, can't fire, fires late or quietly", () => {
@@ -3923,8 +3932,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
       /^\[format\('\{0\},\{1\}\{2\}', format\('https:\/\/\{0\}\.internal\.\{1\}', 'ca-agentx-stg-zitadel'/,
     );
     expect(allowed.endsWith(`.hostName), ',${origins}')]`)).toBe(true);
-    for (const name of mcpNames(clients)) expect(DNS_ALLOWED.has(name), name).toBe(true);
+    // Their hosts are allowed where the OAuth server is on, beside the reviewed names, and nowhere else.
+    for (const name of mcpNames(clients)) {
+      expect(DNS_ALLOWED.has(name), name).toBe(false);
+      expect(dnsAllowedIn('staging').has(name), name).toBe(true);
+      expect(dnsAllowedIn('production').has(name), name).toBe(false);
+    }
     expect([...mcpNames(clients)].filter(tooBroad)).toEqual([]);
+    // A production DNS list holding them is refused, naming each; staging's is not.
+    const production = policyProblems(staging, { region: 'uaenorth', environment: 'production' })
+      .filter((problem) => problem.rule === 'dns-allow')
+      .map(describeProblem);
+    expect(production).toEqual([expect.stringContaining(`: ${mcpNames(clients).join(', ')}`)]);
+    expect(policyProblems(staging, STAGING).filter((problem) => problem.rule === 'dns-allow')).toEqual([]);
   });
 
   it("database-egress (AZ8): the server let out anywhere but its own subnet, DNS and its region's Storage", () => {
