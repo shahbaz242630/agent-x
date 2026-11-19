@@ -38,9 +38,9 @@ afterEach(() => {
 describe('the limits a process runs at', () => {
   const asSet = { waitingPerOrganisation: 8, waitMs: 2_000 };
 
-  it('stay wide until set: as many as the connections, an organisation as many as its share of them', () => {
+  it('stay wide until set: one fewer than the connections (AG10), an organisation as many as its share of them', () => {
     expect(gateLimitsOf(20, { active: null, perOrganisation: null, ...asSet })).toEqual({
-      active: 20,
+      active: 19,
       perOrganisation: 6,
       ...asSet,
     });

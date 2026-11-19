@@ -88,6 +88,7 @@
 // head with the first event recorded, after which only new version rows are
 // written, which wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
+import type { MemberLeaving } from '@agentx/core/modules/identity';
 import {
   AccountNumberLeak,
   type BeneficiaryOutcome,
@@ -105,6 +106,7 @@ import {
   nextVersionNumber,
   onePayeeChangeAtATime,
   openRegistrationOf,
+  openRegistrationsStartedBy,
   payeeFingerprint,
   type PayeeKey,
   payeeKeyOf,
@@ -112,7 +114,9 @@ import {
   recordFailed,
   recordLost,
   recordRegistered,
+  recordStarterRemoved,
   registeredFields,
+  type RegistrationCheck,
   registrationOf,
   type RegistrationRecord,
   type RegistrationRoute,
@@ -120,6 +124,7 @@ import {
   stagePayeeChange,
   startRegistration,
   type SupplierRecord,
+  type SuppliersTables,
   UnusablePayeeIdentity,
   supplierWithPayeeKey,
   unverifySupplier,
@@ -207,6 +212,39 @@ const isOpen = (registration: RegistrationRecord): boolean =>
 
 /** A registration read and verified, with the state a change records from. */
 type RegistrationFound = Extract<Awaited<ReturnType<typeof registrationOf>>, { outcome: 'found' }>;
+
+/**
+ * What removing a member ends of the suppliers module's (AG7, 6F1): the registrations they started and left open. A
+ * hosted one's form is a bearer link that reached them alone, and its answer is kept naming them as entering the payee
+ * (SEC-PAY-03), so once they are gone another admin's check could make a payee of what they then type. Each ended as
+ * a form not filled in time, its event naming the membership removed; the registrations, unlocked until then, read
+ * for change after the memberships (ADR-006 §6: 2a before 6), in order of ID. No brake: no agent's decision waits on
+ * them. A removed member can't open another: a start reads their membership again, after this commits.
+ */
+export const registrationsOfLeaving: MemberLeaving<SuppliersTables> = {
+  brakes: () => Promise.resolve(false),
+  async read(tx, states, { orgId, membershipId }) {
+    const open = await openRegistrationsStartedBy(tx, orgId, membershipId);
+    const found: Extract<RegistrationCheck, { readonly outcome: 'found' }>[] = [];
+    for (const { id, supplierId } of open) {
+      const read = await registrationOf(tx, states, { orgId, id }, supplierId, 'change');
+      if (read.outcome === 'tampered') return { outcome: 'tampered' };
+      // A check may have ended it between the list and its lock: only one still open is ended.
+      if (read.outcome === 'found' && isOpen(read.registration)) found.push(read);
+    }
+    return {
+      outcome: 'read',
+      end: async (actor) => {
+        for (const each of found) {
+          await recordStarterRemoved(tx, states, { orgId, id: each.registration.id }, each, {
+            actor,
+            details: { cause: 'member_removed', membershipId },
+          });
+        }
+      },
+    };
+  },
+};
 
 export function createSupplierPayees({
   database,

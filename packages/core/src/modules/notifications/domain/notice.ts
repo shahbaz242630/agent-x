@@ -223,6 +223,25 @@ export const isAboutAPayment = (kind: NoticeKind): boolean =>
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>
   isAboutAMandate(kind) || isAboutTheOrganization(kind) || SPEND_REQUEST_NOTICE_KINDS.some((each) => each === kind);
 
+/**
+ * The roles a person a notice is sent to must hold in its organisation as it is sent (AG10, 6F1), so one removed, or
+ * moved to a lesser role, after it was written is never told what the group now holds (the sender gives it up). Every
+ * role for what goes to every member, for an agent handed to its new owner, and for a notice about a person sent to
+ * that person (a group's fan-out never names them, `fanOut`); an admin or approver for what goes to them; otherwise an
+ * admin, as the fan-out's default group and the background download's (admins alone ask one) both are.
+ */
+export const rolesToReceive = (
+  notice: Pick<Notice, 'kind' | 'recipientUserId'> & { readonly aboutId: string | null },
+): readonly NoticeRole[] => {
+  const toThemselves =
+    isAboutAPerson(notice.kind) &&
+    notice.recipientUserId !== null &&
+    notice.aboutId?.toLowerCase() === notice.recipientUserId.toLowerCase();
+  if (isToEveryMember(notice.kind) || notice.kind === 'agent_handed_to_you' || toThemselves) return NOTICE_ROLES;
+  if (isToAdminsAndApprovers(notice.kind)) return ['admin', 'approver'];
+  return ['admin'];
+};
+
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
 

@@ -1066,17 +1066,23 @@ describe('the fair gate before an agent’s decision (4D2e C, PL-63)', () => {
     ).toEqual({ active: 6, perOrganisation: 2, waitingPerOrganisation: 8, waitMs: 2_000 });
   });
 
-  it('refuses a whole limit past the pool, and an organisation’s past the whole limit, set or from the pool', () => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '11' })).toEqual([
-      'AGENTX_DECISION_GATE_ACTIVE: must be at most AGENTX_DB_POOL_MAX (10): past it, decisions queue for a connection, not in turn',
-    ]);
-    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '10' }).decisionGate.active).toBe(10);
+  it('AG10: refuses a whole limit at or past the pool, and an organisation’s past the whole limit, set or from the pool', () => {
+    const atPool =
+      'AGENTX_DECISION_GATE_ACTIVE: must be below AGENTX_DB_POOL_MAX (10): at it or past it, decisions take every connection and the requests beside them wait for one';
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '11' })).toEqual([atPool]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '10' })).toEqual([atPool]);
+    expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '9' }).decisionGate.active).toBe(9);
     expect(
       problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_ACTIVE: '4', AGENTX_DECISION_GATE_PER_ORGANISATION: '5' }),
     ).toEqual(["AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (4)"]);
-    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '11' })).toEqual([
-      "AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (10)",
+    // Unset, the gate is one below the pool (decision-gate.ts gateLimitsOf).
+    expect(problemsWith({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '10' })).toEqual([
+      "AGENTX_DECISION_GATE_PER_ORGANISATION: must be at most the gate's whole limit (9)",
     ]);
+    // A pool of one leaves no room below it: unset, the gate takes that one connection rather than none.
+    expect(problemsWith({ ...MINIMAL, AGENTX_DB_POOL_MAX: '1', AGENTX_DECISION_GATE_PER_ORGANISATION: '1' })).toEqual(
+      [],
+    );
     expect(loadConfig({ ...MINIMAL, AGENTX_DECISION_GATE_PER_ORGANISATION: '3' }).decisionGate.perOrganisation).toBe(3);
   });
 
