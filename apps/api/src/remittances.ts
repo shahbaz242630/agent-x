@@ -13,8 +13,9 @@
 // downloadable by its admins and by us (partner S119; decision 34: every send
 // or skip with its reason): a skip in the transaction that decides it
 // (`payment.remittance_skipped`, its reason), one sent once the email went
-// (`payment.remittance_emailed`), one given up once the outbox gave it up
-// (`payment.remittance_failed`, the failure kept: gate H2). About the payment's transaction by a
+// (`payment.remittance_emailed`, with which reference it showed: the order
+// reference or our own, never the text itself; AG11), one given up once the
+// outbox gave it up (`payment.remittance_failed`, the failure kept: gate H2). About the payment's transaction by a
 // subject of its own (never the transaction's signed state), by the API; never
 // the address.
 import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
@@ -91,9 +92,9 @@ export function createRemittances({
   };
 
   return {
-    emailed: async (orgId, transactionId) => {
+    emailed: async (orgId, transactionId, reference) => {
       await withSignedStates(database, orgId, { keys, ids, logger }, (tx) =>
-        recorded(tx, orgId, transactionId, 'payment.remittance_emailed', {}),
+        recorded(tx, orgId, transactionId, 'payment.remittance_emailed', { reference }),
       );
     },
     givenUp: async (orgId, transactionId, why) => {
@@ -158,7 +159,7 @@ export function createRemittances({
           to: email,
           paid: {
             payerName: named.payerName,
-            invoiceNumber: request.request.orderReference,
+            orderReference: request.request.orderReference,
             bankReference: paid.paymentReference,
             amountMinor: paid.amountMinor,
             currency: paid.currency,

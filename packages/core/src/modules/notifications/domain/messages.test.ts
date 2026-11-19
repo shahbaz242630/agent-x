@@ -443,7 +443,7 @@ describe('a notice’s email (B5-1b)', () => {
     };
     const paid: PaidRemittance = {
       payerName: 'Falcon Trading LLC',
-      invoiceNumber: 'INV-2026-0042',
+      orderReference: 'INV-2026-0042',
       bankReference: 'AGX INV-2026-0042',
       amountMinor: 1_234_567_805n,
       currency: 'AED',
@@ -459,6 +459,21 @@ describe('a notice’s email (B5-1b)', () => {
           'Invoice number: INV-2026-0042',
           'Bank reference: AGX INV-2026-0042 (as your bank shows it)',
         ].join('\n'),
+      );
+    });
+
+    it('shows our own payment reference, never the agent’s text, when the order reference isn’t invoice-shaped (AG11)', () => {
+      const phishing = 'Pay now at evil.com/pay';
+      const told = messageFor(remittanceNotice, 'accounts@supplier.example.test', undefined, undefined, {
+        ...paid,
+        orderReference: phishing,
+      });
+
+      expect(told.text).not.toContain(phishing);
+      expect(told.text).not.toContain('Invoice number');
+      expect(told.text).not.toContain('Bank reference');
+      expect(told.text).toContain(
+        ['Amount: AED 12,345,678.05', 'Payment reference: AGX INV-2026-0042 (as your bank shows it)', ''].join('\n'),
       );
     });
 
