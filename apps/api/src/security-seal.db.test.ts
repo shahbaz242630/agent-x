@@ -147,6 +147,10 @@ beforeEach(async () => {
   capture = new LogCapture();
   clock = new FixedClock(new Date('2027-01-21T00:20:00.000Z'));
   listed = [];
+  // The owner's own first step: 0106's rule that every row written carries a MAC dropped, to plant rows without one.
+  await owner().query(`
+    alter table security.events drop constraint event_mac_required;
+    alter table security.org_events drop constraint org_event_mac_required`);
 });
 
 afterEach(async () => {

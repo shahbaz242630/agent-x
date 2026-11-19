@@ -69,6 +69,10 @@ function envFor(role: TestRole, overrides: Record<string, string> = {}): Record<
 
 const servers: FastifyInstance[] = [];
 
+/** The platform chain emptied, and the security rows with it, so a start seals them afresh and records it (S206 V6). */
+const TRUNCATE_CHAIN_AND_SECURITY_ROWS =
+  'truncate platform_controls.audit_events, platform_controls.audit_head, security.events, security.org_events, security.partner_event_evidence';
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((api) => api.close()));
 });
@@ -293,7 +297,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   });
 
   it('SEC-OPS-05 writes each start to the platform audit chain, with the hash it logged, in order', async () => {
-    await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    // The security rows too: a chain emptied beside rows sealed already reads as its sealing record deleted (S206 V6).
+    await database.as('admin').query(TRUNCATE_CHAIN_AND_SECURITY_ROWS);
     const first = await start(envFor('app'));
     await stop(first);
     const second = await start(envFor('app', { AGENTX_RELEASE: 'r-second' }));
@@ -307,6 +312,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         'select seq, actor_id, action, details from platform_controls.audit_events order by seq',
       );
 
+    // The first start's own record, then its sealing of the security rows from before 0106 (S206 V6), once.
     expect(rows).toEqual([
       {
         seq: '1',
@@ -314,8 +320,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[0], release: 'local' }),
       },
+      { seq: '2', actor_id: 'api', action: 'security_events.sealing_started', details: '{}' },
+      { seq: '3', actor_id: 'api', action: 'security_events.all_sealed', details: '{}' },
       {
-        seq: '2',
+        seq: '4',
         actor_id: 'api',
         action: 'platform.started',
         details: JSON.stringify({ configHash: logged[1], release: 'r-second' }),
@@ -332,7 +340,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
         ok: true,
-        seq: 2n,
+        seq: 4n,
       });
     } finally {
       await reader.destroy();
@@ -356,12 +364,12 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     expect(rows).toEqual([{ details: JSON.stringify({ configHash, gateRef, release: 'r-live' }) }]);
   });
 
-  it('anchors the platform chain once it listens, where the start it recorded is the head (ADR-012 §2)', async () => {
-    await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+  it('anchors the platform chain once it listens, at its head: the start, then its sealing of the security rows (ADR-012 §2)', async () => {
+    await database.as('admin').query(TRUNCATE_CHAIN_AND_SECURITY_ROWS);
     const run = await start(envFor('app'));
     await vi.waitFor(() => {
       expect(run.capture.lines().find((line) => line.event === 'audit.anchored')).toEqual(
-        expect.objectContaining({ level: 'info', chain: 'platform', seq: '1' }),
+        expect.objectContaining({ level: 'info', chain: 'platform', seq: '3' }),
       );
     });
     await stop(run);
@@ -560,8 +568,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       ['0199a0f0-0000-7000-8000-0000000b25a2', '89 days'],
     ] as const) {
       await admin.query(
-        `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at)
-         values ($1, 'rate_limited', 'address', '203.0.113.7', null, pg_catalog.now() - $2::interval, 1, pg_catalog.now() - $2::interval)`,
+        `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+         values ($1, 'rate_limited', 'address', '203.0.113.7', null, pg_catalog.now() - $2::interval, 1, pg_catalog.now() - $2::interval, true)`,
         [id, age],
       );
     }

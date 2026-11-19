@@ -32,23 +32,33 @@ const AT = new Date('2026-11-25T09:00:00.000Z');
 
 const owner = () => database.as('admin');
 
-/** Rows of every table as the release before wrote them: no MAC. */
+/** 0106's rule that every row written carries a MAC, off: as before 0106, or as the database's owner can. */
+const DROP_RULE = `
+  alter table security.events drop constraint if exists event_mac_required;
+  alter table security.org_events drop constraint if exists org_event_mac_required;
+  alter table security.partner_event_evidence drop constraint if exists evidence_mac_required`;
+
+const ownerDropsRule = () => owner().query(DROP_RULE);
+
+/** Rows of every table as the release before wrote them: no MAC, marked from before 0106 as it marks them. */
 async function legacyRows(): Promise<void> {
   for (let n = 0; n < 3; n += 1) {
     await owner().query(
-      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at)
-       values ($1, 'sign_in_failed', 'state_mismatch', '203.0.113.7', null, $2, 1, $2)`,
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+       values ($1, 'sign_in_failed', 'state_mismatch', '203.0.113.7', null, $2, 1, $2, true)`,
       [ids.next(), AT],
     );
   }
   await owner().query(
-    `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at)
-     values ($1, $2, 'rate_limited', 'per_user', null, null, null, $3, 2, $3)`,
+    `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at,
+       before_macs)
+     values ($1, $2, 'rate_limited', 'per_user', null, null, null, $3, 2, $3, true)`,
     [ORG, ids.next(), AT],
   );
   await owner().query(
-    `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
-     values ($1, 'signature', null, $2, 1, 2, $3)`,
+    `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes,
+       received_at, before_macs)
+     values ($1, 'signature', null, $2, 1, 2, $3, true)`,
     [ids.next(), Buffer.alloc(40, 1), AT],
   );
 }
@@ -90,6 +100,53 @@ beforeEach(async () => {
 afterEach(async () => {
   await app.destroy();
   await database.drop();
+});
+
+describe('0106: every row written from now on carries a MAC (S206 V6)', () => {
+  it('refuses a row without one in every table, as the release before would write it during the roll-out', async () => {
+    const at = new Date('2026-11-25T09:00:00.000Z');
+    await expect(
+      app
+        .insertInto('security.events')
+        .values({
+          id: ids.next(),
+          kind: 'sign_in_failed',
+          reason: 'state_mismatch',
+          ip: null,
+          user_id: null,
+          window_start: at,
+          count: 1,
+          created_at: at,
+        })
+        .execute(),
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      withTenant(app, ORG, (tx) =>
+        tx
+          .insertInto('security.org_events')
+          .values({
+            org_id: ORG,
+            id: ids.next(),
+            kind: 'rate_limited',
+            reason: 'per_user',
+            ip: null,
+            user_id: null,
+            agent_id: null,
+            window_start: at,
+            count: 1,
+            created_at: at,
+          })
+          .execute(),
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      owner().query(
+        `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+         values ($1, 'signature', null, $2, 1, 2, $3)`,
+        [ids.next(), Buffer.alloc(40, 1), at],
+      ),
+    ).rejects.toMatchObject({ code: '23514' });
+  });
 });
 
 describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
@@ -158,6 +215,7 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
       SEALING_STARTED,
       ALL_SEALED,
     ]);
+    await ownerDropsRule();
     await owner().query('update security.partner_event_evidence set mac = null, mac_key_version = null');
     if (globalKept) await owner().query(NULL_ORG_MACS);
     else await owner().query(NULL_GLOBAL_MACS);
@@ -171,6 +229,7 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     await seal();
     // Its end removed for one start, the owner's rows tampered with and their MACs taken off, to be sealed afresh.
     await owner().query('delete from platform_controls.audit_events where action = $1', [ALL_SEALED]);
+    await ownerDropsRule();
     await owner().query(
       "update security.events set mac = null, mac_key_version = null, reason = 'callback_incomplete'",
     );
@@ -186,6 +245,7 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     await owner().query('delete from platform_controls.audit_events where action = $1', [ALL_SEALED]);
     const waiting = seal(60_000);
     // The other start finishing: its record of the end written now.
+    await ownerDropsRule();
     await owner().query('update security.events set mac = null, mac_key_version = null');
     await app.transaction().execute((tx) =>
       createPlatformChain({ keys, ids }).record(tx, {
@@ -204,6 +264,7 @@ describe('the security rows from before 0106 sealed at start (S206 V6)', () => {
     await legacyRows();
     await seal();
     await owner().query("update platform_controls.audit_events set action = 'x.y' where action = $1", [ALL_SEALED]);
+    await ownerDropsRule();
     await owner().query('update security.events set mac = null, mac_key_version = null');
 
     expect(await seal(0)).toBe('deleted');

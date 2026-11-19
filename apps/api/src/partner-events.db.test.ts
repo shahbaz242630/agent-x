@@ -946,6 +946,9 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
   describe('the store’s caps, for every process together', () => {
     const body = Buffer.from('{}');
     const keep = (ip: string | undefined) => events().keepRefused(app, { reason: 'signature', ip, body });
+    /** The owner's first step: 0106's rule that every row written carries a MAC dropped, to plant one without. */
+    const DROP_EVIDENCE_RULE =
+      'alter table security.partner_event_evidence drop constraint if exists evidence_mac_required';
 
     it('keeps the first 5 an hour from one network, the first of them said first, the rest capped', async () => {
       const answers = [];
@@ -983,6 +986,7 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
 
     it('counts no row the database’s owner planted or edited: dated ahead, with no MAC, or changed (S206 V6)', async () => {
       const owner = database.as('admin');
+      await owner.query(DROP_EVIDENCE_RULE);
       const plant = (receivedAt: Date) =>
         owner.query(
           `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
@@ -1007,6 +1011,7 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
 
     it('counts no row without a MAC however old its ID, received now: the alarm instead', async () => {
       const lastYear = `${v7Floor(clock.now().getTime() - 365 * 86_400_000).slice(0, 14)}7000-8000-00000000abcd`;
+      await database.as('admin').query(DROP_EVIDENCE_RULE);
       await database.as('admin').query(
         `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
          values ($1, 'signature', '203.0.113.7', $2, 1, 2, $3)`,

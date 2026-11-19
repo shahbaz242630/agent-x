@@ -288,6 +288,8 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
       limited('per_agent', { agentId: AGENT, orgId: ORG_A, windowStart: new Date(START.getTime() - 120_000) }),
     ]);
     const owner = database.as('admin');
+    // The owner's first step: 0106's rule that every row written carries a MAC dropped, to plant one without.
+    await owner.query('alter table security.org_events drop constraint if exists org_event_mac_required');
     await owner.query("update security.org_events set count = 99 where reason = 'per_agent'");
     const planted = ids.next();
     await owner.query(
