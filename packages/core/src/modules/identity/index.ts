@@ -86,6 +86,7 @@ export {
   type LoginFlows,
   MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
+  QUIET_NETWORK_SIGN_INS,
 } from './infrastructure/login-flows.ts';
 export { createLoginSessions, type LoginSessions, LoginSessionsUnavailable } from './infrastructure/login-sessions.ts';
 export { LoginTokenRefused } from './infrastructure/zitadel-call.ts';

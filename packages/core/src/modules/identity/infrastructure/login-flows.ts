@@ -5,9 +5,14 @@
 // times are the Clock's (ADR-006 §3).
 //
 // S206 V8 (0106): anyone can start a sign-in with an anonymous GET, so a
-// sign-in's flow is started only while fewer than MOST_OPEN_SIGN_INS are under
-// way, and fewer than MOST_OPEN_SIGN_INS_A_NETWORK from its network, as the
-// OAuth flows are held (oauth/flows.ts). A step-up's flow is never counted.
+// sign-in's flow is started only while its network holds fewer than
+// MOST_OPEN_SIGN_INS_A_NETWORK under way. Every network's together are held
+// too, but never as a lockout (the review of S206 V8): once MOST_OPEN_SIGN_INS
+// are under way, a network holding fewer than QUIET_NETWORK_SIGN_INS is still
+// let in, and only the busy ones are refused, so a crowd of networks filling
+// the table can't stop everyone else signing in, admins included; the table
+// then grows only with each new network's few. A step-up's flow is never
+// counted.
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
@@ -22,10 +27,13 @@ import type { IdentityTables } from './tables.ts';
 export const LOGIN_FLOW_SECONDS = 600;
 
 /**
- * The most sign-ins under way at once, every network together (S206 V8): a picture on a busy page beats any
- * per-address limit, so the table is held here whatever comes. Far above any real day: a flow lives ten minutes.
+ * The sign-ins under way, every network together, past which only a quiet network's start (S206 V8): the table's
+ * storage backstop, far above any real day (a flow lives ten minutes), never a lockout.
  */
-export const MOST_OPEN_SIGN_INS = 20_000;
+export const MOST_OPEN_SIGN_INS = 1_000_000;
+
+/** How few sign-ins under way make a network quiet: let in even when MOST_OPEN_SIGN_INS are under way. */
+export const QUIET_NETWORK_SIGN_INS = 3;
 
 /**
  * The most sign-ins under way at once from one network (S206 V8): an IPv4 address alone, or an IPv6 /48, as the OAuth
@@ -33,7 +41,7 @@ export const MOST_OPEN_SIGN_INS = 20_000;
  */
 export const MOST_OPEN_SIGN_INS_A_NETWORK = 100;
 
-/** A sign-in's flow kept, with the ID for its cookie; or not, every network's sign-ins at their cap, or this one's. */
+/** A sign-in's flow kept, with the ID for its cookie; or not: every network's at their cap and this one not quiet, or this one's at its own. */
 export type SignInFlowStarted =
   { readonly outcome: 'started'; readonly flowId: string } | { readonly outcome: 'full' | 'network_full' };
 
@@ -54,9 +62,10 @@ export interface LoginFlows {
    */
   save(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, stepUpChallengeId?: string): Promise<string>;
   /**
-   * Keeps a sign-in's flow started from `network` (S206 V8), unless MOST_OPEN_SIGN_INS are under way or this network
-   * holds MOST_OPEN_SIGN_INS_A_NETWORK, each count stopping at its cap (0106's indexes). Best effort, with no lock, as
-   * the OAuth flows' caps: sign-ins started at once may pass a cap by a few rows. In the caller's transaction.
+   * Keeps a sign-in's flow started from `network` (S206 V8), unless this network holds MOST_OPEN_SIGN_INS_A_NETWORK
+   * under way, or MOST_OPEN_SIGN_INS are and this network holds QUIET_NETWORK_SIGN_INS or more; each count stopping at
+   * its cap (0106's indexes). Best effort, with no lock, as the OAuth flows' caps: sign-ins started at once may pass a
+   * cap by a few rows. In the caller's transaction.
    */
   start(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, network: string): Promise<SignInFlowStarted>;
   /** Takes the flow this ID names, once and within its ten minutes; undefined for any other. */
@@ -80,7 +89,8 @@ async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, ne
     .selectFrom((inner) => {
       const open = inner
         .selectFrom('identity.login_flows')
-        .select('cookie_hash')
+        // A constant, so the count reads 0106's partial indexes alone, never the rows.
+        .select(sql<number>`1`.as('one'))
         .where('ends_at', '>', now)
         .where('step_up_challenge_id', 'is', null);
       return (network === undefined ? open : open.where('network_key', '=', network)).limit(most).as('open');
@@ -90,7 +100,14 @@ async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, ne
   return flows >= most;
 }
 
-export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlows {
+export function createLoginFlows({
+  clock,
+  mostOpen = MOST_OPEN_SIGN_INS,
+}: {
+  readonly clock: Clock;
+  /** Every network's backstop (MOST_OPEN_SIGN_INS unless a test names fewer, rather than add a million rows). */
+  readonly mostOpen?: number;
+}): LoginFlows {
   /** Keeps the flow from `now` for its ten minutes: a step-up's with its challenge, a sign-in's with its network. */
   async function kept(
     db: Kysely<IdentityTables>,
@@ -128,8 +145,11 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
 
     async start(db, flow, returnTo, network) {
       const now = clock.now();
-      if (await signInsAt(db, MOST_OPEN_SIGN_INS, now)) return { outcome: 'full' };
       if (await signInsAt(db, MOST_OPEN_SIGN_INS_A_NETWORK, now, network)) return { outcome: 'network_full' };
+      // Past the backstop, a quiet network still gets in: only the busy ones wait.
+      if ((await signInsAt(db, mostOpen, now)) && (await signInsAt(db, QUIET_NETWORK_SIGN_INS, now, network))) {
+        return { outcome: 'full' };
+      }
       return { outcome: 'started', flowId: await kept(db, flow, returnTo, now, { network }) };
     },
 

@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import {
   createLoginFlows,
   LOGIN_FLOW_SECONDS,
-  MOST_OPEN_SIGN_INS,
   MOST_OPEN_SIGN_INS_A_NETWORK,
+  QUIET_NETWORK_SIGN_INS,
 } from './login-flows.ts';
 import type { LoginFlow } from './oidc-client.ts';
 import type { IdentityTables } from './tables.ts';
@@ -253,12 +253,13 @@ describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server
     expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
   });
 
-  it(`refuses every new sign-in while ${String(MOST_OPEN_SIGN_INS)} are under way, from any network, keeping none`, async () => {
+  it(`past every network's backstop, still lets a quiet network in and refuses only a busy one: no lockout`, async () => {
     const at = new Date('2027-02-01T09:00:00Z');
-    const store = createLoginFlows({ clock: new FixedClock(at) });
+    // A backstop of 50 here rather than add MOST_OPEN_SIGN_INS rows: the rule is the same at any size.
+    const store = createLoginFlows({ clock: new FixedClock(at), mostOpen: 50 });
     const admin = database.as('admin');
-    // One short of the cap, each from a network of its own, so no network comes near its own cap: the server's cap
-    // alone holds them. Beside them, step-ups' flows, which are never counted.
+    // Each from a network of its own, as a crowd filling the table would be. Beside them, step-ups' flows, never
+    // counted: were they, the busy network's fourth below would be refused too.
     const added = (count: number, stepUp: boolean) =>
       admin.query(
         `insert into identity.login_flows
@@ -269,17 +270,60 @@ describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server
          from pg_catalog.generate_series(1, $3::int) as n`,
         [at, new Date(at.getTime() + 1000), count, stepUp],
       );
-    await added(MOST_OPEN_SIGN_INS - 1, false);
+    await added(46, false);
     await added(5, true);
+    const busy = '203.0.113.9';
+    const start = (network: string) => store.start(app, newFlow(), '/', network);
     try {
-      expect(await store.start(app, newFlow(), '/', '203.0.113.9')).toMatchObject({ outcome: 'started' });
-      expect(await store.start(app, newFlow(), '/', '203.0.113.10')).toEqual({ outcome: 'full' });
-      expect(await openFrom('203.0.113.10')).toEqual([]);
-      // Ended, they hold nothing: the cap counts only the sign-ins under way.
-      const later = createLoginFlows({ clock: new FixedClock(new Date(at.getTime() + 1000)) });
-      expect(await later.start(app, newFlow(), '/', '203.0.113.10')).toMatchObject({ outcome: 'started' });
+      // Under the backstop, the busy network's first four start (50 under way after the fourth).
+      for (let open = 0; open < QUIET_NETWORK_SIGN_INS + 1; open += 1) {
+        expect(await start(busy)).toMatchObject({ outcome: 'started' });
+      }
+      // At it, the busy network is refused, keeping nothing more,
+      expect(await start(busy)).toEqual({ outcome: 'full' });
+      expect(await openFrom(busy)).toHaveLength(QUIET_NETWORK_SIGN_INS + 1);
+      // while a quiet one is let in, up to its few, and only then refused.
+      const quiet = '203.0.113.10';
+      for (let open = 0; open < QUIET_NETWORK_SIGN_INS; open += 1) {
+        expect(await start(quiet)).toMatchObject({ outcome: 'started' });
+      }
+      expect(await start(quiet)).toEqual({ outcome: 'full' });
+      // Ended, they hold nothing: the backstop counts only the sign-ins under way.
+      const later = createLoginFlows({ clock: new FixedClock(new Date(at.getTime() + 1000)), mostOpen: 50 });
+      expect(await later.start(app, newFlow(), '/', busy)).toMatchObject({ outcome: 'started' });
     } finally {
-      await admin.query("delete from identity.login_flows where network_key like 'net-%'");
+      await admin.query("delete from identity.login_flows where network_key like 'net-%' or created_at = $1", [at]);
+    }
+  });
+
+  it('counts the sign-ins under way from the partial indexes alone, never reading the rows', async () => {
+    // One connection, so its settings hold for its plans: no scan of the table, nor a bitmap over it, to fall back on.
+    const client = await database.connect('app');
+    const planOf = async (explained: Promise<{ readonly 'QUERY PLAN': string }[]>) =>
+      (await explained).map((row) => row['QUERY PLAN']).join(' ');
+    try {
+      await client.query('set enable_seqscan = off');
+      await client.query('set enable_bitmapscan = off');
+      // As login-flows.ts counts them: every network's, then one network's.
+      expect(
+        await planOf(
+          client.query(
+            `explain select pg_catalog.count(*) from (select 1 from identity.login_flows
+               where ends_at > now() and step_up_challenge_id is null limit 100) as open`,
+          ),
+        ),
+      ).toMatch(/Index Only Scan using login_flows_(sign_ins_open|by_network)/);
+      expect(
+        await planOf(
+          client.query(
+            `explain select pg_catalog.count(*) from (select 1 from identity.login_flows
+               where ends_at > now() and step_up_challenge_id is null and network_key = $1 limit 100) as open`,
+            ['203.0.113.9'],
+          ),
+        ),
+      ).toMatch(/Index Only Scan using login_flows_by_network/);
+    } finally {
+      await client.end();
     }
   });
 });

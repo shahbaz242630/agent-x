@@ -407,8 +407,8 @@ export const PLAIN_WORDS = {
     next: 'It usually clears once the login service wakes up. If it keeps happening, check the login service is up.',
   },
   'auth.sign_ins_capped': {
-    happened: 'So many sign-ins were under way at once that Agent X refused new ones.',
-    broke: 'People signing in were asked to try again shortly; anyone signed in already carries on.',
+    happened: 'So many sign-ins were under way at once that Agent X let in only networks with few under way.',
+    broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
     next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
   },
   'auth.sign_ins_network_capped': {
