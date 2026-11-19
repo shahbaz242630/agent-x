@@ -456,6 +456,7 @@
   "evidence.versionNamed": "Version {number}: {name}",
   "evidence.verification": "Those details verified",
   "evidence.source": "Paid from",
+  "evidence.sourceUnknown": "Not one of your bank accounts",
   "evidence.sourcePartner": "Linked through",
   "evidence.sourceId": "Bank account ID",
   "evidence.outcome": "Approval and money held",

@@ -905,6 +905,41 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
   // organisation's) is DENIED and sealed naming no version of the supplier's details (0039), and every reader of the
   // organisation's requests then failed: the list with a 500 (suppliersNamed threw), the request, its evidence and
   // its evidence's download as INTEGRITY_FAILED. Each now shows it, its supplier unnamed, never another's name.
+  // The same for a funding source (S206 V8): an ask naming one its organisation doesn't have is DENIED, and its
+  // evidence and the evidence's download failed as INTEGRITY_FAILED. Each reader now shows it, the source by the ID
+  // the agent sent alone, never another organisation's holder, account or partner.
+  it.each([
+    ['one that never existed', () => randomUUID()],
+    ['another organisation’s', () => theirs.world.source],
+  ])(
+    'shows a request denied for naming a funding source its organisation doesn’t have, %s, in every reader',
+    async (_what, sourceOf) => {
+      const fundingSourceId = sourceOf();
+      const base = sample(
+        operations.find(({ method, route }) => method === 'POST' && route === '/v1/spend-requests')?.body ?? {},
+      ) as object;
+      const asked = await send(ours.agent, 'POST', '/v1/spend-requests', { ...base, fundingSourceId });
+      expect(asked.statusCode, asked.body).toBe(201);
+      const { id, status } = JSON.parse(asked.body) as { id: string; status: string };
+      expect(status).toBe('DENIED');
+      const read = async (who: Readonly<Record<string, string>>, method: 'GET' | 'POST', url: string, code = 200) => {
+        const answer = await send(who, method, url);
+        expect(answer.statusCode, `${method} ${url}: ${answer.body}`).toBe(code);
+        // Never another organisation's record, beyond the ID the agent itself sent.
+        expect(everyIdOfTheirs().filter((one) => one !== fundingSourceId && answer.body.includes(one))).toEqual([]);
+        return JSON.parse(answer.body) as Record<string, unknown>;
+      };
+
+      expect(await read(ours.admin, 'GET', '/v1/approvals')).toMatchObject({ unchecked: [] });
+      expect(await read(ours.admin, 'GET', `/v1/spend-requests/${id}`)).toMatchObject({ fundingSourceId });
+      expect(await read(ours.admin, 'GET', `/v1/spend-requests/${id}/evidence`)).toMatchObject({
+        evidence: { fundingSource: { id: fundingSourceId, holderName: null, hint: null, partner: null } },
+      });
+      expect(await read(ours.admin, 'POST', `/v1/spend-requests/${id}/evidence-exports`, 201)).toBeDefined();
+      expect(await read(ours.agent, 'GET', `/v1/agent/spend-requests/${id}`)).toMatchObject({ id, status: 'DENIED' });
+    },
+  );
+
   it.each([
     ['one that never existed', () => randomUUID()],
     ['another organisation’s', () => theirs.world.suppliers[0] ?? ''],
@@ -1030,5 +1065,57 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+
+  // And the funding source's (S206 V8): only a DENIED request is shown with a source none of the organisation's. A
+  // request still waiting whose source is then deleted past the app, its events too, keeps its evidence refused.
+  it('still refuses the evidence of a request not denied once its funding source is gone', async () => {
+    const evidenceOf = async () =>
+      answerOf(await send(theirs.admin, 'GET', `/v1/spend-requests/${theirs.request}/evidence`));
+    // The control: A's waiting request's evidence reads before.
+    expect((await evidenceOf()).status).toBe(200);
+    const admin = await database.connect('admin');
+    try {
+      await admin.query('begin');
+      await admin.query("select pg_catalog.set_config('session_replication_role', 'replica', true)");
+      await admin.query('delete from funding_sources.sources where org_id = $1 and id = $2', [
+        theirs.world.org,
+        theirs.world.source,
+      ]);
+      await admin.query(
+        "delete from audit.events where org_id = $1 and subject_type = 'funding_source' and subject_id = $2",
+        [theirs.world.org, theirs.world.source],
+      );
+      await admin.query('commit');
+    } finally {
+      await admin.end();
+    }
+    expect(await evidenceOf()).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
+  });
+
+  // A DENIED request naming the organisation's own source is shown with it, never as none: that source's row deleted
+  // past the app while its events stay reads as tampered, and the evidence stays refused.
+  it('still refuses the evidence of a denied request whose own funding source’s row is gone', async () => {
+    const base = sample(
+      operations.find(({ method, route }) => method === 'POST' && route === '/v1/spend-requests')?.body ?? {},
+    ) as object;
+    const asked = await send(ours.agent, 'POST', '/v1/spend-requests', base);
+    const { id, status } = JSON.parse(asked.body) as { id: string; status: string };
+    expect(status).toBe('DENIED');
+    const evidenceOf = async () => answerOf(await send(ours.admin, 'GET', `/v1/spend-requests/${id}/evidence`));
+    expect((await evidenceOf()).status).toBe(200);
+    const admin = await database.connect('admin');
+    try {
+      await admin.query('begin');
+      await admin.query("select pg_catalog.set_config('session_replication_role', 'replica', true)");
+      await admin.query('delete from funding_sources.sources where org_id = $1 and id = $2', [
+        ours.world.org,
+        ours.world.source,
+      ]);
+      await admin.query('commit');
+    } finally {
+      await admin.end();
+    }
+    expect(await evidenceOf()).toEqual({ status: 503, code: 'INTEGRITY_FAILED' });
   });
 });

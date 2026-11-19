@@ -133,7 +133,14 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
           label={t('evidence.verification')}
           value={supplier.version === null ? null : <Signed event={supplier.version.verification} />}
         />
-        <Fact label={t('evidence.source')} value={`${fundingSource.holderName} · ${fundingSource.hint}`} />
+        <Fact
+          label={t('evidence.source')}
+          value={
+            fundingSource.holderName === null
+              ? t('evidence.sourceUnknown')
+              : `${fundingSource.holderName} · ${fundingSource.hint ?? ''}`
+          }
+        />
         <Fact label={t('evidence.sourcePartner')} value={fundingSource.partner} />
         <Fact label={t('evidence.sourceId')} value={fundingSource.id} mono />
       </dl>

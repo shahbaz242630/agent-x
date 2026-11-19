@@ -282,7 +282,10 @@ async function paymentObjectsOf(tx: EvidenceTx, orgId: string, requestId: string
 async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: string, request: RequestPart) {
   const { fundingSourceId, supplierId, id } = request.shown.request;
   const source = await sourceOf(tx, states, { orgId, id: fundingSourceId }, 'share');
-  if (source.outcome !== 'found') throw integrityFailed();
+  // A source none of the organisation's (none at all, or another's) is named only by a request denied for it (S206
+  // V8): nothing of it to show. A row of the organisation's gone while its events stay reads as tampered, never missing.
+  const noneOfOurs = source.outcome === 'missing' && request.shown.request.status === 'DENIED';
+  if (source.outcome !== 'found' && !noneOfOurs) throw integrityFailed();
   // A request names no version only for a supplier not the organisation's (0039): denied for it, it has none to show,
   // as requestInOrder found (S206 V8).
   const versionId = fieldOf(request.state, 'supplier_version_id');
@@ -292,7 +295,13 @@ async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: st
   const payment = objects === undefined ? null : await paymentInOrder(tx, states, orgId, objects.transactionId);
   // Found by its instruction's request, a signed field: a row moved to another request fails its seal there.
   if (payment !== null && payment.outcome !== 'found') throw integrityFailed();
-  return { source: source.source, sourceEventId: source.state.eventId, version: version?.version ?? null, payment };
+  const found = source.outcome === 'found' ? source : null;
+  return {
+    source: found?.source ?? null,
+    sourceEventId: found?.state.eventId ?? null,
+    version: version?.version ?? null,
+    payment,
+  };
 }
 
 type FundingAndPayment = Awaited<ReturnType<typeof fundingAndPayment>>;
@@ -315,8 +324,10 @@ const objectsOfPayment = (payment: NonNullable<PaymentRead>): PaymentObjects => 
 function rowsReadOf(request: RequestPart, { source, sourceEventId, payment }: FundingAndPayment): SignedRowRead[] {
   const rows: SignedRowRead[] = [
     { subject: { type: SPEND_REQUESTS.subject, id: request.shown.request.id }, eventId: request.state.eventId },
-    { subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId },
   ];
+  if (source !== null && sourceEventId !== null) {
+    rows.push({ subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId });
+  }
   // The payment as the reservation was judged with it: settled since (its reservation moved by no signed event of
   // the request's), its transaction's newer event shows it moved.
   const judged = request.paymentJudged;
@@ -468,10 +479,10 @@ function bundleOf(
           : { id: version.id, number: version.version, name: version.displayName, verification: logged.verification },
     },
     fundingSource: {
-      id: source.id,
-      holderName: source.summary.holderName,
-      hint: source.summary.hint,
-      partner: source.partner,
+      id: asked.fundingSourceId,
+      holderName: source?.summary.holderName ?? null,
+      hint: source?.summary.hint ?? null,
+      partner: source?.partner ?? null,
     },
     approval: approved === undefined ? null : personDecisionOf(approved),
     rejection:
@@ -843,13 +854,26 @@ const BUNDLE = {
   fundingSource: z
     .object({
       id: z.uuid().describe('The bank account it pays from, by its ID.'),
-      holderName: z.string().describe('The account holder’s name, as the partner gave it.'),
+      holderName: z
+        .string()
+        .nullable()
+        .describe('The account holder’s name, as the partner gave it; null when it is none of the organisation’s.'),
       hint: z
         .string()
-        .describe('The country and the account number’s last four characters, masked, such as `AE…6026`.'),
-      partner: z.string().describe('The payment partner the account is linked through.'),
+        .nullable()
+        .describe(
+          'The country and the account number’s last four characters, masked, such as `AE…6026`; null when it is ' +
+            'none of the organisation’s.',
+        ),
+      partner: z
+        .string()
+        .nullable()
+        .describe('The payment partner the account is linked through; null when it is none of the organisation’s.'),
     })
-    .describe('The funding source chosen, as the console shows it: never its consent or full account number.'),
+    .describe(
+      'The funding source chosen, as the console shows it: never its consent or full account number. Only its ID ' +
+        'when it is none of the organisation’s (the agent named one it doesn’t have, so the request was denied).',
+    ),
   approval: z
     .object(PERSON_DECISION)
     .nullable()

@@ -71,11 +71,12 @@ export interface Evidence {
       readonly verification: LogEvent | null;
     } | null;
   };
+  /** Its details null for one the organisation doesn't have (S206 V8). */
   readonly fundingSource: {
     readonly id: string;
-    readonly holderName: string;
-    readonly hint: string;
-    readonly partner: string;
+    readonly holderName: string | null;
+    readonly hint: string | null;
+    readonly partner: string | null;
   };
   readonly approval: PersonDecision | null;
   readonly rejection: (PersonDecision & { readonly reason: string }) | null;
