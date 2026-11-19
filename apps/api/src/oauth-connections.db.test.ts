@@ -2204,7 +2204,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     expect(await ask(viaDocument)).toMatchObject({ outcome: 'opened' });
     expect(fetched).toEqual([CLIENT_URL]);
     const flow = { flowId: first.flowId, cookie: first.cookie };
-    expect(await consentsOf.request(flow)).toMatchObject({
+    expect(await consentsOf.request(flow, 'a person')).toMatchObject({
       via: 'code',
       client: { id: CLIENT_URL, name: 'Claude', verifiedBy: 'claude.ai' },
       redirectHost: 'claude.ai',
