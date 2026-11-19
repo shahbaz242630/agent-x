@@ -53,6 +53,7 @@
 import {
   type AnchorPoint,
   appendEvents,
+  CHAIN_START,
   type Chain,
   type ChainBatchWriter,
   type ChainEdgeReader,
@@ -93,6 +94,7 @@ import {
   readEachTenant,
   sendTogether,
   type SentTogether,
+  tenantOfTransaction,
   withTenant,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -1029,8 +1031,17 @@ function edgesOf(rows: readonly Readonly<Record<string, unknown>>[]): ChainEdges
   return edgesIn(row, contentOf(row));
 }
 
-/** Checking's reads of the audit tables, for one organisation. */
-function readerFor(tx: AuditTransaction, orgId: string, keys: KeyProvider): ChainReader & ChainEdgeReader {
+/**
+ * Checking's reads of the audit tables, for one organisation. `seen`, when
+ * given, is shown each event row the check reads, as it reads it, for a
+ * caller that acts on those very rows once the check passes (eventsSinceChecked).
+ */
+function readerFor(
+  tx: AuditTransaction,
+  orgId: string,
+  keys: KeyProvider,
+  seen?: (row: Readonly<Record<string, unknown>>) => void,
+): ChainReader & ChainEdgeReader {
   return {
     async edges(anchored) {
       const { rows } = await edgesRead(orgId, anchored).execute(tx);
@@ -1065,6 +1076,7 @@ function readerFor(tx: AuditTransaction, orgId: string, keys: KeyProvider): Chai
         order by e.seq limit ${limit}
       `.execute(tx);
       const chain: Chain = { kind: 'organisation', orgId };
+      if (seen !== undefined) rows.forEach(seen);
       return rows.map((row) => {
         const sealed = sealedSigned(keys, chain, row);
         const content = contentOf(row);
@@ -1072,6 +1084,66 @@ function readerFor(tx: AuditTransaction, orgId: string, keys: KeyProvider): Chai
       });
     },
   };
+}
+
+/** Who recorded an event, and its details' JSON text, as eventsSinceChecked gives them. */
+export interface CheckedEventFacts {
+  readonly actorType: string;
+  readonly actorId: string;
+  readonly details: string;
+}
+
+/**
+ * The organisation's events since a time (eventsSinceChecked): `checked`, every
+ * one, the chain sound from before the time through its head; or
+ * `unbelieved`, why not: no organisation's transaction, or the chain's problem.
+ */
+export type EventsSinceCheck =
+  | { readonly kind: 'checked'; readonly events: readonly CheckedEventFacts[] }
+  | { readonly kind: 'unbelieved'; readonly reason: string; readonly orgId?: string; readonly seq?: bigint };
+
+/**
+ * Every event of the transaction's organisation recorded at or after `since`,
+ * by the database's clock, believed only as the chain's check believes it
+ * (verifyFromAnchor), in the caller's transaction (S206, R-15): from the last
+ * event recorded before `since`, which must be sealed, through the head, every
+ * event read whole, linked to the one before and none missing. So none can be
+ * hidden by deleting it, editing it or moving another's time, and put back
+ * after: the check fails, and the caller refuses. Three statements, and one
+ * more each BATCH (500) events: the edge before `since` (0048's index by time),
+ * the chain's edges, and the events.
+ */
+export async function eventsSinceChecked(
+  tx: AuditTransaction,
+  keys: KeyProvider,
+  since: Date,
+): Promise<EventsSinceCheck> {
+  const tenant = await tenantOfTransaction(tx);
+  if (tenant === undefined) return { kind: 'unbelieved', reason: 'no_organisation' };
+  const chain = chainOf(tenant);
+  const edge = await tx
+    .selectFrom('audit.events')
+    .select(['seq', 'hash', 'mac_key_version'])
+    .where('org_id', '=', chain.orgId)
+    .where('recorded_at', '<', since)
+    .orderBy('recorded_at', 'desc')
+    .orderBy('seq', 'desc')
+    .limit(1)
+    .executeTakeFirst();
+  // The edge is taken as the check's starting place only once the check finds it sealed there (holdsPoint).
+  const from: CheckedPoint =
+    edge === undefined ? CHAIN_START : { seq: edge.seq, hash: edge.hash, macKeyVersion: edge.mac_key_version };
+  const events: CheckedEventFacts[] = [];
+  const keep = (row: Readonly<Record<string, unknown>>) => {
+    const { actor_type: actorType, actor_id: actorId, details } = row;
+    if (isText(actorType) && isText(actorId) && isText(details)) events.push({ actorType, actorId, details });
+  };
+  const report = await verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId, keys, keep), from);
+  const { orgId } = chain;
+  if (!report.ok) return { kind: 'unbelieved', reason: report.problem.reason, orgId, seq: report.problem.seq };
+  // Short of the head: more events than a step reads, so some went unchecked.
+  if (report.seq !== report.to) return { kind: 'unbelieved', reason: 'too_many', orgId, seq: report.seq };
+  return { kind: 'checked', events };
 }
 
 /**

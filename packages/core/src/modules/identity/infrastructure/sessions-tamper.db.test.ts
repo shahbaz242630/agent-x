@@ -21,6 +21,7 @@ import {
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
+import { ChainBroken } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -126,7 +127,7 @@ async function asOwner(text: string, values: readonly unknown[]): Promise<Record
 
 /** Holds the session's challenges and consumes one, in a transaction, as an admin's change does. */
 const consumeFor = (binding: StepUpBinding, challengeId: string) =>
-  app.transaction().execute(async (tx) => {
+  withTenant(app, '0199a0f0-0000-7000-8000-000000000205', async (tx) => {
     const held = await challenges().hold(tx, binding.sessionId);
     return challenges().consume(tx, held, challengeId, binding, { passkeyRequired: true });
   });
@@ -383,10 +384,10 @@ describe(`the owner can't use a step-up twice by putting its challenge back (R-1
    * recorded in the same transaction. Undefined, and nothing recorded, if the
    * challenge is refused.
    */
-  const changeWith = (userId: string, binding: StepUpBinding, challengeId: string, org = ORG) =>
+  const changeWith = (userId: string, binding: StepUpBinding, challengeId: string, org = ORG, made = challenges()) =>
     withTenant(app, org, async (tx) => {
-      const held = await challenges().hold(tx, binding.sessionId);
-      const consumed = await challenges().consume(tx, held, challengeId, binding, { passkeyRequired: true });
+      const held = await made.hold(tx, binding.sessionId);
+      const consumed = await made.consume(tx, held, challengeId, binding, { passkeyRequired: true });
       if (consumed === undefined) return undefined;
       await trail.record(tx, org, {
         actor: { type: 'user', id: userId },
@@ -472,6 +473,89 @@ describe(`the owner can't use a step-up twice by putting its challenge back (R-1
 
     await putBack(kept);
     expect(await changeWith(userId, binding, challengeId, fresh)).toBeUndefined();
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'already_used', rowId: challengeId })]);
+  });
+
+  /** Runs one statement as agentx_owner inside the organisation, as the wall binds the owner too. */
+  async function asOwnerIn(org: string, text: string, values: readonly unknown[]): Promise<void> {
+    const owner = await database.connect('owner');
+    try {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [org]);
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text; every value is bound.
+      await owner.query(text, values);
+    } finally {
+      await owner.end();
+    }
+  }
+
+  it.each([
+    ['deletes', 'delete from audit.events where org_id = $1 and seq = $2'],
+    [
+      'moves to another person',
+      "update audit.events set actor_id = '0199a0f0-0000-7000-8000-0000000000ff' where org_id = $1 and seq = $2",
+    ],
+    ['empties the details of', "update audit.events set details = '{}' where org_id = $1 and seq = $2"],
+  ])(
+    "the owner who %s the change's event to put the used challenge back finds the chain refuses the replay, and the alarm",
+    async (_what, hide) => {
+      const { userId, sessionId } = await signedIn();
+      const { binding, challengeId, kept } = await verified(sessionId);
+      const org = ids.next();
+      expect(await changeWith(userId, binding, challengeId, org)).toMatchObject({ challengeId });
+      // The organisation goes on working: the change's event is mid-chain, as the owner would find it.
+      const other = await signedIn();
+      const next = await verified(other.sessionId);
+      expect(await changeWith(other.userId, next.binding, next.challengeId, org)).toBeDefined();
+
+      await asOwnerIn(org, hide, [org, 1]);
+      await putBack(kept);
+      await expect(changeWith(userId, binding, challengeId, org)).rejects.toThrow(ChainBroken);
+      expect(alarms()).toEqual([
+        expect.objectContaining({ check: 'step_up_challenge', reason: 'chain_unverified', rowId: challengeId }),
+      ]);
+      // Refused whole: the challenge is left where the owner put it, and no new event was sealed.
+      expect(await challengeRow(challengeId)).toMatchObject({ id: challengeId });
+    },
+  );
+
+  it('a challenge consumed outside any organisation is refused outright: there is no trail to tell its use', async () => {
+    const { sessionId } = await signedIn();
+    const { binding, challengeId } = await verified(sessionId);
+    await expect(
+      app.transaction().execute(async (tx) => {
+        const held = await challenges().hold(tx, sessionId);
+        return challenges().consume(tx, held, challengeId, binding, { passkeyRequired: true });
+      }),
+    ).rejects.toThrow(/only in an organisation's transaction/);
+    expect(alarms()).toEqual([]);
+  });
+
+  it("reads from just before the challenge opened by the app's clock, so a use right after it still counts", async () => {
+    // A clock on the database's own time, as in production: the use's event is recorded seconds after the challenge opens.
+    const [now] = await asOwner('select pg_catalog.clock_timestamp() as now', []);
+    const live = new FixedClock(now?.now as Date);
+    const made = createStepUpChallenges({ ids, clock: live, keys, logger: testLogger(capture) });
+    const userId = await person();
+    const { sessionId } = await createSessions({
+      ids,
+      clock: live,
+      timeouts: TIMEOUTS,
+      keys,
+      logger: testLogger(capture),
+    }).open(app, userId, { idpSessionId: 'V1_1', authTime: live.now(), amr: PASSKEY });
+    const binding: StepUpBinding = { sessionId, action: 'members.change-role', changeHash: sha256(ids.next()) };
+    const challenge = await made.open(app, binding);
+    if (challenge === undefined) throw new Error('the challenge did not open');
+    const { challengeId } = challenge;
+    expect(await made.recordEvidence(app, challengeId, sessionId, { ...EVIDENCE, authTime: live.now() })).toBe(true);
+    const [kept] = await asOwner(
+      'select pg_catalog.row_to_json(c) as kept from identity.step_up_challenges c where c.id = $1',
+      [challengeId],
+    );
+    expect(await changeWith(userId, binding, challengeId, ORG, made)).toMatchObject({ challengeId });
+
+    await putBack(kept?.kept);
+    expect(await changeWith(userId, binding, challengeId, ORG, made)).toBeUndefined();
     expect(alarms()).toEqual([expect.objectContaining({ reason: 'already_used', rowId: challengeId })]);
   });
 

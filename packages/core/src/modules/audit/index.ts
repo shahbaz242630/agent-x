@@ -59,7 +59,10 @@ export {
 export {
   type AuditTrail,
   type AuditTransaction,
+  type CheckedEventFacts,
   createAuditTrail,
+  eventsSinceChecked,
+  type EventsSinceCheck,
   type HistoryToRead,
   type LatestSignedState,
   type LogEvent,
