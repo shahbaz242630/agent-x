@@ -695,6 +695,19 @@ describe('needsAt and plan', () => {
     expect(said).toContain('db-setup: then the set-up job runs (jobs.ts run db-setup), with its log.');
   });
 
+  it('plans apps knowing the plan runs secrets --keys first, and only then (a new created secret, S204 release)', async () => {
+    const seen: (boolean | undefined)[] = [];
+    const planned = (request: Request, steps: Steps): Promise<number> => {
+      if (request.command === 'apps') seen.push(steps.unattended?.secretsFirst);
+      return Promise.reject(new Planned('apps', 'a'.repeat(64)));
+    };
+    const both = infraOver({ changed: ['deploy/azure/secrets.bicep', 'deploy/azure/apps.bicep'], deploy: planned });
+    expect((await plan(both.infra, NEW, DIGEST)).steps).toEqual(['secrets', 'apps']);
+    const alone = infraOver({ changed: ['deploy/azure/apps.bicep'], deploy: planned });
+    expect((await plan(alone.infra, NEW, DIGEST)).steps).toEqual(['apps']);
+    expect(seen).toEqual([true, false]);
+  });
+
   it('fails the plan when a step stops before Azure is asked, so nothing can be approved', async () => {
     const { infra } = infraOver({ changed: ['deploy/azure/main.bicep'], deploy: () => Promise.resolve(1) });
     await expect(plan(infra, NEW, DIGEST)).rejects.toThrow("foundation stopped before Azure's what-if");

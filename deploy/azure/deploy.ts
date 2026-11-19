@@ -1118,6 +1118,11 @@ export type Answer = 'alertEmail' | 'authHost' | 'appHost' | 'adminEmail' | 'api
 export interface Unattended {
   readonly mode: 'plan' | 'deploy';
   readonly answers: Readonly<Record<Answer, string>>;
+  /**
+   * apps planned in a plan whose `secrets --keys` step runs before it (S204 release): what that run makes counts as
+   * there, since it will be by the time apps is sent; the approved deploy, after it ran, reads the vault for real.
+   */
+  readonly secretsFirst?: boolean;
 }
 
 /** A prompt's answer: typed by the operator, or the unattended run's. */
@@ -2836,11 +2841,19 @@ async function migratedFirst(
 }
 
 /** Stops apps, before anything is sent, while the vault lacks a secret the apps read, saying which run brings it. */
+/** A secret a service issues and a person pastes, which no secrets run can make (B2-6). */
+const isIssued = (name: string): boolean => VAULT_SECRETS[name]?.source === 'issued';
+
 function refuseMissingSecrets(missing: readonly string[], disabled: readonly string[]): void {
   // AG10: alone, it needs no issued secret, only the run that creates it.
   if (missing.length === 1 && missing[0] === MACHINE_CONFIG) {
     throw new Error(
       `The vault has no ${MACHINE_CONFIG}, so no Zitadel copy could start and the API refuses its machine IDs: run secrets --keys first, then apps again.`,
+    );
+  }
+  if (missing.length > 0 && !missing.some(isIssued)) {
+    throw new Error(
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API, the login pages or Zitadel read, so they couldn't start: run ${secretsRunFor(missing, disabled)}, which makes them, then apps again (by Approve, the plan's secrets step does). Nothing was deployed.`,
     );
   }
   if (missing.length > 0) {
@@ -2960,8 +2973,10 @@ async function deployApps(
   // Before anything else is asked: the API reads its client secret from the vault, the login pages their cookie key.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
   const listed = secretsInVault(steps, subscription, vaultIn(steps, subscription));
+  // Planned behind the plan's own secrets --keys, only the issued ones it can't make count (S204 release).
+  const lacking = issuedMissing(listed.filter((each) => each.enabled).map((each) => each.name));
   refuseMissingSecrets(
-    issuedMissing(listed.filter((each) => each.enabled).map((each) => each.name)),
+    steps.unattended?.mode === 'plan' && steps.unattended.secretsFirst === true ? lacking.filter(isIssued) : lacking,
     listed.filter((each) => !each.enabled).map((each) => each.name),
   );
   const records = await carriedRecords(steps, subscription);

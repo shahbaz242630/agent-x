@@ -2586,7 +2586,7 @@ describe('deploy apps', () => {
         ],
       }),
     });
-    expect((cookie.error as Error).message).toContain(`then run secrets --rotate ${COOKIE} (`);
+    expect((cookie.error as Error).message).toContain(`run secrets --rotate ${COOKIE}, which makes them`);
     expect(cookie.az.deployment).toBeUndefined();
   });
 
@@ -4560,6 +4560,45 @@ describe('unattended: CI’s approved infrastructure deploy (AZ5)', () => {
     expect(held.status).toBe(1);
     expect(changed.asked).toEqual([`running ${SUBSCRIPTION}`]);
     expect(held.terminal.said.at(-1)).toBe("Zitadel's setup did not run, and apps was not sent.");
+  });
+
+  it('apps (S204 release): a plan whose secrets --keys runs first takes what that run makes as there; the deploy checks for real', async () => {
+    const lacking = [
+      'api-oidc-client-secret',
+      'zitadel-directory-token',
+      'zitadel-reset-token',
+      'acs-access-key',
+      'zitadel-our-actors',
+      'zitadel-our-service-users',
+    ];
+    const planned = await run(['apps', '--commit', COMMIT], {
+      unattended: { ...planning, secretsFirst: true },
+      images: recordingImages(),
+      az: new RecordingAz({ before: lacking }),
+    });
+    expect(planned.error).toBeUndefined();
+    // Without the secrets step in the plan, or in the approved deploy (after it ran), the vault is read as it is.
+    for (const unattended of [planning, { ...deploying, secretsFirst: true }]) {
+      const done = await run(['apps', '--commit', COMMIT], {
+        unattended,
+        images: recordingImages(),
+        az: new RecordingAz({ before: lacking }),
+      });
+      const message = (done.error as Error).message;
+      // Only what secrets --keys makes is missing: it names that run alone, never Zitadel's issued secrets.
+      expect(message).toMatch(/^The vault doesn't hold login-cookie-secret, zitadel-machine-config yet/);
+      expect(message).toContain('run secrets --keys, which makes them');
+      expect(message).not.toContain('Get each issued one from Zitadel');
+    }
+    // An issued one the secrets run can't make is refused even so.
+    const issued = await run(['apps', '--commit', COMMIT], {
+      unattended: { ...planning, secretsFirst: true },
+      images: recordingImages(),
+      az: new RecordingAz({ before: lacking.filter((name) => name !== 'zitadel-reset-token') }),
+    });
+    expect((issued.error as Error).message).toMatch(
+      /^The vault doesn't hold zitadel-reset-token yet.*Get each issued one from Zitadel/,
+    );
   });
 
   it('apps: a plan says the migration would run, and runs nothing', async () => {
