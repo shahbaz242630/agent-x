@@ -1,10 +1,11 @@
 // SEC-OAUTH-13 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
 // database's side, a planted or rewritten row never shown, decided or exchanged, with the alarm, is
 // oauth-connections.db.test.ts.
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, type Message, PURPOSES } from '@agentx/platform/keys';
 import { LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
+import { scopesText } from '../../agents/index.ts';
 import {
   decisionJudged,
   decisionSealed,
@@ -14,6 +15,7 @@ import {
   pendingFlowSound,
 } from './flow-seals.ts';
 import { codeEndsFrom, type DeviceFlowRead, type FlowRead } from './flows.ts';
+import { PKCE_METHOD } from './pkce.ts';
 
 const keysAt = (version: number, fill = 1) =>
   createKeyProvider(
@@ -201,5 +203,71 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
       ['error', 'oauth.seal_key_not_held'],
     ]);
     expect(capture.lines()[0]).toMatchObject({ check: 'oauth_flow', objectId: undecidedDevice.id });
+  });
+});
+
+describe('SEC-OAUTH-15 a flow’s state, bound by both seals (v2, S206)', () => {
+  it('is tampered for a code flow’s state rewritten, added or taken out, as opened and as decided', () => {
+    for (const state of ['abc', null]) {
+      expect(openJudged(keys, { ...undecided, state })).toBe('tampered');
+      expect(decisionJudged(keys, { ...allowedCode(), state })).toBe('tampered');
+    }
+    const stateless: FlowRead = { ...opening, state: null };
+    const sealed = { ...stateless, openSeal: openSealed(keys, openedFieldsOf(stateless)) };
+    expect(openJudged(keys, sealed)).toBe('sound');
+    expect(openJudged(keys, { ...sealed, state: 'abc' })).toBe('tampered');
+  });
+
+  /** A v1 message, as the release before sealed it: all but the state. */
+  const v1Parts = (flow: FlowRead): string[] => [
+    flow.id,
+    flow.kind,
+    flow.clientId,
+    flow.redirectUri,
+    `${PKCE_METHOD}:${flow.codeChallenge}`,
+    '',
+    '',
+    scopesText(flow.scopesAsked),
+    flow.resource,
+    flow.endsAt.toISOString(),
+  ];
+  const sealedAs = (message: Message) => {
+    const { mac, keyVersion } = keys.mac('agent-key-pepper', message);
+    return { mac: mac.toString('hex'), keyVersion };
+  };
+  const openedV1 = (flow: FlowRead) => sealedAs(['oauth-flow-open-v1', ...v1Parts(flow)]);
+  const decidedV1 = (flow: FlowRead) => {
+    const done = allowedCode();
+    return sealedAs([
+      'oauth-flow-decision-v1',
+      ...v1Parts(flow),
+      ORG.toLowerCase(),
+      KEY,
+      CODE_HASH,
+      DECIDED.toISOString(),
+      done.codeEndsAt?.toISOString() ?? '',
+    ]);
+  };
+
+  it('never believes a v1 seal, which doesn’t bind the state: one that checks is superseded, even with its state rewritten', () => {
+    expect(openJudged(keys, { ...undecided, openSeal: openedV1(undecided) })).toBe('superseded');
+    expect(openJudged(keys, { ...undecided, state: 'abc', openSeal: openedV1(undecided) })).toBe('superseded');
+    expect(decisionJudged(keys, { ...allowedCode(), seal: decidedV1(undecided) })).toBe('superseded');
+    expect(decisionJudged(keys, { ...allowedCode(), state: null, seal: decidedV1(undecided) })).toBe('superseded');
+    // A v1 seal binds what it always did: anything else changed is still the alarm.
+    const otherClient = { clientId: 'axcl_ffffffffffffffffffffffffffffffff' };
+    expect(openJudged(keys, { ...undecided, ...otherClient, openSeal: openedV1(undecided) })).toBe('tampered');
+    expect(decisionJudged(keys, { ...allowedCode(), ...otherClient, seal: decidedV1(undecided) })).toBe('tampered');
+    // Each label its own: an open v1 seal never stands for a decision's, nor a v1 one for a v2 one.
+    expect(decisionJudged(keys, { ...allowedCode(), seal: openedV1(undecided) })).toBe('tampered');
+  });
+
+  it('refuses a pending flow sealed v1 with a warning, never the alarm', () => {
+    const capture = new LogCapture();
+    const logger = testLogger(capture);
+    expect(pendingFlowSound(keys, logger, { ...undecided, openSeal: openedV1(undecided) })).toBe(false);
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({ level: 'warn', event: 'oauth.flow_seal_superseded', flowId: undecided.id }),
+    ]);
   });
 });
