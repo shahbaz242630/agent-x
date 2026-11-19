@@ -12,9 +12,8 @@
 // 256 bits of secret, kept as HMAC-SHA-256 with the agent-key pepper over
 // a label of its own, so no key's MAC is ever a token's. Since 0102 (R-15,
 // S206) the secret is itself the pepper's MAC of the token's kind, key and ID
-// (connectionTokenSecretMessage): a token can be shown to be one the app
-// issued with its row gone; and a refresh token's row seals the refresh token
-// it replaced (MAC version 2), so its family can't be rewritten unseen.
+// (connectionTokenSecretMessage): a token sent with its row gone can still be
+// shown to be one the app issued. Tokens made before have random secrets.
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { KEY_SECRET_BYTES } from './agent.ts';
 
@@ -101,36 +100,22 @@ export interface TokenBinding {
   readonly expiresAt: Date;
   /** As scopesText writes them. */
   readonly scopes: string;
-  /** The refresh token it replaced, if any: sealed from MAC version 2 on. */
-  readonly parentId: string | null;
 }
 
 /**
- * How a token's MAC is taken (0102's `mac_version`): 1, the tokens made before 0102, parent not covered; 2, every token
- * made since, its parent covered. A row moved to 1 no longer matches: its MAC was taken over version 2's message.
- */
-export type TokenMacVersion = 1 | 2;
-
-/** The MAC version every new token is made with. */
-export const TOKEN_MAC_VERSION: TokenMacVersion = 2;
-
-/**
  * What the agent-key pepper's MAC of a token is taken over: its own label (never a key's `agent-key`), its kind, its
- * key, its ID, its expiry and its scopes, from version 2 the token it replaced, then its secret. A row changed in any
- * of them no longer matches.
+ * key, its ID, its expiry and its scopes, then its secret. A row changed in any of them no longer matches.
  */
 export const connectionTokenMessage = (
-  { kind, keyId, tokenId, expiresAt, scopes, parentId }: TokenBinding,
+  { kind, keyId, tokenId, expiresAt, scopes }: TokenBinding,
   secret: Buffer,
-  version: TokenMacVersion = TOKEN_MAC_VERSION,
-): readonly [string, ...(string | Buffer)[]] => [
-  version === 1 ? 'connection-token' : 'connection-token-v2',
+): readonly [string, string, string, string, string, string, Buffer] => [
+  'connection-token',
   kind,
   keyId.toLowerCase(),
   tokenId.toLowerCase(),
   expiresAt.toISOString(),
   scopes,
-  ...(version === 1 ? [] : [parentId?.toLowerCase() ?? '']),
   secret,
 ];
 

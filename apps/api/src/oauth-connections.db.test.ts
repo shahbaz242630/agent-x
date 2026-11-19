@@ -1026,23 +1026,15 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
     const second = issued(await grants.refresh(refresh, CALLER));
     const owner = await tamperAsOwner(database, CONNECTIONS, org);
-    return {
-      org,
-      agentId,
-      refresh,
-      second,
-      owner,
-      usedId: idOf(first.refreshToken),
-      childId: idOf(second.refreshToken),
-    };
+    return { org, agentId, keyId: first.keyId, refresh, second, owner, usedId: idOf(first.refreshToken) };
   }
   type Rotated = Awaited<ReturnType<typeof rotatedOnce>>;
 
   /** A token's own ID, as its text holds it (32 hex digits, which Postgres takes as a uuid). */
   const idOf = (token: string): string => token.split('_')[2] ?? '';
 
-  const usedAtCleared = ({ owner, usedId }: Rotated) =>
-    owner.query('update agents.connection_tokens set used_at = null where id = $1', [usedId]);
+  const usedAtCleared = ({ owner }: Rotated, id: string) =>
+    owner.query('update agents.connection_tokens set used_at = null where id = $1', [id]);
 
   /** A row deleted by the owner, who first dates it past 0093's retention policy, the only rows it deletes. */
   const rowDeleted = async ({ owner }: Rotated, id: string) => {
@@ -1052,10 +1044,13 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     expect(await owner.query('delete from agents.connection_tokens where id = $1 returning id', [id])).toHaveLength(1);
   };
 
-  /** Both tokens its use made deleted, its refresh child and its access child: either alone still shows the use. */
-  const childrenDeleted = async (rotated: Rotated) => {
-    await rowDeleted(rotated, rotated.childId);
-    await rowDeleted(rotated, idOf(rotated.second.accessToken));
+  /** The head the connection's signed state names, as the owner reads the table, in the uuid's own spelling. */
+  const headIn = async ({ owner, keyId }: Rotated) => {
+    const [row] = await owner.query<{ refresh_id: string }>(
+      "select replace(refresh_id::text, '-', '') as refresh_id from agents.connection_heads where id = $1",
+      [keyId],
+    );
+    return row?.refresh_id;
   };
 
   const refreshWith = (rotated: Rotated, refreshToken: string) =>
@@ -1076,31 +1071,71 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     ]);
   }
 
-  it('seals each new row at version 2, the child naming its parent; rotation goes on as before', async () => {
+  it('moves the connection’s signed head to each new refresh token; rotation goes on as before', async () => {
     const rotated = await rotatedOnce();
-    const [child] = await rotated.owner.query<{ names_it: boolean; mac_version: number }>(
-      'select parent_id = $1::uuid as names_it, mac_version from agents.connection_tokens where id = $2',
-      [rotated.usedId, rotated.childId],
-    );
-    expect(child).toEqual({ names_it: true, mac_version: 2 });
+    expect(await headIn(rotated)).toBe(idOf(rotated.second.refreshToken));
     const third = issued(await refreshWith(rotated, rotated.second.refreshToken));
+    expect(await headIn(rotated)).toBe(idOf(third.refreshToken));
     expect(await accepted(third.accessToken)).toMatchObject({ outcome: 'accepted' });
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
-  it('its use cleared: the child names it, so it is a reuse, the connection revoked, with the alarm', async () => {
+  it('its use cleared: not the signed head, so a reuse, the connection revoked, with the alarm', async () => {
     const rotated = await rotatedOnce();
-    await usedAtCleared(rotated);
-    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'used_at', rotated.second.accessToken);
+    await usedAtCleared(rotated, rotated.usedId);
+    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'not_head', rotated.second.accessToken);
   });
 
-  it('its use cleared and its child deleted: the thief’s refresh goes through, and the app’s next one ends it all', async () => {
+  it('a fork: the thief’s use hidden and its tokens kept to put back; the app’s next refresh ends the connection', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const first = await connected(org, admin, agentId);
+    const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+    // The thief refreshes the stolen token first.
+    const thiefs = issued(await grants.refresh(refresh, CALLER));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    const rotated = {
+      org,
+      agentId,
+      keyId: first.keyId,
+      refresh,
+      second: thiefs,
+      owner,
+      usedId: idOf(first.refreshToken),
+    };
+    const thiefsRows = [idOf(thiefs.refreshToken), idOf(thiefs.accessToken)];
+    const copies = await owner.query<{ json: string }>(
+      'select pg_catalog.to_jsonb(t)::text as json from agents.connection_tokens t where id = any($1::uuid[])',
+      [thiefsRows],
+    );
+    for (const id of thiefsRows) await rowDeleted(rotated, id);
+    await usedAtCleared(rotated, rotated.usedId);
+    // The app refreshes the same token: not the signed head, which names the thief's.
+    await caughtAsReuse(rotated, first.refreshToken, 'not_head', thiefs.accessToken);
+    // The thief's tokens put back byte for byte: their connection is gone with them.
+    for (const { json } of copies) {
+      await owner.query(
+        'insert into agents.connection_tokens select * from pg_catalog.jsonb_populate_record(null::agents.connection_tokens, $1::jsonb)',
+        [json],
+      );
+    }
+    expect(await refreshWith(rotated, thiefs.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(thiefs.accessToken)).toEqual({ outcome: 'refused' });
+  });
+
+  it('the signed head rewritten to the stolen token: the head’s own check refuses it, revoking, with its alarm', async () => {
     const rotated = await rotatedOnce();
-    await usedAtCleared(rotated);
-    await childrenDeleted(rotated);
-    // Detection waits for the other holder's next use, as any rotation's reuse detection does.
-    const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
-    await caughtAsReuse(rotated, rotated.second.refreshToken, 'row_gone', thiefs.accessToken);
+    await usedAtCleared(rotated, rotated.usedId);
+    await rotated.owner.query('update agents.connection_heads set refresh_id = $2 where id = $1', [
+      rotated.keyId,
+      rotated.usedId,
+    ]);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', subjectType: 'connection_head' }),
+    );
   });
 
   it('the used row deleted: the stolen token, genuine with no row, is a reuse, with the alarm', async () => {
@@ -1109,95 +1144,76 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'row_gone', rotated.second.accessToken);
   });
 
-  it('the child hidden while the thief refreshes, then put back: the family split in two is a reuse', async () => {
+  it('the app’s current token’s row changed: its genuine token no longer matches it, a reuse, with the alarm', async () => {
     const rotated = await rotatedOnce();
-    const [saved] = await rotated.owner.query<{ json: string }>(
-      'select pg_catalog.to_jsonb(t)::text as json from agents.connection_tokens t where id = $1',
-      [rotated.childId],
-    );
-    await childrenDeleted(rotated);
-    await usedAtCleared(rotated);
-    const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
-    await rotated.owner.query(
-      'insert into agents.connection_tokens select * from pg_catalog.jsonb_populate_record(null::agents.connection_tokens, $1::jsonb)',
-      [saved?.json],
-    );
-    await caughtAsReuse(rotated, rotated.second.refreshToken, 'branch', thiefs.accessToken);
+    await rotated.owner.query("update agents.connection_tokens set scopes = 'requests:read' where id = $1", [
+      idOf(rotated.second.refreshToken),
+    ]);
+    await caughtAsReuse(rotated, rotated.second.refreshToken, 'row', rotated.second.accessToken);
   });
 
-  it.each([
-    [
-      'moved off its parent',
-      ({ owner, childId }: Rotated) =>
-        owner.query('update agents.connection_tokens set parent_id = gen_random_uuid() where id = $1', [childId]),
-    ],
-    [
-      'moved back to MAC version 1',
-      ({ owner, childId }: Rotated) =>
-        owner.query('update agents.connection_tokens set mac_version = 1 where id = $1', [childId]),
-    ],
-  ] as const)(
-    'the child %s: the app’s genuine token no longer matches its row, a reuse, with the alarm',
-    async (_how, change) => {
-      const rotated = await rotatedOnce();
-      await change(rotated);
-      await caughtAsReuse(rotated, rotated.second.refreshToken, 'row', rotated.second.accessToken);
-    },
-  );
+  /** The key's listing changed by the owner, its foreign key dropped for it as an owner can, and put back after. */
+  async function withListingChanged(
+    rotated: Rotated,
+    change: (keyHex: string) => Promise<unknown>,
+    then: () => Promise<void>,
+  ) {
+    const keyHex = rotated.refresh.refreshToken.split('_')[1] ?? '';
+    const { owner, org } = rotated;
+    await owner.query('alter table agents.agent_keys drop constraint listed_in_the_directory');
+    try {
+      await change(keyHex);
+      await then();
+    } finally {
+      await owner.query(
+        'insert into directory.agent_keys (key_id, org_id) values ($1, $2) on conflict (key_id) do update set org_id = $2',
+        [keyHex, org],
+      );
+      await owner.query(
+        'alter table agents.agent_keys add constraint listed_in_the_directory foreign key (id, org_id) references directory.agent_keys (key_id, org_id)',
+      );
+    }
+  }
 
-  it('review: the thief’s child refresh token deleted, its access token kept: the access child still shows the use', async () => {
+  it('the key’s listing moved to another organisation: refused, nothing done or told there, the alarm names the key', async () => {
     const rotated = await rotatedOnce();
-    // The thief refreshed the app's current token first; the owner deletes its refresh child, keeps its access child.
-    const thiefs = issued(await refreshWith(rotated, rotated.second.refreshToken));
-    await rowDeleted(rotated, idOf(thiefs.refreshToken));
-    await rotated.owner.query('update agents.connection_tokens set used_at = null where id = $1', [rotated.childId]);
-    await caughtAsReuse(rotated, rotated.second.refreshToken, 'used_at', thiefs.accessToken);
-  });
-
-  // The thief's refresh through, then the key's listing moved by the owner (its foreign key dropped for it, as an owner
-  // can, and put back after), so the app's genuine token is looked for in another organisation, or in none.
-  it.each([
-    [
-      'moved to another organisation',
-      'row_gone',
-      async (owner: Rotated['owner'], keyHex: string) =>
-        owner.query('update directory.agent_keys set org_id = $2 where key_id = $1', [keyHex, await organization()]),
-    ],
-    [
-      'deleted',
-      'unlisted',
-      (owner: Rotated['owner'], keyHex: string) =>
-        owner.query('delete from directory.agent_keys where key_id = $1', [keyHex]),
-    ],
-  ] as const)(
-    'review: the key’s listing %s: the app’s genuine token still raises the alarm',
-    async (_how, reason, move) => {
-      const rotated = await rotatedOnce();
-      await usedAtCleared(rotated);
-      await childrenDeleted(rotated);
-      issued(await refreshWith(rotated, rotated.refresh.refreshToken));
-      const keyHex = rotated.refresh.refreshToken.split('_')[1] ?? '';
-      const { owner, org } = rotated;
-      await owner.query('alter table agents.agent_keys drop constraint listed_in_the_directory');
-      try {
-        await move(owner, keyHex);
+    const elsewhere = await organization();
+    await withListingChanged(
+      rotated,
+      (keyHex) =>
+        rotated.owner.query('update directory.agent_keys set org_id = $2 where key_id = $1', [keyHex, elsewhere]),
+      async () => {
         expect(await refreshWith(rotated, rotated.second.refreshToken)).toMatchObject({ error: 'invalid_grant' });
         expect(lines('audit.integrity_failed')).toEqual([
-          expect.objectContaining({ level: 'error', check: 'refresh_token', reason }),
+          expect.objectContaining({
+            level: 'error',
+            check: 'refresh_token',
+            reason: 'listing',
+            keyId: rotated.keyId,
+            listedOrgId: elsewhere,
+          }),
         ]);
-      } finally {
-        await owner.query(
-          'insert into directory.agent_keys (key_id, org_id) values ($1, $2) on conflict (key_id) do update set org_id = $2',
-          [keyHex, org],
-        );
-        await owner.query(
-          'alter table agents.agent_keys add constraint listed_in_the_directory foreign key (id, org_id) references directory.agent_keys (key_id, org_id)',
-        );
-      }
-    },
-  );
+        expect(lines('oauth.refresh_reused')).toEqual([]);
+        expect(noted.filter(({ kind }) => kind === 'connection_token_reused')).toEqual([]);
+      },
+    );
+  });
 
-  it('a genuine token whose row is gone after its connection ended (the sweep’s case) is refused, with no alarm', async () => {
+  it('the key’s listing deleted: the app’s genuine token is refused, with the alarm naming the key', async () => {
+    const rotated = await rotatedOnce();
+    await withListingChanged(
+      rotated,
+      (keyHex) => rotated.owner.query('delete from directory.agent_keys where key_id = $1', [keyHex]),
+      async () => {
+        expect(await refreshWith(rotated, rotated.second.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ level: 'error', check: 'refresh_token', reason: 'unlisted', keyId: rotated.keyId }),
+        ]);
+      },
+    );
+  });
+
+  it('a genuine token whose row is gone after its connection was revoked is refused, with no alarm', async () => {
     const rotated = await rotatedOnce();
     await grants.revoke({ token: rotated.second.refreshToken, clientId }, CALLER);
     await rowDeleted(rotated, rotated.usedId);

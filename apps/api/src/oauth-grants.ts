@@ -17,17 +17,16 @@
 //   issued with the scopes asked, which may only narrow. Used before, it is a
 //   reuse (decision 4: strict, no grace): the connection is revoked, the
 //   organisation's admins see a `connection_token_reused` event, and the
-//   answer is `invalid_grant`, as for every other refusal. Its use is judged
-//   from its family too (0102, R-15, S206), rows the database's owner can't
-//   rewrite unseen: a refresh token any token names as its parent was used, its
-//   `used_at` cleared or not; one whose parent has another refresh child was
-//   split in two. A refresh token the app issued (its secret is the pepper's
-//   own MAC) whose row is gone, or no longer matches, was hidden. Each is a
-//   reuse, and where the rows disagree, the integrity alarm (check
-//   `refresh_token`). As any rotation's reuse detection, a use hidden by
-//   deleting the child row too is caught at the other holder's next refresh,
-//   which sends a genuine token with no row: the connection goes, and the
-//   tokens of whoever used it with it.
+//   answer is `invalid_grant`, as for every other refusal. Which refresh
+//   token is current is the connection's own signed state (its refresh head,
+//   0102, R-15, S206), locked before the token's row and moved to the new
+//   token in the same transaction: any other token is a reuse, and one whose
+//   row still says unused (`used_at` cleared by the database's owner) is the
+//   integrity alarm too (check `refresh_token`, reason `not_head`). A refresh
+//   token the app issued (its secret is the pepper's own MAC) whose row is
+//   gone, or no longer matches it, is a reuse with the alarm as well; one
+//   whose key's listing names an organisation that has no such key is the
+//   alarm alone, nothing revoked or told there (`listing`).
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
 //   connection, by the client it was made for, which must name itself
 //   (client_id, as at the token endpoint; AG8); the answer is always the
@@ -61,6 +60,9 @@ import {
   CONNECTIONS,
   connectionOf,
   credentialAt,
+  type HeadCheck,
+  headMoved,
+  headOf,
   type IssuedTokens,
   issueTokens,
   parseConnectionToken,
@@ -68,11 +70,10 @@ import {
   revokeKey,
   scopesOf,
   tokenAtTheDoor,
-  type TokenFamily,
   tokenGenuine,
-  tokenLockedWithFamily,
   type TokenProof,
   type TokenRow,
+  tokenRowLocked,
   usedNow,
 } from '@agentx/core/modules/agents';
 import { type AuditActor, type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
@@ -413,37 +414,69 @@ export function createOauthGrants({
   };
 
   /**
+   * The connection's key as its signed state says, before anything here revokes it: `ended` (revoked or past its
+   * time), `live`, or `absent`: no such key in this organisation, whose listing then names the wrong one.
+   */
+  const keyState = (orgId: string, keyId: string, caller: Caller): Promise<'ended' | 'live' | 'absent'> =>
+    inOrganisation(orgId, caller.correlationId, async (tx, states) => {
+      const read = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
+      if (read.outcome === 'missing') return 'absent';
+      // Tampered with: its alarm is raised and its hold follows; revoking is still tried.
+      if (read.outcome !== 'found') return 'live';
+      return read.key.status !== 'ACTIVE' || read.key.expiresAt <= clock.now() ? 'ended' : 'live';
+    });
+
+  /**
+   * The integrity alarm for a refresh token whose use the rows hid (R-15), naming the token and its key: on the
+   * organisation's line when it is known, or naming the organisation a moved listing gave (`listedOrgId`).
+   */
+  const refreshAlarm = (
+    caller: Caller,
+    presented: PresentedToken,
+    reason: string,
+    where: { readonly orgId?: string; readonly listedOrgId?: string },
+  ) => {
+    const { orgId, listedOrgId } = where;
+    logger
+      .child({ correlationId: caller.correlationId, ...(orgId === undefined ? {} : { orgId }) })
+      .error('audit.integrity_failed', {
+        check: 'refresh_token',
+        reason,
+        objectId: presented.tokenId,
+        keyId: presented.keyId,
+        ...(listedOrgId === undefined ? {} : { listedOrgId }),
+      });
+  };
+
+  /**
    * SEC-OAUTH-05: a refresh token used twice, so someone else holds it. The connection goes; its organisation's admins
-   * see it. `forgot`: how the rows hid the first use (R-15), which is the integrity alarm: a child naming it with its
-   * `used_at` cleared, its parent split in two (`branch`), its row changed (`row`) or gone (`row_gone`). A row gone
-   * raises it unless the connection's key, as its signed state says before this revokes it, had ended (revoked or past
-   * its time): the sweep deletes rows 120 days on, past every connection's life. A key not found there, or not
-   * believed, is no proof it ended: the owner may have moved the key's listing or row so that nothing is revoked.
+   * see it. `forgot`: how the rows hid the first use (R-15), which is the integrity alarm: its row still unused though
+   * the signed head moved past it (`not_head`), its row changed (`row`) or gone (`row_gone`). A row gone raises it
+   * unless the key, as its signed state says before this revokes it, had ended: the sweep deletes rows 120 days on,
+   * past every connection's life. A key not found in the organisation its listing names (`listing`): that listing
+   * was moved, so nothing is revoked there and its admins are told nothing; the alarm names the key for the operator.
+   * The true organisation can't be found from anything sealed (only the listing maps a key to it), so none is held.
    */
   const refreshReused = async (
     orgId: string,
     presented: PresentedToken,
     caller: Caller,
-    forgot: 'used_at' | 'branch' | 'row' | 'row_gone' | undefined,
+    forgot: 'not_head' | 'row' | 'row_gone' | undefined,
   ): Promise<GrantAnswer> => {
     const named = { keyId: presented.keyId, tokenId: presented.tokenId };
-    const log = logger.child({ correlationId: caller.correlationId, orgId });
-    // Read before the revocation below, which would end it.
-    const endedBefore = forgot === 'row_gone' && (await keyEnded(orgId, presented.keyId, caller));
+    const before = forgot === 'row_gone' ? await keyState(orgId, presented.keyId, caller) : 'live';
+    if (before === 'absent') {
+      refreshAlarm(caller, presented, 'listing', { listedOrgId: orgId });
+      return refusedFor(caller, 'listing', named);
+    }
     const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
       actor: OAUTH_SERVER,
       reason: 'refresh_reused',
     });
-    if (forgot !== undefined && !endedBefore) {
-      log.error('audit.integrity_failed', {
-        chain: 'organisation',
-        check: 'refresh_token',
-        reason: forgot,
-        objectId: presented.tokenId,
-        keyId: presented.keyId,
-      });
-    }
-    log.warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
+    if (forgot !== undefined && before !== 'ended') refreshAlarm(caller, presented, forgot, { orgId });
+    logger
+      .child({ correlationId: caller.correlationId, orgId })
+      .warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
     securityEvents.note({
       kind: 'connection_token_reused',
       reason: 'refresh_reused',
@@ -470,22 +503,9 @@ export function createOauthGrants({
       return hidden === undefined ? undefined : refreshReused(orgId, presented, caller, hidden);
     }
     if (!tokenGenuine(keys, presented)) return undefined;
-    const named = { keyId: presented.keyId, tokenId: presented.tokenId };
-    logger.child({ correlationId: caller.correlationId }).error('audit.integrity_failed', {
-      check: 'refresh_token',
-      reason: 'unlisted',
-      objectId: presented.tokenId,
-      ...named,
-    });
-    return refusedFor(caller, 'unlisted', named);
+    refreshAlarm(caller, presented, 'unlisted', {});
+    return refusedFor(caller, 'unlisted', { keyId: presented.keyId, tokenId: presented.tokenId });
   };
-
-  /** Whether the connection's key, as its signed state says, ended: revoked or past its time. Not found is not ended. */
-  const keyEnded = (orgId: string, keyId: string, caller: Caller): Promise<boolean> =>
-    inOrganisation(orgId, caller.correlationId, async (tx, states) => {
-      const read = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
-      return read.outcome === 'found' && (read.key.status !== 'ACTIVE' || read.key.expiresAt <= clock.now());
-    });
 
   /**
    * A refresh token the app issued (its secret the pepper's own MAC) whose row is gone (`row_gone`), or no longer
@@ -499,13 +519,15 @@ export function createOauthGrants({
   };
 
   /**
-   * What a locked refresh token's family says of its use (R-15): its parent with another refresh child, a family
-   * split in two (`branch`); a refresh child of its own, a use, its `used_at` cleared if it says none. Undefined: none.
+   * Whether the presented refresh token is not the one its connection's signed head names (R-15): a reuse, and the
+   * alarm where its row still says unused. Undefined: it is the head, or there is none yet (a connection not
+   * refreshed since 0102, its token judged by `used_at` alone). A head tampered with is a reuse too: its alarm is
+   * the signed state's own, and the organisation's hold follows.
    */
-  const usedByFamily = (row: TokenRow, { children, siblings }: Pick<TokenFamily, 'children' | 'siblings'>) => {
-    if (siblings > 0) return { outcome: 'reused' as const, forgot: 'branch' as const };
-    if (children === 0) return undefined;
-    return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('used_at' as const) : undefined };
+  const notTheHead = (head: HeadCheck, row: TokenRow, tokenId: string) => {
+    if (head.outcome === 'tampered') return { outcome: 'reused' as const, forgot: undefined };
+    if (head.outcome === 'unset' || head.refreshId === tokenId.toLowerCase()) return undefined;
+    return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('not_head' as const) : undefined };
   };
 
   const grants = {
@@ -661,14 +683,16 @@ export function createOauthGrants({
           clientId: asked.clientId,
         });
         if (checked.outcome !== 'accepted') return checked;
-        // Locked after its connection (3c), its family read on the same trip, and used in one statement where it was
-        // not: two at once can't both rotate.
-        const family = await tokenLockedWithFamily(tx, orgId, presented.tokenId);
-        if (family.row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
-        const used = usedByFamily(family.row, family);
-        if (used !== undefined) return used;
-        if (!(await usedNow(tx, orgId, presented.tokenId, now)))
+        // The connection's signed head (3b, after the connection), then the token's row (3c): one refresh of a
+        // connection at a time, and only of the token the head names.
+        const head = await headOf(tx, states, { orgId, id: presented.keyId });
+        const row = await tokenRowLocked(tx, orgId, presented.tokenId);
+        if (row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
+        const reuse = notTheHead(head, row, presented.tokenId);
+        if (reuse !== undefined) return reuse;
+        if (!(await usedNow(tx, orgId, presented.tokenId, now))) {
           return { outcome: 'reused' as const, forgot: undefined };
+        }
         const tokens = await issueTokens(
           tx,
           { keys, ids },
@@ -683,6 +707,10 @@ export function createOauthGrants({
             alongside: clientSeen(tx, asked.clientId, now),
           },
         );
+        // Last, as its record takes the chain head's lock (ADR-006 §6): the head moves to the token just issued.
+        if (head.outcome !== 'tampered') {
+          await headMoved(tx, states, head, { orgId, id: presented.keyId, refreshId: tokens.refreshTokenId, at: now });
+        }
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'issued') return answer;

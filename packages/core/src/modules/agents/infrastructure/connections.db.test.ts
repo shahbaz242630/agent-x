@@ -36,7 +36,7 @@ import { addAgentKey, AGENT_KEYS, agentKeysOf, keysIssuedSince, revokeKey } from
 import { addAgent, AGENTS } from './agents.ts';
 import { createConnectionTokenCheck } from './connection-check.ts';
 import { credentialAt } from './key-check.ts';
-import { issueTokens, sweepConnectionTokens, tokenLockedWithFamily, usedNow } from './connection-tokens.ts';
+import { issueTokens, sweepConnectionTokens, tokenRowLocked, usedNow } from './connection-tokens.ts';
 import {
   addConnection,
   CONNECTIONS,
@@ -527,14 +527,14 @@ describe(`SEC-OAUTH-05 a refresh token used once (Postgres ${server.version})`, 
     if (presented === undefined) throw new Error('not a token');
     const use = () =>
       withSignedStates(app, org, quiet(), async (tx) => {
-        const { row } = await tokenLockedWithFamily(tx, org, presented.tokenId);
+        const row = await tokenRowLocked(tx, org, presented.tokenId);
         expect(row).toMatchObject({ keyId, kind: 'refresh' });
         return usedNow(tx, org, presented.tokenId, clock.now());
       });
     expect(await use()).toBe(true);
     expect(await use()).toBe(false);
     await withSignedStates(app, org, quiet(), async (tx) => {
-      expect(await tokenLockedWithFamily(tx, org, ids.next())).toEqual({ row: undefined, children: 0, siblings: 0 });
+      expect(await tokenRowLocked(tx, org, ids.next())).toBeUndefined();
     });
   });
 
@@ -546,7 +546,7 @@ describe(`SEC-OAUTH-05 a refresh token used once (Postgres ${server.version})`, 
     const made = Promise.withResolvers<undefined>();
     const letGo = Promise.withResolvers<undefined>();
     const first = withSignedStates(app, org, quiet(), async (tx) => {
-      await tokenLockedWithFamily(tx, org, presented.tokenId);
+      await tokenRowLocked(tx, org, presented.tokenId);
       const used = await usedNow(tx, org, presented.tokenId, clock.now());
       made.resolve(undefined);
       await letGo.promise;
@@ -554,7 +554,7 @@ describe(`SEC-OAUTH-05 a refresh token used once (Postgres ${server.version})`, 
     });
     await made.promise;
     const second = withSignedStates(app, org, quiet(), async (tx) => {
-      await tokenLockedWithFamily(tx, org, presented.tokenId);
+      await tokenRowLocked(tx, org, presented.tokenId);
       return usedNow(tx, org, presented.tokenId, clock.now());
     });
     await waitUntilQueued(database.as('admin'), 1);

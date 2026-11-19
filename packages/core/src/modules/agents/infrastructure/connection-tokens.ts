@@ -9,13 +9,11 @@
 // - A refresh token is used once: usedNow fills in its use in one statement,
 //   only where none was, so two uses at once can't both rotate it; the second
 //   is a reuse, and its connection is revoked (the API's oauth-grants.ts).
-// - Its family as well (0102, R-15, S206): a refresh token any token names as
-//   its parent was used, whatever its `used_at` says, and a parent with two
-//   refresh children was split in two (tokenLockedWithFamily). Each row's MAC
-//   covers its parent, and each token's secret is the pepper's own MAC of
-//   its kind, key and ID (tokenGenuine), so the database's owner can't
-//   rewrite a family unseen, nor delete a row without its token, sent later,
-//   showing it was issued.
+//   Which refresh token is the connection's current one is kept in the
+//   connection's own signed state (connection-heads.ts, 0102, R-15), so the
+//   database's owner can't hide a use by clearing `used_at`. Each token's
+//   secret is the pepper's own MAC of its kind, key and ID (tokenGenuine), so
+//   a token sent with its row deleted or changed still shows it was issued.
 // - The door's read (tokenRowRead, tokenProven): the row read alone, unlocked,
 //   outside any share, and its secret checked with exactly one verifyMac
 //   whatever is found, a MAC of zeros for no row, so a token's ID not in use
@@ -33,9 +31,7 @@ import {
   connectionTokenSecretMessage,
   connectionTokenText,
   type PresentedToken,
-  TOKEN_MAC_VERSION,
   tokenExpiresAt,
-  type TokenMacVersion,
 } from '../domain/connection.ts';
 import type { AgentsTransaction } from './agents.ts';
 import type { AgentsTables } from './tables.ts';
@@ -48,6 +44,8 @@ export interface IssuedTokens {
   readonly refreshToken: string;
   /** The access token's ID, for the log alone (it is public, as a key's ID is). */
   readonly accessTokenId: string;
+  /** The refresh token's ID: the connection's refresh head moves to it (0102). */
+  readonly refreshTokenId: string;
   readonly accessExpiresAt: Date;
   readonly scopes: readonly Scope[];
 }
@@ -88,7 +86,7 @@ export async function issueTokens(
     const expiresAt = tokenExpiresAt(kind, now, keyExpiresAt);
     const { mac, keyVersion } = keys.mac(
       'agent-key-pepper',
-      connectionTokenMessage({ kind, keyId, tokenId: id, expiresAt, scopes: kept, parentId }, secret),
+      connectionTokenMessage({ kind, keyId, tokenId: id, expiresAt, scopes: kept }, secret),
     );
     return {
       text: connectionTokenText(kind, keyId, id, secret),
@@ -104,7 +102,6 @@ export async function issueTokens(
         created_at: now,
         parent_id: parentId,
         used_at: null,
-        mac_version: TOKEN_MAC_VERSION,
       },
     };
   });
@@ -117,6 +114,7 @@ export async function issueTokens(
     accessToken: access.text,
     refreshToken: refresh.text,
     accessTokenId: access.row.id,
+    refreshTokenId: refresh.row.id,
     accessExpiresAt: access.row.expires_at,
     scopes: scopesOf(kept),
   };
@@ -131,9 +129,6 @@ export interface TokenRow {
   readonly secretKeyVersion: number;
   readonly expiresAt: Date;
   readonly usedAt: Date | null;
-  readonly parentId: string | null;
-  /** 1 or 2 as kept (0102). */
-  readonly macVersion: number;
 }
 
 interface RawTokenRow {
@@ -144,8 +139,6 @@ interface RawTokenRow {
   readonly secret_key_version: number;
   readonly expires_at: Date;
   readonly used_at: Date | null;
-  readonly parent_id: string | null;
-  readonly mac_version: number;
 }
 
 /** The row as the table's checks hold it, or undefined for none. */
@@ -160,21 +153,9 @@ const tokenRowOf = (row: RawTokenRow | undefined): TokenRow | undefined =>
         secretKeyVersion: row.secret_key_version,
         expiresAt: row.expires_at,
         usedAt: row.used_at,
-        parentId: row.parent_id?.toLowerCase() ?? null,
-        macVersion: row.mac_version,
       };
 
-const COLUMNS = [
-  'key_id',
-  'kind',
-  'scopes',
-  'secret_mac',
-  'secret_key_version',
-  'expires_at',
-  'used_at',
-  'parent_id',
-  'mac_version',
-] as const;
+const COLUMNS = ['key_id', 'kind', 'scopes', 'secret_mac', 'secret_key_version', 'expires_at', 'used_at'] as const;
 
 /** The door's one statement, not run: the token's row by its organisation and ID, unlocked. */
 export function tokenRowRead(db: Pick<Kysely<AgentsTables>, 'selectFrom'>, orgId: string, id: string) {
@@ -184,40 +165,12 @@ export function tokenRowRead(db: Pick<Kysely<AgentsTables>, 'selectFrom'>, orgId
 /** The door's read, judged: the row, if there is one. */
 export const tokenRowFound = (rows: readonly RawTokenRow[]): TokenRow | undefined => tokenRowOf(rows[0]);
 
-/** A refresh token's row locked, and what its family says of its use (R-15). */
-export interface TokenFamily {
-  readonly row: TokenRow | undefined;
-  /** Tokens of either kind that name it as their parent: made by its use (an access token alone is one too). */
-  readonly children: number;
-  /** Refresh tokens other than it that name its parent: made by another use of the same parent. */
-  readonly siblings: number;
-}
-
 /**
- * The refresh token's row locked for its use (lock level 3c, after its connection's 3b), in the caller's
- * transaction, and its family counted, on one trip: two
- * statements, the count's taken once the lock is held, so it sees a use that committed while this one waited. On
- * 0102's `connection_tokens_by_parent` alone. The parent counted is the locked row's, which the door proved sealed.
+ * The token's row locked for its use (lock level 3c, after its connection's 3b), in the caller's transaction:
+ * a refresh token about to be used or found used.
  */
-export async function tokenLockedWithFamily(tx: AgentsTransaction, orgId: string, id: string): Promise<TokenFamily> {
-  const org = orgId.toLowerCase();
-  const token = id.toLowerCase();
-  const family = sql<{ children: number; siblings: number }>`
-    select
-      (select pg_catalog.count(*)::int from agents.connection_tokens c
-        where c.org_id = ${org} and c.parent_id = ${token}) as children,
-      (select pg_catalog.count(*)::int from agents.connection_tokens s
-        where s.org_id = ${org} and s.kind = 'refresh' and s.id <> ${token}
-          and s.parent_id = (select t.parent_id from agents.connection_tokens t where t.org_id = ${org} and t.id = ${token})
-      ) as siblings
-  `;
-  const [locked, counted] = await sendTogether(tx, [tokenRowRead(tx, org, token).forUpdate(), family]);
-  const counts = counted.rows[0] as { readonly children?: number; readonly siblings?: number } | undefined;
-  return {
-    row: tokenRowFound(locked.rows as RawTokenRow[]),
-    children: counts?.children ?? 0,
-    siblings: counts?.siblings ?? 0,
-  };
+export async function tokenRowLocked(tx: AgentsTransaction, orgId: string, id: string): Promise<TokenRow | undefined> {
+  return tokenRowOf(await tokenRowRead(tx, orgId, id).forUpdate().executeTakeFirst());
 }
 
 /** Fills in the refresh token's use, only where none was: whether this call is the one that used it. */
@@ -300,17 +253,14 @@ export function tokenProven(keys: KeyProvider, row: TokenRow | undefined, presen
     tokenId: presented.tokenId,
     expiresAt: ours ? row.expiresAt : NO_TIME,
     scopes: ours ? row.scopes : '',
-    parentId: ours ? row.parentId : null,
   };
-  // Any version but 1 is taken as the current one: a row moved off its own then fails its MAC.
-  const macVersion: TokenMacVersion = ours && row.macVersion === 1 ? 1 : TOKEN_MAC_VERSION;
   // No pepper at all: nothing can be verified, so nothing is.
   const matches =
     version !== undefined &&
     keys.verifyMac(
       'agent-key-pepper',
       version,
-      connectionTokenMessage(binding, presented.secret, macVersion),
+      connectionTokenMessage(binding, presented.secret),
       held ? row.secretMac : NO_MAC,
     );
   if (!ours) return { outcome: 'unread' };
