@@ -30,11 +30,14 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
-import { type ExpressionBuilder, type Kysely, type Transaction } from 'kysely';
+import type { Logger } from '@agentx/platform/observability';
+import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import { latestPlatformTimeOfRead, type PlatformTransaction } from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import { macHolds, macOf, type RowMacs, rowForged, sessionMessage } from './row-macs.ts';
+import { SESSIONS_ENDED, type SignedEnds } from './signed-ends.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a session lives. */
@@ -140,7 +143,8 @@ export async function lockSessionsOf(tx: Transaction<IdentityTables>, userIds: r
  * deactivation ends them in its own transaction (ADR-003 §7, SEC-HA-10). Their
  * challenges and verified addresses go with them. Keeps `endedAt` as when
  * they were last all ended (0098, AG10), never moved back, so a sign-in made
- * before it opens no session (sessionsEndedAt). Says how many.
+ * before it opens no session (sessionsEndedAt). Says how many. The caller adds sessionsEndedEvent, with the same
+ * `endedAt`, to the platform chain in the same transaction, so the end can't be set back unseen (R-15).
  */
 export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string, endedAt: Date): Promise<number> {
   // The end kept first: it waits for a sign-in that has read the last one (sessionsEndedAt, FOR SHARE) to commit, so
@@ -154,20 +158,75 @@ export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: str
   return rows.length;
 }
 
+export { SESSIONS_ENDED, sessionsEndedEvent } from './signed-ends.ts';
+
+/** How far before a sign-in the platform chain is checked for ends: the app's clock and the database's may differ. */
+const CLOCKS_DIFFER_MS = 2 * 60 * 1000;
+
+/** What a sign-in finds of the person's ends (sessionsEndedAt). */
+export type SessionsEnded =
+  /** The latest end believed, or null for none. */
+  | { readonly kind: 'read'; readonly endedAt: Date | null }
+  /** The platform chain's stretch didn't hold: the alarm raised. */
+  | { readonly kind: 'tampered' };
+
+/** The later of two moments, either of which may be none. */
+const later = (one: Date | null, other: Date | null): Date | null =>
+  one === null || (other !== null && other > one) ? other : one;
+
 /**
- * When the person's sessions were last all ended (endSessionsOf), or null, in the caller's transaction, their row
- * locked FOR SHARE until it ends: an end committing at the same moment is waited for and then read, so a session
- * can't be opened past it. Taken after any of their sessions is locked (the sign-in's previous one ended), as an end
- * locks the sessions before the row.
+ * When the person's sessions were last all ended (endSessionsOf), or null, for a sign-in made at `signedInAt`, in the
+ * caller's transaction, their row locked FOR SHARE until it ends: an end committing at the same moment is waited for
+ * and then read, so a session can't be opened past it. Taken after any of their sessions is locked (the sign-in's
+ * previous one ended), as an end locks the sessions before the row.
+ *
+ * R-15 (S206): the column alone is the owner's to set back, or to put an older value of back. So each end is signed on
+ * the platform chain too (sessionsEndedEvent), and the end believed is the latest of three:
+ * - the column;
+ * - the person's latest signed end, read in the same statement by 0084's by-person index, so a column set back
+ *   behind it raises the alarm wherever that end lies;
+ * - the person's latest end among the platform events checked in place since a little before `signedInAt` (an ID
+ *   token's time, the login service's, which the owner can't move): the only ends that can make this sign-in stale.
+ *   `signedEnds` checks them from where this process got to (signed-ends.ts), so a record deleted, even for a moment
+ *   and put back, is seen. It counts too where the index missed it: the index is read on the first statement's
+ *   snapshot, before any wait for the row's lock, and a record put back while the sign-in waited is missing there.
+ * The column behind either signed end raises the alarm (check `user`), and the signed end is believed; a chain that
+ * doesn't hold raises it too (check `platform_chain`), and nothing is believed.
  */
-export async function sessionsEndedAt(tx: Kysely<IdentityTables>, userId: string): Promise<Date | null> {
+export async function sessionsEndedAt(
+  tx: Kysely<IdentityTables>,
+  userId: string,
+  { logger, signedEnds }: { readonly logger: Logger; readonly signedEnds: SignedEnds },
+  signedInAt: Date,
+): Promise<SessionsEnded> {
+  const person = userId.toLowerCase();
+  // The platform chain's tables are reached in the same transaction: they belong to no organisation.
+  const platform = tx as unknown as PlatformTransaction;
+  const signed = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: { person } }]);
   const row = await tx
     .selectFrom('identity.users')
-    .select('sessions_ended_at')
+    .select(['sessions_ended_at', sql<Date | null>`(${signed})`.as('signed_end')])
     .where('id', '=', userId)
     .forShare()
     .executeTakeFirstOrThrow();
-  return row.sessions_ended_at;
+  // After the row's lock: an end of the person's can't commit from here on, as it would wait for that lock.
+  const checked = await signedEnds.check(platform, new Date(signedInAt.getTime() - CLOCKS_DIFFER_MS));
+  if (checked.kind === 'broken') {
+    const { reason, seq } = checked.problem;
+    logger.error('audit.integrity_failed', { check: 'platform_chain', reason, seq: seq.toString(), userId });
+    return { kind: 'tampered' };
+  }
+  const column = row.sessions_ended_at;
+  const signedEnd = later(row.signed_end, checked.ends.get(person)?.at ?? null);
+  if (signedEnd !== null && (column === null || column < signedEnd)) {
+    logger.error('audit.integrity_failed', {
+      check: 'user',
+      reason: 'sessions_ended_rolled_back',
+      rowId: userId,
+      userId,
+    });
+  }
+  return { kind: 'read', endedAt: later(column, signedEnd) };
 }
 
 /** The columns a session's MAC is made from, with the MAC itself. */

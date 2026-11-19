@@ -22,7 +22,8 @@
 //    and hash; every session of the member ended; then the change, recorded
 //    with the step-up's evidence and how many sessions ended (`signInsEnded`:
 //    the audit trail refuses a detail named for sessions, as it would a
-//    session's secret).
+//    session's secret); last, the end's signed record on the platform chain
+//    (R-15), which a sign-in begun before it is refused by.
 //
 // Deactivating a member also ends what `leaving` names outside this module
 // (6E3b, decision 7: the MCP connections they made, the API's composition):
@@ -62,6 +63,7 @@ import {
 } from '../../audit/index.ts';
 import { type DirectoryTables, listedMember, listedMembership } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
+import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { grantsToChange, tamperThrown } from './membership-grants.ts';
@@ -74,7 +76,7 @@ import {
   type MembershipsTransaction,
 } from './memberships.ts';
 import { tellAdminsOfGrant, tellAdminsOfRemoval } from './grant-notices.ts';
-import { endSessionsOf, lockSessionsOf } from './sessions.ts';
+import { endSessionsOf, lockSessionsOf, sessionsEndedEvent } from './sessions.ts';
 import { changeHashOf, lockChallengesOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { Refusal } from './refusals.ts';
@@ -220,6 +222,7 @@ export function createMembershipChanges<Theirs extends object = object>({
   /** What else a deactivation ends (MemberLeaving); nothing when not given. */
   readonly leaving?: MemberLeaving<Theirs>;
 }): MembershipChanges {
+  const platform = createPlatformChain({ keys, ids });
   /**
    * The admin's membership and the member's, each read once, in order of
    * membership ID (ADR-006 §6 level 2a): the admin's for a decision, the
@@ -376,7 +379,8 @@ export function createMembershipChanges<Theirs extends object = object>({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new ChangeRefused(403, 'STEP_UP_FAILED');
-        const signInsEnded = await endSessionsOf(tx, member.userId, clock.now());
+        const endedAt = clock.now();
+        const signInsEnded = await endSessionsOf(tx, member.userId, endedAt);
         const actor = { type: 'user' as const, id: admin.userId };
         const key = { orgId: admin.orgId, id: member.id };
         const evidence = { signInsEnded, ...stepUpDetails(consumed) };
@@ -407,6 +411,9 @@ export function createMembershipChanges<Theirs extends object = object>({
             role: member.role,
           });
         }
+        // The end's signed record, on the platform chain, its head the last lock of all (ADR-006 §6; R-15).
+        // The platform chain's tables are in the same database, and belong to no organisation.
+        await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(member.userId, endedAt));
         return { status: 200, resourceId: member.id };
       };
       let ran: Awaited<ReturnType<typeof confirmed>>;

@@ -60,7 +60,7 @@ import type { SecondFactorRemover } from './idp-factors.ts';
 import { memberOf } from './memberships.ts';
 import { SECOND_FACTORS_REMOVED } from './removal-restriction.ts';
 import { toldOfReset } from './grant-notices.ts';
-import { endSessionsOf, lockSessionsOf } from './sessions.ts';
+import { endSessionsOf, lockSessionsOf, sessionsEndedEvent } from './sessions.ts';
 import { lockChallengesOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { subjectOfUser } from './users.ts';
@@ -212,8 +212,11 @@ export function createResetRemovals({
       // Completed by another run (a second replica, or two revisions at a release): the same removal, benign.
       if (not === 'done') return 'not_due';
       let outcome: RemovalOutcome = 'removed_after_cancel';
+      // When the person's sessions were ended, if they were: kept to sign it on the platform chain, last.
+      let endedAt: Date | undefined;
       if (not === undefined) {
-        const signInsEnded = await endSessionsOf(tx, userId, clock.now());
+        endedAt = clock.now();
+        const signInsEnded = await endSessionsOf(tx, userId, endedAt);
         await moveReset(tx, states, {
           orgId,
           id,
@@ -234,6 +237,7 @@ export function createResetRemovals({
         action: SECOND_FACTORS_REMOVED,
         details: { person: userId, org: orgId, reset: id, at: clock.now().toISOString() },
       });
+      if (endedAt !== undefined) await platform.record(tx, sessionsEndedEvent(userId, endedAt));
       return outcome;
     });
   };

@@ -3,6 +3,7 @@
 import {
   createTestDatabase,
   FixedClock,
+  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -11,15 +12,30 @@ import {
 } from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import {
+  createPlatformChain,
+  type PlatformControlsTables,
+  type PlatformTransaction,
+} from '../../platform-controls/index.ts';
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
 import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
 import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
-import { createSessions, endSessionsOf, lockSessionsOf, type Sessions, sessionsEndedAt } from './sessions.ts';
+import {
+  createSessions,
+  endSessionsOf,
+  lockSessionsOf,
+  type Sessions,
+  SESSIONS_ENDED,
+  sessionsEndedAt,
+  sessionsEndedEvent,
+} from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
+import { createSignedEnds } from './signed-ends.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { contactData } from './user-contacts.ts';
@@ -117,6 +133,10 @@ const used = (
   );
 let clock: FixedClock;
 let subjects = 0;
+/** What the sign-in logged since the test began. */
+let capture: LogCapture;
+/** What sessionsEndedAt is given beside the transaction: a logger, and ends checked by a process just started. */
+const endsOf = (logger = testLogger()) => ({ logger, signedEnds: createSignedEnds(keys) });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -133,6 +153,7 @@ beforeEach(() => {
   client = new StandInClient();
   client.subject = `sign-in-${String(subjects)}`;
   clock = new FixedClock(START);
+  capture = new LogCapture();
   const ids = new SequentialIds(0x5000 + subjects * 0x100);
   challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
   sessions = createSessions({
@@ -151,7 +172,7 @@ beforeEach(() => {
     ids,
     clock,
     keys,
-    logger: testLogger(),
+    logger: testLogger(capture),
   });
 });
 
@@ -273,7 +294,10 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     const { userId } = await roundTrip();
     const [earlier, later] = [new Date(START.getTime() + 60_000), new Date(START.getTime() + 120_000)];
     for (const at of [later, earlier]) await app.transaction().execute((tx) => endSessionsOf(tx, userId, at));
-    expect(await app.transaction().execute((tx) => sessionsEndedAt(tx, userId))).toEqual(later);
+    expect(await app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(), START))).toEqual({
+      kind: 'read',
+      endedAt: later,
+    });
 
     const latest = new Date(START.getTime() + 180_000);
     const holder = await database.connect('admin');
@@ -281,14 +305,14 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [userId, latest]);
     const reading = within(
       20_000,
-      app.transaction().execute((tx) => sessionsEndedAt(tx, userId)),
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(), START)),
       'the read',
     );
     await waitUntilQueued(database.as('admin'), 1);
     await holder.query('commit');
     await holder.end();
 
-    expect(await reading).toEqual(latest);
+    expect(await reading).toEqual({ kind: 'read', endedAt: latest });
   });
 
   it('AG10 an end waits for a sign-in that has read the last end, then ends the session it opened (ADR-006 §6)', async () => {
@@ -297,7 +321,7 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
     // The sign-in, its read of the last end taken (FOR SHARE), held before it opens its session.
     const signingIn = app.transaction().execute(async (tx) => {
-      await sessionsEndedAt(tx, userId);
+      await sessionsEndedAt(tx, userId, endsOf(), START);
       hasRead(undefined);
       await gate;
       await sessions.open(tx, userId, evidence);
@@ -1001,5 +1025,359 @@ describe(`a person's kept name and address (E10d, decision 25, Postgres ${server
     expect(() =>
       keys.decrypt('field-encryption', { ciphertext: saraName, keyVersion: 1 }, contactData(sara.userId, 'email')),
     ).toThrow();
+  });
+});
+
+describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres ${server.version})`, () => {
+  // The end is signed on the platform chain as the column is written, in the same transaction, as every caller does
+  // (membership-changes, reset-removals, idp-copier). The owner, holding no key, can set the column back or empty it,
+  // but not the signed record: a sign-in begun before the end is still refused, and the alarm raised.
+  const platform = createPlatformChain({ keys, ids: new SequentialIds(0x5206_0000) });
+  const MINUTE = 60_000;
+
+  /** Ends every session of the person at `at`, signing the end, as the callers do. */
+  const endSigned = (userId: string, at: Date) =>
+    app.transaction().execute(async (tx) => {
+      await lockSessionsOf(tx, [userId]);
+      await endSessionsOf(tx, userId, at);
+      return platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(userId, at));
+    });
+
+  /** Runs one statement as agentx_owner, holding none of the app's keys, on a connection of its own. */
+  async function asOwner(text: string, values: readonly unknown[]): Promise<void> {
+    const owner = await database.connect('owner');
+    try {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text; every value is bound.
+      await owner.query(text, values);
+    } finally {
+      await owner.end();
+    }
+  }
+
+  /**
+   * A sign-in made as its flow begins, finished after the person's sessions were ended a minute on, with `meanwhile`
+   * done before the person is back: what it came to.
+   */
+  async function begunBeforeTheEnd(meanwhile: (userId: string, ended: { readonly seq: bigint }) => Promise<void>) {
+    const { userId } = await roundTrip();
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    client.whileFinishing = async () => {
+      clock.advanceBy(MINUTE);
+      const ended = await endSigned(userId, clock.now());
+      await meanwhile(userId, ended);
+    };
+    const settled = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined }).then(
+      () => 'opened',
+      (error: unknown) => (error instanceof SignInFailed ? error.failure : 'other'),
+    );
+    return { userId, settled };
+  }
+
+  const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+  const rolledBack = (userId: string): unknown[] => [
+    expect.objectContaining({ check: 'user', reason: 'sessions_ended_rolled_back', userId, rowId: userId }),
+  ];
+
+  it('control: an end signed and kept refuses a sign-in begun before it, with no alarm; a later one is taken', async () => {
+    const { userId, settled } = await begunBeforeTheEnd(() => Promise.resolve());
+
+    expect(settled).toBe('stale_authentication');
+    expect(await sessionsOf(userId)).toEqual([]);
+    client.whileFinishing = undefined;
+    client.proves = { ...evidence, authTime: clock.now() };
+    expect((await roundTrip()).userId).toBe(userId);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('the column set back by the owner still refuses a sign-in begun before the end, and raises the alarm', async () => {
+    const { userId, settled } = await begunBeforeTheEnd((person) =>
+      asOwner('update identity.users set sessions_ended_at = $2 where id = $1', [person, START]),
+    );
+
+    expect(settled).toBe('stale_authentication');
+    expect(await sessionsOf(userId)).toEqual([]);
+    expect(alarms()).toEqual(rolledBack(userId));
+  });
+
+  it('the column emptied by the owner still refuses it, and raises the alarm', async () => {
+    const { userId, settled } = await begunBeforeTheEnd((person) =>
+      asOwner('update identity.users set sessions_ended_at = null where id = $1', [person]),
+    );
+
+    expect(settled).toBe('stale_authentication');
+    expect(await sessionsOf(userId)).toEqual([]);
+    expect(alarms()).toEqual(rolledBack(userId));
+  });
+
+  it("reads the later of the column and the person's own latest signed end, never another person's", async () => {
+    const { userId } = await roundTrip();
+    client.subject = `${client.subject}-other`;
+    const other = await roundTrip();
+    const at = (minutes: number) => new Date(START.getTime() + minutes * MINUTE);
+    const [first, second, theirs] = [at(1), at(2), at(3)];
+    await endSigned(userId, first);
+    await endSigned(userId, second);
+    await endSigned(other.userId, theirs);
+    // Signed in at the test's clock, long before the database's own: every event since is checked in place. Or an
+    // long past the database's clock, when none is: the person's latest end, by the index, all the same.
+    const read = async (signedInAt: Date) => {
+      const ended = await app
+        .transaction()
+        .execute((tx) => sessionsEndedAt(tx, userId, endsOf(testLogger(capture)), signedInAt));
+      return ended.kind === 'read' ? ended.endedAt : ended.kind;
+    };
+    const [checked, indexed] = [START, new Date('2100-01-01T00:00:00Z')];
+
+    expect([await read(checked), await read(indexed)]).toEqual([second, second]);
+    expect(alarms()).toEqual([]);
+    // Ahead of the record (an end timed by another replica's later clock, say): the column, with no alarm.
+    const ahead = new Date(START.getTime() + 4 * MINUTE);
+    await app.updateTable('identity.users').set({ sessions_ended_at: ahead }).where('id', '=', userId).execute();
+    expect([await read(checked), await read(indexed)]).toEqual([ahead, ahead]);
+    expect(alarms()).toEqual([]);
+    // Behind the latest record, though past an earlier one: the latest record, and the alarm, each way.
+    await asOwner('update identity.users set sessions_ended_at = $2 where id = $1', [userId, first]);
+    expect([await read(checked), await read(indexed)]).toEqual([second, second]);
+    expect(alarms()).toEqual([...rolledBack(userId), ...rolledBack(userId)]);
+  });
+
+  it('an end whose record the owner deletes for a moment, with the column set back, is refused, with the alarm', async () => {
+    const { userId, settled } = await begunBeforeTheEnd(async (person, ended) => {
+      // Another event after it, so it lies inside the chain, not at its top.
+      await platform.recordAlone(app as unknown as Kysely<PlatformControlsTables>, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: { release: 'r-206' },
+      });
+      await database
+        .as('admin')
+        .query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+          ended.seq,
+        ]);
+      await asOwner('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+      await asOwner('update identity.users set sessions_ended_at = null where id = $1', [person]);
+    });
+
+    expect(settled).toBe('account_unbelieved');
+    expect(await sessionsOf(userId)).toEqual([]);
+    expect(alarms()).toEqual([expect.objectContaining({ check: 'platform_chain', reason: 'gap', userId })]);
+    // Put back byte for byte, the chain is whole again: only this check, made while the record was gone, found it.
+    await database.as('admin').query('insert into platform_controls.audit_events select * from public.held_r15');
+    await database.as('admin').query('drop table public.held_r15');
+    expect(await platform.verifyAlone(app as unknown as Kysely<PlatformControlsTables>, undefined)).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('believes the checked stretch, not the index alone: a record put back while the read waits for the row', async () => {
+    const { userId } = await roundTrip();
+    const ended = await endSigned(userId, new Date(START.getTime() + MINUTE));
+    const admin = database.as('admin');
+    // The owner deletes the record, then holds the person's row, its column emptied, uncommitted.
+    await admin.query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+      ended.seq,
+    ]);
+    await admin.query('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('update identity.users set sessions_ended_at = null where id = $1', [userId]);
+    const reading = within(
+      20_000,
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId, endsOf(testLogger(capture)), START)),
+      'the read',
+    );
+    // The read's first statement waits for the row on its snapshot, the record missing; the record is put back.
+    await waitUntilQueued(admin, 1);
+    await admin.query('insert into platform_controls.audit_events select * from public.held_r15');
+    await admin.query('drop table public.held_r15');
+    await holder.query('commit');
+    await holder.end();
+
+    expect(await reading).toEqual({ kind: 'read', endedAt: new Date(START.getTime() + MINUTE) });
+    expect(alarms()).toEqual(rolledBack(userId));
+  });
+
+  /**
+   * The database's own clock, which records the platform chain's events: a sign-in made now by it, as in production,
+   * is checked from where the process got to, not afresh from the test clock's far past.
+   */
+  const databaseNow = async (): Promise<Date> => {
+    const [row] = await database.as('admin').query<{ now: Date }>('select now() as now');
+    if (row === undefined) throw new Error('the database gave no time');
+    return row.now;
+  };
+
+  it('keeps an end it checked: its record deleted after, with the column emptied, still refuses, with the alarm', async () => {
+    const now = await databaseNow();
+    client.proves = { ...evidence, authTime: now };
+    const { userId } = await roundTrip();
+    const begun = async () => {
+      const { url, flowId } = await signIn.begin();
+      return { flowId, state: new URL(url).searchParams.get('state') ?? '' };
+    };
+    const [first, second] = [await begun(), await begun()];
+    const ended = await endSigned(userId, new Date(now.getTime() + MINUTE));
+    const finish = ({ flowId, state }: { flowId: string; state: string }) =>
+      signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined }).then(
+        () => 'opened',
+        (error: unknown) => (error instanceof SignInFailed ? error.failure : 'other'),
+      );
+    // The first sign-in back checks the end's record, and is refused by it.
+    expect(await finish(first)).toBe('stale_authentication');
+    const admin = database.as('admin');
+    await admin.query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+      ended.seq,
+    ]);
+    await asOwner('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+    await asOwner('update identity.users set sessions_ended_at = null where id = $1', [userId]);
+    try {
+      // Checked already, before where the next check starts: the process keeps it.
+      expect(await finish(second)).toBe('stale_authentication');
+      expect(alarms()).toEqual(rolledBack(userId));
+    } finally {
+      await admin.query('insert into platform_controls.audit_events select * from public.held_r15');
+      await admin.query('drop table public.held_r15');
+    }
+  });
+
+  it('checks any number of platform events: thousands recorded since are read once, never a refusal', async () => {
+    const since = new Date((await databaseNow()).getTime() - 2 * MINUTE);
+    const { userId } = await roundTrip();
+    await app.transaction().execute(async (tx) => {
+      for (let n = 0; n < 2500; n += 1) {
+        await platform.record(tx as unknown as PlatformTransaction, {
+          actor: { type: 'system', id: 'api' },
+          action: 'platform.started',
+          details: { release: `r-${String(n)}` },
+        });
+      }
+    });
+    const ends = createSignedEnds(keys);
+    const check = () => app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+
+    // A process just started reads them all once, a page at a time; then only what was recorded since.
+    const cold = await check();
+    expect(cold).toMatchObject({ kind: 'checked' });
+    expect(cold.kind === 'checked' && cold.read).toBeGreaterThanOrEqual(2500);
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    expect(await check()).toMatchObject({ kind: 'checked', read: 1 });
+    expect(await check()).toMatchObject({ kind: 'checked', read: 0 });
+    // And a sign-in through it all, its process just started, is taken.
+    client.proves = { ...evidence, authTime: new Date(START.getTime() + MINUTE) };
+    expect((await roundTrip()).userId).toBe(userId);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('shares one check between sign-ins arriving while one runs: the chain is read once, not once each', async () => {
+    const since = new Date((await databaseNow()).getTime() - 2 * MINUTE);
+    const { userId } = await roundTrip();
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    const checks = await Promise.all(
+      [1, 2, 3].map(() => app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since))),
+    );
+
+    const reads = checks.map((one) => (one.kind === 'checked' ? one.read : -1));
+    expect(Math.max(...reads)).toBeGreaterThan(0);
+    expect(reads.reduce((sum, read) => sum + read, 0)).toBe(Math.max(...reads));
+  });
+
+  it("keeps each person's latest signed end, from records of ends alone, and checks afresh for a moment before it", async () => {
+    // An event recorded a moment before the check's own moment, which only a check from before that reads.
+    const { userId } = await roundTrip();
+    await endSigned(userId, START);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const now = await databaseNow();
+    const ends = createSignedEnds(keys);
+    const check = (since: Date) =>
+      app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+    await check(now);
+    const minutesOn = (minutes: number) => new Date(now.getTime() + minutes * MINUTE);
+    const [first, second, notAnEnd] = [minutesOn(2), minutesOn(1), minutesOn(3)];
+    // Recorded later, but the earlier end: the latest end is kept, whatever the order of their records.
+    await endSigned(userId, first);
+    await endSigned(userId, second);
+    // Another record naming the person and a later time is no end of theirs.
+    await platform.recordAlone(app as unknown as Kysely<PlatformControlsTables>, {
+      actor: { type: 'system', id: 'api' },
+      action: 'idp.event_copied',
+      details: { person: userId, at: notAnEnd.toISOString() },
+    });
+
+    const tail = await check(now);
+    expect(tail).toMatchObject({ kind: 'checked', read: 3 });
+    expect(tail.kind === 'checked' && tail.ends.get(userId)?.at).toEqual(first);
+    // Asked from before where it began: checked afresh from there, not only from where it got to.
+    const afresh = await check(new Date(now.getTime() - 60 * MINUTE));
+    expect(afresh.kind === 'checked' && afresh.read).toBeGreaterThan(3);
+  });
+
+  it('a check afresh from an earlier moment still finds the head wound back behind where it got to', async () => {
+    const now = await databaseNow();
+    const { userId } = await roundTrip();
+    await endSigned(userId, START);
+    const admin = database.as('admin');
+    await admin.query('create table public.head_r15 as select * from platform_controls.audit_head');
+    const ended = await endSigned(userId, new Date(now.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    const check = (since: Date) =>
+      app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+    expect(await check(now)).toMatchObject({ kind: 'checked' });
+    // The end, the newest event, deleted, and the head put back as it stood before it, its MAC whole.
+    await admin.query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+      ended.seq,
+    ]);
+    await admin.query('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+    await admin.query('create table public.head_now as select * from platform_controls.audit_head');
+    await admin.query('delete from platform_controls.audit_head');
+    await admin.query('insert into platform_controls.audit_head select * from public.head_r15');
+    try {
+      expect(await check(new Date(now.getTime() - 60 * MINUTE))).toEqual({
+        kind: 'broken',
+        problem: { reason: 'head', seq: ended.seq - 1n },
+      });
+    } finally {
+      await admin.query('delete from platform_controls.audit_head');
+      await admin.query('insert into platform_controls.audit_head select * from public.head_now');
+      await admin.query('insert into platform_controls.audit_events select * from public.held_r15');
+      await admin.query('drop table public.head_r15, public.head_now, public.held_r15');
+    }
+  });
+
+  it('starts the shared check from the earliest moment its sign-ins asked for, and once one before it failed', async () => {
+    const now = await databaseNow();
+    const { userId } = await roundTrip();
+    await endSigned(userId, new Date(START.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    // A transaction whose database has gone: its check fails.
+    const gone = {
+      selectFrom: () => {
+        throw new Error('the database went away');
+      },
+    } as unknown as PlatformTransaction;
+    await app.transaction().execute(async (tx) => {
+      const on = tx as unknown as PlatformTransaction;
+      const failing = ends.check(gone, now);
+      const [later, earlier] = [ends.check(on, now), ends.check(on, new Date(now.getTime() - 60 * MINUTE))];
+
+      // The two that came while it ran share the next one, which runs all the same, from the earlier moment.
+      expect(later).toBe(earlier);
+      await expect(failing).rejects.toThrow('the database went away');
+      const shared = await later;
+      expect(shared).toMatchObject({ kind: 'checked' });
+      expect(shared.kind === 'checked' && shared.ends.get(userId)).toBeTruthy();
+      // From the earlier moment: the events recorded before `now` by the tests before this one too, not its end alone.
+      expect(shared.kind === 'checked' && shared.read).toBeGreaterThan(1);
+    });
+  });
+
+  it(`signs the end as ${SESSIONS_ENDED}, naming the person in lower case and the moment as toISOString writes it`, () => {
+    const at = new Date(START.getTime() + MINUTE);
+    expect(sessionsEndedEvent('0A0B0C0D-0000-4000-8000-000000000001', at)).toEqual({
+      actor: { type: 'system', id: 'api' },
+      action: SESSIONS_ENDED,
+      details: { person: '0a0b0c0d-0000-4000-8000-000000000001', at: at.toISOString() },
+    });
   });
 });
