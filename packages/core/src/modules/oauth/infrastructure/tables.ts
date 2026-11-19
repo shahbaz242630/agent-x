@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094, 0095, 0096, 0097), as Kysely sees them. */
+/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094, 0095, 0096, 0099), as Kysely sees them. */
 export interface OauthTables {
   'oauth.clients': ClientsTable;
   'oauth.flows': FlowsTable;

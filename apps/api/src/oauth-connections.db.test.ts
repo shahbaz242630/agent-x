@@ -1125,28 +1125,25 @@ describe(`a connection revoked (Postgres ${server.version})`, () => {
     await grants.revoke({ token: first.accessToken, clientId }, CALLER);
   });
 
-  it('AG8: never by a token rotated or past its time, which can act no more: answered the same, nothing revoked', async () => {
+  it('AG8: a token past its time or rotated still disconnects its own client’s connection: disconnecting fails safe', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
-    const first = await connected(org, admin, await agent(org, admin));
     const refreshing = (refreshToken: string) =>
       grants.refresh({ refreshToken, clientId, scope: undefined, resource: undefined }, CALLER);
-    // Rotated: the refresh token used once is spent, and whoever finds it later can't end the connection with it.
-    const second = issued(await refreshing(first.refreshToken));
-    await grants.revoke({ token: first.refreshToken, clientId }, CALLER);
-    expect(await accepted(second.accessToken)).toMatchObject({ outcome: 'accepted' });
-    // Past its time: the first access token, an hour on.
+    // Rotated: an app disconnecting with the refresh token it just swapped still ends the connection.
+    const rotated = await connected(org, admin, await agent(org, admin));
+    const second = issued(await refreshing(rotated.refreshToken));
+    await grants.revoke({ token: rotated.refreshToken, clientId }, CALLER);
+    expect(await accepted(second.accessToken)).toEqual({ outcome: 'refused' });
+    // Past its time: an app disconnecting with an access token an hour old still ends it; its refresh token is dead.
+    const lapsed = await connected(org, admin, await agent(org, admin));
     clock.advanceBy(ACCESS_TOKEN_SECONDS * 1000);
-    await grants.revoke({ token: first.accessToken, clientId }, CALLER);
-    expect(lines('oauth.revoke_ignored')).toEqual([
-      expect.objectContaining({ level: 'info', reason: 'rotated', keyId: first.keyId }),
-      expect.objectContaining({ level: 'info', reason: 'expired', keyId: first.keyId }),
+    await grants.revoke({ token: lapsed.accessToken, clientId }, CALLER);
+    expect(await refreshing(lapsed.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(lines('oauth.connection_revoked')).toEqual([
+      expect.objectContaining({ keyId: rotated.keyId, revoked: true }),
+      expect.objectContaining({ keyId: lapsed.keyId, revoked: true }),
     ]);
-    expect(lines('oauth.connection_revoked')).toEqual([]);
-    // The connection stands: its live refresh token still rotates, and revokes it.
-    const third = issued(await refreshing(second.refreshToken));
-    await grants.revoke({ token: third.refreshToken, clientId }, CALLER);
-    expect(await accepted(third.accessToken)).toEqual({ outcome: 'refused' });
   });
 
   it('by a hand-over, which revokes every connection key of the agent, as it does every key', async () => {
