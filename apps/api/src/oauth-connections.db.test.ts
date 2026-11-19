@@ -8,7 +8,7 @@
 // connected (6E3c, RFC 8628), and a client named by its metadata document
 // (6E3c, SEC-OAUTH-09). The routes' own answers
 // are oauth-routes.test.ts and oauth-requests.test.ts.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   ACCESS_TOKEN_SECONDS,
@@ -2557,5 +2557,191 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     at.advanceBy(60_000);
     await clients.find('https://claude.ai/oauth/varied-next-minute');
     expect(fetched).toHaveLength(MOST_FETCHES_A_MINUTE + 1);
+  });
+});
+
+describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a connection's tokens by writing a flow (Postgres ${server.version})`, () => {
+  // The owner holds none of the app's keys, but owns oauth.flows (global, no row security): it can write any row.
+  const ELSEWHERE = 'https://attacker.example/cb';
+  const OWN_VERIFIER = 'w'.repeat(43);
+  /** A code or device code of the owner's own making: its hash is all a flow keeps. */
+  const own = (prefix: 'axc' | 'axd') => `${prefix}_${randomBytes(32).toString('base64url')}`;
+  const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+  const owner = () => database.as('owner');
+
+  /** The integrity alarm, raised for the connection the flow named. */
+  const alarmed = (keyId: string) => {
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', reason: 'holding', subjectType: 'connection', objectId: keyId }),
+    ]);
+  };
+
+  /**
+   * What the owner plants as the decision's seal, and what it raises: a MAC made up, the integrity alarm; one naming a
+   * pepper version not held, our fault's error; none at all, as a flow decided before 0100 (or by the release before,
+   * while this one rolls out) has, a warning. Each refused all the same.
+   */
+  const SEALS = [
+    ['a seal made up', { mac: 'e'.repeat(64), version: 1 }, 'audit.integrity_failed'],
+    ['a seal of a pepper version not held', { mac: 'e'.repeat(64), version: 9 }, 'oauth.decision_key_not_held'],
+    ['no seal', null, 'oauth.decision_unsealed'],
+  ] as const;
+
+  /** The one line a planted flow raised: the alarm for the connection it named, or its own. */
+  const refusedAsPlanted = (keyId: string, raised: (typeof SEALS)[number][2]) => {
+    if (raised === 'audit.integrity_failed') alarmed(keyId);
+    else {
+      expect(lines('audit.integrity_failed')).toEqual([]);
+      expect(lines(raised)).toEqual([expect.objectContaining({ keyId })]);
+    }
+  };
+
+  /** A victim's live connection: its organisation, its key, and its own tokens. */
+  async function victim() {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    return connected(org, admin, agentId);
+  }
+
+  /** A real flow, allowed by its person: its ID and the code their browser was sent back with. */
+  async function decided() {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const flow = await opened();
+    const write = await allowed(admin, flow, { agentId, scopes: ['requests:read'] });
+    if (write.outcome !== 'connected') throw new Error('connected');
+    return { flowId: flow.flowId, code: codeOf(write), keyId: write.connection.keyId };
+  }
+
+  it.each(SEALS)(
+    '(a) a code flow planted as allowed for an existing connection, %s, is refused invalid_grant',
+    async (_, seal, raised) => {
+      const { org, keyId } = await victim();
+      const ownCode = own('axc');
+      const now = clock.now();
+      await owner().query(
+        `insert into oauth.flows (id, kind, client_id, redirect_uri, code_challenge, scopes_asked, resource,
+         browser_hash, created_at, ends_at, decided_at, outcome, org_id, key_id, code_hash, code_ends_at,
+         decision_mac, decision_key_version)
+       values ($1, 'code', $2, $3, $4, 'requests:read', $5, $6, $7, $8, $7, 'allowed', $9, $10, $11, $12, $13, $14)`,
+        [
+          ids.next(),
+          clientId,
+          ELSEWHERE,
+          challengeOf(OWN_VERIFIER),
+          capabilities.resource,
+          sha256('a browser'),
+          now,
+          new Date(now.getTime() + 15 * 60_000),
+          org,
+          keyId,
+          sha256(ownCode),
+          new Date(now.getTime() + 60_000),
+          seal?.mac ?? null,
+          seal?.version ?? null,
+        ],
+      );
+      expect(await exchange(ownCode, { redirectUri: ELSEWHERE, codeVerifier: OWN_VERIFIER })).toEqual({
+        outcome: 'refused',
+        status: 400,
+        error: 'invalid_grant',
+        description: 'The code or refresh token is not valid, has expired, or was used already.',
+      });
+      refusedAsPlanted(keyId, raised);
+    },
+  );
+
+  it.each(SEALS)(
+    '(b) a device flow planted as allowed, %s, its client given the device grant, is refused invalid_grant',
+    async (_, seal, raised) => {
+      const { org, keyId } = await victim();
+      const ownDeviceCode = own('axd');
+      const now = clock.now();
+      await owner().query('update oauth.clients set grant_types = $2 where client_id = $1', [
+        clientId,
+        ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT],
+      ]);
+      await owner().query(
+        `insert into oauth.flows (id, kind, client_id, scopes_asked, resource, device_hash, user_code_hash,
+         interval_s, created_at, ends_at, decided_at, outcome, org_id, key_id, decision_mac, decision_key_version)
+       values ($1, 'device', $2, 'requests:read', $3, $4, $5, 5, $6, $7, $6, 'allowed', $8, $9, $10, $11)`,
+        [
+          ids.next(),
+          clientId,
+          capabilities.resource,
+          sha256(ownDeviceCode),
+          sha256(ownDeviceCode.toUpperCase()),
+          now,
+          new Date(now.getTime() + 15 * 60_000),
+          org,
+          keyId,
+          seal?.mac ?? null,
+          seal?.version ?? null,
+        ],
+      );
+      expect(await grants.exchangeDevice({ deviceCode: ownDeviceCode, clientId }, CALLER)).toMatchObject({
+        outcome: 'refused',
+        status: 400,
+        error: 'invalid_grant',
+      });
+      refusedAsPlanted(keyId, raised);
+    },
+  );
+
+  it('(c) a real flow, once allowed, its code, challenge and redirect rewritten, is refused invalid_grant, with the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    const ownCode = own('axc');
+    await owner().query('update oauth.flows set code_hash = $2, code_challenge = $3, redirect_uri = $4 where id = $1', [
+      flowId,
+      sha256(ownCode),
+      challengeOf(OWN_VERIFIER),
+      ELSEWHERE,
+    ]);
+    expect(await exchange(ownCode, { redirectUri: ELSEWHERE, codeVerifier: OWN_VERIFIER })).toMatchObject({
+      outcome: 'refused',
+      error: 'invalid_grant',
+    });
+    alarmed(keyId);
+    // The person's own code no longer names a flow: nothing issued for it either.
+    expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+  });
+
+  it('(c) a real flow rewritten in its challenge alone, the code intercepted, is refused invalid_grant, with the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    await owner().query('update oauth.flows set code_challenge = $2 where id = $1', [
+      flowId,
+      challengeOf(OWN_VERIFIER),
+    ]);
+    expect(await exchange(code, { codeVerifier: OWN_VERIFIER })).toMatchObject({
+      outcome: 'refused',
+      error: 'invalid_grant',
+    });
+    alarmed(keyId);
+  });
+
+  it('(d) a pending flow’s challenge rewritten between the ask and its confirm is never decided', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const flow = await opened();
+    const asked = { agentId, scopes: ['requests:read'] as const };
+    const challengeId = askedFor(await consent(admin, flow, asked));
+    await stepUp(admin, challengeId);
+    await owner().query('update oauth.flows set code_challenge = $2 where id = $1', [
+      flow.flowId,
+      challengeOf(OWN_VERIFIER),
+    ]);
+    const write = await consents.confirm(
+      admin,
+      keyed(admin, CONSENT_CONFIRM_OPERATION, 'confirm a flow changed since its ask'),
+      flow,
+      asked,
+      challengeId,
+      CORRELATION,
+    );
+    expect(write).toMatchObject({ outcome: 'refused' });
+    expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
   });
 });

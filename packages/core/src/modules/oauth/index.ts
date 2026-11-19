@@ -40,6 +40,13 @@ export {
   retireClientMetadata,
   sweepClientMetadata,
 } from './infrastructure/client-metadata-cache.ts';
+export {
+  type AllowedFields,
+  type DecisionJudged,
+  decisionJudged,
+  type DecisionSeal,
+  decisionSealed,
+} from './infrastructure/decision-seal.ts';
 export { challengeOf, isCodeChallenge, PKCE_METHOD, pkceMatches } from './infrastructure/pkce.ts';
 export { isLoopback, isRegisteredRedirect, redirectMatches, redirectProblems } from './domain/redirects.ts';
 export {
@@ -64,6 +71,7 @@ export {
 export {
   type AnyFlowRead,
   CODE_SECONDS,
+  codeEndsFrom,
   type CodeFlow,
   codeHeld,
   codeUsed,

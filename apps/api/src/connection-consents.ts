@@ -16,10 +16,12 @@
 //   again; the agent, ACTIVE; the scopes; room for one more connection (10
 //   live an agent, 100 in all, 20 made an organisation a day); a challenge
 //   bound to the organisation, the flow, the agent, the scopes, the client,
-//   its redirect address and the resource, so it makes exactly that
-//   connection. The confirm: the organisation's lock for issuing keys; the
-//   same reads and checks; the challenge consumed; the flow decided, once;
-//   then a key for the agent, its secret random and thrown away (no `axk_`
+//   its redirect address, the resource and the PKCE challenge, so it makes
+//   exactly that connection. The confirm: the organisation's lock for issuing
+//   keys; the same reads and checks; the challenge consumed; the flow decided,
+//   once, its decision sealed with a key the database never holds (S205,
+//   oauth/decision-seal.ts), so the token endpoint believes no flow planted or
+//   changed in the database; then a key for the agent, its secret random and thrown away (no `axk_`
 //   text can work for it), and its connection; the code, shown this once in
 //   the address the browser goes back to, its hash kept on the flow for 60 s.
 // - `deny`: the flow decided denied, and the browser sent back with
@@ -60,6 +62,8 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import {
   type AnyFlowRead,
+  codeEndsFrom,
+  decisionSealed,
   flowById,
   flowDecided,
   hashOf,
@@ -200,6 +204,8 @@ const consentHash = (orgId: string, flow: AnyFlowRead, asked: ConsentAsked): Buf
     // A device's has none: its kind, where the address would be, so neither can stand for the other.
     flow.kind === 'code' ? flow.redirectUri : 'device',
     flow.resource,
+    // S205: its PKCE challenge too, never shown, so a flow's changed between the ask and the confirm is never sealed.
+    flow.kind === 'code' ? flow.codeChallenge : 'device',
   ]);
 
 /**
@@ -410,11 +416,21 @@ export function createConnectionConsents({
           const keyId = ids.next();
           // A device's flow has no code: its device code, polling, takes the tokens (oauth-grants.ts).
           const code = flow.kind === 'code' ? newCode() : null;
+          const codeHash = code === null ? null : hashOf(code);
+          // Sealed over the flow as read here, the one the step-up was bound to (S205): a row changed by anyone
+          // without the app's keys, before or after, is never exchanged (oauth-grants.ts).
+          const seal = decisionSealed(keys, flow, {
+            orgId: member.orgId,
+            keyId,
+            codeHash,
+            decidedAt: now,
+            codeEndsAt: codeEndsFrom(now, codeHash),
+          });
           // Decided first, by one UPDATE of an undecided flow in time: a second confirm of it finds none, and rolls back.
           const decided = await flowDecided(
             tx,
             flow.id,
-            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash: code === null ? null : hashOf(code) },
+            { outcome: 'allowed', orgId: member.orgId, keyId, codeHash, seal },
             now,
           );
           if (!decided) throw new AgentRefused(404, 'NOT_FOUND');

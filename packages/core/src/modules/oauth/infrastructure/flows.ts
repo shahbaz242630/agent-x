@@ -24,6 +24,7 @@ import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kyse
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type Scope, scopesOf, scopesText } from '../../agents/index.ts';
+import type { DecisionSeal } from './decision-seal.ts';
 import type { OauthTables } from './tables.ts';
 
 /** How long a person has to sign in and decide (plan §3): long enough to register an agent first. */
@@ -47,17 +48,24 @@ export interface CodeFlow {
   readonly endsAt: Date;
 }
 
-/** Whether a flow was decided, and how: the organisation and connection key an allowed one made, and its use. */
+/**
+ * Whether a flow was decided, and how: when, the organisation and connection key an allowed one made, its decision's
+ * seal (0100, decision-seal.ts), and its use.
+ */
 interface FlowOutcome {
   readonly decided: 'allowed' | 'denied' | null;
+  readonly decidedAt: Date | null;
   readonly orgId: string | null;
   readonly keyId: string | null;
+  readonly seal: DecisionSeal | null;
   readonly usedAt: Date | null;
 }
 
 /** A browser's flow as read: opened, and whether it was decided and its code used. */
 export interface FlowRead extends CodeFlow, FlowOutcome {
   readonly kind: 'code';
+  /** Its code's SHA-256, once allowed. */
+  readonly codeHash: string | null;
   readonly codeEndsAt: Date | null;
 }
 
@@ -68,6 +76,8 @@ export interface DeviceFlowRead extends FlowOutcome {
   readonly clientId: string;
   readonly scopesAsked: readonly Scope[];
   readonly resource: string;
+  /** Its device code's SHA-256. */
+  readonly deviceHash: string;
   readonly browserHash: string | null;
   /** The SHA-256 of the person who claimed it with that browser (AG8), if one did. */
   readonly personHash: string | null;
@@ -205,11 +215,16 @@ const COLUMNS = [
   'resource',
   'browser_hash',
   'person_hash',
+  'device_hash',
   'created_at',
   'ends_at',
+  'decided_at',
   'outcome',
   'org_id',
   'key_id',
+  'decision_mac',
+  'decision_key_version',
+  'code_hash',
   'code_ends_at',
   'used_at',
   'interval_s',
@@ -223,20 +238,26 @@ type FlowRow = {
 /** How a flow was decided, from its row. */
 const outcomeOf = (row: FlowRow): FlowOutcome => ({
   decided: row.outcome === 'allowed' || row.outcome === 'denied' ? row.outcome : null,
+  decidedAt: row.decided_at,
   orgId: row.org_id,
   keyId: row.key_id,
+  seal:
+    row.decision_mac === null || row.decision_key_version === null
+      ? null
+      : { mac: row.decision_mac, keyVersion: row.decision_key_version },
   usedAt: row.used_at,
 });
 
 /** A device flow's row as read; undefined for a code flow's. */
 function deviceFlowOf(row: FlowRow | undefined): DeviceFlowRead | undefined {
-  if (row?.kind !== 'device' || row.interval_s === null) return undefined;
+  if (row?.kind !== 'device' || row.interval_s === null || row.device_hash === null) return undefined;
   return {
     kind: 'device',
     id: row.id,
     clientId: row.client_id,
     scopesAsked: scopesOf(row.scopes_asked),
     resource: row.resource,
+    deviceHash: row.device_hash,
     browserHash: row.browser_hash,
     personHash: row.person_hash,
     intervalSeconds: row.interval_s,
@@ -264,6 +285,7 @@ function flowOf(row: FlowRow | undefined): FlowRead | undefined {
     browserHash: row.browser_hash,
     createdAt: row.created_at,
     endsAt: row.ends_at,
+    codeHash: row.code_hash,
     codeEndsAt: row.code_ends_at,
     ...outcomeOf(row),
   };
@@ -275,14 +297,28 @@ export async function flowById(db: Handle, id: string): Promise<AnyFlowRead | un
   return flowOf(row) ?? deviceFlowOf(row);
 }
 
-/** How a flow was decided: an allowed code flow keeps its code's hash; a device's has none (its device code is its own). */
+/**
+ * How a flow was decided: an allowed code flow keeps its code's hash, a device's none (its device code is its own), and
+ * either the seal of what it was allowed with (decision-seal.ts decisionSealed, for these fields, decided at the same
+ * `now`, its code ending at codeEndsFrom's).
+ */
 export type FlowDecision =
-  | { readonly outcome: 'allowed'; readonly orgId: string; readonly keyId: string; readonly codeHash: string | null }
+  | {
+      readonly outcome: 'allowed';
+      readonly orgId: string;
+      readonly keyId: string;
+      readonly codeHash: string | null;
+      readonly seal: DecisionSeal;
+    }
   | { readonly outcome: 'denied' };
+
+/** When a code given at `decidedAt` ends: CODE_SECONDS on; none for no code. */
+export const codeEndsFrom = (decidedAt: Date, codeHash: string | null): Date | null =>
+  codeHash === null ? null : new Date(decidedAt.getTime() + CODE_SECONDS * 1000);
 
 /**
  * Decides the flow, if it is still undecided and in time at `now`, in the caller's transaction: whether this call
- * decided it. An allowed flow keeps its code's hash for CODE_SECONDS.
+ * decided it. An allowed flow keeps its code's hash for CODE_SECONDS, and its decision's seal.
  */
 export async function flowDecided(db: Handle, id: string, decision: FlowDecision, now: Date): Promise<boolean> {
   const allowed = decision.outcome === 'allowed' ? decision : undefined;
@@ -294,8 +330,9 @@ export async function flowDecided(db: Handle, id: string, decision: FlowDecision
       org_id: allowed?.orgId ?? null,
       key_id: allowed?.keyId ?? null,
       code_hash: allowed?.codeHash ?? null,
-      code_ends_at:
-        allowed === undefined || allowed.codeHash === null ? null : new Date(now.getTime() + CODE_SECONDS * 1000),
+      code_ends_at: allowed === undefined ? null : codeEndsFrom(now, allowed.codeHash),
+      decision_mac: allowed?.seal.mac ?? null,
+      decision_key_version: allowed?.seal.keyVersion ?? null,
     })
     .where('id', '=', id)
     .where('decided_at', 'is', null)
