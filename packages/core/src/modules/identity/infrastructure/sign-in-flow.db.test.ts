@@ -1,6 +1,14 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
-import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -10,7 +18,7 @@ import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
 import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
-import { createSessions, type Sessions } from './sessions.ts';
+import { createSessions, endSessionsOf, lockSessionsOf, type Sessions, sessionsEndedAt } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -175,6 +183,112 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     );
     const users = await app.selectFrom('identity.users').select('id').where('subject', '=', client.subject).execute();
     expect(users).toEqual([]);
+  });
+
+  it('AG10 refuses a sign-in made before the person’s sessions were last ended, opening none; a later one is taken', async () => {
+    const first = await roundTrip();
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // At the login service, the person signs in as the flow begins; before they are back, every session of theirs is
+    // ended (a removal, a factor reset, a change at the login service), a minute on.
+    client.whileFinishing = async () => {
+      clock.advanceBy(60_000);
+      await app.transaction().execute(async (tx) => {
+        await lockSessionsOf(tx, [first.userId]);
+        await endSessionsOf(tx, first.userId, clock.now());
+      });
+    };
+
+    await expect(signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined })).rejects.toThrow(
+      expect.objectContaining({ failure: 'stale_authentication' }),
+    );
+    expect(await sessionsOf(first.userId)).toEqual([]);
+
+    // A sign-in made after the end, at the moment of it or later, is taken.
+    client.whileFinishing = undefined;
+    client.proves = { ...evidence, authTime: clock.now() };
+    const again = await roundTrip();
+    expect(again.userId).toBe(first.userId);
+    expect(await sessionsOf(first.userId)).toEqual([{ id: again.sessionId }]);
+  });
+
+  it('AG10 waits for an end committing as it signs in, then reads it: no session opened past it (ADR-006 §6)', async () => {
+    const first = await roundTrip();
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // The end, its row written, held open before it commits.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [
+      first.userId,
+      new Date(START.getTime() + 60_000),
+    ]);
+    const completing = within(
+      20_000,
+      signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined }),
+      'the sign-in',
+    );
+    const settled = completing.then(
+      () => 'opened',
+      (error: unknown) => (error instanceof SignInFailed ? error.failure : 'other'),
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    await holder.query('commit');
+    await holder.end();
+
+    expect(await settled).toBe('stale_authentication');
+    expect(await sessionsOf(first.userId)).toEqual([{ id: first.sessionId }]);
+  });
+
+  it('AG10 keeps the latest end, never moved back by an earlier one, and waits for one committing as it is read', async () => {
+    const { userId } = await roundTrip();
+    const [earlier, later] = [new Date(START.getTime() + 60_000), new Date(START.getTime() + 120_000)];
+    for (const at of [later, earlier]) await app.transaction().execute((tx) => endSessionsOf(tx, userId, at));
+    expect(await app.transaction().execute((tx) => sessionsEndedAt(tx, userId))).toEqual(later);
+
+    const latest = new Date(START.getTime() + 180_000);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [userId, latest]);
+    const reading = within(
+      20_000,
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId)),
+      'the read',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    await holder.query('commit');
+    await holder.end();
+
+    expect(await reading).toEqual(latest);
+  });
+
+  it('AG10 an end waits for a sign-in that has read the last end, then ends the session it opened (ADR-006 §6)', async () => {
+    const { userId } = await roundTrip();
+    const { promise: read, resolve: hasRead } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The sign-in, its read of the last end taken (FOR SHARE), held before it opens its session.
+    const signingIn = app.transaction().execute(async (tx) => {
+      await sessionsEndedAt(tx, userId);
+      hasRead(undefined);
+      await gate;
+      await sessions.open(tx, userId, evidence);
+    });
+    await read;
+    const ending = within(
+      20_000,
+      app.transaction().execute(async (tx) => {
+        await lockSessionsOf(tx, [userId]);
+        return endSessionsOf(tx, userId, new Date(START.getTime() + 60_000));
+      }),
+      'the end',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await signingIn;
+
+    // Its own session and the one the sign-in opened meanwhile, both ended: none outlives the end.
+    expect(await ending).toBe(2);
+    expect(await sessionsOf(userId)).toEqual([]);
   });
 
   it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {

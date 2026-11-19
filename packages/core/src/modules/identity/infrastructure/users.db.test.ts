@@ -47,7 +47,8 @@ describe(`the people who sign in (Postgres ${server.version})`, () => {
 
     expect(again).toBe(first);
     expect(await app.selectFrom('identity.users').selectAll().where('subject', '=', subject).execute()).toEqual([
-      { id: first, issuer: ISSUER, subject, created_at: clock.now() },
+      // Never ended yet (0098, AG10).
+      { id: first, issuer: ISSUER, subject, created_at: clock.now(), sessions_ended_at: null },
     ]);
   });
 

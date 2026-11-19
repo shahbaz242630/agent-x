@@ -35,10 +35,10 @@ export const MOST_DB_CPUS = 16;
 
 /**
  * The fair gate's numbers in a load run (4D2e C), each a process's: wide until PR
- * 8's sweep sets them, as the API's own defaults at the load run's twenty connections.
+ * 8's sweep sets them, as the API's own defaults at the load run's twenty connections (one below them, AG10).
  * compose.load.yaml and, on Azure, apps.bicep and policy.ts hold the same.
  */
-export const LOAD_GATE = { active: 20, perOrganisation: 6, waitingPerOrganisation: 100, waitMs: 10_000 } as const;
+export const LOAD_GATE = { active: 19, perOrganisation: 6, waitingPerOrganisation: 100, waitMs: 10_000 } as const;
 
 /** How the runner tells compose.load.yaml the gate's numbers, by option. */
 export const GATE_VARIABLES = {
@@ -87,8 +87,8 @@ const VALUED_OPTIONS = new Map<
   ['--cpus', { name: 'apiCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_API_CPUS }],
   ['--delay-ms', { name: 'delayMs', fits: (value) => Number.isInteger(value) && value >= 0 && value <= MOST_DELAY_MS }],
   ['--db-cpus', { name: 'dbCpus', fits: (value) => value >= LEAST_API_CPUS && value <= MOST_DB_CPUS }],
-  // As the API's config takes them, at the load run's twenty connections.
-  ['--gate-active', { name: 'gateActive', fits: wholeFrom(1, 20) }],
+  // As the API's config takes them, below the load run's twenty connections (AG10).
+  ['--gate-active', { name: 'gateActive', fits: wholeFrom(1, 19) }],
   // 6F1 G5: and an organisation's at most its share of them, 30% of twenty (organisation-shares.ts).
   ['--gate-per-org', { name: 'gatePerOrganisation', fits: wholeFrom(1, 6) }],
   ['--gate-waiting', { name: 'gateWaitingPerOrganisation', fits: wholeFrom(1, 10_000) }],

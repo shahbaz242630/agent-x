@@ -241,7 +241,7 @@ export function createIdpEventCopier({
   const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string): Promise<number> => {
     await lockSessionsOf(tx, [person]);
     await lockChallengesOf(tx, [person]);
-    return endSessionsOf(tx, person);
+    return endSessionsOf(tx, person, clock.now());
   };
 
   /**

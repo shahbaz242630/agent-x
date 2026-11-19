@@ -23,6 +23,8 @@ interface UsersTable {
   issuer: string;
   subject: string;
   created_at: Date;
+  /** When their sessions were last all ended (0098, AG10); null if never. */
+  sessions_ended_at: Date | null;
 }
 
 interface SessionsTable {

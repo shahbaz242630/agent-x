@@ -211,6 +211,7 @@ beforeEach(() => {
     database: app,
     keys,
     ids,
+    clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
     logger: testLogger(),

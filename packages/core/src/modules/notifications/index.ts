@@ -8,10 +8,12 @@ export {
   messageFor,
   type NoticeMessage,
   type PaidRemittance,
+  referenceShown,
   type ResetLink,
   type ResetPerson,
   type WaitingRequest,
 } from './domain/messages.ts';
+export { invoiceShaped, type RemittanceReference } from './domain/invoice-shape.ts';
 export { type AcsSettings, createAcsNotifier, EMAIL_API_VERSION } from './infrastructure/acs-notifier.ts';
 export {
   type ClaimedNotice,

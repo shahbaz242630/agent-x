@@ -31,7 +31,11 @@ import {
   addMembership,
   createSessions,
   createStepUpChallenges,
+  deactivateMembership,
+  grantsBelieved,
+  grantsToChange,
   type IdentityTables,
+  memberOf,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
@@ -480,10 +484,27 @@ export function mandateWorld({
       idTokenHash: createHash('sha256').update('an ID token').digest(),
     });
 
+  /** The member removed from their organisation by the operator, as membership-changes.ts records a removal. */
+  const removed = (who: Member) =>
+    withSignedStates(app(), who.orgId, quiet(), async (tx, states) => {
+      const key = { orgId: who.orgId, id: who.membershipId };
+      const read = await memberOf(tx, states, key, 'change');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      const grants = grantsBelieved(await grantsToChange(tx, states, key));
+      await deactivateMembership(tx, states, {
+        key,
+        member: read.member,
+        grants,
+        actor: OPERATOR,
+        evidence: {},
+      });
+    });
+
   return {
     quiet,
     joined,
     member,
+    removed,
     signedInMember,
     world,
     termsOf,

@@ -38,6 +38,11 @@
 //   so the log can then hold both: given up, then emailed.
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
+// - A notice to a person is sent only while they hold a role it needs in its
+//   organisation, read as it is sent (AG10, 6F1): one removed, or moved to a
+//   lesser role, after it was written (directly, or by a fan-out) gives it up
+//   at once (`not_a_member`); a role that can't be read leaves it to be tried
+//   again (`audience_unavailable`).
 // - A recipient with no address gives the notice up at once (`no_address`);
 //   an address book that can't be reached leaves it to be tried again
 //   (`address_unavailable`).
@@ -57,10 +62,12 @@
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
+import type { RemittanceReference } from '../domain/invoice-shape.ts';
 import {
   messageFor,
   type NoticeMessage,
   type PaidRemittance,
+  referenceShown,
   type ResetLink,
   type ResetPerson,
   type WaitingRequest,
@@ -70,7 +77,9 @@ import {
   isAboutAPerson,
   isToAdminsAndApprovers,
   isToEveryMember,
+  type NoticeRole,
   REMITTANCE_KIND,
+  rolesToReceive,
   REMITTANCE_NO_EMAIL_KIND,
   RESET_LINK_KIND,
   SUPPORT_RESET_KIND,
@@ -156,8 +165,12 @@ export interface Remittances {
    * transaction. Throws if its records can't be read, or can't be believed.
    */
   remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
-  /** Records in the audit log that the payment's supplier was emailed. Throws if it can't be recorded. */
-  emailed(orgId: string, transactionId: string): Promise<void>;
+  /**
+   * Records in the audit log that the payment's supplier was emailed, and which
+   * reference it showed (AG11: the order reference, the bank's, or neither; never the text).
+   * Throws if it can't be recorded.
+   */
+  emailed(orgId: string, transactionId: string, reference: RemittanceReference): Promise<void>;
   /**
    * Records in the audit log that the payment's remittance was given up, and
    * why (the failure the outbox keeps): a send that can never succeed, or
@@ -192,6 +205,11 @@ export interface Audience {
   contactsOf(orgId: string): Promise<readonly string[]>;
   /** Those of them that count now (E2-2b), each verified. Throws if they can't be read, or can't be believed. */
   countingContactsOf(orgId: string): Promise<readonly string[]>;
+  /**
+   * The role each active member holds, by their user ID in lower case, verified (AG10): read once an organisation
+   * a run. Throws if they can't be read, or can't be believed.
+   */
+  rolesOf(orgId: string): Promise<ReadonlyMap<string, NoticeRole>>;
 }
 
 /** How many notices a run takes at a time. */
@@ -335,8 +353,46 @@ export function createNoticeSender({
     return {};
   };
 
+  // Each organisation's members' roles as this run read them (AG10): one read an organisation a run, however many of
+  // its people it tells, never kept past the run, so a later one reads them afresh. One that failed is not kept.
+  let rolesThisRun = new Map<string, ReadonlyMap<string, NoticeRole>>();
+  const rolesIn = async (orgId: string): Promise<ReadonlyMap<string, NoticeRole>> => {
+    const kept = rolesThisRun.get(orgId);
+    if (kept !== undefined) return kept;
+    const read = await audience.rolesOf(orgId);
+    rolesThisRun.set(orgId, read);
+    return read;
+  };
+
+  /**
+   * Whether the person a notice names still holds a role it needs in its organisation (AG10, rolesToReceive), read as
+   * it is sent: written before they were removed or moved to a lesser role, it is given up at once, logged; a role
+   * that can't be read leaves it to be tried again. A contact is no member, and its own row decides (`contactAddresses`).
+   */
+  const stillReceives = async (notice: ClaimedNotice, userId: string): Promise<boolean> => {
+    const needed = rolesToReceive(notice);
+    const holds = (roles: ReadonlyMap<string, NoticeRole>): boolean => {
+      const role = roles.get(userId.toLowerCase());
+      return role !== undefined && needed.includes(role);
+    };
+    try {
+      if (holds(await rolesIn(notice.orgId))) return true;
+      // The run's copy is trusted for a yes alone: someone added or promoted since it was read is missing from it,
+      // and a no gives the notice up for good, so it is read afresh once before.
+      rolesThisRun.delete(notice.orgId);
+      if (holds(await rolesIn(notice.orgId))) return true;
+    } catch {
+      await failed(notice, 'audience_unavailable', false);
+      return false;
+    }
+    const became = await outbox.failed(db, notice.id, 'not_a_member', true);
+    logger.warn('notification.recipient_not_member', { noticeId: notice.id, kind: notice.kind, outcome: became });
+    return false;
+  };
+
   /** Sends one notice to its recipient and records how it went. */
   const sendOne = async (notice: ClaimedNotice): Promise<void> => {
+    if (notice.recipientUserId !== null && !(await stillReceives(notice, notice.recipientUserId))) return;
     let address: string | undefined;
     try {
       address =
@@ -374,9 +430,9 @@ export function createNoticeSender({
   };
 
   /** The remittance sent, kept in the audit log; a failure to keep it is logged, the email never sent again. */
-  const emailedLogged = async (notice: ClaimedNotice): Promise<void> => {
+  const emailedLogged = async (notice: ClaimedNotice, paid: PaidRemittance): Promise<void> => {
     try {
-      await remittances.emailed(notice.orgId, notice.aboutId ?? '');
+      await remittances.emailed(notice.orgId, notice.aboutId ?? '', referenceShown(paid));
     } catch (error) {
       logger.error('notification.remittance_unrecorded', { noticeId: notice.id, err: error });
     }
@@ -409,7 +465,7 @@ export function createNoticeSender({
     }
     if (read.outcome === 'send') {
       const end = await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
-      if (end.outcome === 'sent') await emailedLogged(notice);
+      if (end.outcome === 'sent') await emailedLogged(notice, read.paid);
       else if (end.became === 'given_up') await givenUpLogged(notice, end.failure);
       return false;
     }
@@ -436,6 +492,7 @@ export function createNoticeSender({
 
   return {
     async run(signal) {
+      rolesThisRun = new Map();
       try {
         await runBatches(signal);
         return 'ran';

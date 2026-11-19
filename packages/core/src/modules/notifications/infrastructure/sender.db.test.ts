@@ -15,7 +15,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { NoticeMessage, PaidRemittance, ResetLink, WaitingRequest } from '../domain/messages.ts';
-import type { Notice } from '../domain/notice.ts';
+import type { Notice, NoticeRole } from '../domain/notice.ts';
 import { createOutbox, MOST_ATTEMPTS } from './outbox.ts';
 import {
   type AddressBook,
@@ -80,7 +80,7 @@ const PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b01';
 const SUPPLIER_ADDRESS = 'accounts@gulf-office.example.test';
 const PAID: PaidRemittance = {
   payerName: 'Falcon Trading LLC',
-  invoiceNumber: 'INV-2026-0042',
+  orderReference: 'INV-2026-0042',
   bankReference: 'AGX INV-2026-0042',
   amountMinor: 1_250_000n,
   currency: 'AED',
@@ -155,6 +155,13 @@ const group =
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
   };
 
+/** The role each person holds now, as a send asks it (AG10): the admins', the approver's and the viewer's. */
+const ROLES = new Map<string, NoticeRole>([
+  ...ADMINS.map(({ userId }) => [userId, 'admin'] as const),
+  [APPROVER, 'approver'],
+  [VIEWER, 'viewer'],
+]);
+
 const audience = (
   admins: () => readonly Admin[] | Error = () => ADMINS,
   contacts: () => readonly string[] | Error = () => [CONTACT, OTHER_CONTACT],
@@ -162,12 +169,14 @@ const audience = (
   // Of the two ACTIVE contacts, only the first counts yet.
   counting: () => readonly string[] | Error = () => [CONTACT],
   deciders: () => readonly string[] | Error = () => [ADMIN, APPROVER],
+  roles: () => ReadonlyMap<string, NoticeRole> | Error = () => ROLES,
 ): Audience => ({
   adminsAndApproversOf: group(deciders),
   adminsOf: group(admins),
   contactsOf: group(contacts),
   membersOf: group(members),
   countingContactsOf: group(counting),
+  rolesOf: group(roles),
 });
 
 const resetLinks = (
@@ -243,7 +252,7 @@ const remittances = (
     to: SUPPLIER_ADDRESS,
     paid: PAID,
   }),
-  emailed: (transactionId: string) => Error | undefined = () => undefined,
+  emailed: (transactionId: string, reference: string) => Error | undefined = () => undefined,
   givenUp: (transactionId: string, why: string) => Error | undefined = () => undefined,
 ): Remittances => ({
   remittanceOf: (orgId, transactionId) => {
@@ -251,9 +260,9 @@ const remittances = (
     const found = lookup(transactionId);
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
   },
-  emailed: (orgId, transactionId) => {
+  emailed: (orgId, transactionId, reference) => {
     expect(orgId).toBe(ORG);
-    const failed = emailed(transactionId);
+    const failed = emailed(transactionId, reference);
     return failed === undefined ? Promise.resolve() : Promise.reject(failed);
   },
   givenUp: (orgId, transactionId, why) => {
@@ -442,6 +451,113 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(sent).toEqual([]);
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, sent_at: null, given_up_at: null, last_failure: 'audience_unavailable' },
+    ]);
+  });
+
+  it('AG10 gives up a notice to someone no longer holding the role it needs as it is sent, direct or fanned out', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    // Direct to the admin, now gone; fanned out to the admins (the member it is about left out), the admin gone and the
+    // other one now only a viewer, so neither is told; a mandate's to its admins and approvers, the approver still one.
+    await app.transaction().execute((tx) =>
+      outbox.add(tx, [
+        notice(ADMIN),
+        notice(null),
+        {
+          orgId: ORG,
+          recipientUserId: APPROVER,
+          kind: 'mandate_revoked',
+          membershipId: null,
+          role: null,
+          aboutId: MANDATE,
+        },
+      ]),
+    );
+    const { sent, service } = notifier();
+    const roles = new Map<string, NoticeRole>([
+      [OTHER_ADMIN, 'viewer'],
+      [APPROVER, 'approver'],
+    ]);
+    const { capture, run } = sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, () => roles),
+    );
+
+    await run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['approver@example.test']);
+    const ended = (await rows()).filter(({ last_failure }) => last_failure === 'not_a_member');
+    expect(ended.map(({ recipient_user_id: id }) => id).sort()).toEqual([ADMIN, ADMIN, OTHER_ADMIN].sort());
+    expect(ended.every(({ given_up_at, sent_at }) => given_up_at !== null && sent_at === null)).toBe(true);
+    const givenUp = expect.objectContaining({ level: 'warn', kind: 'role_granted', outcome: 'given_up' }) as unknown;
+    expect(capture.lines().filter(({ event }) => event === 'notification.recipient_not_member')).toEqual([
+      givenUp,
+      givenUp,
+      givenUp,
+    ]);
+  });
+
+  it('AG10 reads an organisation’s roles once a run, however many notices to its people it sends', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    // Two direct notices, and one fanned out to the admins, sent in the same run.
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN), notice(null)]));
+    const { sent, service } = notifier();
+    let reads = 0;
+    const counted = () => {
+      reads += 1;
+      return ROLES;
+    };
+    const { run } = sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, counted),
+    );
+
+    await run.run();
+
+    expect(sent).toHaveLength(4);
+    expect(reads).toBe(1);
+    // The next run reads them again: what a run read is never kept past it.
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    await run.run();
+    expect(reads).toBe(2);
+  });
+
+  it('AG10 reads the roles afresh, once, before giving up a notice to someone the run’s copy lacks (added meanwhile)', async () => {
+    // beforeEach's two notices: to the admin and to the other admin, who the run's first read doesn't hold yet.
+    const { sent, service } = notifier();
+    const reads: number[] = [];
+    const later = () => {
+      reads.push(reads.length);
+      return reads.length === 1 ? new Map([...ROLES].filter(([userId]) => userId !== OTHER_ADMIN)) : ROLES;
+    };
+
+    await sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, later),
+    ).run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    expect(reads).toHaveLength(2);
+    expect((await rows()).map(({ last_failure }) => last_failure)).toEqual([null, null]);
+  });
+
+  it('AG10 tries a notice to one person again when their role cannot be read as it is sent', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    const { sent, service } = notifier();
+    const away = () => new Error('tampered');
+
+    await sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, away),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: ADMIN, sent_at: null, given_up_at: null, last_failure: 'audience_unavailable' },
     ]);
   });
 
@@ -793,15 +909,15 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses(),
       resetLinks(),
       waitingRequests(),
-      remittances(undefined, (id) => {
-        logged.push(id);
+      remittances(undefined, (id, reference) => {
+        logged.push(`${id} ${reference}`);
         return undefined;
       }),
     );
     await run.run();
 
-    // Kept in the organisation's audit log once the email went (partner S119).
-    expect(logged).toEqual([PAYMENT]);
+    // Kept in the organisation's audit log once the email went (partner S119), with which reference it showed (AG11).
+    expect(logged).toEqual([`${PAYMENT} order_reference`]);
     expect(sent).toHaveLength(1);
     const [message] = sent;
     expect(message?.to).toBe(SUPPLIER_ADDRESS);
@@ -841,10 +957,10 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
         (id) => ({
           outcome: 'send',
           to: SUPPLIER_ADDRESS,
-          paid: { ...PAID, invoiceNumber: id === PAYMENT ? 'INV-REFUSED' : 'INV-SENT' },
+          paid: { ...PAID, orderReference: id === PAYMENT ? 'INV-REFUSED' : 'pay.example.ae' },
         }),
-        (id) => {
-          logged.push(id);
+        (id, reference) => {
+          logged.push(`${id} ${reference}`);
           return new Error('the audit chain is held');
         },
         (id, why) => {
@@ -856,7 +972,9 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await run.run();
 
     expect(sent).toHaveLength(2);
-    expect(logged).toEqual([OTHER_PAYMENT]);
+    // The second's order reference is domain-shaped: our own payment reference shown, and kept as the one used (AG11).
+    expect(logged).toEqual([`${OTHER_PAYMENT} payment_reference`]);
+    expect(sent[1]?.text).not.toContain('pay.example.ae');
     expect(gaveUp).toEqual([[PAYMENT, 'address_refused']]);
     const kept = await app
       .selectFrom('notifications.outbox')

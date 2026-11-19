@@ -66,6 +66,7 @@ import {
   SEQ,
   SUBJECT_ASKED,
 } from './audit-log.ts';
+import { createReplayCount, downloaderOf, madeBy, type ReplayCount } from './export-replays.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member } from './use-case-work.ts';
@@ -221,6 +222,7 @@ export function createAuditLogExports({
   logger,
   directory,
   mostEvents = MOST_EXPORTED_EVENTS,
+  replays = createReplayCount(clock),
 }: {
   readonly database: Database<AuditLogTables>;
   readonly keys: KeyProvider;
@@ -231,6 +233,8 @@ export function createAuditLogExports({
   readonly directory: DirectoryNames | undefined;
   /** The cap, MOST_EXPORTED_EVENTS unless a test sets it lower: ten thousand events are too many to record in one. */
   readonly mostEvents?: number;
+  /** The retries answered from their keys, each admin's counted (AG10): this process's own unless a test gives one. */
+  readonly replays?: ReplayCount;
 }): AuditLogExports {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: AuditLogRefused });
 
@@ -290,13 +294,21 @@ export function createAuditLogExports({
       // A retry reads its own record for the seq it was made to, so it answers the same file.
       const id = done.result.resourceId;
       const made = await work.answered(member.orgId, correlationId, async (tx, states) => {
+        // AG10: a retry skips the write's own check, so the file goes only to an admin who may download it still.
+        await work.memberIn(tx, states, member, EXPORTING_ROLES);
         // Through the signed states: a record tampered with raises the alarm and the hold (F1, G2).
         const found = await states.eventOf(tx, member.orgId, { eventId: id });
-        if (found.outcome !== 'read' || found.event === undefined) throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+        // A key is its admin's own: a record naming anyone or anything else was changed past the app.
+        if (found.outcome !== 'read' || !madeBy(found.event, member, AUDIT_LOG_EXPORTED)) {
+          throw new AuditLogRefused(503, 'INTEGRITY_FAILED');
+        }
         const upTo = found.event.event.details.upToSeq;
         return { upToSeq: typeof upTo === 'string' ? BigInt(upTo) : null };
       });
       if ('outcome' in made) return made;
+      // A retry spends no budget, yet its file is built again: held to its own hourly count (AG10, as my-activity's).
+      if (done.outcome === 'replayed' && replays.spent(downloaderOf(member)))
+        return refused(409, 'AUDIT_EXPORTS_SPENT');
       try {
         return { outcome: 'exported', file: await fileOf(member.orgId, id, asked, made.upToSeq, correlationId) };
       } catch (error) {

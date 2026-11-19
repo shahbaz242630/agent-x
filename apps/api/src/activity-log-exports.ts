@@ -58,6 +58,7 @@ import {
   EXPORTING_ROLES,
   exportsSpent,
 } from './audit-log-exports.ts';
+import { createReplayCount, downloaderOf, madeBy, type ReplayCount } from './export-replays.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { type Refused, refused } from './refused.ts';
 import { createUseCaseWork, type Member } from './use-case-work.ts';
@@ -113,6 +114,7 @@ export function createActivityLogExports({
   logger,
   directory,
   mostRequests = MOST_EXPORTED_REQUESTS,
+  replays = createReplayCount(clock),
 }: {
   readonly database: Database<ActivityLogTables>;
   readonly keys: KeyProvider;
@@ -123,6 +125,8 @@ export function createActivityLogExports({
   readonly directory: DirectoryNames | undefined;
   /** The cap, MOST_EXPORTED_REQUESTS unless a test sets it lower: 50,000 requests are too many to write in a test. */
   readonly mostRequests?: number;
+  /** The retries answered from their keys, each admin's counted (AG10): this process's own unless a test gives one. */
+  readonly replays?: ReplayCount;
 }): ActivityLogExports {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: ActivityLogRefused });
   let building = 0;
@@ -189,13 +193,21 @@ export function createActivityLogExports({
     // A retry reads its own record for the last row it was made to, so it answers the same requests.
     const id = done.result.resourceId;
     const made = await work.answered(member.orgId, correlationId, async (tx, states) => {
+      // AG10: a retry skips the write's own check, so the file goes only to an admin who may download it still.
+      await work.memberIn(tx, states, member, EXPORTING_ROLES);
       // Through the signed states: a record tampered with raises the alarm and the hold (F1, G2).
       const found = await states.eventOf(tx, member.orgId, { eventId: id });
-      if (found.outcome !== 'read' || found.event === undefined) throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+      // A key is its admin's own: a record naming anyone or anything else was changed past the app.
+      if (found.outcome !== 'read' || !madeBy(found.event, member, ACTIVITY_LOG_EXPORTED)) {
+        throw new ActivityLogRefused(503, 'INTEGRITY_FAILED');
+      }
       const { writtenUpTo } = found.event.event.details;
       return { writtenUpTo: typeof writtenUpTo === 'string' ? writtenUpTo : null };
     });
     if ('outcome' in made) return made;
+    // A retry spends no budget, yet its file is built again: held to its own hourly count (AG10, as my-activity's).
+    if (done.outcome === 'replayed' && replays.spent(downloaderOf(member)))
+      return refused(409, 'ACTIVITY_EXPORTS_SPENT');
     try {
       return { outcome: 'exported', file: await fileOf(member.orgId, id, asked, made.writtenUpTo, correlationId) };
     } catch (error) {

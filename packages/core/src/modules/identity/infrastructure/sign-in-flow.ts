@@ -48,7 +48,7 @@ import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/s
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
-import type { LiveSession, Sessions } from './sessions.ts';
+import { type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
@@ -259,6 +259,15 @@ export function createSignIn({
       return limited(async (tx) => {
         const userId = await userForSubject(tx, subject, { ids, clock });
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
+        // AG10: a sign-in made before the person's sessions were last all ended (a removal, a factor reset, a change
+        // at the login service) opens none, though its flow began before that end.
+        const endedAt = await sessionsEndedAt(tx, userId);
+        if (endedAt !== null && evidence.authTime.getTime() < endedAt.getTime()) {
+          throw new SignInFailed(
+            'stale_authentication',
+            "the sign-in was made before the person's sessions were ended",
+          );
+        }
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
         if (verifiedEmail !== undefined) await recordSessionEmail(tx, keys, sessionId, verifiedEmail);
         await keepUserContact(tx, keys, userId, { name, verifiedEmail }, clock.now());

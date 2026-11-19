@@ -70,6 +70,7 @@ import { need, personOf } from './access.ts';
 import { CLIENT_CLUES, cursorOf, cursorText } from './activity-log.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { BUSY_RETRY_SECONDS } from './errors.ts';
+import { createReplayCount } from './export-replays.ts';
 import {
   CONTENT_TYPES,
   csvRow,
@@ -182,19 +183,7 @@ export function createBuildGate(
   sweepFrom = 1_024,
 ) {
   const building = new Set<string>();
-  // Each person's retries in the last hour, newest last; a person with none is no entry (review round 2: bounded by
-  // the people active in the hour, however many there are).
-  const replays = new Map<string, number[]>();
-  let sweepAt = sweepFrom;
-  /** Every person's retries older than the hour forgotten, and anyone left with none. */
-  const sweep = (since: number) => {
-    for (const [userId, times] of replays) {
-      const recent = times.filter((at) => at > since);
-      if (recent.length === 0) replays.delete(userId);
-      else replays.set(userId, recent);
-    }
-    sweepAt = Math.max(sweepFrom, replays.size * 2);
-  };
+  const replays = createReplayCount(clock, mostReplays, sweepFrom);
   return {
     /** Takes a slot for the person: undefined once taken, or the refusal (BUSY: the person's own, or no slot free). */
     enter(userId: string): Refused | undefined {
@@ -207,16 +196,10 @@ export function createBuildGate(
     },
     /** Counts a retry answered from its key: SPENT past the person's hourly replays, else undefined. */
     replayed(userId: string): Refused | undefined {
-      const now = clock.now().getTime();
-      const since = now - HOUR_MS;
-      if (replays.size >= sweepAt) sweep(since);
-      const recent = (replays.get(userId) ?? []).filter((at) => at > since);
-      if (recent.length >= mostReplays) return refused(409, 'ACTIVITY_EXPORTS_SPENT');
-      replays.set(userId, [...recent, now]);
-      return undefined;
+      return replays.spent(userId) ? refused(409, 'ACTIVITY_EXPORTS_SPENT') : undefined;
     },
     /** How many people's retries are kept now: for the tests. */
-    kept: (): number => replays.size,
+    kept: (): number => replays.kept(),
   };
 }
 

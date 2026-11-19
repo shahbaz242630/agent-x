@@ -52,7 +52,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type Transaction } from 'kysely';
 
-import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
+import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import {
   type AuditActor,
   type AuditTables,
@@ -140,6 +140,34 @@ export interface MemberLeaving<Theirs> {
   >;
 }
 
+/**
+ * Two modules' leavings as one (AG7: the MCP connections and the payee registrations): the first's brakes, then the
+ * second's (each its own order, the first's agents' brakes the only ones today); both read, a tampered read in either
+ * refusing the change; then both ended, in the same order.
+ */
+export const bothLeaving = <First extends object, Second extends object>(
+  first: MemberLeaving<First>,
+  second: MemberLeaving<Second>,
+): MemberLeaving<First & Second> => ({
+  async brakes(tx, leaving) {
+    const firstHeld = await first.brakes(tx, leaving);
+    return (await second.brakes(tx, leaving)) || firstHeld;
+  },
+  async read(tx, states, leaving) {
+    const firstRead = await first.read(tx, states, leaving);
+    if (firstRead.outcome === 'tampered') return firstRead;
+    const secondRead = await second.read(tx, states, leaving);
+    if (secondRead.outcome === 'tampered') return secondRead;
+    return {
+      outcome: 'read',
+      end: async (actor) => {
+        await firstRead.end(actor);
+        await secondRead.end(actor);
+      },
+    };
+  },
+});
+
 class ChangeRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
     super(`a membership's change refused: ${code}`, status, code);
@@ -173,6 +201,7 @@ export function createMembershipChanges<Theirs extends object = object>({
   database,
   keys,
   ids,
+  clock,
   challenges,
   outbox,
   logger,
@@ -182,6 +211,8 @@ export function createMembershipChanges<Theirs extends object = object>({
   readonly database: Kysely<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  /** When a change ends the member's sessions, as their sign-ins made before it are then refused (0098, AG10). */
+  readonly clock: Clock;
   readonly challenges: StepUpChallenges;
   /** Where the admins' notices of a role granted are written (B5-1b). */
   readonly outbox: Outbox;
@@ -345,7 +376,7 @@ export function createMembershipChanges<Theirs extends object = object>({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new ChangeRefused(403, 'STEP_UP_FAILED');
-        const signInsEnded = await endSessionsOf(tx, member.userId);
+        const signInsEnded = await endSessionsOf(tx, member.userId, clock.now());
         const actor = { type: 'user' as const, id: admin.userId };
         const key = { orgId: admin.orgId, id: member.id };
         const evidence = { signInsEnded, ...stepUpDetails(consumed) };
