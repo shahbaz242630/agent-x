@@ -14,6 +14,7 @@ const READER = 'acdd72a7-3385-48ef-bd42-f606fba81ae7';
 const CRYPTO_OFFICER = '14b46e9e-c2b7-41b4-b07b-48a6ebf60603';
 const role = (id: string): string => `/subscriptions/${SUB}/providers/Microsoft.Authorization/roleDefinitions/${id}`;
 const API = '11111111-1111-1111-1111-111111111111';
+const TENANT = '44444444-4444-4444-4444-444444444444';
 const LOGIN = '22222222-2222-2222-2222-222222222222';
 const STRANGER = '33333333-3333-3333-3333-333333333333';
 
@@ -43,6 +44,18 @@ describe("the vault's grants against GRANTS (AZ32)", () => {
         { scope: GROUP, principalId: STRANGER, roleDefinitionId: role(READER) },
         { scope: GROUP, principalId: STRANGER, roleDefinitionId: USER },
         { scope: `/subscriptions/${SUB}`, principalId: API, roleDefinitionId: role(CRYPTO_OFFICER.toUpperCase()) },
+        // Above the subscription too: a management group (the Tenant Root Group among them, any case) and the root.
+        {
+          scope: `/providers/Microsoft.Management/managementGroups/${TENANT}`,
+          principalId: STRANGER,
+          roleDefinitionId: USER,
+        },
+        { scope: '/', principalId: LOGIN, roleDefinitionId: role(CRYPTO_OFFICER) },
+        {
+          scope: '/providers/microsoft.management/managementgroups/x',
+          principalId: STRANGER,
+          roleDefinitionId: role(READER),
+        },
         // Another group, its name a part of this one's, is not above this vault; nor one named longer.
         { scope: GROUP.slice(0, -3), principalId: STRANGER, roleDefinitionId: USER },
         { scope: `${GROUP}2`, principalId: STRANGER, roleDefinitionId: USER },
@@ -57,8 +70,10 @@ describe("the vault's grants against GRANTS (AZ32)", () => {
     expect(lines).toEqual([
       'api reads db-app-password',
       'login reads login-client-private-key',
-      'an identity not of this deployment holds Key Vault Secrets User over the whole vault, from above it (its resource group or subscription)',
-      'api holds Key Vault Crypto Officer over the whole vault, from above it (its resource group or subscription)',
+      'an identity not of this deployment holds Key Vault Secrets User over the whole vault, from above it (its resource group, subscription, a management group or the root)',
+      'api holds Key Vault Crypto Officer over the whole vault, from above it (its resource group, subscription, a management group or the root)',
+      'an identity not of this deployment holds Key Vault Secrets User over the whole vault, from above it (its resource group, subscription, a management group or the root)',
+      'login holds Key Vault Crypto Officer over the whole vault, from above it (its resource group, subscription, a management group or the root)',
       'api holds Key Vault Secrets User on the whole vault',
       'an identity not of this deployment holds Key Vault Secrets User on db-owner-password',
       'login holds Key Vault Secrets Officer on db-app-password',

@@ -33,6 +33,9 @@ const DATA_ROLES: ReadonlyMap<string, string> = new Map([
   ['db79e9a7-68ee-4b58-9aeb-b90e7c24fcba', 'Key Vault Certificate User'],
 ]);
 
+/** Where management groups' scopes start (the Tenant Root Group's among them), in lower case. */
+const MANAGEMENT_GROUPS = '/providers/microsoft.management/managementgroups/';
+
 /** A role assignment's role by its name, where it is one of Key Vault's data roles; undefined otherwise. */
 const dataRoleOf = (roleDefinitionId: string): string | undefined =>
   DATA_ROLES.get(roleDefinitionId.toLowerCase().split('/').at(-1) ?? '');
@@ -112,7 +115,8 @@ export function readLiveGrants(az: Az, subscription: string): LiveGrants {
 /**
  * Each assignment that reaches the vault's data, as a line: "<workload> reads <secret>" for Key Vault Secrets User on
  * one secret given to one of our identities, the form GRANTS takes; anything else at the vault or under it, and any of
- * Key Vault's data roles above it (its resource group or subscription), said as what it is, in names alone.
+ * Key Vault's data roles above it (its resource group, subscription, a management group or the root), said as what it
+ * is, in names alone.
  */
 export function grantLines({ vault, assignments, identities }: LiveGrants): string[] {
   const at = vault.toLowerCase();
@@ -121,11 +125,14 @@ export function grantLines({ vault, assignments, identities }: LiveGrants): stri
     const scope = each.scope.toLowerCase();
     const who = identities.get(each.principalId) ?? 'an identity not of this deployment';
     const dataRole = dataRoleOf(each.roleDefinitionId);
-    // Above the vault: its group or subscription, a scope the vault's ID starts with.
-    if (scope !== at && under.startsWith(`${scope}/`)) {
+    // Above the vault: its group or subscription (a scope its ID starts with), a management group or the root, whose
+    // grants every subscription under them inherits.
+    if (scope !== at && (scope === '/' || scope.startsWith(MANAGEMENT_GROUPS) || under.startsWith(`${scope}/`))) {
       return dataRole === undefined
         ? []
-        : [`${who} holds ${dataRole} over the whole vault, from above it (its resource group or subscription)`];
+        : [
+            `${who} holds ${dataRole} over the whole vault, from above it (its resource group, subscription, a management group or the root)`,
+          ];
     }
     if (scope !== at && !scope.startsWith(under)) return [];
     const role = dataRole ?? 'another role';
