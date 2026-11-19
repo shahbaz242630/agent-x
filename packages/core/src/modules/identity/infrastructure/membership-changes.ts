@@ -52,7 +52,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type Transaction } from 'kysely';
 
-import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
+import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import {
   type AuditActor,
   type AuditTables,
@@ -201,6 +201,7 @@ export function createMembershipChanges<Theirs extends object = object>({
   database,
   keys,
   ids,
+  clock,
   challenges,
   outbox,
   logger,
@@ -210,6 +211,8 @@ export function createMembershipChanges<Theirs extends object = object>({
   readonly database: Kysely<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
+  /** When a change ends the member's sessions, as their sign-ins made before it are then refused (0098, AG10). */
+  readonly clock: Clock;
   readonly challenges: StepUpChallenges;
   /** Where the admins' notices of a role granted are written (B5-1b). */
   readonly outbox: Outbox;
@@ -373,7 +376,7 @@ export function createMembershipChanges<Theirs extends object = object>({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new ChangeRefused(403, 'STEP_UP_FAILED');
-        const signInsEnded = await endSessionsOf(tx, member.userId);
+        const signInsEnded = await endSessionsOf(tx, member.userId, clock.now());
         const actor = { type: 'user' as const, id: admin.userId };
         const key = { orgId: admin.orgId, id: member.id };
         const evidence = { signInsEnded, ...stepUpDetails(consumed) };

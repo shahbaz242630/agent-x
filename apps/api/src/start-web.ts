@@ -232,6 +232,7 @@ export async function startWeb(
       database,
       keys,
       ids: uuidV7Ids,
+      clock: systemClock,
       challenges,
       outbox,
       logger,

@@ -576,6 +576,7 @@ describe(`a member's removal ends the payee registrations they left open (AG7, 6
       database: app,
       keys,
       ids,
+      clock,
       challenges: challenges(),
       outbox: createOutbox({ ids, clock }),
       logger: testLogger(),

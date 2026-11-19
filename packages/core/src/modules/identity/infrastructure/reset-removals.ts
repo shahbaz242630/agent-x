@@ -213,7 +213,7 @@ export function createResetRemovals({
       if (not === 'done') return 'not_due';
       let outcome: RemovalOutcome = 'removed_after_cancel';
       if (not === undefined) {
-        const signInsEnded = await endSessionsOf(tx, userId);
+        const signInsEnded = await endSessionsOf(tx, userId, clock.now());
         await moveReset(tx, states, {
           orgId,
           id,

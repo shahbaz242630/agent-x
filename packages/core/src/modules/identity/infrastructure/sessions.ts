@@ -126,11 +126,34 @@ export async function lockSessionsOf(tx: Transaction<IdentityTables>, userIds: r
  * Ends every session the person has, live or not, in the caller's
  * transaction, which locked them first (lockSessionsOf): a role change or
  * deactivation ends them in its own transaction (ADR-003 §7, SEC-HA-10). Their
- * challenges and verified addresses go with them. Says how many.
+ * challenges and verified addresses go with them. Keeps `endedAt` as when
+ * they were last all ended (0098, AG10), never moved back, so a sign-in made
+ * before it opens no session (sessionsEndedAt). Says how many.
  */
-export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string): Promise<number> {
+export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string, endedAt: Date): Promise<number> {
   const rows = await tx.deleteFrom('identity.sessions').where('user_id', '=', userId).returning('id').execute();
+  await tx
+    .updateTable('identity.users')
+    .set((eb) => ({ sessions_ended_at: eb.fn('greatest', [eb.ref('sessions_ended_at'), eb.val(endedAt)]) }))
+    .where('id', '=', userId)
+    .execute();
   return rows.length;
+}
+
+/**
+ * When the person's sessions were last all ended (endSessionsOf), or null, in the caller's transaction, their row
+ * locked FOR SHARE until it ends: an end committing at the same moment is waited for and then read, so a session
+ * can't be opened past it. Taken after any of their sessions is locked (the sign-in's previous one ended), as an end
+ * locks the sessions before the row.
+ */
+export async function sessionsEndedAt(tx: Transaction<IdentityTables>, userId: string): Promise<Date | null> {
+  const row = await tx
+    .selectFrom('identity.users')
+    .select('sessions_ended_at')
+    .where('id', '=', userId)
+    .forShare()
+    .executeTakeFirstOrThrow();
+  return row.sessions_ended_at;
 }
 
 export function createSessions({

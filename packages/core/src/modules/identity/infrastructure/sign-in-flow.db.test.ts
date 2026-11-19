@@ -1,6 +1,14 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
-import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -10,7 +18,7 @@ import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
 import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
-import { createSessions, type Sessions } from './sessions.ts';
+import { createSessions, endSessionsOf, lockSessionsOf, type Sessions } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -175,6 +183,61 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     );
     const users = await app.selectFrom('identity.users').select('id').where('subject', '=', client.subject).execute();
     expect(users).toEqual([]);
+  });
+
+  it('AG10 refuses a sign-in made before the person’s sessions were last ended, opening none; a later one is taken', async () => {
+    const first = await roundTrip();
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // At the login service, the person signs in as the flow begins; before they are back, every session of theirs is
+    // ended (a removal, a factor reset, a change at the login service), a minute on.
+    client.whileFinishing = async () => {
+      clock.advanceBy(60_000);
+      await app.transaction().execute(async (tx) => {
+        await lockSessionsOf(tx, [first.userId]);
+        await endSessionsOf(tx, first.userId, clock.now());
+      });
+    };
+
+    await expect(signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined })).rejects.toThrow(
+      expect.objectContaining({ failure: 'stale_authentication' }),
+    );
+    expect(await sessionsOf(first.userId)).toEqual([]);
+
+    // A sign-in made after the end, at the moment of it or later, is taken.
+    client.whileFinishing = undefined;
+    client.proves = { ...evidence, authTime: clock.now() };
+    const again = await roundTrip();
+    expect(again.userId).toBe(first.userId);
+    expect(await sessionsOf(first.userId)).toEqual([{ id: again.sessionId }]);
+  });
+
+  it('AG10 waits for an end committing as it signs in, then reads it: no session opened past it (ADR-006 §6)', async () => {
+    const first = await roundTrip();
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // The end, its row written, held open before it commits.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [
+      first.userId,
+      new Date(START.getTime() + 60_000),
+    ]);
+    const completing = within(
+      20_000,
+      signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined }),
+      'the sign-in',
+    );
+    const settled = completing.then(
+      () => 'opened',
+      (error: unknown) => (error instanceof SignInFailed ? error.failure : 'other'),
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    await holder.query('commit');
+    await holder.end();
+
+    expect(await settled).toBe('stale_authentication');
+    expect(await sessionsOf(first.userId)).toEqual([{ id: first.sessionId }]);
   });
 
   it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {
