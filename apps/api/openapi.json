@@ -28772,7 +28772,7 @@
       "post": {
         "operationId": "connections.device-lookup",
         "summary": "Find the device asking to be connected, by the code it shows",
-        "description": "The request becomes this browser’s: read it, then allow or deny it, as a browser’s. A code typed wrong, ended, decided or already claimed by another browser is a 404, which says nothing of which.",
+        "description": "The request becomes this browser’s and this person’s: read it, then allow or deny it, as a browser’s. A code typed wrong, ended, decided or already claimed by anyone else is a 404, which says nothing of which; once too many lookups failed from one network this minute, its every lookup is a 429 with Retry-After.",
         "requestBody": {
           "required": true,
           "content": {

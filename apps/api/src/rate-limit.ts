@@ -92,6 +92,16 @@ export function clientNetwork(ip: string | undefined): string {
   return network.includes(':') ? network : network.replace(/\.\d+$/, '.0');
 }
 
+/**
+ * The network an OAuth flow is counted under beside its source (AG8): an IPv4 address alone, as its source is, or an
+ * IPv6 address's /48, the whole site a /64 source sits in. It never throws.
+ */
+export function clientSite(ip: string | undefined): string {
+  const address = clientAddress(ip);
+  // normalizeIP gives an IPv4 address, or an IPv6 address written as one (::ffff:a.b.c.d), as plain IPv4.
+  return address === undefined ? UNREADABLE_ADDRESS : normalizeIP(address, IPV6_NETWORK_PREFIX);
+}
+
 /** The client's address as the trust rule reads it from the connection and its proxies' headers. */
 export function rawClientIp(request: FastifyRequest, trust: ProxyTrust): string | undefined {
   // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to

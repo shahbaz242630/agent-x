@@ -25,7 +25,8 @@
 // - `deny`: the flow decided denied, and the browser sent back with
 //   `access_denied`.
 // - A device's flow (6E3c, RFC 8628), once the person's browser claimed it by
-//   its user code (oauth-device.ts), is asked and decided here the same way:
+//   its user code (oauth-device.ts), is asked and decided here the same way,
+//   by the person who claimed it alone (AG8: a shared browser is not enough):
 //   only no address to send the browser back to (the device polls for its
 //   tokens), and its connection made `via: device`, with no redirect address.
 //
@@ -157,8 +158,11 @@ export type ConsentWrite =
   | Refused;
 
 export interface ConnectionConsents {
-  /** The flow, as its own browser is shown it; undefined for any other, or one decided or ended. */
-  request(named: FlowNamed): Promise<RequestShown | undefined>;
+  /**
+   * The flow, as its own browser is shown it, to `userId` (a device's, only to the person who claimed it); undefined
+   * for any other, or one decided or ended.
+   */
+  request(named: FlowNamed, userId: string): Promise<RequestShown | undefined>;
   consent(
     member: AgentMember,
     idempotent: IdempotentRequest,
@@ -198,9 +202,17 @@ const consentHash = (orgId: string, flow: AnyFlowRead, asked: ConsentAsked): Buf
     flow.resource,
   ]);
 
-/** Whether the browser asking is the one that opened the flow (or claimed a device's): its cookie's hash, as kept. */
-const fromItsBrowser = (flow: AnyFlowRead, cookie: string | undefined): boolean =>
-  cookie !== undefined && flow.browserHash !== null && isFlowCookie(cookie) && hashOf(cookie) === flow.browserHash;
+/**
+ * Whether the browser asking is the one that opened the flow (or claimed a device's), by its cookie's hash, as kept;
+ * and, for a device's, whether the person asking is the one who claimed it (AG8): on a shared browser, another
+ * person's flow is never theirs to read or decide.
+ */
+const fromItsBrowser = (flow: AnyFlowRead, cookie: string | undefined, userId: string): boolean =>
+  cookie !== undefined &&
+  flow.browserHash !== null &&
+  isFlowCookie(cookie) &&
+  hashOf(cookie) === flow.browserHash &&
+  (flow.kind === 'code' || flow.personHash === hashOf(userId));
 
 /** What a client no longer known is called: its redirect address's host, or its ID, at most 100 characters. */
 const unnamed = (flow: AnyFlowRead): string =>
@@ -241,10 +253,13 @@ export function createConnectionConsents({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: AgentRefused });
   const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
-  /** The flow named, open and this browser's: NOT_FOUND for any other, which says nothing of whether it exists. */
-  const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, now: Date): Promise<AnyFlowRead> => {
+  /**
+   * The flow named, open and this browser's (a device's, this person's too): NOT_FOUND for any other, which says
+   * nothing of whether it exists.
+   */
+  const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, userId: string, now: Date): Promise<AnyFlowRead> => {
     const flow = await flowById(tx, flowId);
-    if (flow === undefined || !isOpen(flow, now) || !fromItsBrowser(flow, cookie)) {
+    if (flow === undefined || !isOpen(flow, now) || !fromItsBrowser(flow, cookie, userId)) {
       throw new AgentRefused(404, 'NOT_FOUND');
     }
     return flow;
@@ -297,7 +312,7 @@ export function createConnectionConsents({
     asked: ConsentAsked,
   ) => {
     const now = clock.now();
-    const flow = await openFlow(tx, named, now);
+    const flow = await openFlow(tx, named, member.userId, now);
     const membership = await work.memberIn(tx, states, member, CONNECTING_ROLES);
     const agent = await connectable(
       tx,
@@ -327,9 +342,11 @@ export function createConnectionConsents({
     });
 
   return {
-    async request(named) {
+    async request(named, userId) {
       const flow = await flowById(database, named.flowId);
-      if (flow === undefined || !isOpen(flow, clock.now()) || !fromItsBrowser(flow, named.cookie)) return undefined;
+      if (flow === undefined || !isOpen(flow, clock.now()) || !fromItsBrowser(flow, named.cookie, userId)) {
+        return undefined;
+      }
       const client = await clients.find(flow.clientId);
       const redirectUri = flow.kind === 'code' ? flow.redirectUri : null;
       return {
@@ -465,7 +482,7 @@ export function createConnectionConsents({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const now = clock.now();
         await work.memberIn(tx, states, member, CONNECTING_ROLES);
-        const flow = await openFlow(tx, named, now);
+        const flow = await openFlow(tx, named, member.userId, now);
         if (!(await flowDecided(tx, flow.id, { outcome: 'denied' }, now))) throw new AgentRefused(404, 'NOT_FOUND');
         return { status: 200, resourceId: flow.id };
       });

@@ -188,7 +188,7 @@ const REVOKE_FORM = z.object({
     .max(256)
     .describe('Either of the connection’s tokens: the connection is revoked (required, RFC 7009 §2.1).'),
   token_type_hint: text(64),
-  client_id: text(2048),
+  client_id: text(2048).describe('The client the connection was made for, naming itself (required, AG8).'),
 });
 
 const REVOKED = z.object({}).describe('Taken, whatever the token was (RFC 7009 §2.2).');
@@ -481,6 +481,10 @@ export function registerOauthForms(
       if (grants === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       if (request.formRepeated) return sendOauthError(reply, 400, 'invalid_request', 'A field was sent twice.');
       const { token, client_id: clientId } = request.body;
+      // AG8: a public client names itself, as at the token endpoint, so only its own connection can be revoked.
+      if (clientId === undefined) {
+        return sendOauthError(reply, 401, 'invalid_client', 'Name the client, as it registered: client_id.');
+      }
       const taken = await grants.revoke({ token, clientId }, { correlationId: request.id, ip: request.ip });
       if (taken.outcome === 'refused') return sendOauthError(reply, taken.status, taken.error, taken.description);
       return noStore(reply).code(200).send({});

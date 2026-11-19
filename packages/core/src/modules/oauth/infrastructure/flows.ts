@@ -14,11 +14,13 @@
 //   revoked by the API.
 // - A device's flow (6E3c, RFC 8628) has no browser when it opens: the
 //   person types its user code into the console, which claims it for that
-//   browser, once (deviceClaimed), and the consent that follows is the code
-//   flow's. The device polls by its device code's hash, no sooner than its
+//   browser and that person, once (deviceClaimed, AG8), and the consent that
+//   follows is the code flow's, by that person alone. Anyone else typing the
+//   code of a flow claimed is a failed claim, counted on the flow; the third
+//   denies it (MOST_FAILED_CLAIMS_A_FLOW). The device polls by its device code's hash, no sooner than its
 //   interval (devicePolled), and its tokens are issued once (codeUsed).
 import { limitStatements } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type Scope, scopesOf, scopesText } from '../../agents/index.ts';
@@ -67,6 +69,8 @@ export interface DeviceFlowRead extends FlowOutcome {
   readonly scopesAsked: readonly Scope[];
   readonly resource: string;
   readonly browserHash: string | null;
+  /** The SHA-256 of the person who claimed it with that browser (AG8), if one did. */
+  readonly personHash: string | null;
   readonly intervalSeconds: number;
   readonly polledAt: Date | null;
   readonly createdAt: Date;
@@ -97,45 +101,64 @@ export const MOST_OPEN_FLOWS_A_BROWSER = 5;
  */
 export const MOST_OPEN_FLOWS_A_SOURCE = 20;
 
-/** Opened; or not, every browser's flows at their cap, this source's, or this browser's. */
-export type FlowOpened = 'opened' | 'full' | 'source_full' | 'browser_full';
+/**
+ * The most flows one network holds open at once, of either kind, decided or not (AG8): an IPv4 address alone, or an
+ * IPv6 /48, a site's whole allocation. One /48 holds 65,536 sources of a /64 each, so the source's cap alone would let
+ * one site fill MOST_OPEN_FLOWS; an IPv4 address is its own source, held to that source's cap first.
+ */
+export const MOST_OPEN_FLOWS_A_NETWORK = 100;
+
+/** Where a flow comes from (6F1 G4, AG8): its source as the rate limit keys it, and that source's network. */
+export interface FlowSource {
+  readonly source: string;
+  readonly network: string;
+}
+
+/** Opened; or not, every browser's flows at their cap, this network's, this source's, or this browser's. */
+export type FlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'browser_full';
 
 /**
  * Whether the flows of either kind not ended at `now` are at a cap: every source's together (MOST_OPEN_FLOWS, the ends
- * index), or this source's own (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
+ * index), this network's (MOST_OPEN_FLOWS_A_NETWORK, the network index), or this source's own
+ * (MOST_OPEN_FLOWS_A_SOURCE, the source index), each count stopping at its cap.
  */
 async function flowsFull(
   tx: Transaction<OauthTables>,
-  source: string,
+  { source, network }: FlowSource,
   now: Date,
-): Promise<'full' | 'source_full' | undefined> {
-  const atCap = async (most: number, of?: string): Promise<boolean> => {
+): Promise<'full' | 'network_full' | 'source_full' | undefined> {
+  const atCap = async (most: number, of?: readonly ['network_key' | 'source_key', string]): Promise<boolean> => {
     const { flows } = await tx
       .selectFrom((inner) => {
         const open = inner.selectFrom('oauth.flows').select('id').where('ends_at', '>', now);
-        return (of === undefined ? open : open.where('source_key', '=', of)).limit(most).as('open');
+        return (of === undefined ? open : open.where(of[0], '=', of[1])).limit(most).as('open');
       })
       .select(sql<number>`pg_catalog.count(*)::int`.as('flows'))
       .executeTakeFirstOrThrow();
     return flows >= most;
   };
   if (await atCap(MOST_OPEN_FLOWS)) return 'full';
-  if (await atCap(MOST_OPEN_FLOWS_A_SOURCE, source)) return 'source_full';
+  if (await atCap(MOST_OPEN_FLOWS_A_NETWORK, ['network_key', network])) return 'network_full';
+  if (await atCap(MOST_OPEN_FLOWS_A_SOURCE, ['source_key', source])) return 'source_full';
   return undefined;
 }
 
 /**
- * Opens the flow from `source` (its client address's key, 6F1 G4), for FLOW_SECONDS from its creation, unless
- * MOST_OPEN_FLOWS have not ended, or this source holds MOST_OPEN_FLOWS_A_SOURCE not ended, or this browser holds
- * MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a transaction of its own whose statements are limited to 10
- * seconds, each count stopping at its cap (the ends index, the source index, the browser index). Best effort, with no
- * lock (lead's re-review: one would make every authorize wait its turn): flows opened at once may pass a cap by a few
- * rows.
+ * Opens the flow from `from` (its client address's source and network, 6F1 G4, AG8), for FLOW_SECONDS from its
+ * creation, unless MOST_OPEN_FLOWS have not ended, or this network holds MOST_OPEN_FLOWS_A_NETWORK or this source
+ * MOST_OPEN_FLOWS_A_SOURCE not ended, or this browser holds MOST_OPEN_FLOWS_A_BROWSER open and undecided, in a
+ * transaction of its own whose statements are limited to 10 seconds, each count stopping at its cap (the ends index,
+ * the network index, the source index, the browser index). Best effort, with no lock (lead's re-review: one would make
+ * every authorize wait its turn): flows opened at once may pass a cap by a few rows.
  */
-export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>, source: string): Promise<FlowOpened> {
+export async function openCodeFlow(
+  db: Database,
+  flow: Omit<CodeFlow, 'endsAt'>,
+  from: FlowSource,
+): Promise<FlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    const full = await flowsFull(tx, source, flow.createdAt);
+    const full = await flowsFull(tx, from, flow.createdAt);
     if (full !== undefined) return full;
     const own = await tx
       .selectFrom('oauth.flows')
@@ -145,12 +168,12 @@ export async function openCodeFlow(db: Database, flow: Omit<CodeFlow, 'endsAt'>,
       .where('decided_at', 'is', null)
       .executeTakeFirstOrThrow();
     if (own.flows >= MOST_OPEN_FLOWS_A_BROWSER) return 'browser_full';
-    await insertFlow(tx, flow, source);
+    await insertFlow(tx, flow, from);
     return 'opened';
   });
 }
 
-async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>, source: string): Promise<void> {
+async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>, { source, network }: FlowSource): Promise<void> {
   await db
     .insertInto('oauth.flows')
     .values({
@@ -164,6 +187,7 @@ async function insertFlow(db: Handle, flow: Omit<CodeFlow, 'endsAt'>, source: st
       resource: flow.resource,
       browser_hash: flow.browserHash,
       source_key: source,
+      network_key: network,
       created_at: flow.createdAt,
       ends_at: new Date(flow.createdAt.getTime() + FLOW_SECONDS * 1000),
     })
@@ -180,6 +204,7 @@ const COLUMNS = [
   'scopes_asked',
   'resource',
   'browser_hash',
+  'person_hash',
   'created_at',
   'ends_at',
   'outcome',
@@ -213,6 +238,7 @@ function deviceFlowOf(row: FlowRow | undefined): DeviceFlowRead | undefined {
     scopesAsked: scopesOf(row.scopes_asked),
     resource: row.resource,
     browserHash: row.browser_hash,
+    personHash: row.person_hash,
     intervalSeconds: row.interval_s,
     polledAt: row.polled_at,
     createdAt: row.created_at,
@@ -308,19 +334,22 @@ export interface DeviceFlow {
   readonly createdAt: Date;
 }
 
-/** Opened; or not, every flow at the server's cap or this source's, or the user code drawn already held (draw another). */
-export type DeviceFlowOpened = 'opened' | 'full' | 'source_full' | 'collided';
+/**
+ * Opened; or not, every flow at the server's cap, this network's or this source's, or the user code drawn already held
+ * (draw another).
+ */
+export type DeviceFlowOpened = 'opened' | 'full' | 'network_full' | 'source_full' | 'collided';
 
 /**
- * Opens the device's flow from `source` (6F1 G4), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended or this
- * source holds MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best effort, as openCodeFlow's), in a transaction of
- * its own whose statements are limited to 10 seconds. A user code another flow holds, ended or not, opens no flow:
- * `collided`, and nothing kept.
+ * Opens the device's flow from `from` (6F1 G4, AG8), for FLOW_SECONDS, unless MOST_OPEN_FLOWS have not ended or this
+ * network holds MOST_OPEN_FLOWS_A_NETWORK or this source MOST_OPEN_FLOWS_A_SOURCE (the code flows' own caps, best
+ * effort, as openCodeFlow's), in a transaction of its own whose statements are limited to 10 seconds. A user code
+ * another flow holds, ended or not, opens no flow: `collided`, and nothing kept.
  */
-export async function openDeviceFlow(db: Database, flow: DeviceFlow, source: string): Promise<DeviceFlowOpened> {
+export async function openDeviceFlow(db: Database, flow: DeviceFlow, from: FlowSource): Promise<DeviceFlowOpened> {
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
-    const full = await flowsFull(tx, source, flow.createdAt);
+    const full = await flowsFull(tx, from, flow.createdAt);
     if (full !== undefined) return full;
     const inserted = await tx
       .insertInto('oauth.flows')
@@ -333,7 +362,8 @@ export async function openDeviceFlow(db: Database, flow: DeviceFlow, source: str
         device_hash: flow.deviceHash,
         user_code_hash: flow.userCodeHash,
         interval_s: flow.intervalSeconds,
-        source_key: source,
+        source_key: from.source,
+        network_key: from.network,
         created_at: flow.createdAt,
         ends_at: new Date(flow.createdAt.getTime() + FLOW_SECONDS * 1000),
       })
@@ -345,27 +375,79 @@ export async function openDeviceFlow(db: Database, flow: DeviceFlow, source: str
 }
 
 /**
- * Claims the device flow whose user code this is for the browser whose cookie's hash is `browserHash`, at `now`: only
- * an undecided flow in time, claimed by no other browser (or by this one before). The flow's ID, or undefined for no
- * such flow: a code typed wrong, ended, decided, or another browser's.
+ * How many times someone other than the browser and person that claimed a device flow may type its code before the
+ * flow is denied (AG8): its code is then known to more than one person, so neither may finish it, and the device is
+ * told no. A few, not one: the person's own second browser, or a colleague reading over a shoulder, is a slip.
+ */
+export const MOST_FAILED_CLAIMS_A_FLOW = 3;
+
+/** Who types a user code (AG8): their browser's flow cookie's SHA-256, and their own. */
+export interface DeviceClaimant {
+  readonly browserHash: string;
+  readonly personHash: string;
+}
+
+/**
+ * Claimed, for this browser and person; contested, the flow another's, counted and, at MOST_FAILED_CLAIMS_A_FLOW,
+ * denied; or no flow open for that code.
+ */
+export type DeviceClaim =
+  | { readonly outcome: 'claimed'; readonly flowId: string }
+  | { readonly outcome: 'contested'; readonly flowId: string; readonly failedClaims: number; readonly denied: boolean }
+  | { readonly outcome: 'not_found' };
+
+/**
+ * Claims the device flow whose user code this is for the browser and person `by`, at `now`: only an undecided flow in
+ * time, claimed by no one (or by this same browser and person before). A flow claimed by anyone else is a failed claim,
+ * counted on it in one statement, which denies it at the MOST_FAILED_CLAIMS_A_FLOW-th. Nothing found for a code typed
+ * wrong, ended or decided.
  */
 export async function deviceClaimed(
   db: Database,
   userCodeHash: string,
-  browserHash: string,
+  by: DeviceClaimant,
   now: Date,
-): Promise<string | undefined> {
-  const row = await db
+): Promise<DeviceClaim> {
+  const open = (eb: ExpressionBuilder<OauthTables, 'oauth.flows'>) =>
+    eb.and([
+      eb('user_code_hash', '=', userCodeHash),
+      eb('kind', '=', 'device'),
+      eb('decided_at', 'is', null),
+      eb('ends_at', '>', now),
+    ]);
+  const claimed = await db
     .updateTable('oauth.flows')
-    .set({ browser_hash: browserHash })
-    .where('user_code_hash', '=', userCodeHash)
-    .where('kind', '=', 'device')
-    .where('decided_at', 'is', null)
-    .where('ends_at', '>', now)
-    .where((eb) => eb.or([eb('browser_hash', 'is', null), eb('browser_hash', '=', browserHash)]))
+    .set({ browser_hash: by.browserHash, person_hash: by.personHash })
+    .where(open)
+    .where((eb) =>
+      eb.or([
+        eb('browser_hash', 'is', null),
+        eb.and([eb('browser_hash', '=', by.browserHash), eb('person_hash', '=', by.personHash)]),
+      ]),
+    )
     .returning('id')
     .executeTakeFirst();
-  return row?.id;
+  if (claimed !== undefined) return { outcome: 'claimed', flowId: claimed.id };
+  // Another's: counted, and denied at the cap, in one statement, so failed claims at once are each counted.
+  const spent = sql<boolean>`failed_claims + 1 >= ${MOST_FAILED_CLAIMS_A_FLOW}`;
+  const contested = await db
+    .updateTable('oauth.flows')
+    .set({
+      failed_claims: sql<number>`failed_claims + 1`,
+      decided_at: sql<Date | null>`case when ${spent} then ${now}::timestamptz end`,
+      outcome: sql<string | null>`case when ${spent} then 'denied' end`,
+    })
+    .where(open)
+    .where('browser_hash', 'is not', null)
+    .returning(['id', 'failed_claims', 'outcome'])
+    .executeTakeFirst();
+  if (contested === undefined) return { outcome: 'not_found' };
+  return {
+    outcome: 'contested',
+    flowId: contested.id,
+    failedClaims: contested.failed_claims,
+    denied: contested.outcome === 'denied',
+  };
 }
 
 /** The device flow this device code's hash names, read unlocked: where its organisation is, never a decision. */

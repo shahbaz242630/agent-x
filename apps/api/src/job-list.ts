@@ -29,7 +29,7 @@ import {
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch } from '@agentx/core/schema-check';
 import { sweepConnectionTokens } from '@agentx/core/modules/agents';
-import { sweepClientMetadata, sweepClients, sweepFlows } from '@agentx/core/modules/oauth';
+import { sweepClientMetadata, sweepClientNetworks, sweepClients, sweepFlows } from '@agentx/core/modules/oauth';
 import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
@@ -462,6 +462,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // The OAuth flows a day after they end, and clients that never connected a day after they registered (6E3a).
     sweepRows('oauth.flow', (most) => sweepFlows(database, systemClock.now(), most)),
     sweepRows('oauth.client', (most) => sweepClients(database, systemClock.now(), most)),
+    // The network each client registered from, cleared once its day's count is past (AG8): its `deleted` counts those.
+    sweepRows('oauth.client_network', (most) => sweepClientNetworks(database, systemClock.now(), most)),
     // The clients' metadata documents past their day (6E3c): one still in use is fetched again.
     sweepRows('oauth.client_metadata', (most) => sweepClientMetadata(database, systemClock.now(), most)),
     // Each organisation's MCP connections' token rows past 120 days, inside its own transaction (6E3a, 0093).

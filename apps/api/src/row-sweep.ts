@@ -15,6 +15,8 @@
 // - the OAuth flows (6E3a): a day after each ends, so a used code's second use
 //   is still caught; and the clients that registered and never connected, a
 //   day after they registered, so anyone registering can't fill the table;
+//   the network each client registered from, cleared (not deleted: the
+//   client stays) a day on (AG8), as it is kept only for that day's count;
 //   and the clients' metadata documents past their day (6E3c).
 //
 // The API sweeps each when it starts and then an hour after each sweep ends,
@@ -41,6 +43,7 @@ export type SweptRows =
   | 'provider_events.message'
   | 'oauth.flow'
   | 'oauth.client'
+  | 'oauth.client_network'
   | 'oauth.client_metadata';
 
 export interface RowSweepOptions {

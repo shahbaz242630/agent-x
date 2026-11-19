@@ -467,7 +467,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'oauth.clients': {
       reason:
-        "The MCP clients that registered themselves (0093, RFC 7591; 6E3a): a client registers before anyone is signed in or any organisation is known, and one client connects to many organisations. Its name is what it says it is, never trusted; it grants nothing: a connection is made only by a person's consent, inside their organisation. It keeps the network it registered from (an IPv4 /24, an IPv6 /48), for each network's own day's cap (0096, 6F1 G4)",
+        "The MCP clients that registered themselves (0093, RFC 7591; 6E3a): a client registers before anyone is signed in or any organisation is known, and one client connects to many organisations. Its name is what it says it is, never trusted; it grants nothing: a connection is made only by a person's consent, inside their organisation. It keeps the network it registered from (an IPv4 /24, an IPv6 /48), for each network's own day's cap (0096, 6F1 G4), cleared once that day is past (0099, AG8)",
       columns: [
         'client_id',
         'name',
@@ -481,13 +481,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'last_connected_at',
         'network',
       ],
-      // Registered, read, and swept once unused; changed only to note when it connects (0094), never its addresses.
+      // Registered, read, and swept once unused; changed only to note when it connects (0094) and to clear its network a
+      // day on (0099), never its addresses.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['first_connected_at', 'last_connected_at'],
+      appMayUpdate: ['first_connected_at', 'last_connected_at', 'network'],
     },
     'oauth.flows': {
       reason:
-        "The OAuth authorization flows under way (0093, 6E3a): a client sends a person's browser here before anyone is signed in or any organisation chosen. A flow names the organisation and connection key it was allowed with by ID alone, and its code's SHA-256; a token is issued only once that organisation's own signed rows are read. Stated trade: it keeps the client's `state` until it ends, as OAuth sends it back unchanged, and the address that opened it (an IPv6 /64 as one), for each source's own cap (0096, 6F1 G4)",
+        "The OAuth authorization flows under way (0093, 6E3a): a client sends a person's browser here before anyone is signed in or any organisation chosen. A flow names the organisation and connection key it was allowed with by ID alone, and its code's SHA-256; a token is issued only once that organisation's own signed rows are read. Stated trade: it keeps the client's `state` until it ends, as OAuth sends it back unchanged, and the address that opened it (an IPv6 /64 as one) and its network (an IPv6 /48), for each source's and network's own cap (0096, 6F1 G4; 0099, AG8). A device's flow keeps the SHA-256 of the person who claimed it (0099)",
       columns: [
         'id',
         'kind',
@@ -512,12 +513,17 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'used_at',
         'polled_at',
         'source_key',
+        'network_key',
+        'person_hash',
+        'failed_claims',
       ],
-      // Opened, a device's claimed once by a browser (0095), decided once, its code used once, and swept a day after it
-      // ends; never moved to another client.
+      // Opened, a device's claimed once by a browser and its person (0095, 0099), anyone else's claims counted (0099),
+      // decided once, its code used once, and swept a day after it ends; never moved to another client.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
       appMayUpdate: [
         'browser_hash',
+        'person_hash',
+        'failed_claims',
         'decided_at',
         'outcome',
         'org_id',

@@ -142,6 +142,12 @@ export function agentOf(request: Pick<FastifyRequest, 'agent'>): AcceptedKey {
   return request.agent;
 }
 
+/** A person's route's caller: the session's person. The access hook lets no one else through, so none is a bug. */
+export function personOf(request: Pick<FastifyRequest, 'person'>): string {
+  if (request.person === null) throw new Error("a person's own route ran without a person");
+  return request.person.userId;
+}
+
 /** A member's route's caller: their organisation, and who they are in which session. The hooks let no one else through. */
 export function memberInSessionOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
   const { member, person } = request;

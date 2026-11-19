@@ -25,6 +25,7 @@ import {
   MOST_REGISTRATIONS_A_DAY,
   MOST_REGISTRATIONS_A_NETWORK_A_DAY,
   registerClient,
+  sweepClientNetworks,
   sweepClients,
 } from './clients.ts';
 import {
@@ -39,7 +40,9 @@ import {
   FLOW_SECONDS,
   flowById,
   flowDecided,
+  MOST_FAILED_CLAIMS_A_FLOW,
   MOST_OPEN_FLOWS,
+  MOST_OPEN_FLOWS_A_NETWORK,
   MOST_OPEN_FLOWS_A_SOURCE,
   openCodeFlow,
   openDeviceFlow,
@@ -76,8 +79,8 @@ const registration = (): ClientRegistration => {
   return checked.client;
 };
 
-/** A code flow opened at `createdAt` from `source`, by one browser unless another is named; its ID. */
-const opened = async (createdAt = NOW, source = fresh(), browserHash = 'a'.repeat(64)) => {
+/** A code flow opened at `createdAt` from `source` on `network`, by one browser unless another is named; its ID. */
+const opened = async (createdAt = NOW, source = fresh(), browserHash = 'a'.repeat(64), network = source) => {
   const id = flowId();
   const outcome = await openCodeFlow(
     app,
@@ -92,7 +95,7 @@ const opened = async (createdAt = NOW, source = fresh(), browserHash = 'a'.repea
       browserHash,
       createdAt,
     },
-    source,
+    { source, network },
   );
   if (outcome !== 'opened') throw new Error(`not opened: ${outcome}`);
   return id;
@@ -183,6 +186,30 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1), network)).toMatchObject({
       outcome: 'registered',
     });
+  });
+
+  it('AG8: clears the network a client registered from once its day is past, never before; the client stays', async () => {
+    const day = new Date('2027-02-01T09:00:00Z');
+    // The cases before registered from networks of their own, days before: theirs go first, as the sweep's own job.
+    await sweepClientNetworks(app, day, 1000);
+    const network = fresh();
+    const registered = await registerClient(app, registration(), day, network);
+    if (registered.outcome !== 'registered') throw new Error('registered');
+    const { clientId } = registered.client;
+    const networkOf = async () => {
+      const [row] = await database
+        .as('admin')
+        .query<{ network: string | null }>('select network from oauth.clients where client_id = $1', [clientId]);
+      return row?.network;
+    };
+    expect(await sweepClientNetworks(app, new Date(day.getTime() + DAY_MS - 1), 1000)).toBe(0);
+    expect(await networkOf()).toBe(network);
+    expect(await sweepClientNetworks(app, new Date(day.getTime() + DAY_MS), 1000)).toBeGreaterThanOrEqual(1);
+    expect(await networkOf()).toBeNull();
+    expect(await clientOf(app, clientId)).toMatchObject({ clientId });
+    // Cleared once: a second sweep has nothing of it left to clear.
+    expect(await sweepClientNetworks(app, new Date(day.getTime() + DAY_MS), 1000)).toBe(0);
+    await expect(sweepClientNetworks(app, day, 0)).rejects.toBeInstanceOf(RangeError);
   });
 });
 
@@ -283,7 +310,7 @@ describe(`SEC-OAUTH-04 flows decided once, codes used once (Postgres ${server.ve
 describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   let codes = 0;
   /** A device's flow opened at `createdAt`, its two codes' hashes distinct from every other test's. */
-  const device = async (createdAt = NOW, userCodeHash?: string, source = fresh()) => {
+  const device = async (createdAt = NOW, userCodeHash?: string, source = fresh(), network = source) => {
     codes += 1;
     const id = flowId();
     const flow = {
@@ -296,10 +323,13 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       intervalSeconds: 5,
       createdAt,
     };
-    return { flow, opened: await openDeviceFlow(app, flow, source) };
+    return { flow, opened: await openDeviceFlow(app, flow, { source, network }) };
   };
   const BROWSER = 'b'.repeat(64);
   const OTHER = 'c'.repeat(64);
+  const PERSON = 'd'.repeat(64);
+  const OWNER = { browserHash: BROWSER, personHash: PERSON };
+  const NOTHING = { outcome: 'not_found' };
 
   it('opens a device’s flow with no browser, reads it by its device code, and draws again for a user code held', async () => {
     const { flow, opened: outcome } = await device();
@@ -311,6 +341,7 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       scopesAsked: ['requests:read'],
       resource: flow.resource,
       browserHash: null,
+      personHash: null,
       intervalSeconds: 5,
       polledAt: null,
       createdAt: NOW,
@@ -328,20 +359,50 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(await flowById(app, again.flow.id)).toBeUndefined();
   });
 
-  it('is claimed once, by the first browser whose person types its code, and only while open and undecided', async () => {
+  it('is claimed once, by the first browser and person to type its code, and only while open and undecided', async () => {
     const { flow } = await device();
-    expect(await deviceClaimed(app, flow.userCodeHash, BROWSER, NOW)).toBe(flow.id);
-    // The same browser again (a reload) finds it; another browser never does.
-    expect(await deviceClaimed(app, flow.userCodeHash, BROWSER, NOW)).toBe(flow.id);
-    expect(await deviceClaimed(app, flow.userCodeHash, OTHER, NOW)).toBeUndefined();
-    expect(await flowById(app, flow.id)).toMatchObject({ browserHash: BROWSER });
-    expect(await deviceClaimed(app, hashOf('typed wrong'), BROWSER, NOW)).toBeUndefined();
+    const claimed = { outcome: 'claimed', flowId: flow.id };
+    expect(await deviceClaimed(app, flow.userCodeHash, OWNER, NOW)).toEqual(claimed);
+    // The same browser and person again (a reload) finds it.
+    expect(await deviceClaimed(app, flow.userCodeHash, OWNER, NOW)).toEqual(claimed);
+    expect(await flowById(app, flow.id)).toMatchObject({ browserHash: BROWSER, personHash: PERSON });
+    expect(await deviceClaimed(app, hashOf('typed wrong'), OWNER, NOW)).toEqual(NOTHING);
     const ended = await device();
     const end = new Date(NOW.getTime() + FLOW_SECONDS * 1000);
-    expect(await deviceClaimed(app, ended.flow.userCodeHash, BROWSER, end)).toBeUndefined();
+    expect(await deviceClaimed(app, ended.flow.userCodeHash, OWNER, end)).toEqual(NOTHING);
     const decided = await device();
     expect(await flowDecided(app, decided.flow.id, { outcome: 'denied' }, NOW)).toBe(true);
-    expect(await deviceClaimed(app, decided.flow.userCodeHash, BROWSER, NOW)).toBeUndefined();
+    expect(await deviceClaimed(app, decided.flow.userCodeHash, OWNER, NOW)).toEqual(NOTHING);
+  });
+
+  it(`AG8: a claim by another browser or person fails, counted; the ${String(MOST_FAILED_CLAIMS_A_FLOW)}rd denies the flow`, async () => {
+    const { flow } = await device();
+    expect(await deviceClaimed(app, flow.userCodeHash, OWNER, NOW)).toEqual({ outcome: 'claimed', flowId: flow.id });
+    const contested = (failedClaims: number, denied: boolean) => ({
+      outcome: 'contested',
+      flowId: flow.id,
+      failedClaims,
+      denied,
+    });
+    // Another person on the claiming browser, then another browser: each a failed claim, the flow kept as it was.
+    expect(await deviceClaimed(app, flow.userCodeHash, { browserHash: BROWSER, personHash: OTHER }, NOW)).toEqual(
+      contested(1, false),
+    );
+    expect(await deviceClaimed(app, flow.userCodeHash, { browserHash: OTHER, personHash: PERSON }, NOW)).toEqual(
+      contested(2, false),
+    );
+    expect(await flowById(app, flow.id)).toMatchObject({ decided: null, browserHash: BROWSER, personHash: PERSON });
+    // Its code is known to someone else: at the third no one may decide it, and the device is told no.
+    expect(await deviceClaimed(app, flow.userCodeHash, { browserHash: OTHER, personHash: OTHER }, NOW)).toEqual(
+      contested(MOST_FAILED_CLAIMS_A_FLOW, true),
+    );
+    expect(await flowById(app, flow.id)).toMatchObject({ decided: 'denied', orgId: null });
+    expect(await deviceClaimed(app, flow.userCodeHash, OWNER, NOW)).toEqual(NOTHING);
+    // A flow no one claimed yet is claimed by whoever types its code first, never a failed claim.
+    const unclaimed = await device();
+    expect(
+      await deviceClaimed(app, unclaimed.flow.userCodeHash, { browserHash: OTHER, personHash: OTHER }, NOW),
+    ).toEqual({ outcome: 'claimed', flowId: unclaimed.flow.id });
   });
 
   it('notes a poll no sooner than its interval, one at a time', async () => {
@@ -424,6 +485,20 @@ describe(`device flows (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect((await device(at)).opened).toBe('opened');
     await opened(at);
     await opened(new Date(at.getTime() + FLOW_SECONDS * 1000), source, browser());
+  });
+
+  it(`AG8: holds one network to ${String(MOST_OPEN_FLOWS_A_NETWORK)} flows not ended, of either kind, whatever source in it`, async () => {
+    const at = new Date('2027-03-01T09:00:00Z');
+    const network = fresh();
+    const browser = () => hashOf(fresh());
+    // Each from a source of its own (an IPv6 /64 of one /48): no source comes near its own cap.
+    for (let open = 1; open < MOST_OPEN_FLOWS_A_NETWORK; open += 1) await opened(at, fresh(), browser(), network);
+    expect((await device(at, undefined, fresh(), network)).opened).toBe('opened');
+    expect((await device(at, undefined, fresh(), network)).opened).toBe('network_full');
+    await expect(opened(at, fresh(), browser(), network)).rejects.toThrow('not opened: network_full');
+    // Another network is not held by it; once its flows end, this one isn't either.
+    expect((await device(at)).opened).toBe('opened');
+    await opened(new Date(at.getTime() + FLOW_SECONDS * 1000), fresh(), browser(), network);
   });
 });
 

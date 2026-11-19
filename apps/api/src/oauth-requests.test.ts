@@ -53,14 +53,14 @@ async function consentServer(
   const calls: unknown[] = [];
   const device: OauthDevice = {
     authorize: () => Promise.reject(new Error('no')),
-    lookup: (typed, cookie) => {
-      calls.push({ typed, cookie });
+    lookup: (typed, cookie, userId, ip) => {
+      calls.push({ typed, cookie, userId, ip });
       return Promise.resolve(found);
     },
   };
   const consents: ConnectionConsents = {
-    request: (named) => {
-      calls.push(named);
+    request: (named, userId) => {
+      calls.push({ ...named, userId });
       return Promise.resolve(shown ?? undefined);
     },
     consent: (member, idempotent, named, asked) => {
@@ -129,7 +129,8 @@ describe('the request, as its browser is shown it', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ ...SHOWN, endsAt: '2026-09-28T09:15:00.000Z' });
-    expect(calls).toEqual([NAMED]);
+    // The person asking is named too: a device's request is shown only to the person who claimed it (AG8).
+    expect(calls).toEqual([{ ...NAMED, userId: LIVE.userId }]);
   });
 
   it('answers 404 for a flow its browser did not open, or one decided or ended', async () => {
@@ -227,7 +228,17 @@ describe('a device’s request (6E3c, RFC 8628 §3.3)', () => {
     expect(response.headers['set-cookie']).toBe(
       `${CONNECT_COOKIE}=${BROWSER}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400`,
     );
-    expect(calls).toEqual([{ typed: 'bcdf-ghjk', cookie: BROWSER }]);
+    // The person, and the address its network is counted by (AG8).
+    expect(calls).toEqual([{ typed: 'bcdf-ghjk', cookie: BROWSER, userId: LIVE.userId, ip: '127.0.0.1' }]);
+  });
+
+  it('AG8: answers 429 with Retry-After while every lookup is held, setting no cookie', async () => {
+    const { app } = await consentServer({ outcome: 'conflict' }, SHOWN, { outcome: 'held' });
+    const response = await app.inject(lookup('BCDF-GHJK'));
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    expect(response.headers['retry-after']).toBe('60');
+    expect(response.headers['set-cookie']).toBeUndefined();
   });
 
   it('answers 404 for a code that finds nothing, saying nothing of why', async () => {
