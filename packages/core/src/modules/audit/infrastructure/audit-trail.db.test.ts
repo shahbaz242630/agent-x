@@ -2703,4 +2703,13 @@ describe("the organisation's events since a time, the chain checked through them
     await attacker.query(tamper, [org]);
     expect(await since(org, at)).toEqual({ kind: 'unbelieved', reason, orgId: org, seq });
   });
+
+  it('FX-TAMPER: an event since moved to just before the time is taken as the edge, and refused there', async () => {
+    const at = await twoAndTwo();
+    await attacker.query(
+      "update audit.events set recorded_at = $2::timestamptz - interval '1 millisecond' where org_id = $1 and seq = 3",
+      [org, at],
+    );
+    expect(await since(org, at)).toEqual({ kind: 'unbelieved', reason: 'anchor', orgId: org, seq: 3n });
+  });
 });
