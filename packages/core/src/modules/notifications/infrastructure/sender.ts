@@ -364,14 +364,21 @@ export function createNoticeSender({
    * that can't be read leaves it to be tried again. A contact is no member, and its own row decides (`contactAddresses`).
    */
   const stillReceives = async (notice: ClaimedNotice, userId: string): Promise<boolean> => {
-    let role: NoticeRole | undefined;
+    const needed = rolesToReceive(notice);
+    const holds = (roles: ReadonlyMap<string, NoticeRole>): boolean => {
+      const role = roles.get(userId.toLowerCase());
+      return role !== undefined && needed.includes(role);
+    };
     try {
-      role = (await rolesIn(notice.orgId)).get(userId.toLowerCase());
+      if (holds(await rolesIn(notice.orgId))) return true;
+      // The run's copy is trusted for a yes alone: someone added or promoted since it was read is missing from it,
+      // and a no gives the notice up for good, so it is read afresh once before.
+      rolesThisRun.delete(notice.orgId);
+      if (holds(await rolesIn(notice.orgId))) return true;
     } catch {
       await failed(notice, 'audience_unavailable', false);
       return false;
     }
-    if (role !== undefined && rolesToReceive(notice).includes(role)) return true;
     const became = await outbox.failed(db, notice.id, 'not_a_member', true);
     logger.warn('notification.recipient_not_member', { noticeId: notice.id, kind: notice.kind, outcome: became });
     return false;

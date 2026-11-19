@@ -523,6 +523,26 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(reads).toBe(2);
   });
 
+  it('AG10 reads the roles afresh, once, before giving up a notice to someone the run’s copy lacks (added meanwhile)', async () => {
+    // beforeEach's two notices: to the admin and to the other admin, who the run's first read doesn't hold yet.
+    const { sent, service } = notifier();
+    const reads: number[] = [];
+    const later = () => {
+      reads.push(reads.length);
+      return reads.length === 1 ? new Map([...ROLES].filter(([userId]) => userId !== OTHER_ADMIN)) : ROLES;
+    };
+
+    await sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, later),
+    ).run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    expect(reads).toHaveLength(2);
+    expect((await rows()).map(({ last_failure }) => last_failure)).toEqual([null, null]);
+  });
+
   it('AG10 tries a notice to one person again when their role cannot be read as it is sent', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
