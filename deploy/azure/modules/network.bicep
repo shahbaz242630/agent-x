@@ -28,6 +28,8 @@ param databaseZoneName string
 param blobZoneName string
 param tags object
 param addressSpace string
+@description('Whether Agent X\'s OAuth server is on here, and so the API fetches the MCP clients\' documents (AG5).')
+param mcpOauth bool
 
 // The one spelling of the apps subnet's range: the apps deployment reads the
 // same function for what the API trusts as its proxy.
@@ -70,7 +72,8 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
   location: location
   tags: tags
   properties: {
-    securityRules: [
+    // The MCP clients' door only where the OAuth server is on (`mcpOauth`).
+    securityRules: concat([
       {
         name: 'allow-load-balancer-probes'
         properties: {
@@ -318,24 +321,6 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         }
       }
       {
-        // No service tag names them, so these are their owners' published
-        // addresses (mcp-clients.json). Cloudflare's ranges, where ChatGPT
-        // answers, carry many sites: as with Front Door's tag above, the API's
-        // exact origins and the DNS policy's names are the real limit.
-        name: 'allow-out-mcp-clients'
-        properties: {
-          description: 'The MCP clients\' metadata documents (CIMD), which the API fetches to know a client: their published addresses (mcp-clients.json).'
-          priority: 320
-          direction: 'Outbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourceAddressPrefix: appsPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefixes: mcpClientPrefixes
-          destinationPortRange: '443'
-        }
-      }
-      {
         name: 'deny-out-rest'
         properties: {
           description: 'Overrides Azure\'s default rules that let the subnet reach the whole internet: nothing leaves but what is allowed above.'
@@ -349,7 +334,25 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           destinationPortRange: '*'
         }
       }
-    ]
+    ], mcpOauth ? [
+      {
+        // No service tag names them, so these are their owners' published
+        // addresses (mcp-clients.json), each the client's own: a client behind
+        // a front shared with the rest of the web (Cloudflare) isn't listed.
+        name: 'allow-out-mcp-clients'
+        properties: {
+          description: 'The MCP clients\' metadata documents (CIMD), which the API fetches to know a client: their published addresses (mcp-clients.json).'
+          priority: 320
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefixes: mcpClientPrefixes
+          destinationPortRange: '443'
+        }
+      }
+    ] : [])
   }
 }
 

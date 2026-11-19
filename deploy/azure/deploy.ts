@@ -2074,10 +2074,17 @@ export function issuedMissing(held: readonly string[]): string[] {
   ];
 }
 
-/** The secrets run that writes what `issuedMissing` found: the issued ones by name, or, for a copied one alone, the run that writes nothing else. */
-export function secretsRunFor(missing: readonly string[]): string {
-  const issued = missing.filter((name) => VAULT_SECRETS[name]?.source === 'issued');
-  return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
+/**
+ * The secrets run that writes what `issuedMissing` found: the issued ones by name, and a seeded one the vault holds
+ * disabled (`disabled`) by name too, since a keys run keeps what the vault holds (SA5); for the rest alone, the run
+ * that writes nothing else.
+ */
+export function secretsRunFor(missing: readonly string[], disabled: readonly string[] = []): string {
+  const named = missing.filter(
+    (name) =>
+      VAULT_SECRETS[name]?.source === 'issued' || (VAULT_SECRETS[name]?.source === 'seeded' && disabled.includes(name)),
+  );
+  return named.length > 0 ? `secrets --rotate ${named.join(' ')}` : 'secrets --keys';
 }
 
 /** Our login lists the vault holds but disabled (SA2b): a run never writes none over one silently. */
@@ -2813,14 +2820,12 @@ async function deployApps(
   }
   // Before anything else is asked: the API reads its client secret from the vault, the login pages their cookie key.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
-  const missing = issuedMissing(
-    secretsInVault(steps, subscription, vaultIn(steps, subscription))
-      .filter((listed) => listed.enabled)
-      .map((listed) => listed.name),
-  );
+  const listed = secretsInVault(steps, subscription, vaultIn(steps, subscription));
+  const missing = issuedMissing(listed.filter((each) => each.enabled).map((each) => each.name));
+  const disabled = listed.filter((each) => !each.enabled).map((each) => each.name);
   if (missing.length > 0) {
     throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API or the login pages read, so they couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, makes the login pages' cookie key if the vault lacks it, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API or the login pages read, so they couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing, disabled)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, makes the login pages' cookie key if the vault lacks it, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
   const records = await carriedRecords(steps, subscription);

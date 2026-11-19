@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { setting } from '../../packages/platform/src/config/settings.ts';
-import { type McpClient, mcpClientProblems, mcpNames, mcpPrefixes, originOf, readMcpClients } from './mcp-clients.ts';
+import {
+  checkClientHosts,
+  type McpClient,
+  mcpClientProblems,
+  mcpNames,
+  mcpPrefixes,
+  originOf,
+  readMcpClients,
+} from './mcp-clients.ts';
 
 const CLIENTS = readMcpClients();
 
@@ -13,12 +21,44 @@ const client = (change: Partial<McpClient>): McpClient => ({
   ...change,
 });
 
+/** A resolver answering each host with the addresses given, or failing for one not given. */
+const resolver = (answers: Readonly<Record<string, readonly string[]>>) => (host: string) =>
+  answers[host] === undefined ? Promise.reject(new Error('ENOTFOUND')) : Promise.resolve([...(answers[host] ?? [])]);
+
+describe("the MCP clients' hosts against their listed ranges (AG5, daily)", () => {
+  const listed = [client({ metadata: 'https://client.example/doc.json', prefixes: ['203.0.113.0/24'] })];
+
+  it('is quiet while each host answers inside its ranges, and warns in plain words, ending 1, when one leaves them', async () => {
+    const said: string[] = [];
+    expect(
+      await checkClientHosts(listed, resolver({ 'client.example': ['203.0.113.9'] }), (line) => said.push(line)),
+    ).toBe(0);
+    expect(said).toEqual(['Example (client.example) answers inside its listed ranges.']);
+    const moved: string[] = [];
+    expect(
+      await checkClientHosts(listed, resolver({ 'client.example': ['203.0.113.9', '198.51.100.4'] }), (line) =>
+        moved.push(line),
+      ),
+    ).toBe(1);
+    expect(moved.join('\n')).toContain('Example (client.example) answers at 198.51.100.4, outside its listed ranges');
+    expect(moved.at(-1)).toMatch(/^What broke: .* What next: .*mcp-clients\.json/);
+  });
+
+  it('warns, ending 1, when a host does not answer at all', async () => {
+    const said: string[] = [];
+    expect(await checkClientHosts(listed, resolver({}), (line) => said.push(line))).toBe(1);
+    expect(said.join('\n')).toContain("Example (client.example) didn't answer a lookup");
+  });
+});
+
 describe('the MCP clients list (AG5)', () => {
-  it('holds Claude and ChatGPT, each sound, and every entry is one the API setting takes', () => {
+  it("holds Claude's one document address alone, sound, and every entry is one the API setting takes", () => {
     expect(mcpClientProblems(CLIENTS)).toEqual([]);
-    expect(CLIENTS.map((each) => each.metadata)).toEqual(
-      expect.arrayContaining(['https://claude.ai', 'https://chatgpt.com']),
-    );
+    // Its exact address (claude.ai serves people's own content too, so never the whole origin), and no client behind
+    // Cloudflare, whose shared ranges would open the way out to every site there: ChatGPT registers (DCR) until a
+    // name-aware way out exists (AZ22).
+    expect(CLIENTS.map((each) => each.metadata)).toEqual(['https://claude.ai/oauth/mcp-oauth-client-metadata']);
+    expect(CLIENTS.flatMap((each) => each.prefixes).some((prefix) => prefix.startsWith('104.16.'))).toBe(false);
     const entries = setting(
       { AGENTX_OAUTH_CLIENT_METADATA_ORIGINS: CLIENTS.map((each) => each.metadata).join(',') },
       'AGENTX_OAUTH_CLIENT_METADATA_ORIGINS',

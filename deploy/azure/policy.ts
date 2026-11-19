@@ -1092,6 +1092,9 @@ const GITHUB_RANGES = readRanges();
 /** The MCP clients whose documents the API fetches (AG5), from the file network.bicep and dns-policy.bicep compile. */
 const MCP_CLIENTS = readMcpClients();
 
+/** Where Agent X's OAuth server is on, and so the API fetches their documents: staging (main.bicep's and apps.bicep's `mcpOauth`). */
+const mcpOauthOn = (environment: Expectations['environment']): boolean => environment === 'staging';
+
 /** Azure's own DNS, which Microsoft says an environment stops working without. */
 const AZURE_DNS = '168.63.129.16';
 
@@ -2042,6 +2045,7 @@ const egressDoors = (
   apps: string,
   database: string,
   endpoints: string,
+  environment: Expectations['environment'],
 ): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
   [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the database's private name and every host below"],
@@ -2064,11 +2068,15 @@ const egressDoors = (
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
   // Every account in the region, not ours alone: the store's own network rule is the limit.
   [`Tcp to Storage.${region} on 443`, "the API's activity downloads, to their store"],
-  // Cloudflare's ranges among them carry many sites: the API's exact origins and the DNS names are the real limit.
-  [
-    `Tcp to ${[...mcpPrefixes(MCP_CLIENTS)].sort().join(' ')} on 443`,
-    "the MCP clients' metadata documents, which the API fetches (mcp-clients.json)",
-  ],
+  // Only where the OAuth server is on (mcpOauthOn), each client's own published ranges.
+  ...(mcpOauthOn(environment)
+    ? [
+        [
+          `Tcp to ${[...mcpPrefixes(MCP_CLIENTS)].sort().join(' ')} on 443`,
+          "the MCP clients' metadata documents, which the API fetches (mcp-clients.json)",
+        ] as const,
+      ]
+    : []),
 ];
 
 /**
@@ -2079,7 +2087,7 @@ const egressDoors = (
  * doors must match exactly: one missing breaks a deployment, one extra is a
  * way out nobody decided on.
  */
-const appsEgress: Check = (snapshot, _expected, add) => {
+const appsEgress: Check = (snapshot, expected, add) => {
   for (const network of ofType(snapshot, TYPES.network)) {
     const apps = appsSubnetOf(network);
     const prefix = text(at(apps, 'properties', 'addressPrefix'));
@@ -2095,7 +2103,13 @@ const appsEgress: Check = (snapshot, _expected, add) => {
     // key vault tag names where this deployment is, and `in-country` asks
     // separately that that is the UAE.
     const wanted = new Map(
-      egressDoors(text(network.location), prefix, subnetPrefix('database'), subnetPrefix('endpoints')),
+      egressDoors(
+        text(network.location),
+        prefix,
+        subnetPrefix('database'),
+        subnetPrefix('endpoints'),
+        expected.environment,
+      ),
     );
     for (const message of egressProblems(snapshot, apps, 'apps', wanted)) {
       add({ rule: 'apps-egress', resource: network.name, message });

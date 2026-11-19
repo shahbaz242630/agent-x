@@ -334,6 +334,11 @@ describe('the secrets a run writes', () => {
       ]),
     ).toEqual([COOKIE]);
     expect(secretsRunFor([COOKIE])).toBe('secrets --keys');
+    // A disabled one: a keys run keeps what the vault holds, so only its name writes a new one.
+    expect(secretsRunFor([COOKIE], [COOKIE])).toBe(`secrets --rotate ${COOKIE}`);
+    expect(secretsRunFor(['zitadel-reset-token', COOKIE], [COOKIE])).toBe(
+      `secrets --rotate zitadel-reset-token ${COOKIE}`,
+    );
   });
 
   it('SA2b: writes none (off) for a list of our login IDs the vault lacks, on every kind of run, and keeps one it holds', () => {
@@ -2467,6 +2472,23 @@ describe('deploy apps', () => {
     });
     expect(done.error).toMatchObject({ message: expect.stringMatching(/or holds it disabled/) as unknown });
     expect(done.az.deployment).toBeUndefined();
+    // SA5: a disabled cookie key is written again only by its name, never by the keys run that keeps it.
+    const cookie = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({
+        before: [
+          'api-oidc-client-secret',
+          'zitadel-directory-token',
+          'zitadel-reset-token',
+          'acs-access-key',
+          ...OUR_LISTS,
+          { name: COOKIE, version: '1', disabled: true },
+        ],
+      }),
+    });
+    expect((cookie.error as Error).message).toContain(`then run secrets --rotate ${COOKIE} (`);
+    expect(cookie.az.deployment).toBeUndefined();
   });
 
   it('names only the issued and copied secrets a vault lacks, and the secrets run that writes them', () => {

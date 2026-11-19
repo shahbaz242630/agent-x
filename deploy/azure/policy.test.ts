@@ -274,6 +274,8 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       }
     }
     guardrailsForProduction(resource);
+    // Production's OAuth server is off, so its foundation opens no way out to the MCP clients (AG5, main.bicep).
+    if (APPS_RULES(resource as unknown as PredictedResource)) dropRule(resource, 'allow-out-mcp-clients');
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
     if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
       inside(resource, 'sku').name = 'Standard_ZRS';
@@ -3888,6 +3890,24 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(new Set(prefixes(staging.predictedResources.find(APPS_RULES) as unknown as Mutable, 'mcp-clients'))).toEqual(
       new Set(mcpPrefixes(readMcpClients())),
     );
+    // Only where Agent X's OAuth server is on (staging): production's way out has no such door, and the policy
+    // refuses one there; the foundation sends the door and the names on the same switch as the apps' setting.
+    const production = policyProblems(staging, { region: 'uaenorth', environment: 'production' })
+      .filter((problem) => problem.rule === 'apps-egress')
+      .map(describeProblem);
+    expect(production).toEqual([
+      expect.stringContaining(
+        `lets out Tcp to ${[...mcpPrefixes(readMcpClients())].sort().join(' ')} on 443, which nothing it runs needs`,
+      ),
+    ]);
+    const main = JSON.stringify(bicepFile('main.bicep').template);
+    // Both modules, the network and the DNS policy, given the one switch.
+    expect(main.split(`"mcpOauth":{"value":"[variables('mcpOauth')]"}`)).toHaveLength(3);
+    // And each module sends its part, the door and the names, only on it.
+    expect(
+      main.match(/if\(parameters\('mcpOauth'\), (?:createArray\(createObject\('name', 'allow-out-mcp-clients'|map\()/g),
+    ).toHaveLength(2);
+    expect(main).toContain(`"mcpOauth":"[equals(parameters('environment'), 'staging')]"`);
   });
 
   it("AG5: the API trusts exactly the MCP clients list's documents where OAuth is on, each origin on its outbound allowlist, and the network looks up their hosts", () => {
