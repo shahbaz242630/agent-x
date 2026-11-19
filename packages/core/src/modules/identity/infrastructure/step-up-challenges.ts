@@ -32,7 +32,9 @@
 // `pending`, `recordEvidence` and `consume` take only a challenge whose MAC
 // holds; one planted or edited by something without the app's key, such as
 // the database's owner moving it to verified with a passkey, is none of them,
-// and raises the integrity alarm.
+// and raises the integrity alarm. So does one whose MAC holds but whose use
+// the organisation's audit trail already records (`usedBefore`): the owner
+// put back, byte for byte, the row its change deleted (R-15, S206).
 //
 // Each runs on the handle it is given, so the caller decides the transaction:
 // `hold` one statement, the rest a read and then a write of only the row as it
@@ -275,6 +277,46 @@ function verifiedOf(row: EvidenceRow): VerifiedFacts | undefined {
   return { verifiedAt, authTime, amr, idpSessionId, idTokenHash: id_token_hash };
 }
 
+/**
+ * How far back, by the database's clock, `usedBefore` looks for the event of a
+ * challenge's first use. A challenge is used only within its five minutes, so
+ * its event is at most that old when it comes back; an hour leaves room for a
+ * slow transaction and the app's clock running apart from the database's.
+ */
+const USED_WITHIN = '1 hour';
+
+/**
+ * Whether the organisation's audit trail already holds a change made with
+ * this challenge: every change that consumes one records `stepUpDetails` in
+ * an event of its own transaction, by the challenge's person. One statement,
+ * on indexes alone (0048's `events_by_time` for where the window starts,
+ * 0051's `events_by_actor` from there): under the tenant wall only leakproof
+ * comparisons can seek an index (S178), and the JSON read is not one, so it
+ * only filters the person's few events since.
+ *
+ * A plain read, not the verified one: an event found means used, forged or
+ * not, so refusing is safe; and to hide the real one the owner must delete or
+ * edit a sealed event, which breaks the chain's hashes and MACs (or winds its
+ * head back) for the chain's own checks to find. Outside an organisation's
+ * transaction the wall shows no events; every change consumes inside one.
+ */
+async function usedBefore(db: Handle, row: PendingRow): Promise<boolean> {
+  const { rows } = await sql<{ used: boolean }>`
+    select exists (
+      select 1 from audit.events e
+      where e.actor_type = 'user' and e.actor_id = ${row.user_id}
+        and e.seq >= (
+          select f.seq from audit.events f
+          where f.recorded_at >= pg_catalog.statement_timestamp() - ${USED_WITHIN}::interval
+          order by f.recorded_at, f.seq
+          limit 1
+        )
+        and ((e.details::jsonb) ->> 'stepUpChallengeId') = ${row.id}
+    ) as used
+  `.execute(db);
+  return rows[0]?.used === true;
+}
+
 const pendingOf = (row: PendingRow): PendingChallenge => ({
   challengeId: row.id,
   sessionId: row.session_id,
@@ -442,6 +484,11 @@ export function createStepUpChallenges({
         return undefined;
       }
       if (!genuine(row, verified)) return undefined;
+      // A genuine row already used: the owner put back the one its change deleted (R-15), to use it again.
+      if (await usedBefore(db, row)) {
+        rowForged(logger, 'step_up_challenge', row, 'already_used');
+        return undefined;
+      }
       const deleted = await db
         .deleteFrom('identity.step_up_challenges')
         .where('id', '=', challengeId)
