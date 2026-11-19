@@ -47,7 +47,7 @@ const ASSIGNMENTS_API = '2022-04-01';
 const OUR_IDENTITY = /^id-agentx-[a-z]+-([a-z-]+)$/;
 
 /** One role assignment as Azure lists it: where, to whom, which role. */
-export interface Assignment {
+interface Assignment {
   readonly scope: string;
   readonly principalId: string;
   readonly roleDefinitionId: string;
