@@ -108,10 +108,12 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     // B3a: the active admins and approvers, a mandate's audience.
     await expect(audience.adminsAndApproversOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m6']);
     // AG10: one person's role, by their user ID in any case; none for one removed, or never a member.
-    await expect(audience.roleOf(ORG, 'USER-M3')).resolves.toBe('approver');
-    await expect(audience.roleOf(ORG, 'user-m2')).resolves.toBeUndefined();
-    await expect(audience.roleOf(ORG, 'user-m9')).resolves.toBeUndefined();
-    expect(asked).toEqual([ORG, ORG, ORG, ORG, ORG, ORG]);
+    // AG10: each active member's role, by user ID in lower case; none for one removed.
+    const roles = await audience.rolesOf(ORG);
+    expect(roles.get('user-m3')).toBe('approver');
+    expect(roles.has('user-m2')).toBe(false);
+    expect(roles.size).toBe(5);
+    expect(asked).toEqual([ORG, ORG, ORG, ORG]);
   });
 
   it('throws for memberships that failed their check, so the notice waits and names nobody', async () => {
@@ -124,7 +126,7 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     await expect(audience.adminsOf(ORG)).rejects.toThrow(AudienceTampered);
     await expect(audience.membersOf(ORG)).rejects.toThrow(AudienceTampered);
     await expect(audience.adminsAndApproversOf(ORG)).rejects.toThrow(AudienceTampered);
-    await expect(audience.roleOf(ORG, 'user-m1')).rejects.toThrow(AudienceTampered);
+    await expect(audience.rolesOf(ORG)).rejects.toThrow(AudienceTampered);
   });
 
   it("B6-1b gives an organisation's ACTIVE contacts, and E2-2b those that count, as identity lists them", async () => {

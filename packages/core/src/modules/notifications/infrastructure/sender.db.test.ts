@@ -169,14 +169,14 @@ const audience = (
   // Of the two ACTIVE contacts, only the first counts yet.
   counting: () => readonly string[] | Error = () => [CONTACT],
   deciders: () => readonly string[] | Error = () => [ADMIN, APPROVER],
-  roles: (userId: string) => NoticeRole | undefined | Error = (userId) => ROLES.get(userId),
+  roles: () => ReadonlyMap<string, NoticeRole> | Error = () => ROLES,
 ): Audience => ({
   adminsAndApproversOf: group(deciders),
   adminsOf: group(admins),
   contactsOf: group(contacts),
   membersOf: group(members),
   countingContactsOf: group(counting),
-  roleOf: (orgId, userId) => group(() => roles(userId))(orgId),
+  rolesOf: group(roles),
 });
 
 const resetLinks = (
@@ -480,7 +480,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     const { capture, run } = sender(
       service,
       addressBook(),
-      audience(undefined, undefined, undefined, undefined, undefined, (userId) => roles.get(userId)),
+      audience(undefined, undefined, undefined, undefined, undefined, () => roles),
     );
 
     await run.run();
@@ -495,6 +495,32 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       givenUp,
       givenUp,
     ]);
+  });
+
+  it('AG10 reads an organisation’s roles once a run, however many notices to its people it sends', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    // Two direct notices, and one fanned out to the admins, sent in the same run.
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN), notice(null)]));
+    const { sent, service } = notifier();
+    let reads = 0;
+    const counted = () => {
+      reads += 1;
+      return ROLES;
+    };
+    const { run } = sender(
+      service,
+      addressBook(),
+      audience(undefined, undefined, undefined, undefined, undefined, counted),
+    );
+
+    await run.run();
+
+    expect(sent).toHaveLength(4);
+    expect(reads).toBe(1);
+    // The next run reads them again: what a run read is never kept past it.
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    await run.run();
+    expect(reads).toBe(2);
   });
 
   it('AG10 tries a notice to one person again when their role cannot be read as it is sent', async () => {

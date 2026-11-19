@@ -39,7 +39,7 @@ export class AudienceTampered extends Error {
 
 /**
  * The active admins, and every active member (E2-2b), in an organisation's
- * verified list, and one person's role there (AG10); its ACTIVE registered
+ * verified list, and each active member's role there (AG10); its ACTIVE registered
  * contacts, and those that count now (E2-2b). A list that can't be believed
  * throws.
  */
@@ -69,10 +69,9 @@ export function audienceFrom(
     async membersOf(orgId): Promise<readonly string[]> {
       return (await activeMembers(orgId)).map((member) => member.userId);
     },
-    // AG10: as a notice to one person is sent, whether they still hold a role it needs.
-    async roleOf(orgId, userId) {
-      const wanted = userId.toLowerCase();
-      return (await activeMembers(orgId)).find((member) => member.userId.toLowerCase() === wanted)?.role;
+    // AG10: who holds which role, for the notices to its people a run sends (read once an organisation a run).
+    async rolesOf(orgId) {
+      return new Map((await activeMembers(orgId)).map((member) => [member.userId.toLowerCase(), member.role]));
     },
   };
 }
