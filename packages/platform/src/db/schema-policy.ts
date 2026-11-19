@@ -282,13 +282,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
-      columns: ['id', 'issuer', 'subject', 'created_at', 'sessions_ended_at'],
+      columns: ['id', 'issuer', 'subject', 'created_at', 'sessions_ended_at', 'mac', 'mac_key_version'],
       // Made at the first sign-in and read; a user changed or deleted would
       // move or orphan every membership and event pointing at them. Only when
       // their sessions were last all ended moves on (0098, AG10), which a
-      // sign-in made before it can't get past.
+      // sign-in made before it can't get past, and a person made before 0100
+      // is given their MAC, once.
       appMay: ['SELECT', 'INSERT'],
-      appMayUpdate: ['sessions_ended_at'],
+      appMayUpdate: ['sessions_ended_at', 'mac', 'mac_key_version'],
     },
     'identity.sessions': {
       reason:
@@ -303,12 +304,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'created_at',
         'last_seen_at',
         'ends_at',
+        'mac',
+        'mac_key_version',
       ],
-      // Opened, read and ended; changed only in its cookie ID (rotated) and
-      // its last-seen time, never moved to another person, nor what it
-      // proved or when it ends.
+      // Opened, read and ended; changed only in its cookie ID (rotated, its
+      // MAC made again with it: 0100) and its last-seen time, never moved to
+      // another person, nor what it proved or when it ends.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['cookie_hash', 'last_seen_at'],
+      appMayUpdate: ['cookie_hash', 'last_seen_at', 'mac', 'mac_key_version'],
     },
     'identity.login_flows': {
       reason:
@@ -343,11 +346,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'amr',
         'idp_session_id',
         'id_token_hash',
+        'mac',
+        'mac_key_version',
       ],
       // Added, read and consumed (deleted as it is read); changed only to
-      // record its evidence, never in what it is for or whose it is.
+      // record its evidence, with its MAC made again over it (0100), never in
+      // what it is for or whose it is.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'],
+      appMayUpdate: ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash', 'mac', 'mac_key_version'],
     },
     'notifications.outbox': {
       reason:

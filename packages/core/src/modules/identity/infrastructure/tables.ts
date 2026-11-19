@@ -25,6 +25,9 @@ interface UsersTable {
   created_at: Date;
   /** When their sessions were last all ended (0098, AG10); null if never. */
   sessions_ended_at: Date | null;
+  /** `session-mac` over id, issuer, subject and created_at (row-macs.ts, 0100); null only for a person made before it. */
+  mac: Buffer | null;
+  mac_key_version: number | null;
 }
 
 interface SessionsTable {
@@ -40,6 +43,9 @@ interface SessionsTable {
   last_seen_at: Date;
   /** The absolute end, set when it opens; the idle end moves with last_seen_at. */
   ends_at: Date;
+  /** `session-mac` over every column but last_seen_at (row-macs.ts, 0100), and its key's version. */
+  mac: Buffer;
+  mac_key_version: number;
 }
 
 interface LoginFlowsTable {
@@ -75,6 +81,9 @@ interface StepUpChallengesTable {
   amr: string[] | null;
   idp_session_id: string | null;
   id_token_hash: Buffer | null;
+  /** `session-mac` over the challenge as it stands, opened or verified (row-macs.ts, 0100), and its key's version. */
+  mac: Buffer;
+  mac_key_version: number;
 }
 
 interface MembershipsTable {

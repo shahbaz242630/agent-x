@@ -631,10 +631,13 @@ async function resetOwn(): Promise<void> {
     people[role] = (await shared.signedInMember(own.world.org, role)).cookie;
   }
   endedCookie = (await shared.signedInMember(own.world.org, 'admin')).cookie;
-  await createSessions({ ids: uuidV7Ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } }).end(
-    database,
-    endedCookie,
-  );
+  await createSessions({
+    ids: uuidV7Ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  }).end(database, endedCookie);
   await signInPerson();
   await signInAdmin();
   await shared.joined(own.world.org, adminUserId, 'admin');

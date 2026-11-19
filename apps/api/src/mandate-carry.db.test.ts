@@ -114,7 +114,7 @@ const acceptance = () =>
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     outbox: createOutbox({ ids, clock }),
     logger: logger(),
   });
@@ -301,7 +301,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: logger(),
     });
 
@@ -688,7 +688,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: logger(),
     });
 

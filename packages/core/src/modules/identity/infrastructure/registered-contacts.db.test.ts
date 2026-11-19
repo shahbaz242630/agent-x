@@ -83,7 +83,7 @@ async function organization(): Promise<Who> {
   const adminUser = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `contacts-admin-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const admin = ids.next();
   await withSignedStates(app, org, services(), async (tx, states) => {

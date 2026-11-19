@@ -55,7 +55,7 @@ const START = new Date('2026-09-27T09:00:00Z');
 let clock: FixedClock;
 let changes: ContactChanges;
 let capture: LogCapture;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
@@ -69,9 +69,15 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `contact-changes-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),
@@ -86,7 +92,13 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
 
 /** The same person signed in again, with a new session: after the clock has moved past the old one. */
 async function signedInAgain<T extends InvitingAdmin>(who: T): Promise<T> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, who.userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

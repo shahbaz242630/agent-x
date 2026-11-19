@@ -60,7 +60,7 @@ const START = new Date('2026-09-28T09:00:00Z');
 let clock: FixedClock;
 let registrations: AgentRegistrations;
 let capture: LogCapture;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
@@ -79,9 +79,15 @@ async function member(org: string, role: Role): Promise<Member> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `agent-registering-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),
@@ -385,6 +391,8 @@ describe('what registering refuses, writing nothing', () => {
       ids,
       clock,
       timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
     }).open(app, developer.userId, { idpSessionId: 'V1_3', authTime: clock.now(), amr: [...APP_CODE] });
     const again = { ...developer, sessionId };
     const later = askedFor(await ask(again, last, 'ask-later'));

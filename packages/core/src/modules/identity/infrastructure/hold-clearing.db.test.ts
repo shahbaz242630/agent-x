@@ -58,8 +58,9 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xe200_0000_0000);
 const clock = new FixedClock(new Date('2026-09-26T09:00:00Z'));
-const challenges = () => createStepUpChallenges({ ids, clock });
-const sessions = () => createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
+const sessions = () =>
+  createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 }, keys, logger: testLogger() });
 let clearings: HoldClearings;
 /** What the clearings log. */
 const capture = new LogCapture();
@@ -78,7 +79,7 @@ async function member(org: string, role: Role): Promise<Member> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `clearing-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId, cookie } = await sessions().open(app, userId, {
     idpSessionId: 'V1_1',
@@ -839,7 +840,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       const user = await userForSubject(
         app,
         { issuer: 'https://auth.example.test', subject: `planted-${id}` },
-        { ids, clock },
+        { ids, clock, keys, logger: testLogger() },
       );
       await asOwner(async (owner) => {
         await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [

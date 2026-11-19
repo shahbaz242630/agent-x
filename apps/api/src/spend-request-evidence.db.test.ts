@@ -313,7 +313,7 @@ beforeEach(() => {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger,
   });
   approvals = createSpendRequestApprovals({
@@ -321,7 +321,7 @@ beforeEach(() => {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger,
   });
   evidence = evidenceWith({ logger });

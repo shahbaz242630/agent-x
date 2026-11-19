@@ -179,7 +179,7 @@ function makers(options: StageGSeedOptions) {
     const userId = await userForSubject(
       database,
       { issuer: 'https://auth.example.test', subject: `stage-g-${orgId}` },
-      { ids: uuidV7Ids, clock },
+      { ids: uuidV7Ids, clock, keys: keyring, logger: services.logger },
     );
     const membershipId = uuidV7Ids.next();
     await withSignedStates(database, orgId, services, async (tx, states) => {

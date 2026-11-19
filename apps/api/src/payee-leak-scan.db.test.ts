@@ -31,7 +31,14 @@ import { addSupplier } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -205,7 +212,7 @@ beforeAll(async () => {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: 'payee-scan' },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   live = {
     sessionId: ids.next(),

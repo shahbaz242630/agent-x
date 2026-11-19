@@ -54,7 +54,10 @@ let subjects = 0;
 async function person(): Promise<{ userId: string; subject: string }> {
   subjects += 1;
   const subject = String(313_000_000_000_000_000n + BigInt(subjects));
-  return { userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock }), subject };
+  return {
+    userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger() }),
+    subject,
+  };
 }
 
 /** A new organisation with the person as an admin. */

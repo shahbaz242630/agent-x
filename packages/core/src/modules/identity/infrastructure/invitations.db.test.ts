@@ -70,7 +70,7 @@ async function organization(): Promise<{ org: string; admin: string; adminUser: 
   const adminUser = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `inviter-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const admin = ids.next();
   await withSignedStates(app, org, services(), async (tx, states) => {
@@ -509,7 +509,7 @@ describe(`accepting an invitation (B4-4b, Postgres ${server.version})`, () => {
     return userForSubject(
       app,
       { issuer: 'https://auth.example.test', subject: `invitee-${String(invitees)}` },
-      { ids, clock },
+      { ids, clock, keys, logger: testLogger() },
     );
   };
 

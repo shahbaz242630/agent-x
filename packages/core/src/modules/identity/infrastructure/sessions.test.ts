@@ -1,13 +1,20 @@
-import { FixedClock, SequentialIds } from '@agentx/testing';
+import { createKeyProvider } from '@agentx/platform/keys';
+import { FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { createSessions } from './sessions.ts';
+
+const keys = createKeyProvider({ 'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 1)]]) } }, [
+  'session-mac',
+]);
 
 const make = (idleSeconds: number, absoluteSeconds: number) => () =>
   createSessions({
     ids: new SequentialIds(),
     clock: new FixedClock(new Date('2026-09-24T09:00:00Z')),
     timeouts: { idleSeconds, absoluteSeconds },
+    keys,
+    logger: testLogger(),
   });
 
 describe("the sessions' timeouts", () => {

@@ -227,7 +227,7 @@ function startedAt(start: Date) {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger,
   });
 }
@@ -654,7 +654,7 @@ describe('approving a spend request waiting for approval (B4b)', () => {
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       logger: testLogger(),
     });
     const forReject = askedFor(

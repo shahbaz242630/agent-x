@@ -83,7 +83,7 @@ const DETAILS: SupplierDetails = {
 let clock: FixedClock;
 let registry: SupplierRegistry;
 let changes: SupplierChanges;
-const challenges = () => createStepUpChallenges({ ids, clock });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
 
 const quiet = () => ({ keys, ids, logger: testLogger() });
 
@@ -95,9 +95,15 @@ async function member(org: string, role: Role): Promise<SessionMember & { member
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `supplier-changes-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),
@@ -491,7 +497,13 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
     const notYet = askedFor(await reactivate(admin, id));
     const own = askedFor(await reactivate(admin, id));
     await stepUp(admin, own);
-    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const sessions = createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
+    });
     const { sessionId } = await sessions.open(app, admin.userId, {
       idpSessionId: 'V1_3',
       authTime: clock.now(),

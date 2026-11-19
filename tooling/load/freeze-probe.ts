@@ -61,7 +61,7 @@ export async function probeFreeze(
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     outbox: createOutbox({ ids, clock }),
     logger: testLogger(),
   });

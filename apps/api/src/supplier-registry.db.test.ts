@@ -86,7 +86,7 @@ async function member(org: string, role: Role): Promise<SupplierMember & { membe
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `supplier-registry-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const membershipId = ids.next();
   await withSignedStates(app, org, quiet(), (tx, states) =>

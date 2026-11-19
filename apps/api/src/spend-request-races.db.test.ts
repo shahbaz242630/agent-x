@@ -217,7 +217,7 @@ beforeEach(() => {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     logger,
   });
 });
@@ -381,7 +381,7 @@ describe('the deadlock suite: a freeze racing each change and the agent’s requ
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     outbox: createOutbox({ ids, clock }),
     logger: testLogger(capture),
   });

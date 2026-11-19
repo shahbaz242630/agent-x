@@ -56,7 +56,7 @@ async function organisation(): Promise<{ readonly org: string; readonly before: 
     return userForSubject(
       app,
       { issuer: 'https://auth.example.test', subject: `job-${String(subjects)}` },
-      { ids, clock },
+      { ids, clock, keys, logger: testLogger() },
     );
   };
   const [first, second] = [await person(), await person()];

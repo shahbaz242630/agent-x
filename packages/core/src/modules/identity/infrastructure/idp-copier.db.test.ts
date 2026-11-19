@@ -69,7 +69,10 @@ const zitadelId = (): string => {
 /** A person who has signed in to Agent X, as Zitadel's subject. */
 async function person(): Promise<{ userId: string; subject: string }> {
   const subject = zitadelId();
-  return { userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock }), subject };
+  return {
+    userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger() }),
+    subject,
+  };
 }
 
 /** A new organisation, with the person as a member when given one. */
@@ -618,7 +621,13 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
   const sessionsOf = async (userId: string) =>
     (await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute()).length;
   const signIn = (userId: string) =>
-    createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } }).open(app, userId, {
+    createSessions({
+      ids,
+      clock,
+      timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      keys,
+      logger: testLogger(),
+    }).open(app, userId, {
       idpSessionId: 'V1_1',
       authTime: clock.now(),
       amr: ['pwd', 'user', 'mfa'],
@@ -900,7 +909,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect.objectContaining({ org: 'none', person: null, subject, by: 'other' }),
     ]);
     // Signed in for the first time since: the removal limits them; their own removal after it changes nothing.
-    const userId = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock });
+    const userId = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger() });
     expect(await restrictedUntil(userId)).toEqual(new Date(removed.createdAt.getTime() + WEEK_MS));
     // Another login's removal limits no one else.
     const other = await person();
@@ -913,7 +922,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       const who = await person();
       const org = await organization(who.userId, 'admin');
       const { sessionId } = await signIn(who.userId);
-      await createStepUpChallenges({ ids, clock }).open(app, {
+      await createStepUpChallenges({ ids, clock, keys, logger: testLogger() }).open(app, {
         sessionId,
         action: 'members.invite',
         changeHash: changeHashOf(['invite', who.subject]),

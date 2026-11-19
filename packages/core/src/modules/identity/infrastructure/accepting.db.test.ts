@@ -88,9 +88,15 @@ async function person(email: string | null = INVITED): Promise<AcceptingPerson> 
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `accepting-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),

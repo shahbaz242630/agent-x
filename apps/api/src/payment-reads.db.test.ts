@@ -288,7 +288,13 @@ const lostTrack = (w: World, transactionId: string) =>
 
 /** The same person signed in again now, with a passkey: a new session, their membership as it was. */
 async function signedInAgain(who: Member): Promise<Member> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, who.userId, {
     idpSessionId: 'V1_9',
     authTime: clock.now(),
@@ -377,7 +383,7 @@ beforeEach(() => {
     keys,
     ids,
     clock,
-    challenges: createStepUpChallenges({ ids, clock }),
+    challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
     outbox: createOutbox({ ids, clock }),
     logger,
   });

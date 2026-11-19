@@ -80,8 +80,8 @@ const logger = createLogger({
   destination: new LogCapture(),
 });
 const quiet = { keys, ids, logger };
-const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
-const challenges = () => createStepUpChallenges({ ids, clock });
+const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 }, keys, logger });
+const challenges = () => createStepUpChallenges({ ids, clock, keys, logger });
 
 interface Person {
   readonly orgId: string;
@@ -110,7 +110,7 @@ async function member(org: string, role: Role, restricted = false): Promise<Pers
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `restricted-admin-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger },
   );
   const { sessionId, cookie } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',

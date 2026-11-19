@@ -62,7 +62,7 @@ const person = (): Promise<string> => {
   return userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `mine-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
 };
 

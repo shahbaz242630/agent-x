@@ -103,12 +103,21 @@ let people = 0;
 const newUser = async (issuer = ISSUER): Promise<{ userId: string; subject: string }> => {
   people += 1;
   const subject = String(312_000_000_000_000_000n + BigInt(people));
-  return { userId: await userForSubject(app, { issuer, subject }, { ids, clock }), subject };
+  return {
+    userId: await userForSubject(app, { issuer, subject }, { ids, clock, keys, logger: testLogger() }),
+    subject,
+  };
 };
 
 /** A session for the person, opened now. */
 async function signedIn(userId: string): Promise<string> {
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const sessions = createSessions({
+    ids,
+    clock,
+    timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+    keys,
+    logger: testLogger(),
+  });
   const { sessionId } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',
     authTime: clock.now(),
@@ -342,7 +351,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     const who = await organization();
     const id = await coolingOff(who);
     const other = await signedIn(who.person.userId);
-    await createStepUpChallenges({ ids, clock }).open(app, {
+    await createStepUpChallenges({ ids, clock, keys, logger: testLogger() }).open(app, {
       sessionId: other,
       action: 'resets.ask',
       changeHash: Buffer.alloc(32, 7),
@@ -455,7 +464,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
         keys,
         ids,
         clock,
-        challenges: createStepUpChallenges({ ids, clock }),
+        challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
         outbox: createOutbox({ ids, clock }),
         logger: testLogger(),
       });
@@ -551,7 +560,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     const who = await organization();
     const id = await coolingOff(who);
     clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
-    const opened = await createStepUpChallenges({ ids, clock }).open(app, {
+    const opened = await createStepUpChallenges({ ids, clock, keys, logger: testLogger() }).open(app, {
       sessionId: await signedIn(who.person.userId),
       action: 'resets.ask',
       changeHash: Buffer.alloc(32, 9),
@@ -604,7 +613,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       outbox: createOutbox({ ids, clock }),
       logger: testLogger(),
     });
@@ -725,7 +734,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       keys,
       ids,
       clock,
-      challenges: createStepUpChallenges({ ids, clock }),
+      challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
       outbox: createOutbox({ ids, clock }),
       logger: testLogger(),
     });
