@@ -162,6 +162,7 @@
   {"table":"identity.user_contacts","name":"user_contacts_name_ciphertext_check","expression":"((octet_length(name_ciphertext) >= 29) AND (octet_length(name_ciphertext) <= 1024))"},
   {"table":"identity.user_contacts","name":"user_contacts_name_key_version_check","expression":"(name_key_version >= 1)"},
   {"table":"identity.users","name":"users_issuer_check","expression":"((char_length(issuer) >= 1) AND (char_length(issuer) <= 255))"},
+  {"table":"identity.users","name":"users_sessions_ended_at_check","expression":"isfinite(sessions_ended_at)"},
   {"table":"identity.users","name":"users_subject_check","expression":"((char_length(subject) >= 1) AND (char_length(subject) <= 255))"},
   {"table":"instructions.instructions","name":"instructions_account_consent_id_check","expression":"(account_consent_id ~ '^[!-~]{1,128}$'::text)"},
   {"table":"instructions.instructions","name":"instructions_amount_minor_check","expression":"(amount_minor > 0)"},

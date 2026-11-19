@@ -282,10 +282,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
-      columns: ['id', 'issuer', 'subject', 'created_at'],
+      columns: ['id', 'issuer', 'subject', 'created_at', 'sessions_ended_at'],
       // Made at the first sign-in and read; a user changed or deleted would
-      // move or orphan every membership and event pointing at them.
+      // move or orphan every membership and event pointing at them. Only when
+      // their sessions were last all ended moves on (0098, AG10), which a
+      // sign-in made before it can't get past.
       appMay: ['SELECT', 'INSERT'],
+      appMayUpdate: ['sessions_ended_at'],
     },
     'identity.sessions': {
       reason:
