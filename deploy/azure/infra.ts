@@ -55,6 +55,8 @@ import {
   text,
 } from './deploy.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
+import { checkGrants } from './grants.ts';
+import { pinnedZitadelImage } from './zitadel-upgrade.ts';
 import {
   azureRefusal,
   behindRecords,
@@ -117,6 +119,25 @@ const ourImage = (value: unknown): boolean =>
   typeof value === 'string' &&
   value.startsWith(`${IMAGE_REPOSITORY}@sha256:`) &&
   /^[0-9a-f]{64}$/.test(value.slice(-64));
+
+/** Zitadel's server image, by tag and digest (policy.ts ZITADEL_SERVER_IMAGE). */
+const zitadelImage = (value: unknown): boolean =>
+  typeof value === 'string' && value.startsWith('ghcr.io/zitadel/zitadel:') && /@sha256:[0-9a-f]{64}$/.test(value);
+
+/** Zitadel's setup job, which an apps run gives a new Zitadel image before it sends the deployment (AZ29). */
+const SETUP_JOB = /\/jobs\/job-agentx-[a-z]+-zitadel-setup$/i;
+
+/**
+ * AZ29: a Zitadel image moving on the setup job alone, from one of Zitadel's to the very one apps pins. apps puts it
+ * there and runs the setup before it sends the deployment, so the plan, made before, shows it and the deploy's
+ * what-if, after, can't: dropped from both, so the two match. Any other image there counts, and the Zitadel and login
+ * apps' own move stays what the partner approves.
+ */
+const movedBySetupFirst = (resource: string, leaf: Leaf): boolean =>
+  SETUP_JOB.test(resource) &&
+  IMAGE_PATH.test(leaf.path) &&
+  zitadelImage(leaf.before) &&
+  leaf.after === pinnedZitadelImage();
 
 const absentOr = (value: unknown, test: (value: unknown) => boolean): boolean =>
   value === undefined || value === null || test(value);
@@ -186,9 +207,12 @@ export function whatIfShape(result: unknown): Changed[] {
         const change = text(item.changeType);
         if (change === 'NoChange' || change === 'Ignore') return [];
         const all = change === 'Create' ? bodyLeaves(item.after, '') : deltaLeaves(item.delta, '');
-        const leaves = all.filter((leaf) => !movedByReleases(leaf, [item.after, item.before]));
+        const resource = text(item.resourceId);
+        const leaves = all.filter(
+          (leaf) => !movedByReleases(leaf, [item.after, item.before]) && !movedBySetupFirst(resource, leaf),
+        );
         if (change === 'Modify' && leaves.length === 0 && all.length > 0) return [];
-        return [{ resource: text(item.resourceId), change, leaves: leaves.toSorted((a, b) => byText(a.path, b.path)) }];
+        return [{ resource, change, leaves: leaves.toSorted((a, b) => byText(a.path, b.path)) }];
       },
     )
     .toSorted((a, b) => byText(a.resource.toLowerCase(), b.resource.toLowerCase()));
@@ -632,6 +656,9 @@ async function runPlan(infra: InfraSteps, args: readonly string[], outlets: Outl
     infra.say(USAGE);
     return 2;
   }
+  // AZ32: first, who can read the vault's secrets. A grant nobody listed stops the plan red: nothing is approved
+  // while one stands (grants.ts says what next). The release itself goes on, as with any plan that couldn't run.
+  if (checkGrants(infra.az, subscriptionOf(infra.az), infra.say) !== 0) return 1;
   const planned = await plan(infra, commit, digest);
   const output = outlets.env.GITHUB_OUTPUT;
   // `needed` alone decides whether the approval job runs at all: a merge needing none never waits for the partner.

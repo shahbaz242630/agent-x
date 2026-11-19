@@ -530,7 +530,7 @@ const TELEMETRY_SETTINGS = [
  * settings and email's four taken together, whose jobs send the notices and
  * carry out the factor resets.
  */
-const GRANTS: ReadonlySet<string> = new Set([
+export const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.filter((key) => !operatorOnly(key)).flatMap((key) => [`api reads ${key}`, `jobs reads ${key}`]),
   ...[...PUBLIC_HALVES.values()].flatMap((half) => [`api reads ${half}`, `jobs reads ${half}`]),
   'jobs reads db-app-password',
@@ -5463,6 +5463,12 @@ function ingressProblems(ingress: unknown, servesNothing: boolean, problem: (mes
   }
   if (at(ingress, 'external') !== false) {
     problem('must say its ingress is internal (external false): the public doors are the route configs (G2e)');
+  }
+  // AZ32: each further port too, stated false, since Azure's guardrail reads only the main port's (apps-internal).
+  if (list(at(ingress, 'additionalPortMappings')).some((port) => at(port, 'external') !== false)) {
+    problem(
+      'must say each additional port is internal (additionalPortMappings[*].external false): a second port open to the internet is a public door too (G2e)',
+    );
   }
   if (at(ingress, 'allowInsecure') !== false) {
     problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
