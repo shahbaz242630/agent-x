@@ -9,7 +9,7 @@
 // - A refresh token is used once: usedNow fills in its use in one statement,
 //   only where none was, so two uses at once can't both rotate it; the second
 //   is a reuse, and its connection is revoked (the API's oauth-grants.ts).
-// - Its family as well (0102, R-15, S206): a refresh token another names as
+// - Its family as well (0102, R-15, S206): a refresh token any token names as
 //   its parent was used, whatever its `used_at` says, and a parent with two
 //   refresh children was split in two (tokenLockedWithFamily). Each row's MAC
 //   covers its parent, and each token's secret is the pepper's own MAC of
@@ -187,7 +187,7 @@ export const tokenRowFound = (rows: readonly RawTokenRow[]): TokenRow | undefine
 /** A refresh token's row locked, and what its family says of its use (R-15). */
 export interface TokenFamily {
   readonly row: TokenRow | undefined;
-  /** Refresh tokens that name it as their parent: made by its use. */
+  /** Tokens of either kind that name it as their parent: made by its use (an access token alone is one too). */
   readonly children: number;
   /** Refresh tokens other than it that name its parent: made by another use of the same parent. */
   readonly siblings: number;
@@ -205,7 +205,7 @@ export async function tokenLockedWithFamily(tx: AgentsTransaction, orgId: string
   const family = sql<{ children: number; siblings: number }>`
     select
       (select pg_catalog.count(*)::int from agents.connection_tokens c
-        where c.org_id = ${org} and c.parent_id = ${token} and c.kind = 'refresh') as children,
+        where c.org_id = ${org} and c.parent_id = ${token}) as children,
       (select pg_catalog.count(*)::int from agents.connection_tokens s
         where s.org_id = ${org} and s.kind = 'refresh' and s.id <> ${token}
           and s.parent_id = (select t.parent_id from agents.connection_tokens t where t.org_id = ${org} and t.id = ${token})

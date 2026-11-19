@@ -15,7 +15,7 @@
 -- - its secret is itself the pepper's MAC of its kind, key and ID, so a token
 --   sent with its row gone can still be shown to be one the app issued.
 --
--- A refresh token is used if `used_at` says so, or if a refresh token names it
+-- A refresh token is used if `used_at` says so, or if any token names it
 -- as its parent; its parent with another refresh child is a family split in
 -- two. Either way its connection is revoked, and where the row disagrees, the
 -- integrity alarm. As any rotation's reuse detection, a use hidden by deleting

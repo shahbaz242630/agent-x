@@ -19,7 +19,7 @@
 //   organisation's admins see a `connection_token_reused` event, and the
 //   answer is `invalid_grant`, as for every other refusal. Its use is judged
 //   from its family too (0102, R-15, S206), rows the database's owner can't
-//   rewrite unseen: a refresh token another names as its parent was used, its
+//   rewrite unseen: a refresh token any token names as its parent was used, its
 //   `used_at` cleared or not; one whose parent has another refresh child was
 //   split in two. A refresh token the app issued (its secret is the pepper's
 //   own MAC) whose row is gone, or no longer matches, was hidden. Each is a
@@ -416,7 +416,9 @@ export function createOauthGrants({
    * SEC-OAUTH-05: a refresh token used twice, so someone else holds it. The connection goes; its organisation's admins
    * see it. `forgot`: how the rows hid the first use (R-15), which is the integrity alarm: a child naming it with its
    * `used_at` cleared, its parent split in two (`branch`), its row changed (`row`) or gone (`row_gone`). A row gone
-   * raises it only if the connection was still live: the sweep deletes rows 120 days on, past every connection's life.
+   * raises it unless the connection's key, as its signed state says before this revokes it, had ended (revoked or past
+   * its time): the sweep deletes rows 120 days on, past every connection's life. A key not found there, or not
+   * believed, is no proof it ended: the owner may have moved the key's listing or row so that nothing is revoked.
    */
   const refreshReused = async (
     orgId: string,
@@ -426,11 +428,13 @@ export function createOauthGrants({
   ): Promise<GrantAnswer> => {
     const named = { keyId: presented.keyId, tokenId: presented.tokenId };
     const log = logger.child({ correlationId: caller.correlationId, orgId });
+    // Read before the revocation below, which would end it.
+    const endedBefore = forgot === 'row_gone' && (await keyEnded(orgId, presented.keyId, caller));
     const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
       actor: OAUTH_SERVER,
       reason: 'refresh_reused',
     });
-    if (forgot !== undefined && (forgot !== 'row_gone' || revoked !== undefined)) {
+    if (forgot !== undefined && !endedBefore) {
       log.error('audit.integrity_failed', {
         chain: 'organisation',
         check: 'refresh_token',
@@ -449,6 +453,39 @@ export function createOauthGrants({
     });
     return INVALID_GRANT;
   };
+
+  /**
+   * A genuine refresh token whose listing, row or row's match was taken away (R-15): the answer, or undefined for
+   * none. No organisation lists its key: the app never removes a listing, so that is the alarm too, with no
+   * organisation to revoke in.
+   */
+  const tokenHidden = async (
+    orgId: string | undefined,
+    outcome: TokenProof['outcome'],
+    presented: PresentedToken,
+    caller: Caller,
+  ): Promise<GrantAnswer | undefined> => {
+    if (orgId !== undefined) {
+      const hidden = rowHidden(outcome, presented);
+      return hidden === undefined ? undefined : refreshReused(orgId, presented, caller, hidden);
+    }
+    if (!tokenGenuine(keys, presented)) return undefined;
+    const named = { keyId: presented.keyId, tokenId: presented.tokenId };
+    logger.child({ correlationId: caller.correlationId }).error('audit.integrity_failed', {
+      check: 'refresh_token',
+      reason: 'unlisted',
+      objectId: presented.tokenId,
+      ...named,
+    });
+    return refusedFor(caller, 'unlisted', named);
+  };
+
+  /** Whether the connection's key, as its signed state says, ended: revoked or past its time. Not found is not ended. */
+  const keyEnded = (orgId: string, keyId: string, caller: Caller): Promise<boolean> =>
+    inOrganisation(orgId, caller.correlationId, async (tx, states) => {
+      const read = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
+      return read.outcome === 'found' && (read.key.status !== 'ACTIVE' || read.key.expiresAt <= clock.now());
+    });
 
   /**
    * A refresh token the app issued (its secret the pepper's own MAC) whose row is gone (`row_gone`), or no longer
@@ -595,8 +632,8 @@ export function createOauthGrants({
         return { outcome: 'refused', status: 400, error: 'invalid_target', description: 'The resource is not ours.' };
       }
       const { orgId, door } = await proven(presented);
-      const hidden = orgId === undefined ? undefined : rowHidden(door.outcome, presented);
-      if (hidden !== undefined && orgId !== undefined) return refreshReused(orgId, presented, caller, hidden);
+      const hidden = await tokenHidden(orgId, door.outcome, presented, caller);
+      if (hidden !== undefined) return hidden;
       if (orgId === undefined || door.outcome !== 'proven') {
         if (door.outcome === 'key_not_held') {
           logger.child({ correlationId: caller.correlationId }).error('connection_token.refused', {

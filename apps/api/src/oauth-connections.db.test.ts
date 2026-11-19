@@ -1052,6 +1052,12 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     expect(await owner.query('delete from agents.connection_tokens where id = $1 returning id', [id])).toHaveLength(1);
   };
 
+  /** Both tokens its use made deleted, its refresh child and its access child: either alone still shows the use. */
+  const childrenDeleted = async (rotated: Rotated) => {
+    await rowDeleted(rotated, rotated.childId);
+    await rowDeleted(rotated, idOf(rotated.second.accessToken));
+  };
+
   const refreshWith = (rotated: Rotated, refreshToken: string) =>
     grants.refresh({ ...rotated.refresh, refreshToken }, CALLER);
 
@@ -1091,7 +1097,7 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
   it('its use cleared and its child deleted: the thief’s refresh goes through, and the app’s next one ends it all', async () => {
     const rotated = await rotatedOnce();
     await usedAtCleared(rotated);
-    await rowDeleted(rotated, rotated.childId);
+    await childrenDeleted(rotated);
     // Detection waits for the other holder's next use, as any rotation's reuse detection does.
     const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
     await caughtAsReuse(rotated, rotated.second.refreshToken, 'row_gone', thiefs.accessToken);
@@ -1109,7 +1115,7 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
       'select pg_catalog.to_jsonb(t)::text as json from agents.connection_tokens t where id = $1',
       [rotated.childId],
     );
-    await rowDeleted(rotated, rotated.childId);
+    await childrenDeleted(rotated);
     await usedAtCleared(rotated);
     const thiefs = issued(await refreshWith(rotated, rotated.refresh.refreshToken));
     await rotated.owner.query(
@@ -1139,10 +1145,70 @@ describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner 
     },
   );
 
+  it('review: the thief’s child refresh token deleted, its access token kept: the access child still shows the use', async () => {
+    const rotated = await rotatedOnce();
+    // The thief refreshed the app's current token first; the owner deletes its refresh child, keeps its access child.
+    const thiefs = issued(await refreshWith(rotated, rotated.second.refreshToken));
+    await rowDeleted(rotated, idOf(thiefs.refreshToken));
+    await rotated.owner.query('update agents.connection_tokens set used_at = null where id = $1', [rotated.childId]);
+    await caughtAsReuse(rotated, rotated.second.refreshToken, 'used_at', thiefs.accessToken);
+  });
+
+  // The thief's refresh through, then the key's listing moved by the owner (its foreign key dropped for it, as an owner
+  // can, and put back after), so the app's genuine token is looked for in another organisation, or in none.
+  it.each([
+    [
+      'moved to another organisation',
+      'row_gone',
+      async (owner: Rotated['owner'], keyHex: string) =>
+        owner.query('update directory.agent_keys set org_id = $2 where key_id = $1', [keyHex, await organization()]),
+    ],
+    [
+      'deleted',
+      'unlisted',
+      (owner: Rotated['owner'], keyHex: string) =>
+        owner.query('delete from directory.agent_keys where key_id = $1', [keyHex]),
+    ],
+  ] as const)(
+    'review: the key’s listing %s: the app’s genuine token still raises the alarm',
+    async (_how, reason, move) => {
+      const rotated = await rotatedOnce();
+      await usedAtCleared(rotated);
+      await childrenDeleted(rotated);
+      issued(await refreshWith(rotated, rotated.refresh.refreshToken));
+      const keyHex = rotated.refresh.refreshToken.split('_')[1] ?? '';
+      const { owner, org } = rotated;
+      await owner.query('alter table agents.agent_keys drop constraint listed_in_the_directory');
+      try {
+        await move(owner, keyHex);
+        expect(await refreshWith(rotated, rotated.second.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ level: 'error', check: 'refresh_token', reason }),
+        ]);
+      } finally {
+        await owner.query(
+          'insert into directory.agent_keys (key_id, org_id) values ($1, $2) on conflict (key_id) do update set org_id = $2',
+          [keyHex, org],
+        );
+        await owner.query(
+          'alter table agents.agent_keys add constraint listed_in_the_directory foreign key (id, org_id) references directory.agent_keys (key_id, org_id)',
+        );
+      }
+    },
+  );
+
   it('a genuine token whose row is gone after its connection ended (the sweep’s case) is refused, with no alarm', async () => {
     const rotated = await rotatedOnce();
     await grants.revoke({ token: rotated.second.refreshToken, clientId }, CALLER);
     await rowDeleted(rotated, rotated.usedId);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a genuine token whose row is gone after its connection ran past its time is refused, with no alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rowDeleted(rotated, rotated.usedId);
+    clock.advanceBy(91 * DAY_MS);
     expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
@@ -1187,6 +1253,8 @@ describe(`refusals on the way (Postgres ${server.version})`, () => {
     ).toMatchObject({ error: 'invalid_grant' });
     await grants.revoke({ token: forged.replace('axr_', 'axa_'), clientId }, CALLER);
     expect(lines('oauth.grant_refused').map(({ reason }) => reason)).toEqual(['unlisted', 'malformed']);
+    // Never issued (its secret no MAC of the pepper's), so no alarm: R-15's unlisted case is a genuine token's alone.
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('refuses a refresh token made with a pepper version this process no longer holds, logged as an error', async () => {
