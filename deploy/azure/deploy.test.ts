@@ -2378,7 +2378,7 @@ function recordingImages(
 }
 
 /** The API's client ID in Zitadel, as its app's page shows one. */
-const CLIENT_ID = '338719472394810051';
+const CLIENT_ID = 'stand-in-client-id';
 
 describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
