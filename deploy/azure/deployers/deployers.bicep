@@ -23,9 +23,9 @@
 //   across the subscription (watch.bicep, AZ5e), where the infra identity can't reach it
 //
 // The subjects are the immutable form names.bicep's githubRepository() writes;
-// infra.test.ts holds the two equal (names.bicep is read by every deployment,
-// so it is left as it is).
-import { resourceTags } from '../names.bicep'
+// infra.test.ts holds the two equal. The tags come from tags.bicep, not
+// names.bicep, so a change to names.bicep never asks for this deployment (AZ5i).
+import { resourceTags } from '../tags.bicep'
 
 targetScope = 'subscription'
 

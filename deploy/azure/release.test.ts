@@ -1134,15 +1134,17 @@ describe('which hand deploys read each file', () => {
   it('is what the pinned Bicep says of our deployments: the foundation alone reads the infrastructure, access the roles and guardrails (AZ5)', async () => {
     const readers = readersFrom(await fileReferences([...PARAMS_PATHS.values()]));
     const all = ['foundation', 'access', 'deployers', 'secrets', 'apps', 'certificates'];
+    // Every deployment but the deployers, who take only their tags from Bicep beside them (AZ5i).
+    const names = all.filter((part) => part !== 'deployers');
     expect(Object.fromEntries(readers)).toEqual({
       // The partner's own (AZ5): every custom role, the guardrails, the activity log and the budget.
       'deploy/azure/access.bicep': ['access'],
-      'deploy/azure/app-keys.json': all,
+      'deploy/azure/app-keys.json': names,
       'deploy/azure/apps.bicep': ['apps'],
       'deploy/azure/bicepconfig.json': all,
       'deploy/azure/certificates.bicep': ['certificates'],
-      // The database server's generation (AZ25), through names.bicep: a change asks for every hand deploy.
-      'deploy/azure/database-generation.json': all,
+      // The database server's generation (AZ25), through names.bicep: a change asks for every hand deploy reading it.
+      'deploy/azure/database-generation.json': names,
       // CI's two deploy identities and the access alarm (AZ5, AZ5e), the partner's own; recorded since AZ5h.
       'deploy/azure/deployers/deployers.bicep': ['deployers'],
       'deploy/azure/deployers/identities.bicep': ['deployers'],
@@ -1175,13 +1177,14 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/modules/server-lock.bicep': ['access'],
       // The main workspace's (AZ5e): the access alarm reads it.
       'deploy/azure/modules/workspace-lock.bicep': ['access'],
-      'deploy/azure/names.bicep': all,
+      'deploy/azure/names.bicep': names,
       'deploy/azure/secrets.bicep': ['secrets'],
       'deploy/azure/staging.access.bicepparam': ['access'],
       'deploy/azure/staging.apps.bicepparam': ['apps'],
       'deploy/azure/staging.bicepparam': ['foundation'],
       'deploy/azure/staging.certificates.bicepparam': ['certificates'],
       'deploy/azure/staging.secrets.bicepparam': ['secrets'],
+      'deploy/azure/tags.bicep': ['deployers'],
     });
     // None of it a test file, which a release lets through unasked.
     expect([...readers.keys()].filter((file) => file.endsWith(TEST_FILE))).toEqual([]);
