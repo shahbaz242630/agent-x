@@ -28,7 +28,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpEvidence } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-import { userForSubject } from './users.ts';
+import {
+  backfillUserMacs,
+  subjectOfUser,
+  USER_MAC_BACKFILL_UNTIL,
+  userForSubject,
+  userOfSubject,
+  UserUnbelieved,
+} from './users.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -76,14 +83,22 @@ const challenges = (with_: KeyProvider = keys) =>
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
 
 let people = 0;
+const ISSUER = 'https://auth.example.test';
 async function person(): Promise<string> {
   people += 1;
   return userForSubject(
     app,
-    { issuer: 'https://auth.example.test', subject: `session-tamper-${String(people)}` },
-    { ids, clock },
+    { issuer: ISSUER, subject: `session-tamper-${String(people)}` },
+    { ids, clock, keys, logger: testLogger() },
   );
 }
+
+/** A person made through the app, with the subject they sign in as. */
+async function personAs(subject: string): Promise<string> {
+  return userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger(capture) });
+}
+
+const macs = () => ({ keys, logger: testLogger(capture) });
 
 /** An admin signed in with a passkey: their user, session and cookie. */
 async function signedIn(): Promise<{ userId: string; sessionId: string; cookie: string }> {
@@ -332,5 +347,106 @@ describe(`the owner can't verify a person's step-up (Postgres ${server.version})
 
     expect(await consumeFor(binding, challengeId)).toBeUndefined();
     expect(alarms()).toEqual([expect.objectContaining({ check: 'step_up_challenge', rowId: challengeId })]);
+  });
+});
+
+describe(`the owner can't move a person to its own login account (Postgres ${server.version})`, () => {
+  it('control: a person is found by their own subject, and theirs by their ID, with no alarm', async () => {
+    const admin = await personAs('admin-control');
+
+    expect(await personAs('admin-control')).toBe(admin);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'admin-control' }, macs())).toBe(admin);
+    expect(await subjectOfUser(app, admin, macs())).toEqual({ issuer: ISSUER, subject: 'admin-control' });
+    expect(alarms()).toEqual([]);
+  });
+
+  it("an admin's subject moved to the owner's own login account signs no one in as the admin, and raises the alarm", async () => {
+    const admin = await personAs('admin-x');
+    const theirs = await personAs('owner-own');
+    // The owner's own row out of the way of the unique key first, then the admin's moved onto its subject.
+    await asOwner('update identity.users set subject = $2 where id = $1', [theirs, 'owner-parked']);
+    await asOwner('update identity.users set subject = $2 where id = $1', [admin, 'owner-own']);
+
+    // The sign-in (made, or found), the step-up's person, and the address book's subject: none is the admin.
+    await expect(personAs('owner-own')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-own' }, macs())).toBeUndefined();
+    expect(await subjectOfUser(app, admin, macs())).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'user', reason: 'mac', rowId: admin, userId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
+    ]);
+    // Nor is the backfill ever a way to make it genuine: it gives a MAC only to a row with none.
+    expect(await backfillUserMacs(app, { keys, clock })).toBe(0);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-own' }, macs())).toBeUndefined();
+  });
+
+  it('a person made before 0100 is given their MAC at a start before the cutoff, and then signs in', async () => {
+    const earlier = await personAs('made-before-0100');
+    await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [earlier]);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBeUndefined();
+
+    expect(await backfillUserMacs(app, { keys, clock })).toBe(1);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBe(earlier);
+    expect(await personAs('made-before-0100')).toBe(earlier);
+  });
+
+  it('a person with no MAC is never believed once the cutoff has passed, and none is given', async () => {
+    const late = await personAs('no-mac-after-cutoff');
+    await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [late]);
+    const after = new FixedClock(new Date(USER_MAC_BACKFILL_UNTIL.getTime() + 1000));
+
+    expect(await backfillUserMacs(app, { keys, clock: after })).toBe(0);
+    await expect(personAs('no-mac-after-cutoff')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'no-mac-after-cutoff' }, macs())).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ check: 'user', rowId: late }),
+      expect.objectContaining({ check: 'user', rowId: late }),
+    ]);
+  });
+});
+
+describe(`the owner can't end someone else's login sessions, nor open a challenge on a forged session (Postgres ${server.version})`, () => {
+  it("control: a sign-out of the app's own session names its person", async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+
+    expect(await sessions().end(app, cookie)).toBe(userId);
+    expect(
+      await app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst(),
+    ).toBeUndefined();
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a sign-out of a session the owner planted for an admin names no one, deletes it, and raises the alarm', async () => {
+    const admin = await person();
+    const cookie = randomBytes(32).toString('base64url');
+    const rowId = ids.next();
+    await asOwner(
+      `insert into identity.sessions
+         (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at, mac, mac_key_version)
+       values ($1, $2, $3, $4, '{pwd,user,mfa}', $4, $4, $5, $6, 1)`,
+      [rowId, admin, sha256(cookie), START, new Date(START.getTime() + 3_600_000), randomBytes(32)],
+    );
+
+    expect(await sessions().end(app, cookie)).toBeUndefined();
+    expect(
+      await app.selectFrom('identity.sessions').select('id').where('id', '=', rowId).executeTakeFirst(),
+    ).toBeUndefined();
+    expect(alarms()).toEqual([expect.objectContaining({ check: 'session', rowId, userId: admin })]);
+  });
+
+  it('a challenge is never opened on a session whose MAC fails, so it binds no one', async () => {
+    const victim = await signedIn();
+    const other = await signedIn();
+    await asOwner('update identity.sessions set user_id = $2 where id = $1', [victim.sessionId, other.userId]);
+
+    expect(
+      await challenges().open(app, {
+        sessionId: victim.sessionId,
+        action: 'members.change-role',
+        changeHash: sha256('bound to the wrong person'),
+      }),
+    ).toBeUndefined();
+    expect(alarms()).toEqual([expect.objectContaining({ check: 'session', rowId: victim.sessionId })]);
   });
 });

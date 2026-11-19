@@ -94,7 +94,7 @@ async function member(org: string, role: Role): Promise<SessionMember & { readon
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `funding-suspension-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const sessions = createSessions({
     ids,

@@ -88,7 +88,7 @@ async function person(email: string | null = INVITED): Promise<AcceptingPerson> 
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `accepting-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const sessions = createSessions({
     ids,

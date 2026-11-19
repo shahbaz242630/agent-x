@@ -1,9 +1,11 @@
-// The MACs on console sessions and step-up challenges (S205 tamper pass;
+// The MACs on people, console sessions and step-up challenges (S205 tamper pass;
 // ADR-012 §2, Threat-Model row 13: operators can stop money, not grant
 // authority). Both tables are global, so no row wall stands between them and
 // the database's owner, who holds none of the app's keys: without a MAC, a
-// session row it planted signed anyone in as anyone, and a challenge it moved
-// to verified, with a passkey, let the app sign an admin's change itself.
+// session row it planted signed anyone in as anyone, a challenge it moved to
+// verified, with a passkey, let the app sign an admin's change itself, and a
+// person's subject moved to the owner's own login account signed the owner in
+// as that person, through the login service itself.
 //
 // Each row carries a MAC with `session-mac` over a fixed, versioned, labelled
 // message of every column that says who it is, what it proved or what it is
@@ -25,6 +27,14 @@ export interface RowMacs {
 export interface RowMac {
   readonly mac: Buffer;
   readonly mac_key_version: number;
+}
+
+/** What a person's MAC covers: who they are at the login service, for good. */
+export interface UserFacts {
+  readonly id: string;
+  readonly issuer: string;
+  readonly subject: string;
+  readonly createdAt: Date;
 }
 
 /** What a session's MAC covers. */
@@ -62,6 +72,7 @@ export interface ChallengeFacts {
 }
 
 /** Each message's label: a session's MAC can never stand for a challenge's, nor either for another key's work. */
+const USER_LABEL = 'agentx/identity.user/v1';
 const SESSION_LABEL = 'agentx/identity.session/v1';
 const CHALLENGE_LABEL = 'agentx/identity.step-up-challenge/v1';
 
@@ -70,6 +81,14 @@ const time = (at: Date): string => String(at.getTime());
 const list = (items: readonly string[]): string[] => [String(items.length), ...items];
 /** An absent value apart from any present one, however the column's own check is set. */
 const maybe = (value: string | null): string[] => (value === null ? ['none'] : ['some', value]);
+
+export const userMessage = (facts: UserFacts): Message => [
+  USER_LABEL,
+  facts.id,
+  facts.issuer,
+  facts.subject,
+  time(facts.createdAt),
+];
 
 export const sessionMessage = (facts: SessionFacts): Message => [
   SESSION_LABEL,
@@ -135,13 +154,14 @@ export function macHolds(
 }
 
 /**
- * The integrity alarm for a session or challenge whose MAC doesn't hold: a row
- * written by something without the app's key. Names the row and its person,
- * never the cookie, so the incident can find who was being impersonated.
+ * The integrity alarm for a person, session or challenge whose MAC doesn't
+ * hold: a row written by something without the app's key. Names the row and
+ * its person, never the cookie, so the incident can find who was being
+ * impersonated.
  */
 export function rowForged(
   logger: Logger,
-  check: 'session' | 'step_up_challenge',
+  check: 'user' | 'session' | 'step_up_challenge',
   row: { readonly id: string; readonly user_id: string },
 ): void {
   logger.error('audit.integrity_failed', { check, reason: 'mac', rowId: row.id, userId: row.user_id });

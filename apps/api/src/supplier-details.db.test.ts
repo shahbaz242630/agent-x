@@ -144,7 +144,7 @@ async function member(org: string, role: Role): Promise<Person> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `supplier-details-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const membershipId = ids.next();
   await withSignedStates(app, org, quiet(), (tx, states) =>

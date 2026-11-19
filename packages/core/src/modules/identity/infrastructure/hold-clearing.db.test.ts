@@ -79,7 +79,7 @@ async function member(org: string, role: Role): Promise<Member> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `clearing-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId, cookie } = await sessions().open(app, userId, {
     idpSessionId: 'V1_1',
@@ -840,7 +840,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       const user = await userForSubject(
         app,
         { issuer: 'https://auth.example.test', subject: `planted-${id}` },
-        { ids, clock },
+        { ids, clock, keys, logger: testLogger() },
       );
       await asOwner(async (owner) => {
         await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [

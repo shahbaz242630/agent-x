@@ -40,6 +40,7 @@
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
 import { limitStatements } from '@agentx/platform/db';
+import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
@@ -52,7 +53,7 @@ import { type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts'
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
-import { subjectOfUser, userForSubject, userOfSubject } from './users.ts';
+import { subjectOfUser, userForSubject, userOfSubject, UserUnbelieved } from './users.ts';
 
 export interface SignInBegun {
   /** The login service's address to send the browser to. */
@@ -145,6 +146,7 @@ export function createSignIn({
   ids,
   clock,
   keys,
+  logger,
 }: {
   readonly db: Kysely<IdentityTables>;
   readonly oidc: OidcClient;
@@ -155,7 +157,10 @@ export function createSignIn({
   readonly clock: Clock;
   /** For the session's verified address (`field-encryption`). */
   readonly keys: KeyProvider;
+  /** For the integrity alarm of a person's row whose MAC fails (S205). */
+  readonly logger: Logger;
 }): SignIn {
+  const macs = { keys, logger };
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
     db.transaction().execute(async (tx) => {
@@ -189,7 +194,8 @@ export function createSignIn({
       throw failed(error.failure, error.message, userId);
     }
     const { subject, evidence, idTokenHash } = signedIn;
-    const personId = await limited((tx) => userOfSubject(tx, subject));
+    // A row whose MAC fails is no one (S205): refused as another person, with the alarm.
+    const personId = await limited((tx) => userOfSubject(tx, subject, macs));
     // A passkey is asked for as the change consumes the challenge, where its role is known (B3+-1).
     const refusal =
       personId === undefined
@@ -257,7 +263,13 @@ export function createSignIn({
         throw new SignInFailed('stale_authentication', 'the sign-in was made before the flow began');
       }
       return limited(async (tx) => {
-        const userId = await userForSubject(tx, subject, { ids, clock });
+        let userId: string;
+        try {
+          userId = await userForSubject(tx, subject, { ids, clock, ...macs });
+        } catch (error) {
+          if (!(error instanceof UserUnbelieved)) throw error;
+          throw new SignInFailed('account_unbelieved', error.message);
+        }
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
         // AG10: a sign-in made before the person's sessions were last all ended (a removal, a factor reset, a change
         // at the login service) opens none, though its flow began before that end.
@@ -279,7 +291,7 @@ export function createSignIn({
       if (cookie === undefined) return Promise.resolve(undefined);
       return limited(async (tx) => {
         const userId = await sessions.end(tx, cookie);
-        return userId === undefined ? undefined : subjectOfUser(tx, userId);
+        return userId === undefined ? undefined : subjectOfUser(tx, userId, macs);
       });
     },
 

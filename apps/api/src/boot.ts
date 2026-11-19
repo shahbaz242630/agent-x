@@ -17,6 +17,7 @@ import type { OauthTables } from '@agentx/core/modules/oauth';
 import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
 import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
+  backfillUserMacs,
   createLoginFlows,
   createSessions,
   createStepUpChallenges,
@@ -323,6 +324,14 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
     return undefined;
   }
   logger.info('api.start_recorded', { seq: recorded });
+  // S205: people made before 0100 get their MAC, until its cutoff; a failure leaves them unable to sign in, nothing more.
+  // TODO(S205): delete this once USER_MAC_BACKFILL_UNTIL (2026-11-22) has passed, with backfillUserMacs.
+  try {
+    const given = await backfillUserMacs(database, { keys, clock: systemClock });
+    if (given > 0) logger.info('identity.user_macs_given', { people: given });
+  } catch (error) {
+    logger.warn('identity.user_mac_backfill_failed', { err: error });
+  }
   // Only now may a live adapter move money: its start, and a live one's gate reference, is on the chain (startedLive).
   recordedStartWith(config.partner);
   return {

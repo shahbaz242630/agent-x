@@ -78,7 +78,7 @@ async function signedIn(): Promise<{ userId: string; sessionId: string }> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `changing-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId } = await sessions().open(app, userId, {
     idpSessionId: 'V1_1',

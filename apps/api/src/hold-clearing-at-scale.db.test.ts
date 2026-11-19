@@ -154,7 +154,7 @@ async function member(org: string, role: 'admin' | 'viewer'): Promise<ClearingAd
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `at-scale-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId } = await createSessions({
     ids,

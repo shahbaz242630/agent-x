@@ -32,6 +32,7 @@ import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Config, partnerName } from '@agentx/platform/config';
 import { type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import { type KeyProvider } from '@agentx/platform/keys';
+import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
 import type { FastifyInstance } from 'fastify';
 
@@ -102,6 +103,7 @@ function signInFrom(
   sessions: Sessions,
   challenges: StepUpChallenges,
   keys: KeyProvider,
+  logger: Logger,
 ): SignIn | undefined {
   if (config.signIn === undefined) return undefined;
   const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
@@ -124,6 +126,7 @@ function signInFrom(
     ids: uuidV7Ids,
     clock: systemClock,
     keys,
+    logger,
   });
 }
 
@@ -135,7 +138,7 @@ export async function startWeb(
   /** What must end while the pool is open when it can't listen. */
   whenRefused: () => Promise<void>,
 ): Promise<FastifyInstance | undefined> {
-  const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
+  const signIn = signInFrom(config, database, flows, sessions, challenges, keys, logger);
   // An agent's key, checked before its request goes on (C2-1); on the MCP endpoint, an MCP connection's access token
   // too, while the OAuth server is on (6E3a).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });

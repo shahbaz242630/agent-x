@@ -22,7 +22,14 @@ import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -68,7 +75,7 @@ async function agentWithKey(expiresAt = new Date(START.getTime() + 90 * DAY_MS))
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `agent-access-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const owner = ids.next();
   const agentId = ids.next();

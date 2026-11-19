@@ -103,7 +103,10 @@ let people = 0;
 const newUser = async (issuer = ISSUER): Promise<{ userId: string; subject: string }> => {
   people += 1;
   const subject = String(312_000_000_000_000_000n + BigInt(people));
-  return { userId: await userForSubject(app, { issuer, subject }, { ids, clock }), subject };
+  return {
+    userId: await userForSubject(app, { issuer, subject }, { ids, clock, keys, logger: testLogger() }),
+    subject,
+  };
 };
 
 /** A session for the person, opened now. */

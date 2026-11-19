@@ -23,6 +23,7 @@ import {
 import { systemClock } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Database } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { OutboundFetch } from '@agentx/platform/outbound';
 
@@ -90,6 +91,7 @@ export function noticeSenderFrom({
   remittances,
   personOf,
   fetch,
+  keys,
   logger,
 }: {
   readonly config: Config;
@@ -111,6 +113,8 @@ export function noticeSenderFrom({
   /** What Agent X keeps of a person, their name and address (identity's keptPeopleOf, 0049): our team's reset shows them (0087). */
   readonly personOf: People['personOf'];
   readonly fetch: OutboundFetch;
+  /** The person's own row is believed only where its MAC holds (S205): a moved subject would mail someone else. */
+  readonly keys: KeyProvider;
   readonly logger: Logger;
 }): NoticeSender | undefined {
   const { email, signIn } = config;
@@ -124,7 +128,7 @@ export function noticeSenderFrom({
       clock: systemClock,
     }),
     addresses: createAddressBook({
-      subjectOf: (userId) => subjectOfUser(db, userId),
+      subjectOf: (userId) => subjectOfUser(db, userId, { keys, logger }),
       issuer: signIn.issuer,
       internalOrigin: signIn.internalOrigin,
       token: email.directoryToken,

@@ -17,6 +17,15 @@
 -- after this release. Then both columns are required: a session gets its MAC
 -- as it opens, a challenge as it opens and again as it is verified.
 --
+-- A person (identity.users) gets a MAC too, over their ID, issuer, subject
+-- and when they were made: otherwise the owner could move an admin's subject
+-- to its own login account's, sign in through the login service as itself,
+-- and be found as that admin. People are never deleted, so theirs stays
+-- nullable: the API gives each one made before this their MAC at its start
+-- until a fixed cutoff in its code (users.ts USER_MAC_BACKFILL_UNTIL), never
+-- to a row that has one; after it, a row without a MAC is never believed.
+-- The app may write only those two columns of a person, and only to do that.
+--
 -- The app may write the MAC where it may already write what it covers: a
 -- session's at its new cookie ID (a step-up's rotation), a challenge's with
 -- its evidence.
@@ -33,3 +42,10 @@ ALTER TABLE identity.step_up_challenges
 
 GRANT UPDATE (mac, mac_key_version) ON identity.sessions TO agentx_app;
 GRANT UPDATE (mac, mac_key_version) ON identity.step_up_challenges TO agentx_app;
+
+ALTER TABLE identity.users
+  ADD COLUMN mac bytea CHECK (pg_catalog.octet_length(mac) = 32),
+  ADD COLUMN mac_key_version integer CHECK (mac_key_version >= 1),
+  ADD CONSTRAINT user_mac_whole CHECK ((mac IS NULL) = (mac_key_version IS NULL));
+
+GRANT UPDATE (mac, mac_key_version) ON identity.users TO agentx_app;

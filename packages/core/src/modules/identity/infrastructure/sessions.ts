@@ -80,7 +80,10 @@ export interface Sessions {
    * session isn't live.
    */
   rotate(db: Kysely<IdentityTables>, sessionId: string): Promise<string | undefined>;
-  /** Ends the session this cookie ID belongs to, live or not; its user's ID, undefined if there is none. */
+  /**
+   * Ends the session this cookie ID belongs to, live or not; its user's ID,
+   * undefined if there is none, or if its MAC doesn't hold (deleted all the same).
+   */
   end(db: Kysely<IdentityTables>, cookie: string): Promise<string | undefined>;
   /**
    * Deletes up to `most` sessions no process could use again: past their
@@ -168,7 +171,7 @@ export async function sessionsEndedAt(tx: Kysely<IdentityTables>, userId: string
 }
 
 /** The columns a session's MAC is made from, with the MAC itself. */
-const SEALED = [
+export const SESSION_SEALED = [
   'id',
   'user_id',
   'cookie_hash',
@@ -182,7 +185,7 @@ const SEALED = [
 ] as const;
 
 /** A session's facts as its columns keep them, without the MAC. */
-interface SessionRow {
+export interface SessionRow {
   readonly id: string;
   readonly user_id: string;
   readonly cookie_hash: Buffer;
@@ -193,7 +196,7 @@ interface SessionRow {
   readonly ends_at: Date;
 }
 
-const messageOf = (row: SessionRow) =>
+export const sessionRowMessage = (row: SessionRow) =>
   sessionMessage({
     id: row.id,
     userId: row.user_id,
@@ -234,7 +237,7 @@ export function createSessions({
 
   /** Whether the row is the app's own: a row whose MAC doesn't hold raises the alarm, and is no session. */
   const genuine = (row: SessionRow & { readonly mac: Buffer; readonly mac_key_version: number }): boolean => {
-    if (macHolds(keys, messageOf(row), row)) return true;
+    if (macHolds(keys, sessionRowMessage(row), row)) return true;
     rowForged(logger, 'session', row);
     return false;
   };
@@ -256,7 +259,7 @@ export function createSessions({
       };
       await db
         .insertInto('identity.sessions')
-        .values({ ...row, ...macOf(keys, messageOf(row)), last_seen_at: now })
+        .values({ ...row, ...macOf(keys, sessionRowMessage(row)), last_seen_at: now })
         .execute();
       return { sessionId: row.id, cookie };
     },
@@ -271,7 +274,7 @@ export function createSessions({
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
-        .returning([...SEALED, 'last_seen_at'])
+        .returning([...SESSION_SEALED, 'last_seen_at'])
         .executeTakeFirst();
       if (row === undefined || !genuine(row)) return undefined;
       const idleEnd = row.last_seen_at.getTime() + idleSeconds * 1000;
@@ -293,7 +296,7 @@ export function createSessions({
       const now = clock.now();
       const row = await db
         .selectFrom('identity.sessions')
-        .select(SEALED)
+        .select(SESSION_SEALED)
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
@@ -306,7 +309,7 @@ export function createSessions({
       const now = clock.now();
       const live = await db
         .selectFrom('identity.sessions')
-        .select(SEALED)
+        .select(SESSION_SEALED)
         .where('id', '=', sessionId)
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
@@ -317,7 +320,7 @@ export function createSessions({
       const cookieHash = hashOf(cookie);
       const row = await db
         .updateTable('identity.sessions')
-        .set({ cookie_hash: cookieHash, ...macOf(keys, messageOf({ ...live, cookie_hash: cookieHash })) })
+        .set({ cookie_hash: cookieHash, ...macOf(keys, sessionRowMessage({ ...live, cookie_hash: cookieHash })) })
         .where('id', '=', sessionId)
         // Only the row as it was checked: changed meanwhile (rotated, or written by anyone else), it is left as it is.
         .where('cookie_hash', '=', live.cookie_hash)
@@ -331,12 +334,14 @@ export function createSessions({
 
     async end(db, cookie) {
       if (!isCookie(cookie)) return undefined;
+      // Deleted whatever its MAC: ending a session is always safe. Its person is named, for the login service's own
+      // sessions to end too, only where the row is the app's own (S205): a forged one would end someone else's.
       const row = await db
         .deleteFrom('identity.sessions')
         .where('cookie_hash', '=', hashOf(cookie))
-        .returning('user_id')
+        .returning(SESSION_SEALED)
         .executeTakeFirst();
-      return row?.user_id;
+      return row !== undefined && genuine(row) ? row.user_id : undefined;
     },
 
     async sweep(db, most) {

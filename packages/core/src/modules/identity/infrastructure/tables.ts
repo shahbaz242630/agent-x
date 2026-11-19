@@ -25,6 +25,9 @@ interface UsersTable {
   created_at: Date;
   /** When their sessions were last all ended (0098, AG10); null if never. */
   sessions_ended_at: Date | null;
+  /** `session-mac` over id, issuer, subject and created_at (row-macs.ts, 0100); null only for a person made before it. */
+  mac: Buffer | null;
+  mac_key_version: number | null;
 }
 
 interface SessionsTable {

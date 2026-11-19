@@ -160,7 +160,7 @@ beforeEach(async () => {
   adminUser = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `tamper-contacts-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   await withSignedStates(app, org, quiet(), async (tx, states) => {
     await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
@@ -209,7 +209,7 @@ describe(`FX-TAMPER as the owner on a registered contact: denied, and held (Post
         userId: await userForSubject(
           app,
           { issuer: 'https://auth.example.test', subject: `tamper-contacts-other-${String(subjects)}` },
-          { ids, clock },
+          { ids, clock, keys, logger: testLogger() },
         ),
         role: 'admin',
         joinedAt: clock.now(),

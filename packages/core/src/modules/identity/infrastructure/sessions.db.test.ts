@@ -41,7 +41,7 @@ async function setUp(): Promise<{ userId: string; clock: FixedClock; sessions: S
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `sessions-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   return {
     userId,

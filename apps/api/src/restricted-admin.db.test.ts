@@ -110,7 +110,7 @@ async function member(org: string, role: Role, restricted = false): Promise<Pers
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `restricted-admin-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger },
   );
   const { sessionId, cookie } = await sessions.open(app, userId, {
     idpSessionId: 'V1_1',

@@ -159,7 +159,7 @@ export function mandateWorld({
     const userId = await userForSubject(
       app(),
       { issuer: 'https://auth.example.test', subject: `${name}-${String(people)}` },
-      { ids, clock: clock() },
+      { ids, clock: clock(), keys: keyring, logger: testLogger() },
     );
     const sessions = createSessions({
       ids,

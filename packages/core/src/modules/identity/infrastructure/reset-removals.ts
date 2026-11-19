@@ -204,7 +204,7 @@ export function createResetRemovals({
         return 'cancelled';
       });
     }
-    const signsInAs = await subjectOfUser(database, userId);
+    const signsInAs = await subjectOfUser(database, userId, { keys, logger });
     if (signsInAs?.issuer !== issuer) throw new RemovalRefused('the person signs in with another login service');
     const factorsRemoved = await factors.removeAll(signsInAs.subject);
     return inOrganization(orgId, async (tx, states) => {

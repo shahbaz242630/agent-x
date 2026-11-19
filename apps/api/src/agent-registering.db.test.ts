@@ -79,7 +79,7 @@ async function member(org: string, role: Role): Promise<Member> {
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `agent-registering-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const sessions = createSessions({
     ids,

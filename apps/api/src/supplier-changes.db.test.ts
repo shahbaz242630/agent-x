@@ -95,7 +95,7 @@ async function member(org: string, role: Role): Promise<SessionMember & { member
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `supplier-changes-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const sessions = createSessions({
     ids,

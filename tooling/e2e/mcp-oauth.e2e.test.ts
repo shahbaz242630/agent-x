@@ -445,7 +445,7 @@ describe('SEC-OAUTH-01, -02, -05, -07, -10, -12, -13 a real MCP client connected
     const adminUser = await userForSubject(
       database,
       { issuer: 'https://auth.example.test', subject: `mcp-oauth-admin-${randomUUID()}` },
-      { ids: uuidV7Ids, clock },
+      { ids: uuidV7Ids, clock, keys, logger: testLogger() },
     );
     const opened = await createSessions({
       ids: uuidV7Ids,

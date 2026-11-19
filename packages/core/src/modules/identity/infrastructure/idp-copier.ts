@@ -315,7 +315,7 @@ export function createIdpEventCopier({
   const copy = async (event: IdpEvent): Promise<number> => {
     const person =
       event.aggregateType === 'user'
-        ? await userOfSubject(database, { issuer, subject: event.aggregateId })
+        ? await userOfSubject(database, { issuer, subject: event.aggregateId }, { keys, logger })
         : undefined;
     const orgs = person === undefined ? [] : await organizationsOf(database, person);
     // Decided once, on the event's first copy: a run that stopped part-way decides nothing again.

@@ -47,6 +47,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { PASSKEY_METHOD } from '../domain/step-up.ts';
+import { SESSION_SEALED, sessionRowMessage } from './sessions.ts';
 import {
   type ChallengeFacts,
   challengeMessage,
@@ -322,11 +323,16 @@ export function createStepUpChallenges({
       // The person is the session's: read first, for the MAC, and asked again of the session as the row is written.
       const session = await db
         .selectFrom('identity.sessions')
-        .select('user_id')
+        .select(SESSION_SEALED)
         .where('id', '=', binding.sessionId)
         .where('ends_at', '>', now)
         .executeTakeFirst();
       if (session === undefined) return undefined;
+      // Its person is bound to the challenge only from a session whose MAC holds.
+      if (!macHolds(keys, sessionRowMessage(session), session)) {
+        rowForged(logger, 'session', session);
+        return undefined;
+      }
       const { mac, mac_key_version: macKeyVersion } = macOf(
         keys,
         challengeMessage({

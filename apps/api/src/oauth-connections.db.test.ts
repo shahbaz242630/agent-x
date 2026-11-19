@@ -148,7 +148,7 @@ async function member(org: string, role: Role, amr: readonly string[] = PASSKEY)
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `oauth-connections-${String(people)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
   const { sessionId } = await createSessions({
     ids,

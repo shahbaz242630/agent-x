@@ -69,7 +69,10 @@ const zitadelId = (): string => {
 /** A person who has signed in to Agent X, as Zitadel's subject. */
 async function person(): Promise<{ userId: string; subject: string }> {
   const subject = zitadelId();
-  return { userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock }), subject };
+  return {
+    userId: await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger() }),
+    subject,
+  };
 }
 
 /** A new organisation, with the person as a member when given one. */
@@ -906,7 +909,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect.objectContaining({ org: 'none', person: null, subject, by: 'other' }),
     ]);
     // Signed in for the first time since: the removal limits them; their own removal after it changes nothing.
-    const userId = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock });
+    const userId = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock, keys, logger: testLogger() });
     expect(await restrictedUntil(userId)).toEqual(new Date(removed.createdAt.getTime() + WEEK_MS));
     // Another login's removal limits no one else.
     const other = await person();

@@ -90,7 +90,7 @@ const newUser = async (name: string): Promise<string> => {
   return userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `resets-${name}-${String(subjects)}` },
-    { ids, clock },
+    { ids, clock, keys, logger: testLogger() },
   );
 };
 
