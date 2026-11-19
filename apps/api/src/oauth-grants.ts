@@ -41,7 +41,7 @@
 //   transaction), and a poll after that is `invalid_grant`. A device code
 //   never travels through a browser, so a second use revokes nothing.
 // - Either kind, before anything else is believed of it (tamper pass S205,
-//   SEC-OAUTH-13): the flow held must be the one its organisation's
+//   SEC-OAUTH-15): the flow held must be the one its organisation's
 //   transaction was opened for, and its decision's seal its own
 //   (oauth/flow-seals.ts), made with a key the database never holds. A
 //   flow planted or changed in the database is refused as any other code is,

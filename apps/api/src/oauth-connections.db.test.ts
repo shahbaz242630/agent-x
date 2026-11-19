@@ -2507,7 +2507,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     });
   });
 
-  describe('SEC-OAUTH-13 (S205 fix round): a claimed device flow’s device code rewritten by the database’s owner', () => {
+  describe('SEC-OAUTH-15 (S205 fix round): a claimed device flow’s device code rewritten by the database’s owner', () => {
     /** A device code of the owner's own making, written over the person's flow: the owner then polls with it. */
     const rewritten = async (flowId: string) => {
       const ownDeviceCode = `axd_${randomBytes(32).toString('base64url')}`;
@@ -3045,7 +3045,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
   });
 });
 
-describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a connection's tokens by writing a flow (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-15 (S205 tamper pass): the database's owner can't grant a connection's tokens by writing a flow (Postgres ${server.version})`, () => {
   // The owner holds none of the app's keys, but owns oauth.flows (global, no row security): it can write any row.
   const ELSEWHERE = 'https://attacker.example/cb';
   const OWN_VERIFIER = 'w'.repeat(43);

@@ -1,4 +1,4 @@
-// SEC-OAUTH-13 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
+// SEC-OAUTH-15 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
 // database's side, a planted or rewritten row never shown, decided or exchanged, with the alarm, is
 // oauth-connections.db.test.ts.
 import { createKeyProvider, type Message, PURPOSES } from '@agentx/platform/keys';
@@ -104,7 +104,7 @@ function allowedDevice(): DeviceFlowRead {
   return { ...undecidedDevice, ...fields, decided: 'allowed', seal: decisionSealed(keys, undecidedDevice, fields) };
 }
 
-describe('SEC-OAUTH-13 a flow decision’s seal', () => {
+describe('SEC-OAUTH-15 a flow decision’s seal', () => {
   it('is sound for the flow it was made for, either kind, and whatever the IDs’ case', () => {
     expect(decisionJudged(keys, allowedCode())).toBe('sound');
     expect(decisionJudged(keys, allowedDevice())).toBe('sound');
@@ -162,7 +162,7 @@ describe('SEC-OAUTH-13 a flow decision’s seal', () => {
   });
 });
 
-describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
+describe('SEC-OAUTH-15 a flow’s seal as it opened', () => {
   it('is sound for the flow its client opened, either kind', () => {
     expect(openJudged(keys, undecided)).toBe('sound');
     expect(openJudged(keys, undecidedDevice)).toBe('sound');

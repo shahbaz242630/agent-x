@@ -1,5 +1,5 @@
 // A flow sealed as it opens and as it is decided (Phase 6 6F1 gate, tamper
-// pass S205; SEC-OAUTH-13; 0101): oauth.flows holds no signed state, and its
+// pass S205; SEC-OAUTH-15; 0101): oauth.flows holds no signed state, and its
 // owner can write any row, so a flow is believed only with the MACs the app
 // made of it, with a key the database never holds.
 //
