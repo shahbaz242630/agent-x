@@ -360,7 +360,14 @@ export async function openDeviceFlow(
   from: FlowSource,
 ): Promise<DeviceFlowOpened> {
   const endsAt = flowEndsFrom(flow.createdAt);
-  const seal = openSealed(keys, { ...flow, kind: 'device', redirectUri: null, codeChallenge: null, endsAt });
+  const seal = openSealed(keys, {
+    ...flow,
+    kind: 'device',
+    redirectUri: null,
+    state: null,
+    codeChallenge: null,
+    endsAt,
+  });
   return db.transaction().execute(async (tx) => {
     await limitStatements(tx);
     const full = await flowsFull(tx, from, flow.createdAt);
