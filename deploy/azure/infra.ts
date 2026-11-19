@@ -550,15 +550,18 @@ export function requestFor(step: Sent, commit: string): Request {
 }
 
 /** deploy.ts's steps for an unattended run, its CLI and terminal swapped for CI's. */
-function stepsFor(infra: InfraSteps, mode: 'plan' | 'deploy', approved: Plan['whatIf']): Steps {
+function stepsFor(infra: InfraSteps, mode: 'plan' | 'deploy', approved: Plan['whatIf'], secretsFirst?: boolean): Steps {
   const real = infra.steps(unattendedTerminal(infra.say), unattendedAz(infra.az, mode, approved, infra.say));
-  return { ...real, unattended: { mode, answers: infra.answers } };
+  return {
+    ...real,
+    unattended: { mode, answers: infra.answers, ...(secretsFirst === undefined ? {} : { secretsFirst }) },
+  };
 }
 
 /** One step planned: its what-if's hash, or an error saying why it ended before Azure was asked. */
-async function planStep(infra: InfraSteps, step: Sent, commit: string): Promise<string> {
+async function planStep(infra: InfraSteps, step: Sent, commit: string, secretsFirst: boolean): Promise<string> {
   try {
-    await infra.deploy(requestFor(step, commit), stepsFor(infra, 'plan', {}));
+    await infra.deploy(requestFor(step, commit), stepsFor(infra, 'plan', {}, secretsFirst));
   } catch (error) {
     if (error instanceof Planned) return error.hash;
     throw error;
@@ -588,7 +591,8 @@ export async function plan(infra: InfraSteps, commit: string, digest: string): P
   const whatIf: Partial<Record<Sent, string>> = {};
   for (const step of needs.steps) {
     if (step === 'db-setup') infra.say('db-setup: then the set-up job runs (jobs.ts run db-setup), with its log.');
-    else whatIf[step] = await planStep(infra, step, commit);
+    // Each step knows whether this plan's secrets --keys runs (apps reads it: what that run makes, S204 release).
+    else whatIf[step] = await planStep(infra, step, commit, needs.steps.includes('secrets'));
   }
   return { steps: needs.steps, whatIf };
 }
