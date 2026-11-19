@@ -39,16 +39,13 @@ vi.mock('@agentx/platform/audit-chain', () => ({
 
 const ANCHOR = { seq: 7n, hash: Buffer.alloc(32, 7), macKeyVersion: 1 };
 
-/** A stand-in for the jobs' anchor store: `writes` says whether a flush writes a file. */
-function anchorStore({
-  state = 'read',
-  latest = ANCHOR,
-  writes = true,
-}: { readonly state?: string; readonly latest?: unknown; readonly writes?: boolean } = {}) {
-  let fileAt: Date | undefined;
+/** A stand-in for the jobs' anchor store: what it keeps, and how many times it is written. */
+function anchorStore({ state = 'read', latest = ANCHOR }: { readonly state?: string; readonly latest?: unknown } = {}) {
   const kept: unknown[] = [];
+  const flushes = { count: 0 };
   return {
     kept,
+    flushes,
     log: {
       epoch: 1,
       read: () => Promise.resolve(),
@@ -57,10 +54,9 @@ function anchorStore({
       latest: () => latest ?? undefined,
       keep: (anchor: unknown) => kept.push(anchor),
       flush: () => {
-        if (writes) fileAt = new Date((fileAt?.getTime() ?? 0) + 1);
+        flushes.count += 1;
         return Promise.resolve();
       },
-      lastFileAt: () => fileAt,
     },
   };
 }
@@ -131,6 +127,7 @@ describe('the security rows’ sealing job (S206 V6)', () => {
     await anchorNow();
 
     expect(store.kept).toEqual([{ signed: chain.step }]);
+    expect(store.flushes.count).toBe(1);
     expect(unanchored()).toEqual([]);
   });
 
@@ -138,7 +135,6 @@ describe('the security rows’ sealing job (S206 V6)', () => {
     ['the store holds no anchor', { latest: null }, undefined],
     ['the chain fails its check from it', {}, { ok: false, problem: { reason: 'gap', seq: 8n } }],
     ['the check stops short of the head', {}, { ok: true, seq: 8n, to: 9n, hash: Buffer.alloc(32), macKeyVersion: 1 }],
-    ['the write fails', { writes: false }, undefined],
   ] as const)('an anchor not written (%s): its own error line, nothing thrown', async (_why, store, step) => {
     if (step !== undefined) chain.step = step;
     const { log, kept } = anchorStore(store);

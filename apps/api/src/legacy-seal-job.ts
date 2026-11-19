@@ -7,8 +7,10 @@
 // After each record of the sealing (its start, its end) the platform chain is
 // anchored at once, as the anchor check anchors it, so deleting either record
 // is a chain wound back past an anchor, which the next sealing (and the anchor
-// check) refuses. A write that fails is its own error: the record stays
-// unanchored until the anchor check's next run anchors it.
+// check) refuses. It uses the jobs' one anchor store, the anchor check's own,
+// whose writes go one at a time. An anchor it can't take is its own error; a
+// write that fails is the store's own line and alert. Either way the record
+// stays unanchored until the anchor check's next run anchors it.
 //
 // TODO(S206 AT10-style): delete this with sealLegacyRows once every environment holds its `all_sealed` record.
 import { type SecurityEventsTables, sealLegacyRows } from '@agentx/core/modules/security-events';
@@ -64,14 +66,14 @@ export function createLegacySealJob({
     try {
       const from = await platformAnchorIn(store);
       const step = from === undefined ? undefined : await platform.checkFromAnchor(database, from);
-      const before = store.lastFileAt()?.getTime();
-      if (step?.ok === true && step.seq === step.to) {
-        store.keep(signAnchor(keys, PLATFORM, step, clock.now(), store.epoch));
-        await store.flush();
-      }
-      if (step?.ok !== true || store.lastFileAt()?.getTime() === before) {
+      if (step?.ok !== true || step.seq !== step.to) {
         logger.error('security.legacy_seal_unanchored', {});
+        return;
       }
+      // Kept in the jobs' one store, beside the anchor check's own, and written through its single flight (one write
+      // at a time; a second joins the first). A write that fails is the store's own line and alert, as the check's is.
+      store.keep(signAnchor(keys, PLATFORM, step, clock.now(), store.epoch));
+      await store.flush();
     } catch (error) {
       logger.error('security.legacy_seal_unanchored', { err: error });
     }
