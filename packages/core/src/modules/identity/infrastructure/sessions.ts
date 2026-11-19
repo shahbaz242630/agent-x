@@ -131,12 +131,14 @@ export async function lockSessionsOf(tx: Transaction<IdentityTables>, userIds: r
  * before it opens no session (sessionsEndedAt). Says how many.
  */
 export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string, endedAt: Date): Promise<number> {
-  const rows = await tx.deleteFrom('identity.sessions').where('user_id', '=', userId).returning('id').execute();
+  // The end kept first: it waits for a sign-in that has read the last one (sessionsEndedAt, FOR SHARE) to commit, so
+  // the delete after it, on a fresh snapshot (READ COMMITTED, as every transaction here), takes that session too.
   await tx
     .updateTable('identity.users')
     .set((eb) => ({ sessions_ended_at: eb.fn('greatest', [eb.ref('sessions_ended_at'), eb.val(endedAt)]) }))
     .where('id', '=', userId)
     .execute();
+  const rows = await tx.deleteFrom('identity.sessions').where('user_id', '=', userId).returning('id').execute();
   return rows.length;
 }
 

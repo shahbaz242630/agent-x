@@ -11,7 +11,9 @@
 -- sessions were never all ended. The app may change this column alone: a
 -- user's issuer and subject still never change. A sign-in reads it locking
 -- the row (FOR SHARE, which needs this column's UPDATE right), so an end
--- committing at the same moment is waited for, never read past.
+-- committing at the same moment is waited for, never read past; and an end
+-- writes it before deleting the sessions, so it waits for a sign-in that read
+-- it first, then deletes the session that sign-in opened too.
 
 ALTER TABLE identity.users
   ADD COLUMN sessions_ended_at timestamptz CHECK (pg_catalog.isfinite(sessions_ended_at));

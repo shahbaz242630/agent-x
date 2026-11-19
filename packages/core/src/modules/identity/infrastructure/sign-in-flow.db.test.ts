@@ -262,6 +262,35 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await reading).toEqual(latest);
   });
 
+  it('AG10 an end waits for a sign-in that has read the last end, then ends the session it opened (ADR-006 §6)', async () => {
+    const { userId } = await roundTrip();
+    const { promise: read, resolve: hasRead } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The sign-in, its read of the last end taken (FOR SHARE), held before it opens its session.
+    const signingIn = app.transaction().execute(async (tx) => {
+      await sessionsEndedAt(tx, userId);
+      hasRead(undefined);
+      await gate;
+      await sessions.open(tx, userId, evidence);
+    });
+    await read;
+    const ending = within(
+      20_000,
+      app.transaction().execute(async (tx) => {
+        await lockSessionsOf(tx, [userId]);
+        return endSessionsOf(tx, userId, new Date(START.getTime() + 60_000));
+      }),
+      'the end',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await signingIn;
+
+    // Its own session and the one the sign-in opened meanwhile, both ended: none outlives the end.
+    expect(await ending).toBe(2);
+    expect(await sessionsOf(userId)).toEqual([]);
+  });
+
   it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {
     const { url, flowId } = await signIn.begin();
     const state = new URL(url).searchParams.get('state') ?? '';
