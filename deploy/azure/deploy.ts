@@ -2791,6 +2791,21 @@ async function migratedFirst(
   return true;
 }
 
+/** Stops apps, before anything is sent, while the vault lacks a secret the apps read, saying which run brings it. */
+function refuseMissingSecrets(missing: readonly string[]): void {
+  // AG10: alone, it needs no issued secret, only the run that creates it.
+  if (missing.length === 1 && missing[0] === MACHINE_CONFIG) {
+    throw new Error(
+      `The vault has no ${MACHINE_CONFIG}, so no Zitadel copy could start and the API refuses its machine IDs: run secrets --keys first, then apps again.`,
+    );
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+    );
+  }
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2819,17 +2834,7 @@ async function deployApps(
       .filter((listed) => listed.enabled)
       .map((listed) => listed.name),
   );
-  // AG10: alone, it needs no issued secret, only the run that creates it.
-  if (missing.length === 1 && missing[0] === MACHINE_CONFIG) {
-    throw new Error(
-      `The vault has no ${MACHINE_CONFIG}, so no Zitadel copy could start and the API refuses its machine IDs: run secrets --keys first, then apps again.`,
-    );
-  }
-  if (missing.length > 0) {
-    throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
-    );
-  }
+  refuseMissingSecrets(missing);
   const records = await carriedRecords(steps, subscription);
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
