@@ -269,6 +269,24 @@ describe('downloading the audit log (E10b, decision 24)', () => {
     });
   });
 
+  it('AG10 builds a retry only from its admin’s own record: a key moved past the app to another’s is INTEGRITY_FAILED', async () => {
+    const w = await world();
+    const other = await member(w.org, 'admin');
+    const key = keyed(w.admin, EXPORT_OPERATION);
+    fileOf(await exports.export(w.admin, key, asked('csv'), CORRELATION));
+    const theirs = fileOf(await exports.export(other, keyed(other, EXPORT_OPERATION), asked('csv'), CORRELATION));
+    await database
+      .as('admin')
+      .query('update idempotency.keys set result_id = $3 where org_id = $1 and client_id = $2 and key = $4', [
+        w.org,
+        w.admin.userId,
+        theirs.id,
+        key.key,
+      ]);
+
+    expect(await exports.export(w.admin, key, asked('csv'), CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+  });
+
   it('refuses a range past the cap with nothing logged, an admin’s sixth in an hour, and a member not an admin', async () => {
     const w = await world();
     for (let n = 0; n < 50; n += 1) await noted(w, { n });

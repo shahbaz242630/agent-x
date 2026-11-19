@@ -18,7 +18,7 @@ import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
 import { openField } from './sealed-fields.ts';
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
-import { createSessions, endSessionsOf, lockSessionsOf, type Sessions } from './sessions.ts';
+import { createSessions, endSessionsOf, lockSessionsOf, type Sessions, sessionsEndedAt } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -238,6 +238,28 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
 
     expect(await settled).toBe('stale_authentication');
     expect(await sessionsOf(first.userId)).toEqual([{ id: first.sessionId }]);
+  });
+
+  it('AG10 keeps the latest end, never moved back by an earlier one, and waits for one committing as it is read', async () => {
+    const { userId } = await roundTrip();
+    const [earlier, later] = [new Date(START.getTime() + 60_000), new Date(START.getTime() + 120_000)];
+    for (const at of [later, earlier]) await app.transaction().execute((tx) => endSessionsOf(tx, userId, at));
+    expect(await app.transaction().execute((tx) => sessionsEndedAt(tx, userId))).toEqual(later);
+
+    const latest = new Date(START.getTime() + 180_000);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('update identity.users set sessions_ended_at = $2 where id = $1', [userId, latest]);
+    const reading = within(
+      20_000,
+      app.transaction().execute((tx) => sessionsEndedAt(tx, userId)),
+      'the read',
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    await holder.query('commit');
+    await holder.end();
+
+    expect(await reading).toEqual(latest);
   });
 
   it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {
