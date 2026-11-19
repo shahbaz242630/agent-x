@@ -283,16 +283,16 @@ async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: st
   const { fundingSourceId, supplierId, id } = request.shown.request;
   const source = await sourceOf(tx, states, { orgId, id: fundingSourceId }, 'share');
   if (source.outcome !== 'found') throw integrityFailed();
-  // A request names no version only for a supplier not the organisation's (0039), which requestInOrder never finds.
+  // A request names no version only for a supplier not the organisation's (0039): denied for it, it has none to show,
+  // as requestInOrder found (S206 V8).
   const versionId = fieldOf(request.state, 'supplier_version_id');
-  if (versionId === null) throw integrityFailed();
-  const version = await versionOf(tx, states, { orgId, id: versionId }, supplierId);
-  if (version.outcome !== 'found') throw integrityFailed();
+  const version = versionId === null ? null : await versionOf(tx, states, { orgId, id: versionId }, supplierId);
+  if (version !== null && version.outcome !== 'found') throw integrityFailed();
   const objects = await paymentObjectsOf(tx, orgId, id);
   const payment = objects === undefined ? null : await paymentInOrder(tx, states, orgId, objects.transactionId);
   // Found by its instruction's request, a signed field: a row moved to another request fails its seal there.
   if (payment !== null && payment.outcome !== 'found') throw integrityFailed();
-  return { source: source.source, sourceEventId: source.state.eventId, version: version.version, payment };
+  return { source: source.source, sourceEventId: source.state.eventId, version: version?.version ?? null, payment };
 }
 
 type FundingAndPayment = Awaited<ReturnType<typeof fundingAndPayment>>;
@@ -462,12 +462,10 @@ function bundleOf(
     supplier: {
       id: asked.supplierId,
       name: shown.supplierName,
-      version: {
-        id: version.id,
-        number: version.version,
-        name: version.displayName,
-        verification: logged.verification,
-      },
+      version:
+        version === null
+          ? null
+          : { id: version.id, number: version.version, name: version.displayName, verification: logged.verification },
     },
     fundingSource: {
       id: source.id,
@@ -568,7 +566,8 @@ export function createSpendRequestEvidence({
       readonly mandate: AuditSubjectKey | null;
       readonly mandateVersionId: string | null;
       readonly supplierId: string;
-      readonly versionId: string;
+      /** None for a supplier not the organisation's (S206 V8): no verification to find. */
+      readonly versionId: string | null;
     },
     correlationId: string,
   ): Promise<LoggedPart> => {
@@ -614,7 +613,8 @@ export function createSpendRequestEvidence({
         ? undefined
         : await basisFound(mandate, MANDATE_ACCEPTED, 'versionId', mandateVersionId);
     const supplier = { type: SUPPLIERS.subject, id: supplierId };
-    const verified = await basisFound(supplier, VERIFIER_RECORDED, 'verifiedVersionId', versionId);
+    const verified =
+      versionId === null ? undefined : await basisFound(supplier, VERIFIER_RECORDED, 'verifiedVersionId', versionId);
     return {
       events: events.toReversed(),
       names,
@@ -639,7 +639,7 @@ export function createSpendRequestEvidence({
           mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
           mandateVersionId,
           supplierId,
-          versionId: rows.version.id,
+          versionId: rows.version?.id ?? null,
         },
         reading.correlationId,
       );
@@ -820,7 +820,13 @@ const BUNDLE = {
   supplier: z
     .object({
       id: z.uuid().describe('The supplier to pay.'),
-      name: z.string().describe('The name its current verified details give it.'),
+      name: z
+        .string()
+        .nullable()
+        .describe(
+          'The name its current verified details give it; null when the organisation has no such supplier (the agent ' +
+            'named one it doesn’t have, so the request was denied).',
+        ),
       version: z
         .object({
           id: z.uuid().describe('The supplier’s details it was decided under, by their ID.'),
@@ -830,7 +836,8 @@ const BUNDLE = {
             'The signed verification of those details, as the log holds it; null if they were never verified as such.',
           ),
         })
-        .describe('The supplier’s details it was decided under.'),
+        .nullable()
+        .describe('The supplier’s details it was decided under; null when it is none of the organisation’s.'),
     })
     .describe('The supplier, never its payee’s reference or account.'),
   fundingSource: z

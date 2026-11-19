@@ -326,15 +326,30 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
     expect(await reads.show(renamed.w.org, second.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
   });
 
-  it('throws for an agent or supplier named that is missing: the list names only its own rows’, so a bug', async () => {
+  it('throws for an agent named that is missing: the list names only its own rows’, so a bug', async () => {
     const { w } = await ready();
-    const named = (read: typeof agentsNamed | typeof suppliersNamed) =>
-      withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, (tx, states): Promise<unknown> =>
-        read(tx, states, w.org, [ids.next()]),
-      );
+    const named = await withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, (tx, states) =>
+      agentsNamed(tx, states, w.org, [ids.next()]),
+    ).catch((error: unknown) => error);
 
-    await expect(named(agentsNamed)).rejects.toThrow('An agent a verified row names is missing');
-    await expect(named(suppliersNamed)).rejects.toThrow('A supplier a verified row names is missing');
+    expect(named).toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining('An agent a verified row names is missing') as unknown,
+      }),
+    );
+  });
+
+  // S206 V8: a request denied for naming a supplier its organisation doesn't have names one that is missing, so the
+  // supplier is said missing, for the list to judge by the request's seal, never thrown for (one row failing them all).
+  it('says which suppliers named are missing, beside those found, never throwing', async () => {
+    const { w } = await ready();
+    const absent = ids.next();
+    const named = await withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, (tx, states) =>
+      suppliersNamed(tx, states, w.org, [absent, w.suppliers[0] ?? '']),
+    );
+
+    expect(named).toMatchObject({ outcome: 'named', missing: new Set([absent]) });
+    expect(named.outcome === 'named' && [...named.suppliers.keys()]).toEqual([w.suppliers[0]]);
   });
 });
 

@@ -901,23 +901,57 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
     expect(await theirRows()).toEqual(before);
   }, 120_000);
 
-  // A bug the sweep found (S206 V8): an agent's ask naming a supplier its organisation doesn't have is recorded as
-  // DENIED, as asks are, but the organisation's request list then fails (500: suppliersNamed throws for a supplier a
-  // row names that is missing). Marked as failing until it is fixed, so the fix flips it; the body sweep below makes
-  // such asks, so the lists are swept above it.
-  it.fails('lists an organisation’s requests after its agent asked to pay a supplier it doesn’t have', async () => {
-    const asked = await send(ours.agent, 'POST', '/v1/spend-requests', {
-      ...(sample(
+  // A bug the sweep found (S206 V8): an agent's ask naming a supplier its organisation doesn't have (none, or another
+  // organisation's) is DENIED and sealed naming no version of the supplier's details (0039), and every reader of the
+  // organisation's requests then failed: the list with a 500 (suppliersNamed threw), the request, its evidence and
+  // its evidence's download as INTEGRITY_FAILED. Each now shows it, its supplier unnamed, never another's name.
+  it.each([
+    ['one that never existed', () => randomUUID()],
+    ['another organisation’s', () => theirs.world.suppliers[0] ?? ''],
+  ])(
+    'shows a request denied for naming a supplier its organisation doesn’t have, %s, in every reader',
+    async (_what, supplierOf) => {
+      const supplierId = supplierOf();
+      const base = sample(
         operations.find(({ method, route }) => method === 'POST' && route === '/v1/spend-requests')?.body ?? {},
-      ) as object),
-      supplierId: randomUUID(),
-    });
-    expect(asked.statusCode, asked.body).toBeLessThan(500);
-    const listed = await send(ours.admin, 'GET', '/v1/spend-requests');
-    expect(listed.statusCode, listed.body).toBe(200);
-  });
+      ) as object;
+      const asked = await send(ours.agent, 'POST', '/v1/spend-requests', { ...base, supplierId });
+      expect(asked.statusCode, asked.body).toBe(201);
+      const { id, status } = JSON.parse(asked.body) as { id: string; status: string };
+      expect(status).toBe('DENIED');
+      const unnamed = { id: supplierId, name: null };
+      const read = async (who: Readonly<Record<string, string>>, method: 'GET' | 'POST', url: string, code = 200) => {
+        const answer = await send(who, method, url);
+        expect(answer.statusCode, `${method} ${url}: ${answer.body}`).toBe(code);
+        // Never another organisation's record, beyond the ID the agent itself sent. The list holds the sweep's own
+        // denied asks too, each naming A's IDs as its agent sent them: checked below by name instead.
+        if (!url.endsWith('/spend-requests')) {
+          expect(everyIdOfTheirs().filter((one) => one !== supplierId && answer.body.includes(one))).toEqual([]);
+        }
+        return JSON.parse(answer.body) as Record<string, unknown>;
+      };
 
-  // Last: it puts both organisations on hold, which stops their other work.
+      const listed = (await read(ours.admin, 'GET', '/v1/spend-requests')) as { spendRequests: { id: string }[] };
+      expect(listed.spendRequests.find((one) => one.id === id)).toMatchObject({ supplier: unnamed });
+      // Every request naming a supplier of A's, this one or the sweep's, names none: never A's supplier's name.
+      const theirSuppliers = new Set(theirs.world.suppliers);
+      const naming = (listed.spendRequests as unknown as { supplier: { id: string; name: string | null } }[]).filter(
+        ({ supplier }) => theirSuppliers.has(supplier.id),
+      );
+      expect(naming.map(({ supplier }) => supplier.name)).toEqual(naming.map(() => null));
+      // Denied, so never waiting: the approvals list is untouched by it.
+      expect(await read(ours.admin, 'GET', '/v1/approvals')).toMatchObject({ unchecked: [] });
+      expect(await read(ours.admin, 'GET', `/v1/spend-requests/${id}`)).toMatchObject({ supplier: unnamed });
+      expect(await read(ours.admin, 'GET', `/v1/spend-requests/${id}/evidence`)).toMatchObject({
+        evidence: { supplier: { ...unnamed, version: null } },
+      });
+      expect(await read(ours.admin, 'POST', `/v1/spend-requests/${id}/evidence-exports`, 201)).toBeDefined();
+      // The agent's own read, and its MCP tool get_spend_request (its twin: the same use case).
+      expect(await read(ours.agent, 'GET', `/v1/agent/spend-requests/${id}`)).toMatchObject({ id, status: 'DENIED' });
+    },
+  );
+
+  // Near the end: it puts both organisations on hold, which stops their hand-offs.
   it('refuses B to clear its hold by an investigation of A’s, as by one never recorded, showing nothing of A’s', async () => {
     const quiet = { keys, ids, logger: testLogger() };
     await holdOrganisation(app, theirs.world.org, quiet, 'test');
@@ -957,5 +991,44 @@ describe('S206 V8 SEC-TEN-01 another organisation’s IDs reach nothing, on ever
     expect([theirInvestigation, ...everyIdOfTheirs()].filter((id) => shown.body.includes(id))).toEqual([]);
     expect(wrong).toEqual([]);
     expect(await theirRows()).toEqual(before);
+  });
+
+  // The other side of the fix (S206 V8): only a request sealed naming no version of its supplier's details is shown
+  // unnamed. One sealed naming a version, its supplier then deleted past the app (its foreign keys' triggers off,
+  // which takes the test server's superuser), is still not believed: left out of the list and named there as unchecked, and its
+  // own read INTEGRITY_FAILED. Last: it takes one of B's suppliers away.
+  it('still refuses to believe a request sealed naming its supplier’s details once that supplier is gone', async () => {
+    const supplierId = ours.world.suppliers[1] ?? '';
+    const base = sample(
+      operations.find(({ method, route }) => method === 'POST' && route === '/v1/spend-requests')?.body ?? {},
+    ) as object;
+    const asked = await send(ours.agent, 'POST', '/v1/spend-requests', { ...base, supplierId });
+    expect(asked.statusCode, asked.body).toBe(201);
+    const { id } = JSON.parse(asked.body) as { id: string };
+    expect((await send(ours.admin, 'GET', `/v1/spend-requests/${id}`)).statusCode).toBe(200);
+
+    const admin = await database.connect('admin');
+    try {
+      await admin.query('begin');
+      await admin.query("select pg_catalog.set_config('session_replication_role', 'replica', true)");
+      await admin.query('delete from suppliers.suppliers where org_id = $1 and id = $2', [ours.world.org, supplierId]);
+      await admin.query(
+        "delete from audit.events where org_id = $1 and subject_type = 'supplier' and subject_id = $2",
+        [ours.world.org, supplierId],
+      );
+      await admin.query('commit');
+    } finally {
+      await admin.end();
+    }
+
+    const listed = await send(ours.admin, 'GET', '/v1/spend-requests');
+    expect(listed.statusCode, listed.body).toBe(200);
+    const page = JSON.parse(listed.body) as { spendRequests: { id: string }[]; unchecked: string[] };
+    expect(page.spendRequests.map((one) => one.id)).not.toContain(id);
+    expect(page.unchecked).toContain(id);
+    expect(answerOf(await send(ours.admin, 'GET', `/v1/spend-requests/${id}`))).toEqual({
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
   });
 });

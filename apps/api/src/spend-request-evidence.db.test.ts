@@ -350,7 +350,7 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     expect(bundle.mandate?.acceptance).toMatchObject({ action: 'mandate.accepted' });
     expect(bundle.policies.organizationPolicyVersionId).not.toBeNull();
     expect(bundle.supplier.version).toMatchObject({ id: instruction.supplierVersionId });
-    expect(bundle.supplier.version.verification).toMatchObject({ action: 'supplier.verifier_recorded' });
+    expect(bundle.supplier.version?.verification).toMatchObject({ action: 'supplier.verifier_recorded' });
     expect(bundle.fundingSource).toMatchObject({ id: w.source });
     expect(bundle.reservation).toMatchObject({ state: 'FINALISED', amountMinor: Number(SMALL().minor) });
     expect(bundle.approval).toBeNull();
@@ -738,7 +738,7 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
     const { w, acting } = await ready();
     // Waiting, so no payment of its own reads those details again after the read of them.
     const waiting = await ask(acting, w);
-    const versionId = bundleOf(await exported(w.admin, waiting.id)).supplier.version.id;
+    const versionId = bundleOf(await exported(w.admin, waiting.id)).supplier.version?.id ?? '';
     const tampering = evidenceWith({
       betweenReads: () => changedByOwner(w, SUPPLIER_VERSIONS, versionId, ['display_name', 'Pay me instead LLC']),
     });
@@ -788,7 +788,7 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
   it('finds the verification of the very supplier details it was decided under, past a batch of newer ones', async () => {
     const { w, request } = await paid();
     const first = bundleOf(await exported(w.admin, request.id));
-    const verification = first.supplier.version.verification;
+    const verification = first.supplier.version?.verification;
     expect(verification).toMatchObject({ action: VERIFIER_RECORDED });
     // A full batch of newer verifications of the supplier, each naming other details: the search pages past them.
     await withTenant(app, w.org, async (tx) => {
@@ -805,7 +805,7 @@ describe('a spend request’s evidence (Phase 6 C2a, BR-16)', () => {
 
     const later = bundleOf(await exported(w.admin, request.id));
 
-    expect(later.supplier.version.verification?.id).toBe(verification?.id);
+    expect(later.supplier.version?.verification?.id).toBe(verification?.id);
   });
 });
 

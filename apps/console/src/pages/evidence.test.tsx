@@ -333,6 +333,21 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     }
   });
 
+  it('S206 V8 shows a request denied for a supplier the organisation doesn’t have: not one of yours, no details', async () => {
+    const evidence = handedOff();
+    signedIn();
+    answer(`GET ${READ}`, {
+      status: 200,
+      body: { evidence: { ...evidence, supplier: { id: evidence.supplier.id, name: null, version: null } } },
+    });
+    open(`/approvals/${ID}/evidence`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    expect(fact('Supplier and bank account', 'Supplier')).toBe('Not one of your suppliers');
+    expect(fact('Supplier and bank account', 'Details decided under')).toBe('None');
+    expect(fact('Supplier and bank account', 'Those details verified')).toBe('None');
+  });
+
   it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
     signedIn();
     answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });

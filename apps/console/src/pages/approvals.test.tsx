@@ -206,6 +206,23 @@ describe('the approvals lists (6B1)', () => {
     expect(rows.map((row) => within(row).getByText(/^0199a0f0-/).textContent)).toEqual([AGENT, twin]);
   });
 
+  it('S206 V8 lists and shows a request denied for a supplier the organisation doesn’t have, as not one of yours', async () => {
+    signedIn();
+    const unknown = { id: '0199a0f0-0000-7000-8000-00000000dead', name: null };
+    const denied = { status: 'DENIED', decision: 'DENY', expiresAt: null, supplier: unknown };
+    answer('GET /v1/spend-requests', {
+      status: 200,
+      body: { spendRequests: [listed(ID, denied)], next: null, unchecked: [] },
+    });
+    answer(`GET /v1/spend-requests/${ID}`, { status: 200, body: details(denied) });
+    open('/approvals/all');
+
+    expect(await screen.findByRole('link', { name: /Not one of your suppliers/ })).toBeDefined();
+    await userEvent.click(screen.getByRole('link', { name: /Not one of your suppliers/ }));
+    const term = await screen.findByText('Supplier', { selector: 'dt' });
+    expect(term.nextElementSibling?.textContent).toBe('Not one of your suppliers');
+  });
+
   it('says when no request was ever made', async () => {
     signedIn();
     answer('GET /v1/spend-requests', { status: 200, body: { spendRequests: [], next: null, unchecked: [] } });

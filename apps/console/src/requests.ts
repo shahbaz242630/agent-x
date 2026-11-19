@@ -40,7 +40,8 @@ export interface ListedRequest {
   readonly amountMinor: number;
   readonly currency: string;
   readonly agent: Named;
-  readonly supplier: Named;
+  /** Its name null for a supplier the organisation doesn't have: the agent named one, so it was denied (S206 V8). */
+  readonly supplier: { readonly id: string; readonly name: string | null };
   readonly fundingSourceId: string;
   readonly mandateId: string | null;
   readonly bankReference: string;

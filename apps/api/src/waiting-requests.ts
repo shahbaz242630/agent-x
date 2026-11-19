@@ -45,6 +45,8 @@ export function createWaitingRequests({
           // Only a request still waiting has an expiry (requestInOrder: read from its decision).
           if (read.outcome !== 'found' || read.shown.expiresAt === null) return undefined;
           const { request, agentName, supplierName, expiresAt } = read.shown;
+          // One naming no supplier of the organisation's was denied, so never waits (S206 V8).
+          if (supplierName === null) return undefined;
           return {
             amountMinor: request.amount.minor,
             currency: request.amount.currency,

@@ -60,15 +60,16 @@ export interface Evidence {
     readonly organizationPolicyVersionId: string | null;
     readonly mandatePolicyVersionId: string | null;
   };
+  /** Its name and version null for a supplier the organisation doesn't have (S206 V8). */
   readonly supplier: {
     readonly id: string;
-    readonly name: string;
+    readonly name: string | null;
     readonly version: {
       readonly id: string;
       readonly number: number;
       readonly name: string;
       readonly verification: LogEvent | null;
-    };
+    } | null;
   };
   readonly fundingSource: {
     readonly id: string;
