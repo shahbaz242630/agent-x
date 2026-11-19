@@ -6,6 +6,7 @@
   {"table":"agents.agent_keys","name":"agent_keys_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"agents.agent_keys","name":"with_its_agent","definition":"UNIQUE (org_id, id, agent_id)"},
   {"table":"agents.agents","name":"agents_pkey","definition":"PRIMARY KEY (org_id, id)"},
+  {"table":"agents.connection_heads","name":"connection_heads_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"agents.connection_tokens","name":"connection_tokens_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"agents.connections","name":"connections_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"audit.events","name":"events_org_id_id_key","definition":"UNIQUE (org_id, id)"},

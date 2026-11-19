@@ -1,11 +1,24 @@
 import type { Generated } from 'kysely';
 
-/** The agents schema's tables (db/migrations/0027_agents.sql), as Kysely sees them. */
+/** The agents schema's tables (db/migrations/0027_agents.sql, 0093, 0102), as Kysely sees them. */
 export interface AgentsTables {
   'agents.agents': AgentsTable;
   'agents.agent_keys': AgentKeysTable;
   'agents.connections': ConnectionsTable;
   'agents.connection_tokens': ConnectionTokensTable;
+  'agents.connection_heads': ConnectionHeadsTable;
+}
+
+/** A connection's refresh head (0102): the refresh token that may be used now, its signed state's. */
+interface ConnectionHeadsTable {
+  org_id: string;
+  /** Its connection's (its key's) ID. */
+  id: string;
+  refresh_id: string;
+  created_at: Date;
+  /** These two are written by the signed state's steps alone (the audit module's record). */
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
 }
 
 interface AgentsTable {

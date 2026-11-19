@@ -35,6 +35,7 @@ import {
   type AuditTransaction,
   type AuditTrail,
   createAuditTrail,
+  eventsSinceChecked,
   headJoins,
   type HistoryToRead,
   type LogPageToRead,
@@ -2632,5 +2633,83 @@ describe("the head's check under the tenant wall (S178)", () => {
       expect(String(scan['Index Cond'])).toMatch(/seq >/);
       expect(scan['Rows Removed by Filter'] ?? 0).toBe(0);
     }
+  });
+});
+
+describe("the organisation's events since a time, the chain checked through them (eventsSinceChecked; S206, R-15)", () => {
+  const since = (orgId: string, at: Date) => withTenant(app, orgId, (tx) => eventsSinceChecked(tx, keys, at));
+  /** The database's own time, which the events are recorded at. */
+  const dbNow = async (): Promise<Date> => {
+    const [row] = await attacker.query('select pg_catalog.clock_timestamp() as now', []);
+    return row?.now as Date;
+  };
+  const START = new Date('2026-11-19T09:00:00Z');
+  const steps = (check: Awaited<ReturnType<typeof since>>) =>
+    check.kind === 'checked' ? check.events.map(({ details }) => details) : check;
+
+  /** Two events, then the time, then two more: the edge is the second. */
+  async function twoAndTwo(): Promise<Date> {
+    await record(org, event(1), event(2));
+    const at = await dbNow();
+    await record(org, event(3), event(4));
+    return at;
+  }
+
+  it('gives the events since the time, by whom and with what, the chain checked from the last before it', async () => {
+    const at = await twoAndTwo();
+    expect(steps(await since(org, at))).toEqual(['{"step":3}', '{"step":4}']);
+    const check = await since(org, at);
+    expect(check.kind === 'checked' && check.events[0]).toEqual({
+      actorType: 'user',
+      actorId: USER,
+      details: '{"step":3}',
+    });
+  });
+
+  it('checks the whole chain when none was recorded before the time, and none after it', async () => {
+    const first = await dbNow();
+    await record(org, event(1), event(2));
+    expect(steps(await since(org, first))).toEqual(['{"step":1}', '{"step":2}']);
+    expect(steps(await since(org, await dbNow()))).toEqual([]);
+    expect(steps(await since(newOrg(), first))).toEqual([]);
+  });
+
+  it("believes nothing outside an organisation's transaction", async () => {
+    expect(await app.transaction().execute((tx) => eventsSinceChecked(tx, keys, START))).toEqual({
+      kind: 'unbelieved',
+      reason: 'no_organisation',
+    });
+  });
+
+  it.each([
+    ['an event since the time deleted', 'delete from audit.events where org_id = $1 and seq = 3', 'gap', 3n],
+    ['the edge before the time deleted', 'delete from audit.events where org_id = $1 and seq = 2', 'gap', 2n],
+    ['every event before the time deleted', 'delete from audit.events where org_id = $1 and seq <= 2', 'gap', 1n],
+    [
+      'an event since moved before the time, to be taken as the edge',
+      "update audit.events set recorded_at = recorded_at - interval '1 hour' where org_id = $1 and seq = 3",
+      'hash',
+      3n,
+    ],
+    [
+      'the details of one since emptied',
+      "update audit.events set details = '{}' where org_id = $1 and seq = 4",
+      'hash',
+      4n,
+    ],
+  ])('FX-TAMPER: with %s, believes none of them, and says where', async (_what, tamper, reason, seq) => {
+    const at = await twoAndTwo();
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await attacker.query(tamper, [org]);
+    expect(await since(org, at)).toEqual({ kind: 'unbelieved', reason, orgId: org, seq });
+  });
+
+  it('FX-TAMPER: an event since moved to just before the time is taken as the edge, and refused there', async () => {
+    const at = await twoAndTwo();
+    await attacker.query(
+      "update audit.events set recorded_at = $2::timestamptz - interval '1 millisecond' where org_id = $1 and seq = 3",
+      [org, at],
+    );
+    expect(await since(org, at)).toEqual({ kind: 'unbelieved', reason: 'anchor', orgId: org, seq: 3n });
   });
 });

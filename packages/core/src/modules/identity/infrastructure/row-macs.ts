@@ -155,7 +155,11 @@ export function macHolds(
 
 /**
  * The integrity alarm for a person, session or challenge whose MAC doesn't
- * hold: a row written by something without the app's key. Names the row and
+ * hold: a row written by something without the app's key (`mac`), or a
+ * challenge whose MAC holds but whose use the audit trail already records,
+ * put back after its change deleted it (`already_used`), or one whose use
+ * can't be told because the audit chain since it opened fails its check
+ * (`chain_unverified`). Names the row and
  * its person, never the cookie, so the incident can find who was being
  * impersonated.
  */
@@ -163,6 +167,7 @@ export function rowForged(
   logger: Logger,
   check: 'user' | 'session' | 'step_up_challenge',
   row: { readonly id: string; readonly user_id: string },
+  reason: 'mac' | 'already_used' | 'chain_unverified' = 'mac',
 ): void {
-  logger.error('audit.integrity_failed', { check, reason: 'mac', rowId: row.id, userId: row.user_id });
+  logger.error('audit.integrity_failed', { check, reason, rowId: row.id, userId: row.user_id });
 }

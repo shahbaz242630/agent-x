@@ -9,13 +9,16 @@
 // - A refresh token is used once: usedNow fills in its use in one statement,
 //   only where none was, so two uses at once can't both rotate it; the second
 //   is a reuse, and its connection is revoked (the API's oauth-grants.ts).
+//   Which refresh token is the connection's current one is kept in the
+//   connection's own signed state (connection-heads.ts, 0102, R-15), so the
+//   database's owner can't hide a use by clearing `used_at`. Each token's
+//   secret is the pepper's own MAC of its kind, key and ID (tokenGenuine), so
+//   a token sent with its row deleted or changed still shows it was issued.
 // - The door's read (tokenRowRead, tokenProven): the row read alone, unlocked,
 //   outside any share, and its secret checked with exactly one verifyMac
 //   whatever is found, a MAC of zeros for no row, so a token's ID not in use
 //   takes as long as a wrong secret. The row grants nothing: its connection
 //   and key are then read through their signed states.
-import { randomBytes } from 'node:crypto';
-
 import { type SentTogether, sendTogether, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, sql } from 'kysely';
@@ -25,6 +28,7 @@ import { KEY_SECRET_BYTES, type Scope, scopesOf, scopesText } from '../domain/ag
 import {
   type ConnectionTokenKind,
   connectionTokenMessage,
+  connectionTokenSecretMessage,
   connectionTokenText,
   type PresentedToken,
   tokenExpiresAt,
@@ -40,6 +44,8 @@ export interface IssuedTokens {
   readonly refreshToken: string;
   /** The access token's ID, for the log alone (it is public, as a key's ID is). */
   readonly accessTokenId: string;
+  /** The refresh token's ID: the connection's refresh head moves to it (0102). */
+  readonly refreshTokenId: string;
   readonly accessExpiresAt: Date;
   readonly scopes: readonly Scope[];
 }
@@ -74,7 +80,9 @@ export async function issueTokens(
   const kept = scopesText(scopes);
   const made = (['access', 'refresh'] as const).map((kind) => {
     const id = ids.next();
-    const secret = randomBytes(KEY_SECRET_BYTES);
+    // The secret is the pepper's MAC of what the token is (0102): 256 bits no one without the pepper can make.
+    const secret = keys.mac('agent-key-pepper', connectionTokenSecretMessage({ kind, keyId, tokenId: id })).mac;
+    if (secret.length !== KEY_SECRET_BYTES) throw new Error("a token's secret is the pepper's 32-byte MAC");
     const expiresAt = tokenExpiresAt(kind, now, keyExpiresAt);
     const { mac, keyVersion } = keys.mac(
       'agent-key-pepper',
@@ -106,6 +114,7 @@ export async function issueTokens(
     accessToken: access.text,
     refreshToken: refresh.text,
     accessTokenId: access.row.id,
+    refreshTokenId: refresh.row.id,
     accessExpiresAt: access.row.expires_at,
     scopes: scopesOf(kept),
   };
@@ -257,4 +266,17 @@ export function tokenProven(keys: KeyProvider, row: TokenRow | undefined, presen
   if (!ours) return { outcome: 'unread' };
   if (!held) return { outcome: 'key_not_held' };
   return matches ? { outcome: 'proven', row } : { outcome: 'wrong_secret' };
+}
+
+/**
+ * Whether a token sent is one the app issued (0102): its secret the pepper's MAC of its kind, key and ID, under any
+ * version of the pepper held. Asked only of a token its row doesn't prove, to tell a row deleted or changed (the
+ * integrity alarm) from a token never issued. A token made before 0102, its secret random, never is.
+ */
+export function tokenGenuine(keys: KeyProvider, presented: PresentedToken): boolean {
+  const pepper = keys.describe().find(({ purpose }) => purpose === 'agent-key-pepper');
+  const message = connectionTokenSecretMessage(presented);
+  return (pepper?.versions ?? []).some(({ version }) =>
+    keys.verifyMac('agent-key-pepper', version, message, presented.secret),
+  );
 }
