@@ -165,6 +165,31 @@ const revoke = (id: string) =>
 
 const hold = () => withSignedStates(app, org, quiet(), (tx, states) => states.integrityHold(tx, org, 'none'));
 
+/**
+ * Every place of the organisation's share in `shared` taken by its own agent traffic, held open while `work` runs:
+ * anything that then waits for a place waits out the share's bound. The places are taken before `work` starts.
+ */
+async function withShareHeld<T>(shared: Database<Tables>, places: number, work: () => Promise<T>): Promise<T> {
+  const letGo = Promise.withResolvers<undefined>();
+  const opened = Array.from({ length: places }, () => Promise.withResolvers<undefined>());
+  const held = opened.map(({ resolve }) =>
+    asAgentTraffic(() =>
+      withTenant(shared, org, async () => {
+        resolve(undefined);
+        await letGo.promise;
+      }),
+    ),
+  );
+  try {
+    // A place refused ends the wait too, as the failure it is.
+    await Promise.race([Promise.all(opened.map(({ promise }) => promise)), Promise.all(held)]);
+    return await work();
+  } finally {
+    letGo.resolve(undefined);
+    await Promise.all(held);
+  }
+}
+
 /** The one session of this database waiting for a lock. */
 const waitingPid = async (): Promise<number> => {
   const [pid] = await waitUntilQueued(database.as('admin'), 1);
@@ -355,48 +380,29 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
     ]);
   });
 
-  it('V7: leaves the whole share to the organisation’s agents while wrong secrets are held mid-check at the door (forced)', async () => {
+  it('V7: answers a flood of wrong secrets, listed IDs and not, while the organisation holds its whole share: none waits for a place (forced)', async () => {
     const agent = await newAgent();
-    const { id } = await issue(agent);
+    const { id, text } = await issue(agent);
     const shared = createDatabase<Tables>(
       { ...database.connection('app'), maxConnections: 8, organisationShare: 2 },
       testLogger(capture),
     );
-    // Every door read waits on the keys' table, so the outsider's checks are certainly in flight, not done.
-    const holder = await database.connect('admin');
-    await holder.query('begin');
-    await holder.query('lock table agents.agent_keys in access exclusive mode');
     const checker = createAgentKeyCheck({ database: shared, keys, ids, clock, logger: testLogger(capture) });
     const wrong = Buffer.alloc(32, 0xee);
-    const outsider = [id, id, ids.next(), ids.next()].map((keyId) =>
-      checker.check(agentKeyText(keyId, wrong), '0199a0f0-0000-7000-8000-00000000c017'),
-    );
-    const letGo = Promise.withResolvers<undefined>();
-    const places: Promise<unknown>[] = [];
     try {
-      await waitUntilQueued(database.as('admin'), 4);
-      // Both of the share's places, taken at once by the organisation's own work while all four wait at the door: a
-      // check holding a place would leave the second to wait out the share's 10 s.
-      const opened = [Promise.withResolvers<undefined>(), Promise.withResolvers<undefined>()];
-      places.push(
-        ...opened.map(({ resolve }) =>
-          asAgentTraffic(() =>
-            withTenant(shared, org, async () => {
-              resolve(undefined);
-              await letGo.promise;
-            }),
+      // No deadline: a check that took a place would wait out the share's bound and be told busy, never refused.
+      const answers = await withShareHeld(shared, 2, () =>
+        Promise.allSettled(
+          [id, id, id, ids.next(), ids.next(), ids.next()].map((keyId) =>
+            checker.check(agentKeyText(keyId, wrong), '0199a0f0-0000-7000-8000-00000000c017'),
           ),
         ),
       );
-      await within(3_000, Promise.all(opened.map(({ promise }) => promise)), 'both places in the share');
-    } finally {
-      letGo.resolve(undefined);
-      await Promise.all(places);
-      await holder.query('rollback');
-      await holder.end();
-    }
-    try {
-      expect(await Promise.all(outsider)).toEqual(Array.from({ length: 4 }, () => ({ outcome: 'refused' })));
+      expect(answers).toEqual(
+        Array.from({ length: 6 }, () => ({ status: 'fulfilled', value: { outcome: 'refused' } })),
+      );
+      // The share given back whole: the organisation's own agent goes on at once.
+      expect(await checker.check(text, '0199a0f0-0000-7000-8000-00000000c018')).toMatchObject({ outcome: 'accepted' });
     } finally {
       await shared.destroy();
     }
@@ -404,7 +410,7 @@ describe(`SEC-AG-01 AG1 (PL-67) the key check: a caller holding only a key's ID,
       lines('agent_key.refused')
         .map(({ reason }) => String(reason))
         .sort(),
-    ).toEqual(['unlisted', 'unlisted', 'wrong_secret', 'wrong_secret']);
+    ).toEqual(['unlisted', 'unlisted', 'unlisted', 'wrong_secret', 'wrong_secret', 'wrong_secret']);
     expect(lines('db.organisation_busy')).toEqual([]);
   });
 });
