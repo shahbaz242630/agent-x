@@ -356,7 +356,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         actor_id: 'api',
         action: 'security_events.sealing_started',
         // Its manifest of the rows it began with: none here.
-        details: expect.stringContaining('"rows":0') as unknown,
+        details: expect.stringContaining('"days":"{}"') as unknown,
       },
       { seq: '2', actor_id: 'api', action: 'security_events.all_sealed', details: '{}' },
       {

@@ -167,9 +167,15 @@ const recorded = (action: string, details: Readonly<Record<string, string | numb
       createPlatformChain({ keys, ids }).record(tx, { actor: { type: 'system', id: 'api' }, action, details }),
     );
 
-/** The manifest a start would record as it began sealing at AT. */
-const manifestNow = () =>
-  legacyManifest(app, () => Promise.resolve([ORG]), new Date(AT.getTime() - (RETENTION - 2) * DAY_MS));
+/** The manifest a start would record as it began sealing at AT, as its record's details hold it. */
+const manifestNow = async () => {
+  const manifest = await legacyManifest(
+    app,
+    () => Promise.resolve([ORG]),
+    new Date(AT.getTime() - (RETENTION - 2) * DAY_MS),
+  );
+  return { since: manifest.since, days: JSON.stringify(manifest.days) };
+};
 
 const alarms = () =>
   capture
@@ -361,7 +367,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
   it('a sealing begun and left part way (a stop) is taken up by the next start, from the rows still without a MAC', async () => {
     await legacyRows();
     // Another start's record of its beginning, with its manifest, and one row it reached sealed, as a stop leaves them.
-    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
+    await recorded(SEALING_STARTED, await manifestNow());
     const [first] = await owner().query<Row>(
       'select id, kind, reason, ip, user_id, window_start, count, created_at from security.events order by id limit 1',
     );
@@ -381,7 +387,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
 
   it('a sealing begun and left, its end then deleted from the chain’s tail and the head put back, rows planted: the manifest no longer holds, nothing sealed, the alarm', async () => {
     await legacyRows();
-    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
+    await recorded(SEALING_STARTED, await manifestNow());
     // The head as it stood with the beginning the last event, kept by the owner.
     const [kept] = await owner().query<{ seq: string; hash: Buffer; mac: Buffer; mac_key_version: number }>(
       'select seq, hash, mac, mac_key_version from platform_controls.audit_head',
@@ -462,9 +468,50 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual([]);
   });
 
+  it('taken up again days later, after the sweep took rows of the oldest days: those days left out of the manifest’s comparison, the rest sealed', async () => {
+    // Rows of an old day, written well inside the scope then, and of the day the sealing began.
+    const oldDay = new Date(AT.getTime() - 25 * DAY_MS);
+    await owner().query(
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+       values ($1, 'sign_in_failed', 'state_mismatch', null, null, $2, 1, $2, true)`,
+      [ids.next(), oldDay],
+    );
+    await legacyRows();
+    await recorded(SEALING_STARTED, await manifestNow());
+    // Ten days on, the sweep has taken the old day's rows.
+    await owner().query('delete from security.events where created_at = $1', [oldDay]);
+
+    expect(await seal(new Date(AT.getTime() + 10 * DAY_MS))).toBe('sealed');
+    expect(await unsealed()).toBe('0');
+    expect(alarms()).toEqual([]);
+  });
+
+  it('past the cutoff, every row from before 0105 sealed though no record says so: quiet, nothing left to seal', async () => {
+    await legacyRows();
+    const kept = await headRow();
+    await seal();
+    await deletedFromTail(kept);
+
+    expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('sealed');
+    expect(alarms()).toEqual([]);
+  });
+
+  it('past the cutoff, a database with no row from before 0105 left unsealed (one made after it, say): quiet', async () => {
+    expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('sealed');
+    expect(await records()).toEqual([]);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('past the cutoff, a row from before 0105 still without a MAC and no record of its sealing: the alarm', async () => {
+    await legacyRows();
+
+    expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
+    expect(alarms()).toEqual(['seal_record_deleted']);
+  });
+
   it('past the cutoff, a sealing begun and left is not taken up: the alarm, the rows left unbelieved', async () => {
     await legacyRows();
-    await recorded(SEALING_STARTED, { ...(await manifestNow()) });
+    await recorded(SEALING_STARTED, await manifestNow());
 
     expect(await seal(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toBe('deleted');
     expect(await unsealed()).toBe('5');

@@ -32,7 +32,7 @@
 // TODO(S206 AT10-style): delete this, and its call at start, once the release
 // that brings 0105 has started everywhere and every environment holds
 // `all_sealed`, as 0100's people backfill goes.
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 
 import { limitedTransaction, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -46,7 +46,7 @@ import {
   platformEventSealed,
   platformEventsSigned,
 } from '../../platform-controls/index.ts';
-import { eventMac, evidenceMessage, rowMac } from './event-seals.ts';
+import { eventMac, evidenceMessage, firstCheckableDay, rowMac } from './event-seals.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 /** The platform events that record the sealing: begun, and done. */
@@ -88,15 +88,24 @@ export interface ChainPlace {
   readonly macKeyVersion: number;
 }
 
-/** What `sealing_started` records of the rows from before 0105 as it began: how many, and the digest of them all. */
-export interface Manifest {
+/** One UTC day of a manifest: how many marked rows say they were written in it, and the digest of them. */
+interface ManifestDay {
   readonly rows: number;
   readonly digest: string;
+}
+
+/**
+ * What `sealing_started` records of the rows from before 0105 as it began, a day at a time (by when each says it was
+ * written): so a sealing taken up again days later holds the rows to it only for the days the sweep can't yet have
+ * touched, never reading a row the sweep took as one deleted.
+ */
+export interface Manifest {
   /**
    * The rows it holds: those written from this time on. Older ones, the sweep's within days, are left to it unsealed
-   * (never believed), so the sweep taking one between a start and the next never reads as a row deleted.
+   * (never believed).
    */
   readonly since: string;
+  readonly days: Readonly<Record<string, ManifestDay>>;
 }
 
 /** The records on the platform chain, each sealed: where sealing began and its manifest, if it did; where it ended. */
@@ -107,10 +116,19 @@ interface Records {
 
 /** The manifest a record's details hold, or undefined for none. */
 function manifestIn(details: string): Manifest | undefined {
-  const { rows, digest, since } = JSON.parse(details) as Record<string, unknown>;
-  return typeof rows === 'number' && typeof digest === 'string' && typeof since === 'string'
-    ? { rows, digest, since }
-    : undefined;
+  const { since, days } = JSON.parse(details) as Record<string, unknown>;
+  if (typeof since !== 'string' || typeof days !== 'string') return undefined;
+  // Sealed with the record, as the app wrote it: read as it was written.
+  return { since, days: JSON.parse(days) as Record<string, ManifestDay> };
+}
+
+/**
+ * each such day the same digest (over every row, so the same rows too), and none with rows now that had none then.
+ * each such day the same count and digest, and none with rows now that had none then.
+ */
+function manifestHolds(then: Manifest, now: Manifest, from: string): boolean {
+  const days = new Set([...Object.keys(then.days), ...Object.keys(now.days)].filter((day) => day >= from));
+  return [...days].every((day) => then.days[day]?.digest === now.days[day]?.digest);
 }
 
 /** The records as their rows stand, each one's MAC checked; `unsealed` if any can't be believed, or begun with none. */
@@ -137,8 +155,9 @@ const textOrNull = (value: unknown): string | null => (typeof value === 'string'
 interface LegacyTable {
   readonly table: RawBuilder<unknown>;
   readonly columns: RawBuilder<unknown>;
-  /** When a row says it was written: what the sealing's scope is held to. */
+  /** When a row says it was written: what the sealing's scope is held to, and the manifest's days. */
   readonly written: RawBuilder<unknown>;
+  readonly writtenColumn: 'created_at' | 'received_at';
   readonly macOf: (keys: KeyProvider, row: Row) => { readonly mac: Buffer; readonly mac_key_version: number };
 }
 
@@ -161,6 +180,7 @@ const GLOBAL_EVENTS: LegacyTable = {
   table: sql.table('security.events'),
   columns: sql`id, kind, reason, ip, user_id, window_start, count, created_at`,
   written: sql.ref('created_at'),
+  writtenColumn: 'created_at',
   macOf: eventRowMac,
 };
 
@@ -168,6 +188,7 @@ const ORG_EVENTS: LegacyTable = {
   table: sql.table('security.org_events'),
   columns: sql`org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at`,
   written: sql.ref('created_at'),
+  writtenColumn: 'created_at',
   macOf: eventRowMac,
 };
 
@@ -175,6 +196,7 @@ const EVIDENCE: LegacyTable = {
   table: sql.table('security.partner_event_evidence'),
   columns: sql`id, reason, ip, body_key_version, body_bytes, received_at`,
   written: sql.ref('received_at'),
+  writtenColumn: 'received_at',
   macOf: (keys, row) =>
     rowMac(
       keys,
@@ -237,6 +259,12 @@ async function sealTable(
 }
 
 /** Whether any row of the table from before 0105 already carries a MAC: only a sealing gives one. */
+/** Whether any row of the table from before 0105 is still without a MAC. */
+const anyUnsealedIn = async (tx: Tx, legacy: LegacyTable): Promise<boolean> => {
+  const { rows } = await sql`select 1 from ${legacy.table} where mac is null and before_macs limit 1`.execute(tx);
+  return rows.length > 0;
+};
+
 const anyMac = async (tx: Tx, legacy: LegacyTable): Promise<boolean> => {
   const { rows } = await sql`select 1 from ${legacy.table} where mac is not null and before_macs limit 1`.execute(tx);
   return rows.length > 0;
@@ -266,8 +294,7 @@ export async function legacyManifest(
   orgs: () => Promise<readonly string[]>,
   since: Date,
 ): Promise<Manifest> {
-  const hash = createHash('sha256');
-  let rows = 0;
+  const days = new Map<string, { rows: number; hash: Hash }>();
   const digestTable = async (
     open: <T>(work: (tx: Tx) => Promise<T>) => Promise<T>,
     name: string,
@@ -277,8 +304,13 @@ export async function legacyManifest(
     for (;;) {
       const from = after;
       const page = await open((tx) => markedPage(tx, legacy, since, from));
-      for (const row of page) hash.update(manifestLine(name, row));
-      rows += page.length;
+      for (const row of page) {
+        const day = (row[legacy.writtenColumn] as Date).toISOString().slice(0, 10);
+        const seen = days.get(day) ?? { rows: 0, hash: createHash('sha256') };
+        seen.hash.update(manifestLine(name, row));
+        seen.rows += 1;
+        days.set(day, seen);
+      }
       const last = page.at(-1);
       if (last === undefined || page.length < PAGE) return;
       after = String(last.id);
@@ -290,7 +322,12 @@ export async function legacyManifest(
   for (const orgId of await orgs()) {
     await digestTable((work) => withTenant(db, orgId, work, { limited: true }), 'org_events', ORG_EVENTS);
   }
-  return { rows, digest: hash.digest('hex'), since: since.toISOString() };
+  return {
+    since: since.toISOString(),
+    days: Object.fromEntries(
+      [...days].map(([day, seen]) => [day, { rows: seen.rows, digest: seen.hash.digest('hex') }] as const),
+    ),
+  };
 }
 
 export async function sealLegacyRows(
@@ -332,6 +369,13 @@ export async function sealLegacyRows(
       reason: `seal_record_${reason}`,
     });
     return reason;
+  };
+
+  /** Whether any marked row of any table is still without a MAC: one per organisation's transaction for its own. */
+  const anyUnsealed = async (): Promise<boolean> => {
+    if (await plain(async (tx) => (await anyUnsealedIn(tx, GLOBAL_EVENTS)) || anyUnsealedIn(tx, EVIDENCE))) return true;
+    for (const orgId of await orgs()) if (await inOrg(orgId)((tx) => anyUnsealedIn(tx, ORG_EVENTS))) return true;
+    return false;
   };
 
   /** Whether any row of any table already carries a MAC: one per organisation's transaction for its own. */
@@ -390,10 +434,10 @@ export async function sealLegacyRows(
     const manifest = await legacyManifest(db, orgs, since);
     if (now.started === undefined) {
       if (await anySigned()) return alarm('deleted');
-      await recordAlone(SEALING_STARTED, { ...manifest });
+      await recordAlone(SEALING_STARTED, { since: manifest.since, days: JSON.stringify(manifest.days) });
       // Anchored at once: deleting the record is then a chain wound back past an anchor, which step 0 refuses.
       await anchorNow();
-    } else if (manifest.rows !== now.started.manifest.rows || manifest.digest !== now.started.manifest.digest) {
+    } else if (!manifestHolds(now.started.manifest, manifest, firstCheckableDay(clock.now(), retentionDays))) {
       return alarm('manifest');
     }
     await sealTable(plain, keys, GLOBAL_EVENTS, since);
@@ -404,11 +448,13 @@ export async function sealLegacyRows(
     return 'sealed';
   };
 
-  const found = await records();
+  // Its end recorded and sealed: done, with no walk of the chain (nothing will be sealed, so nothing rests on it).
+  const found = await plain((tx) => recordsIn(tx, keys));
   if (found === 'unsealed') return alarm('unsealed');
   if (found.sealedAt !== undefined) return 'sealed';
-  // Past the cutoff no sealing runs, nor is one taken up again: one unfinished or missing by then is a record deleted.
-  if (clock.now().getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return alarm('deleted');
+  // Past the cutoff no sealing runs, nor is one taken up again. A marked row still without a MAC by then is a sealing
+  // unfinished or its record deleted: the alarm. With none (a database made after 0105, say) there is nothing to do.
+  if (clock.now().getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return (await anyUnsealed()) ? alarm('deleted') : 'sealed';
   // One sealer at a time: a session lock on a connection of its own, held with no transaction open (so no limit on
   // a transaction left waiting can end it however long the sealing runs), given back at the end; a copy that finds it
   // held leaves the work to that one, quietly. A connection lost takes the lock with it.
