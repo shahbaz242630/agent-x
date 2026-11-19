@@ -1961,7 +1961,10 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
   describe('read as it is sent, from the payment’s verified records (remittances.ts)', () => {
     const SUPPLIER_EMAIL = 'accounts@gulf-office.example.test';
     const remittances = () => createRemittances({ database: app, keys, ids, logger: testLogger(capture) });
-    /** An invoice number the rail can't carry whole: its bank reference keeps the Latin part alone. */
+    /**
+     * An order reference the rail can't carry whole: its bank reference keeps the Latin part alone. Not
+     * invoice-shaped (Arabic letters), so the supplier is shown that bank reference in its place (AG11).
+     */
     const INVOICE = 'فاتورة INV-C2B-0042';
 
     /** What the world's audit log keeps of its remittances (partner S119): readable by its admins. */
@@ -1999,22 +2002,23 @@ describe('a payment that SUCCEEDED queues its supplier’s remittance email, onc
         to: SUPPLIER_EMAIL,
         paid: {
           payerName: 'Acme Trading LLC',
-          invoiceNumber: INVOICE,
+          orderReference: INVOICE,
           bankReference: 'INV-C2B-0042',
           amountMinor: ALLOWED().minor,
           currency: 'AED',
         },
       });
-      // Nothing kept until it is sent; then that it was, by the API, never the address.
+      // Nothing kept until it is sent; then that it was, by the API, with which reference it showed
+      // (AG11: never the agent's text itself), never the address.
       expect(await remittanceEvents(w)).toEqual([]);
-      await remittances().emailed(w.org, transactionId);
+      await remittances().emailed(w.org, transactionId, 'payment_reference');
       expect(await remittanceEvents(w)).toEqual([
         {
           actor_type: 'system',
           actor_id: 'api',
           action: 'payment.remittance_emailed',
           subject_id: transactionId,
-          details: {},
+          details: { reference: 'payment_reference' },
         },
       ]);
     });

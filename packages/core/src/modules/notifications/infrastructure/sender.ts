@@ -57,10 +57,12 @@
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
+import type { RemittanceReference } from '../domain/invoice-shape.ts';
 import {
   messageFor,
   type NoticeMessage,
   type PaidRemittance,
+  referenceShown,
   type ResetLink,
   type ResetPerson,
   type WaitingRequest,
@@ -156,8 +158,12 @@ export interface Remittances {
    * transaction. Throws if its records can't be read, or can't be believed.
    */
   remittanceOf(orgId: string, transactionId: string): Promise<RemittanceRead>;
-  /** Records in the audit log that the payment's supplier was emailed. Throws if it can't be recorded. */
-  emailed(orgId: string, transactionId: string): Promise<void>;
+  /**
+   * Records in the audit log that the payment's supplier was emailed, and which
+   * reference it showed (AG11: the order reference, the bank's, or neither; never the text).
+   * Throws if it can't be recorded.
+   */
+  emailed(orgId: string, transactionId: string, reference: RemittanceReference): Promise<void>;
   /**
    * Records in the audit log that the payment's remittance was given up, and
    * why (the failure the outbox keeps): a send that can never succeed, or
@@ -374,9 +380,9 @@ export function createNoticeSender({
   };
 
   /** The remittance sent, kept in the audit log; a failure to keep it is logged, the email never sent again. */
-  const emailedLogged = async (notice: ClaimedNotice): Promise<void> => {
+  const emailedLogged = async (notice: ClaimedNotice, paid: PaidRemittance): Promise<void> => {
     try {
-      await remittances.emailed(notice.orgId, notice.aboutId ?? '');
+      await remittances.emailed(notice.orgId, notice.aboutId ?? '', referenceShown(paid));
     } catch (error) {
       logger.error('notification.remittance_unrecorded', { noticeId: notice.id, err: error });
     }
@@ -409,7 +415,7 @@ export function createNoticeSender({
     }
     if (read.outcome === 'send') {
       const end = await sendAndRecord(notice, messageFor(notice, read.to, undefined, undefined, read.paid));
-      if (end.outcome === 'sent') await emailedLogged(notice);
+      if (end.outcome === 'sent') await emailedLogged(notice, read.paid);
       else if (end.became === 'given_up') await givenUpLogged(notice, end.failure);
       return false;
     }
