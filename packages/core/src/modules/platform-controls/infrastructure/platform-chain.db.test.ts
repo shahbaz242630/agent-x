@@ -1057,6 +1057,33 @@ describe('R-15 a stretch of the chain checked in place, from a moment or a place
     expect((await stretch({ after: place })).found).toEqual({ kind: 'broken', problem: { reason: 'head', seq: 3n } });
   });
 
+  it('from a moment, through a place checked before: from the earlier, the place unchanged and not behind the head', async () => {
+    const [, second, third] = await four();
+    if (second === undefined || third === undefined) throw new Error('four events were recorded');
+    const [atTwo, atThree] = [await placeOf(2n), await placeOf(3n)];
+
+    // The place before the moment: walked from it. After it: walked through it.
+    expect((await stretch({ since: after(third), through: atTwo })).seqs).toEqual([3n, 4n]);
+    expect((await stretch({ since: after(second), through: atThree })).seqs).toEqual([3n, 4n]);
+    expect((await stretch({ since: after(second), through: { ...atThree, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    // Not the event checked there before, whichever the walk starts from: the place itself, or the moment's.
+    expect((await stretch({ since: after(third), through: { ...atTwo, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'link', seq: 3n },
+    });
+    expect((await stretch({ since: after(third), through: { ...atThree, hash: Buffer.alloc(32) } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    expect((await stretch({ since: after(second), through: { ...atThree, seq: 5n } })).found).toEqual({
+      kind: 'broken',
+      problem: { reason: 'head', seq: 4n },
+    });
+  });
+
   it('finds the chain grown again on a head wound back, to the same place as one checked before', async () => {
     await record(started(1), started(2), started(3));
     await tamper('create table public.head_then as select * from platform_controls.audit_head');

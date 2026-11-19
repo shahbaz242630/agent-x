@@ -28,6 +28,7 @@ import {
   type PlatformPoint,
   type PlatformTransaction,
   type StretchCheck,
+  type StretchStart,
 } from '../../platform-controls/index.ts';
 
 /**
@@ -100,8 +101,11 @@ export function createSignedEnds(keys: KeyProvider): SignedEnds {
     const was = reached;
     // From where it got to, if that covers `since` and is no older than it; otherwise afresh from `since`.
     const on = was?.point !== undefined && was.from <= since && was.point.recordedAt >= since ? was : undefined;
-    const ends = on?.ends ?? new Map<string, KeptEnd>();
-    const start = on?.point === undefined ? { since } : { after: on.point };
+    // Afresh, the ends checked before are kept, and the chain must still run through where it got to (R-15 review).
+    const ends = on?.ends ?? new Map(was?.ends);
+    let start: StretchStart = { since };
+    if (on?.point !== undefined) start = { after: on.point };
+    else if (was?.point !== undefined) start = { since, through: was.point };
     let read = 0;
     const found = await checkPlatformStretch(tx, keys, start, (events) => {
       read += events.length;

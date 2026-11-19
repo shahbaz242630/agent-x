@@ -345,7 +345,9 @@ export interface PlatformPoint extends CheckedPoint {
 }
 
 /** Where a stretch's check starts: from the last event recorded before a moment, or after a place checked before. */
-export type StretchStart = { readonly since: Date } | { readonly after: PlatformPoint };
+export type StretchStart =
+  /** From a moment; `through`, a place checked before, which the chain must still run through, unchanged. */
+  { readonly since: Date; readonly through?: PlatformPoint } | { readonly after: PlatformPoint };
 
 /** What checkPlatformStretch found: the stretch whole up to the head (none for a chain never started), or a problem. */
 export type StretchCheck =
@@ -396,6 +398,24 @@ async function pointBefore(
 }
 
 /**
+ * The walk's problem with the next event, if any: out of place or not sealed, or sealed and in place but not the
+ * event checked there before (`through`): the chain grown again on a wound-back head.
+ */
+function rowProblem(
+  keys: KeyProvider,
+  walker: ReturnType<typeof createChainWalker>,
+  row: Readonly<Record<string, unknown>> & { readonly seq: bigint; readonly hash: Buffer },
+  through: PlatformPoint | undefined,
+): ChainProblem | undefined {
+  const sealed = sealedSigned(keys, CHAIN, row);
+  const content = contentOf(row);
+  const problem =
+    sealed === undefined || content === undefined ? walker.unreadable() : walker.check({ ...sealed, content });
+  if (problem !== undefined) return problem;
+  return row.seq === through?.seq && !row.hash.equals(through.hash) ? { reason: 'anchor', seq: row.seq } : undefined;
+}
+
+/**
  * Walks the events after `from` up to the head, a page at a time, giving `seen` each page once it holds: the place
  * reached, the head's, or the first problem. The last event must be the head's: an event missing at the top, under a
  * head left where it was, shows too.
@@ -406,6 +426,7 @@ async function walkToHead(
   from: PlatformPoint,
   head: ChainHead,
   seen: (events: readonly CheckedPlatformEvent[]) => void,
+  through?: PlatformPoint,
 ): Promise<PlatformPoint | ChainProblem> {
   const walker = createChainWalker(keys, CHAIN, from);
   let reached = from;
@@ -418,10 +439,7 @@ async function walkToHead(
       .execute();
     const events: CheckedPlatformEvent[] = [];
     for (const row of rows) {
-      const sealed = sealedSigned(keys, CHAIN, row);
-      const content = contentOf(row);
-      const problem =
-        sealed === undefined || content === undefined ? walker.unreadable() : walker.check({ ...sealed, content });
+      const problem = rowProblem(keys, walker, row, through);
       if (problem !== undefined) return problem;
       events.push({ seq: row.seq, recordedAt: row.recorded_at, action: row.action, details: row.details });
       reached = { seq: row.seq, hash: row.hash, macKeyVersion: row.mac_key_version, recordedAt: row.recorded_at };
@@ -454,11 +472,19 @@ export async function checkPlatformStretch(
   const head = await sealedHead(tx, keys);
   if (head === 'none' && !('after' in start)) return { kind: 'checked', reached: undefined };
   if (head === 'none' || head === undefined) return { kind: 'broken', problem: { reason: 'head', seq: 0n } };
-  if ('after' in start && head.seq < start.after.seq)
+  const through = 'after' in start ? start.after : start.through;
+  // A head behind a place checked before: the chain wound back.
+  if (through !== undefined && head.seq < through.seq) {
     return { kind: 'broken', problem: { reason: 'head', seq: head.seq } };
-  const from = 'after' in start ? start.after : await pointBefore(tx, keys, start.since, head);
-  if (typeof from === 'bigint') return { kind: 'broken', problem: { reason: 'mac', seq: from } };
-  const walked = await walkToHead(tx, keys, from, head, seen);
+  }
+  const before = 'after' in start ? start.after : await pointBefore(tx, keys, start.since, head);
+  if (typeof before === 'bigint') return { kind: 'broken', problem: { reason: 'mac', seq: before } };
+  // From the earlier of the two, so the walk covers the moment and runs through the place checked before.
+  const from = through !== undefined && through.seq < before.seq ? through : before;
+  if (from.seq === through?.seq && !from.hash.equals(through.hash)) {
+    return { kind: 'broken', problem: { reason: 'anchor', seq: from.seq } };
+  }
+  const walked = await walkToHead(tx, keys, from, head, seen, through);
   return 'reason' in walked ? { kind: 'broken', problem: walked } : { kind: 'checked', reached: walked };
 }
 

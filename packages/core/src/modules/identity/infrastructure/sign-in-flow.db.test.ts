@@ -1306,6 +1306,38 @@ describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres
     expect(afresh.kind === 'checked' && afresh.read).toBeGreaterThan(3);
   });
 
+  it('a check afresh from an earlier moment still finds the head wound back behind where it got to', async () => {
+    const now = await databaseNow();
+    const { userId } = await roundTrip();
+    await endSigned(userId, START);
+    const admin = database.as('admin');
+    await admin.query('create table public.head_r15 as select * from platform_controls.audit_head');
+    const ended = await endSigned(userId, new Date(now.getTime() + MINUTE));
+    const ends = createSignedEnds(keys);
+    const check = (since: Date) =>
+      app.transaction().execute((tx) => ends.check(tx as unknown as PlatformTransaction, since));
+    expect(await check(now)).toMatchObject({ kind: 'checked' });
+    // The end, the newest event, deleted, and the head put back as it stood before it, its MAC whole.
+    await admin.query('create table public.held_r15 as select * from platform_controls.audit_events where seq = $1', [
+      ended.seq,
+    ]);
+    await admin.query('delete from platform_controls.audit_events where seq = $1', [ended.seq]);
+    await admin.query('create table public.head_now as select * from platform_controls.audit_head');
+    await admin.query('delete from platform_controls.audit_head');
+    await admin.query('insert into platform_controls.audit_head select * from public.head_r15');
+    try {
+      expect(await check(new Date(now.getTime() - 60 * MINUTE))).toEqual({
+        kind: 'broken',
+        problem: { reason: 'head', seq: ended.seq - 1n },
+      });
+    } finally {
+      await admin.query('delete from platform_controls.audit_head');
+      await admin.query('insert into platform_controls.audit_head select * from public.head_now');
+      await admin.query('insert into platform_controls.audit_events select * from public.held_r15');
+      await admin.query('drop table public.head_r15, public.head_now, public.held_r15');
+    }
+  });
+
   it('starts the shared check from the earliest moment its sign-ins asked for, and once one before it failed', async () => {
     const now = await databaseNow();
     const { userId } = await roundTrip();
