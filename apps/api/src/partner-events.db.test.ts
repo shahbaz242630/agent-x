@@ -11,6 +11,7 @@
 // from an address, and alerted (-01).
 import { createHash } from 'node:crypto';
 
+import { v7Floor } from '@agentx/core/modules/activity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
@@ -87,7 +88,6 @@ const events = () =>
     ids,
     clock,
     logger: testLogger(capture),
-    macsFrom: () => Promise.resolve(0),
     retentionDays: 30,
   });
 
@@ -1005,31 +1005,19 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
       expect(alarms.map(({ rows }) => rows)).toEqual([6, 7]);
     });
 
-    it('counts no row from before the MACs that the owner dated ahead, and none whose body was swapped', async () => {
-      const owner = database.as('admin');
-      // Every row without a MAC from before the boundary, as the rows of the release before are.
-      const before = createProviderEvents({
-        keys,
-        ids,
-        clock,
-        logger: testLogger(capture),
-        macsFrom: () => Promise.resolve(Number.POSITIVE_INFINITY),
-        retentionDays: 30,
-      });
-      for (let n = 0; n < 6; n += 1) {
-        await owner.query(
-          `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
-           values ($1, 'signature', '203.0.113.7', $2, 1, 2, '2200-01-01T00:00:00Z')`,
-          [ids.next(), Buffer.alloc(40, 1)],
-        );
-      }
-      expect(await before.keepRefused(app, { reason: 'signature', ip: '203.0.113.7', body })).toBe('first');
+    it('counts no row without a MAC however old its ID, received now: the alarm instead', async () => {
+      const lastYear = `${v7Floor(clock.now().getTime() - 365 * 86_400_000).slice(0, 14)}7000-8000-00000000abcd`;
+      await database.as('admin').query(
+        `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+         values ($1, 'signature', '203.0.113.7', $2, 1, 2, $3)`,
+        [lastYear, Buffer.alloc(40, 1), clock.now()],
+      );
 
-      // A kept row's body swapped for another's: its MAC no longer holds.
-      await owner.query('update security.partner_event_evidence set body_ciphertext = $1 where mac is not null', [
-        Buffer.alloc(40, 2),
-      ]);
       expect(await keep('203.0.113.7')).toBe('first');
+      const alarms = capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed' && line.check === 'partner_event_evidence');
+      expect(alarms.map(({ rowId }) => rowId)).toEqual([lastYear]);
     });
 
     it('keeps again an hour on', async () => {

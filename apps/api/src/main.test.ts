@@ -129,6 +129,19 @@ vi.mock('./start-record.ts', () => ({
 }));
 
 /**
+ * A stand-in for the start's sealing of the security rows from before 0106 (S206 V6), proven against a real database
+ * in legacy-seal.db.test.ts. `result` is what it gives back.
+ */
+const legacySeal = vi.hoisted(() => ({
+  result: (): Promise<string> => Promise.resolve('sealed'),
+}));
+
+vi.mock('@agentx/core/modules/security-events', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentx/core/modules/security-events')>()),
+  sealLegacyRows: () => legacySeal.result(),
+}));
+
+/**
  * A stand-in for the anchor check, proven in anchor-check.test.ts: these tests
  * see only how it is set up, and when it starts and stops. Stopping takes a
  * moment, as it does when a run is in flight.
@@ -450,6 +463,7 @@ beforeEach(() => {
   lease.released = 0;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
+  legacySeal.result = () => Promise.resolve('sealed');
   anchorChecks.intervals.length = 0;
   anchorChecks.staleAfter.length = 0;
   anchorChecks.reachWithin.length = 0;
@@ -994,6 +1008,15 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'api.start_not_recorded' }));
     expect(host.exitCode).toBe(1);
     expect(startedLive()).toBe(false);
+  });
+
+  it('refuses to start when the security rows from before 0106 could not be sealed (S206 V6)', async () => {
+    legacySeal.result = () => Promise.reject(new Error('the database went away'));
+
+    const { host, booted, capture } = await bootLive(PARTNER);
+    expect(booted).toBeUndefined();
+    expect(capture.lines().at(-1)).toEqual(expect.objectContaining({ event: 'security.legacy_seal_failed' }));
+    expect(host.exitCode).toBe(1);
   });
 
   it('refuses to start live today: no partner adapter is built, so nothing goes live before Phase 5', async () => {

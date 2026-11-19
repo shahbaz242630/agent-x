@@ -4128,7 +4128,7 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
 export const SECURITY_SEAL_SHORTFALL_LINES = [
   'where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed")',
   'extend Line = parse_json(Log)',
-  'summarize Tallied = maxif(toint(Line.rows), tostring(Line.event) == "security_seal.tally"), Sealed = maxif(toint(Line.requests), tostring(Line.event) == "security_events.sealed"), Seals = countif(tostring(Line.event) == "security_events.sealed") by Chain = tostring(Line.orgId), Day = tostring(Line.day)',
+  `summarize Tallied = maxif(toint(Line['rows']), tostring(Line['event']) == "security_seal.tally"), Sealed = maxif(toint(Line['requests']), tostring(Line['event']) == "security_events.sealed"), Seals = countif(tostring(Line['event']) == "security_events.sealed") by Chain = tostring(Line['orgId']), Day = tostring(Line['day'])`,
   'where Seals > 0 and Tallied > Sealed',
 ] as const;
 

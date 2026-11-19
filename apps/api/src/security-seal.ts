@@ -49,7 +49,6 @@ import {
   brokenSecuritySeal,
   anythingToSeal,
   firstCheckableDay,
-  macBoundary,
   nextDayWithRows,
   outOfRange,
   rowsBetween,
@@ -125,11 +124,10 @@ interface OrgHeld {
   readonly states: SignedStates;
 }
 
-/** What one run reads by: its time, the first day still checked, and when the rows' MACs began. */
+/** What one run reads by: its time, and the first day still checked. */
 interface RunMoment {
   readonly now: Date;
   readonly checkableFrom: string;
-  readonly macsFrom: number;
 }
 
 export interface SecuritySeal {
@@ -168,7 +166,6 @@ export function createSecuritySeal({
   readonly pick?: (below: bigint) => bigint;
 }): SecuritySeal {
   const platform = createPlatformChain({ keys, ids });
-  const boundary = macBoundary(keys, logger);
 
   /** The global table's chain: the platform's. */
   const globalChain = (log: Logger): SealChain<SealTx> => ({
@@ -247,23 +244,20 @@ export function createSecuritySeal({
     return { day: typeof day === 'string' ? day : null };
   };
 
-  /** The day's digest; a row whose MAC doesn't hold, or one left out misdated, raising the alarm (the day is sealed). */
-  const digestOf = async <Held>(chain: SealChain<Held>, day: string, moment: RunMoment) => {
-    const digest = await securityDigestOfDay(
-      readerOf(chain),
-      { keys, macsFrom: moment.macsFrom },
-      chain.log,
-      day,
-      batch,
-    );
+  /**
+   * The day's digest; a row whose MAC doesn't hold, or one left out misdated, raising the alarm: as the day is sealed
+   * (it is sealed as it stands), and as its seal is checked, so one planted into a day sealed already shows too.
+   */
+  const digestOf = async <Held>(chain: SealChain<Held>, day: string) => {
+    const digest = await securityDigestOfDay(readerOf(chain), keys, chain.log, day, batch);
     if (digest.forged !== null) securityLogAlarm(chain.logger, chain.log, 'mac', day, digest.forged);
     if (digest.leftOut !== null) securityLogAlarm(chain.logger, chain.log, 'misdated', day, digest.leftOut);
     return digest;
   };
 
   /** The log's seal, its steps on its own chain under its own lock (seal-days.ts). */
-  const sealingOf = <Held>(chain: SealChain<Held>, moment: RunMoment): DaySealing<Held> => ({
-    digest: (day) => digestOf(chain, day, moment),
+  const sealingOf = <Held>(chain: SealChain<Held>): DaySealing<Held> => ({
+    digest: (day) => digestOf(chain, day),
     // Never asked: a misdated row is left out of its day's digest (core's securityDigestOfDay), not a reason to stop.
     misdated: () => Promise.resolve(),
     locked: (work) =>
@@ -289,7 +283,7 @@ export function createSecuritySeal({
     // A day older than the retention allows is never sealed: the sweep may be part way through it.
     const { checkableFrom, now } = moment;
     let from = newest.day === null || nextDay(newest.day) < checkableFrom ? checkableFrom : nextDay(newest.day);
-    const sealing = sealingOf(chain, moment);
+    const sealing = sealingOf(chain);
     let finished = false;
     for (let sealed = 0; sealed < MOST_DAYS_A_RUN && signal?.aborted !== true; sealed += 1) {
       const day = await readerOf(chain)((tx) => nextDayWithRows(tx, chain.log, from));
@@ -316,8 +310,7 @@ export function createSecuritySeal({
     const older = await pageOf(chain, olderARun, pick(first.seq));
     if (older === undefined) return;
     const rules = {
-      digest: (day: string) =>
-        securityDigestOfDay(readerOf(chain), { keys, macsFrom: moment.macsFrom }, chain.log, day, batch),
+      digest: (day: string) => digestOf(chain, day),
       between: (from: string, to: string) => readerOf(chain)((tx) => rowsBetween(tx, chain.log, from, to)),
       checkableFrom: moment.checkableFrom,
     };
@@ -339,14 +332,8 @@ export function createSecuritySeal({
   return {
     async run(signal) {
       const log = logger.child({ correlationId: ids.next() });
-      let moment: RunMoment;
-      try {
-        const now = clock.now();
-        moment = { now, checkableFrom: firstCheckableDay(now, retentionDays), macsFrom: await boundary(database) };
-      } catch (error) {
-        log.error('security_event_seal.run_failed', { err: error });
-        return;
-      }
+      const now = clock.now();
+      const moment: RunMoment = { now, checkableFrom: firstCheckableDay(now, retentionDays) };
       try {
         await visit(globalChain(log), moment, signal);
       } catch (error) {

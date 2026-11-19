@@ -8,8 +8,9 @@
 //   INSERT, with no lock beyond its own rows: a flood of refusals from many
 //   addresses never queues on a shared head, as a chain written row by row
 //   would make it (an attacker spraying sign-ins could then slow everyone's).
-//   A row with no MAC is believed only if written before the boundary
-//   (mac-boundary.ts); the admins' page shows only rows whose MAC holds.
+//   A row with no MAC is never believed: those from before 0106 were given
+//   theirs at the first start on it (legacy-seal.ts). The admins' page shows
+//   only rows whose MAC holds and whose ID agrees with when they were written.
 // - Each closed UTC day of rows is digested and the digest sealed on an audit
 //   chain after the fact (the activity log's daily seal, reused: its days by
 //   UUIDv7 ID, its grace and its steps): the global table's days on the
@@ -84,7 +85,7 @@ const GLOBAL_LABEL = 'agentx/security.event/v1';
 const ORG_LABEL = 'agentx/security.org-event/v1';
 
 /** An absent value apart from any present one. */
-export const maybe = (value: string | null): string[] => (value === null ? ['none'] : ['some', value]);
+const maybe = (value: string | null): string[] => (value === null ? ['none'] : ['some', value]);
 
 /**
  * An address in one form, however it was written: the API's text and Postgres's `inet` output of it read alike
@@ -120,22 +121,38 @@ export function rowMac(
 /** The row's MAC, made over every column. */
 export const eventMac = (keys: KeyProvider, facts: EventFacts) => rowMac(keys, eventMessage(facts));
 
-/** The instant a UUIDv7 was made, in milliseconds. */
-const msOfId = (id: string): number => Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16);
+/** What a kept refused message's MAC covers (0063's columns): its body is the AEAD's, bound to its ID already. */
+export interface EvidenceFacts {
+  readonly id: string;
+  readonly reason: string;
+  readonly ip: string | null;
+  readonly body_key_version: number;
+  readonly body_bytes: number;
+  readonly received_at: Date;
+}
+
+/** A kept refused message's MAC's message, under its own label: no other row's MAC can stand for it. */
+export const evidenceMessage = (facts: EvidenceFacts): Message => [
+  'agentx/security.partner-event-evidence/v1',
+  facts.id.toLowerCase(),
+  facts.reason,
+  ...maybe(facts.ip === null ? null : ipForm(facts.ip)),
+  String(facts.body_key_version),
+  String(facts.body_bytes),
+  String(facts.received_at.getTime()),
+];
 
 /**
- * Whether a security row's MAC holds for the message, with the version it names; a row with none only if its ID was
- * made before `macsFrom` (mac-boundary.ts). A MAC or version made up (no such key version) holds for nothing.
+ * Whether a security row's MAC holds for the message, with the version it names. A row with none never does: the rows
+ * from before 0106 were each given theirs at the first start on it (legacy-seal.ts). A MAC or version made up (no such
+ * key version) holds for nothing.
  */
 export function rowMacHolds(
   keys: KeyProvider,
   message: Message,
-  id: string,
   row: { readonly mac: unknown; readonly mac_key_version: unknown },
-  macsFrom: number,
 ): boolean {
   const { mac, mac_key_version: version } = row;
-  if (mac === null && version === null) return msOfId(id) < macsFrom;
   if (!Buffer.isBuffer(mac) || typeof version !== 'number' || !Number.isSafeInteger(version)) return false;
   try {
     return keys.verifyMac('session-mac', version, message, mac);
@@ -150,8 +167,7 @@ export const eventMacHolds = (
   keys: KeyProvider,
   facts: EventFacts,
   row: { readonly mac: unknown; readonly mac_key_version: unknown },
-  macsFrom: number,
-): boolean => rowMacHolds(keys, eventMessage(facts), facts.id, row, macsFrom);
+): boolean => rowMacHolds(keys, eventMessage(facts), row);
 
 /** A time to the microsecond, in UTC, as text, so a tampered microsecond shows in the digest. */
 const microText = (column: string) =>
@@ -167,7 +183,7 @@ const WRITTEN_MS = sql<string>`(pg_catalog.date_part('epoch', created_at) * 1000
  * Whether the row's ID was made when it says it was written: from 5 seconds before to 6 hours after, the activity
  * log's bounds (a server clock stepped back makes IDs late until it catches up). Any other is `misdated`.
  */
-const DATED = sql<boolean>`(${ID_MS} between ${WRITTEN_MS} - 5000 and ${WRITTEN_MS} + 21600000)`;
+export const DATED = sql<boolean>`(${ID_MS} between ${WRITTEN_MS} - 5000 and ${WRITTEN_MS} + 21600000)`;
 
 /** The log's table, the condition that keeps a read to its rows, and its organisation and agent columns. */
 const scopeOf = (log: SecurityLog) =>
@@ -262,7 +278,7 @@ export interface SecurityDayDigest extends DayDigest {
  */
 export async function securityDigestOfDay(
   read: <T>(work: (tx: SealTx) => Promise<T>) => Promise<T>,
-  { keys, macsFrom }: { readonly keys: KeyProvider; readonly macsFrom: number },
+  keys: KeyProvider,
   log: SecurityLog,
   day: string,
   batch: number,
@@ -285,7 +301,7 @@ export async function securityDigestOfDay(
       requests += 1;
       idFrom ??= row.id;
       idTo = row.id;
-      if (forged === null && !eventMacHolds(keys, factsOf(row), row, macsFrom)) forged = row.id;
+      if (forged === null && !eventMacHolds(keys, factsOf(row), row)) forged = row.id;
     }
     after = rows.at(-1)?.id ?? after;
     if (rows.length < batch) break;

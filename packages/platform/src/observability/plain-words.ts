@@ -1310,10 +1310,10 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
-  'security.mac_boundary_not_recorded': {
-    happened: 'The API could not record when the security records began to carry their tamper seals.',
-    broke: 'Older security records without a seal are flagged as tampered until it is recorded.',
-    next: 'The next API start records it. If it repeats, check the database and the platform audit chain.',
+  'security.legacy_seal_failed': {
+    happened: 'At start, the API could not give the older security records their tamper seals.',
+    broke: 'This copy of the API did not start; the others go on as before.',
+    next: 'The next start tries again. If it repeats, check the database and the platform audit chain.',
   },
   'security_event_seal.failed': {
     happened: 'The daily seal of the security records could not be made or checked this run.',

@@ -18,7 +18,6 @@ const build = (retentionDays: number) =>
     ids: new SequentialIds(1),
     clock: new FixedClock(new Date(0)),
     logger: testLogger(),
-    macsFrom: () => Promise.resolve(0),
     retentionDays,
   });
 

@@ -9,14 +9,15 @@
 // before.
 //
 // S206 V6: each row's MAC is checked as the page is read (at most a page of
-// them). A row whose MAC doesn't hold, planted or edited by the database's
-// owner, is left off the page and raises the integrity alarm, one line a row;
-// the page's `next` is still where the rows read end, so no row is read twice.
+// them), and its ID held to when it says it was written (the seal's DATED).
+// A row that fails either, planted or edited by the database's owner, is left
+// off the page and raises the integrity alarm, one line a row; the page's
+// `next` is still where the rows read end, so no row is read twice.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 
-import { eventMacHolds, securityLogAlarm } from './event-seals.ts';
+import { DATED, eventMacHolds, securityLogAlarm } from './event-seals.ts';
 import { ORG_EVENT_KINDS } from './security-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
@@ -68,22 +69,21 @@ const actorOf = (userId: string | null, agentId: string | null): OrgEventActor |
   return agentId === null ? null : { type: 'agent', id: agentId };
 };
 
-/** What a page's rows are checked with: the MAC key, the boundary before which a row may have none, and the alarm's logger. */
+/** What a page's rows are checked with: the MAC key, and the alarm's logger. */
 export interface OrgEventsChecked {
   readonly keys: KeyProvider;
-  readonly macsFrom: number;
   readonly logger: Logger;
 }
 
 /**
  * A page of the organisation's security events, newest first, and where the next starts before (null at the end):
- * only rows whose MAC holds, each other raising the alarm.
+ * only rows whose MAC holds and whose ID agrees with when they were written, each other raising the alarm.
  */
 export async function orgSecurityEventsPage(
   tx: Transaction<SecurityEventsTables>,
   orgId: string,
   asked: OrgEventsToRead,
-  { keys, macsFrom, logger }: OrgEventsChecked,
+  { keys, logger }: OrgEventsChecked,
 ): Promise<{ readonly rows: readonly OrgSecurityEvent[]; readonly next: OrgEventCursor | null }> {
   let query = tx
     .selectFrom('security.org_events')
@@ -100,6 +100,7 @@ export async function orgSecurityEventsPage(
       'created_at',
       'mac',
       'mac_key_version',
+      DATED.as('dated'),
     ])
     .where('org_id', '=', orgId.toLowerCase())
     .where('window_start', '>=', asked.from)
@@ -127,9 +128,15 @@ export async function orgSecurityEventsPage(
       count: row.count,
       createdAt: row.created_at,
     };
-    if (eventMacHolds(keys, facts, row, macsFrom)) return true;
-    securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
-    return false;
+    if (!eventMacHolds(keys, facts, row)) {
+      securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
+      return false;
+    }
+    if (!row.dated) {
+      securityLogAlarm(logger, { orgId }, 'misdated', null, row.id);
+      return false;
+    }
+    return true;
   });
   const rows = believed.map((row): OrgSecurityEvent => ({
     id: row.id,

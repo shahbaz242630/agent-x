@@ -12,12 +12,7 @@
 // from many addresses never queues: not behind another's open write, nor
 // behind the seal's lock, which the seal itself does queue behind.
 import { v7Floor } from '@agentx/core/modules/activity';
-import {
-  createSecurityEvents,
-  recordMacBoundary,
-  SECURITY_EVENTS_SEALED,
-  type SecurityEvent,
-} from '@agentx/core/modules/security-events';
+import { createSecurityEvents, SECURITY_EVENTS_SEALED, type SecurityEvent } from '@agentx/core/modules/security-events';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
@@ -218,10 +213,13 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     await written('2027-01-20T09:00:00.000Z', [failed('2027-01-20T09:00:00.000Z', { count: 40 })]);
     await sealer().run();
 
+    const [row] = await rowsOf('2027-01-20');
     await owner().query('update security.events set count = 1');
     await sealer().run();
 
+    // Its MAC no longer holds, and its day's digest has moved.
     expect(alarms()).toEqual([
+      { chain: 'platform', reason: 'mac', day: '2027-01-20', orgId: undefined, rowId: row?.id },
       { chain: 'platform', reason: 'digest', day: '2027-01-20', orgId: undefined, rowId: undefined },
     ]);
   });
@@ -233,21 +231,23 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     await owner().query("update security.events set mac = pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex')");
     await sealer().run();
 
-    expect(alarms()).toEqual([
-      { chain: 'platform', reason: 'digest', day: '2027-01-20', orgId: undefined, rowId: undefined },
-    ]);
+    expect(alarms().map(({ reason }) => reason)).toEqual(['mac', 'digest']);
   });
 
-  it('a row planted with no MAC before its day is sealed: the alarm as the day is sealed, once', async () => {
+  /** Each alarm for `id` on the 20th, as one run after another raises it. */
+  const onThe20th = (reason: string, id: string | undefined, runs: number) =>
+    Array.from({ length: runs }, () => ({ chain: 'platform', reason, day: '2027-01-20', orgId: undefined, rowId: id }));
+
+  it('a row planted with no MAC before its day is sealed: the alarm as the day is sealed, and at each check', async () => {
     await written('2027-01-20T09:00:00.000Z', [failed('2027-01-20T09:00:00.000Z')]);
     const id = await planted('2027-01-20T10:00:00.000Z');
 
     await sealer().run();
     await sealer().run();
 
-    // Sealed as it stands, so the seal's own check holds and the alarm isn't raised again each run.
+    // Sealed as it stands, so later days go on being sealed; the row is met again at each run's check.
     expect(await globalSeals()).toEqual([['2027-01-20', 2]]);
-    expect(alarms()).toEqual([{ chain: 'platform', reason: 'mac', day: '2027-01-20', orgId: undefined, rowId: id }]);
+    expect(alarms()).toEqual(onThe20th('mac', id, 3));
   });
 
   it('a row edited before its day is sealed fails its MAC as the day is sealed', async () => {
@@ -257,9 +257,7 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
 
     await sealer().run();
 
-    expect(alarms()).toEqual([
-      { chain: 'platform', reason: 'mac', day: '2027-01-20', orgId: undefined, rowId: row?.id },
-    ]);
+    expect(alarms()).toEqual(onThe20th('mac', row?.id, 2));
   });
 
   it('a row slipped into a day between two seals, which no seal holds: the alarm', async () => {
@@ -286,7 +284,7 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     return id;
   };
 
-  it('a row whose ID is far from when it says it was written is left out of its day, alarmed once; sealing goes on', async () => {
+  it('a row whose ID is far from when it says it was written is left out of its day, alarmed; sealing goes on', async () => {
     await written('2027-01-19T09:00:00.000Z', [failed('2027-01-19T09:00:00.000Z')]);
     await written('2027-01-20T09:00:00.000Z', [failed('2027-01-20T09:00:00.000Z')]);
     const id = await misdated('2027-01-19T10:00:00.000Z', '2027-01-17T09:00:00.000Z');
@@ -294,14 +292,20 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     await sealer().run();
     await sealer().run();
 
-    // Both days sealed, the 19th without the misdated row; its alarm raised as the 19th was sealed, not again.
+    // Both days sealed, the 19th without the misdated row; its alarm raised as the 19th was sealed and at each check.
     expect(await globalSeals()).toEqual([
       ['2027-01-19', 1],
       ['2027-01-20', 1],
     ]);
-    expect(alarms()).toEqual([
-      { chain: 'platform', reason: 'misdated', day: '2027-01-19', orgId: undefined, rowId: id },
-    ]);
+    expect(alarms()).toEqual(
+      Array.from({ length: 3 }, () => ({
+        chain: 'platform',
+        reason: 'misdated',
+        day: '2027-01-19',
+        orgId: undefined,
+        rowId: id,
+      })),
+    );
   });
 
   it('a sealed row edited into a misdated one, to drop it from its day: the alarm at the next check', async () => {
@@ -313,7 +317,7 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     );
     await sealer().run();
 
-    expect(alarms().map(({ reason }) => reason)).toEqual(['digest']);
+    expect(alarms().map(({ reason }) => reason)).toEqual(['misdated', 'digest']);
   });
 
   it.each([
@@ -362,21 +366,17 @@ describe('the security events’ daily seals (S206 V6, R-15)', () => {
     expect(alarms()).toEqual([]);
   });
 
-  it('a row with no MAC from before the boundary is believed; one after it is not; the first boundary stands', async () => {
-    const first = await recordMacBoundary(app, {
-      keys,
-      ids,
-      clock: new FixedClock(new Date('2027-01-19T12:00:00.000Z')),
-    });
-    const again = await recordMacBoundary(app, { keys, ids, clock });
-    expect([first, again]).toEqual([Date.parse('2027-01-19T13:00:00.000Z'), Date.parse('2027-01-19T13:00:00.000Z')]);
-    const before = await planted('2027-01-19T12:30:00.000Z');
-    const after = await planted('2027-01-19T13:30:00.000Z');
+  it('a misdated row planted into a day sealed already: the alarm at the check, though the digest still holds', async () => {
+    await written('2027-01-19T09:00:00.000Z', [failed('2027-01-19T09:00:00.000Z')]);
+    await sealer().run();
+    expect(alarms()).toEqual([]);
 
+    const id = await misdated('2027-01-19T10:00:00.000Z', '2027-01-16T09:00:00.000Z');
     await sealer().run();
 
-    expect(alarms()).toEqual([{ chain: 'platform', reason: 'mac', day: '2027-01-19', orgId: undefined, rowId: after }]);
-    expect(before).not.toBe(after);
+    expect(alarms()).toEqual([
+      { chain: 'platform', reason: 'misdated', day: '2027-01-19', orgId: undefined, rowId: id },
+    ]);
   });
 
   it('a seal of the global table rewritten on the platform chain: the alarm, and nothing sealed past it', async () => {

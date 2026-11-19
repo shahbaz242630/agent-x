@@ -15,6 +15,8 @@ import {
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
+import { v7Floor } from '../../activity/index.ts';
+import { eventMac } from './event-seals.ts';
 import {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
@@ -45,8 +47,15 @@ const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
   ...change,
 });
 
+let made = 0;
+/** A UUIDv7 of the instant `ms`, as a row written then has (the admins' page holds each row's ID to its time, S206 V6). */
+const idAt = (ms: number) => {
+  made += 1;
+  return `${v7Floor(ms).slice(0, 14)}7000-8000-${made.toString(16).padStart(12, '0')}`;
+};
+
 const at = (ms: number, retentionDays = RETENTION) =>
-  createSecurityEvents({ ids, clock: new FixedClock(new Date(ms)), keys, retentionDays });
+  createSecurityEvents({ ids: { next: () => idAt(ms) }, clock: new FixedClock(new Date(ms)), keys, retentionDays });
 
 const all = () => app.selectFrom('security.events').selectAll().orderBy('created_at').orderBy('reason').execute();
 
@@ -265,7 +274,7 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
 
   /** Each row's MAC checked, every row written by the app having one (S206 V6): none is believed without. */
   let capture = new LogCapture();
-  const checked = () => ({ keys, macsFrom: Number.NEGATIVE_INFINITY, logger: testLogger(capture) });
+  const checked = () => ({ keys, logger: testLogger(capture) });
 
   /** One organisation's page, read inside its own transaction as the admins' route reads it. */
   const pageOf = (orgId: string, asked: Partial<OrgEventsToRead> = {}) =>
@@ -286,6 +295,26 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
        values ($1, $2, 'rate_limited', 'per_user', '198.51.100.9', null, null, $3, 7, $3)`,
       [ORG_A, planted, new Date(START.getTime() - 180_000)],
     );
+    // A row whose MAC holds but whose ID was made a year before it says it was written: one the seal never reaches.
+    const misdated = idAt(START.getTime() - 365 * DAY_MS);
+    const misdatedRow = {
+      id: misdated,
+      orgId: ORG_A,
+      kind: 'rate_limited',
+      reason: 'per_user',
+      ip: null,
+      userId: null,
+      agentId: null,
+      windowStart: new Date(START.getTime() - 150_000),
+      count: 1,
+      createdAt: START,
+    };
+    const { mac, mac_key_version } = eventMac(keys, misdatedRow);
+    await owner.query(
+      `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at, mac, mac_key_version)
+       values ($1, $2, 'rate_limited', 'per_user', null, null, null, $3, 1, $4, $5, $6)`,
+      [ORG_A, misdated, misdatedRow.windowStart, START, mac, mac_key_version],
+    );
 
     const page = await pageOf(ORG_A, { limit: 2 });
     expect(page.rows.map(({ reason }) => reason)).toEqual(['per_user']);
@@ -299,6 +328,7 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
         .map(({ check, reason, rowId, orgId }) => ({ check, reason, rowId, orgId })),
     ).toEqual([
       { check: 'security_event', reason: 'mac', rowId: expect.any(String) as unknown, orgId: ORG_A },
+      { check: 'security_event', reason: 'misdated', rowId: misdated, orgId: ORG_A },
       { check: 'security_event', reason: 'mac', rowId: planted, orgId: ORG_A },
     ]);
   });

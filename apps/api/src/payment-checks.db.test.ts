@@ -1317,7 +1317,6 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
         ids,
         clock: moving,
         logger: testLogger(),
-        macsFrom: () => Promise.resolve(0),
         retentionDays: 30,
       }),
       runBudgetMs: 2_000,

@@ -4874,7 +4874,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       edited('"security_seal.tally", ', ''),
       edited('Tallied > Sealed', 'Tallied >= Sealed'),
       edited('Seals > 0 and ', ''),
-      edited('by Chain = tostring(Line.orgId), ', 'by '),
+      edited("by Chain = tostring(Line['orgId']), ", 'by '),
       (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
       (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT6H'),
       (alert: Mutable) => (properties(alert).severity = 2),

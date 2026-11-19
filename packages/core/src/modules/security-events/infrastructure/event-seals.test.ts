@@ -1,7 +1,7 @@
 // S206 V6: the security events' MACs and the seal check's rules, without a
 // database: a MAC holds over every column and for no change to any; an
 // address reads alike however it was written; a row without a MAC is believed
-// only before the boundary; and a page of seals is held to its days, gaps
+// never; and a page of seals is held to its days, gaps
 // between them and the retention.
 import { createKeyProvider } from '@agentx/platform/keys';
 import { LogCapture, testLogger } from '@agentx/testing';
@@ -26,9 +26,7 @@ const otherKeys = createKeyProvider({ 'session-mac': material(4) }, ['session-ma
 /** A UUIDv7 of the instant `ms`. */
 const idOf = (ms: number) => `${v7Floor(ms).slice(0, 14)}7000-8000-000000000001`;
 
-/** When the rows' MACs began, as the platform chain would hold it (mac-boundary.ts). */
-const MACS_FROM = Date.parse('2026-12-10T00:00:00.000Z');
-const AFTER = MACS_FROM + 86_400_000;
+const AFTER = Date.parse('2026-12-11T00:00:00.000Z');
 const ORG = '0199a0f0-0000-7000-8000-00000000a0a0';
 
 const facts = (change: Partial<EventFacts> = {}): EventFacts => ({
@@ -45,8 +43,7 @@ const facts = (change: Partial<EventFacts> = {}): EventFacts => ({
   ...change,
 });
 
-const holds = (made: EventFacts, read: EventFacts, by = keys) =>
-  eventMacHolds(by, read, eventMac(keys, made), MACS_FROM);
+const holds = (made: EventFacts, read: EventFacts, by = keys) => eventMacHolds(by, read, eventMac(keys, made));
 
 describe('a security event’s MAC (S206 V6)', () => {
   it('holds over the row as written, and as Postgres gives it back', () => {
@@ -77,17 +74,16 @@ describe('a security event’s MAC (S206 V6)', () => {
   it('fails with another key, a made-up version, a MAC of the wrong shape, or half a pair', () => {
     expect(holds(facts(), facts(), otherKeys)).toBe(false);
     const { mac } = eventMac(keys, facts());
-    expect(eventMacHolds(keys, facts(), { mac, mac_key_version: 7 }, MACS_FROM)).toBe(false);
-    expect(eventMacHolds(keys, facts(), { mac: mac.toString('hex'), mac_key_version: 1 }, MACS_FROM)).toBe(false);
-    expect(eventMacHolds(keys, facts(), { mac, mac_key_version: 1.5 }, MACS_FROM)).toBe(false);
-    expect(eventMacHolds(keys, facts(), { mac: null, mac_key_version: 1 }, MACS_FROM)).toBe(false);
+    expect(eventMacHolds(keys, facts(), { mac, mac_key_version: 7 })).toBe(false);
+    expect(eventMacHolds(keys, facts(), { mac: mac.toString('hex'), mac_key_version: 1 })).toBe(false);
+    expect(eventMacHolds(keys, facts(), { mac, mac_key_version: 1.5 })).toBe(false);
+    expect(eventMacHolds(keys, facts(), { mac: null, mac_key_version: 1 })).toBe(false);
   });
 
-  it('believes a row with none only if written before the boundary, and none at all with no boundary', () => {
+  it('never believes a row with none, however old its ID', () => {
     const none = { mac: null, mac_key_version: null };
-    expect(eventMacHolds(keys, facts({ id: idOf(MACS_FROM - 1) }), none, MACS_FROM)).toBe(true);
-    expect(eventMacHolds(keys, facts({ id: idOf(MACS_FROM) }), none, MACS_FROM)).toBe(false);
-    expect(eventMacHolds(keys, facts({ id: idOf(0) }), none, Number.NEGATIVE_INFINITY)).toBe(false);
+    expect(eventMacHolds(keys, facts({ id: idOf(0) }), none)).toBe(false);
+    expect(eventMacHolds(keys, facts(), none)).toBe(false);
   });
 
   it('reads an address in one form', () => {

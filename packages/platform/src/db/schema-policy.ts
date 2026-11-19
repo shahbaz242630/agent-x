@@ -397,8 +397,10 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'mac_key_version',
       ],
       // Added, read, and deleted once past the retention the config names;
-      // never changed, so a count once written stands.
+      // never changed, so a count once written stands, but for a row from
+      // before 0106 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'security.partner_event_evidence': {
       reason:
@@ -414,8 +416,10 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'mac',
         'mac_key_version',
       ],
-      // Added (the first few an hour per address), read, and deleted once past the security events' retention.
+      // Added (the first few an hour per address), read, and deleted once past the security events' retention; a row
+      // from before 0106 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'provider_events.inbox': {
       reason:
