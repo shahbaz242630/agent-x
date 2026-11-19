@@ -30,9 +30,16 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
-import { type ExpressionBuilder, type Kysely, type Transaction } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import {
+  type CheckedPlatformEvent,
+  latestPlatformTimeOfRead,
+  type PlatformEvent,
+  type PlatformTransaction,
+  recentPlatformEvents,
+} from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import { macHolds, macOf, type RowMacs, rowForged, sessionMessage } from './row-macs.ts';
 import type { IdentityTables } from './tables.ts';
@@ -140,7 +147,8 @@ export async function lockSessionsOf(tx: Transaction<IdentityTables>, userIds: r
  * deactivation ends them in its own transaction (ADR-003 §7, SEC-HA-10). Their
  * challenges and verified addresses go with them. Keeps `endedAt` as when
  * they were last all ended (0098, AG10), never moved back, so a sign-in made
- * before it opens no session (sessionsEndedAt). Says how many.
+ * before it opens no session (sessionsEndedAt). Says how many. The caller adds sessionsEndedEvent, with the same
+ * `endedAt`, to the platform chain in the same transaction, so the end can't be set back unseen (R-15).
  */
 export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string, endedAt: Date): Promise<number> {
   // The end kept first: it waits for a sign-in that has read the last one (sessionsEndedAt, FOR SHARE) to commit, so
@@ -155,19 +163,120 @@ export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: str
 }
 
 /**
- * When the person's sessions were last all ended (endSessionsOf), or null, in the caller's transaction, their row
- * locked FOR SHARE until it ends: an end committing at the same moment is waited for and then read, so a session
- * can't be opened past it. Taken after any of their sessions is locked (the sign-in's previous one ended), as an end
- * locks the sessions before the row.
+ * The platform chain's signed record of a person's sessions all ended (R-15, S206), at the moment endSessionsOf was
+ * given. The column alone can be set back by the database's owner, with no MAC to break, and a sign-in begun before
+ * the end would then open a session; this record can't be set back without breaking the chain. On the platform's
+ * chain, not an organisation's: one person's ends come from every organisation they belong to and from none (a
+ * change at the login service), and a sign-in reads them all in one indexed look-up (0084's by-person index).
  */
-export async function sessionsEndedAt(tx: Kysely<IdentityTables>, userId: string): Promise<Date | null> {
+export const SESSIONS_ENDED = 'identity.sessions_ended';
+
+/**
+ * The record of the end, for the caller to add to the platform chain in the same transaction as endSessionsOf, with
+ * the same moment, and last of its locks (ADR-006 §6: the platform head comes last).
+ */
+export const sessionsEndedEvent = (userId: string, endedAt: Date): PlatformEvent => ({
+  actor: { type: 'system', id: 'api' },
+  action: SESSIONS_ENDED,
+  details: { person: userId.toLowerCase(), at: endedAt.toISOString() },
+});
+
+/** How far before a sign-in the platform chain is checked for ends: the app's clock and the database's may differ. */
+const CLOCKS_DIFFER_MS = 2 * 60 * 1000;
+
+/**
+ * The most platform events a sign-in checks (R-15): a login flow lives ten minutes (LOGIN_FLOW_SECONDS), so this is
+ * the events the whole platform records in about twelve. More than this, and the sign-in is refused, not let past.
+ */
+export const MOST_EVENTS_CHECKED = 5000;
+
+/** What a sign-in finds of the person's ends (sessionsEndedAt). */
+export type SessionsEnded =
+  /** The latest end believed, or null for none. */
+  | { readonly kind: 'read'; readonly endedAt: Date | null }
+  /** The platform chain's recent stretch didn't hold: the alarm raised. */
+  | { readonly kind: 'tampered' }
+  /** More recent platform events than a sign-in checks: logged. */
+  | { readonly kind: 'unchecked' };
+
+/** The latest moment among the checked events' records of the person's sessions ended, or null. */
+function latestEndIn(events: readonly CheckedPlatformEvent[], person: string): Date | null {
+  let latest: Date | null = null;
+  for (const { action, details } of events) {
+    if (action !== SESSIONS_ENDED) continue;
+    const { person: named, at } = JSON.parse(details) as { person?: unknown; at?: unknown };
+    const when = typeof at === 'string' ? new Date(at) : undefined;
+    if (named !== person || when === undefined || Number.isNaN(when.getTime())) continue;
+    latest = later(latest, when);
+  }
+  return latest;
+}
+
+/** The later of two moments, either of which may be none. */
+const later = (one: Date | null, other: Date | null): Date | null =>
+  one === null || (other !== null && other > one) ? other : one;
+
+/**
+ * When the person's sessions were last all ended (endSessionsOf), or null, for a sign-in made at `signedInAt`, in the
+ * caller's transaction, their row locked FOR SHARE until it ends: an end committing at the same moment is waited for
+ * and then read, so a session can't be opened past it. Taken after any of their sessions is locked (the sign-in's
+ * previous one ended), as an end locks the sessions before the row.
+ *
+ * R-15 (S206): the column alone is the owner's to set back, or to put an older value of back. So each end is signed on
+ * the platform chain too (sessionsEndedEvent), and the end believed is the latest of three:
+ * - the column;
+ * - the person's latest signed end, read in the same statement by 0084's by-person index, so a column set back
+ *   behind it raises the alarm wherever that end lies;
+ * - the person's ends among the platform events recorded since a little before `signedInAt` (an ID token's time, the
+ *   login service's, which the owner can't move), the only ends that can make this sign-in stale, each checked in
+ *   place with the stretch it lies in through the chain's head (recentPlatformEvents): a record deleted or edited,
+ *   even for a moment and put back after, breaks that stretch now. The stretch is a login flow's few minutes, never
+ *   the person's whole history.
+ * The column behind either signed end raises the alarm (check `user`), and the signed end is believed; a stretch that
+ * doesn't hold raises it too (check `platform_chain`), and nothing is believed. Left unseen: the newest events
+ * deleted with the head wound back to an older one, which the anchor check finds once an anchor has passed them.
+ */
+export async function sessionsEndedAt(
+  tx: Kysely<IdentityTables>,
+  userId: string,
+  { keys, logger }: RowMacs,
+  signedInAt: Date,
+): Promise<SessionsEnded> {
+  const person = userId.toLowerCase();
+  // The platform chain's tables are reached in the same transaction: they belong to no organisation.
+  const platform = tx as unknown as PlatformTransaction;
+  const signed = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: { person } }]);
   const row = await tx
     .selectFrom('identity.users')
-    .select('sessions_ended_at')
+    .select(['sessions_ended_at', sql<Date | null>`(${signed})`.as('signed_end')])
     .where('id', '=', userId)
     .forShare()
     .executeTakeFirstOrThrow();
-  return row.sessions_ended_at;
+  // Read after the row's lock: an end of the person's can't commit from here on, as it would wait for that lock.
+  const since = new Date(signedInAt.getTime() - CLOCKS_DIFFER_MS);
+  const recent = await recentPlatformEvents(platform, keys, since, MOST_EVENTS_CHECKED);
+  if (recent.kind === 'broken') {
+    const { reason, seq } = recent.problem;
+    logger.error('audit.integrity_failed', { check: 'platform_chain', reason, seq: seq.toString(), userId });
+    return { kind: 'tampered' };
+  }
+  if (recent.kind === 'too_many') {
+    logger.error('sign_in.ends_unchecked', { userId, most: MOST_EVENTS_CHECKED });
+    return { kind: 'unchecked' };
+  }
+  const column = row.sessions_ended_at;
+  // The checked stretch's own ends too, not the index's alone: the index was read on the first statement's snapshot,
+  // before any wait for the row's lock, so a record deleted then and put back while the sign-in waited is missed there.
+  const signedEnd = later(row.signed_end, latestEndIn(recent.events, person));
+  if (signedEnd !== null && (column === null || column < signedEnd)) {
+    logger.error('audit.integrity_failed', {
+      check: 'user',
+      reason: 'sessions_ended_rolled_back',
+      rowId: userId,
+      userId,
+    });
+  }
+  return { kind: 'read', endedAt: later(column, signedEnd) };
 }
 
 /** The columns a session's MAC is made from, with the MAC itself. */

@@ -114,7 +114,7 @@ import { restrictedUntil } from '../domain/removal-restriction.ts';
 import { toldOfReset } from './grant-notices.ts';
 import type { SecondFactorsHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
-import { endSessionsOf, lockSessionsOf } from './sessions.ts';
+import { endSessionsOf, lockSessionsOf, sessionsEndedEvent } from './sessions.ts';
 import { lockChallengesOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userOfSubject } from './users.ts';
@@ -238,10 +238,10 @@ export function createIdpEventCopier({
    * first (level 0b, in order of ID, as a demotion does), so the challenges
    * the sessions' end deletes are never locked out of order; how many ended.
    */
-  const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string): Promise<number> => {
+  const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string, at: Date): Promise<number> => {
     await lockSessionsOf(tx, [person]);
     await lockChallengesOf(tx, [person]);
-    return endSessionsOf(tx, person, clock.now());
+    return endSessionsOf(tx, person, at);
   };
 
   /**
@@ -276,6 +276,16 @@ export function createIdpEventCopier({
       action: IDP_EVENT_COPIED,
       details: signInsEnded === undefined ? details : { ...details, signInsEnded },
     });
+    /** The person's sessions ended, when the copy ends them: how many, and the signed record of the end (R-15). */
+    const ended = async (tx: Transaction<Tables>, ending: string | undefined) => {
+      if (ending === undefined) return { count: undefined, signed: [] };
+      const at = clock.now();
+      return { count: await endSessions(tx, ending, at), signed: [sessionsEndedEvent(ending, at)] };
+    };
+    /** The platform chain's records, last of all (ADR-006 §6): the copy, then the end if there was one. */
+    const recordOnPlatform = async (tx: Transaction<Tables>, end: Awaited<ReturnType<typeof ended>>) => {
+      for (const event of [platformEvent(end.count), ...end.signed]) await platform.record(tx, event);
+    };
     /** The event's lock, then whether to copy it and whose sessions to end: undefined to copy nothing. */
     const judged = async (tx: Transaction<Tables>): Promise<{ ending: string | undefined } | undefined> => {
       await holdTransactionLock(tx, COPY_LOCK, key);
@@ -288,15 +298,14 @@ export function createIdpEventCopier({
       return database.transaction().execute(async (tx) => {
         const copying = await judged(tx);
         if (copying === undefined) return false;
-        const ended = copying.ending === undefined ? undefined : await endSessions(tx, copying.ending);
-        await platform.record(tx, platformEvent(ended));
+        await recordOnPlatform(tx, await ended(tx, copying.ending));
         return true;
       });
     }
     return withTenant(database, orgId, async (tx) => {
       const copying = await judged(tx);
       if (copying === undefined) return false;
-      const ended = copying.ending === undefined ? undefined : await endSessions(tx, copying.ending);
+      const end = await ended(tx, copying.ending);
       await trail.record(tx, orgId, {
         actor: ACTOR,
         action: SIGN_IN_CHANGED,
@@ -306,7 +315,7 @@ export function createIdpEventCopier({
       if (isToldToThePerson(event.eventClass)) {
         await outbox.add(tx, toldOfReset(orgId, event.eventClass, person, false));
       }
-      await platform.record(tx, platformEvent(ended));
+      await recordOnPlatform(tx, end);
       return true;
     });
   };

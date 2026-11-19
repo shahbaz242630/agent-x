@@ -23,7 +23,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type PlatformEvent, PlatformEventRefused } from '../domain/event.ts';
-import { createPlatformChain, HEAD_WAIT_SECONDS } from './platform-chain.ts';
+import { createPlatformChain, HEAD_WAIT_SECONDS, recentPlatformEvents } from './platform-chain.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -961,5 +961,101 @@ describe("the operator's events, believed only signed with its own key (PL-57)",
     );
 
     expect(await verifiedByApi()).toEqual({ ok: false, problem: { reason: 'mac', seq: 2n } });
+  });
+});
+
+describe('R-15 the events recorded since a moment, checked in place (S206)', () => {
+  /** Four events, each recorded a few milliseconds after the last, so each has its own time. */
+  async function four() {
+    const recorded = [];
+    for (const n of [1, 2, 3, 4]) {
+      recorded.push(...(await record(started(n))));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return recorded;
+  }
+  const recent = (since: Date, most = 100) =>
+    app.transaction().execute((tx) => recentPlatformEvents(tx, keys, since, most));
+  const seqs = async (since: Date, most?: number) => {
+    const read = await recent(since, most);
+    return read.kind === 'checked' ? read.events.map((event) => event.seq) : read;
+  };
+  /** A moment just after the event's own. */
+  const after = (event: { readonly recordedAt: Date }) => new Date(event.recordedAt.getTime() + 1);
+
+  it('gives the events past the last one recorded before the moment, through the head, each with what it says', async () => {
+    const [, second] = await four();
+    if (second === undefined) throw new Error('four events were recorded');
+
+    expect(await seqs(after(second))).toEqual([3n, 4n]);
+    expect(await recent(after(second))).toMatchObject({
+      kind: 'checked',
+      events: [{ action: 'platform.started', details: expect.stringContaining('"release":"r-3"') as unknown }, {}],
+    });
+    // From before the first: the whole chain, from its start. After the head's: none.
+    expect(await seqs(new Date(0))).toEqual([1n, 2n, 3n, 4n]);
+    expect(await seqs(new Date('2100-01-01T00:00:00Z'))).toEqual([]);
+  });
+
+  it('checks a chain with no events yet as none', async () => {
+    expect(await seqs(new Date(0))).toEqual([]);
+  });
+
+  it('reads no more than it is given: past that, nothing is believed', async () => {
+    const [first] = await four();
+    if (first === undefined) throw new Error('four events were recorded');
+
+    expect(await seqs(new Date(0), 3)).toEqual({ kind: 'too_many' });
+    expect(await seqs(after(first), 3)).toEqual([2n, 3n, 4n]);
+  });
+
+  it.each([
+    [
+      'an event of the stretch deleted',
+      'delete from platform_controls.audit_events where seq = 3',
+      { reason: 'gap', seq: 3n },
+    ],
+    [
+      'its details edited',
+      `update platform_controls.audit_events set details = '{}' where seq = 3`,
+      { reason: 'hash', seq: 3n },
+    ],
+    [
+      'the newest deleted, the head left',
+      'delete from platform_controls.audit_events where seq = 4',
+      { reason: 'head', seq: 4n },
+    ],
+    [
+      'the event before it edited',
+      `update platform_controls.audit_events set details = '{}' where seq = 2`,
+      { reason: 'mac', seq: 2n },
+    ],
+    [
+      'the head given another MAC',
+      'update platform_controls.audit_head set mac = mac || $$x$$::bytea',
+      { reason: 'head', seq: 0n },
+    ],
+    ['the head deleted, the events left', 'delete from platform_controls.audit_head', { reason: 'head', seq: 0n }],
+  ])('finds %s, now', async (_what, statement, found) => {
+    const [, second] = await four();
+    if (second === undefined) throw new Error('four events were recorded');
+    await tamper(statement);
+
+    expect(await recent(after(second))).toEqual({ kind: 'broken', problem: found });
+  });
+
+  it('finds an event deleted for a moment, which put back byte for byte leaves the chain whole again', async () => {
+    const [, second] = await four();
+    if (second === undefined) throw new Error('four events were recorded');
+    await tamper(
+      'create table public.held as select * from platform_controls.audit_events where seq = 3',
+      'delete from platform_controls.audit_events where seq = 3',
+    );
+
+    expect(await recent(after(second))).toEqual({ kind: 'broken', problem: { reason: 'gap', seq: 3n } });
+    await tamper('insert into platform_controls.audit_events select * from public.held', 'drop table public.held');
+    // Whole again: only a check made while it was gone could find it.
+    expect(await verify()).toMatchObject({ ok: true, seq: 4n });
+    expect(await seqs(after(second))).toEqual([3n, 4n]);
   });
 });

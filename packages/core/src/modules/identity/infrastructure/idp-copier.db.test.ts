@@ -32,6 +32,7 @@ import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from 
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
 import { createRemovalRestriction } from './removal-restriction.ts';
+import { endsKept } from './sessions-ended.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { changeHashOf, createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -861,6 +862,9 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(copies).toHaveLength(2);
     // Ended once, on the first organisation's copy: the other's records none.
     expect(copies.filter((copy) => 'signInsEnded' in copy)).toEqual([expect.objectContaining({ signInsEnded: 2 })]);
+    // R-15: the end signed on the platform chain, at the moment its row keeps.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
     // Signed in again since, and joined another organisation: the same event read again, and copied
     // there for the first time, ends nothing.
     await signIn(who.userId);
@@ -871,6 +875,8 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect.arrayContaining([expect.objectContaining({ org: joined })]) as unknown,
     );
     expect(await sessionsOf(who.userId)).toBe(1);
+    // Ended nothing again: still the one signed end.
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
   });
 
   it('ends the sessions of a person in no organisation too', async () => {
@@ -881,6 +887,9 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await copierWith(feedOf(() => [locked]).feed).run();
 
     expect(await sessionsOf(who.userId)).toBe(0);
+    // R-15: signed on the platform chain all the same, which belongs to no organisation.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
   });
 
   it('ends no session on a login unlocked or a token issued', async () => {

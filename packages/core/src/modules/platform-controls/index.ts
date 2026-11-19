@@ -18,17 +18,20 @@ export {
 export { jobsBeating, releaseJobLease, takeJobLease } from './infrastructure/job-lease.ts';
 export { nextMachineId } from './infrastructure/machine-ids.ts';
 export {
+  type CheckedPlatformEvent,
   createPlatformChain,
   HEAD_WAIT_SECONDS,
   type PlatformChain,
   platformEventSealed,
   platformEventsSigned,
   type PlatformTransaction,
+  recentPlatformEvents,
   type RecordedPlatformEvent,
 } from './infrastructure/platform-chain.ts';
 export {
   latestPlatformTime,
   latestPlatformTimeOf,
+  latestPlatformTimeOfRead,
   platformEventWith,
   type PlatformEventsMatching,
 } from './infrastructure/platform-events.ts';
