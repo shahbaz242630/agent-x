@@ -7,6 +7,7 @@
 // Whichever has the jobs runs them only while it holds their lease (background.ts).
 // Each first does what boot.ts says, then its own work, then stops as it says.
 import { jobsBeating } from '@agentx/core/modules/platform-controls';
+import { systemClock } from '@agentx/core/shared-kernel';
 import type { FastifyInstance } from 'fastify';
 
 import type { Leadership } from './background.ts';
@@ -23,6 +24,7 @@ import {
 import { HEARTBEAT_STALE_MS } from './handoff.ts';
 import { type HealthCheck, heartbeatChecks, sharedHeartbeat } from './health.ts';
 import { eachProcessJobs, oneCopyJobs } from './job-list.ts';
+import { sealLegacyNotices } from './notice-legacy.ts';
 import { keepAlive, startJobs } from './start-jobs.ts';
 import { startWeb } from './start-web.ts';
 
@@ -52,6 +54,23 @@ function healthChecksOf(
   ];
 }
 
+/** The longest a stop waits for a seal pass under way (S206 V4) before it closes the pool: its statements' own limit. */
+const SEALING_STOP_MS = 10_000;
+
+/** Waits for `work`, if any, at most `ms`: what it came to is its own to log (sealLegacyNotices never throws). */
+async function finishedWithin(work: Promise<void> | undefined, ms: number): Promise<void> {
+  if (work === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ranOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  try {
+    await Promise.race([work, ranOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Starts the role's work and returns its server, or nothing where it has none
  * (`jobs`), or nothing with a failed exit code when it can't start.
@@ -72,6 +91,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const started: {
     server?: FastifyInstance | undefined;
     jobs?: ReturnType<typeof startJobs>;
+    sealing?: Promise<void>;
     stopped?: boolean;
   } = {};
   const stopping = (): boolean => started.stopped === true;
@@ -85,6 +105,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         started.stopped = true;
         // The lease last: another copy takes over only once this one's runs have ended.
         await started.jobs?.stop();
+        // Its pool is closed after: a seal pass under way is given SEALING_STOP_MS to finish, never more.
+        await finishedWithin(started.sealing, SEALING_STOP_MS);
         await leadership?.stop();
         holding?.stop();
       },
@@ -104,6 +126,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     if (started.server === undefined) return undefined;
   }
   if (!stopping()) started.jobs = startJobs([...(oneCopy?.jobs ?? []), ...eachProcessJobs(booted, parts)]);
+  // S206 V4: the notices from before seals sealed in the background, once it answers: off the start's own path, so a
+  // long chain check never holds the start up; until then they wait unclaimed. It never throws.
+  // TODO(S206 V4): delete with sealLegacyNotices once NOTICE_SEAL_BACKFILL_UNTIL has passed (Outstanding-Work AT10).
+  if (!stopping() && role !== 'jobs') started.sealing = sealLegacyNotices(booted, { now: systemClock.now() });
   return started.server;
 }
 

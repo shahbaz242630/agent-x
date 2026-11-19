@@ -1,4 +1,4 @@
-// S206 V4 (R-15; 0105): a notice's seals as queued and as it ended, made and
+// S206 V4 (R-15; 0104): a notice's seals as queued and as it ended, made and
 // judged with `audit-mac` under labels of their own.
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { describe, expect, it } from 'vitest';

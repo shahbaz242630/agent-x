@@ -33,7 +33,7 @@
 //   touches a notice already sent or given up.
 // - `sweep` deletes notices sent or given up past the retention, oldest first.
 //
-// Sealed (S206 V4, Threat-Model R-15; 0105, notice-seals.ts): every notice it
+// Sealed (S206 V4, Threat-Model R-15; 0104, notice-seals.ts): every notice it
 // writes carries a MAC over whom it tells of what, and `notice.queued` is
 // recorded about it on its organisation's chain in the same statement, so a
 // notice deleted leaves its signed record behind; every notice it ends, sent or
@@ -80,7 +80,7 @@ export const CLAIM_LEASE_MS = 10 * 60_000;
 
 /**
  * The notices whose last try's lease ran out by `now`, locked to be given up; the caller picks which kinds. Read
- * first, as each is given up with its own end seal in the one write (0105 refuses an end with none).
+ * first, as each is given up with its own end seal in the one write (0104 refuses an end with none).
  */
 const leaseEnded = (tx: Kysely<NotificationsTables>, now: Date) =>
   tx
@@ -295,6 +295,16 @@ export async function sealNoticesFromBefore(
   return { sealed: open.length, complete };
 }
 
+/**
+ * Whether this transaction took the pass over the notices from before seals for itself (a transaction's advisory
+ * lock, only tried): a replica that didn't leaves it to the one that did. TODO(S206 V4): delete with the pass (AT10).
+ */
+export async function tookLegacySealPass(tx: Transaction<NotificationsTables>): Promise<boolean> {
+  const { rows } = await sql<{ got: boolean }>`select pg_catalog.pg_try_advisory_xact_lock(
+      pg_catalog.hashtextextended('notifications.legacy_seal', 0)) as got`.execute(tx);
+  return rows[0]?.got === true;
+}
+
 /** Which of these notices their organisations' chains record as queued: one statement an organisation, one trip. */
 async function recordedNotices(
   db: Kysely<OutboxTables>,
@@ -487,7 +497,7 @@ export function createOutbox({
           .where('given_up_at', 'is', null)
           .where('next_attempt_at', '<=', now)
           .where('attempts', '<', MOST_ATTEMPTS)
-          // Only a notice with a seal to judge: one with none is the owner's, never sent, and 0105 refuses its claim.
+          // Only a notice with a seal to judge: one with none is the owner's, never sent, and 0104 refuses its claim.
           .where('mac', 'is not', null)
           .orderBy('next_attempt_at')
           .orderBy('id')

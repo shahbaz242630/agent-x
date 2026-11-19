@@ -104,7 +104,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   clock.set(new Date(START.getTime() + 10_000 * DAY_MS));
-  // Every notice of the test before gone: none can be marked given up here, with no end seal (0105).
+  // Every notice of the test before gone: none can be marked given up here, with no end seal (0104).
   await sql`delete from notifications.outbox`.execute(app);
   expect(await rows()).toEqual([]);
   clock.set(START);
@@ -234,7 +234,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
           created_at: START,
           attempts: 0,
           next_attempt_at: START,
-          // Some seal, so the rule the case is about is the one that refuses it (0105 refuses a notice with none).
+          // Some seal, so the rule the case is about is the one that refuses it (0104 refuses a notice with none).
           mac: Buffer.alloc(32),
           mac_key_version: 1,
           ...values,

@@ -1,62 +1,59 @@
 // The notices queued before seals, sealed once (S206 V4, Threat-Model R-15;
-// 0105), as S205 sealed the people made before 0100: a start of the release
-// with seals seals every notice still to be sent that has none, over what it
-// says now, in the transaction that records the start on the platform chain,
-// and says so in that start's record (`noticesSealed`). From then on a notice
-// with no seal is one the database's owner wrote, never claimed by the sender,
-// and the notice check alarms for any still unsent a day on.
+// 0104), as S205 sealed the people made before 0100: in the background, once
+// the API answers (main.ts), every notice still to be sent that has no seal
+// and no `notice.queued` record gets one over what it says now, and the
+// platform chain records it (`notice.legacy_sealed`, with how many). Until
+// then they wait, never claimed (the sender takes sealed notices alone); a
+// notice with no seal still unsent a day on raises the notice check's alarm.
 //
 // It runs only while all of these hold, the S205 backfill's way of bounding
 // what a forced restart can bless:
 // - before NOTICE_SEAL_BACKFILL_UNTIL;
 // - no notice written by this release yet (before_seals false): once the app
 //   has queued one, every notice from before had its chance;
-// - the platform chain checks out whole, from its start to its head, and no
-//   start in it says it sealed them: a record of it deleted shows as a gap,
-//   and seals nothing, with the integrity alarm (check `start_record`).
-// And it seals only a notice with no `notice.queued` record: one with a record
-// was queued sealed, so one unsealed now had its seal taken out.
+// - the platform chain checks out whole, from its start to its head, and holds
+//   no `notice.legacy_sealed`: one deleted shows as a gap, and nothing is
+//   sealed, with the integrity alarm (check `start_record`).
+// One with a `notice.queued` record was queued sealed: unsealed now, it had
+// its seal taken out, and stays so.
 //
-// A pass that couldn't read an organisation's records (a statement's limit, a
-// busy pool) seals none of its notices and says nothing in the start's record,
-// so the next start tries again, with a warning (`notification.legacy_seal_incomplete`).
-// A start whose record fails seals nothing either: its transaction rolls back.
+// Off the start's path, on the web side alone (not `jobs`), one replica at a
+// time (an advisory lock, only tried: the others leave it quietly): a long
+// chain's check never holds a start up past its probe, and nothing here can
+// stop the API. A pass that fails, or couldn't
+// read an organisation's records, says so (`notification.legacy_seal_failed`,
+// `notification.legacy_seal_incomplete`) and records nothing, so the next
+// start tries again. A pass that sealed none records nothing either.
 //
-// What it can't tell: a notice from before seals the owner changed before that
-// start is sealed as it stands, as S205's people were.
+// What it can't tell: a notice from before seals the owner changed before
+// that pass is sealed as it stands, as S205's people were.
 //
-// TODO(S206 V4): a later commit deletes this once NOTICE_SEAL_BACKFILL_UNTIL has passed, boot.ts back to recordStart
-// alone, with sealNoticesFromBefore (Outstanding-Work AT10).
+// TODO(S206 V4): a later commit deletes this once NOTICE_SEAL_BACKFILL_UNTIL has passed, its call in main.ts with it,
+// and sealNoticesFromBefore (Outstanding-Work AT10).
 import type { AuditTables } from '@agentx/core/modules/audit';
-import { type NotificationsTables, sealNoticesFromBefore } from '@agentx/core/modules/notifications';
 import {
-  createPlatformChain,
-  platformEventsSigned,
-  type PlatformControlsTables,
-} from '@agentx/core/modules/platform-controls';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+  type NotificationsTables,
+  sealNoticesFromBefore,
+  tookLegacySealPass,
+} from '@agentx/core/modules/notifications';
+import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { StartFacts } from './start-record.ts';
+/** The platform chain's record that the notices from before seals were sealed, and how many. */
+export const LEGACY_SEALED = 'notice.legacy_sealed';
 
-/** The start record's detail that says the notices from before seals were sealed then, and how many. */
-export const NOTICES_SEALED = 'noticesSealed';
-
-/** After this, no start seals a notice from before seals, whatever it finds (S205's USER_MAC_BACKFILL_UNTIL's way). */
+/** After this, no pass seals a notice from before seals, whatever it finds (S205's USER_MAC_BACKFILL_UNTIL's way). */
 export const NOTICE_SEAL_BACKFILL_UNTIL = new Date('2026-12-07T00:00:00Z');
 
 type LegacyTables = NotificationsTables & PlatformControlsTables & AuditTables;
 
-/**
- * Whether this start may seal the notices from before seals: `yes`, `no`, or `unbelieved` for a platform chain that
- * fails its whole check (nothing is sealed; the caller raises the alarm).
- */
+/** Whether this pass may seal: `yes`, `no`, or `unbelieved` for a platform chain that fails its whole check. */
 async function maySeal(
   tx: DatabaseTransaction<LegacyTables>,
   keys: KeyProvider,
-  ids: IdGenerator,
   now: Date,
 ): Promise<'yes' | 'no' | 'unbelieved'> {
   if (now.getTime() >= NOTICE_SEAL_BACKFILL_UNTIL.getTime()) return 'no';
@@ -67,43 +64,46 @@ async function maySeal(
     .limit(1)
     .executeTakeFirst();
   if (written !== undefined) return 'no';
-  // Whole, in this transaction: a start's record deleted, even the newest under a head wound back to it, is a gap.
-  const report = await createPlatformChain({ keys, ids }).verify(tx, undefined);
+  // Whole, in this transaction: a record of it deleted, even the newest under a head wound back to it, is a gap.
+  const report = await createPlatformChain({ keys, ids: uuidV7Ids }).verify(tx, undefined);
   if (!report.ok) return 'unbelieved';
-  const starts = await platformEventsSigned(tx).where('e.action', '=', 'platform.started').execute();
-  const sealedBefore = starts.some(
-    ({ details }) => typeof details === 'string' && Object.hasOwn(JSON.parse(details) as object, NOTICES_SEALED),
-  );
-  return sealedBefore ? 'no' : 'yes';
+  const before = await tx
+    .selectFrom('platform_controls.audit_events')
+    .select('seq')
+    .where('action', '=', LEGACY_SEALED)
+    .limit(1)
+    .executeTakeFirst();
+  return before === undefined ? 'yes' : 'no';
 }
 
-/**
- * recordStart, and with a start that may, the notices from before seals sealed in the same transaction, its record
- * saying how many when every one could be looked at. Gives back the start's place in the chain.
- */
-export async function recordStartSealingNotices(
-  database: Database<LegacyTables>,
-  keys: KeyProvider,
-  ids: IdGenerator,
-  facts: StartFacts,
-  { logger, now }: { readonly logger: Logger; readonly now: Date },
-): Promise<bigint> {
-  const recorded = await limitedTransaction(database, async (tx) => {
-    const may = await maySeal(tx, keys, ids, now);
-    if (may === 'unbelieved') logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
-    const pass = may === 'yes' ? await sealNoticesFromBefore(tx, database, keys) : undefined;
-    if (pass?.complete === false) logger.warn('notification.legacy_seal_incomplete', { notices: pass.sealed });
-    // The platform head's lock last.
-    return createPlatformChain({ keys, ids }).record(tx, {
-      actor: { type: 'system', id: 'api' },
-      action: 'platform.started',
-      details: {
-        configHash: facts.configHash,
-        release: facts.release,
-        ...(facts.gateRef === undefined ? {} : { gateRef: facts.gateRef }),
-        ...(pass?.complete === true ? { [NOTICES_SEALED]: pass.sealed } : {}),
-      },
+/** Seals the notices from before seals, once ever, as above. Never throws: what went wrong is logged. */
+export async function sealLegacyNotices(
+  {
+    database,
+    keys,
+    logger,
+  }: { readonly database: Database<LegacyTables>; readonly keys: KeyProvider; readonly logger: Logger },
+  { now }: { readonly now: Date },
+): Promise<void> {
+  try {
+    await limitedTransaction(database, async (tx) => {
+      // Another replica of the web side has it under way: it is that one's, quietly.
+      if (!(await tookLegacySealPass(tx))) return;
+      const may = await maySeal(tx, keys, now);
+      if (may === 'unbelieved') logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
+      if (may !== 'yes') return;
+      const { sealed, complete } = await sealNoticesFromBefore(tx, database, keys);
+      if (!complete) logger.warn('notification.legacy_seal_incomplete', { notices: sealed });
+      if (!complete || sealed === 0) return;
+      // The platform head's lock last.
+      await createPlatformChain({ keys, ids: uuidV7Ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: LEGACY_SEALED,
+        details: { notices: sealed },
+      });
+      logger.info('notification.legacy_sealed', { notices: sealed });
     });
-  });
-  return recorded.seq;
+  } catch (error) {
+    logger.warn('notification.legacy_seal_failed', { err: error });
+  }
 }

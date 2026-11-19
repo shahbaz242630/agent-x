@@ -1,5 +1,5 @@
 // A notice sealed as it is queued and as it ends (S206 V4, Threat-Model R-15;
-// 0105): notifications.outbox is global and holds no signed state, and the
+// 0104): notifications.outbox is global and holds no signed state, and the
 // sender reads whom to tell from the row, so a notice is believed only with
 // the MACs the app made of it, with a key the database never holds.
 //

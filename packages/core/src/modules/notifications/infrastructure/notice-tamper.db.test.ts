@@ -1,4 +1,4 @@
-// S206 V4 (Threat-Model R-15; 0105): a warning email queued in the outbox, as
+// S206 V4 (Threat-Model R-15; 0104): a warning email queued in the outbox, as
 // the database's owner (agentx_owner, holding none of the app's keys) can
 // change it, on the real migrated schema. A notice deleted before it went,
 // marked sent or given up, moved to another person, planted, held back or its

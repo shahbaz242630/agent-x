@@ -1126,6 +1126,11 @@ export const PLAIN_WORDS = {
     broke: 'Its recipient has not been told yet; a notice that can never be sent is given up at once.',
     next: 'It is tried again later, up to 8 tries in all. If many fail, check the email service and the login service.',
   },
+  'notification.legacy_seal_failed': {
+    happened: 'The background pass that seals old email notices failed, perhaps on a slow database.',
+    broke: 'Those notices wait unsent; the API itself carries on as usual.',
+    next: 'The next start tries again. Any still unsent a day on raises the alarm.',
+  },
   'notification.legacy_seal_incomplete': {
     happened: 'At start, some old email notices could not be sealed: an organisation’s records could not be read.',
     broke: 'Those notices wait unsent, and the next start tries again.',

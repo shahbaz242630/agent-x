@@ -312,8 +312,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         seq: '1',
         actor_id: 'api',
         action: 'platform.started',
-        // The first start with notice seals says how many notices from before them it sealed (S206 V4).
-        details: JSON.stringify({ configHash: logged[0], noticesSealed: 0, release: 'local' }),
+        details: JSON.stringify({ configHash: logged[0], release: 'local' }),
       },
       {
         seq: '2',
@@ -620,7 +619,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ] as const;
     for (const [id, age, sent] of notices) {
       await admin.query(
-        // Rows from before 0105's seals (before_seals), which only the sweep touches here.
+        // Rows from before 0104's seals (before_seals), which only the sweep touches here.
         `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at,
            before_seals)
          values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now() - $3::interval, 1,
@@ -639,6 +638,91 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       await admin.query<{ id: string }>('select id from notifications.outbox where org_id = $1 order by id', [orgId]),
     ).toEqual([{ id: notices[1][0] }, { id: notices[2][0] }]);
     await stop(run);
+  });
+
+  it('seals the notices from before seals in the background once it answers, and records it (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5204';
+    const id = '0199a0f0-0000-7000-8000-0000000b5205';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+
+    const run = await start(envFor('app'));
+    expect((await run.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'notification.legacy_sealed')).toEqual(
+        expect.objectContaining({ level: 'info', notices: 1 }),
+      );
+    });
+    await stop(run);
+    expect(await admin.query('select id from notifications.outbox where id = $1 and mac is not null', [id])).toEqual([
+      { id },
+    ]);
+    expect(
+      await admin.query('select seq from platform_controls.audit_events where action = $1', ['notice.legacy_sealed']),
+    ).toHaveLength(1);
+  });
+
+  it('leaves the seal pass to the web side: `jobs` never runs it (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5208';
+    const id = '0199a0f0-0000-7000-8000-0000000b5209';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+    try {
+      const run = await start(envFor('app', { AGENTX_ROLE: 'jobs' }));
+      await vi.waitFor(() => {
+        expect(run.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
+      });
+      await stop(run);
+      expect(run.capture.lines().filter((line) => String(line.event).startsWith('notification.legacy'))).toEqual([]);
+      expect(await admin.query('select id from notifications.outbox where mac is null')).toEqual([{ id }]);
+    } finally {
+      await admin.query('delete from notifications.outbox');
+    }
+  });
+
+  it('raises the alarm, seals nothing and goes on serving when the platform chain has a gap (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    await stop(await start(envFor('app')));
+    await stop(await start(envFor('app')));
+    await admin.query('delete from platform_controls.audit_events where seq = 1');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5206';
+    const id = '0199a0f0-0000-7000-8000-0000000b5207';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+    try {
+      const run = await start(envFor('app'));
+      await vi.waitFor(() => {
+        expect(
+          run.capture.lines().find((line) => line.event === 'audit.integrity_failed' && line.check === 'start_record'),
+        ).toEqual(expect.objectContaining({ level: 'error', chain: 'platform' }));
+      });
+      expect((await run.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
+      await stop(run);
+      expect(await admin.query('select id from notifications.outbox where mac is null')).toEqual([{ id }]);
+    } finally {
+      await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+      await admin.query('delete from notifications.outbox');
+    }
   });
 
   it('writes the rate-limit refusals it counted as it stops, before the pool closes (B2-5b)', async () => {
@@ -673,8 +757,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       expect(api).toBeUndefined();
       expect(host.exitCode).toBe(1);
       expect(events()).toEqual(['api.starting', 'api.partner', 'api.database_connected', 'api.start_not_recorded']);
-      // The start's own alarm (the notices' seal pass, S206 V4, raises its own first: check start_record).
-      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed' && line.check === 'start')).toEqual(
+      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed')).toEqual(
         expect.objectContaining({ level: 'error', chain: 'platform', check: 'start' }),
       );
       await expectNoApiConnections();
