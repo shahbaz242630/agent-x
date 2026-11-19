@@ -62,6 +62,7 @@ import {
   verifyImage,
 } from '../image/verify.ts';
 import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
+import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/machine-id-header.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
@@ -156,6 +157,18 @@ export const APPS_ENVIRONMENT = 'cae-agentx-staging';
 /** What the certificates deployment reads from the shell (staging.certificates.bicepparam): the apps' two hosts. */
 export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost: APP_VARIABLES.appHost } as const;
 
+/** AG10: the vault secret holding Zitadel's machine-ID config, which the API reads too (apps.bicep `machineConfig`). */
+const MACHINE_CONFIG = 'zitadel-machine-config';
+
+/**
+ * Zitadel's machine-ID config (AG10): its webhook's one header, 32 random bytes as hex, as JSON, which Zitadel's
+ * `--config` reads as YAML and the API's AGENTX_MACHINE_IDS_CONFIG checks (settings.ts machineIdsConfig).
+ */
+const newMachineConfig = (random: Random): string =>
+  JSON.stringify({
+    Machine: { Identification: { Webhook: { Headers: { [MACHINE_ID_HEADER]: random(32).toString('hex') } } } },
+  });
+
 /**
  * Every secret the vault holds, by its name there, with the variable
  * staging.secrets.bicepparam reads it from and who makes it. A test holds this
@@ -163,18 +176,26 @@ export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost
  * - person: pasted from the password manager
  * - machine: a fresh login, made here
  * - pair: the login container's key pair, both halves made together
- * - once: Zitadel's master key; a fresh one goes every run, and Azure keeps only the first
+ * - once: Zitadel's master key, and its machine-ID config (AG10); a fresh one goes every run, and Azure
+ *   keeps only the first
  * - issued: given by a service we are a client of, pasted by a person, and
  *   written only by name (`--rotate`): it exists only once that service does,
  *   so a first `--all` can't have it (B2-6)
  * - ids: login service user IDs a person pastes (SA2b), written only by name
  *   like an issued one; any run writes `none` (off) for one the vault lacks, so
  *   the apps always have it to mount and the feature stays off until then
+ * - seeded: made here like a machine login, and also by any run the vault lacks
+ *   it on (`--keys`, the Approve path's, among them), so the app that mounts it
+ *   always finds it; a new one signs everyone out of the login pages once, and
+ *   the API's own sessions stay (SA5)
  */
 export const VAULT_SECRETS: Readonly<
   Record<
     string,
-    { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' | 'ids' }
+    {
+      readonly variable: string;
+      readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' | 'ids' | 'seeded';
+    }
   >
 > = {
   'db-admin-password': { variable: 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', source: 'person' },
@@ -187,6 +208,8 @@ export const VAULT_SECRETS: Readonly<
   'login-client-private-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY', source: 'pair' },
   'login-client-public-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY', source: 'pair' },
   'zitadel-masterkey': { variable: 'AGENTX_AZURE_ZITADEL_MASTERKEY', source: 'once' },
+  // AG10: Zitadel's config file naming the header its processes ask the API for their machine IDs with.
+  [MACHINE_CONFIG]: { variable: 'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG', source: 'once' },
   'api-oidc-client-secret': { variable: 'AGENTX_AZURE_API_OIDC_CLIENT_SECRET', source: 'issued' },
   // B5-3: the token Zitadel gave the API's read-only service user, for the admins' addresses.
   'zitadel-directory-token': { variable: 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN', source: 'issued' },
@@ -196,6 +219,9 @@ export const VAULT_SECRETS: Readonly<
   // (AGENTX_IDP_OUR_*). Kept in the vault, never the public repository: the list tells an attacker which to aim at.
   'zitadel-our-actors': { variable: 'AGENTX_AZURE_ZITADEL_OUR_ACTORS', source: 'ids' },
   'zitadel-our-service-users': { variable: 'AGENTX_AZURE_ZITADEL_OUR_SERVICE_USERS', source: 'ids' },
+  // SA5: the key the login pages sign their sessions cookie with (ZITADEL_SESSION_COOKIE_SECRET), apart from their
+  // login key, so rotating that key no longer signs everyone out of the pages.
+  'login-cookie-secret': { variable: 'AGENTX_AZURE_LOGIN_COOKIE_SECRET', source: 'seeded' },
 };
 
 /** SA2b: the two lists go together, both or neither (config.ts), so a run that writes one writes both. */
@@ -487,7 +513,9 @@ function refuseUnrotatable(name: string): void {
   }
   if (secret.source === 'once') {
     throw new UsageError(
-      `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
+      name === MACHINE_CONFIG
+        ? `${name} is never rotated: the API and each Zitadel copy restart onto a new one in their own time, and a copy whose header the API doesn't hold yet can't start (AG10)`
+        : `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
     );
   }
 }
@@ -539,10 +567,18 @@ export function secretValues(
   const values: Record<string, string> = {};
   for (const [name, secret] of Object.entries(VAULT_SECRETS)) {
     const written = planIncludes(plan, name);
+    const lacking = !written && !held.includes(name);
     values[secret.variable] =
-      secret.source === 'ids' && !written && !held.includes(name)
+      secret.source === 'ids' && lacking
         ? NO_LOGIN_IDS
-        : secretValue(name, secret.source, written, people, pair, makers.random);
+        : secretValue(
+            name,
+            secret.source,
+            written || (secret.source === 'seeded' && lacking),
+            people,
+            pair,
+            makers.random,
+          );
   }
   values[APP_KEYS_VARIABLE] = newAppKeys(makers.random);
   return values;
@@ -566,12 +602,13 @@ function secretValue(
       return written ? (given ?? '') : '';
     }
     case 'machine':
+    case 'seeded':
       return written ? newPassword(random) : '';
     case 'pair':
       if (pair === undefined) return '';
       return name === 'login-client-private-key' ? pair.privatePem : pair.publicPem;
     case 'once':
-      return newMasterKey(random);
+      return name === MACHINE_CONFIG ? newMachineConfig(random) : newMasterKey(random);
   }
 }
 
@@ -581,6 +618,9 @@ export function describePlan(plan: SecretPlan): string[] {
     if (secret.source === 'once') return `  ${name}: written only if the vault has none yet`;
     if (secret.source === 'ids' && !planIncludes(plan, name)) {
       return `  ${name}: kept as the vault has it, or written as ${NO_LOGIN_IDS} (off) if it has none yet`;
+    }
+    if (secret.source === 'seeded' && !planIncludes(plan, name)) {
+      return `  ${name}: kept as the vault has it, or made fresh if it has none yet`;
     }
     if (!planIncludes(plan, name)) return `  ${name}: kept as the vault has it`;
     return pasted(secret.source)
@@ -2004,15 +2044,21 @@ export function keyProblems(
   before: readonly Pick<Listed, 'name' | 'version'>[],
   after: readonly Pick<Listed, 'name' | 'version'>[],
 ): string[] {
-  return CREATED_ONCE.flatMap((key) => {
+  // AG10: Zitadel's machine-ID config is created once too, and checked alike: every Zitadel copy and the API mount it.
+  return [...CREATED_ONCE, MACHINE_CONFIG].flatMap((key) => {
+    const machine = key === MACHINE_CONFIG;
     const now = after.find((secret) => secret.name === key);
-    if (now === undefined) return [`${key} isn't in the vault, so the API won't start: run secrets --keys again`];
+    if (now === undefined) {
+      const stops = machine ? 'no Zitadel copy can start' : "the API won't start";
+      return [`${key} isn't in the vault, so ${stops}: run secrets --keys again`];
+    }
     const was = before.find((secret) => secret.name === key);
-    return was !== undefined && was.version !== now.version
-      ? [
-          `${key} was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"`,
-        ]
-      : [];
+    if (was === undefined || was.version === now.version) return [];
+    return [
+      machine
+        ? `${key} was written again, so a Zitadel copy and the API may hold different headers: restart the API and Zitadel together`
+        : `${key} was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"`,
+    ];
   });
 }
 
@@ -2034,25 +2080,37 @@ function vaultIn(steps: Steps, subscription: string): string {
 }
 
 /**
- * The issued secrets and our login ID lists the vault doesn't hold yet (B2-6, SA2b), and the copied ones
- * (B5-3). An app reads each by its URL, so a deployment without one leaves
+ * The issued secrets, our login ID lists and the seeded ones the vault doesn't hold yet (B2-6, SA2b, SA5), and the
+ * copied ones (B5-3). An app reads each by its URL, so a deployment without one leaves
  * that app unable to start; each issued one is issued by a service already
- * running, then written by name, and any secrets run copies the rest and
- * writes `none` for a list of our login IDs it lacks (SA2b).
+ * running, then written by name, and any secrets run copies the rest, makes a
+ * seeded one and writes `none` for a list of our login IDs it lacks (SA2b).
  */
 export function issuedMissing(held: readonly string[]): string[] {
   return [
     ...Object.entries(VAULT_SECRETS)
-      .filter(([name, secret]) => (secret.source === 'issued' || secret.source === 'ids') && !held.includes(name))
+      .filter(
+        ([name, secret]) =>
+          (secret.source === 'issued' || secret.source === 'ids' || secret.source === 'seeded') && !held.includes(name),
+      )
       .map(([name]) => name),
     ...COPIED_SECRETS.filter((name) => !held.includes(name)),
+    // AG10: created by any secrets run; without it no Zitadel copy can start, and the API refuses to.
+    ...(held.includes(MACHINE_CONFIG) ? [] : [MACHINE_CONFIG]),
   ];
 }
 
-/** The secrets run that writes what `issuedMissing` found: the issued ones by name, or, for a copied one alone, the run that writes nothing else. */
-export function secretsRunFor(missing: readonly string[]): string {
-  const issued = missing.filter((name) => VAULT_SECRETS[name]?.source === 'issued');
-  return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
+/**
+ * The secrets run that writes what `issuedMissing` found: the issued ones by name, and a seeded one the vault holds
+ * disabled (`disabled`) by name too, since a keys run keeps what the vault holds (SA5); for the rest alone, the run
+ * that writes nothing else.
+ */
+export function secretsRunFor(missing: readonly string[], disabled: readonly string[] = []): string {
+  const named = missing.filter(
+    (name) =>
+      VAULT_SECRETS[name]?.source === 'issued' || (VAULT_SECRETS[name]?.source === 'seeded' && disabled.includes(name)),
+  );
+  return named.length > 0 ? `secrets --rotate ${named.join(' ')}` : 'secrets --keys';
 }
 
 /** Our login lists the vault holds but disabled (SA2b): a run never writes none over one silently. */
@@ -2082,7 +2140,7 @@ function problemsOf(name: string): (value: string) => string[] {
 /** An --all run on a vault that holds secrets goes on only once the operator types that it rotates everything. */
 async function confirmRotateEverything(steps: Steps, held: number): Promise<void> {
   steps.terminal.say(
-    `The vault already holds ${String(held)} secrets. --all replaces every one but the master key: every login changes, so run the set-up job straight after.`,
+    `The vault already holds ${String(held)} secrets. --all replaces every one but the master key and Zitadel's machine-ID config: every login changes, so run the set-up job straight after.`,
   );
   if ((await steps.terminal.ask('Type "rotate everything" to go on: ')) !== 'rotate everything') {
     throw new Cancelled();
@@ -2126,7 +2184,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   for (const problem of problems) steps.terminal.say(problem);
   if (problems.length > 0) return 1;
   steps.terminal.say(
-    `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
+    `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
   );
   // Recorded only once the keys are sound: a release on a vault missing one would start an API that can't.
   const recorded = leaveRecord(steps, subscription, 'secrets', commit);
@@ -2765,6 +2823,21 @@ async function migratedFirst(
   return true;
 }
 
+/** Stops apps, before anything is sent, while the vault lacks a secret the apps read, saying which run brings it. */
+function refuseMissingSecrets(missing: readonly string[], disabled: readonly string[]): void {
+  // AG10: alone, it needs no issued secret, only the run that creates it.
+  if (missing.length === 1 && missing[0] === MACHINE_CONFIG) {
+    throw new Error(
+      `The vault has no ${MACHINE_CONFIG}, so no Zitadel copy could start and the API refuses its machine IDs: run secrets --keys first, then apps again.`,
+    );
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API or the login pages read, so they couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing, disabled)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, makes the login pages' cookie key if the vault lacks it, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+    );
+  }
+}
+
 async function deployApps(
   steps: Steps,
   {
@@ -2786,18 +2859,13 @@ async function deployApps(
     confirmLoadServer(steps, subscription, loadDatabase);
     confirmJobsIdentity(steps, subscription);
   }
-  // Before anything else is asked: the API reads its client secret from the vault.
+  // Before anything else is asked: the API reads its client secret from the vault, the login pages their cookie key.
   // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
-  const missing = issuedMissing(
-    secretsInVault(steps, subscription, vaultIn(steps, subscription))
-      .filter((listed) => listed.enabled)
-      .map((listed) => listed.name),
+  const listed = secretsInVault(steps, subscription, vaultIn(steps, subscription));
+  refuseMissingSecrets(
+    issuedMissing(listed.filter((each) => each.enabled).map((each) => each.name)),
+    listed.filter((each) => !each.enabled).map((each) => each.name),
   );
-  if (missing.length > 0) {
-    throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too, and writes none (off) for any of our login ID lists the vault lacks. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
-    );
-  }
   const records = await carriedRecords(steps, subscription);
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);

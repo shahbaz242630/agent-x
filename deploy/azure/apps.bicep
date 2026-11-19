@@ -300,27 +300,52 @@ var zitadelOrigins = [
   }
 ]
 
+// Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on in staging
+// first, off in production until its own sign-off.
+var mcpOauth = environment == 'staging'
+
+// The MCP clients whose metadata documents the API fetches where that server is
+// on (AG5, 6E3c): each entry as the setting takes it, and the origin it is
+// fetched on (every entry is https: its host, the third `/`-separated part),
+// each once. One list, mcp-clients.json, which the foundation's way out and DNS
+// names read too.
+var mcpClients = loadJsonContent('mcp-clients.json', 'clients')
+var mcpClientOrigins = union(map(mcpClients, client => 'https://${sys.split(client.metadata, '/')[2]}'), [])
+
 // What an app that sends the admins' notices is told (B5-3), known only once
 // the deployment reads the email resources, so added to its container
-// alone, as Zitadel's address is: the two origins it may call out to, where
+// alone, as Zitadel's address is: the origins it may call out to, where
 // each notice is sent, and the address it is sent from, Azure's own
 // domain's DoNotReply. The API is the one app that both reaches Zitadel
 // inside the environment and sends email, so its allowlist lives here: an app
-// that reached Zitadel without sending email would need its own.
-var emailSettings = [
-  {
-    name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
-    value: '${zitadelInternalUrl},${emailEndpoint}'
-  }
-  {
-    name: 'AGENTX_EMAIL_ENDPOINT'
-    value: emailEndpoint
-  }
-  {
-    name: 'AGENTX_EMAIL_SENDER'
-    value: 'DoNotReply@${emailDomain.properties.mailFromSenderDomain}'
-  }
-]
+// that reached Zitadel without sending email would need its own. Where the
+// OAuth server is on, the MCP clients' origins join the allowlist and their
+// entries are what it trusts (AG5); any other client registers itself.
+var emailSettings = concat(
+  [
+    {
+      name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
+      // One interpolated text, which the release's drift check reads (drift.ts: format, never join).
+      value: '${zitadelInternalUrl},${emailEndpoint}${mcpOauth ? ',${join(mcpClientOrigins, ',')}' : ''}'
+    }
+    {
+      name: 'AGENTX_EMAIL_ENDPOINT'
+      value: emailEndpoint
+    }
+    {
+      name: 'AGENTX_EMAIL_SENDER'
+      value: 'DoNotReply@${emailDomain.properties.mailFromSenderDomain}'
+    }
+  ],
+  mcpOauth
+    ? [
+        {
+          name: 'AGENTX_OAUTH_CLIENT_METADATA_ORIGINS'
+          value: join(map(mcpClients, client => client.metadata), ',')
+        }
+      ]
+    : []
+)
 
 // What every container of ours is told, wherever it runs: which environment
 // this is, which build it is, and where the database is. Each job adds the
@@ -455,6 +480,20 @@ var zitadelMachineWebhook = {
 var machineIdsHostSetting = {
   name: 'AGENTX_MACHINE_IDS_HOST'
   value: apiInternalHost
+}
+
+// AG10: the header every Zitadel process asks for its machine ID with, so the API
+// needn't trust the host alone. Zitadel's webhook signs nothing but sends static
+// headers, which a config file of its own can add (`--config`, a global flag of the
+// pinned image, proven on it with the file mounted as here). A file, as its master
+// key is, never a setting: one vault secret holding that config, mounted by every
+// Zitadel container and by the API, which checks the header against the same file.
+var machineConfig = 'zitadel-machine-config'
+var machineConfigArgs = ['--config', '${secretsPath}/${machineConfig}']
+var machineConfigFile = {
+  reads: machineConfig
+  // Named on the command line (`machineConfigArgs`), not by a setting.
+  setting: ''
 }
 
 // What Zitadel writes, and what it must not send anywhere (ADR-013,
@@ -864,10 +903,10 @@ var jobs = concat([
     workload: 'zitadel-init'
     image: zitadelImage
     command: ['/app/zitadel']
-    args: ['init', 'zitadel']
+    args: concat(['init', 'zitadel'], machineConfigArgs)
     timeoutSeconds: 900
     evidence: false
-    files: []
+    files: [machineConfigFile]
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
     asksMachineId: true
@@ -882,7 +921,7 @@ var jobs = concat([
     // The master key from a file rather than the environment: `zitadel setup
     // --help` on the pinned image offers `--masterkeyFile`, and this key
     // encrypts every signing key and authenticator secret it writes.
-    args: ['setup', '--masterkeyFile', '${secretsPath}/zitadel-masterkey']
+    args: concat(['setup', '--masterkeyFile', '${secretsPath}/zitadel-masterkey'], machineConfigArgs)
     // Setup writes every step of a new instance, which takes longer than a
     // migration on the smallest server.
     timeoutSeconds: 1800
@@ -893,6 +932,7 @@ var jobs = concat([
         // Named on the command line above, not by a setting.
         setting: ''
       }
+      machineConfigFile
     ]
     held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
@@ -1343,11 +1383,10 @@ var signInAndPartnerSettings = [
     name: 'AGENTX_PARTNER_MODE'
     value: partnerMode
   }
-  // Agent X's own OAuth server for MCP connections (6E3b, ADR-016): on in staging first, off in production until its
-  // own sign-off.
+  // Agent X's own OAuth server for MCP connections (`mcpOauth`).
   {
     name: 'AGENTX_MCP_OAUTH'
-    value: environment == 'staging' ? 'on' : 'off'
+    value: mcpOauth ? 'on' : 'off'
   }
 ]
 
@@ -1546,7 +1585,13 @@ var apps = concat([
     cpu: apiSize.cpu
     memory: apiSize.memory
     probes: apiProbes
-    files: apiFiles
+    // And the config whose header it checks Zitadel's asks for machine IDs against (AG10).
+    files: concat(apiFiles, [
+      {
+        reads: machineConfig
+        setting: 'AGENTX_MACHINE_IDS_CONFIG_FILE'
+      }
+    ])
     settings: concat(
       appOurSettings,
       [
@@ -1585,7 +1630,7 @@ var apps = concat([
     command: ['/app/zitadel']
     // The master key from a file, as `setup` takes it: `zitadel start --help`
     // on the pinned image offers `--masterkeyFile` too.
-    args: ['start', '--masterkeyFile', '${secretsPath}/zitadel-masterkey']
+    args: concat(['start', '--masterkeyFile', '${secretsPath}/zitadel-masterkey'], machineConfigArgs)
     targetPort: 8080
     // Zitadel serves gRPC beside HTTP on the one port, as it does on the
     // compose stack.
@@ -1612,6 +1657,7 @@ var apps = concat([
         // Named by Path inside ZITADEL_SYSTEMAPIUSERS below.
         setting: ''
       }
+      machineConfigFile
     ]
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, [
       // The login pages' system user: the file its public half is in, and the
@@ -1673,6 +1719,14 @@ var apps = concat([
       {
         name: 'NEXT_PUBLIC_BASE_PATH'
         value: '/ui/v2/login'
+      }
+      // The key the pages sign their sessions cookie with (SA5), apart from their
+      // login key: rotating that key no longer signs everyone out. A value, not a
+      // file: the pinned image reads only the setting (a comma-separated list, the
+      // first signing, every one checked, for a rotation without sign-outs).
+      {
+        name: 'ZITADEL_SESSION_COOKIE_SECRET'
+        secretRef: 'login-cookie-secret'
       }
       // The pages carry an OpenTelemetry SDK that starts by default and exports
       // to an OTLP endpoint. Off, so nothing is gathered to be sent anywhere

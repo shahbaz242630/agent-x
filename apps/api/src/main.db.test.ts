@@ -171,8 +171,20 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   });
 
   it("SA3e hands Zitadel's copies machine IDs from the database in turn, on the internal host alone", async () => {
-    const run = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_MACHINE_IDS_HOST: 'agentx-api.internal' }));
-    const ask = async (host: string) => run.api?.inject({ url: MACHINE_ID_PATH, headers: { host } });
+    // AG10: with the header Zitadel's config file names, the value built at run time.
+    const shared = '0f'.repeat(32);
+    const zitadelConfig = JSON.stringify({
+      Machine: { Identification: { Webhook: { Headers: { 'X-Agentx-Machine-Key': shared } } } },
+    });
+    const run = await start(
+      envFor('app', {
+        AGENTX_ROLE: 'web',
+        AGENTX_MACHINE_IDS_HOST: 'agentx-api.internal',
+        AGENTX_MACHINE_IDS_CONFIG: zitadelConfig,
+      }),
+    );
+    const ask = async (host: string, presented = shared) =>
+      run.api?.inject({ url: MACHINE_ID_PATH, headers: { host, 'x-agentx-machine-key': presented } });
     const first = await ask('agentx-api.internal');
     const second = await ask('agentx-api.internal');
     expect(first?.statusCode).toBe(200);
@@ -180,6 +192,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const ids = [first, second].map((each) => fnv1Of(each?.body ?? '') & 0xffff);
     expect(ids[1]).toBe(((ids[0] ?? 0) + 1) & 0xffff);
     expect((await ask('app.example.test'))?.statusCode).toBe(404);
+    expect((await ask('agentx-api.internal', 'a1'.repeat(32)))?.statusCode).toBe(404);
     await stop(run);
     await expectNoApiConnections();
   });

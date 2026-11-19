@@ -1152,6 +1152,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/dns-allowed.json': ['foundation'],
       'deploy/azure/github-ranges.json': ['foundation'],
       'deploy/azure/main.bicep': ['foundation'],
+      // AG5: the MCP clients, whose addresses and names the foundation opens and whose origins the apps trust.
+      'deploy/azure/mcp-clients.json': ['foundation', 'apps'],
       'deploy/azure/modules/activity-downloads.bicep': ['foundation', 'apps'],
       'deploy/azure/modules/communication.bicep': ['foundation'],
       'deploy/azure/modules/dns-policy.bicep': ['foundation'],

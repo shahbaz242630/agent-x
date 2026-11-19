@@ -14,4 +14,5 @@ export {
   startedLive,
 } from './partner.ts';
 export { loadSetupConfig, type SetupConfig, type SetupRole } from './setup.ts';
+export { MACHINE_ID_HEADER } from './machine-id-header.ts';
 export { tlsChecksOff } from './tls.ts';

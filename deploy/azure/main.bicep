@@ -195,6 +195,11 @@ module monitoring 'modules/monitoring.bicep' = {
   }
 }
 
+// Agent X's own OAuth server for MCP connections, on in staging first (apps.bicep's
+// `mcpOauth`, the same switch): only there does the way out open to the MCP clients'
+// documents and the network look up their hosts (AG5, mcp-clients.json).
+var mcpOauth = environment == 'staging'
+
 module network 'modules/network.bicep' = {
   scope: group
   params: {
@@ -208,6 +213,7 @@ module network 'modules/network.bicep' = {
     blobZoneName: blobZoneName
     tags: tags
     addressSpace: networkAddressSpace
+    mcpOauth: mcpOauth
   }
 }
 
@@ -226,6 +232,7 @@ module dnsPolicy 'modules/dns-policy.bicep' = {
     workspaceId: ids.workspace
     actionGroupId: ids.actionGroup
     blockedAlertName: 'alert-agentx-${short}-dns-blocked'
+    mcpOauth: mcpOauth
   }
   // The network, the workspace and the action group must exist first.
   dependsOn: [
@@ -315,6 +322,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     mcpRefusalsAlertName: 'alert-agentx-${short}-mcp-refusals'
     mcpUnknownProtocolAlertName: 'alert-agentx-${short}-mcp-unknown-protocol'
     mcpKeysRefusedAlertName: 'alert-agentx-${short}-mcp-keys-refused'
+    oauthSourceCappedAlertName: 'alert-agentx-${short}-oauth-source-capped'
     dailyWordsAlertName: 'alert-agentx-${short}-daily-words'
     handoffQueueAlertName: 'alert-agentx-${short}-handoff-queue'
     loginServiceAlertName: 'alert-agentx-${short}-login-service'

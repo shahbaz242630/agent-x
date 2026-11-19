@@ -155,3 +155,23 @@ jobs:
         run: |
           node tooling/mcp-watch/canary-judge.ts judge \
             "$RUNNER_TEMP/python-legacy.json" "$RUNNER_TEMP/python-auto.json" "$RUNNER_TEMP/openai-agents.json"
+
+  # AG5: the hosts of the clients whose documents staging fetches (deploy/azure/mcp-clients.json) still answer
+  # inside the ranges its way out allows. Red, in plain words, when one moved: that client can't connect by its
+  # document until the list and the foundation follow. Our own code on bare Node, nothing installed, no secret.
+  client-hosts:
+    name: MCP clients' hosts inside their listed ranges
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Look up each listed host
+        run: node deploy/azure/mcp-clients.ts
