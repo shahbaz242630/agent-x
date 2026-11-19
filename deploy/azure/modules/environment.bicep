@@ -57,6 +57,7 @@ param fullPassAlertName string
 param mcpRefusalsAlertName string
 param mcpUnknownProtocolAlertName string
 param mcpKeysRefusedAlertName string
+param oauthSourceCappedAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -1194,6 +1195,48 @@ resource mcpKeysRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
           metricMeasureColumn: 'Refused'
           operator: 'GreaterThan'
           threshold: 30
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// One address or network past its share of the OAuth sign-ins or registrations
+// (AG9, 6F1 G4): the API refuses only that source and says so at most once a
+// minute a copy (`oauth.source_capped`), so any line tells someone. Stateful:
+// once until it clears.
+resource oauthSourceCappedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: oauthSourceCappedAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'MCP: one address or network over its OAuth share'
+    description: 'SEV-2. One address or network asked for more OAuth sign-ins or registrations than its share (oauth.source_capped), and only it was told to wait; everyone else connects as usual. Rare: an office sharing an address. Going on: an attack, to block at the front door. Each line names its kind: flow (sign-ins) or registration. Runbook: Incident-Response-Playbook.md section Y.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "oauth.source_capped" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

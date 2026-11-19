@@ -28,6 +28,8 @@ param databaseZoneName string
 param blobZoneName string
 param tags object
 param addressSpace string
+@description('Whether Agent X\'s OAuth server is on here, and so the API fetches the MCP clients\' documents (AG5).')
+param mcpOauth bool
 
 // The one spelling of the apps subnet's range: the apps deployment reads the
 // same function for what the API trusts as its proxy.
@@ -41,6 +43,14 @@ var endpointsPrefix = cidrSubnet(addressSpace, 24, 2)
 // exact list this deployment would create.
 var githubRegistry = loadJsonContent('../github-ranges.json', 'registry.prefixes')
 var githubDownloads = loadJsonContent('../github-ranges.json', 'downloads.prefixes')
+
+// The MCP clients whose metadata documents the API fetches (AG5,
+// mcp-clients.json, the one list): their published addresses, each once.
+var mcpClientPrefixes = reduce(
+  map(loadJsonContent('../mcp-clients.json', 'clients'), client => client.prefixes),
+  [],
+  (kept, prefixes) => union(kept, prefixes)
+)
 
 // Microsoft's inbound list for a workload profiles environment. The apps take
 // public traffic through the environment's public IP, which Microsoft says
@@ -62,7 +72,8 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
   location: location
   tags: tags
   properties: {
-    securityRules: [
+    // The MCP clients' door only where the OAuth server is on (`mcpOauth`).
+    securityRules: concat([
       {
         name: 'allow-load-balancer-probes'
         properties: {
@@ -323,7 +334,25 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           destinationPortRange: '*'
         }
       }
-    ]
+    ], mcpOauth ? [
+      {
+        // No service tag names them, so these are their owners' published
+        // addresses (mcp-clients.json), each the client's own: a client behind
+        // a front shared with the rest of the web (Cloudflare) isn't listed.
+        name: 'allow-out-mcp-clients'
+        properties: {
+          description: 'The MCP clients\' metadata documents (CIMD), which the API fetches to know a client: their published addresses (mcp-clients.json).'
+          priority: 320
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefixes: mcpClientPrefixes
+          destinationPortRange: '443'
+        }
+      }
+    ] : [])
   }
 }
 

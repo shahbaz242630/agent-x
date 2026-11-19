@@ -8,12 +8,14 @@ import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observab
 import { APP_KEYS } from './app-keys.ts';
 import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
 import { DEAD_MAN_RULE } from './deploy.ts';
+import { mcpNames, mcpPrefixes, originOf, readMcpClients } from './mcp-clients.ts';
 import {
   at,
   bicepGuid,
   describeProblem,
   ALLOWED_TYPES,
   DNS_ALLOWED,
+  dnsAllowedIn,
   DNS_EXPECTED_LEFTOVERS,
   type Expectations,
   kqlStages,
@@ -216,6 +218,13 @@ function splitTheApi(from: Snapshot): Snapshot {
   );
   containerOf(jobs).name = 'jobs';
   delete inside(jobs, 'properties', 'configuration').ingress;
+  // The jobs hand out no machine IDs (SA3e), so neither read Zitadel's machine-ID config (AG10).
+  containerOf(jobs).env = settingsOf(jobs).filter(({ name }) => !String(name).startsWith('AGENTX_MACHINE_IDS_'));
+  const configuration = inside(jobs, 'properties', 'configuration');
+  configuration.secrets = list(configuration.secrets).filter((item) => at(item, 'name') !== 'zitadel-machine-config');
+  for (const volume of list(at(jobs, 'properties', 'template', 'volumes')) as Mutable[]) {
+    volume.secrets = list(volume.secrets).filter((item) => at(item, 'secretRef') !== 'zitadel-machine-config');
+  }
   const kept = [...resources, jobs].filter(
     (resource) =>
       at(resource, 'properties', 'description') !== 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
@@ -249,6 +258,15 @@ function twoSignInCopies(snapshotted: Snapshot): void {
   }
 }
 
+/** Production's OAuth server is off, so its foundation opens no way out to the MCP clients, nor looks up their hosts (AG5, main.bicep). */
+function withoutMcpClients(resource: Mutable): void {
+  if (APPS_RULES(resource as unknown as PredictedResource)) dropRule(resource, 'allow-out-mcp-clients');
+  if (ALLOWED_NAMES(resource as unknown as PredictedResource)) {
+    const names = inside(resource, 'properties');
+    names.domains = (names.domains as string[]).filter((name) => !mcpNames(readMcpClients()).includes(name));
+  }
+}
+
 /**
  * Staging's resources as production's would name them: their tags and CI's
  * identity (where it is and whom its role is given to), and (unless a test
@@ -273,6 +291,7 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
       }
     }
     guardrailsForProduction(resource);
+    withoutMcpClients(resource);
     // Production keeps each audit export five years, Locked, in three zones (decision 27).
     if (EVIDENCE_STORE(resource as unknown as PredictedResource)) {
       inside(resource, 'sku').name = 'Standard_ZRS';
@@ -392,6 +411,7 @@ const DECISIONS_SUPPRESSED_ALERT = named(/^alert-agentx-.+-decisions-suppressed$
 const MCP_REFUSALS_ALERT = named(/^alert-agentx-.+-mcp-refusals$/);
 const MCP_UNKNOWN_PROTOCOL_ALERT = named(/^alert-agentx-.+-mcp-unknown-protocol$/);
 const MCP_KEYS_REFUSED_ALERT = named(/^alert-agentx-.+-mcp-keys-refused$/);
+const OAUTH_SOURCE_CAPPED_ALERT = named(/^alert-agentx-.+-oauth-source-capped$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const HANDOFF_QUEUE_ALERT = named(/^alert-agentx-.+-handoff-queue$/);
 const LOGIN_SERVICE_ALERT = named(/^alert-agentx-.+-login-service$/);
@@ -562,6 +582,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'dbOperatorPassword',
       'dbZitadelPassword',
       'zitadelMasterKey',
+      'zitadelMachineConfig',
       'zitadelAdminPassword',
       'loginClientPrivateKey',
       'loginClientPublicKey',
@@ -570,6 +591,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'resetToken',
       'ourActors',
       'ourServiceUsers',
+      'loginCookieSecret',
       'appKeyValues',
     ]);
     for (const [environment, { together }] of deployed) {
@@ -721,6 +743,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-refusals',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-unknown-protocol',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-mcp-keys-refused',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-oauth-source-capped',
       expect.stringMatching(/^Microsoft\.Storage\/storageAccounts stagentxstg[a-z0-9]{6}$/),
       expect.stringMatching(/^Microsoft\.Network\/privateEndpoints pe-stagentxstg[a-z0-9]{6}-blob$/),
       expect.stringMatching(
@@ -882,7 +905,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `zitadel-reset-token ${givenOnly('resetToken')}`,
       `zitadel-our-actors ${givenOnly('ourActors')}`,
       `zitadel-our-service-users ${givenOnly('ourServiceUsers')}`,
+      // SA5: the login pages' cookie key, given when a run makes it.
+      `login-cookie-secret ${givenOnly('loginCookieSecret')}`,
       'zitadel-masterkey once',
+      // AG10: Zitadel's machine-ID config, whose header the API checks, created once as the master key is.
+      'zitadel-machine-config once',
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
@@ -924,8 +951,13 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'jobs reads zitadel-our-actors',
         'api reads zitadel-our-service-users',
         'jobs reads zitadel-our-service-users',
+        'login reads login-cookie-secret',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
+        'zitadel-init reads zitadel-machine-config',
+        'zitadel-setup reads zitadel-machine-config',
+        'zitadel reads zitadel-machine-config',
+        'api reads zitadel-machine-config',
         'api reads acs-access-key',
         'jobs reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each
@@ -956,23 +988,33 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(16);
+    expect(variables).toHaveLength(18);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
-    const everyRun = ['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY', 'AGENTX_AZURE_APP_KEYS'];
+    const everyRun = [
+      'AGENTX_AZURE_DB_APP_PASSWORD',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+      'AGENTX_AZURE_ZITADEL_MACHINE_CONFIG',
+      'AGENTX_AZURE_APP_KEYS',
+    ];
     const kept = Object.fromEntries(variables.filter((name) => !everyRun.includes(name)).map((name) => [name, '']));
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      // Sixteen written when given (our login lists among them, SA2b), each key, and the operator's keys' public
-      // halves (PL-57, E11).
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(16 + APP_KEYS.length + 2);
+      // Seventeen written when given (our login lists and the login pages' cookie key among them, SA2b, SA5), each
+      // key, and the operator's keys' public halves (PL-57, E11).
+      // And Zitadel's machine-ID config, created once like the master key (AG10).
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(18 + APP_KEYS.length + 2);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MASTERKEY: '' })).toThrow(
         /minimum allowable length is 32/,
+      );
+      // So must Zitadel's machine-ID config (AG10).
+      expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MACHINE_CONFIG: '' })).toThrow(
+        /minimum allowable length is 1/,
       );
     });
   });
@@ -3369,6 +3411,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [MCP_REFUSALS_ALERT, 'mcp-alerts'],
       [MCP_UNKNOWN_PROTOCOL_ALERT, 'mcp-alerts'],
       [MCP_KEYS_REFUSED_ALERT, 'mcp-alerts'],
+      [OAUTH_SOURCE_CAPPED_ALERT, 'mcp-alerts'],
     ] as const) {
       expect(brokenRules(changed(pick, onLogins))).toEqual([rule]);
     }
@@ -3506,7 +3549,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ])
       expect(tooBroad(narrow), narrow).toBe(false);
     const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
-    expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
+    expect(at(allowedList?.properties, 'domains')).toEqual([...dnsAllowedIn('staging')]);
   });
 
   it("dns-block-alert (AZ1): no alert on a lookup the catch-all blocks, or one that counts another list, hides more than the expected leftovers, can't fire, fires late or quietly", () => {
@@ -3846,6 +3889,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (group: Mutable) => prefixes(group, 'github-registry').push('203.0.113.7/32'),
       (group: Mutable) => prefixes(group, 'github-registry').pop(),
       (group: Mutable) => (out(group, 'github-downloads').destinationAddressPrefixes = ['0.0.0.0/0']),
+      // The MCP clients' door (AG5) drifting from mcp-clients.json, either way, widened, or gone.
+      (group: Mutable) => prefixes(group, 'mcp-clients').push('203.0.113.7/32'),
+      (group: Mutable) => prefixes(group, 'mcp-clients').pop(),
+      (group: Mutable) => (out(group, 'mcp-clients').destinationAddressPrefixes = ['0.0.0.0/0']),
+      (group: Mutable) => (out(group, 'mcp-clients').destinationPortRange = '*'),
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-mcp-clients');
+      },
       // A door open to something that isn't the apps subnet.
       (group: Mutable) => (out(group, 'monitor').sourceAddressPrefix = '*'),
       (group: Mutable) => (out(group, 'entra').sourceAddressPrefix = '10.40.1.0/24'),
@@ -3868,6 +3919,56 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // The order Azure is given a list of addresses in is its business, not ours.
     expect(brokenRules(changed(APPS_RULES, (group) => prefixes(group, 'github-registry').reverse()))).toEqual([]);
+    // The MCP clients' door is exactly the list's ranges, each once (AG5).
+    expect(new Set(prefixes(staging.predictedResources.find(APPS_RULES) as unknown as Mutable, 'mcp-clients'))).toEqual(
+      new Set(mcpPrefixes(readMcpClients())),
+    );
+    // Only where Agent X's OAuth server is on (staging): production's way out has no such door, and the policy
+    // refuses one there; the foundation sends the door and the names on the same switch as the apps' setting.
+    const production = policyProblems(staging, { region: 'uaenorth', environment: 'production' })
+      .filter((problem) => problem.rule === 'apps-egress')
+      .map(describeProblem);
+    expect(production).toEqual([
+      expect.stringContaining(
+        `lets out Tcp to ${[...mcpPrefixes(readMcpClients())].sort().join(' ')} on 443, which nothing it runs needs`,
+      ),
+    ]);
+    const main = JSON.stringify(bicepFile('main.bicep').template);
+    // Both modules, the network and the DNS policy, given the one switch.
+    expect(main.split(`"mcpOauth":{"value":"[variables('mcpOauth')]"}`)).toHaveLength(3);
+    // And each module sends its part, the door and the names, only on it.
+    expect(
+      main.match(/if\(parameters\('mcpOauth'\), (?:createArray\(createObject\('name', 'allow-out-mcp-clients'|map\()/g),
+    ).toHaveLength(2);
+    expect(main).toContain(`"mcpOauth":"[equals(parameters('environment'), 'staging')]"`);
+  });
+
+  it("AG5: the API trusts exactly the MCP clients list's documents where OAuth is on, each origin on its outbound allowlist, and the network looks up their hosts", () => {
+    const clients = readMcpClients();
+    const api = staging.predictedResources.find(APP('api')) as unknown as Mutable;
+    const settings = new Map(settingsOf(api).map((each) => [String(each.name), String(each.value)]));
+    const entries = settings.get('AGENTX_OAUTH_CLIENT_METADATA_ORIGINS')?.split(',') ?? [];
+    expect(entries).toEqual(clients.map((client) => client.metadata));
+    // An expression, as Zitadel's and the email service's addresses are Azure's to give: those two, then each origin.
+    const allowed = settings.get('AGENTX_OUTBOUND_ALLOWED_ORIGINS') ?? '';
+    const origins = [...new Set(clients.map(originOf))].join(',');
+    expect(allowed).toMatch(
+      /^\[format\('\{0\},\{1\}\{2\}', format\('https:\/\/\{0\}\.internal\.\{1\}', 'ca-agentx-stg-zitadel'/,
+    );
+    expect(allowed.endsWith(`.hostName), ',${origins}')]`)).toBe(true);
+    // Their hosts are allowed where the OAuth server is on, beside the reviewed names, and nowhere else.
+    for (const name of mcpNames(clients)) {
+      expect(DNS_ALLOWED.has(name), name).toBe(false);
+      expect(dnsAllowedIn('staging').has(name), name).toBe(true);
+      expect(dnsAllowedIn('production').has(name), name).toBe(false);
+    }
+    expect([...mcpNames(clients)].filter(tooBroad)).toEqual([]);
+    // A production DNS list holding them is refused, naming each; staging's is not.
+    const production = policyProblems(staging, { region: 'uaenorth', environment: 'production' })
+      .filter((problem) => problem.rule === 'dns-allow')
+      .map(describeProblem);
+    expect(production).toEqual([expect.stringContaining(`: ${mcpNames(clients).join(', ')}`)]);
+    expect(policyProblems(staging, STAGING).filter((problem) => problem.rule === 'dns-allow')).toEqual([]);
   });
 
   it("database-egress (AZ8): the server let out anywhere but its own subnet, DNS and its region's Storage", () => {
@@ -4360,13 +4461,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it("mcp-alerts: no alert on the MCP door's refusals, an unspoken version or refused keys, or one that counts something else, can't fire or fires too late (6E4)", () => {
+  it("mcp-alerts: no alert on the MCP door's refusals, an unspoken version, refused keys or a source over its OAuth share, or one that counts something else, can't fire or fires too late (6E4, AG9)", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
     const ROUTE = 'where tostring(parse_json(Log).route) == "/v1/mcp"';
     const NAMED = `extend mcpProtocol = extract(@'"mcpProtocol":"([^"]*)"', 1, Log) | where isnotempty(mcpProtocol)`;
     const SPOKEN = `where mcpProtocol !in (${PROTOCOLS.map((version) => JSON.stringify(version)).join(', ')})`;
-    for (const alert of [MCP_REFUSALS_ALERT, MCP_UNKNOWN_PROTOCOL_ALERT, MCP_KEYS_REFUSED_ALERT]) {
+    for (const alert of [
+      MCP_REFUSALS_ALERT,
+      MCP_UNKNOWN_PROTOCOL_ALERT,
+      MCP_KEYS_REFUSED_ALERT,
+      OAUTH_SOURCE_CAPPED_ALERT,
+    ]) {
       expect(brokenRules(without(alert))).toEqual(['mcp-alerts']);
       for (const change of [
         ...LATE_OR_BLIND,
@@ -4412,6 +4518,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [
         MCP_KEYS_REFUSED_ALERT,
         'ContainerAppConsoleLogs | where toint(parse_json(Log).status) == 401 | summarize Refused = count()',
+      ],
+      // AG9: another OAuth cap's line (the whole server's), or every warning.
+      [
+        OAUTH_SOURCE_CAPPED_ALERT,
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "oauth.flows_capped" | summarize Events = count()',
+      ],
+      [
+        OAUTH_SOURCE_CAPPED_ALERT,
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) == "warn" | summarize Events = count()',
       ],
     ] as const) {
       expect(brokenRules(changed(alert, query(text)))).toEqual(['mcp-alerts']);
@@ -7208,6 +7323,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['workload-secrets']);
+    // SA5: their cookie key is listed for its one setting alone, never another of theirs (an exporter's
+    // headers would also send something out: container-telemetry's, beside).
+    for (const name of ['OTEL_EXPORTER_OTLP_HEADERS', 'ZITADEL_SESSION_COOKIE_SECRETS']) {
+      expect({
+        name,
+        rules: brokenRules(
+          changed(APP('login'), (app) => {
+            const cookie = settingsOf(app).find((entry) => entry.name === 'ZITADEL_SESSION_COOKIE_SECRET');
+            if (cookie !== undefined) cookie.name = name;
+          }),
+        ),
+      }).toEqual({ name, rules: expect.arrayContaining(['workload-secrets']) as unknown });
+    }
   });
 
   it("workload-secrets and no-secret-literals: the operator's job holds its request once, as none, as a file, and no other job holds one (B1c-2a)", () => {
@@ -7387,6 +7515,42 @@ describe('SEC-OPS-09 each rule can fail', () => {
         workload,
         rules: ['zitadel-machine-ids'],
       });
+      // AG10: started without the config file that names the header the API checks, or with another file.
+      const args = (resource: Mutable): string[] => list(containerOf(resource).args).map(String);
+      for (const change of [
+        (given: string[]) => given.filter((arg, index) => arg !== '--config' && given[index - 1] !== '--config'),
+        (given: string[]) =>
+          given.map((arg) => arg.replace('/mnt/secrets/zitadel-machine-config', '/mnt/secrets/other')),
+        (given: string[]) => given.map((arg) => (arg === '--config' ? '--configs' : arg)),
+      ]) {
+        const rules = brokenRules(
+          changed(pick, (resource) => {
+            containerOf(resource).args = change(args(resource));
+          }),
+        );
+        expect({ workload, rules }).toEqual({ workload, rules: ['zitadel-machine-ids'] });
+      }
+    }
+    // AG10: the API not checking the header from the same mounted config: read from elsewhere, set in its
+    // environment, or not at all (it would refuse to start, the host being set).
+    for (const env of [
+      (kept: Mutable[]) => kept,
+      (kept: Mutable[]) => [...kept, { name: 'AGENTX_MACHINE_IDS_CONFIG_FILE', value: '/mnt/secrets/other' }],
+      (kept: Mutable[]) => [...kept, { name: 'AGENTX_MACHINE_IDS_CONFIG', value: '{}' }],
+      (kept: Mutable[]) => [
+        ...kept,
+        { name: 'AGENTX_MACHINE_IDS_CONFIG_FILE', value: '/mnt/secrets/zitadel-machine-config' },
+        { name: 'AGENTX_MACHINE_IDS_CONFIG', value: '{}' },
+      ],
+    ]) {
+      const rules = brokenRules(
+        changed(APP('api'), (app) => {
+          containerOf(app).env = env(
+            settingsOf(app).filter((entry) => !String(entry.name).startsWith('AGENTX_MACHINE_IDS_CONFIG')),
+          );
+        }),
+      );
+      expect(rules).toContain('zitadel-machine-ids');
     }
     // The API not handing them out on its internal host: every Zitadel process would ask in vain, and panic.
     for (const value of [undefined, 'app.example.invalid']) {
@@ -7507,7 +7671,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(
         changed(APP('login'), (app) => {
-          containerOf(app).env = settingsOf(app).filter((entry) => !String(entry.name).startsWith('ZITADEL_'));
+          // Their own cookie key (SA5) stays: it is a secret the login pages are granted, not one of the server's.
+          containerOf(app).env = settingsOf(app).filter(
+            (entry) => !String(entry.name).startsWith('ZITADEL_') || entry.name === 'ZITADEL_SESSION_COOKIE_SECRET',
+          );
         }),
       ),
     ).toEqual([]);
@@ -7652,8 +7819,13 @@ describe('what each job is told', () => {
     }
     const mounted = (workload: string): unknown =>
       at(first(at(staging.predictedResources.find(JOB(workload))?.properties, 'template', 'volumes')), 'secrets');
-    expect(mounted('zitadel-setup')).toEqual([{ secretRef: 'zitadel-masterkey', path: 'zitadel-masterkey' }]);
-    expect(mounted('zitadel-init')).toBeUndefined();
+    // And each its machine-ID config, the header it asks the API with (AG10), as a file too.
+    const machineConfig = { secretRef: 'zitadel-machine-config', path: 'zitadel-machine-config' };
+    expect(mounted('zitadel-setup')).toEqual([
+      { secretRef: 'zitadel-masterkey', path: 'zitadel-masterkey' },
+      machineConfig,
+    ]);
+    expect(mounted('zitadel-init')).toEqual([machineConfig]);
   });
 
   it('creates the first instance with a starting password and the rules of ADR-003 and ADR-005', () => {
@@ -7693,12 +7865,21 @@ describe('what each job is told', () => {
     expect(ran('migrate')).toEqual(['node', 'apps/migrate/src/main.ts']);
     // The compose stack's healthcheck proves this path on the same digest, and
     // splits `start-from-setup` into the two steps a deployment runs separately.
-    expect(ran('zitadel-init')).toEqual(['/app/zitadel', 'init', 'zitadel']);
+    // Each with the machine-ID config (AG10), which the compose stack's Zitadel, asking no webhook, goes without.
+    expect(ran('zitadel-init')).toEqual([
+      '/app/zitadel',
+      'init',
+      'zitadel',
+      '--config',
+      '/mnt/secrets/zitadel-machine-config',
+    ]);
     expect(ran('zitadel-setup')).toEqual([
       '/app/zitadel',
       'setup',
       '--masterkeyFile',
       '/mnt/secrets/zitadel-masterkey',
+      '--config',
+      '/mnt/secrets/zitadel-machine-config',
     ]);
   });
 });

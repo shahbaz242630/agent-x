@@ -16,6 +16,9 @@
 //   restarts with its new version within 30 minutes (Microsoft)
 // - Zitadel's master key is created once and never overwritten, whatever a
 //   later run brings: Zitadel can't read what it encrypted with another key.
+//   So is Zitadel's machine-ID config (AG10), whose header the API checks:
+//   each restarts onto a new version in its own time, and a Zitadel copy that
+//   starts with a header the API doesn't hold yet can't start.
 //   So is each of the app's keys (appKeys in names.bicep): what a key sealed
 //   or signed needs it as it was, so a rotation adds a version instead
 // - each identity reads only the secrets listed for it below (Key Vault
@@ -69,6 +72,11 @@ param dbZitadelPassword string
 @secure()
 param zitadelMasterKey string
 
+@description('Zitadel\'s config file for its machine-ID webhook (AG10): the one header its processes ask the API with, a fresh random value on every run. Only the first run\'s is kept, as the master key\'s is.')
+@minLength(1)
+@secure()
+param zitadelMachineConfig string
+
 @description('The first Zitadel admin\'s starting password, from the password manager: Zitadel\'s set-up uses it once.')
 @secure()
 param zitadelAdminPassword string
@@ -100,6 +108,10 @@ param ourActors string
 @description('The Zitadel user IDs of the API\'s own service users those changes are made for (SA2b; AGENTX_IDP_OUR_SERVICE_USERS), as ourActors.')
 @secure()
 param ourServiceUsers string
+
+@description('The key the login pages sign their sessions cookie with (SA5; ZITADEL_SESSION_COOKIE_SECRET), 32 characters or more, made by the deploy tool: given when a run makes it (when the vault lacks it, or by name), empty otherwise.')
+@secure()
+param loginCookieSecret string
 
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
@@ -191,6 +203,12 @@ var secrets = [
     value: ourServiceUsers
     readers: ['api', 'jobs']
   }
+  // SA5: the login pages sign their sessions cookie with it, apart from their login key.
+  {
+    name: 'login-cookie-secret'
+    value: loginCookieSecret
+    readers: ['login']
+  }
 ]
 
 // Copied from Communication Services on every run (B5-3): the key the API
@@ -207,13 +225,19 @@ var masterKey = {
   readers: ['zitadel-setup', 'zitadel']
 }
 
+// Nor this one (AG10): every Zitadel process reads it at start, the API to check them.
+var machineConfig = {
+  name: 'zitadel-machine-config'
+  readers: ['zitadel-init', 'zitadel-setup', 'zitadel', 'api']
+}
+
 // Every secret and who reads it, the master key and the app's keys included.
 var access = concat(
   map(secrets, secret => {
     name: secret.name
     readers: secret.readers
   }),
-  [masterKey, copiedKey],
+  [masterKey, machineConfig, copiedKey],
   // The API and its jobs read every key but the operator's own, whose public
   // half they read instead (PL-57); the operator's command the audit chains'
   // MAC, the field encryption and its own keys alone, each version of them
@@ -254,6 +278,15 @@ resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   name: masterKey.name
   properties: {
     value: zitadelMasterKey
+  }
+}
+
+@onlyIfNotExists()
+resource machineConfigCreated 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
+  parent: vault
+  name: machineConfig.name
+  properties: {
+    value: zitadelMachineConfig
   }
 }
 
@@ -308,6 +341,7 @@ module readAccess 'modules/secret-access.bicep' = {
   dependsOn: [
     written
     created
+    machineConfigCreated
     copied
     keys
     halves

@@ -18,6 +18,7 @@ import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
+import { mcpNames, mcpPrefixes, readMcpClients } from './mcp-clients.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 import { STAGE_G_JOB_SECONDS } from '../../tooling/load/stageg.ts';
 import {
@@ -460,6 +461,13 @@ export const MCP_ALERTS = [
     lines: [`where tostring(parse_json(Log).route) == "${MCP_PATH}"`, 'where toint(parse_json(Log).status) == 401'],
     threshold: 30,
   },
+  // AG9: one address or network past its share of the OAuth sign-ins or registrations (6F1 G4), at most a line a
+  // minute a copy (capWarning), so any line is news.
+  {
+    what: 'any oauth.source_capped line',
+    lines: ['where tostring(parse_json(Log).event) == "oauth.source_capped"'],
+    threshold: 0,
+  },
 ] as const;
 
 /**
@@ -512,6 +520,10 @@ const TELEMETRY_SETTINGS = [
   'openTelemetryConfiguration',
   'appInsightsConfiguration',
 ] as const;
+
+/** AG10: the vault secret holding Zitadel's machine-ID config, mounted where every container finds its secrets. */
+const MACHINE_CONFIG = 'zitadel-machine-config';
+const MACHINE_CONFIG_PATH = `/mnt/secrets/${MACHINE_CONFIG}`;
 
 /**
  * Who reads which secret, one grant a line as "<app or job> reads <secret>"
@@ -576,9 +588,14 @@ export const GRANTS: ReadonlySet<string> = new Set([
   'zitadel reads login-client-public-key',
   'zitadel-init reads db-zitadel-password',
   'zitadel-setup reads db-zitadel-password',
+  // AG10: Zitadel's config naming the header every one of its processes asks for a machine ID with, and the API
+  // that checks it.
+  ...['zitadel', 'zitadel-init', 'zitadel-setup', 'api'].map((reader) => `${reader} reads ${MACHINE_CONFIG}`),
   'zitadel-setup reads zitadel-masterkey',
   'zitadel-setup reads zitadel-admin-password',
   'login reads login-client-private-key',
+  // SA5: the key the login pages sign their sessions cookie with.
+  'login reads login-cookie-secret',
 ]);
 
 const GRANT = / reads /;
@@ -1025,6 +1042,12 @@ const SECRETS_IN_ENVIRONMENT: readonly {
     settings: /^ZITADEL_(?:DATABASE_POSTGRES_(?:USER|ADMIN)_PASSWORD|FIRSTINSTANCE_ORG_HUMAN_PASSWORD)$/,
     reason: 'Zitadel offers no file form for a database login or its first admin’s password',
   },
+  {
+    images: ZITADEL_LOGIN_IMAGE,
+    settings: /^ZITADEL_SESSION_COOKIE_SECRET$/,
+    // Read from the pinned image's own code (SA5, S204): process.env alone, no _FILE form, unlike its login key.
+    reason: 'the login pages read their cookie key from the setting alone, with no file form',
+  },
 ];
 
 /**
@@ -1073,6 +1096,12 @@ const WORKLOAD_PROFILE = 'Consumption';
  */
 const GITHUB_RANGES = readRanges();
 
+/** The MCP clients whose documents the API fetches (AG5), from the file network.bicep and dns-policy.bicep compile. */
+const MCP_CLIENTS = readMcpClients();
+
+/** Where Agent X's OAuth server is on, and so the API fetches their documents: staging (main.bicep's and apps.bicep's `mcpOauth`). */
+const mcpOauthOn = (environment: Expectations['environment']): boolean => environment === 'staging';
+
 /** Azure's own DNS, which Microsoft says an environment stops working without. */
 const AZURE_DNS = '168.63.129.16';
 
@@ -1082,9 +1111,16 @@ const LONGEST_RUN_SECONDS = 3600;
 /**
  * Secrets created once and never written again: Zitadel can't read what it
  * encrypted with another master key, and what one of the app's keys sealed or
- * signed needs that key as it was (a rotation adds a version instead).
+ * signed needs that key as it was (a rotation adds a version instead). So is
+ * Zitadel's machine-ID config (AG10): the API and each Zitadel copy would take a
+ * new one in their own time, and a copy whose header the API lacks can't start.
  */
-const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS, ...PUBLIC_HALVES.values()]);
+const CREATED_ONCE: ReadonlySet<string> = new Set([
+  'zitadel-masterkey',
+  MACHINE_CONFIG,
+  ...APP_KEYS,
+  ...PUBLIC_HALVES.values(),
+]);
 
 /**
  * The secrets a run copies from an Azure service of this deployment on every
@@ -2015,13 +2051,15 @@ const doorOf = (rule: unknown): string =>
  * which Azure keeps current; then GitHub's published addresses, two sets,
  * which nothing keeps current but the refresher (github-ranges.ts); and two
  * more service tags for the apps' own outbound calls: email (B5) and the
- * activity downloads' store (L5c), in this region alone.
+ * activity downloads' store (L5c), in this region alone; last the MCP clients'
+ * published addresses, for their metadata documents (AG5, mcp-clients.json).
  */
 const egressDoors = (
   region: string,
   apps: string,
   database: string,
   endpoints: string,
+  environment: Expectations['environment'],
 ): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
   [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the database's private name and every host below"],
@@ -2044,6 +2082,15 @@ const egressDoors = (
   ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
   // Every account in the region, not ours alone: the store's own network rule is the limit.
   [`Tcp to Storage.${region} on 443`, "the API's activity downloads, to their store"],
+  // Only where the OAuth server is on (mcpOauthOn), each client's own published ranges.
+  ...(mcpOauthOn(environment)
+    ? [
+        [
+          `Tcp to ${[...mcpPrefixes(MCP_CLIENTS)].sort().join(' ')} on 443`,
+          "the MCP clients' metadata documents, which the API fetches (mcp-clients.json)",
+        ] as const,
+      ]
+    : []),
 ];
 
 /**
@@ -2054,7 +2101,7 @@ const egressDoors = (
  * doors must match exactly: one missing breaks a deployment, one extra is a
  * way out nobody decided on.
  */
-const appsEgress: Check = (snapshot, _expected, add) => {
+const appsEgress: Check = (snapshot, expected, add) => {
   for (const network of ofType(snapshot, TYPES.network)) {
     const apps = appsSubnetOf(network);
     const prefix = text(at(apps, 'properties', 'addressPrefix'));
@@ -2070,7 +2117,13 @@ const appsEgress: Check = (snapshot, _expected, add) => {
     // key vault tag names where this deployment is, and `in-country` asks
     // separately that that is the UAE.
     const wanted = new Map(
-      egressDoors(text(network.location), prefix, subnetPrefix('database'), subnetPrefix('endpoints')),
+      egressDoors(
+        text(network.location),
+        prefix,
+        subnetPrefix('database'),
+        subnetPrefix('endpoints'),
+        expected.environment,
+      ),
     );
     for (const message of egressProblems(snapshot, apps, 'apps', wanted)) {
       add({ rule: 'apps-egress', resource: network.name, message });
@@ -2217,6 +2270,13 @@ export const DNS_ALLOWED: ReadonlySet<string> = new Set(
 );
 
 /**
+ * The names an environment's network may look up: the reviewed ones, then, where the OAuth server is on, each MCP
+ * client's host (mcp-clients.json, AG5), as dns-policy.bicep compiles them on main.bicep's switch.
+ */
+export const dnsAllowedIn = (environment: Expectations['environment']): ReadonlySet<string> =>
+  new Set([...DNS_ALLOWED, ...(mcpOauthOn(environment) ? mcpNames(MCP_CLIENTS) : [])]);
+
+/**
  * A DNS rule that allows lets its names through before the rule that alerts
  * on or blocks every name is reached (dns-watch), so what it allows is held to
  * the reviewed list (S78): every name in every list an enabled Allow rule
@@ -2224,8 +2284,9 @@ export const DNS_ALLOWED: ReadonlySet<string> = new Set(
  * list is one this deployment creates (a list the snapshot doesn't hold can't
  * be read, so it is refused).
  */
-const dnsAllow: Check = (snapshot, _expected, add) => {
+const dnsAllow: Check = (snapshot, expected, add) => {
   const lists = new Map(ofType(snapshot, TYPES.dnsDomainList).map((names) => [names.id, names]));
+  const allowed = dnsAllowedIn(expected.environment);
   for (const rule of ofType(snapshot, TYPES.dnsPolicyRule)) {
     if (dnsActionOf(rule) !== 'allow' || !dnsRuleOn(rule)) continue;
     const refused = list(at(rule.properties, 'dnsResolverDomainLists')).flatMap((reference) => {
@@ -2234,13 +2295,13 @@ const dnsAllow: Check = (snapshot, _expected, add) => {
       if (names === undefined) return [`a list it doesn't create (${id})`];
       return list(at(names.properties, 'domains'))
         .map(String)
-        .filter((domain) => !DNS_ALLOWED.has(domain));
+        .filter((domain) => !allowed.has(domain));
     });
     if (refused.length > 0) {
       add({
         rule: 'dns-allow',
         resource: rule.name,
-        message: `allows names outside the reviewed list (dns-allowed.json): ${refused.join(', ')}`,
+        message: `allows names outside the reviewed list (dns-allowed.json; mcp-clients.json where the OAuth server is on): ${refused.join(', ')}`,
       });
     }
   }
@@ -6476,9 +6537,35 @@ function machineIdProblems(settings: ReadonlyMap<string, unknown>, host: string 
     .filter((name) => /^ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_(?:JPATH|HEADERS)/.test(name))
     .map(
       (name) =>
-        `sets ${name}: the API's answer is hashed as its body, as it is written, and needs no header of ours (Zitadel's default Metadata-Flavor header is harmless) (SA3e)`,
+        `sets ${name}: the API's answer is hashed as its body, as it is written, and our one header comes from the vault-held config file (--config), never the deployment (SA3e, AG10)`,
     );
   return [...switches, ...where, ...reshaped];
+}
+
+/**
+ * AG10: a Zitadel process started without the config file that names the header the API checks (`--config`, the
+ * mounted secret): its asks would be refused, and it would never start.
+ */
+function machineConfigProblems(args: readonly unknown[]): string[] {
+  const named = args.indexOf('--config');
+  return named !== -1 && args[named + 1] === MACHINE_CONFIG_PATH
+    ? []
+    : [
+        `must start with --config ${MACHINE_CONFIG_PATH}, the config naming the header the API hands machine IDs out to (AG10)`,
+      ];
+}
+
+/** AG10: the API checking the header against anything but the mounted config every Zitadel process starts with. */
+function apiMachineConfigProblems(api: PredictedResource): string[] {
+  return containersOf(api).flatMap((container) => {
+    const settings = settingsIn(container);
+    return settings.get('AGENTX_MACHINE_IDS_CONFIG_FILE') === MACHINE_CONFIG_PATH &&
+      !settings.has('AGENTX_MACHINE_IDS_CONFIG')
+      ? []
+      : [
+          `must set AGENTX_MACHINE_IDS_CONFIG_FILE to ${MACHINE_CONFIG_PATH} alone, the config every Zitadel process starts with, whose header it checks (AG10)`,
+        ];
+  });
 }
 
 const zitadelMachineIds: Check = (snapshot, _expected, add) => {
@@ -6495,10 +6582,15 @@ const zitadelMachineIds: Check = (snapshot, _expected, add) => {
         "must set AGENTX_MACHINE_IDS_HOST to its own internal host (<app>.internal.<the environment's domain>), where Zitadel asks for its machine IDs (SA3e)",
     });
   }
+  if (api !== undefined && zitadels.length > 0) {
+    for (const message of apiMachineConfigProblems(api))
+      add({ rule: 'zitadel-machine-ids', resource: api.name, message });
+  }
   for (const workload of zitadels) {
-    for (const message of containersOf(workload).flatMap((container) =>
-      machineIdProblems(settingsIn(container), host),
-    )) {
+    for (const message of containersOf(workload).flatMap((container) => [
+      ...machineIdProblems(settingsIn(container), host),
+      ...machineConfigProblems(list(at(container, 'args'))),
+    ])) {
       add({ rule: 'zitadel-machine-ids', resource: workload.name, message });
     }
   }

@@ -7,6 +7,9 @@ import { bodyOf, fnv1Of, MACHINE_ID_PATH, machineNameFor, MOST_TRIES } from './m
 import { closeServers, routeServer } from './route-server.helper.test.ts';
 
 const INTERNAL_HOST = 'ax-staging-api.internal.example.uaenorth.azurecontainerapps.io';
+/** The header Zitadel's config file names (AG10), and its value: built at run time, as every stand-in for a secret. */
+const HEADER = 'x-agentx-machine-key';
+const SHARED = '0f'.repeat(32);
 
 afterEach(closeServers);
 
@@ -83,12 +86,21 @@ async function server(next: () => Promise<number | undefined>, on = true) {
     config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 10_000 } },
     destination: capture,
   });
-  const app = await routeServer({ logger, machineIds: on ? { host: INTERNAL_HOST, next } : undefined });
+  const app = await routeServer({ logger, machineIds: on ? { host: INTERNAL_HOST, key: SHARED, next } : undefined });
   return { app, capture };
 }
 
-const ask = (app: Awaited<ReturnType<typeof server>>['app'], host: string, headers: Record<string, string> = {}) =>
-  app.inject({ method: 'GET', url: MACHINE_ID_PATH, headers: { host, ...headers } });
+/** Zitadel's ask, with the header its config names unless `headers` says otherwise. */
+const ask = (
+  app: Awaited<ReturnType<typeof server>>['app'],
+  host: string,
+  headers: Record<string, string | string[] | undefined> = {},
+) => {
+  // An undefined header is left out, as Zitadel without the config file would send none.
+  const given: Record<string, string | string[] | undefined> = { host, [HEADER]: SHARED, ...headers };
+  const sent = Object.entries(given).filter((entry): entry is [string, string | string[]] => entry[1] !== undefined);
+  return app.inject({ method: 'GET', url: MACHINE_ID_PATH, headers: Object.fromEntries(sent) });
+};
 
 describe(`GET ${MACHINE_ID_PATH}`, () => {
   it('hands out the next ID on the internal host, as a body whose bytes hash to it, and logs which', async () => {
@@ -134,6 +146,44 @@ describe(`GET ${MACHINE_ID_PATH}`, () => {
     const forwarded = await ask(app, 'app.agentx.example', { 'x-forwarded-host': INTERNAL_HOST });
     expect(forwarded.statusCode).toBe(404);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("is the same 404 on the internal host without Zitadel's header, drawing nothing, with a plain warning (AG10)", async () => {
+    const next = vi.fn(() => Promise.resolve(7));
+    const { app, capture } = await server(next);
+    for (const value of [
+      undefined,
+      '',
+      // One character off, a value cut short or grown long, upper case, and the value twice.
+      `${SHARED.slice(0, -1)}e`,
+      SHARED.slice(0, -2),
+      `${SHARED}0f`,
+      SHARED.toUpperCase(),
+      [SHARED, SHARED],
+    ]) {
+      const answer = await ask(app, INTERNAL_HOST, { [HEADER]: value });
+      expect({ value, status: answer.statusCode, code: answer.json<{ error: { code: string } }>().error.code }).toEqual(
+        {
+          value,
+          status: 404,
+          code: 'NOT_FOUND',
+        },
+      );
+    }
+    expect(next).not.toHaveBeenCalled();
+    const refused = capture.lines().filter((line) => line.event === 'machine_ids.refused');
+    expect(refused).toHaveLength(7);
+    expect(refused[0]).toMatchObject({ level: 'warn' });
+    // The line never carries what was presented.
+    expect(JSON.stringify(capture.lines())).not.toContain(SHARED.slice(0, 8));
+  });
+
+  it("takes the header's name in any case, as HTTP does", async () => {
+    const next = vi.fn(() => Promise.resolve(9));
+    const { app } = await server(next);
+    const answer = await ask(app, INTERNAL_HOST, { [HEADER]: undefined, 'X-Agentx-Machine-Key': SHARED });
+    expect(answer.statusCode).toBe(200);
+    expect(next).toHaveBeenCalledTimes(1);
   });
 
   it('is a 404 on every host where it is off', async () => {

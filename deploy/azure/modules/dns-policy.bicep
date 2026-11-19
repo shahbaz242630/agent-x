@@ -42,6 +42,8 @@ param networkId string
 param workspaceId string
 param actionGroupId string
 param blockedAlertName string
+@description('Whether Agent X has its OAuth server on here, so the hosts of the MCP clients are looked up (AG5).')
+param mcpOauth bool
 
 // The lookups the catch-all refuses that are expected, each answered no-such-name before Block too, their labels
 // reaching only servers no customer runs: reverse lookups of private addresses, the root's NS, the nodes' bare
@@ -70,7 +72,12 @@ resource allowed 'Microsoft.Network/dnsResolverDomainLists@2025-05-01' = {
   location: location
   tags: tags
   properties: {
-    domains: map(loadJsonContent('../dns-allowed.json', 'domains'), entry => entry.domain)
+    // The reviewed names, then each MCP client's host where the API fetches its document (AG5, mcp-clients.json),
+    // only where the OAuth server is on.
+    domains: concat(
+      map(loadJsonContent('../dns-allowed.json', 'domains'), entry => entry.domain),
+      mcpOauth ? map(loadJsonContent('../mcp-clients.json', 'clients'), client => '${split(client.metadata, '/')[2]}.') : []
+    )
   }
 }
 
