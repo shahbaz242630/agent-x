@@ -20,7 +20,7 @@
 //   exactly that connection. The confirm: the organisation's lock for issuing
 //   keys; the same reads and checks; the challenge consumed; the flow decided,
 //   once, its decision sealed with a key the database never holds (S205,
-//   oauth/decision-seal.ts), so the token endpoint believes no flow planted or
+//   oauth/flow-seals.ts), so the token endpoint believes no flow planted or
 //   changed in the database; then a key for the agent, its secret random and thrown away (no `axk_`
 //   text can work for it), and its connection; the code, shown this once in
 //   the address the browser goes back to, its hash kept on the flow for 60 s.
@@ -67,6 +67,7 @@ import {
   flowById,
   flowDecided,
   hashOf,
+  pendingFlowSound,
   isFlowCookie,
   isLoopback,
   newCode,
@@ -204,8 +205,9 @@ const consentHash = (orgId: string, flow: AnyFlowRead, asked: ConsentAsked): Buf
     // A device's has none: its kind, where the address would be, so neither can stand for the other.
     flow.kind === 'code' ? flow.redirectUri : 'device',
     flow.resource,
-    // S205: its PKCE challenge too, never shown, so a flow's changed between the ask and the confirm is never sealed.
-    flow.kind === 'code' ? flow.codeChallenge : 'device',
+    // S205: its PKCE challenge, or a device's device code hash, too: never shown, so one changed between the ask and
+    // the confirm is never decided.
+    flow.kind === 'code' ? flow.codeChallenge : flow.deviceHash,
   ]);
 
 /**
@@ -263,11 +265,16 @@ export function createConnectionConsents({
    * The flow named, open and this browser's (a device's, this person's too): NOT_FOUND for any other, which says
    * nothing of whether it exists.
    */
+  /** Open, this browser's and person's, and as its client opened it (S205: sealed); none else is shown or decided. */
+  const shown = (flow: AnyFlowRead | undefined, cookie: string | undefined, userId: string, now: Date) =>
+    flow !== undefined &&
+    isOpen(flow, now) &&
+    fromItsBrowser(flow, cookie, userId) &&
+    pendingFlowSound(keys, logger, flow);
+
   const openFlow = async (tx: Tx, { flowId, cookie }: FlowNamed, userId: string, now: Date): Promise<AnyFlowRead> => {
     const flow = await flowById(tx, flowId);
-    if (flow === undefined || !isOpen(flow, now) || !fromItsBrowser(flow, cookie, userId)) {
-      throw new AgentRefused(404, 'NOT_FOUND');
-    }
+    if (flow === undefined || !shown(flow, cookie, userId, now)) throw new AgentRefused(404, 'NOT_FOUND');
     return flow;
   };
 
@@ -350,9 +357,7 @@ export function createConnectionConsents({
   return {
     async request(named, userId) {
       const flow = await flowById(database, named.flowId);
-      if (flow === undefined || !isOpen(flow, clock.now()) || !fromItsBrowser(flow, named.cookie, userId)) {
-        return undefined;
-      }
+      if (flow === undefined || !shown(flow, named.cookie, userId, clock.now())) return undefined;
       const client = await clients.find(flow.clientId);
       const redirectUri = flow.kind === 'code' ? flow.redirectUri : null;
       return {

@@ -1,9 +1,18 @@
-// SEC-OAUTH-13 (tamper pass S205): a flow's decision is believed only with its own seal. The database's side, a
-// planted or rewritten row refused at the token endpoint with the alarm, is oauth-connections.db.test.ts.
+// SEC-OAUTH-13 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
+// database's side, a planted or rewritten row never shown, decided or exchanged, with the alarm, is
+// oauth-connections.db.test.ts.
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { decisionJudged, decisionSealed } from './decision-seal.ts';
+import {
+  decisionJudged,
+  decisionSealed,
+  openedFieldsOf,
+  openJudged,
+  openSealed,
+  pendingFlowSound,
+} from './flow-seals.ts';
 import { codeEndsFrom, type DeviceFlowRead, type FlowRead } from './flows.ts';
 
 const keysAt = (version: number, fill = 1) =>
@@ -22,7 +31,7 @@ const KEY = '0199a0f0-0000-7000-8000-0000000e3a02';
 const DECIDED = new Date('2026-11-19T09:00:00Z');
 const CODE_HASH = 'c'.repeat(64);
 
-const undecided: FlowRead = {
+const opening: FlowRead = {
   kind: 'code',
   id: '0199a0f0-0000-7000-8000-0000000e3a03',
   clientId: 'axcl_0123456789abcdef0123456789abcdef',
@@ -39,10 +48,14 @@ const undecided: FlowRead = {
   orgId: null,
   keyId: null,
   seal: null,
+  openSeal: null,
   usedAt: null,
   codeHash: null,
   codeEndsAt: null,
 };
+
+/** The code flow as a person's consent reads it, sealed as it opened. */
+const undecided: FlowRead = { ...opening, openSeal: openSealed(keys, openedFieldsOf(opening)) };
 
 /** The code flow as the token endpoint reads it once allowed and sealed. */
 function allowedCode(): FlowRead {
@@ -56,7 +69,7 @@ function allowedCode(): FlowRead {
   return { ...undecided, ...fields, decided: 'allowed', seal: decisionSealed(keys, undecided, fields) };
 }
 
-const undecidedDevice: DeviceFlowRead = {
+const openingDevice: DeviceFlowRead = {
   kind: 'device',
   id: '0199a0f0-0000-7000-8000-0000000e3a04',
   clientId: undecided.clientId,
@@ -74,7 +87,13 @@ const undecidedDevice: DeviceFlowRead = {
   orgId: null,
   keyId: null,
   seal: null,
+  openSeal: null,
   usedAt: null,
+};
+
+const undecidedDevice: DeviceFlowRead = {
+  ...openingDevice,
+  openSeal: openSealed(keys, openedFieldsOf(openingDevice)),
 };
 
 function allowedDevice(): DeviceFlowRead {
@@ -129,12 +148,56 @@ describe('SEC-OAUTH-13 a flow decision’s seal', () => {
     }
   });
 
-  it('tells a flow with no seal (decided before 0100), and one sealed with a pepper version no longer held', () => {
+  it('tells a flow with no seal (decided before 0101), and one sealed with a pepper version no longer held', () => {
     expect(decisionJudged(keys, { ...allowedCode(), seal: null })).toBe('unsealed');
     expect(decisionJudged(keys, { ...allowedCode(), seal: { mac: 'a'.repeat(64), keyVersion: 2 } })).toBe(
       'key_not_held',
     );
     // A pepper another server holds never makes a seal this one believes.
     expect(decisionJudged(keysAt(1, 7), allowedCode())).toBe('tampered');
+  });
+});
+
+describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
+  it('is sound for the flow its client opened, either kind', () => {
+    expect(openJudged(keys, undecided)).toBe('sound');
+    expect(openJudged(keys, undecidedDevice)).toBe('sound');
+    // Its decision doesn't touch it.
+    expect(openJudged(keys, allowedCode())).toBe('sound');
+  });
+
+  it.each<[string, Partial<FlowRead>]>([
+    ['another flow', { id: undecidedDevice.id }],
+    ['another client', { clientId: 'axcl_ffffffffffffffffffffffffffffffff' }],
+    ['another redirect address', { redirectUri: 'https://attacker.example/cb' }],
+    ['another PKCE challenge', { codeChallenge: 'B'.repeat(43) }],
+    ['other scopes', { scopesAsked: ['requests:read'] }],
+    ['another resource', { resource: 'https://elsewhere.example/mcp' }],
+    ['a later end', { endsAt: new Date(undecided.endsAt.getTime() + 60_000) }],
+    ['the decision’s seal in its place', { openSeal: allowedCode().seal }],
+  ])('is tampered for %s', (_, changed) => {
+    expect(openJudged(keys, { ...undecided, ...changed })).toBe('tampered');
+  });
+
+  it('binds a device’s own code', () => {
+    expect(openJudged(keys, { ...undecidedDevice, deviceHash: 'f'.repeat(64) })).toBe('tampered');
+  });
+
+  it('shows, claims or decides only a pending flow sealed as opened: anything else is the alarm, an error or a warning', () => {
+    const capture = new LogCapture();
+    const logger = testLogger(capture);
+    expect(pendingFlowSound(keys, logger, undecided)).toBe(true);
+    expect(capture.lines()).toEqual([]);
+    expect(pendingFlowSound(keys, logger, { ...undecidedDevice, deviceHash: 'f'.repeat(64) })).toBe(false);
+    expect(pendingFlowSound(keys, logger, opening)).toBe(false);
+    expect(pendingFlowSound(keys, logger, { ...undecided, openSeal: { mac: 'a'.repeat(64), keyVersion: 2 } })).toBe(
+      false,
+    );
+    expect(capture.lines().map(({ level, event }) => [level, event])).toEqual([
+      ['error', 'audit.integrity_failed'],
+      ['warn', 'oauth.flow_unsealed'],
+      ['error', 'oauth.seal_key_not_held'],
+    ]);
+    expect(capture.lines()[0]).toMatchObject({ check: 'oauth_flow', objectId: undecidedDevice.id });
   });
 });

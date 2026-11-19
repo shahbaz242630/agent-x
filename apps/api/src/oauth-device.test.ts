@@ -6,6 +6,7 @@
 // oauth-connections.db.test.ts.
 import { DEVICE_CODE_GRANT, type DeviceClaim, newFlowCookie, type OauthTables } from '@agentx/core/modules/oauth';
 import type { Database } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { FixedClock, LogCapture, SequentialIds, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +20,8 @@ import { capabilitiesOf } from './oauth-wire.ts';
 
 const opened = vi.hoisted(() => ({ answers: [] as (string | Error)[] }));
 const claims = vi.hoisted(() => ({ answers: [] as DeviceClaim[], asked: 0 }));
+/** Whether a claimed flow reads as its device opened it (S205): sealed, unless a case says otherwise. */
+const sealed = vi.hoisted(() => ({ sound: true }));
 
 vi.mock('@agentx/core/modules/oauth', async (original) => ({
   ...(await original<typeof import('@agentx/core/modules/oauth')>()),
@@ -30,12 +33,15 @@ vi.mock('@agentx/core/modules/oauth', async (original) => ({
     claims.asked += 1;
     return Promise.resolve(claims.answers.shift() ?? { outcome: 'not_found' });
   },
+  flowById: (_: unknown, id: string) => Promise.resolve({ kind: 'device', id }),
+  pendingFlowSound: () => sealed.sound,
 }));
 
 afterEach(() => {
   opened.answers = [];
   claims.answers = [];
   claims.asked = 0;
+  sealed.sound = true;
 });
 
 const CLIENT = 'axcl_0123456789abcdef0123456789abcdef';
@@ -53,6 +59,7 @@ function device(capture = new LogCapture(), clock = new FixedClock(new Date('202
   return createOauthDevice({
     // Never reached: the flow's opening and claiming are the stand-ins above.
     database: {} as Database<OauthTables>,
+    keys: {} as KeyProvider,
     clock,
     ids: new SequentialIds(),
     logger: testLogger(capture),
@@ -64,6 +71,14 @@ function device(capture = new LogCapture(), clock = new FixedClock(new Date('202
 
 const PERSON = '0199a0f0-0000-7000-8000-00000000a801';
 const FLOW = '0199a0f0-0000-7000-8000-00000000a802';
+
+describe('S205: a claimed flow is believed only as its device opened it', () => {
+  it('answers a claimed flow whose seal is not its own as nothing found', async () => {
+    claims.answers = [{ outcome: 'claimed', flowId: FLOW }];
+    sealed.sound = false;
+    expect(await device().lookup('BCDF-GHJK', undefined, PERSON, '203.0.113.9')).toEqual({ outcome: 'not_found' });
+  });
+});
 
 describe('AG8: failed user-code lookups, held per network, watched server-wide, and on each flow', () => {
   const HOME = '203.0.113.9';

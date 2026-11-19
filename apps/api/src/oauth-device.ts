@@ -32,6 +32,7 @@ import {
   DEVICE_CODE_GRANT,
   deviceClaimed,
   FLOW_SECONDS,
+  flowById,
   type FlowSource,
   hashOf,
   isFlowCookie,
@@ -42,11 +43,13 @@ import {
   newUserCode,
   type OauthTables,
   openDeviceFlow,
+  pendingFlowSound,
   scopesAsked,
   userCodeOf,
 } from '@agentx/core/modules/oauth';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, isRetryable, isStatementLimit } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { capWarning, flowSourceOf } from './oauth-authorizing.ts';
@@ -131,6 +134,7 @@ const BUSY = refused(503, 'temporarily_unavailable', 'Agent X is busy; try again
 
 export function createOauthDevice({
   database,
+  keys,
   clock,
   ids,
   logger,
@@ -139,6 +143,8 @@ export function createOauthDevice({
   copies = 1,
 }: {
   readonly database: Database<OauthTables>;
+  /** Seals each flow as it opens, and checks a flow's seal as it is claimed (S205, oauth/flow-seals.ts). */
+  readonly keys: KeyProvider;
   readonly clock: Clock;
   readonly ids: IdGenerator;
   readonly logger: Logger;
@@ -194,7 +200,14 @@ export function createOauthDevice({
             { browserHash: hashOf(browser), personHash: hashOf(userId) },
             clock.now(),
           );
-    if (claim.outcome === 'claimed') return { outcome: 'claimed', requestId: claim.flowId, cookie: browser };
+    if (claim.outcome === 'claimed') {
+      // S205: only a flow its device opened, as sealed; one rewritten since is no flow, and the alarm.
+      const flow = await flowById(database, claim.flowId);
+      if (flow !== undefined && pendingFlowSound(keys, logger, flow)) {
+        return { outcome: 'claimed', requestId: claim.flowId, cookie: browser };
+      }
+      return { outcome: 'not_found' };
+    }
     failedFrom(network);
     if (claim.outcome === 'contested') {
       const { flowId, failedClaims, denied } = claim;
@@ -209,6 +222,7 @@ export function createOauthDevice({
       const [deviceCode, userCode] = [newDeviceCode(), newUserCode()];
       const outcome = await openDeviceFlow(
         database,
+        keys,
         {
           id: ids.next(),
           clientId,

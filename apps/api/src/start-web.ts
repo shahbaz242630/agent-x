@@ -322,6 +322,7 @@ export async function startWeb(
     oauth: {
       authorizing: createOauthAuthorizing({
         database,
+        keys,
         clock: systemClock,
         ids: uuidV7Ids,
         logger,
@@ -330,6 +331,7 @@ export async function startWeb(
       }),
       device: createOauthDevice({
         database,
+        keys,
         clock: systemClock,
         ids: uuidV7Ids,
         logger,

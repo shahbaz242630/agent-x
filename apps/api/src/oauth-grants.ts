@@ -34,7 +34,7 @@
 // - Either kind, before anything else is believed of it (tamper pass S205,
 //   SEC-OAUTH-13): the flow held must be the one its organisation's
 //   transaction was opened for, and its decision's seal its own
-//   (oauth/decision-seal.ts), made with a key the database never holds. A
+//   (oauth/flow-seals.ts), made with a key the database never holds. A
 //   flow planted or changed in the database is refused as any other code is,
 //   revokes nothing (the connection it names is not its), and raises the
 //   integrity alarm for that connection, which puts its organisation on hold.
@@ -378,7 +378,7 @@ export function createOauthGrants({
    * Why the flow held for its tokens is not one this server decided for the organisation and key the transaction was
    * opened for, if it isn't (S205): a seal not its own raises the integrity alarm for that connection (the hold
    * follows once the transaction ends); a pepper version no longer held is ours to fix, an error; a flow with no seal,
-   * decided before 0100 or by the release before while this one rolls out, a warning.
+   * decided before 0101 or by the release before while this one rolls out, a warning.
    */
   const unsealed = (
     flow: AnyFlowRead,
@@ -390,9 +390,9 @@ export function createOauthGrants({
     if (judged === 'sound') return undefined;
     const log = logger.child({ correlationId: caller.correlationId, orgId });
     if (judged === 'tampered') states.mismatch(CONNECTIONS.subject, { orgId, id: keyId });
-    // Never the alarm: the release before this one decides flows unsealed until it is swapped out (0100).
+    // Never the alarm: the release before this one decides flows unsealed until it is swapped out (0101).
     else if (judged === 'unsealed') log.warn('oauth.decision_unsealed', { flowId: flow.id, keyId });
-    else log.error('oauth.decision_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
+    else log.error('oauth.seal_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
     return `decision_${judged}`;
   };
 

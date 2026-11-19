@@ -482,14 +482,19 @@ export const PLAIN_WORDS = {
     broke: 'That connection no longer works; the person must connect the app again.',
     next: 'If it repeats for one app, its sign-in may be intercepted or broken: look at which app on these lines.',
   },
-  'oauth.decision_key_not_held': {
-    happened: "An MCP app's sign-in was turned away: the key version its person's consent was sealed with is gone.",
+  'oauth.seal_key_not_held': {
+    happened: "An MCP app's sign-in was turned away: the key version it was sealed with is no longer held.",
     broke: 'That app got no tokens; the person must connect it again.',
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
   },
   'oauth.decision_unsealed': {
     happened: "An MCP app's sign-in was turned away: the person's consent it named carried no seal from this server.",
     broke: 'That app got no tokens; the person must connect it again.',
+    next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
+  },
+  'oauth.flow_unsealed': {
+    happened: "An MCP app's sign-in under way carried no seal from this server, so it was not shown.",
+    broke: 'The person was told it was not found; they must connect the app again.',
     next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
   },
   'oauth.registrations_capped': {

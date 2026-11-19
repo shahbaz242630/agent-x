@@ -313,7 +313,7 @@ beforeEach(async () => {
   const logger = testLogger(capture);
   const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
   oauthClients = clients;
-  authorizing = createOauthAuthorizing({ database: app, clock, ids, logger, capabilities, clients });
+  authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
   grants = createOauthGrants({
     database: app,
     keys,
@@ -628,6 +628,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     // A device's flow from it too: one count of every flow it holds.
     const device = createOauthDevice({
       database: app,
+      keys,
       clock,
       ids,
       logger: testLogger(capture),
@@ -668,6 +669,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const later = new FixedClock(new Date(START.getTime() + 15 * 60_000));
     const after = createOauthAuthorizing({
       database: app,
+      keys,
       clock: later,
       ids,
       logger: testLogger(capture),
@@ -695,6 +697,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     ]);
     const device = createOauthDevice({
       database: app,
+      keys,
       clock,
       ids,
       logger: testLogger(capture),
@@ -740,6 +743,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const later = new FixedClock(new Date(START.getTime() + DAY_MS + 1000));
     const after = createOauthAuthorizing({
       database: app,
+      keys,
       clock: later,
       ids,
       logger: testLogger(capture),
@@ -767,6 +771,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
     const logger = testLogger(capture);
     const busy = createOauthAuthorizing({
       database: failing,
+      keys,
       clock,
       ids,
       logger,
@@ -1841,6 +1846,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
   const deviceOf = (at: FixedClock = clock) =>
     createOauthDevice({
       database: app,
+      keys,
       clock: at,
       ids,
       logger: testLogger(capture),
@@ -2115,6 +2121,58 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     });
   });
 
+  describe('SEC-OAUTH-13 (S205 fix round): a claimed device flow’s device code rewritten by the database’s owner', () => {
+    /** A device code of the owner's own making, written over the person's flow: the owner then polls with it. */
+    const rewritten = async (flowId: string) => {
+      const ownDeviceCode = `axd_${randomBytes(32).toString('base64url')}`;
+      await database
+        .as('owner')
+        .query('update oauth.flows set device_hash = $2 where id = $1', [
+          flowId,
+          createHash('sha256').update(ownDeviceCode, 'utf8').digest('hex'),
+        ]);
+      return ownDeviceCode;
+    };
+
+    it('before the ask: the flow is no longer found, and the owner’s poll gets nothing', async () => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const agentId = await agent(org, admin);
+      const flow = await claimed((await codes()).userCode, admin);
+      const ownDeviceCode = await rewritten(flow.flowId);
+      expect(await consents.request(flow, admin.userId)).toBeUndefined();
+      expect(await consent(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({
+        outcome: 'refused',
+        code: 'NOT_FOUND',
+      });
+      expect(lines('audit.integrity_failed')).toContainEqual(
+        expect.objectContaining({ level: 'error', check: 'oauth_flow', objectId: flow.flowId }),
+      );
+      expect(errorOf(await poll(ownDeviceCode))).toBe('authorization_pending');
+    });
+
+    it('between the ask and its confirm: the confirm is refused, and the owner’s poll gets nothing', async () => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const agentId = await agent(org, admin);
+      const flow = await claimed((await codes()).userCode, admin);
+      const asked = { agentId, scopes: ['requests:read'] as const };
+      const challengeId = askedFor(await consent(admin, flow, asked));
+      await stepUp(admin, challengeId);
+      const ownDeviceCode = await rewritten(flow.flowId);
+      const write = await consents.confirm(
+        admin,
+        keyed(admin, CONSENT_CONFIRM_OPERATION, 'confirm a device flow rewritten since its ask'),
+        flow,
+        asked,
+        challengeId,
+        CORRELATION,
+      );
+      expect(write).toMatchObject({ outcome: 'refused' });
+      expect(errorOf(await poll(ownDeviceCode))).toBe('authorization_pending');
+    });
+  });
+
   it('mutation V4: a lookup with no cookie gets one; the same browser finds it again; another browser never', async () => {
     const person = await member(await organization(), 'admin');
     const given = await codes();
@@ -2171,6 +2229,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
     const viaDocument = createOauthAuthorizing({
       database: app,
+      keys,
       clock,
       ids,
       logger: testLogger(capture),
@@ -2380,7 +2439,15 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
       },
     }));
     const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
-    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    const device = createOauthDevice({
+      database: app,
+      keys,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients,
+    });
     const given = await device.authorize({ client_id: HERMES }, CORRELATION, fresh());
     if (given.outcome !== 'opened') throw new Error(`not opened: ${JSON.stringify(given)}`);
     const found = await device.lookup(given.codes.userCode, undefined, 'a person', CALLER.ip);
@@ -2407,7 +2474,15 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
       document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
     }));
     const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
-    const device = createOauthDevice({ database: app, clock, ids, logger: testLogger(capture), capabilities, clients });
+    const device = createOauthDevice({
+      database: app,
+      keys,
+      clock,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients,
+    });
     expect(
       await device.authorize({ client_id: 'https://claude.ai/oauth/code-only' }, CORRELATION, fresh()),
     ).toMatchObject({
@@ -2578,12 +2653,12 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
 
   /**
    * What the owner plants as the decision's seal, and what it raises: a MAC made up, the integrity alarm; one naming a
-   * pepper version not held, our fault's error; none at all, as a flow decided before 0100 (or by the release before,
+   * pepper version not held, our fault's error; none at all, as a flow decided before 0101 (or by the release before,
    * while this one rolls out) has, a warning. Each refused all the same.
    */
   const SEALS = [
     ['a seal made up', { mac: 'e'.repeat(64), version: 1 }, 'audit.integrity_failed'],
-    ['a seal of a pepper version not held', { mac: 'e'.repeat(64), version: 9 }, 'oauth.decision_key_not_held'],
+    ['a seal of a pepper version not held', { mac: 'e'.repeat(64), version: 9 }, 'oauth.seal_key_not_held'],
     ['no seal', null, 'oauth.decision_unsealed'],
   ] as const;
 
@@ -2719,6 +2794,32 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
       error: 'invalid_grant',
     });
     alarmed(keyId);
+  });
+
+  it('(e) a pending flow’s redirect and challenge rewritten before the ask: never shown, never decided, the alarm', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const flow = await opened();
+    // The owner's own address added to the client's list too: the flow's is still the one the client sent.
+    await owner().query('update oauth.clients set redirect_uris = $2 where client_id = $1', [
+      clientId,
+      [REDIRECT, ELSEWHERE],
+    ]);
+    await owner().query('update oauth.flows set redirect_uri = $2, code_challenge = $3 where id = $1', [
+      flow.flowId,
+      ELSEWHERE,
+      challengeOf(OWN_VERIFIER),
+    ]);
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
+    expect(await consent(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({
+      outcome: 'refused',
+      code: 'NOT_FOUND',
+    });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', check: 'oauth_flow', objectId: flow.flowId }),
+    );
+    expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
   });
 
   it('(d) a pending flow’s challenge rewritten between the ask and its confirm is never decided', async () => {
