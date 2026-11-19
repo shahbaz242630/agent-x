@@ -2022,15 +2022,21 @@ export function keyProblems(
   before: readonly Pick<Listed, 'name' | 'version'>[],
   after: readonly Pick<Listed, 'name' | 'version'>[],
 ): string[] {
-  return CREATED_ONCE.flatMap((key) => {
+  // AG10: Zitadel's machine-ID config is created once too, and checked alike: every Zitadel copy and the API mount it.
+  return [...CREATED_ONCE, MACHINE_CONFIG].flatMap((key) => {
+    const machine = key === MACHINE_CONFIG;
     const now = after.find((secret) => secret.name === key);
-    if (now === undefined) return [`${key} isn't in the vault, so the API won't start: run secrets --keys again`];
+    if (now === undefined) {
+      const stops = machine ? 'no Zitadel copy can start' : "the API won't start";
+      return [`${key} isn't in the vault, so ${stops}: run secrets --keys again`];
+    }
     const was = before.find((secret) => secret.name === key);
-    return was !== undefined && was.version !== now.version
-      ? [
-          `${key} was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"`,
-        ]
-      : [];
+    if (was === undefined || was.version === now.version) return [];
+    return [
+      machine
+        ? `${key} was written again, so a Zitadel copy and the API may hold different headers: restart the API and Zitadel together`
+        : `${key} was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"`,
+    ];
   });
 }
 
@@ -2064,6 +2070,8 @@ export function issuedMissing(held: readonly string[]): string[] {
       .filter(([name, secret]) => (secret.source === 'issued' || secret.source === 'ids') && !held.includes(name))
       .map(([name]) => name),
     ...COPIED_SECRETS.filter((name) => !held.includes(name)),
+    // AG10: created by any secrets run; without it no Zitadel copy can start, and the API refuses to.
+    ...(held.includes(MACHINE_CONFIG) ? [] : [MACHINE_CONFIG]),
   ];
 }
 
@@ -2144,7 +2152,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
   for (const problem of problems) steps.terminal.say(problem);
   if (problems.length > 0) return 1;
   steps.terminal.say(
-    `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
+    `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
   );
   // Recorded only once the keys are sound: a release on a vault missing one would start an API that can't.
   const recorded = leaveRecord(steps, subscription, 'secrets', commit);

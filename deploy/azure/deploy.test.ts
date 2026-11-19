@@ -1217,6 +1217,8 @@ class RecordingAz implements Az {
       // SA2b: our login ID lists, which any secrets run writes as none until the partner's.
       'zitadel-our-actors',
       'zitadel-our-service-users',
+      // AG10: Zitadel's machine-ID config, which any secrets run creates once.
+      'zitadel-machine-config',
     ];
     const pages = this.options.pages ?? {};
     const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
@@ -1907,7 +1909,8 @@ describe('alerts', () => {
 describe("what a secrets run did to the app's keys", () => {
   const vault = (versions: Readonly<Record<string, string>>) =>
     Object.entries(versions).map(([name, version]) => ({ name, version }));
-  const every = (version: string) => Object.fromEntries(CREATED_ONCE.map((key) => [key, version]));
+  const MACHINE = 'zitadel-machine-config';
+  const every = (version: string) => Object.fromEntries([...CREATED_ONCE, MACHINE].map((key) => [key, version]));
 
   it('accepts every key there, each the version it was, or new', () => {
     expect(keyProblems(vault(every('v1')), vault(every('v1')))).toEqual([]);
@@ -1924,6 +1927,16 @@ describe("what a secrets run did to the app's keys", () => {
     ]);
     expect(keyProblems(vault(every('v1')), vault({ ...every('v1'), 'key-payee-index-v1': 'v2' }))).toEqual([
       'key-payee-index-v1 was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"',
+    ]);
+  });
+
+  it("names Zitadel's machine-ID config missing or written again, as a key (AG10)", () => {
+    const { [MACHINE]: _gone, ...rest } = every('v1');
+    expect(keyProblems([], vault(rest))).toEqual([
+      "zitadel-machine-config isn't in the vault, so no Zitadel copy can start: run secrets --keys again",
+    ]);
+    expect(keyProblems(vault(every('v1')), vault({ ...every('v1'), [MACHINE]: 'v2' }))).toEqual([
+      'zitadel-machine-config was written again, so a Zitadel copy and the API may hold different headers: restart the API and Zitadel together',
     ]);
   });
 });
@@ -2001,7 +2014,7 @@ describe('deploy secrets', () => {
       [...everything].sort().map((name) => `  ${name}`),
     );
     expect(done.terminal.said.slice(-2)).toEqual([
-      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
     ]);
   });
@@ -2204,7 +2217,7 @@ describe('deploy secrets', () => {
     ]);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
-      `The app's ${String(CREATED_ONCE.length)} keys and public halves are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
     );
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });
@@ -2362,7 +2375,7 @@ describe('deploy apps', () => {
     it('secrets and apps go back to an older generation beside a newer one only with --back-to-generation', async () => {
       const both = {
         servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
-        after: [...COPIED_SECRETS, ...CREATED_ONCE],
+        after: [...COPIED_SECRETS, ...CREATED_ONCE, 'zitadel-machine-config'],
       };
       for (const command of ['secrets', 'apps'] as const) {
         const refusedBack = await part(command, 0, both);
@@ -2417,7 +2430,7 @@ describe('deploy apps', () => {
         const done = await part(command, 1, {
           servers: [{ name: OWN_SERVER }, { name: `${OWN_SERVER}-r1` }],
           // A keys run ends green only with every key there afterwards.
-          after: [...COPIED_SECRETS, ...CREATED_ONCE],
+          after: [...COPIED_SECRETS, ...CREATED_ONCE, 'zitadel-machine-config'],
         });
         expect(done.error).toBeUndefined();
         expect(done.status).toBe(0);
@@ -2430,12 +2443,30 @@ describe('deploy apps', () => {
     }
   });
 
+  it("sends nothing while the vault lacks Zitadel's machine-ID config, and says secrets --keys comes first (AG10)", async () => {
+    const held = [
+      'api-oidc-client-secret',
+      'zitadel-directory-token',
+      'zitadel-reset-token',
+      'acs-access-key',
+      'zitadel-our-actors',
+      'zitadel-our-service-users',
+    ];
+    const done = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ before: held }) });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The vault doesn't hold zitadel-machine-config yet,.* run secrets --keys /,
+      ) as unknown,
+    });
+    expect(done.az.deployment).toBeUndefined();
+  });
+
   it("sends nothing, and asks nothing past the subscription, while the vault lacks the API's client secret (B2-6)", async () => {
     const images = recordingImages();
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, zitadel-our-actors, zitadel-our-service-users, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too, and writes none \(off\) for any of our login ID lists the vault lacks.*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, zitadel-our-actors, zitadel-our-service-users, acs-access-key, zitadel-machine-config yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too, and writes none \(off\) for any of our login ID lists the vault lacks.*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
@@ -2461,9 +2492,11 @@ describe('deploy apps', () => {
       'zitadel-reset-token',
       ...OUR_LISTS,
       'acs-access-key',
+      'zitadel-machine-config',
     ]);
     const held = [
       'db-app-password',
+      'zitadel-machine-config',
       'api-oidc-client-secret',
       'zitadel-directory-token',
       'zitadel-reset-token',
@@ -2486,6 +2519,9 @@ describe('deploy apps', () => {
     );
     // The email key alone: any secrets run copies it, so the one that writes nothing else.
     expect(secretsRunFor(['acs-access-key'])).toBe('secrets --keys');
+    // AG10: Zitadel's machine-ID config, which the API and every Zitadel copy mount: any secrets run creates it.
+    expect(issuedMissing(held.filter((name) => name !== 'zitadel-machine-config'))).toEqual(['zitadel-machine-config']);
+    expect(secretsRunFor(['zitadel-machine-config'])).toBe('secrets --keys');
   });
 
   describe("waits for the API's revision of the new image to be the ready one before saying done (AZ7)", () => {
