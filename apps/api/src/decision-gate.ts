@@ -25,7 +25,7 @@
 // them is how an admin's freeze was told busy after it committed (S166). Counted
 // per process, so across N copies the limits are N times these, and turns are fair
 // within a copy, not across copies.
-import { organisationShareOf } from '@agentx/platform/db';
+import { gateActiveOf, organisationShareOf } from '@agentx/platform/db';
 
 /** What the gate holds to: each a limit in this process. */
 export interface GateLimits {
@@ -161,7 +161,7 @@ export function createDecisionGate({
 /**
  * The limits a process runs at: its settings where set. Until a load run sets the
  * numbers they stay wide, so the gate only takes turns and adds no refusal of its
- * own: as many decisions as connections, one organisation's as many as its share of them.
+ * own: one fewer decision than connections (AG10), one organisation's as many as its share of them.
  */
 export const gateLimitsOf = (
   poolMax: number,
@@ -172,7 +172,7 @@ export const gateLimitsOf = (
     readonly waitMs: number;
   },
 ): GateLimits => {
-  const active = settings.active ?? poolMax;
+  const active = settings.active ?? gateActiveOf(poolMax);
   return {
     active,
     perOrganisation: settings.perOrganisation ?? Math.min(active, organisationShareOf(poolMax)),
