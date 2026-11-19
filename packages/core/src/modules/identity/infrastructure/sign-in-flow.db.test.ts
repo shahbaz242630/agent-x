@@ -10,7 +10,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -116,14 +116,21 @@ let sessions: Sessions;
 let signIn: SignIn;
 let challenges: StepUpChallenges;
 
-/** Holds the session's challenges, then consumes one, as a change's confirmation does (ADR-006 §6, level 0b). */
-const used = async (
+/**
+ * Holds the session's challenges, then consumes one, as a change's
+ * confirmation does (ADR-006 §6, level 0b): in a change's own transaction, in
+ * an organisation, as every consume runs (S206).
+ */
+const used = (
   challenges: StepUpChallenges,
-  db: Parameters<StepUpChallenges['consume']>[0],
+  db: Database<IdentityTables>,
   challengeId: string,
   binding: StepUpBinding,
   need: { readonly passkeyRequired: boolean },
-) => challenges.consume(db, await challenges.hold(db, binding.sessionId), challengeId, binding, need);
+): ReturnType<StepUpChallenges['consume']> =>
+  withTenant(db, '0199a0f0-0000-7000-8000-000000000b33', async (tx) =>
+    challenges.consume(tx, await challenges.hold(tx, binding.sessionId), challengeId, binding, need),
+  );
 let clock: FixedClock;
 let subjects = 0;
 /** What the sign-in logged since the test began. */

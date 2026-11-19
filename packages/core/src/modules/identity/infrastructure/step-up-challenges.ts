@@ -32,7 +32,12 @@
 // `pending`, `recordEvidence` and `consume` take only a challenge whose MAC
 // holds; one planted or edited by something without the app's key, such as
 // the database's owner moving it to verified with a passkey, is none of them,
-// and raises the integrity alarm.
+// and raises the integrity alarm. So does one whose MAC holds but whose use
+// the organisation's audit trail already records (`usedBefore`): the owner
+// put back, byte for byte, the row its change deleted (R-15, S206). That read
+// believes the chain from before the challenge opened through its head, or
+// refuses the change as a broken chain does (ChainBroken); `consume` so runs
+// only in an organisation's transaction.
 //
 // Each runs on the handle it is given, so the caller decides the transaction:
 // `hold` one statement, the rest a read and then a write of only the row as it
@@ -43,9 +48,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import { type AuditTransaction, ChainBroken, type CheckedEventFacts, eventsSinceChecked } from '../../audit/index.ts';
 import { PASSKEY_METHOD } from '../domain/step-up.ts';
 import { SESSION_SEALED, sessionRowMessage } from './sessions.ts';
 import {
@@ -275,6 +282,45 @@ function verifiedOf(row: EvidenceRow): VerifiedFacts | undefined {
   return { verifiedAt, authTime, amr, idpSessionId, idTokenHash: id_token_hash };
 }
 
+/**
+ * How much earlier than a challenge's own creation `usedBefore` starts
+ * reading: its first use can't come before it opened, but the time it holds
+ * is the app's clock, and the events' the database's.
+ */
+const CLOCKS_APART_MS = 60_000;
+
+/** A challenge's use as the audit trail tells it: `used` or `unused`, believed; or the chain can't be (its problem). */
+type Use =
+  | { readonly kind: 'used' | 'unused' }
+  | { readonly kind: 'unbelieved'; readonly reason: string; readonly orgId?: string; readonly seq?: bigint };
+
+/** An event of the challenge's person whose details name it: the change that used it. */
+function namesChallenge(event: CheckedEventFacts, row: PendingRow): boolean {
+  // Most events don't hold the ID at all: only those that do are read as JSON.
+  if (event.actorType !== 'user' || event.actorId !== row.user_id || !event.details.includes(row.id)) return false;
+  // The chain's check passed it, so its details are the app's own canonical JSON object.
+  const details = JSON.parse(event.details) as Readonly<Record<string, unknown>>;
+  return details.stepUpChallengeId === row.id;
+}
+
+/**
+ * Whether the organisation's audit trail already holds a change made with
+ * this challenge (R-15, S206): every change that consumes one records
+ * `stepUpDetails` in an event of its own transaction, by the challenge's
+ * person. Read only from events the chain's check believes, from the last one
+ * before the challenge opened through the head (eventsSinceChecked): the owner
+ * can't hide the change's event for the replay and put it back after, since a
+ * chain with it gone, edited or moved fails the check, and fails closed. The
+ * challenge's creation time is its MAC's, so the owner can't move the start.
+ */
+async function usedBefore(db: Handle, row: PendingRow, keys: KeyProvider): Promise<Use> {
+  const since = new Date(row.created_at.getTime() - CLOCKS_APART_MS);
+  // The audit trail's read runs raw SQL on the change's own transaction, whatever tables its type names.
+  const checked = await eventsSinceChecked(db as unknown as AuditTransaction, keys, since);
+  if (checked.kind === 'unbelieved') return checked;
+  return { kind: checked.events.some((event) => namesChallenge(event, row)) ? 'used' : 'unused' };
+}
+
 const pendingOf = (row: PendingRow): PendingChallenge => ({
   challengeId: row.id,
   sessionId: row.session_id,
@@ -442,6 +488,19 @@ export function createStepUpChallenges({
         return undefined;
       }
       if (!genuine(row, verified)) return undefined;
+      // A genuine row already used: the owner put back the one its change deleted (R-15), to use it again.
+      const use = await usedBefore(db, row, keys);
+      if (use.kind === 'used') {
+        rowForged(logger, 'step_up_challenge', row, 'already_used');
+        return undefined;
+      }
+      if (use.kind === 'unbelieved') {
+        if (use.orgId === undefined)
+          throw new RangeError("a challenge is consumed only in an organisation's transaction");
+        rowForged(logger, 'step_up_challenge', row, 'chain_unverified');
+        // As a write finding its chain broken does: refused whole, and withSignedStates names the chain.
+        throw new ChainBroken({ kind: 'organisation', orgId: use.orgId });
+      }
       const deleted = await db
         .deleteFrom('identity.step_up_challenges')
         .where('id', '=', challengeId)

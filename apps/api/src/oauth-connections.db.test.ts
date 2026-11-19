@@ -17,11 +17,16 @@ import {
   agentKeysOf,
   AGENT_KEYS,
   AGENTS,
+  addConnection,
   CONNECTIONS,
+  headMoved,
+  issueTokens,
+  keySecretMessage,
   ENDED_CONNECTIONS_SHOWN_DAYS,
   createConnectionTokenCheck,
   MOST_LIVE_CONNECTIONS,
   type Scope,
+  scopesText,
 } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import {
@@ -1015,6 +1020,362 @@ describe(`SEC-OAUTH-05, -08 a refresh token rotated, used once (Postgres ${serve
   });
 });
 
+describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner (Postgres ${server.version})`, () => {
+  /** A connection whose first refresh token (the one stolen) was used once by its app: that token, and the pair. */
+  async function rotatedOnce() {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const first = await connected(org, admin, agentId);
+    const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+    const second = issued(await grants.refresh(refresh, CALLER));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    return { org, agentId, keyId: first.keyId, refresh, second, owner, usedId: idOf(first.refreshToken) };
+  }
+  type Rotated = Awaited<ReturnType<typeof rotatedOnce>>;
+
+  /** A token's own ID, as its text holds it (32 hex digits, which Postgres takes as a uuid). */
+  const idOf = (token: string): string => token.split('_')[2] ?? '';
+
+  const usedAtCleared = ({ owner }: Rotated, id: string) =>
+    owner.query('update agents.connection_tokens set used_at = null where id = $1', [id]);
+
+  /** A row deleted by the owner, who first dates it past 0093's retention policy, the only rows it deletes. */
+  const rowDeleted = async ({ owner }: Rotated, id: string) => {
+    await owner.query("update agents.connection_tokens set created_at = now() - interval '200 days' where id = $1", [
+      id,
+    ]);
+    expect(await owner.query('delete from agents.connection_tokens where id = $1 returning id', [id])).toHaveLength(1);
+  };
+
+  /** The head the connection's signed state names, as the owner reads the table, in the uuid's own spelling. */
+  const headIn = async ({ owner, keyId }: Rotated) => {
+    const [row] = await owner.query<{ refresh_id: string }>(
+      "select replace(refresh_id::text, '-', '') as refresh_id from agents.connection_heads where id = $1",
+      [keyId],
+    );
+    return row?.refresh_id;
+  };
+
+  const refreshWith = (rotated: Rotated, refreshToken: string) =>
+    grants.refresh({ ...rotated.refresh, refreshToken }, CALLER);
+
+  /** What a reuse the rows tried to hide shows: refused, the connection gone, its organisation told, the alarm. */
+  async function caughtAsReuse(rotated: Rotated, refreshToken: string, reason: string, accessToken: string) {
+    expect(await refreshWith(rotated, refreshToken)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('oauth.refresh_reused')).toEqual([
+      expect.objectContaining({ level: 'warn', revoked: true, orgId: rotated.org }),
+    ]);
+    expect(noted).toContainEqual(
+      expect.objectContaining({ kind: 'connection_token_reused', orgId: rotated.org, agentId: rotated.agentId }),
+    );
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: rotated.org, check: 'refresh_token', reason }),
+    ]);
+  }
+
+  it('moves the connection’s signed head to each new refresh token; rotation goes on as before', async () => {
+    const rotated = await rotatedOnce();
+    expect(await headIn(rotated)).toBe(idOf(rotated.second.refreshToken));
+    const third = issued(await refreshWith(rotated, rotated.second.refreshToken));
+    expect(await headIn(rotated)).toBe(idOf(third.refreshToken));
+    expect(await accepted(third.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('makes a new connection’s signed head at its exchange, naming its first refresh token', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const first = await connected(org, admin, await agent(org, admin));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    const [made] = await owner.query<{ refresh_id: string; state_version: number }>(
+      "select replace(refresh_id::text, '-', '') as refresh_id, state_version from agents.connection_heads where id = $1",
+      [first.keyId],
+    );
+    expect(made).toEqual({ refresh_id: idOf(first.refreshToken), state_version: 1 });
+    issued(
+      await grants.refresh(
+        { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined },
+        CALLER,
+      ),
+    );
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  /** A signed-state finding on the head: refused, the connection revoked, and the signed state's own alarm. */
+  async function headRefused(rotated: Rotated, refreshToken: string) {
+    expect(await refreshWith(rotated, refreshToken)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('oauth.refresh_reused')).toEqual([expect.objectContaining({ revoked: true, orgId: rotated.org })]);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', subjectType: 'connection_head' }),
+    );
+  }
+
+  it('the signed head’s row deleted: refused, the connection revoked, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rotated.owner.query('delete from agents.connection_heads where id = $1', [rotated.keyId]);
+    await headRefused(rotated, rotated.second.refreshToken);
+  });
+
+  it('the signed head rolled back to its older signed state: the stolen token is refused, revoking, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    const [older] = await rotated.owner.query<{ json: string }>(
+      'select pg_catalog.to_jsonb(h)::text as json from agents.connection_heads h where id = $1',
+      [rotated.keyId],
+    );
+    issued(await refreshWith(rotated, rotated.second.refreshToken));
+    await rotated.owner.query(
+      `update agents.connection_heads h set refresh_id = o.refresh_id, state_version = o.state_version,
+         state_event_id = o.state_event_id
+       from pg_catalog.jsonb_populate_record(null::agents.connection_heads, $2::jsonb) o where h.id = $1`,
+      [rotated.keyId, older?.json],
+    );
+    await usedAtCleared(rotated, idOf(rotated.second.refreshToken));
+    await headRefused(rotated, rotated.second.refreshToken);
+  });
+
+  it('two live refresh tokens of a connection made before 0102: the second to make its head is a reuse', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    // Made as before 0102: a key, its connection and two pairs, and no head.
+    const keyId = ids.next();
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, randomBytes(32)));
+      const expiresAt = new Date(clock.now().getTime() + 90 * DAY_MS);
+      const scopes = ['requests:read'] as const;
+      await addAgentKey(tx, states, {
+        orgId: org,
+        id: keyId,
+        agentId,
+        scopes,
+        secretMac: mac,
+        secretKeyVersion: keyVersion,
+        expiresAt,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      });
+      await addConnection(tx, states, {
+        orgId: org,
+        keyId,
+        agentId,
+        clientId,
+        clientName: 'ChatGPT',
+        resource: capabilities.resource,
+        redirectUri: REDIRECT,
+        via: 'code',
+        madeBy: admin.userId,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    const pair = () =>
+      withSignedStates(app, org, quiet(), (tx) =>
+        issueTokens(
+          tx,
+          { keys, ids },
+          {
+            orgId: org,
+            keyId,
+            scopes: ['requests:read'],
+            now: clock.now(),
+            keyExpiresAt: new Date(clock.now().getTime() + 90 * DAY_MS),
+          },
+        ),
+      );
+    const [one, two] = [await pair(), await pair()];
+    // The first refresh's head made and held uncommitted, so the second's waits on the table's key.
+    const made = Promise.withResolvers<undefined>();
+    const letGo = Promise.withResolvers<undefined>();
+    const first = withSignedStates(app, org, quiet(), async (tx, states) => {
+      await headMoved(
+        tx,
+        states,
+        { outcome: 'unset' },
+        { orgId: org, id: keyId, refreshId: one.refreshTokenId, at: clock.now() },
+      );
+      made.resolve(undefined);
+      await letGo.promise;
+    });
+    await made.promise;
+    const second = grants.refresh(
+      { refreshToken: two.refreshToken, clientId, scope: undefined, resource: undefined },
+      CALLER,
+    );
+    await waitUntilQueued(database.as('admin'), 1);
+    letGo.resolve(undefined);
+    await first;
+    expect(await second).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(await accepted(one.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, check: 'refresh_token', reason: 'not_head' }),
+    ]);
+  });
+
+  it('its use cleared: not the signed head, so a reuse, the connection revoked, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await usedAtCleared(rotated, rotated.usedId);
+    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'not_head', rotated.second.accessToken);
+  });
+
+  it('a fork: the thief’s use hidden and its tokens kept to put back; the app’s next refresh ends the connection', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const first = await connected(org, admin, agentId);
+    const refresh = { refreshToken: first.refreshToken, clientId, scope: undefined, resource: undefined };
+    // The thief refreshes the stolen token first.
+    const thiefs = issued(await grants.refresh(refresh, CALLER));
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    const rotated = {
+      org,
+      agentId,
+      keyId: first.keyId,
+      refresh,
+      second: thiefs,
+      owner,
+      usedId: idOf(first.refreshToken),
+    };
+    const thiefsRows = [idOf(thiefs.refreshToken), idOf(thiefs.accessToken)];
+    const copies = await owner.query<{ json: string }>(
+      'select pg_catalog.to_jsonb(t)::text as json from agents.connection_tokens t where id = any($1::uuid[])',
+      [thiefsRows],
+    );
+    for (const id of thiefsRows) await rowDeleted(rotated, id);
+    await usedAtCleared(rotated, rotated.usedId);
+    // The app refreshes the same token: not the signed head, which names the thief's.
+    await caughtAsReuse(rotated, first.refreshToken, 'not_head', thiefs.accessToken);
+    // The thief's tokens put back byte for byte: their connection is gone with them.
+    for (const { json } of copies) {
+      await owner.query(
+        'insert into agents.connection_tokens select * from pg_catalog.jsonb_populate_record(null::agents.connection_tokens, $1::jsonb)',
+        [json],
+      );
+    }
+    expect(await refreshWith(rotated, thiefs.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(thiefs.accessToken)).toEqual({ outcome: 'refused' });
+  });
+
+  it('the signed head rewritten to the stolen token: the head’s own check refuses it, revoking, with its alarm', async () => {
+    const rotated = await rotatedOnce();
+    await usedAtCleared(rotated, rotated.usedId);
+    await rotated.owner.query('update agents.connection_heads set refresh_id = $2 where id = $1', [
+      rotated.keyId,
+      rotated.usedId,
+    ]);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toEqual({ outcome: 'refused' });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', subjectType: 'connection_head' }),
+    );
+  });
+
+  it('the used row deleted: the stolen token, genuine with no row, is a reuse, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rowDeleted(rotated, rotated.usedId);
+    await caughtAsReuse(rotated, rotated.refresh.refreshToken, 'row_gone', rotated.second.accessToken);
+  });
+
+  it('the app’s current token’s row changed: its genuine token no longer matches it, a reuse, with the alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rotated.owner.query("update agents.connection_tokens set scopes = 'requests:read' where id = $1", [
+      idOf(rotated.second.refreshToken),
+    ]);
+    await caughtAsReuse(rotated, rotated.second.refreshToken, 'row', rotated.second.accessToken);
+  });
+
+  /** The key's listing changed by the owner, its foreign key dropped for it as an owner can, and put back after. */
+  async function withListingChanged(
+    rotated: Rotated,
+    change: (keyHex: string) => Promise<unknown>,
+    then: () => Promise<void>,
+  ) {
+    const keyHex = rotated.refresh.refreshToken.split('_')[1] ?? '';
+    const { owner, org } = rotated;
+    await owner.query('alter table agents.agent_keys drop constraint listed_in_the_directory');
+    try {
+      await change(keyHex);
+      await then();
+    } finally {
+      await owner.query(
+        'insert into directory.agent_keys (key_id, org_id) values ($1, $2) on conflict (key_id) do update set org_id = $2',
+        [keyHex, org],
+      );
+      await owner.query(
+        'alter table agents.agent_keys add constraint listed_in_the_directory foreign key (id, org_id) references directory.agent_keys (key_id, org_id)',
+      );
+    }
+  }
+
+  it('the key’s listing moved to another organisation: refused, nothing done or told there, the alarm names the key', async () => {
+    const rotated = await rotatedOnce();
+    const elsewhere = await organization();
+    await withListingChanged(
+      rotated,
+      (keyHex) =>
+        rotated.owner.query('update directory.agent_keys set org_id = $2 where key_id = $1', [keyHex, elsewhere]),
+      async () => {
+        expect(await refreshWith(rotated, rotated.second.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({
+            level: 'error',
+            check: 'refresh_token',
+            reason: 'listing',
+            keyId: rotated.keyId,
+            listedOrgId: elsewhere,
+          }),
+        ]);
+        expect(lines('oauth.refresh_reused')).toEqual([]);
+        expect(noted.filter(({ kind }) => kind === 'connection_token_reused')).toEqual([]);
+      },
+    );
+  });
+
+  it('the key’s listing deleted: the app’s genuine token is refused, with the alarm naming the key', async () => {
+    const rotated = await rotatedOnce();
+    await withListingChanged(
+      rotated,
+      (keyHex) => rotated.owner.query('delete from directory.agent_keys where key_id = $1', [keyHex]),
+      async () => {
+        expect(await refreshWith(rotated, rotated.second.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+        expect(lines('audit.integrity_failed')).toEqual([
+          expect.objectContaining({ level: 'error', check: 'refresh_token', reason: 'unlisted', keyId: rotated.keyId }),
+        ]);
+      },
+    );
+  });
+
+  it('a genuine token whose row is gone after its connection was revoked is refused, with no alarm', async () => {
+    const rotated = await rotatedOnce();
+    await grants.revoke({ token: rotated.second.refreshToken, clientId }, CALLER);
+    await rowDeleted(rotated, rotated.usedId);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a genuine token whose row is gone after its connection ran past its time is refused, with no alarm', async () => {
+    const rotated = await rotatedOnce();
+    await rowDeleted(rotated, rotated.usedId);
+    clock.advanceBy(91 * DAY_MS);
+    expect(await refreshWith(rotated, rotated.refresh.refreshToken)).toMatchObject({ error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a token of a real ID with a guessed secret is refused, row or none, and revokes nothing', async () => {
+    const rotated = await rotatedOnce();
+    const guessed = (token: string) =>
+      [...token.split('_').slice(0, 3), randomBytes(32).toString('base64url')].join('_');
+    expect(await refreshWith(rotated, guessed(rotated.second.refreshToken))).toMatchObject({ error: 'invalid_grant' });
+    await rowDeleted(rotated, rotated.usedId);
+    expect(await refreshWith(rotated, guessed(rotated.refresh.refreshToken))).toMatchObject({ error: 'invalid_grant' });
+    expect(await accepted(rotated.second.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('oauth.refresh_reused')).toEqual([]);
+  });
+});
+
 describe(`refusals on the way (Postgres ${server.version})`, () => {
   it('refuses a code whose agent was suspended after the consent', async () => {
     const org = await organization();
@@ -1042,6 +1403,8 @@ describe(`refusals on the way (Postgres ${server.version})`, () => {
     ).toMatchObject({ error: 'invalid_grant' });
     await grants.revoke({ token: forged.replace('axr_', 'axa_'), clientId }, CALLER);
     expect(lines('oauth.grant_refused').map(({ reason }) => reason)).toEqual(['unlisted', 'malformed']);
+    // Never issued (its secret no MAC of the pepper's), so no alarm: R-15's unlisted case is a genuine token's alone.
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
   it('refuses a refresh token made with a pepper version this process no longer holds, logged as an error', async () => {
@@ -1980,6 +2343,14 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     expect(await connectionChanges().list(org, agentId, CORRELATION)).toMatchObject({
       connections: [{ keyId: write.connection.keyId, via: 'device', redirectHost: null, status: 'ACTIVE' }],
     });
+    // R-15: its signed head made with the pair, naming its refresh token (0102).
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    expect(
+      await owner.query(
+        "select replace(refresh_id::text, '-', '') as refresh_id from agents.connection_heads where id = $1",
+        [write.connection.keyId],
+      ),
+    ).toEqual([{ refresh_id: tokens.refreshToken.split('_')[2] }]);
   });
 
   it('answers a denied device access_denied, an unknown or another client’s code invalid_grant, an ended one expired_token', async () => {
@@ -2883,5 +3254,73 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
     );
     expect(write).toMatchObject({ outcome: 'refused' });
     expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
+  });
+
+  // SEC-OAUTH-15 (S206, R-15): the client's `state` goes back to it with its code, so both seals bind it (v2).
+  it('SEC-OAUTH-15 a pending flow’s state rewritten: never shown, never decided, the alarm', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agentId = await agent(org, admin);
+    const flow = await opened();
+    await owner().query('update oauth.flows set state = $2 where id = $1', [flow.flowId, 'the owner’s own']);
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
+    expect(await consent(admin, flow, { agentId, scopes: ['requests:read'] })).toMatchObject({
+      outcome: 'refused',
+      code: 'NOT_FOUND',
+    });
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ level: 'error', check: 'oauth_flow', reason: 'open_seal', objectId: flow.flowId }),
+    );
+    expect(await flowById(app, flow.flowId)).toMatchObject({ decided: null });
+  });
+
+  it('SEC-OAUTH-15 a pending flow’s state taken out: never shown, the alarm', async () => {
+    const admin = await member(await organization(), 'admin');
+    const flow = await opened();
+    await owner().query('update oauth.flows set state = null where id = $1', [flow.flowId]);
+    expect(await consents.request(flow, admin.userId)).toBeUndefined();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'oauth_flow', objectId: flow.flowId }),
+    );
+  });
+
+  it('SEC-OAUTH-15 a real flow, once allowed, its state rewritten, is refused invalid_grant, with the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    await owner().query('update oauth.flows set state = $2 where id = $1', [flowId, 'the owner’s own']);
+    expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    alarmed(keyId);
+  });
+
+  it('SEC-OAUTH-15 a flow decided by the release before (sealed v1) is refused invalid_grant, with a warning, never the alarm', async () => {
+    const { flowId, code, keyId } = await decided();
+    const flow = await flowById(app, flowId);
+    if (flow?.kind !== 'code' || flow.decidedAt === null || flow.codeEndsAt === null) throw new Error('decided');
+    // The v1 decision message, as the release before made it: all but the state.
+    const { mac, keyVersion } = keys.mac('agent-key-pepper', [
+      'oauth-flow-decision-v1',
+      flow.id,
+      'code',
+      flow.clientId,
+      flow.redirectUri,
+      `S256:${flow.codeChallenge}`,
+      '',
+      '',
+      scopesText(flow.scopesAsked),
+      flow.resource,
+      flow.endsAt.toISOString(),
+      String(flow.orgId).toLowerCase(),
+      keyId,
+      String(flow.codeHash),
+      flow.decidedAt.toISOString(),
+      flow.codeEndsAt.toISOString(),
+    ]);
+    await owner().query('update oauth.flows set decision_mac = $2, decision_key_version = $3 where id = $1', [
+      flowId,
+      mac.toString('hex'),
+      keyVersion,
+    ]);
+    expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    expect(lines('oauth.flow_seal_superseded')).toEqual([expect.objectContaining({ level: 'warn', flowId, keyId })]);
   });
 });

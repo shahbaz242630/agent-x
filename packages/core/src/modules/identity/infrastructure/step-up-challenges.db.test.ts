@@ -12,7 +12,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -53,14 +53,28 @@ const EVIDENCE: StepUpEvidence = {
 /** An admin's change: its step-up must be proved with a passkey (SEC-HA-12). */
 const NEED = { passkeyRequired: true };
 
-/** Holds the session's challenges, then consumes one, as a change's confirmation does (ADR-006 §6, level 0b). */
+/** The organisation every change here is made in: a challenge is consumed only in one's transaction (S206). */
+const ORG = '0199a0f0-0000-7000-8000-000000000b31';
+
+/** A change's transaction, in the organisation. */
+const inOrg = <T>(work: (tx: Parameters<StepUpChallenges['consume']>[0]) => Promise<T>): Promise<T> =>
+  withTenant(app, ORG, work);
+
+/**
+ * Holds the session's challenges, then consumes one, as a change's
+ * confirmation does (ADR-006 §6, level 0b): in the transaction given, or in a
+ * change's own one when given the pool.
+ */
 const used = async (
   challenges: StepUpChallenges,
   db: Parameters<StepUpChallenges['consume']>[0],
   challengeId: string,
   binding: StepUpBinding,
   need: { readonly passkeyRequired: boolean },
-) => challenges.consume(db, await challenges.hold(db, binding.sessionId), challengeId, binding, need);
+): ReturnType<StepUpChallenges['consume']> =>
+  db === app
+    ? inOrg((tx) => used(challenges, tx, challengeId, binding, need))
+    : challenges.consume(db, await challenges.hold(db, binding.sessionId), challengeId, binding, need);
 
 let people = 0;
 /** A person no other test has, with a live session, and challenges on a clock of the test's own. */
@@ -195,7 +209,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     clock.advanceBy(30 * SECOND);
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
 
-    const consumed = await app.transaction().execute((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
+    const consumed = await inOrg((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
     expect(consumed).toEqual({
       ...opened,
       userId,
@@ -239,7 +253,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
         consumed = resolve;
       });
       const refusal = new Error('the first change was refused');
-      const first = app.transaction().execute(async (tx) => {
+      const first = inOrg(async (tx) => {
         const got = await used(challenges, tx, opened.challengeId, binding, NEED);
         consumed();
         await released;
@@ -247,7 +261,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
         return got;
       });
       await hasConsumed;
-      const second = app.transaction().execute((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
+      const second = inOrg((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
       await waitUntilQueued(database.as('admin'), 1);
       letGo();
 
@@ -270,7 +284,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
 
     const refusal = new Error('the change was refused');
     await expect(
-      app.transaction().execute(async (tx) => {
+      inOrg(async (tx) => {
         expect(await used(challenges, tx, opened.challengeId, binding, NEED)).toBeDefined();
         throw refusal;
       }),

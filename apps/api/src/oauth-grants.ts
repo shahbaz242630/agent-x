@@ -17,7 +17,16 @@
 //   issued with the scopes asked, which may only narrow. Used before, it is a
 //   reuse (decision 4: strict, no grace): the connection is revoked, the
 //   organisation's admins see a `connection_token_reused` event, and the
-//   answer is `invalid_grant`, as for every other refusal.
+//   answer is `invalid_grant`, as for every other refusal. Which refresh
+//   token is current is the connection's own signed state (its refresh head,
+//   0102, R-15, S206), locked before the token's row and moved to the new
+//   token in the same transaction: any other token is a reuse, and one whose
+//   row still says unused (`used_at` cleared by the database's owner) is the
+//   integrity alarm too (check `refresh_token`, reason `not_head`). A refresh
+//   token the app issued (its secret is the pepper's own MAC) whose row is
+//   gone, or no longer matches it, is a reuse with the alarm as well; one
+//   whose key's listing names an organisation that has no such key is the
+//   alarm alone, nothing revoked or told there (`listing`).
 // - A revocation (RFC 7009): either token, its secret proven, revokes its
 //   connection, by the client it was made for, which must name itself
 //   (client_id, as at the token endpoint; AG8); the answer is always the
@@ -51,6 +60,10 @@ import {
   CONNECTIONS,
   connectionOf,
   credentialAt,
+  type HeadCheck,
+  headMoved,
+  headOf,
+  isHeadTaken,
   type IssuedTokens,
   issueTokens,
   parseConnectionToken,
@@ -58,6 +71,9 @@ import {
   revokeKey,
   scopesOf,
   tokenAtTheDoor,
+  tokenGenuine,
+  type TokenProof,
+  type TokenRow,
   tokenRowLocked,
   usedNow,
 } from '@agentx/core/modules/agents';
@@ -378,7 +394,7 @@ export function createOauthGrants({
    * Why the flow held for its tokens is not one this server decided for the organisation and key the transaction was
    * opened for, if it isn't (S205): a seal not its own raises the integrity alarm for that connection (the hold
    * follows once the transaction ends); a pepper version no longer held is ours to fix, an error; a flow with no seal,
-   * decided before 0101 or by the release before while this one rolls out, a warning.
+   * decided before 0101 or by the release before while this one rolls out, or sealed v1 (S206), a warning.
    */
   const unsealed = (
     flow: AnyFlowRead,
@@ -392,8 +408,150 @@ export function createOauthGrants({
     if (judged === 'tampered') states.mismatch(CONNECTIONS.subject, { orgId, id: keyId });
     // Never the alarm: the release before this one decides flows unsealed until it is swapped out (0101).
     else if (judged === 'unsealed') log.warn('oauth.decision_unsealed', { flowId: flow.id, keyId });
+    // Sealed v1 by the release before this one (S206), which didn't bind its `state`: refused, but no alarm.
+    else if (judged === 'superseded') log.warn('oauth.flow_seal_superseded', { flowId: flow.id, keyId });
     else log.error('oauth.seal_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
     return `decision_${judged}`;
+  };
+
+  /**
+   * A pair issued, and the connection's signed head moved to its refresh token (0102), in the caller's transaction,
+   * after the head was read with headOf: last, as the head's record takes the chain head's lock (ADR-006 §6). A head
+   * tampered with is left as it is: its alarm is raised, and every refresh after is refused.
+   */
+  const pairAndHead = async (
+    tx: Tx,
+    states: SignedStates,
+    head: HeadCheck,
+    issue: Parameters<typeof issueTokens>[2],
+  ): Promise<IssuedTokens> => {
+    const tokens = await issueTokens(tx, { keys, ids }, issue);
+    if (head.outcome !== 'tampered') {
+      await headMoved(tx, states, head, {
+        orgId: issue.orgId,
+        id: issue.keyId,
+        refreshId: tokens.refreshTokenId,
+        at: issue.now,
+      });
+    }
+    return tokens;
+  };
+
+  /**
+   * The connection's key as its signed state says, before anything here revokes it: `ended` (revoked or past its
+   * time), `live`, or `absent`: no such key in this organisation, whose listing then names the wrong one.
+   */
+  const keyState = (orgId: string, keyId: string, caller: Caller): Promise<'ended' | 'live' | 'absent'> =>
+    inOrganisation(orgId, caller.correlationId, async (tx, states) => {
+      const read = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
+      if (read.outcome === 'missing') return 'absent';
+      // Tampered with: its alarm is raised and its hold follows; revoking is still tried.
+      if (read.outcome !== 'found') return 'live';
+      return read.key.status !== 'ACTIVE' || read.key.expiresAt <= clock.now() ? 'ended' : 'live';
+    });
+
+  /**
+   * The integrity alarm for a refresh token whose use the rows hid (R-15), naming the token and its key: on the
+   * organisation's line when it is known, or naming the organisation a moved listing gave (`listedOrgId`).
+   */
+  const refreshAlarm = (
+    caller: Caller,
+    presented: PresentedToken,
+    reason: string,
+    where: { readonly orgId?: string; readonly listedOrgId?: string },
+  ) => {
+    const { orgId, listedOrgId } = where;
+    logger
+      .child({ correlationId: caller.correlationId, ...(orgId === undefined ? {} : { orgId }) })
+      .error('audit.integrity_failed', {
+        check: 'refresh_token',
+        reason,
+        objectId: presented.tokenId,
+        keyId: presented.keyId,
+        ...(listedOrgId === undefined ? {} : { listedOrgId }),
+      });
+  };
+
+  /**
+   * SEC-OAUTH-05: a refresh token used twice, so someone else holds it. The connection goes; its organisation's admins
+   * see it. `forgot`: how the rows hid the first use (R-15), which is the integrity alarm: its row still unused though
+   * the signed head moved past it (`not_head`), its row changed (`row`) or gone (`row_gone`). A row gone raises it
+   * unless the key, as its signed state says before this revokes it, had ended: the sweep deletes rows 120 days on,
+   * past every connection's life. A key not found in the organisation its listing names (`listing`): that listing
+   * was moved, so nothing is revoked there and its admins are told nothing; the alarm names the key for the operator.
+   * The true organisation can't be found from anything sealed (only the listing maps a key to it), so none is held.
+   */
+  const refreshReused = async (
+    orgId: string,
+    presented: PresentedToken,
+    caller: Caller,
+    forgot: 'not_head' | 'row' | 'row_gone' | undefined,
+  ): Promise<GrantAnswer> => {
+    const named = { keyId: presented.keyId, tokenId: presented.tokenId };
+    const before = forgot === 'row_gone' ? await keyState(orgId, presented.keyId, caller) : 'live';
+    if (before === 'absent') {
+      refreshAlarm(caller, presented, 'listing', { listedOrgId: orgId });
+      return refusedFor(caller, 'listing', named);
+    }
+    const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
+      actor: OAUTH_SERVER,
+      reason: 'refresh_reused',
+    });
+    if (forgot !== undefined && before !== 'ended') refreshAlarm(caller, presented, forgot, { orgId });
+    logger
+      .child({ correlationId: caller.correlationId, orgId })
+      .warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
+    securityEvents.note({
+      kind: 'connection_token_reused',
+      reason: 'refresh_reused',
+      ip: caller.ip,
+      orgId,
+      ...(revoked === undefined ? {} : { agentId: revoked.agentId }),
+    });
+    return INVALID_GRANT;
+  };
+
+  /**
+   * A genuine refresh token whose listing, row or row's match was taken away (R-15): the answer, or undefined for
+   * none. No organisation lists its key: the app never removes a listing, so that is the alarm too, with no
+   * organisation to revoke in.
+   */
+  const tokenHidden = async (
+    orgId: string | undefined,
+    outcome: TokenProof['outcome'],
+    presented: PresentedToken,
+    caller: Caller,
+  ): Promise<GrantAnswer | undefined> => {
+    if (orgId !== undefined) {
+      const hidden = rowHidden(outcome, presented);
+      return hidden === undefined ? undefined : refreshReused(orgId, presented, caller, hidden);
+    }
+    if (!tokenGenuine(keys, presented)) return undefined;
+    refreshAlarm(caller, presented, 'unlisted', {});
+    return refusedFor(caller, 'unlisted', { keyId: presented.keyId, tokenId: presented.tokenId });
+  };
+
+  /**
+   * A refresh token the app issued (its secret the pepper's own MAC) whose row is gone (`row_gone`), or no longer
+   * matches it (`row`): the database's owner hid it, or its use (R-15). Undefined for anything else, a token never
+   * issued among them, which is refused as before.
+   */
+  const rowHidden = (outcome: TokenProof['outcome'], presented: PresentedToken): 'row_gone' | 'row' | undefined => {
+    if (outcome !== 'unread' && outcome !== 'wrong_secret') return undefined;
+    if (!tokenGenuine(keys, presented)) return undefined;
+    return outcome === 'unread' ? 'row_gone' : 'row';
+  };
+
+  /**
+   * Whether the presented refresh token is not the one its connection's signed head names (R-15): a reuse, and the
+   * alarm where its row still says unused. Undefined: it is the head, or there is none yet (a connection not
+   * refreshed since 0102, its token judged by `used_at` alone). A head tampered with is a reuse too: its alarm is
+   * the signed state's own, and the organisation's hold follows.
+   */
+  const notTheHead = (head: HeadCheck, row: TokenRow, tokenId: string) => {
+    if (head.outcome === 'tampered') return { outcome: 'reused' as const, forgot: undefined };
+    if (head.outcome === 'unset' || head.refreshId === tokenId.toLowerCase()) return undefined;
+    return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('not_head' as const) : undefined };
   };
 
   const grants = {
@@ -427,18 +585,15 @@ export function createOauthGrants({
         });
         if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, flow, reason: checked.reason };
         // The client's connection noted on the pair's own trip (0094): the sweep keeps a client in use.
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId,
-            scopes: checked.key.scopes,
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            alongside: clientSeen(tx, flow.clientId, now),
-          },
-        );
+        // The connection's signed head made with its first refresh token (0102): no connection runs without one.
+        const tokens = await pairAndHead(tx, states, await headOf(tx, states, { orgId, id: keyId }), {
+          orgId,
+          keyId,
+          scopes: checked.key.scopes,
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          alongside: clientSeen(tx, flow.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'unknown') return refusedFor(caller, 'code_unknown', { clientId: asked.clientId });
@@ -484,18 +639,15 @@ export function createOauthGrants({
           clientId: flow.clientId,
         });
         if (checked.outcome !== 'accepted') return { outcome: 'spent' as const, reason: checked.reason };
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId,
-            scopes: checked.key.scopes,
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            alongside: clientSeen(tx, flow.clientId, now),
-          },
-        );
+        // The connection's signed head made with its first refresh token (0102): no connection runs without one.
+        const tokens = await pairAndHead(tx, states, await headOf(tx, states, { orgId, id: keyId }), {
+          orgId,
+          keyId,
+          scopes: checked.key.scopes,
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          alongside: clientSeen(tx, flow.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
       });
       if (answer.outcome === 'used') return refusedFor(caller, 'device_used', { clientId: known.clientId });
@@ -520,6 +672,8 @@ export function createOauthGrants({
         return { outcome: 'refused', status: 400, error: 'invalid_target', description: 'The resource is not ours.' };
       }
       const { orgId, door } = await proven(presented);
+      const hidden = await tokenHidden(orgId, door.outcome, presented, caller);
+      if (hidden !== undefined) return hidden;
       if (orgId === undefined || door.outcome !== 'proven') {
         if (door.outcome === 'key_not_held') {
           logger.child({ correlationId: caller.correlationId }).error('connection_token.refused', {
@@ -547,44 +701,36 @@ export function createOauthGrants({
           clientId: asked.clientId,
         });
         if (checked.outcome !== 'accepted') return checked;
-        // Locked after its connection (3c), and used in one statement where it was not: two at once can't both rotate.
+        // The connection's signed head (3b, after the connection), then the token's row (3c): one refresh of a
+        // connection at a time, and only of the token the head names.
+        const head = await headOf(tx, states, { orgId, id: presented.keyId });
         const row = await tokenRowLocked(tx, orgId, presented.tokenId);
         if (row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
-        if (!(await usedNow(tx, orgId, presented.tokenId, now))) return { outcome: 'reused' as const };
-        const tokens = await issueTokens(
-          tx,
-          { keys, ids },
-          {
-            orgId,
-            keyId: presented.keyId,
-            scopes: checked.key.scopes.filter((scope) => scopes.includes(scope)),
-            now,
-            keyExpiresAt: checked.key.expiresAt,
-            parentId: presented.tokenId,
-            // The connection's own client (credentialAt held it to the connection's): noted on the pair's trip.
-            alongside: clientSeen(tx, asked.clientId, now),
-          },
-        );
+        const reuse = notTheHead(head, row, presented.tokenId);
+        if (reuse !== undefined) return reuse;
+        if (!(await usedNow(tx, orgId, presented.tokenId, now))) {
+          return { outcome: 'reused' as const, forgot: undefined };
+        }
+        const tokens = await pairAndHead(tx, states, head, {
+          orgId,
+          keyId: presented.keyId,
+          scopes: checked.key.scopes.filter((scope) => scopes.includes(scope)),
+          now,
+          keyExpiresAt: checked.key.expiresAt,
+          parentId: presented.tokenId,
+          // The connection's own client (credentialAt held it to the connection's): noted on the pair's trip.
+          alongside: clientSeen(tx, asked.clientId, now),
+        });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
+      }).catch((error: unknown) => {
+        // Another refresh of the same head-less connection (one made before 0102) made its head first: two of its
+        // refresh tokens were live at once, so one was used by someone else. A reuse, as any other.
+        if (isHeadTaken(error)) return { outcome: 'reused' as const, forgot: 'not_head' as const };
+        throw error;
       });
       if (answer.outcome === 'issued') return answer;
       if (answer.outcome === 'refused') return refusedFor(caller, answer.reason, named);
-      // SEC-OAUTH-05: used twice, so someone else holds it. The connection goes; its organisation's admins see it.
-      const revoked = await revokeConnection(orgId, presented.keyId, caller.correlationId, {
-        actor: OAUTH_SERVER,
-        reason: 'refresh_reused',
-      });
-      logger
-        .child({ correlationId: caller.correlationId, orgId })
-        .warn('oauth.refresh_reused', { ...named, revoked: revoked !== undefined });
-      securityEvents.note({
-        kind: 'connection_token_reused',
-        reason: 'refresh_reused',
-        ip: caller.ip,
-        orgId,
-        ...(revoked === undefined ? {} : { agentId: revoked.agentId }),
-      });
-      return INVALID_GRANT;
+      return refreshReused(orgId, presented, caller, answer.forgot);
     },
 
     async revoke(asked: { readonly token: string; readonly clientId: string }, caller: Caller): Promise<void> {

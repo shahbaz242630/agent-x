@@ -21,12 +21,18 @@ import {
   type TestDatabase,
   testLogger,
 } from '@agentx/testing';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
 import { createSessions } from './sessions.ts';
-import { createStepUpChallenges, type StepUpBinding, type StepUpEvidence } from './step-up-challenges.ts';
+import {
+  createStepUpChallenges,
+  type StepUpBinding,
+  type StepUpEvidence,
+  stepUpDetails,
+} from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import {
   backfillUserMacs,
@@ -39,7 +45,7 @@ import {
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<IdentityTables>;
+let app: Database<IdentityTables & AuditTables>;
 
 /** The app's keys, `session-mac` at version `current` with every version up to it held. The owner has none. */
 const keysAt = (current: number): KeyProvider =>
@@ -107,12 +113,12 @@ async function signedIn(): Promise<{ userId: string; sessionId: string; cookie: 
   return { userId, ...opened };
 }
 
-/** Runs one statement as agentx_owner, on a connection of its own. */
-async function asOwner(text: string, values: readonly unknown[]): Promise<void> {
+/** Runs one statement as agentx_owner, on a connection of its own, and gives its rows. */
+async function asOwner(text: string, values: readonly unknown[]): Promise<Record<string, unknown>[]> {
   const owner = await database.connect('owner');
   try {
     // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text; every value is bound.
-    await owner.query(text, values);
+    return await owner.query(text, values);
   } finally {
     await owner.end();
   }
@@ -120,7 +126,7 @@ async function asOwner(text: string, values: readonly unknown[]): Promise<void> 
 
 /** Holds the session's challenges and consumes one, in a transaction, as an admin's change does. */
 const consumeFor = (binding: StepUpBinding, challengeId: string) =>
-  app.transaction().execute(async (tx) => {
+  withTenant(app, '0199a0f0-0000-7000-8000-000000000205', async (tx) => {
     const held = await challenges().hold(tx, binding.sessionId);
     return challenges().consume(tx, held, challengeId, binding, { passkeyRequired: true });
   });
@@ -138,7 +144,10 @@ async function opened(sessionId: string): Promise<{ binding: StepUpBinding; chal
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  app = createDatabase<IdentityTables & AuditTables>(
+    { ...database.connection('app'), maxConnections: 2 },
+    testLogger(),
+  );
 });
 
 beforeEach(() => {
@@ -361,6 +370,210 @@ describe(`the owner can't verify a person's step-up (Postgres ${server.version})
 
     expect(await consumeFor(binding, challengeId)).toBeUndefined();
     expect(alarms()).toEqual([expect.objectContaining({ check: 'step_up_challenge', rowId: challengeId })]);
+  });
+});
+
+describe(`the owner can't use a step-up twice by putting its challenge back (R-15, S206; Postgres ${server.version})`, () => {
+  const trail = createAuditTrail({ keys, ids });
+  const ORG = '0199a0f0-0000-7000-8000-000000005206';
+
+  /**
+   * An admin's change in the organisation, as every change consumes one: the
+   * challenge consumed and the change's event, with the step-up's evidence,
+   * recorded in the same transaction. Undefined, and nothing recorded, if the
+   * challenge is refused.
+   */
+  const changeWith = (userId: string, binding: StepUpBinding, challengeId: string, org = ORG, made = challenges()) =>
+    withTenant(app, org, async (tx) => {
+      const held = await made.hold(tx, binding.sessionId);
+      const consumed = await made.consume(tx, held, challengeId, binding, { passkeyRequired: true });
+      if (consumed === undefined) return undefined;
+      await trail.record(tx, org, {
+        actor: { type: 'user', id: userId },
+        action: 'probe.changed',
+        subject: { type: 'probe', id: binding.sessionId, version: 1 },
+        details: stepUpDetails(consumed),
+      });
+      return consumed;
+    });
+
+  /** A verified challenge, and the row as the owner reads it before its change deletes it. */
+  async function verified(sessionId: string) {
+    const { binding, challengeId } = await opened(sessionId);
+    expect(await challenges().recordEvidence(app, challengeId, sessionId, EVIDENCE)).toBe(true);
+    const [kept] = await asOwner(
+      'select pg_catalog.row_to_json(c) as kept from identity.step_up_challenges c where c.id = $1',
+      [challengeId],
+    );
+    return { binding, challengeId, kept: kept?.kept };
+  }
+
+  /** The owner puts the row back exactly as it was, its MAC and all. */
+  const putBack = (kept: unknown) =>
+    asOwner(
+      `insert into identity.step_up_challenges
+         select * from pg_catalog.json_populate_record(null::identity.step_up_challenges, $1::json)`,
+      [JSON.stringify(kept)],
+    );
+
+  it('control: a challenge never used, put back by the owner, is consumed with no alarm', async () => {
+    const { userId, sessionId } = await signedIn();
+    const { binding, challengeId, kept } = await verified(sessionId);
+    await asOwner('delete from identity.step_up_challenges where id = $1', [challengeId]);
+    await putBack(kept);
+
+    expect(await changeWith(userId, binding, challengeId)).toMatchObject({ challengeId });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a used challenge the owner puts back, byte for byte, is never consumed again, and raises the alarm', async () => {
+    const { userId, sessionId } = await signedIn();
+    const { binding, challengeId, kept } = await verified(sessionId);
+    expect(await changeWith(userId, binding, challengeId)).toMatchObject({ challengeId });
+    expect(await challengeRow(challengeId)).toBeUndefined();
+    // The organisation goes on working meanwhile: the change's event is no longer its newest.
+    const other = await signedIn();
+    const next = await verified(other.sessionId);
+    expect(await changeWith(other.userId, next.binding, next.challengeId)).toMatchObject({
+      challengeId: next.challengeId,
+    });
+
+    await putBack(kept);
+    expect(await challengeRow(challengeId)).toMatchObject({ id: challengeId });
+    expect(await changeWith(userId, binding, challengeId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ check: 'step_up_challenge', reason: 'already_used', rowId: challengeId, userId }),
+    ]);
+    // Left as it was, for the sweep: the change and its event were never made again.
+    expect(await challengeRow(challengeId)).toMatchObject({ id: challengeId });
+    const made = await withTenant(app, ORG, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('seq')
+        .where('action', '=', 'probe.changed')
+        .where('actor_id', '=', userId)
+        .execute(),
+    );
+    expect(made).toHaveLength(1);
+
+    // The person's next step-up, a fresh challenge, still works.
+    const fresh = await verified(sessionId);
+    expect(await changeWith(userId, fresh.binding, fresh.challengeId)).toMatchObject({
+      challengeId: fresh.challengeId,
+    });
+    expect(alarms()).toHaveLength(1);
+  });
+
+  it("a used challenge put back is refused when its change was the organisation's first event in the window too", async () => {
+    const { userId, sessionId } = await signedIn();
+    const { binding, challengeId, kept } = await verified(sessionId);
+    const fresh = '0199a0f0-0000-7000-8000-000000015206';
+    expect(await changeWith(userId, binding, challengeId, fresh)).toMatchObject({ challengeId });
+
+    await putBack(kept);
+    expect(await changeWith(userId, binding, challengeId, fresh)).toBeUndefined();
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'already_used', rowId: challengeId })]);
+  });
+
+  /** Runs one statement as agentx_owner inside the organisation, as the wall binds the owner too. */
+  async function asOwnerIn(org: string, text: string, values: readonly unknown[]): Promise<void> {
+    const owner = await database.connect('owner');
+    try {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [org]);
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text; every value is bound.
+      await owner.query(text, values);
+    } finally {
+      await owner.end();
+    }
+  }
+
+  it.each([
+    ['deletes', 'delete from audit.events where org_id = $1 and seq = $2'],
+    [
+      'moves to another person',
+      "update audit.events set actor_id = '0199a0f0-0000-7000-8000-0000000000ff' where org_id = $1 and seq = $2",
+    ],
+    ['empties the details of', "update audit.events set details = '{}' where org_id = $1 and seq = $2"],
+  ])(
+    "the owner who %s the change's event to put the used challenge back finds the chain refuses the replay, and the alarm",
+    async (_what, hide) => {
+      const { userId, sessionId } = await signedIn();
+      const { binding, challengeId, kept } = await verified(sessionId);
+      const org = ids.next();
+      expect(await changeWith(userId, binding, challengeId, org)).toMatchObject({ challengeId });
+      // The organisation goes on working: the change's event is mid-chain, as the owner would find it.
+      const other = await signedIn();
+      const next = await verified(other.sessionId);
+      expect(await changeWith(other.userId, next.binding, next.challengeId, org)).toBeDefined();
+
+      await asOwnerIn(org, hide, [org, 1]);
+      await putBack(kept);
+      await expect(changeWith(userId, binding, challengeId, org)).rejects.toThrow(ChainBroken);
+      expect(alarms()).toEqual([
+        expect.objectContaining({ check: 'step_up_challenge', reason: 'chain_unverified', rowId: challengeId }),
+      ]);
+      // Refused whole: the challenge is left where the owner put it, and no new event was sealed.
+      expect(await challengeRow(challengeId)).toMatchObject({ id: challengeId });
+    },
+  );
+
+  it('a challenge consumed outside any organisation is refused outright: there is no trail to tell its use', async () => {
+    const { sessionId } = await signedIn();
+    const { binding, challengeId } = await verified(sessionId);
+    await expect(
+      app.transaction().execute(async (tx) => {
+        const held = await challenges().hold(tx, sessionId);
+        return challenges().consume(tx, held, challengeId, binding, { passkeyRequired: true });
+      }),
+    ).rejects.toThrow(/only in an organisation's transaction/);
+    expect(alarms()).toEqual([]);
+  });
+
+  it("reads from just before the challenge opened by the app's clock, so a use right after it still counts", async () => {
+    // A clock on the database's own time, as in production: the use's event is recorded seconds after the challenge opens.
+    const [now] = await asOwner('select pg_catalog.clock_timestamp() as now', []);
+    const live = new FixedClock(now?.now as Date);
+    const made = createStepUpChallenges({ ids, clock: live, keys, logger: testLogger(capture) });
+    const userId = await person();
+    const { sessionId } = await createSessions({
+      ids,
+      clock: live,
+      timeouts: TIMEOUTS,
+      keys,
+      logger: testLogger(capture),
+    }).open(app, userId, { idpSessionId: 'V1_1', authTime: live.now(), amr: PASSKEY });
+    const binding: StepUpBinding = { sessionId, action: 'members.change-role', changeHash: sha256(ids.next()) };
+    const challenge = await made.open(app, binding);
+    if (challenge === undefined) throw new Error('the challenge did not open');
+    const { challengeId } = challenge;
+    expect(await made.recordEvidence(app, challengeId, sessionId, { ...EVIDENCE, authTime: live.now() })).toBe(true);
+    const [kept] = await asOwner(
+      'select pg_catalog.row_to_json(c) as kept from identity.step_up_challenges c where c.id = $1',
+      [challengeId],
+    );
+    expect(await changeWith(userId, binding, challengeId, ORG, made)).toMatchObject({ challengeId });
+
+    await putBack(kept?.kept);
+    expect(await changeWith(userId, binding, challengeId, ORG, made)).toBeUndefined();
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'already_used', rowId: challengeId })]);
+  });
+
+  it("another person's use of a challenge with the same ID in their details doesn't count as this one's", async () => {
+    const { userId, sessionId } = await signedIn();
+    const other = await signedIn();
+    const { binding, challengeId } = await verified(sessionId);
+    // The other person's event names this challenge: only the challenge's own person's events are read.
+    await withTenant(app, ORG, (tx) =>
+      trail.record(tx, ORG, {
+        actor: { type: 'user', id: other.userId },
+        action: 'probe.changed',
+        subject: { type: 'probe', id: other.sessionId, version: 1 },
+        details: { stepUpChallengeId: challengeId },
+      }),
+    );
+
+    expect(await changeWith(userId, binding, challengeId)).toMatchObject({ challengeId });
+    expect(alarms()).toEqual([]);
   });
 });
 
