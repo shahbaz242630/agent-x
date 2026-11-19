@@ -58,7 +58,7 @@ interface KeptEnd {
 }
 
 /** A check's answer: the chain's problem, or each person's latest end checked, by person, and how many events it read. */
-export type EndsChecked =
+type EndsChecked =
   | Extract<StretchCheck, { kind: 'broken' }>
   | { readonly kind: 'checked'; readonly ends: ReadonlyMap<string, KeptEnd>; readonly read: number };
 
