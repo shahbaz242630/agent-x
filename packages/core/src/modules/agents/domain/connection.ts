@@ -9,8 +9,11 @@
 //   endpoint alone, once, for a new pair: unused for 30 days, it ends.
 //
 // Each holds its key's ID (public, ADR-011 §1: where to look), its own ID and
-// 256 bits of randomness, kept as HMAC-SHA-256 with the agent-key pepper over
-// a label of its own, so no key's MAC is ever a token's.
+// 256 bits of secret, kept as HMAC-SHA-256 with the agent-key pepper over
+// a label of its own, so no key's MAC is ever a token's. Since 0102 (R-15,
+// S206) the secret is itself the pepper's MAC of the token's kind, key and ID
+// (connectionTokenSecretMessage): a token sent with its row gone can still be
+// shown to be one the app issued. Tokens made before have random secrets.
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { KEY_SECRET_BYTES } from './agent.ts';
 
@@ -114,4 +117,19 @@ export const connectionTokenMessage = (
   expiresAt.toISOString(),
   scopes,
   secret,
+];
+
+/**
+ * What a token's secret is (0102): the agent-key pepper's MAC of this label, its kind, its key and its ID. So a token
+ * shows by itself that the app issued it, its row present or not; and only the app, holding the pepper, makes one.
+ */
+export const connectionTokenSecretMessage = ({
+  kind,
+  keyId,
+  tokenId,
+}: Pick<TokenBinding, 'kind' | 'keyId' | 'tokenId'>): readonly [string, string, string, string] => [
+  'connection-token-secret',
+  kind,
+  keyId.toLowerCase(),
+  tokenId.toLowerCase(),
 ];
