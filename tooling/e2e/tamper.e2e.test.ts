@@ -28,7 +28,7 @@ import { mayFund, sourceOf } from '../../packages/core/src/modules/funding-sourc
 import { createSessions, type Role } from '../../packages/core/src/modules/identity/index.ts';
 import { tamperIdentityFixtures } from '../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import type { InstructionsTables } from '../../packages/core/src/modules/instructions/index.ts';
-import { createOutbox } from '../../packages/core/src/modules/notifications/index.ts';
+import { createNoticeCheck, createOutbox } from '../../packages/core/src/modules/notifications/index.ts';
 import {
   changeHandoffPause,
   createPlatformChain,
@@ -1273,6 +1273,17 @@ beforeAll(async () => {
   await resetOwn();
   payment = await seedPayment();
   await controls(admin.userId);
+  // The API's notice check (S206 V4) records where it stopped on an organisation's chain the first time it walks past
+  // its notices, at the organisation's slot within the hour: done here first, as that job would, so the snapshot holds
+  // it. A later visit with nothing new writes nothing, so any change after is still a request's.
+  await createNoticeCheck({
+    list: () => Promise.resolve([foreign.world.org]),
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock,
+    logger: testLogger(),
+  }).run();
   foreignBefore = await foreignChain();
   expect(foreignBefore.events).toBeGreaterThan(0);
 });
