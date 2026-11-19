@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { SCOPES } from '../../packages/core/src/modules/agents/index.ts';
@@ -1273,9 +1273,26 @@ beforeAll(async () => {
   await resetOwn();
   payment = await seedPayment();
   await controls(admin.userId);
-  // The API's notice check (S206 V4) records where it stopped on an organisation's chain the first time it walks past
-  // its notices, at the organisation's slot within the hour: done here first, as that job would, so the snapshot holds
-  // it. A later visit with nothing new writes nothing, so any change after is still a request's.
+  // The setup's own background work on the foreign chain, settled before its snapshot (S206 V4): the sender turns each
+  // notice to a group (a spend request waiting, to its admins and approvers) into one to each, which records each on
+  // the chain; and the notice check records where it stopped the first time it walks past them, at the organisation's
+  // slot within the hour, here run first as that job would. With nothing new, neither writes again, so any change to
+  // the foreign chain after the snapshot is still a request's.
+  await vi.waitFor(
+    async () => {
+      const groups = await database
+        .selectFrom('notifications.outbox')
+        .select('id')
+        .where('org_id', '=', foreign.world.org)
+        .where('recipient_user_id', 'is', null)
+        .where('recipient_contact_id', 'is', null)
+        .where('sent_at', 'is', null)
+        .where('given_up_at', 'is', null)
+        .execute();
+      expect(groups).toEqual([]);
+    },
+    { timeout: 180_000, interval: 2_000 },
+  );
   await createNoticeCheck({
     list: () => Promise.resolve([foreign.world.org]),
     database,

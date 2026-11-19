@@ -15,7 +15,6 @@ import {
   within,
 } from '@agentx/testing';
 import { createDatabase, type Database, noStatementTimes, timingStatements, withTenant } from '@agentx/platform/db';
-import { CHAIN_START } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -23,7 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import type { NoticeMessage } from '../domain/messages.ts';
 import type { Notice, NoticeRole } from '../domain/notice.ts';
-import { createAuditTrail } from '../../audit/index.ts';
+import { CHAIN_START, createAuditTrail } from '../../audit/index.ts';
 import { createNoticeCheck, NOTICE_CHECK_PASSED } from './notice-check.ts';
 import { queuedSeal } from './notice-seals.ts';
 import { createOutbox, MOST_ATTEMPTS, type OutboxTables, sealNoticesFromBefore } from './outbox.ts';

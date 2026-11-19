@@ -43,13 +43,18 @@
 // A first visit starts just before the organisation's oldest record (read as
 // it is: a wrong place fails the walk's first step); a record hidden at that
 // one moment is the one thing it can't see (R-15).
-import { CHAIN_START, type CheckedPoint } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { limitedTransaction } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import { createAuditTrail, type WalkedEvent, withSignedStates } from '../../audit/index.ts';
+import {
+  CHAIN_START,
+  type CheckedPoint,
+  createAuditTrail,
+  type WalkedEvent,
+  withSignedStates,
+} from '../../audit/index.ts';
 import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { endJudged, queuedJudged } from './notice-seals.ts';
 import { LEASE_EXPIRED, NOTICE_QUEUED, type OutboxTables, recipientOf } from './outbox.ts';

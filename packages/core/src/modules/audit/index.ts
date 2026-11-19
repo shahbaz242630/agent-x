@@ -20,7 +20,7 @@ export {
 } from './domain/event.ts';
 export { actorEventsSince } from './infrastructure/actor-counts.ts';
 // What a chain that fails its check throws, for a module refusing a change on the trail's word (step-up, S206).
-export { ChainBroken } from '@agentx/platform/audit-chain';
+export { CHAIN_START, ChainBroken, type CheckedPoint } from '@agentx/platform/audit-chain';
 export {
   lockChainHead,
   REPAIR_ROLE,
