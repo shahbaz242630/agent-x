@@ -25,7 +25,7 @@ import {
 } from './security-events.ts';
 import { type OrgEventsToRead, orgSecurityEventsPage } from './org-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
-import type { PlatformControlsTables } from '../../platform-controls/index.ts';
+import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -34,9 +34,14 @@ let app: Database<SecurityEventsTables & PlatformControlsTables>;
 const START = new Date('2026-09-24T09:00:00Z');
 const RETENTION = 90;
 const ids = new SequentialIds(0x5ec0);
-const keys = createKeyProvider({ 'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) } }, [
-  'session-mac',
-]);
+// `audit-mac` for the platform chain's start a test records (legacyRowsAt reads it).
+const keys = createKeyProvider(
+  {
+    'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) },
+    'audit-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 8)]]) },
+  },
+  ['session-mac', 'audit-mac'],
+);
 
 const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
   kind: 'sign_in_failed',
@@ -347,6 +352,14 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
   it('leaves off quietly a row from before 0105 still without its MAC; one marked so but with a MAC that fails, alarmed', async () => {
     await emptyOrgs();
     capture = new LogCapture();
+    // A database an API started on before 0105's release, as staging's: its first start records no ROW_MACS_FROM.
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: {},
+      }),
+    );
     const owner = database.as('admin');
     const waiting = ids.next();
     const edited = ids.next();

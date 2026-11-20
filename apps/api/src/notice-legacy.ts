@@ -9,6 +9,13 @@
 // It runs only while all of these hold, the S205 backfill's way of bounding
 // what a forced restart can bless:
 // - before NOTICE_SEAL_BACKFILL_UNTIL;
+// - on a database an API started on before the release that brought 0105
+//   (databaseBirth, S207: its platform chain's first start, MAC-checked,
+//   records no ROW_MACS_FROM). One
+//   born sealed (production's) holds no notice from before seals: one marked
+//   so is the owner's, planted, never sealed, and the notice check's alarm a
+//   day on. A first start that can't be believed, or none, seals nothing,
+//   with the integrity alarm (check `start_record`);
 // - no notice written by this release yet (before_seals false): once the app
 //   has queued one, every notice from before had its chance;
 // - the platform chain holds no `notice.legacy_sealed` (read first: a pass
@@ -43,6 +50,7 @@ import {
   tookLegacySealPass,
 } from '@agentx/core/modules/notifications';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { databaseBirth } from '@agentx/core/modules/security-events';
 import { type Clock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type AnchorLog, type AnchorPoint, type CheckedPoint, signAnchor } from '@agentx/platform/audit-chain';
 import { type Database, type DatabaseTransaction, limitedTransaction } from '@agentx/platform/db';
@@ -152,6 +160,16 @@ export async function sealLegacyNotices(
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   try {
     if (!(await limitedTransaction(database, (tx) => mayStillSeal(tx, now)))) return;
+    const birth = await limitedTransaction(database, (tx) => databaseBirth(tx, keys));
+    if (birth === 'unsealed') {
+      logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
+      return;
+    }
+    if (birth === 'sealed') {
+      // As sealLegacyRows' `born_sealed`: nothing from before seals can be here, so nothing is sealed.
+      logger.info('notification.legacy_born_sealed');
+      return;
+    }
     const anchor = await anchors?.latest();
     if (anchors === undefined || anchor === undefined) {
       logger.warn('notification.legacy_seal_no_anchor');
