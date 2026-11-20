@@ -287,7 +287,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // move or orphan every membership and event pointing at them. Only when
       // their sessions were last all ended moves on (0098, AG10), which a
       // sign-in made before it can't get past. A person's MAC is written once,
-      // as they are added, and never changed (0107, S207).
+      // as they are added, and never changed (0109, S207).
       appMay: ['SELECT', 'INSERT'],
       appMayUpdate: ['sessions_ended_at'],
     },

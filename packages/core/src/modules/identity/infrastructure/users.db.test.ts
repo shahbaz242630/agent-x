@@ -121,7 +121,7 @@ describe(`the people who sign in (Postgres ${server.version})`, () => {
     await expect(sql`truncate identity.users cascade`.execute(app)).rejects.toMatchObject({ code: '42501' });
   });
 
-  it("never lets the app change a person's MAC, or wipe it, once they are added (0107, S207)", async () => {
+  it("never lets the app change a person's MAC, or wipe it, once they are added (0109, S207)", async () => {
     const id = await userForSubject(
       app,
       { issuer: ISSUER, subject: newSubject() },
