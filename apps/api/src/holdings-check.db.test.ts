@@ -679,6 +679,39 @@ describe('the holdings check (E1)', () => {
     expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
   });
 
+  // GM-3 (R-15, S207): which keys are compared rests on the decided event alone, which the owner can't write; no
+  // column of the request or its claim (its times least of all) makes a new request read as one decided before.
+  it.each([
+    ['payee key', "update spend_requests.order_claims set payee_key = 'planted-payee' where request_id = $1"],
+    ['bank key', 'update spend_requests.order_claims set bank_key = null where request_id = $1'],
+  ])(
+    'SEC-DB-09 R-15 still compares the %s of a request the owner backdated to before E1b and G5 (S207, GM-3)',
+    async (_, change) => {
+      const { w, acting } = await ready();
+      await withPayee(w);
+      const { allowed } = await requests(acting, w);
+      const longAgo = new Date('2026-01-01T00:00:00Z');
+      await pastTheApp(w, async (owner) => {
+        await owner.query('update spend_requests.requests set created_at = $2 where id = $1', [allowed, longAgo]);
+        await owner.query('update spend_requests.order_claims set claimed_at = $2 where request_id = $1', [
+          allowed,
+          longAgo,
+        ]);
+      });
+      // Backdated alone, it still holds as decided: nothing else was changed.
+      await job(w).run();
+      expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
+
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text from the table above; every value is bound.
+      await pastTheApp(w, (owner) => owner.query(change, [allowed]));
+      await job(w).run();
+
+      expect(lines('audit.integrity_failed')).toEqual([
+        expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: allowed }),
+      ]);
+    },
+  );
+
   it('raises the alarm for a payee key added past the app where the decision sealed none (E1b)', async () => {
     const { w, acting } = await ready();
     const held = await requests(acting, w);

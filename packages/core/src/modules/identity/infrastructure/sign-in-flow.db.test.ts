@@ -1,10 +1,13 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
+import { createHash } from 'node:crypto';
+
 import {
   createTestDatabase,
   FixedClock,
   LogCapture,
   SequentialIds,
+  type TestClient,
   type TestDatabase,
   testLogger,
   waitUntilQueued,
@@ -30,6 +33,7 @@ import {
   endSessionsOf,
   lockSessionsOf,
   type Sessions,
+  SESSION_ENDED,
   SESSIONS_ENDED,
   sessionsEndedAt,
   sessionsEndedEvent,
@@ -480,6 +484,94 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
     expect(await signIn.signOut(done.cookie)).toBeUndefined();
+  });
+
+  it('SEC-DB-14 R-15 signs each session it ends on the platform chain, so the owner putting one back finds it refused (S207)', async () => {
+    const first = await roundTrip();
+    // A sign-in in the same browser ends the session it brought; a sign-out ends the new one.
+    const second = await roundTrip(undefined, first.cookie);
+    const owner = await database.connect('owner');
+    try {
+      const [kept] = await owner.query(
+        'select pg_catalog.row_to_json(s) as kept from identity.sessions s where s.id = $1',
+        [second.sessionId],
+      );
+      await signIn.signOut(second.cookie);
+      // Nothing left to end: nothing more signed.
+      expect(await signIn.signOut(second.cookie)).toBeUndefined();
+
+      const signed = await (app as unknown as Kysely<PlatformControlsTables>)
+        .selectFrom('platform_controls.audit_events')
+        .select('details')
+        .where('action', '=', SESSION_ENDED)
+        .execute();
+      const mine = signed
+        .map(({ details }) => JSON.parse(details) as Record<string, string>)
+        .filter(({ person }) => person === first.userId);
+      expect(mine).toEqual([
+        { person: first.userId, record: first.sessionId, at: START.toISOString() },
+        { person: first.userId, record: second.sessionId, at: START.toISOString() },
+      ]);
+
+      await owner.query(
+        `insert into identity.sessions
+           select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
+        [JSON.stringify(kept?.kept)],
+      );
+    } finally {
+      await owner.end();
+    }
+    // Back in the table, its MAC holding, and still no session (its alarm: sessions-tamper.db).
+    expect(await sessionsOf(first.userId)).toEqual([{ id: second.sessionId }]);
+    expect(await signIn.signedIn(second.cookie)).toBeUndefined();
+  });
+
+  describe('SEC-DB-14 R-15 a sign-out whose end cannot be signed still signs out, with the alarm (S207)', () => {
+    /** Signs out of a fresh session while `hinder` stands in the platform chain's way, and says what came of it. */
+    async function signOutHindered(hinder: (admin: TestClient) => Promise<() => Promise<void>>) {
+      // A sign-out first, so the platform chain has its head.
+      await signIn.signOut((await roundTrip()).cookie);
+      const done = await roundTrip();
+      const admin = await database.connect('admin');
+      const undo = await hinder(admin);
+      try {
+        expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+      } finally {
+        await undo();
+        await admin.end();
+      }
+      expect(await sessionsOf(done.userId)).toEqual([]);
+      expect(await signIn.signedIn(done.cookie)).toBeUndefined();
+      expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([
+        expect.objectContaining({
+          level: 'error',
+          check: 'session',
+          reason: 'end_unsigned',
+          rowId: done.sessionId,
+          userId: done.userId,
+        }),
+      ]);
+    }
+
+    it('the platform head held past the limit: the session deleted all the same', async () => {
+      await signOutHindered(async (admin) => {
+        await admin.query('begin');
+        await admin.query('select seq from platform_controls.audit_head for update');
+        return async () => {
+          await admin.query('rollback');
+        };
+      });
+    }, 30_000);
+
+    it('the platform head tampered with: the session deleted all the same', async () => {
+      await signOutHindered(async (admin) => {
+        const [head] = await admin.query<{ mac: Buffer }>('select mac from platform_controls.audit_head');
+        await admin.query("update platform_controls.audit_head set mac = '\\x00'::bytea");
+        return async () => {
+          await admin.query('update platform_controls.audit_head set mac = $1', [head?.mac]);
+        };
+      });
+    });
   });
 
   it('finds the live session a signed-in request names (B2-4b), and none once it is signed out', async () => {
@@ -1399,5 +1491,68 @@ describe(`SEC-DB-16 R-15 the owner can't set a person's sessions' end back (S206
       action: SESSIONS_ENDED,
       details: { person: '0a0b0c0d-0000-4000-8000-000000000001', at: at.toISOString() },
     });
+  });
+});
+
+describe(`SEC-DB-10 R-15 the owner can't send a sign-in's browser to another site (S207, Postgres ${server.version})`, () => {
+  // A flow's return path is kept unsealed. The owner, holding none of the app's keys, can rewrite it; the callback
+  // checks it again, so one that isn't a path of ours sends the browser home, with the alarm.
+  /** Sets the return path of the flow this ID names, as agentx_owner on a connection of its own. */
+  async function returnToAsOwner(flowId: string, returnTo: string): Promise<void> {
+    const owner = await database.connect('owner');
+    try {
+      await owner.query('update identity.login_flows set return_to = $2 where cookie_hash = $1', [
+        createHash('sha256').update(flowId, 'ascii').digest(),
+        returnTo,
+      ]);
+    } finally {
+      await owner.end();
+    }
+  }
+  const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+
+  it('control: a path of our own the owner wrote is where the browser goes, with no alarm', async () => {
+    const { url, flowId } = await signIn.begin('/agents', NETWORK);
+    await returnToAsOwner(flowId, '/approvals');
+    const state = new URL(url).searchParams.get('state') ?? '';
+
+    const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+    expect(done.returnTo).toBe('/approvals');
+    expect(alarms()).toEqual([]);
+  });
+
+  it.each(['https://evil.example/', '//evil.example', '/\\evil.example'])(
+    'a return path rewritten to %s sends the browser home, and raises the alarm',
+    async (foreign) => {
+      const { url, flowId } = await signIn.begin('/agents', NETWORK);
+      await returnToAsOwner(flowId, foreign);
+      const state = new URL(url).searchParams.get('state') ?? '';
+
+      const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+      expect(done.returnTo).toBe('/');
+      // The sign-in itself still stands: the person signed in, only the address was the owner's.
+      expect(await sessions.use(app, done.cookie)).toMatchObject({ userId: done.userId });
+      expect(alarms()).toEqual([expect.objectContaining({ level: 'error', check: 'login_flow', reason: 'return_to' })]);
+    },
+  );
+
+  it('a refused step-up whose return path was rewritten goes home too, with the alarm', async () => {
+    const done = await roundTrip();
+    const challenge = await challenges.open(app, {
+      sessionId: done.sessionId,
+      action: 'members.invite',
+      changeHash: Buffer.alloc(32, 9),
+    });
+    if (challenge === undefined) throw new Error('no challenge');
+    const { flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId, '/members/confirm');
+    await returnToAsOwner(flowId, 'https://evil.example/members/confirm');
+
+    await expect(
+      signIn.complete({ flowId, previousCookie: done.cookie, refused: 'provider_refused' }),
+    ).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      back: { returnTo: '/', challengeId: challenge.challengeId },
+    });
+    expect(alarms()).toEqual([expect.objectContaining({ check: 'login_flow', reason: 'return_to' })]);
   });
 });

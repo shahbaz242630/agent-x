@@ -22,7 +22,10 @@
 //   0102, R-15, S206), locked before the token's row and moved to the new
 //   token in the same transaction: any other token is a reuse, and one whose
 //   row still says unused (`used_at` cleared by the database's owner) is the
-//   integrity alarm too (check `refresh_token`, reason `not_head`). A refresh
+//   integrity alarm too (check `refresh_token`, reason `not_head`). A
+//   connection with no head (made before 0102, not refreshed since) is
+//   refused, nothing issued, so its client connects again (S207, R-15): its
+//   tokens would be judged by `used_at` alone, which the owner can clear. A refresh
 //   token the app issued (its secret is the pepper's own MAC) whose row is
 //   gone, or no longer matches it, is a reuse with the alarm as well; one
 //   whose key's listing names an organisation that has no such key is the
@@ -63,7 +66,6 @@ import {
   type HeadCheck,
   headMoved,
   headOf,
-  isHeadTaken,
   type IssuedTokens,
   issueTokens,
   parseConnectionToken,
@@ -540,13 +542,12 @@ export function createOauthGrants({
 
   /**
    * Whether the presented refresh token is not the one its connection's signed head names (R-15): a reuse, and the
-   * alarm where its row still says unused. Undefined: it is the head, or there is none yet (a connection not
-   * refreshed since 0102, its token judged by `used_at` alone). A head tampered with is a reuse too: its alarm is
-   * the signed state's own, and the organisation's hold follows.
+   * alarm where its row still says unused. Undefined: it is the head. A head tampered with is a reuse too: its alarm
+   * is the signed state's own, and the organisation's hold follows.
    */
-  const notTheHead = (head: HeadCheck, row: TokenRow, tokenId: string) => {
+  const notTheHead = (head: Exclude<HeadCheck, { readonly outcome: 'unset' }>, row: TokenRow, tokenId: string) => {
     if (head.outcome === 'tampered') return { outcome: 'reused' as const, forgot: undefined };
-    if (head.outcome === 'unset' || head.refreshId === tokenId.toLowerCase()) return undefined;
+    if (head.refreshId === tokenId.toLowerCase()) return undefined;
     return { outcome: 'reused' as const, forgot: row.usedAt === null ? ('not_head' as const) : undefined };
   };
 
@@ -700,6 +701,10 @@ export function createOauthGrants({
         // The connection's signed head (3b, after the connection), then the token's row (3c): one refresh of a
         // connection at a time, and only of the token the head names.
         const head = await headOf(tx, states, { orgId, id: presented.keyId });
+        // No head: a connection made before 0102 and not refreshed since (S207, R-15). Its tokens could only be judged
+        // by `used_at`, which the database's owner can clear, so none is refreshed: its client connects again. Every
+        // connection made since gets its head at its exchange, so production, which started on 0102, has none.
+        if (head.outcome === 'unset') return { outcome: 'refused' as const, reason: 'no_head' as const };
         const row = await tokenRowLocked(tx, orgId, presented.tokenId);
         if (row === undefined) return { outcome: 'refused' as const, reason: 'missing' as const };
         const reuse = notTheHead(head, row, presented.tokenId);
@@ -718,11 +723,6 @@ export function createOauthGrants({
           alongside: clientSeen(tx, asked.clientId, now),
         });
         return { outcome: 'issued' as const, tokens, agent: checked.key };
-      }).catch((error: unknown) => {
-        // Another refresh of the same head-less connection (one made before 0102) made its head first: two of its
-        // refresh tokens were live at once, so one was used by someone else. A reuse, as any other.
-        if (isHeadTaken(error)) return { outcome: 'reused' as const, forgot: 'not_head' as const };
-        throw error;
       });
       if (answer.outcome === 'issued') return answer;
       if (answer.outcome === 'refused') return refusedFor(caller, answer.reason, named);

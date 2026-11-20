@@ -23,10 +23,12 @@ import {
 } from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
+import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
-import { createSessions } from './sessions.ts';
+import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
+import { createSessions, endSessionsOf, lockSessionsOf, sessionEndedEvent, sessionsEndedEvent } from './sessions.ts';
 import {
   createStepUpChallenges,
   type StepUpBinding,
@@ -34,14 +36,7 @@ import {
   stepUpDetails,
 } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-import {
-  backfillUserMacs,
-  subjectOfUser,
-  USER_MAC_BACKFILL_UNTIL,
-  userForSubject,
-  userOfSubject,
-  UserUnbelieved,
-} from './users.ts';
+import { subjectOfUser, userForSubject, userOfSubject, UserUnbelieved } from './users.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -123,6 +118,10 @@ async function asOwner(text: string, values: readonly unknown[]): Promise<Record
     await owner.end();
   }
 }
+
+/** A person's MAC and its key version as the database holds them. */
+const sealOf = (userId: string) =>
+  app.selectFrom('identity.users').select(['mac', 'mac_key_version']).where('id', '=', userId).executeTakeFirst();
 
 /** Holds the session's challenges and consumes one, in a transaction, as an admin's change does. */
 const consumeFor = (binding: StepUpBinding, challengeId: string) =>
@@ -248,6 +247,114 @@ describe(`the owner can't sign in as a person (Postgres ${server.version})`, () 
         .executeTakeFirst(),
     ).toEqual({ mac_key_version: 2 });
     expect(await sessions(later).use(app, again)).toMatchObject({ sessionId });
+    expect(alarms()).toEqual([]);
+  });
+});
+
+describe(`SEC-DB-14 R-15 the owner can't put back a session that was ended (S207; Postgres ${server.version})`, () => {
+  const platform = createPlatformChain({ keys, ids });
+
+  /** The session's row as the owner reads it, to put back later. */
+  async function keep(sessionId: string): Promise<unknown> {
+    const [kept] = await asOwner('select pg_catalog.row_to_json(s) as kept from identity.sessions s where s.id = $1', [
+      sessionId,
+    ]);
+    return kept?.kept;
+  }
+
+  /** The owner puts the row back exactly as it was, its MAC and all. */
+  const putBack = (kept: unknown) =>
+    asOwner(
+      `insert into identity.sessions
+         select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
+      [JSON.stringify(kept)],
+    );
+
+  /** A sign-out as the app makes one (sign-in-flow.ts): the session deleted and its end signed, in one transaction. */
+  const signOut = (cookie: string) =>
+    app.transaction().execute(async (tx) => {
+      // As the sign-in flow holds it: a transaction on the identity tables alone.
+      const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
+      if (ended !== undefined) {
+        await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
+      }
+      return ended;
+    });
+
+  /** The person's sessions all ended at `at`, as a role change does (membership-changes.ts), the end signed. */
+  const endAll = (userId: string, at: Date) =>
+    app.transaction().execute(async (tx) => {
+      await lockSessionsOf(tx, [userId]);
+      await endSessionsOf(tx, userId, at);
+      await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(userId, at));
+    });
+
+  const rowOf = (sessionId: string) =>
+    app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst();
+
+  it('control: a session never ended, deleted and put back by the owner, is still found, with no alarm', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const kept = await keep(sessionId);
+    await asOwner('delete from identity.sessions where id = $1', [sessionId]);
+    await putBack(kept);
+
+    expect(await sessions().use(app, cookie)).toMatchObject({ sessionId, userId });
+    expect(await sessions().holder(app, cookie)).toBe(userId);
+    expect(await sessions().rotate(app, sessionId)).toBeDefined();
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a session signed out of, put back byte for byte, is no session, and raises the alarm', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const other = await sessions().open(app, userId, { idpSessionId: 'V1_3', authTime: START, amr: PASSKEY });
+    const kept = await keep(sessionId);
+    expect(await signOut(cookie)).toEqual({ userId, sessionId });
+    expect(await rowOf(sessionId)).toBeUndefined();
+
+    await putBack(kept);
+    expect(await rowOf(sessionId)).toEqual({ id: sessionId });
+    expect(await sessions().use(app, cookie)).toBeUndefined();
+    expect(await sessions().holder(app, cookie)).toBeUndefined();
+    expect(await sessions().rotate(app, sessionId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'session', reason: 'ended', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+    ]);
+    // The person's other session, never signed out of, is still theirs.
+    expect(await sessions().use(app, other.cookie)).toMatchObject({ sessionId: other.sessionId });
+    expect(alarms()).toHaveLength(3);
+  });
+
+  it("a session ended with all its person's, put back, is no session; one signed in after the end is", async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const kept = await keep(sessionId);
+    const at = new Date(START.getTime() + 1000);
+    await endAll(userId, at);
+    expect(await rowOf(sessionId)).toBeUndefined();
+
+    await putBack(kept);
+    expect(await sessions().use(app, cookie)).toBeUndefined();
+    expect(await sessions().holder(app, cookie)).toBeUndefined();
+    expect(await sessions().rotate(app, sessionId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+    ]);
+    // A sign-in made at the end's moment is not before it (the sign-in's own rule): its session is found.
+    const after = await sessions().open(app, userId, { idpSessionId: 'V1_4', authTime: at, amr: PASSKEY });
+    expect(await sessions().use(app, after.cookie)).toMatchObject({ sessionId: after.sessionId });
+    expect(alarms()).toHaveLength(3);
+  });
+
+  it("another person's ends don't touch this person's session", async () => {
+    const mine = await signedIn();
+    const theirs = await signedIn();
+    await signOut(theirs.cookie);
+    await endAll(theirs.userId, new Date(START.getTime() + 1000));
+
+    expect(await sessions().use(app, mine.cookie)).toMatchObject({ sessionId: mine.sessionId });
     expect(alarms()).toEqual([]);
   });
 });
@@ -603,32 +710,42 @@ describe(`the owner can't move a person to its own login account (Postgres ${ser
       expect.objectContaining({ check: 'user', rowId: admin }),
       expect.objectContaining({ check: 'user', rowId: admin }),
     ]);
-    // Nor is the backfill ever a way to make it genuine: it gives a MAC only to a row with none.
-    expect(await backfillUserMacs(app, { keys, clock })).toBe(0);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-own' }, macs())).toBeUndefined();
   });
 
-  it('a person made before 0100 is given their MAC at a start before the cutoff, and then signs in', async () => {
-    const earlier = await personAs('made-before-0100');
-    await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [earlier]);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBeUndefined();
-
-    expect(await backfillUserMacs(app, { keys, clock })).toBe(1);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBe(earlier);
-    expect(await personAs('made-before-0100')).toBe(earlier);
-  });
-
-  it('a person with no MAC is never believed once the cutoff has passed, and none is given', async () => {
-    const late = await personAs('no-mac-after-cutoff');
+  it('SEC-DB-10 R-15 a person whose MAC the owner nulled is never believed, and nothing gives them one again', async () => {
+    const late = await personAs('no-mac');
     await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [late]);
-    const after = new FixedClock(new Date(USER_MAC_BACKFILL_UNTIL.getTime() + 1000));
 
-    expect(await backfillUserMacs(app, { keys, clock: after })).toBe(0);
-    await expect(personAs('no-mac-after-cutoff')).rejects.toBeInstanceOf(UserUnbelieved);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'no-mac-after-cutoff' }, macs())).toBeUndefined();
+    await expect(personAs('no-mac')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'no-mac' }, macs())).toBeUndefined();
+    expect(await subjectOfUser(app, late, macs())).toBeUndefined();
     expect(alarms()).toEqual([
       expect.objectContaining({ check: 'user', rowId: late }),
       expect.objectContaining({ check: 'user', rowId: late }),
+      expect.objectContaining({ check: 'user', rowId: late }),
+    ]);
+    expect(await sealOf(late)).toEqual({ mac: null, mac_key_version: null });
+  });
+
+  it("SEC-DB-10 R-15 an admin's MAC nulled and subject moved to the owner's own login account signs no one in as the admin", async () => {
+    // The S207 attack on the deleted start-up backfill: a row with no MAC used to be sealed at the API's next start.
+    const admin = await personAs('admin-unsealed');
+    await asOwner('update identity.users set mac = null, mac_key_version = null, subject = $2 where id = $1', [
+      admin,
+      'owner-login',
+    ]);
+
+    await expect(personAs('owner-login')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-login' }, macs())).toBeUndefined();
+    expect(await subjectOfUser(app, admin, macs())).toBeUndefined();
+    // Nor did any of it seal the row, and no second person was made for the owner's subject.
+    expect(await sealOf(admin)).toEqual({ mac: null, mac_key_version: null });
+    const [count] = await asOwner('select count(*)::int as n from identity.users where subject = $1', ['owner-login']);
+    expect(count?.n).toBe(1);
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'user', reason: 'mac', rowId: admin, userId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
     ]);
   });
 });
@@ -637,7 +754,7 @@ describe(`the owner can't end someone else's login sessions, nor open a challeng
   it("control: a sign-out of the app's own session names its person", async () => {
     const { userId, sessionId, cookie } = await signedIn();
 
-    expect(await sessions().end(app, cookie)).toBe(userId);
+    expect(await sessions().end(app, cookie)).toEqual({ userId, sessionId });
     expect(
       await app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst(),
     ).toBeUndefined();

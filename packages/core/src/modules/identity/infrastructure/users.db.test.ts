@@ -120,4 +120,27 @@ describe(`the people who sign in (Postgres ${server.version})`, () => {
     });
     await expect(sql`truncate identity.users cascade`.execute(app)).rejects.toMatchObject({ code: '42501' });
   });
+
+  it("never lets the app change a person's MAC, or wipe it, once they are added (0108, S207)", async () => {
+    const id = await userForSubject(
+      app,
+      { issuer: ISSUER, subject: newSubject() },
+      { ids, clock, keys, logger: testLogger() },
+    );
+
+    await expect(
+      app
+        .updateTable('identity.users')
+        .set({ mac: Buffer.alloc(32, 7) })
+        .where('id', '=', id)
+        .execute(),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      app.updateTable('identity.users').set({ mac_key_version: 2 }).where('id', '=', id).execute(),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      app.updateTable('identity.users').set({ mac: null, mac_key_version: null }).where('id', '=', id).execute(),
+    ).rejects.toMatchObject({ code: '42501' });
+    expect(await subjectOfUser(app, id, macs)).toBeDefined();
+  });
 });

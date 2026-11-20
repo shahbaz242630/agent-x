@@ -332,6 +332,9 @@ async function judged<Tx extends HoldingsTransaction>(
     // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
     // where its decision wrote one (G5), with its bank key (0043): one changed past the app could hide a
     // possible duplicate. A claim made before G5 has none to compare, as E1b's payee seal.
+    // Which keys are compared rests on the decided event alone (R-15, S207 GM-3): the payee seal's fields, and G5's
+    // `possibleDuplicate`, which every decision since writes. The owner can't write or edit that event (the chain's
+    // MAC), and no column, its times least of all, is read here, so backdating a new request skips neither.
     const bankKeyAsMade = (bankKey: string | null) =>
       held?.bankKeyed !== true || bankKey === bankKeyOf(request.orderReference);
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({
