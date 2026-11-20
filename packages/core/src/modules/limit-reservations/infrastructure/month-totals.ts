@@ -55,6 +55,12 @@ export interface MonthTotalKey {
   readonly currency: string;
 }
 
+/**
+ * Two totals' IDs in the order every holder of several locks them (11a, GM-1a): as Postgres orders uuids, which lower-case
+ * UUID text sorts alike. A brake's batch and a carry both sort by it, so none takes two totals crosswise.
+ */
+export const monthTotalOrder = (a: string, b: string): number => (a < b ? -1 : Number(a > b));
+
 /** The total's ID: named by what it totals, the same every time. */
 export const monthTotalId = (orgId: string, { agentId, month, currency }: MonthTotalKey): string =>
   namedId(['month_total', orgId, agentId, month, currency]);

@@ -884,6 +884,19 @@ describe('an organisation made before GM-1a, until its cutover', () => {
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
+  it('logs a cutover that fails and goes on, the hold-off waited by its own timer', async () => {
+    // Not an organisation's ID at all: its transaction refused before anything is read.
+    await createHoldingsCheck({
+      list: () => Promise.resolve(['not an organisation']),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+      cutoverHoldOffMs: 5,
+    }).run();
+    expect(lines('month_totals.cutover_failed')).toHaveLength(1);
+  });
+
   it('waits out the hold-off once, at its first run, before cutting any organisation over; none for one cut over', async () => {
     const waits: number[] = [];
     const check = (w: World) =>

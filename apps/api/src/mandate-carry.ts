@@ -44,7 +44,13 @@
 import { type AuditActor, type AuditDetails, type SignedStates, type VerifiedState } from '@agentx/core/modules/audit';
 import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
-import { lockAgentPeriod, lockReservationsOf, monthTotalId, splitHeld } from '@agentx/core/modules/limit-reservations';
+import {
+  lockAgentPeriod,
+  lockReservationsOf,
+  monthTotalId,
+  monthTotalOrder,
+  splitHeld,
+} from '@agentx/core/modules/limit-reservations';
 import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/policies';
 import {
   claimsOnEach,
@@ -367,7 +373,7 @@ export async function outsideOf(
     );
   const months = monthsOf(held)
     .map((month) => ({ month, key: { agentId, month, currency } }))
-    .toSorted((a, b) => (monthTotalId(orgId, a.key) < monthTotalId(orgId, b.key) ? -1 : 1));
+    .toSorted((a, b) => monthTotalOrder(monthTotalId(orgId, a.key), monthTotalId(orgId, b.key)));
   const spent = new Map<string, bigint>();
   for (const { month, key } of months) {
     const own = leftHeld

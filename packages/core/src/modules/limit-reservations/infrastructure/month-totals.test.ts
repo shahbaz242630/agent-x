@@ -3,7 +3,14 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SignedStates, VerifiedState } from '../../audit/index.ts';
-import { checkMonthTotals, givenBack, monthTotalFrom, monthTotalKeyText, reservationsHeldIn } from './month-totals.ts';
+import {
+  checkMonthTotals,
+  givenBack,
+  monthTotalFrom,
+  monthTotalKeyText,
+  monthTotalOrder,
+  reservationsHeldIn,
+} from './month-totals.ts';
 
 /** A transaction and signed states any use of which would fail: the rules below decide before either is touched. */
 const NONE = null as never;
@@ -29,6 +36,17 @@ describe('a month total read', () => {
     expect(() => monthTotalFrom(verified('-1'))).toThrow('holds no amount');
     expect(() => monthTotalFrom(verified('01'))).toThrow('holds no amount');
     expect(() => monthTotalFrom(verified(null))).toThrow('holds no amount');
+  });
+});
+
+describe('the order totals are locked in', () => {
+  it('is the order Postgres keeps uuids in: lower first, the same as equal', () => {
+    const low = '0199a0f0-0000-7000-8000-00000000000a';
+    const high = '0199a0f0-0000-7000-8000-0000000000a0';
+    expect([high, low].toSorted(monthTotalOrder)).toEqual([low, high]);
+    expect(monthTotalOrder(low, high)).toBe(-1);
+    expect(monthTotalOrder(high, low)).toBe(1);
+    expect(monthTotalOrder(low, low)).toBe(0);
   });
 });
 

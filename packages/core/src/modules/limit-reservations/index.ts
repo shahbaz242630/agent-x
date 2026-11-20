@@ -27,6 +27,7 @@ export {
   monthTotalKeyText,
   type MonthTotalKey,
   monthTotalOf,
+  monthTotalOrder,
   monthTotalsCutOver,
   monthTotalToSend,
   MOST_TOTALS_CHECKED_A_PAGE,

@@ -49,6 +49,7 @@ import {
   type MonthTotalKey,
   type MonthTotalCheck,
   monthTotalOf,
+  monthTotalOrder,
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
@@ -466,7 +467,7 @@ async function lockedTotalsOf(tx: EndingsTransaction, states: SignedStates, orgI
     entry.of.push(request);
     byId.set(id, entry);
   }
-  const ordered = [...byId.entries()].toSorted(([a], [b]) => (a < b ? -1 : 1)).map(([, entry]) => entry);
+  const ordered = [...byId.entries()].toSorted(([a], [b]) => monthTotalOrder(a, b)).map(([, entry]) => entry);
   for (let start = 0; start < ordered.length; start += MOST_ROWS_GATHERED) {
     const batch = ordered.slice(start, start + MOST_ROWS_GATHERED);
     await states.gather(
