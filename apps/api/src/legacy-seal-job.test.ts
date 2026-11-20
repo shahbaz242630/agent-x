@@ -169,9 +169,9 @@ describe('the security rows’ sealing job (S206 V6)', () => {
     await job.run();
     clock.advanceBy(60 * 60_000);
     await job.run();
-    expect(stalls().map(({ busySince }) => busySince)).toEqual([
-      '2026-11-25T00:00:00.000Z',
-      '2026-11-25T00:00:00.000Z',
+    expect(stalls().map(({ level, busySince }) => [level, busySince])).toEqual([
+      ['error', '2026-11-25T00:00:00.000Z'],
+      ['error', '2026-11-25T00:00:00.000Z'],
     ]);
 
     // A run that gets it ends the stall; the lock taken again starts it over.
