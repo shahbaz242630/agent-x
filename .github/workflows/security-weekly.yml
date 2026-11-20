@@ -123,17 +123,21 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
-          TENANT: ${{ secrets.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        # Each by name, and every one checked before any stops the job: a value is never printed, only masked.
         run: |
-          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
-            if [ -z "${id}" ]; then
-              echo "::error::One of staging-whatif's three Azure IDs (client, tenant, subscription) is not set, so no certificate was read. Set it as a secret of staging-whatif (Settings, Environments, staging-whatif, Environment secrets: never a variable, which the public log prints); then run this workflow again."
-              exit 1
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The staging-whatif environment has no secret ${name}, so no certificate was read. Add it in GitHub: Settings, Environments, staging-whatif, Environment secrets (a secret, never a variable: a variable is printed in this public log); then run this workflow again."
+              missing=1
+            else
+              echo "::add-mask::${!name}"
             fi
-            echo "::add-mask::${id}"
           done
+          exit "${missing}"
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
