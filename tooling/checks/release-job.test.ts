@@ -63,14 +63,18 @@ const AZURE_LOGIN = /^azure\/login@[0-9a-f]{40}$/;
 /** The job-start watch (Carry-Forward S175), the one other job that signs in to Azure. */
 const WATCH_WORKFLOW = '.github/workflows/job-starts.yml';
 
+/** The console watch (PL-26), which signs in as the infrastructure plan's read-only identity. */
+const CONSOLE_WATCH_WORKFLOW = '.github/workflows/console-watch.yml';
+
 describe('the release job', () => {
-  it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the job-start watch', () => {
+  it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the two watches', () => {
     const naming = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => job.environment !== undefined)
         .map(([name]) => `${file}: ${name}`),
     );
     expect(naming).toEqual([
+      `${CONSOLE_WATCH_WORKFLOW}: watch`,
       `${RELEASE_WORKFLOW}: release`,
       `${RELEASE_WORKFLOW}: infra-plan`,
       `${RELEASE_WORKFLOW}: infra-deploy`,
@@ -80,12 +84,27 @@ describe('the release job', () => {
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(signingIn.toSorted()).toEqual([
-      `${WATCH_WORKFLOW}: watch`,
-      `${RELEASE_WORKFLOW}: infra-deploy`,
-      `${RELEASE_WORKFLOW}: infra-plan`,
-      `${RELEASE_WORKFLOW}: release`,
-    ]);
+    expect(signingIn.toSorted()).toEqual(
+      [
+        `${CONSOLE_WATCH_WORKFLOW}: watch`,
+        `${WATCH_WORKFLOW}: watch`,
+        `${RELEASE_WORKFLOW}: infra-deploy`,
+        `${RELEASE_WORKFLOW}: infra-plan`,
+        `${RELEASE_WORKFLOW}: release`,
+      ].toSorted(),
+    );
+  });
+
+  it('PL-26: lets the console watch only read the auth door, on main, in staging-whatif, as the plan does', () => {
+    const watchFile = workflows.find(({ file }) => file === CONSOLE_WATCH_WORKFLOW);
+    const watch = watchFile?.jobs.watch;
+    if (watchFile === undefined || watch === undefined) throw new Error(`${CONSOLE_WATCH_WORKFLOW} has no watch job`);
+    expect(watch.if).toBe("github.ref == 'refs/heads/main'");
+    expect(watch.environment).toBe('staging-whatif');
+    expect(watch.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    const runs = (watch.steps ?? []).flatMap((step) => (step.run === undefined ? [] : [step.run.trim()]));
+    expect(runs.filter((run) => run.startsWith('node '))).toEqual(['node deploy/azure/console-watch.ts']);
+    expect(runs.at(-1)).toBe('az account clear');
   });
 
   it('runs only on a push to main, after CI’s image is published and attested, in the staging environment', () => {

@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { IMAGE_REPOSITORY } from '../image/verify.ts';
-import type { Az, AzResult, Request, Steps, Terminal } from './deploy.ts';
+import { authRules, type ConsoleState } from './auth-door.ts';
+import { type Az, type AzResult, CONSOLE_SAID, type Request, stagingApp, type Steps, type Terminal } from './deploy.ts';
 import type { History } from './git.ts';
 import {
   ANSWER_VARIABLES,
@@ -622,6 +623,8 @@ function infraOver(options: {
   readonly since?: Readonly<Record<string, readonly string[]>>;
   /** The role assignments on the vault (AZ32): none unless given. */
   readonly grants?: readonly { scope: string; principalId: string; roleDefinitionId: string }[];
+  /** The auth door's rules (PL-26): closed unless given. */
+  readonly door?: ConsoleState | readonly unknown[];
 }) {
   const said: string[] = [];
   const requests: { request: Request; steps: Steps }[] = [];
@@ -634,6 +637,10 @@ function infraOver(options: {
       const url = args[args.indexOf('--url') + 1] ?? '';
       if (url.includes('/roleAssignments'))
         return ok({ value: (options.grants ?? []).map((properties) => ({ properties })) });
+      if (url.includes('/httpRouteConfigs/')) {
+        const door = options.door ?? 'closed';
+        return ok({ properties: { rules: typeof door === 'string' ? authRules(door, stagingApp) : door } });
+      }
       const workload = url.includes('/jobs/') ? 'migrate' : 'api';
       return ok({
         properties: { template: { containers: [container(workload, options.running ?? OLD, options.role)] } },
@@ -843,7 +850,7 @@ describe('answers, the summary and main', () => {
     // The vault's grants are read first (AZ32): this stand-in's vault holds none, so each listed one is said lacking.
     expect(written[1]?.file).toBe('sum');
     expect(written[1]?.text).toMatch(
-      /^```\nThe vault lacks \d+ grants .*\nThe vault's grants: none beyond the repository's list \(GRANTS, policy\.ts\)\.\nThis merge needs no infrastructure deploy: the release goes on by itself\.\n```\n$/,
+      /^```\nThe vault lacks \d+ grants .*\nThe vault's grants: none beyond the repository's list \(GRANTS, policy\.ts\)\.\nZitadel's console is closed on the auth host: .*\nThis merge needs no infrastructure deploy: the release goes on by itself\.\n```\n$/,
     );
     const HASH = 'f'.repeat(64);
     const deploying = infraOver({});
@@ -867,6 +874,40 @@ describe('answers, the summary and main', () => {
     expect(await main(['plan', NEW, DIGEST], outlets, (say) => ({ ...made.infra, say }))).toBe(1);
     expect(written).toEqual([]);
     expect(made.requests).toEqual([]);
+  });
+
+  it('PL-26: says an open console and plans on; a door in neither shape plans nothing and ends red', async () => {
+    const written: { file: string; text: string }[] = [];
+    const outlets = {
+      env: { ...ENV, GITHUB_OUTPUT: 'out' },
+      append: (file: string, text: string) => written.push({ file, text }),
+    };
+    const open = infraOver({ changed: [], door: 'open' });
+    expect(
+      await main(['plan', NEW, DIGEST], outlets, (say) => ({
+        ...open.infra,
+        say: (line) => {
+          open.said.push(line);
+          say(line);
+        },
+      })),
+    ).toBe(0);
+    expect(open.said).toContain(CONSOLE_SAID.open);
+    expect(written).toEqual([{ file: 'out', text: 'plan={"steps":[],"whatIf":{}}\nneeded=false\n' }]);
+    written.length = 0;
+    const stray = infraOver({ changed: ['deploy/azure/apps.bicep'], door: authRules('closed', stagingApp).slice(1) });
+    expect(
+      await main(['plan', NEW, DIGEST], outlets, (say) => ({
+        ...stray.infra,
+        say: (line) => {
+          stray.said.push(line);
+          say(line);
+        },
+      })),
+    ).toBe(1);
+    expect(stray.said).toContain(CONSOLE_SAID.neither);
+    expect(written).toEqual([]);
+    expect(stray.requests).toEqual([]);
   });
 
   it('refuses what it is not asked properly, and says an error as the run’s last word', async () => {

@@ -64,6 +64,7 @@ import {
 import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
 import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/machine-id-header.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
+import { type ConsoleState, consolePatch, consoleStateOf } from './auth-door.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
 const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
@@ -312,7 +313,11 @@ export type Request =
   | { readonly command: 'access' }
   | { readonly command: 'alerts' }
   | { readonly command: 'dns' }
-  | { readonly command: 'certificates' };
+  | { readonly command: 'certificates' }
+  | { readonly command: 'console'; readonly mode: ConsoleMode };
+
+/** What `console` was asked: open Zitadel's console on the auth host, close it, or only say which it is. */
+export type ConsoleMode = 'open' | 'close' | 'status';
 
 /** The generation flags taken out of a command's options, wherever they stand, and the options left. */
 function takeServerFlags(
@@ -360,7 +365,16 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
   node deploy/azure/deploy.ts certificates
-  node deploy/azure/deploy.ts access   (the partner's alone: roles, guardrails, activity log, budget; AZ5)`;
+  node deploy/azure/deploy.ts access   (the partner's alone: roles, guardrails, activity log, budget; AZ5)
+  node deploy/azure/deploy.ts console --open | --close | --status
+
+Zitadel's console (PL-26): the auth host lets a browser sign in and nothing more, so Zitadel's console
+and its admin and management services are closed to the internet. To work in the console on staging:
+  1. node deploy/azure/deploy.ts console --open     (type y; it says when the console is open)
+  2. sign in at https://<auth host>/ui/console and do the work
+  3. node deploy/azure/deploy.ts console --close    (the same sitting; it says when it is closed)
+Every apps deploy closes it too. While it is open, the console watch fails every few hours and the
+infrastructure plan on each merge says so; console --status says which it is now.`;
 
 /** `apps`'s options, each at most once, in either order. */
 function parseApps(options: readonly string[]): Request {
@@ -453,13 +467,14 @@ function loadDatabaseOf(name: string): string {
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...options] = argv;
+  if (command === 'console') return { command, mode: consoleModeOf(options) };
   if (command === 'access' || command === 'alerts' || command === 'dns' || command === 'certificates') {
     if (options.length > 0) throw new UsageError(`${command} takes no options, not ${options.join(' ')}`);
     return { command };
   }
   if (command !== 'foundation' && command !== 'apps' && command !== 'secrets') {
     throw new UsageError(
-      `say foundation, access, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`,
+      `say foundation, access, secrets, apps, alerts, dns, certificates or console, not ${command ?? 'nothing'}`,
     );
   }
   const { rest, flags } = takeServerFlags(command, options);
@@ -472,6 +487,16 @@ export function parseArguments(argv: readonly string[]): Request {
   throw new UsageError(
     `foundation takes only --load-size (the load run's database size), --always-on (the alerts on the jobs stopping, for apps --keep-running), --first-server and --back-to-generation <n> (playbook L), each once, not ${rest.join(' ')}`,
   );
+}
+
+/** `console`'s one option. */
+function consoleModeOf(options: readonly string[]): ConsoleMode {
+  const [option, ...more] = options;
+  const mode = { '--open': 'open', '--close': 'close', '--status': 'status' }[option ?? ''];
+  if (mode === undefined || more.length > 0) {
+    throw new UsageError('console takes one of --open, --close or --status, and nothing else');
+  }
+  return mode as ConsoleMode;
 }
 
 /** The plan a secrets run's options ask for, or a UsageError saying why it can't be done. */
@@ -2445,6 +2470,91 @@ async function deployCertificates(steps: Steps): Promise<number> {
   return recorded ? 0 : 1;
 }
 
+/** The auth host's door (names.bicep `doorName`), which `console` opens and closes. */
+const AUTH_DOOR = 'rtagentxstgauth';
+
+const authDoorUrl = (subscription: string): string =>
+  `${environmentUrl(subscription)}/httpRouteConfigs/${AUTH_DOOR}?api-version=${ENVIRONMENT_API}`;
+
+/** A staging workload's app (names.bicep `appName`), as the auth door's rules name it. */
+export const stagingApp = (workload: string): string => `ca-agentx-stg-${workload}`;
+
+/** The auth door as Azure holds it: which shape its rules are in (none of the two: undefined), and its host as read. */
+export interface ConsoleDoor {
+  readonly state: ConsoleState | undefined;
+  readonly customDomains: unknown;
+}
+
+/** Reads the auth door through Azure Resource Manager, with read rights alone (the plan's and the watch's identity). */
+export function readConsoleDoor(az: Az, subscription: string): ConsoleDoor {
+  const door = azJson(az, ['rest', '--method', 'get', '--url', authDoorUrl(subscription)]) as {
+    properties?: { rules?: unknown; customDomains?: unknown };
+  };
+  return {
+    state: consoleStateOf(door.properties?.rules, stagingApp),
+    customDomains: door.properties?.customDomains,
+  };
+}
+
+/** What each reading of the auth door means, in plain words: what it is, what it breaks, what next. */
+export const CONSOLE_SAID: Readonly<Record<ConsoleState | 'neither', string>> = {
+  closed:
+    "Zitadel's console is closed on the auth host: a browser can sign in, and Zitadel's console and its admin and management services can't be reached from the internet (the normal shape).",
+  open: "Zitadel's console is OPEN on the auth host: its console and its admin and management services can be reached from the internet, behind Zitadel's own sign-in. Once the work is done, close it: node deploy/azure/deploy.ts console --close (an apps deploy closes it too).",
+  neither:
+    "The auth host's door routes neither as auth-door.json's closed shape nor its open one: something changed it outside deploy.ts. What broke: paths nobody decided on may be open to the internet, or sign-in may be broken. What next: find who changed it in the resource group's activity log (Microsoft.App/managedEnvironments/httpRouteConfigs/write); if it was not one of us, treat it as Incident-Response-Playbook section B; then run apps, which puts the door back closed.",
+};
+
+/**
+ * `console` (PL-26): Zitadel's console on the auth host, open for a piece of work and closed straight after. A PATCH
+ * of the door's rules alone, its host sent back exactly as read (never az containerapp, never a revision suffix), from
+ * one of the two shapes auth-door.json allows to the other, then read back. A door in neither shape is left as it is.
+ */
+async function deployConsole(steps: Steps, mode: ConsoleMode): Promise<number> {
+  const subscription = signedIn(steps.az, (line) => {
+    steps.terminal.say(line);
+  });
+  const door = readConsoleDoor(steps.az, subscription);
+  if (door.state === undefined) throw new Error(`${CONSOLE_SAID.neither} Nothing was changed.`);
+  const wanted: ConsoleState = mode === 'open' ? 'open' : 'closed';
+  if (mode === 'status' || door.state === wanted) {
+    steps.terminal.say(CONSOLE_SAID[door.state]);
+    return 0;
+  }
+  const asked =
+    mode === 'open'
+      ? `Open Zitadel's console on ${ENVIRONMENT}'s auth host?`
+      : `Close Zitadel's console on ${ENVIRONMENT}'s auth host?`;
+  if (!yes(await steps.terminal.ask(`${asked} [y/N] `))) throw new Cancelled();
+  const sent = steps.az.run([
+    'rest',
+    '--method',
+    'patch',
+    '--url',
+    authDoorUrl(subscription),
+    '--body',
+    consolePatch(wanted, door.customDomains, stagingApp),
+  ]);
+  if (sent.status !== 0) {
+    throw new Error(
+      `Azure refused the change to the auth host's door (${sent.stderr.trim().split('\n')[0] ?? ''}), so the console stays ${door.state}.`,
+    );
+  }
+  const after = readConsoleDoor(steps.az, subscription).state;
+  if (after !== wanted) {
+    throw new Error(
+      `Azure took the change, but the auth host's door now reads ${after ?? 'as neither shape'}, not ${wanted}. Run console --status in a minute; if it still isn't ${wanted}, run apps, which puts the door back closed.`,
+    );
+  }
+  steps.terminal.say(CONSOLE_SAID[after]);
+  if (after === 'open') {
+    steps.terminal.say(
+      'A change to a door can take a minute to reach the internet. Work in the console, then close it in this same sitting.',
+    );
+  }
+  return 0;
+}
+
 /**
  * The apps are stamped with the release, and CI's release job takes the stamp
  * to say which commit Azure's set-up was built from (release.ts): so the
@@ -3078,6 +3188,8 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
       return deployCertificates(steps);
     case 'access':
       return deployAccess(steps);
+    case 'console':
+      return deployConsole(steps, request.mode);
   }
 }
 

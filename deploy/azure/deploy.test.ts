@@ -233,7 +233,7 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation, access, secrets, apps, alerts, dns or certificates, not deploy/],
+      [['deploy'], /say foundation, access, secrets, apps, alerts, dns, certificates or console, not deploy/],
       [
         ['apps', '--commit'],
         /apps takes --keep-running, --load-run, --load-database with the throwaway copy, --commit with one full 40-hex commit, --api-stopped, --migrate-first and --back-to-generation <n>/,

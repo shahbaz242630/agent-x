@@ -54,6 +54,7 @@ import {
   type Terminal,
   text,
 } from './deploy.ts';
+import { checkConsoleDoor } from './console-watch.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { checkGrants } from './grants.ts';
 import { pinnedZitadelImage } from './zitadel-upgrade.ts';
@@ -662,7 +663,11 @@ async function runPlan(infra: InfraSteps, args: readonly string[], outlets: Outl
   }
   // AZ32: first, who can read the vault's secrets. A grant nobody listed stops the plan red: nothing is approved
   // while one stands (grants.ts says what next). The release itself goes on, as with any plan that couldn't run.
-  if (checkGrants(infra.az, subscriptionOf(infra.az), infra.say) !== 0) return 1;
+  const subscription = subscriptionOf(infra.az);
+  if (checkGrants(infra.az, subscription, infra.say) !== 0) return 1;
+  // PL-26: the auth door in one of auth-door.json's two shapes. An open console is said (a person is working in it,
+  // and an approved apps deploy will close it); a door in neither shape stops the plan red, as a stray grant does.
+  if (checkConsoleDoor(infra.az, subscription, infra.say, false) !== 0) return 1;
   const planned = await plan(infra, commit, digest);
   const output = outlets.env.GITHUB_OUTPUT;
   // `needed` alone decides whether the approval job runs at all: a merge needing none never waits for the partner.
