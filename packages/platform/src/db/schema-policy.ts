@@ -286,10 +286,10 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Made at the first sign-in and read; a user changed or deleted would
       // move or orphan every membership and event pointing at them. Only when
       // their sessions were last all ended moves on (0098, AG10), which a
-      // sign-in made before it can't get past, and a person made before 0100
-      // is given their MAC, once.
+      // sign-in made before it can't get past. A person's MAC is written once,
+      // as they are added, and never changed (0107, S207).
       appMay: ['SELECT', 'INSERT'],
-      appMayUpdate: ['sessions_ended_at', 'mac', 'mac_key_version'],
+      appMayUpdate: ['sessions_ended_at'],
     },
     'identity.sessions': {
       reason:
