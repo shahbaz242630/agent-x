@@ -20,7 +20,8 @@
 // sign-out's (`identity.session_ended`, naming the session) and a person's all
 // ended (`identity.sessions_ended`). A session either names, as ended after its
 // sign-in, is no session and raises the alarm: read in the statement that finds
-// the row, by 0084's by-person index, so no request costs a trip more. A signed
+// the row, by 0110's by-record and 0084's by-person indexes, so no request costs
+// a trip more, nor reads more as the person signs out more. A signed
 // end deleted to hide it breaks the platform chain, which the anchor check reads.
 //
 // A session lives while both its timeouts hold: the idle one, from its last
@@ -45,6 +46,7 @@ import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index
 import {
   latestPlatformTimeOfRead,
   type PlatformControlsTables,
+  platformEventWithRead,
   type PlatformTransaction,
 } from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -287,24 +289,25 @@ export const sessionRowMessage = (row: SessionRow) =>
   });
 
 /**
- * The session's latest signed ends, read with its row (R-15, S207): its own sign-out's, and its person's latest all
- * ended. Each matched by 0084's by-person index on the row's own columns, as a subquery of the statement.
+ * The session's signed ends, read with its row (R-15, S207): whether its own sign-out is signed (one entry of 0110's
+ * by-record index, however often the person signed out), and its person's latest all ended (0084's by-person index).
+ * Each a subquery of the statement, on the row's own columns.
  */
 const signedEndsOfRow = (db: Kysely<IdentityTables>) => {
   const platform = db as unknown as Kysely<PlatformControlsTables>;
   const person = sql<string>`identity.sessions.user_id::text`;
   const record = sql<string>`identity.sessions.id::text`;
-  const latest = (kind: { readonly action: string; readonly factsFrom: Record<string, typeof person> }) =>
-    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ ...kind, facts: {} }])})`;
   return [
-    latest({ action: SESSION_ENDED, factsFrom: { person, record } }).as('signed_out_at'),
-    latest({ action: SESSIONS_ENDED, factsFrom: { person } }).as('all_ended_at'),
+    sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ENDED, {}, { record, person })})`.as('signed_out'),
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person } }])})`.as(
+      'all_ended_at',
+    ),
   ] as const;
 };
 
 /** The row's signed ends, as signedEndsOfRow reads them. */
 interface SignedEndsOfRow {
-  readonly signed_out_at: Date | null;
+  readonly signed_out: boolean;
   readonly all_ended_at: Date | null;
 }
 
@@ -314,7 +317,7 @@ interface SignedEndsOfRow {
  * the end deletes every one opened before.
  */
 const endedBySignature = (row: SignedEndsOfRow & { readonly auth_time: Date }): boolean =>
-  row.signed_out_at !== null || (row.all_ended_at !== null && row.auth_time < row.all_ended_at);
+  row.signed_out || (row.all_ended_at !== null && row.auth_time < row.all_ended_at);
 
 export function createSessions({
   ids,
