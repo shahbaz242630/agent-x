@@ -89,6 +89,32 @@ describe('SEC-OAUTH-17 a registered client sealed as it registered', () => {
     expect(registeredJudged(keys, REGISTERED, documentSealed(keys, asDocument))).toBe('tampered');
     expect(documentJudged(keys, DOCUMENT, registeredSealed(keys, REGISTERED))).toBe('tampered');
   });
+
+  it('a registered client and a document whose parts read the same, part for part, are told apart by label alone', () => {
+    // Both messages, after their labels: the ID, the name, '3', '1', the address, '0', '0', the fetch, the end.
+    const fetchedAt = DOCUMENT.fetchedAt;
+    const expiresAt = DOCUMENT.expiresAt;
+    const document: DocumentFields = {
+      clientId: REGISTERED.clientId,
+      name: REGISTERED.name,
+      redirectUris: ['1', 'https://a.example/cb', '0'],
+      grantTypes: [],
+      fetchedAt,
+      expiresAt,
+    };
+    const registered: RegisteredFields = {
+      clientId: REGISTERED.clientId,
+      name: REGISTERED.name,
+      applicationType: '3',
+      redirectUris: ['https://a.example/cb'],
+      grantTypes: [],
+      softwareId: '0',
+      softwareVersion: fetchedAt.toISOString(),
+      createdAt: expiresAt,
+    };
+    expect(registeredJudged(keys, registered, documentSealed(keys, document))).toBe('tampered');
+    expect(documentJudged(keys, document, registeredSealed(keys, registered))).toBe('tampered');
+  });
 });
 
 describe('SEC-OAUTH-17 a kept document sealed as it was kept', () => {
