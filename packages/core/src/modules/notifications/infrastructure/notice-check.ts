@@ -86,7 +86,7 @@ const UNSEALED_A_RUN = 100;
 const JUDGED_WITHIN_MS = 20 * DAY_MS;
 
 /** Why a recorded notice raised the alarm (beside `chain`, a walk that failed, and `record`, a record of its own). */
-export type NoticeFault = 'gone' | 'seal' | 'not_as_recorded' | 'end_seal' | 'tries_spent' | 'unsent';
+type NoticeFault = 'gone' | 'seal' | 'not_as_recorded' | 'end_seal' | 'tries_spent' | 'unsent';
 
 /** Where the last visit stopped, and the notices it carried, as its record says. */
 interface Passed {

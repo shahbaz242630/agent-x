@@ -112,7 +112,7 @@ export const MOST_NOTICES_A_BATCH = 100;
 export const NOTICE_QUEUED = 'notice.queued';
 
 /** The type of object a notice's record is about. */
-export const NOTICE_SUBJECT = 'notice';
+const NOTICE_SUBJECT = 'notice';
 
 /** Who records a notice queued: the outbox itself, whichever process writes it. */
 const OUTBOX_ACTOR = { type: 'system', id: 'notifications' } as const;
