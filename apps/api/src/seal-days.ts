@@ -63,7 +63,8 @@ export async function sealDay<Held>(sealing: DaySealing<Held>, day: string): Pro
       idTo: digest.idTo,
       form: sealing.form,
     });
-    sealing.log.info(sealing.lines.sealed, { day, requests: digest.requests });
+    // Its last row ID too: the security shortfall alert orders a day's lines by what they read (S206).
+    sealing.log.info(sealing.lines.sealed, { day, requests: digest.requests, idTo: digest.idTo });
     return true;
   });
 }

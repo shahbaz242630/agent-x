@@ -4944,7 +4944,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       // Another event, a day at its own count, a later tally counted too, another log's, or lines arrived long ago.
       edited('"security_seal.tally", ', ''),
       edited('Tallied > Rows', 'Tallied >= Rows'),
-      edited('TalliedAt < TimeGenerated and ', ''),
+      // A tally that read further taken for an earlier one: an older read logged late would page.
+      edited(' and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0)', ''),
+      edited('strcmp(ReadTo, TalliedTo) >= 0', 'strcmp(ReadTo, TalliedTo) > 0'),
+      edited('isempty(ReadTo) or ', ''),
       edited(' on Chain, Day', ' on Day'),
       edited('ago(10m)', 'ago(1d)'),
       (alert: Mutable) => (properties(alert).windowSize = 'P1D'),

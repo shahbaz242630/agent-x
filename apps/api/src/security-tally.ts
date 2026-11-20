@@ -18,9 +18,10 @@
 //   database: when a day is first counted, when it fell, and when it grew, at
 //   most once an hour a day, so the log stays small (each row is a minute's
 //   count of one kind, so a busy organisation grows every run). The
-//   environment's alert holds each new line, and each seal, to the highest
-//   count logged of its day before it: so a fall is found even across a
-//   restart, which forgets the memory, within the alert's own few minutes.
+//   environment's alert holds each new line, and each seal, to every tally of
+//   its day that read no further (its last ID not past this one's): so a fall
+//   is found even across a restart, which forgets the memory, within the
+//   alert's own few minutes, and an older read logged late is no fall.
 //
 // And once an hour, every retained day of each log counted again (S206,
 // faster detection): its rows by their ID's day, dated or not, one statement a

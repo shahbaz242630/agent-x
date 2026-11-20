@@ -836,8 +836,11 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
 // count (`security_seal.tally`: when first counted, when it fell, and when it
 // grew, at most hourly), and each day it seals with the count sealed
 // (`security_events.sealed`), for the global table and each organisation. The
-// log is off the database: a line with fewer rows than an earlier tally of its
-// day lost rows in between, past the app. Each line is judged as it arrives
+// log is off the database: a line with fewer rows than another tally of its
+// day that read no further (its last row ID, `idTo`, not past this line's)
+// lost rows in between, past the app. Reads are ordered by what they read,
+// never by when their lines were written: the two jobs log the same day, and
+// one's older read can be logged after the other's newer one. Each line is judged as it arrives
 // (in the last 10 minutes, as lines come 4-9 minutes late), against the
 // tallies of the two days before (a day's tallies and its seal can be a day and
 // a half apart), every 5 minutes: a fall pages within about 10-20 minutes of
@@ -863,7 +866,7 @@ resource securitySealAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log), Arrived = ingestion_time() | where Arrived > ago(10m) | extend Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Rows = iff(tostring(Line[\'event\']) == "security_seal.tally", toint(Line[\'rows\']), toint(Line[\'requests\'])) | join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Tallied = toint(Line[\'rows\']), TalliedAt = TimeGenerated) on Chain, Day | where TalliedAt < TimeGenerated and Tallied > Rows | summarize Shortfalls = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log), Arrived = ingestion_time() | where Arrived > ago(10m) | extend Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Rows = iff(tostring(Line[\'event\']) == "security_seal.tally", toint(Line[\'rows\']), toint(Line[\'requests\'])), ReadTo = tostring(Line[\'idTo\']) | join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Tallied = toint(Line[\'rows\']), TalliedTo = tostring(Line[\'idTo\'])) on Chain, Day | where Tallied > Rows and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0) | summarize Shortfalls = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Shortfalls'
           operator: 'GreaterThan'
