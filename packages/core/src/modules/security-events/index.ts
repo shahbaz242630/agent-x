@@ -42,7 +42,11 @@ export {
   securityDigestOfDay,
   type SecurityLog,
   securityLogAlarm,
+  talliesOf,
   tallyFrom,
+  tallyRead,
+  type DayTally,
+  dayCountsRead,
 } from './infrastructure/event-seals.ts';
 export {
   ALL_SEALED,

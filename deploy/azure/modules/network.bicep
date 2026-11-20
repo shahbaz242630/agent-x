@@ -13,13 +13,6 @@
 // - endpoints: the audit-export store's private endpoint (AZ11, PL-43), with a
 //   private DNS zone so the store's name resolves to its private address inside
 //   the network. Only the apps subnet may reach it, on 443
-// - storagePolicy: the apps subnet's Storage traffic reaches our own accounts
-//   alone (AZ32 c, 6F1 audit h28). The regional tag lets it reach any account in
-//   the region, so a container that was taken over could copy data out to an
-//   account of the attacker's; the policy names ours and Azure refuses the rest.
-//   The database subnet has none: the server archives its write-ahead log to
-//   Microsoft's own accounts, which a policy can't name and would refuse
-//   (Microsoft: managed services and managed accounts aren't supported)
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
@@ -37,10 +30,6 @@ param tags object
 param addressSpace string
 @description('Whether Agent X\'s OAuth server is on here, and so the API fetches the MCP clients\' documents (AG5).')
 param mcpOauth bool
-@description('The apps subnet\'s Storage endpoint policy (AZ32 c).')
-param storagePolicyName string
-@description('Our own Storage accounts (the audit exports\' and the activity downloads\'), by ID: the only ones the apps subnet may reach.')
-param storageAccountIds string[]
 
 // The one spelling of the apps subnet's range: the apps deployment reads the
 // same function for what the API trusts as its proxy.
@@ -316,9 +305,8 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         }
       }
       {
-        // The regional tag, as the key vault's: it covers every account in this
-        // region, so the subnet's endpoint policy (storagePolicy) narrows it to
-        // ours; the audit exports' store left it for a private endpoint (AZ11).
+        // The regional tag, as the key vault's: it still covers every account
+        // in this region, not ours alone; the audit exports' store left it for a private endpoint (AZ11).
         name: 'allow-out-storage'
         properties: {
           description: 'Activity downloads, to their store through the subnet\'s Storage endpoint, in this region only.'
@@ -550,32 +538,6 @@ resource endpointsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
   }
 }
 
-// An allow list (Microsoft): with it on the subnet, Storage over the subnet's
-// endpoint reaches the accounts named here and no other, in any region. The
-// audit-export store is reached through its private endpoint, which a policy
-// doesn't filter, but is named too: its network rule takes the apps subnet as
-// its fallback (evidence.bicep). The environment's own platform needs no Storage
-// of its own (Microsoft's list for a workload profiles environment names it only
-// for images in Azure Container Registry; ours come from ghcr.io), so the policy
-// filters our traffic alone.
-resource storagePolicy 'Microsoft.Network/serviceEndpointPolicies@2025-01-01' = {
-  name: storagePolicyName
-  location: location
-  tags: tags
-  properties: {
-    serviceEndpointPolicyDefinitions: [
-      {
-        name: 'our-stores'
-        properties: {
-          description: 'Agent X\'s own Storage accounts, the only ones the apps and jobs may reach.'
-          service: 'Microsoft.Storage'
-          serviceResources: storageAccountIds
-        }
-      }
-    ]
-  }
-}
-
 resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
   name: name
   location: location
@@ -610,12 +572,6 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
             {
               service: 'Microsoft.Storage'
               locations: [location]
-            }
-          ]
-          // ...and only our own accounts, whatever the regional tag lets through.
-          serviceEndpointPolicies: [
-            {
-              id: storagePolicy.id
             }
           ]
         }

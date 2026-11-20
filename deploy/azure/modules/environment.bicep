@@ -148,6 +148,14 @@ resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
 // writes "ERROR" in its newer lines and "error", "fatal" or "panic" in its
 // older ones, so the match ignores case (`in~`). A line that isn't JSON counts
 // as nothing here.
+// What each line-counting alert on the apps' logs reads before its run: Azure's most, two days, so a line that reaches
+// the workspace late (4-9 minutes, or hours behind a cap) is still in view when it arrives. Each counts the lines that
+// arrived over twice its interval (`where ingestion_time() > ago(...)`), the daily summary over 25 hours: a run
+// starting late leaves no gap, and a line may notify twice (counted in two summaries), never not at all (MO2, the
+// login alerts' rule; S206). Reading costs nothing more; a rule's price
+// follows how often it runs.
+var consoleLinesRead = 'P2D'
+
 var errorLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")'
 
 // Each error line's plain words (decision 29), for the alert to split by.
@@ -208,12 +216,14 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: '${errorLines} | ${saysStages} | summarize Errors = count() by Says'
+          query: '${errorLines} | where ingestion_time() > ago(30m) | ${saysStages} | summarize Errors = count() by Says'
           // One email a kind of error, naming it in plain words.
           dimensions: [
             {
@@ -260,11 +270,13 @@ resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [workspaceId]
     evaluationFrequency: 'P1D'
     windowSize: 'P1D'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic") | ${saysStages} | summarize Times = count() by Says'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(25h) | where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic") | ${saysStages} | summarize Times = count() by Says'
           dimensions: [
             {
               name: 'Says'
@@ -297,7 +309,10 @@ resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // `audit.anchor_check_crashed`). A start refused on a broken platform chain
 // logs the first too, and so does the operator's command wherever the API
 // would (B1c): its job logs to the same table. Only the count leaves the
-// workspace; the lines say which chain and why.
+// workspace; the lines say which chain and why. Every 5 minutes, each line
+// judged as it arrives (the last 10 minutes' arrivals, S206 faster detection):
+// with the checks finding a change within about 5 minutes and lines 4-10
+// minutes late, a tamper pages within about 10-20, and no late line is missed.
 resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: integrityAlertName
   location: location
@@ -309,14 +324,16 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     severity: 1
     enabled: true
     scopes: [workspaceId]
-    evaluationFrequency: 'PT15M'
-    windowSize: 'PT15M'
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(10m) | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -358,12 +375,14 @@ resource tokenRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -421,12 +440,14 @@ resource denialSurgeAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: '${denialLines} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)'
+          query: '${denialLines} | where ingestion_time() > ago(30m) | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Highest'
           operator: 'GreaterThan'
@@ -464,12 +485,14 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -507,12 +530,14 @@ resource handoffQueueAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "handoff.queue_stale" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "handoff.queue_stale" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -556,12 +581,14 @@ resource loginServiceAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("idp.impersonated", "idp.rights_changed", "idp.token_issued", "idp_events.tied_page") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("idp.impersonated", "idp.rights_changed", "idp.token_issued", "idp_events.tied_page") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -599,12 +626,14 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("spend_request.platform_full", "db.pool_wait_ran_out") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -643,12 +672,14 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -684,12 +715,14 @@ resource dailyCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.daily_check_overdue" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "audit.daily_check_overdue" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -724,12 +757,14 @@ resource fullPassAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.full_pass_overdue" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "audit.full_pass_overdue" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -769,12 +804,14 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("access_log_seal.run_failed", "access_log_seal_check.run_failed", "hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed", "waiting_rejection.run_failed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -794,33 +831,44 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   dependsOn: [appLogs]
 }
 
-// Security records deleted before their day was sealed (S206 V6, R-15): the
-// API's seal job logs each day not yet sealed with its row count
-// (`security_seal.tally`), and each day it seals with the count sealed
+// Security records deleted (S206 V6, R-15; S206 faster detection): the API
+// counts yesterday's and today's rows every 5 minutes and logs each day's
+// count (`security_seal.tally`: when first counted, when it fell, and when it
+// grew, at most hourly), and each day it seals with the count sealed
 // (`security_events.sealed`), for the global table and each organisation. The
-// log is off the database: a day sealed with fewer rows than a tally of it
-// counted lost rows in between, past the app. A day's tallies and its seal can
-// be a day and a half apart, so the window is two days, checked hourly.
-// Stateless, as every SEV-1: it notifies each hour while the window holds such a day.
+// log is off the database: a line with fewer rows than another tally of its
+// day that read no further (its last row ID, `idTo`, not past this line's)
+// lost rows in between, past the app. Reads are ordered by what they read,
+// never by when their lines were written: the two jobs log the same day, and
+// one's older read can be logged after the other's newer one, within seconds.
+// A line that read less logged over 60 seconds after the tally is no such
+// race: the day's newest rows were deleted, a fall too. Each line is judged as it arrives
+// (in the last 10 minutes, as lines come 4-9 minutes late), against the
+// tallies of the two days before (a day's tallies and its seal can be a day and
+// a half apart), every 5 minutes: a fall pages within about 10-20 minutes of
+// the deletion. Stateless, as every SEV-1: each line that shows a fall
+// notifies once or twice (its 10 minutes span two runs).
 resource securitySealAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: securitySealAlertName
   location: location
   tags: tags
   kind: 'LogAlert'
   properties: {
-    displayName: 'Security records: a day sealed with fewer rows than were seen'
-    description: 'SEV-1. A day of failed sign-ins or rate-limit hits was sealed with fewer rows than the seal job counted earlier (security_seal.tally against security_events.sealed): rows were deleted from the database past the app before the seal. Runbook: Incident-Response-Playbook.md section H.'
+    displayName: 'Security records: a day with fewer rows than were seen'
+    description: 'SEV-1. A day of failed sign-ins or rate-limit hits was counted or sealed with fewer rows than the API counted earlier (security_seal.tally, security_events.sealed): rows were deleted from the database past the app. Runbook: Incident-Response-Playbook.md section H.'
     severity: 1
     enabled: true
     scopes: [workspaceId]
-    evaluationFrequency: 'PT1H'
-    windowSize: 'P2D'
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT10M'
+    // Two days back for the tallies a line is held to; the line itself judged as it arrives (the query's own band).
+    overrideQueryTimeRange: 'P2D'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log) | summarize Tallied = maxif(toint(Line[\'rows\']), tostring(Line[\'event\']) == "security_seal.tally"), Sealed = maxif(toint(Line[\'requests\']), tostring(Line[\'event\']) == "security_events.sealed"), Seals = countif(tostring(Line[\'event\']) == "security_events.sealed") by Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']) | where Seals > 0 and Tallied > Sealed | summarize Shortfalls = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log), Arrived = ingestion_time() | where Arrived > ago(10m) | extend Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Rows = iff(tostring(Line[\'event\']) == "security_seal.tally", toint(Line[\'rows\']), toint(Line[\'requests\'])), ReadTo = tostring(Line[\'idTo\']) | join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Tallied = toint(Line[\'rows\']), TalliedTo = tostring(Line[\'idTo\']), TalliedAt = TimeGenerated) on Chain, Day | where Tallied > Rows and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0 or TimeGenerated - TalliedAt > 60s) | summarize Shortfalls = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Shortfalls'
           operator: 'GreaterThan'
@@ -859,12 +907,14 @@ resource recordsFillingAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "identity.records_filling" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -1006,12 +1056,14 @@ resource agentCancelsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: '${agentCancelLines} | summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Cancels)'
+          query: '${agentCancelLines} | where ingestion_time() > ago(30m) | summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Cancels)'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Highest'
           operator: 'GreaterThan'
@@ -1049,12 +1101,14 @@ resource agentCancelCapAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -1092,12 +1146,14 @@ resource decisionsSuppressedAlert 'Microsoft.Insights/scheduledQueryRules@2026-0
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "log.suppressed" | where tostring(parse_json(Log).suppressedEvent) == "spend_request.decided" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -1143,12 +1199,14 @@ resource mcpRefusalsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "mcp.protocol_refused" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "mcp.protocol_refused" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -1191,12 +1249,14 @@ resource mcpUnknownProtocolAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | extend mcpProtocol = extract(@\'"mcpProtocol":"([^"]*)"\', 1, Log) | where isnotempty(mcpProtocol) | where mcpProtocol !in (${join(map(mcpProtocols, version => '"${version}"'), ', ')}) | summarize Requests = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).route) == "/v1/mcp" | extend mcpProtocol = extract(@\'"mcpProtocol":"([^"]*)"\', 1, Log) | where isnotempty(mcpProtocol) | where mcpProtocol !in (${join(map(mcpProtocols, version => '"${version}"'), ', ')}) | summarize Requests = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Requests'
           operator: 'GreaterThan'
@@ -1232,12 +1292,14 @@ resource mcpKeysRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01'
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).route) == "/v1/mcp" | where toint(parse_json(Log).status) == 401 | summarize Refused = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).route) == "/v1/mcp" | where toint(parse_json(Log).status) == 401 | summarize Refused = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Refused'
           operator: 'GreaterThan'
@@ -1274,12 +1336,14 @@ resource oauthSourceCappedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-
     scopes: [workspaceId]
     evaluationFrequency: 'PT15M'
     windowSize: 'PT15M'
+    // Lines judged as they arrive (4-9 minutes late, or later), the two days before read for them.
+    overrideQueryTimeRange: consoleLinesRead
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "oauth.source_capped" | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) == "oauth.source_capped" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
