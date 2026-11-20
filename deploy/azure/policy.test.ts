@@ -316,9 +316,23 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
   return copy;
 }
 
+/**
+ * The rules a snapshot breaks. Rule alert-arrival (S206) is left out: an alert's own test swaps in queries with no
+ * arrival band to break its own rule, and alert-arrival has its own test (arrivalRules).
+ */
 const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
-  ...new Set(policyProblems(snapshotted, expected).map((problem) => problem.rule)),
+  ...new Set(
+    policyProblems(snapshotted, expected)
+      .map((problem) => problem.rule)
+      .filter((rule) => rule !== 'alert-arrival'),
+  ),
 ];
+
+/** The alerts rule alert-arrival names. */
+const arrivalRules = (snapshotted: Snapshot): string[] =>
+  policyProblems(snapshotted, STAGING)
+    .filter((problem) => problem.rule === 'alert-arrival')
+    .map((problem) => problem.resource);
 
 /** A nested object of a resource, for changing it in place. */
 const inside = (value: unknown, ...keys: readonly string[]): Mutable => at(value, ...keys) as Mutable;
@@ -4165,6 +4179,43 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it('alert-arrival: an alert counting the apps’ lines over a window no longer than its interval judges each by when it arrived (S206)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const ALL = type('Microsoft.Insights/scheduledQueryRules');
+    expect(arrivalRules(staging)).toEqual([]);
+    // Every such alert on the apps' logs has its band: none judges by a line's own time alone.
+    const counting = staging.predictedResources.filter(
+      (alert) =>
+        ALL(alert) &&
+        String(at(alert.properties, 'criteria', 'allOf', '0', 'query')).startsWith('ContainerAppConsoleLogs') &&
+        at(alert.properties, 'windowSize') === at(alert.properties, 'evaluationFrequency'),
+    );
+    expect(counting.length).toBeGreaterThan(15);
+    for (const alert of counting) {
+      expect(String(at(alert.properties, 'criteria', 'allOf', '0', 'query'))).toMatch(
+        /\| where ingestion_time\(\) > ago\(/,
+      );
+    }
+    const banded = (from: RegExp | string, to: string) => (alert: Mutable) => {
+      criterion(alert).query = String(criterion(alert).query).replace(from, to);
+    };
+    for (const change of [
+      // No band, a band shorter than its interval, or no two days read back for late lines.
+      banded('where ingestion_time() > ago(10m) | ', ''),
+      banded('ingestion_time() > ago(10m)', 'ingestion_time() > ago(4m)'),
+      banded('ingestion_time() > ago(10m)', 'TimeGenerated > ago(10m)'),
+      (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
+    ]) {
+      expect(arrivalRules(changed(INTEGRITY_ALERT, change))).toEqual([
+        String(staging.predictedResources.find(INTEGRITY_ALERT)?.name),
+      ]);
+    }
+    // A window longer than its interval is the dead-man alerts' shape, judged by its own rule.
+    expect(arrivalRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).windowSize = 'PT15M')))).toEqual([]);
+  });
+
   it("audit-integrity-alert: no alert on the integrity alarm, or one that can't fire, or fires too late or too quietly", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
@@ -4221,7 +4272,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // The rule's query names exactly the copier's list, every line of it.
     expect(
       String(at(staging.predictedResources.find(LOGIN_SERVICE_ALERT)?.properties, 'criteria', 'allOf', '0', 'query')),
-    ).toBe(`ContainerAppConsoleLogs | ${listed(LOGIN_SERVICE_ALERT_EVENTS)} | summarize Events = count()`);
+    ).toBe(
+      `ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | ${listed(LOGIN_SERVICE_ALERT_EVENTS)} | summarize Events = count()`,
+    );
     for (const change of [
       ...LOGIN_SERVICE_ALERT_EVENTS.map((left) =>
         counted(listed(LOGIN_SERVICE_ALERT_EVENTS.filter((event) => event !== left))),

@@ -63,6 +63,7 @@ export type RuleId =
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
+  | 'alert-arrival'
   | 'alert-runbook'
   | 'alert-delivery'
   | 'alert-rules-watch'
@@ -1328,6 +1329,20 @@ export function kqlStages(query: string): string[] {
   return stages;
 }
 
+/** An arrival band's stage (`where ingestion_time() > ago(30m)`), and its minutes; rule alert-arrival holds it. */
+const ARRIVAL_STAGE = /^where ingestion_time\(\) > ago\((\d+)([mhd])\)$/;
+
+/**
+ * The stages a rule's own check compares: the arrival band left out unless the check names one itself, as rule
+ * alert-arrival holds every line-counting alert's band (S206).
+ */
+const comparedStages = (query: unknown, filters: readonly string[]): string[] => {
+  const stages = kqlStages(String(query));
+  return filters.some((filter) => ARRIVAL_STAGE.test(filter))
+    ? stages
+    : stages.filter((stage) => !ARRIVAL_STAGE.test(stage));
+};
+
 /**
  * The one column a query's final `summarize Name = aggregation(…)` produces, or
  * undefined if the query ends otherwise, makes more than one column, or groups
@@ -1359,7 +1374,7 @@ export function singleSummaryColumn(query: string): string | undefined {
  * container's name before the words are read. Undefined for any other shape.
  */
 function saysCountColumn(criterion: unknown): string | undefined {
-  const stages = kqlStages(String(at(criterion, 'query')));
+  const stages = comparedStages(at(criterion, 'query'), []);
   const own = SAYS_FROM_OWN.exec(stages.at(-3) ?? '');
   const counted = /^summarize ([A-Za-z_][A-Za-z0-9_]*) = count\(\) by Says$/.exec(stages.at(-1) ?? '');
   const containers = own?.[1]?.split(', ') ?? [];
@@ -1396,7 +1411,7 @@ const totals = (criterion: unknown): boolean => at(criterion, 'timeAggregation')
  * the same stages, in order, whatever the spacing around its pipes.
  */
 const queryIs = (query: unknown, table: string, filters: readonly string[], aggregation: string): boolean => {
-  const stages = kqlStages(String(query));
+  const stages = comparedStages(query, filters);
   const last = stages.at(-1) ?? '';
   return (
     stages.length === filters.length + 2 &&
@@ -3406,8 +3421,50 @@ const ALERT_WINDOWS = new Set(
   ),
 );
 
+/** An ISO 8601 duration of days, hours or minutes (`P2D`, `PT1H`, `PT15M`) in minutes; NaN for any other. */
+const minutesOf = (duration: unknown): number => {
+  const found = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(String(duration));
+  if (found === null || String(duration) === 'P' || String(duration).endsWith('T')) return Number.NaN;
+  const [, days = '0', hours = '0', minutes = '0'] = found;
+  return Number(days) * 1440 + Number(hours) * 60 + Number(minutes);
+};
+
+/** The minutes of a query's arrival band, or undefined for a query with none. */
+const arrivalMinutes = (query: unknown): number | undefined => {
+  const band = kqlStages(String(query))
+    .map((stage) => ARRIVAL_STAGE.exec(stage))
+    .find((found) => found !== null);
+  if (band === undefined) return undefined;
+  const [, count = '0', unit = 'm'] = band;
+  return Number(count) * ({ m: 1, h: 60, d: 1440 } as const)[unit as 'm' | 'h' | 'd'];
+};
+
+/**
+ * Rule alert-arrival (S206): an alert counting the apps' log lines over a window no longer than its interval judges each
+ * line by when it arrived, not its own time. The container tables arrive 4-9 minutes late (S33), and later behind the
+ * daily cap: judged by its own time, a line landing after its window was read is never seen. So each such query keeps
+ * the lines that arrived within at least its interval (`where ingestion_time() > ago(...)`), reading the two days
+ * before its run (overrideQueryTimeRange) for them.
+ */
+const judgesOnArrival = (alert: PredictedResource, add: (problem: Problem) => void): void => {
+  const criteria = list(at(alert.properties, 'criteria', 'allOf'));
+  const every = minutesOf(at(alert.properties, 'evaluationFrequency'));
+  const reads = criteria.some((criterion) => String(at(criterion, 'query')).includes('ContainerAppConsoleLogs'));
+  if (!reads || minutesOf(at(alert.properties, 'windowSize')) > every) return;
+  const banded = criteria.every((criterion) => (arrivalMinutes(at(criterion, 'query')) ?? 0) >= every);
+  if (!banded || at(alert.properties, 'overrideQueryTimeRange') !== 'P2D') {
+    add({
+      rule: 'alert-arrival',
+      resource: alert.name,
+      message:
+        "counts the apps' log lines over a window no longer than its interval, so it must keep the lines that arrived within at least that interval (where ingestion_time() > ago(...)) and read two days back for them (overrideQueryTimeRange P2D): lines arrive 4-9 minutes late, and one judged by its own time after its window was read is never seen",
+    });
+  }
+};
+
 const alertRules: Check = (snapshot, expected, add) => {
   for (const alert of ofType(snapshot, TYPES.alert)) {
+    judgesOnArrival(alert, add);
     if (!ALERT_WINDOWS.has(String(at(alert.properties, 'windowSize')))) {
       add({
         rule: 'alert-window',
@@ -3694,7 +3751,7 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion) =>
         saysCountColumn(criterion) !== undefined &&
-        kqlStages(String(at(criterion, 'query')))[1] === ERROR_LINES &&
+        comparedStages(at(criterion, 'query'), [])[1] === ERROR_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
         // One error is enough, in every environment: a record past its event cap logs one and refuses the action (PL-41).
         at(criterion, 'threshold') === 0,
@@ -3721,7 +3778,7 @@ const dailyWordsAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         saysCountColumn(criterion) !== undefined &&
-        kqlStages(String(at(criterion, 'query')))[1] === PROBLEM_LINES &&
+        comparedStages(at(criterion, 'query'), [])[1] === PROBLEM_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         totals(criterion) &&
