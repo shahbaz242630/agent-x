@@ -11,8 +11,10 @@
 #   trusts only in GitHub's `staging-whatif` environment (main only) and which
 #   can only read (Reader on the resource group, deployers/staging-access.bicep):
 #   nothing new in Azure
-# - its three IDs are that environment's variables, masked as the plan masks
-#   them; the log names the door's shape alone, never its host
+# - its three IDs are that environment's secrets (AZURE_CLIENT_ID,
+#   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID), never variables, which a step's
+#   env prints in the public log (S68); masked as well. The log names the
+#   door's shape alone, never its host
 # - one at a time; a run waiting behind another is dropped for the newer
 name: Console watch (staging)
 
@@ -52,13 +54,13 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
+          TENANT: ${{ secrets.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
             if [ -z "${id}" ]; then
-              echo "::error::One of staging-whatif's three Azure IDs (client, tenant, subscription) is not set, so the auth door was not read. Set it in GitHub: Settings, Environments, staging-whatif, Variables; then run this workflow again."
+              echo "::error::One of staging-whatif's three Azure IDs (client, tenant, subscription) is not set, so the auth door was not read. Set it as a secret of staging-whatif (Settings, Environments, staging-whatif, Environment secrets: never a variable, which the public log prints); then run this workflow again."
               exit 1
             fi
             echo "::add-mask::${id}"
@@ -66,9 +68,9 @@ jobs:
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Read the auth door
         run: node deploy/azure/console-watch.ts
