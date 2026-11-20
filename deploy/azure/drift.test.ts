@@ -338,7 +338,7 @@ describe("staging's apps.bicep, as the pinned Bicep snapshots it", () => {
       'AzureManagedDomain.mailFromSenderDomain': `${GUID}.azurecomm.net`,
       'shell AGENTX_AZURE_APP_HOST': 'app.example.com',
       'shell AGENTX_AZURE_AUTH_HOST': 'auth.example.com',
-      'shell AGENTX_AZURE_API_OIDC_CLIENT_ID': '338719472394810051',
+      'shell AGENTX_AZURE_API_OIDC_CLIENT_ID': 'stand-in-client-id',
     };
     const filled = (parts: Readonly<ReturnType<typeof partsOf>>): string =>
       parts

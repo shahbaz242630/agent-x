@@ -78,6 +78,7 @@ beforeEach(() => {
     database: app,
     keys,
     ids,
+    clock,
     logger: testLogger(new LogCapture()),
     directory: undefined,
   });

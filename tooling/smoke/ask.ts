@@ -6,7 +6,13 @@ import { setTimeout as sleep } from 'node:timers/promises';
 /** A fetch that answers, or throws on a dropped line. */
 type Fetch = (
   url: string,
-  init: { method?: string; headers: Record<string, string>; body?: string; signal: AbortSignal },
+  init: {
+    method?: string;
+    headers: Record<string, string>;
+    body?: string;
+    redirect?: 'manual';
+    signal: AbortSignal;
+  },
 ) => Promise<Response>;
 
 /** How the requests reach staging and wait, real by default. */
@@ -33,7 +39,7 @@ export const REAL: Ways = {
  */
 export async function askAwake(
   url: string,
-  init: { method?: string; headers: Record<string, string>; body?: string },
+  init: { method?: string; headers: Record<string, string>; body?: string; redirect?: 'manual' },
   { fetcher, now, wakeMs, pause }: Ways,
 ): Promise<{ readonly answer: Response } | { readonly waited: string }> {
   const until = now().getTime() + wakeMs;

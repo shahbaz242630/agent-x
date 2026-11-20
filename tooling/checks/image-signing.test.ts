@@ -107,17 +107,22 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     );
     // The release job and the job-start watch ask for a token too, but Azure's (release-job.test.ts): they push
     // nothing and sign nothing, and a signature from any workflow but SIGNING_WORKFLOW fails the deploy check.
-    expect(holding('id-token').sort()).toEqual([
-      `${SIGNING_WORKFLOW}: image-attest`,
-      `${SIGNING_WORKFLOW}: image-publish`,
-      '.github/workflows/job-starts.yml: watch',
-      `${LOAD_SIGNER.workflow}: load-image-attest`,
-      `${LOAD_SIGNER.workflow}: load-image-publish`,
-      // AZ5: the infrastructure plan and its approved deploy, Azure's tokens too.
-      `${RELEASE_WORKFLOW}: infra-deploy`,
-      `${RELEASE_WORKFLOW}: infra-plan`,
-      `${RELEASE_WORKFLOW}: release`,
-    ]);
+    expect(holding('id-token').sort()).toEqual(
+      [
+        `${SIGNING_WORKFLOW}: image-attest`,
+        `${SIGNING_WORKFLOW}: image-publish`,
+        '.github/workflows/job-starts.yml: watch',
+        `${LOAD_SIGNER.workflow}: load-image-attest`,
+        `${LOAD_SIGNER.workflow}: load-image-publish`,
+        // AZ5: the infrastructure plan and its approved deploy, Azure's tokens too.
+        `${RELEASE_WORKFLOW}: infra-deploy`,
+        `${RELEASE_WORKFLOW}: infra-plan`,
+        `${RELEASE_WORKFLOW}: release`,
+        // PL-26: the console watch, and the weekly certificate check, as the infrastructure plan's read-only identity.
+        '.github/workflows/console-watch.yml: watch',
+        '.github/workflows/security-weekly.yml: certificates',
+      ].sort(),
+    );
     // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.
     expect(
       releaseSteps('release').some((step) =>
