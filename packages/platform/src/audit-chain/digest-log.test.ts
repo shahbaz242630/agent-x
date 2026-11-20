@@ -608,6 +608,24 @@ describe('the digest within its memory: one organisation’s growth never stops 
     expect(restarted.log.covers(OTHER, 3n)).toBe(true);
   });
 
+  it('a chain whose payments gave way writes no coverage past what it held whole: a restart walks it again', async () => {
+    const { log, fake, time } = digestOn(undefined, { mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
+    await log.flush();
+    log.record(CHAIN, requests(400), START);
+    // A walk read from its first event after it gave way: true of what is held, not of the payments let go.
+    log.record(CHAIN, new Map(), START, stretch(0n, 600n));
+    expect(log.covers(CHAIN, 600n)).toBe(true);
+    time.held.at += 2 * HOUR;
+    await log.flush();
+    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024 });
+    await restarted.log.read();
+    // Its snapshot carries no coverage at all: uncovered, to be walked again from its first event.
+    expect(restarted.log.covers(CHAIN, 4n)).toBe(false);
+    expect(restarted.log.covers(CHAIN, 600n)).toBe(false);
+  });
+
   it('says it is past half, once', async () => {
     const capture = new LogCapture();
     const { log } = digestOn(undefined, { capture, mostBytes: 16_000 });

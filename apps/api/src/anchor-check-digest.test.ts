@@ -164,11 +164,13 @@ describe('the anchor check keeping the signed states’ digest (AT13)', () => {
     // Tx A asks to 9: not covered, so it waits (digest_pending), this organisation alone.
     expect(after.digest.covers(CHAIN, 9n)).toBe(false);
     expect(after.digest.coverage(CHAIN)?.seq).toBe(5n);
+    // The chain has grown meanwhile: its turn walks 9 to 12 and anchors there, which joins nothing below 9.
+    report.current = walk(12n, new Map([[subjectKey('agent', AGENT), 11n]]));
     await after.check.run();
-    // Its turn compares with the anchor, then walks on from where the digest is covered: 5.
+    // Then, still not covered, it walks on from where the digest is covered: 5.
     expect(walkedFrom).toEqual([9n, 5n]);
-    expect(after.digest.covers(CHAIN, 9n)).toBe(true);
-    expect(after.digest.latest(CHAIN, 'agent', AGENT)).toBe(8n);
+    expect(after.digest.covers(CHAIN, 12n)).toBe(true);
+    expect(after.digest.latest(CHAIN, 'agent', AGENT)).toBe(11n);
   });
 
   it('a catch-up walk that fails is the alarm, and leaves the chain uncovered', async () => {
