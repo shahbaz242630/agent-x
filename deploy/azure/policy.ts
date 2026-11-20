@@ -91,6 +91,7 @@ export type RuleId =
   | 'daily-check-alert'
   | 'full-pass-alert'
   | 'integrity-runs-alert'
+  | 'security-seal-alert'
   | 'records-filling-alert'
   | 'dead-man-alerts'
   | 'agent-cancels-alert'
@@ -4120,6 +4121,48 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
   }
 };
 
+/**
+ * The security records' seal shortfall (S206 V6, R-15): each day's highest tallied count before its seal against the
+ * count sealed, per log (the global table, or an organisation), counted where a day was sealed with fewer.
+ */
+export const SECURITY_SEAL_SHORTFALL_LINES = [
+  'where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed")',
+  'extend Line = parse_json(Log)',
+  `summarize Tallied = maxif(toint(Line['rows']), tostring(Line['event']) == "security_seal.tally"), Sealed = maxif(toint(Line['requests']), tostring(Line['event']) == "security_events.sealed"), Seals = countif(tostring(Line['event']) == "security_events.sealed") by Chain = tostring(Line['orgId']), Day = tostring(Line['day'])`,
+  'where Seals > 0 and Tallied > Sealed',
+] as const;
+
+/**
+ * An enabled SEV-1 alert on the workspace fires on any security records' day sealed with fewer rows than were tallied,
+ * looking back two days (a day's tallies and its seal can be a day and a half apart), checked at least hourly.
+ */
+const securitySealAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', SECURITY_SEAL_SHORTFALL_LINES, 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        at(alert.properties, 'severity') === 1 &&
+        at(alert.properties, 'windowSize') === 'P2D' &&
+        at(alert.properties, 'evaluationFrequency') === 'PT1H' &&
+        at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+        at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
+    );
+    if (!alerted) {
+      add({
+        rule: 'security-seal-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled SEV-1 alert on this deployment's workspace that fires on any security records' day sealed with fewer rows than its tallies counted, looking back two days, checked hourly, firing on the first window",
+      });
+    }
+  }
+};
+
 /** An enabled alert on the workspace fires on any organisation's records filling (partner S170). */
 const recordsFillingAlert = anyLineAlert('records-filling-alert', RECORDS_FILLING_LINES, 'identity.records_filling');
 
@@ -6675,6 +6718,7 @@ const CHECKS: readonly Check[] = [
   dailyCheckAlert,
   fullPassAlert,
   integrityRunsAlert,
+  securitySealAlert,
   recordsFillingAlert,
   deadManAlerts,
   agentCancelsAlert,

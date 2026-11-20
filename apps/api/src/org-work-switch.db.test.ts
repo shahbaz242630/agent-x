@@ -126,7 +126,7 @@ function switchedHandoff(
       waitsAsAWhole: handOffs.waitsAsAWhole,
       ...(runBudgetMs === undefined ? {} : { runBudgetMs }),
       database: db,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -166,7 +166,7 @@ function switchedChecks({
         checks.dueBy(orgId, at);
       },
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -236,7 +236,7 @@ beforeEach(async () => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -479,7 +479,7 @@ describe('the hand-off follows its marks', () => {
         },
         sweepList: () => Promise.resolve([]),
         database: app,
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         rail: w.rail,
         keys,
         ids,
@@ -538,7 +538,7 @@ describe('the hand-off follows its marks', () => {
         return swept === 1 ? Promise.reject(new Error('no marks')) : Promise.resolve([w.org]);
       },
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,

@@ -316,6 +316,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     holdingsCheckAlertName: names.holdingsCheck
     // Named here, not in names.bicep, so only foundation reads it (Phase 2 E2c).
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
+    // S206 V6: security records deleted before their day's seal.
+    securitySealAlertName: 'alert-agentx-${short}-security-seal'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
     agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
     decisionsSuppressedAlertName: 'alert-agentx-${short}-decisions-suppressed'

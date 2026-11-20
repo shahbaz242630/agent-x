@@ -164,8 +164,10 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(code).toBe(0);
     expect(events).toEqual(['operator.audit_exported']);
     const after = await eventsOf(orgId);
-    expect(after).toHaveLength(before.length + 1);
-    expect(after.at(-1)).toMatchObject({
+    // The export's record, then the record of the notice it queued (S206 V4).
+    expect(after).toHaveLength(before.length + 2);
+    expect(after.at(-1)).toMatchObject({ action: 'notice.queued', actor_id: 'notifications' });
+    expect(after.at(-2)).toMatchObject({
       id: request.exportId,
       actor_type: 'system',
       actor_id: 'operator',
@@ -250,8 +252,8 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
     expect(await eventsOf(orgId)).toEqual(recorded);
     expect(await noticesOf(orgId)).toHaveLength(1);
     expect(await platformExportsOf(orgId)).toHaveLength(1);
-    // The same events, to the same seq: the record's, not the log's newest.
-    expect(fileOf(request).trimEnd().split('\n')).toHaveLength(recorded.length - 1);
+    // The same events, to the same seq: the record's, not the log's newest (the notice's record after it, S206 V4).
+    expect(fileOf(request).trimEnd().split('\n')).toHaveLength(recorded.length - 2);
   });
 
   it.each([
@@ -336,7 +338,8 @@ describe(`E10c the operator's audit export for a case (Postgres ${server.version
       'the range holds more than 3 events: export it in parts, each its own request',
     ]);
     expect(at.code).toBe(0);
-    expect(await eventsOf(orgId)).toHaveLength(5);
+    // The four, the export's record and its notice's (S206 V4).
+    expect(await eventsOf(orgId)).toHaveLength(6);
   });
 
   it('refuses an organisation that isn’t there, recording nothing', async () => {

@@ -18,13 +18,17 @@
 //   transaction, never to the global one: a batch is one organisation's
 //   events or none's, so each write is whole. `sweepOrganisation` deletes one
 //   organisation's past their retention, inside its transaction too.
+// - Each row is written with its MAC (0105, S206 V6; event-seals.ts), made
+//   here: the write stays one INSERT, with no lock beyond its own rows.
 //
 // Each runs in a transaction of its own whose statements give up after 10
 // seconds, a wait for a lock included.
 import { limitStatements, withTenant } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator, isIpAddress, UUID } from '../../../shared-kernel/index.ts';
+import { eventMac } from './event-seals.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 export const SECURITY_EVENT_KINDS = [
@@ -113,16 +117,46 @@ function problemWith(event: SecurityEvent, now: Date): string | undefined {
 export function createSecurityEvents({
   ids,
   clock,
+  keys,
   retentionDays,
 }: {
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  /** Holds `session-mac`, each row's MAC's key. */
+  readonly keys: KeyProvider;
   /** How long an event is kept: AGENTX_SECURITY_EVENT_RETENTION_DAYS. */
   readonly retentionDays: number;
 }): SecurityEvents {
   if (!Number.isSafeInteger(retentionDays) || retentionDays < LEAST_RETENTION_DAYS) {
     throw new RangeError(`security events are kept at least ${String(LEAST_RETENTION_DAYS)} whole days`);
   }
+
+  /** The row of `event` as written at `now` for the organisation (null for none), with its MAC: all but its agent's. */
+  const rowOf = (event: SecurityEvent, orgId: string | null, now: Date) => {
+    const facts = {
+      id: ids.next(),
+      orgId,
+      kind: event.kind,
+      reason: event.reason,
+      ip: event.ip !== undefined && isIpAddress(event.ip) ? event.ip : null,
+      userId: event.userId ?? null,
+      agentId: event.agentId ?? null,
+      windowStart: event.windowStart,
+      count: event.count,
+      createdAt: now,
+    };
+    return {
+      id: facts.id,
+      kind: facts.kind,
+      reason: facts.reason,
+      ip: facts.ip,
+      user_id: facts.userId,
+      window_start: facts.windowStart,
+      count: facts.count,
+      created_at: now,
+      ...eventMac(keys, facts),
+    };
+  };
 
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(db: Kysely<SecurityEventsTables>, work: (tx: Kysely<SecurityEventsTables>) => Promise<T>) =>
@@ -157,15 +191,8 @@ export function createSecurityEvents({
               .values(
                 events.map((event) => ({
                   org_id: orgId.toLowerCase(),
-                  id: ids.next(),
-                  kind: event.kind,
-                  reason: event.reason,
-                  ip: event.ip !== undefined && isIpAddress(event.ip) ? event.ip : null,
-                  user_id: event.userId ?? null,
                   agent_id: event.agentId ?? null,
-                  window_start: event.windowStart,
-                  count: event.count,
-                  created_at: now,
+                  ...rowOf(event, orgId, now),
                 })),
               )
               .execute(),
@@ -176,18 +203,8 @@ export function createSecurityEvents({
       await limited(db, (tx) =>
         tx
           .insertInto('security.events')
-          .values(
-            events.map((event) => ({
-              id: ids.next(),
-              kind: event.kind,
-              reason: event.reason,
-              ip: event.ip !== undefined && isIpAddress(event.ip) ? event.ip : null,
-              user_id: event.userId ?? null,
-              window_start: event.windowStart,
-              count: event.count,
-              created_at: now,
-            })),
-          )
+          // The global table has no agent column: an agent is always an organisation's (ownerProblem).
+          .values(events.map((event) => rowOf(event, null, now)))
           .execute(),
       );
     },

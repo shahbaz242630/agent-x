@@ -268,7 +268,7 @@ beforeEach(() => {
   changes = createSupplierPayeeChanges({
     ...services,
     challenges: challenges(),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
   });
 });
 
@@ -480,7 +480,7 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
       clock,
       logger: testLogger(),
       challenges: challenges(),
-      outbox: { ...createOutbox({ ids, clock }), add: () => Promise.reject(new Error('the outbox is down')) },
+      outbox: { ...createOutbox({ ids, clock, keys }), add: () => Promise.reject(new Error('the outbox is down')) },
     });
 
     await expect(confirm(admin, id, challengeId)).rejects.toThrow('the outbox is down');

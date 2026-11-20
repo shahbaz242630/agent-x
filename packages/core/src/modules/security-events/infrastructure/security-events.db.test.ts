@@ -2,10 +2,21 @@
 // written a batch at a time, refused whole when anything in the batch is
 // malformed, and swept once past the retention period, oldest first.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
-import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
+import { createKeyProvider } from '@agentx/platform/keys';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
+import { v7Floor } from '../../activity/index.ts';
+import { eventMac } from './event-seals.ts';
 import {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
@@ -22,6 +33,9 @@ let app: Database<SecurityEventsTables>;
 const START = new Date('2026-09-24T09:00:00Z');
 const RETENTION = 90;
 const ids = new SequentialIds(0x5ec0);
+const keys = createKeyProvider({ 'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 9)]]) } }, [
+  'session-mac',
+]);
 
 const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
   kind: 'sign_in_failed',
@@ -33,8 +47,15 @@ const event = (change: Partial<SecurityEvent> = {}): SecurityEvent => ({
   ...change,
 });
 
+let made = 0;
+/** A UUIDv7 of the instant `ms`, as a row written then has (the admins' page holds each row's ID to its time, S206 V6). */
+const idAt = (ms: number) => {
+  made += 1;
+  return `${v7Floor(ms).slice(0, 14)}7000-8000-${made.toString(16).padStart(12, '0')}`;
+};
+
 const at = (ms: number, retentionDays = RETENTION) =>
-  createSecurityEvents({ ids, clock: new FixedClock(new Date(ms)), retentionDays });
+  createSecurityEvents({ ids: { next: () => idAt(ms) }, clock: new FixedClock(new Date(ms)), keys, retentionDays });
 
 const all = () => app.selectFrom('security.events').selectAll().orderBy('created_at').orderBy('reason').execute();
 
@@ -251,9 +272,68 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
   const limited = (reason: string, change: Partial<SecurityEvent> = {}) =>
     event({ kind: 'rate_limited', reason, ...change });
 
+  /** Each row's MAC checked, every row written by the app having one (S206 V6): none is believed without. */
+  let capture = new LogCapture();
+  const checked = () => ({ keys, logger: testLogger(capture) });
+
   /** One organisation's page, read inside its own transaction as the admins' route reads it. */
   const pageOf = (orgId: string, asked: Partial<OrgEventsToRead> = {}) =>
-    withTenant(app, orgId, (tx) => orgSecurityEventsPage(tx, orgId, { ...RANGE, ...asked }));
+    withTenant(app, orgId, (tx) => orgSecurityEventsPage(tx, orgId, { ...RANGE, ...asked }, checked()));
+
+  it('leaves off the page a row planted or edited by the database’s owner, the alarm raised for each (S206 V6)', async () => {
+    await emptyOrgs();
+    capture = new LogCapture();
+    await at(START.getTime()).record(app, [
+      limited('per_user', { userId: PERSON, orgId: ORG_A, windowStart: new Date(START.getTime() - 60_000) }),
+      limited('per_agent', { agentId: AGENT, orgId: ORG_A, windowStart: new Date(START.getTime() - 120_000) }),
+    ]);
+    const owner = database.as('admin');
+    // The owner's first step: 0105's rule that every row written carries a MAC dropped, to plant one without.
+    await owner.query('alter table security.org_events drop constraint if exists org_event_mac_required');
+    await owner.query("update security.org_events set count = 99 where reason = 'per_agent'");
+    const planted = ids.next();
+    await owner.query(
+      `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at)
+       values ($1, $2, 'rate_limited', 'per_user', '198.51.100.9', null, null, $3, 7, $3)`,
+      [ORG_A, planted, new Date(START.getTime() - 180_000)],
+    );
+    // A row whose MAC holds but whose ID was made a year before it says it was written: one the seal never reaches.
+    const misdated = idAt(START.getTime() - 365 * DAY_MS);
+    const misdatedRow = {
+      id: misdated,
+      orgId: ORG_A,
+      kind: 'rate_limited',
+      reason: 'per_user',
+      ip: null,
+      userId: null,
+      agentId: null,
+      windowStart: new Date(START.getTime() - 150_000),
+      count: 1,
+      createdAt: START,
+    };
+    const { mac, mac_key_version } = eventMac(keys, misdatedRow);
+    await owner.query(
+      `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at, mac, mac_key_version)
+       values ($1, $2, 'rate_limited', 'per_user', null, null, null, $3, 1, $4, $5, $6)`,
+      [ORG_A, misdated, misdatedRow.windowStart, START, mac, mac_key_version],
+    );
+
+    const page = await pageOf(ORG_A, { limit: 2 });
+    expect(page.rows.map(({ reason }) => reason)).toEqual(['per_user']);
+    // Where the rows read end: the next page starts past the edited one, never reading it twice.
+    expect(page.next?.at).toEqual(new Date(START.getTime() - 120_000));
+    expect((await pageOf(ORG_A, { limit: 2, before: page.next ?? undefined })).rows).toEqual([]);
+    expect(
+      capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed')
+        .map(({ check, reason, rowId, orgId }) => ({ check, reason, rowId, orgId })),
+    ).toEqual([
+      { check: 'security_event', reason: 'mac', rowId: expect.any(String) as unknown, orgId: ORG_A },
+      { check: 'security_event', reason: 'misdated', rowId: misdated, orgId: ORG_A },
+      { check: 'security_event', reason: 'mac', rowId: planted, orgId: ORG_A },
+    ]);
+  });
 
   /** Each test starts with no organisation's events: each organisation's sweep far in the future takes them all. */
   async function emptyOrgs(): Promise<void> {
@@ -307,7 +387,7 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
     expect((await pageOf(ORG_A)).rows.map(({ reason }) => reason)).toEqual(['per_user']);
     expect((await pageOf(ORG_B)).rows.map(({ reason }) => reason)).toEqual(['per_agent']);
     // B's own ID asked inside A's transaction: the wall is the database's, not the query's.
-    expect((await withTenant(app, ORG_A, (tx) => orgSecurityEventsPage(tx, ORG_B, RANGE))).rows).toEqual([]);
+    expect((await withTenant(app, ORG_A, (tx) => orgSecurityEventsPage(tx, ORG_B, RANGE, checked()))).rows).toEqual([]);
   });
 
   it('reaches no row with no organisation set, and refuses a row written for another or a change', async () => {

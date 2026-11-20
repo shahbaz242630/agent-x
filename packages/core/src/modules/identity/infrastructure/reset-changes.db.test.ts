@@ -292,6 +292,8 @@ const lastEvent = (org: string) =>
     tx
       .selectFrom('audit.events')
       .select(['action', 'actor_id', 'details'])
+      // The change's own, not the record of a notice it queued (S206 V4).
+      .where('action', '!=', 'notice.queued')
       .orderBy('seq', 'desc')
       .limit(1)
       .executeTakeFirstOrThrow(),
@@ -325,7 +327,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
 });
@@ -726,7 +728,7 @@ describe(`a contact confirming it by its link (B6-3b-3, Postgres ${server.versio
       keys,
       ids,
       clock,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(capture),
     });
   };

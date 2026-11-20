@@ -12,8 +12,9 @@
 //    A caller holding only a key's ID is refused here, never taking a place in
 //    that share, a lock or a brake's wait, so it can't slow the organisation's
 //    agents. An ID not listed is read for under no organisation and compared
-//    with a MAC of zeros: the same trip, the same one verifyMac, so how long
-//    the answer takes doesn't tell a listed ID. Only the steps below are
+//    with a MAC of zeros: the same trip, the same one verifyMac. What differs
+//    is only the database finding a row or none, within the trip's own noise.
+//    Only the steps below are
 //    believed: the row read here grants nothing. The row is judged against its
 //    newest signed event's pointer, version and seal first (one local HMAC,
 //    and one over zeros for an ID not listed); a row that disagrees is never

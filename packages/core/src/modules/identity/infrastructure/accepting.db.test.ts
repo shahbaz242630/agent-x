@@ -183,7 +183,7 @@ beforeEach(() => {
     keys,
     ids,
     clock,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
 });
