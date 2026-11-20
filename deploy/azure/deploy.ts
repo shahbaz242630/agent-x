@@ -65,6 +65,7 @@ import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/l
 import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/machine-id-header.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
 import { type ConsoleState, consolePatch, consoleStateOf } from './auth-door.ts';
+import { expiryLine, expiryProblems } from './secret-expiry.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
 const CREATED_ONCE: readonly string[] = [...APP_KEYS, ...PUBLIC_HALVES.values()];
@@ -2051,6 +2052,8 @@ interface Listed {
   readonly version: string;
   /** False only when Azure says so: a disabled secret can't be read by the app that holds its URL. */
   readonly enabled: boolean;
+  /** Its expiry date (`attributes.exp`, PL-25), when the vault holds one. */
+  readonly expires?: number;
 }
 
 /**
@@ -2065,12 +2068,14 @@ function secretsInVault(steps: Steps, subscription: string, vault: string): List
   ).map((secret) => {
     const listed = secret as {
       name?: unknown;
-      properties?: { secretUriWithVersion?: unknown; attributes?: { enabled?: unknown } };
+      properties?: { secretUriWithVersion?: unknown; attributes?: { enabled?: unknown; exp?: unknown } };
     };
+    const expires = listed.properties?.attributes?.exp;
     return {
       name: text(listed.name),
       version: text(listed.properties?.secretUriWithVersion),
       enabled: listed.properties?.attributes?.enabled !== false,
+      ...(typeof expires === 'number' ? { expires } : {}),
     };
   });
 }
@@ -2218,15 +2223,19 @@ async function deploySecrets(steps: Steps, plan: SecretPlan, server?: ServerSaid
     existing.map((listed) => listed.name),
   );
   checkPolicy(steps, values);
+  const started = steps.now();
   if ((await sendWithWhatIf(steps, subscription, 'secrets', values)) === undefined) return 1;
   const now = secretsInVault(steps, subscription, vault);
+  // PL-25: each secret with its expiry date, read back; one this run wrote must carry the schedule's.
   steps.terminal.say('Deployed. The vault now holds:');
-  for (const secret of now.map((listed) => listed.name).sort()) steps.terminal.say(`  ${secret}`);
-  const problems = keyProblems(existing, now);
+  for (const secret of now.toSorted((one, other) => Number(one.name > other.name) - Number(one.name < other.name))) {
+    steps.terminal.say(expiryLine(secret));
+  }
+  const problems = [...keyProblems(existing, now), ...expiryProblems(existing, now, started, steps.now())];
   for (const problem of problems) steps.terminal.say(problem);
   if (problems.length > 0) return 1;
   steps.terminal.say(
-    `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
+    `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again. Every secret this run wrote carries the schedule's expiry date (secret-expiry.json).`,
   );
   // Recorded only once the keys are sound: a release on a vault missing one would start an API that can't.
   const recorded = leaveRecord(steps, subscription, 'secrets', commit);

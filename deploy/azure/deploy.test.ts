@@ -78,6 +78,7 @@ import {
   VAULT_SECRETS,
 } from './deploy.ts';
 import type { Checkout } from './git.ts';
+import { expiryFor, periodOf } from './secret-expiry.ts';
 import type { MigrationState } from './migration-state.ts';
 import { policyProblems } from './policy.ts';
 import {
@@ -817,17 +818,33 @@ interface Call {
   readonly values?: Readonly<Record<string, string>>;
 }
 
-/** A secret in the vault: its name, or its name and current version. */
-type Held = string | { readonly name: string; readonly version: string; readonly disabled?: boolean };
+/** The clock every run here reads (`run`'s steps). */
+const RUNS_AT = '2026-09-16T16:42:15Z';
 
-/** How the vault lists a secret: its name and its current version's URL, never its value. */
+/**
+ * A secret in the vault: its name, or its name and current version, and its expiry date when not the one the schedule
+ * gives a secret written at the runs' clock (PL-25; null: none).
+ */
+type Held =
+  | string
+  | { readonly name: string; readonly version: string; readonly disabled?: boolean; readonly expires?: number | null };
+
+/** The expiry the schedule gives a secret written at the runs' clock (`run`'s now), or none. */
+const scheduled = (name: string): number | undefined => {
+  const period = periodOf(name);
+  return period === undefined || period === '' ? undefined : expiryFor(period, new Date(RUNS_AT));
+};
+
+/** How the vault lists a secret: its name, its current version's URL and its expiry date, never its value. */
 const listed = (held: Held) => {
-  const { name, version, disabled } = typeof held === 'string' ? { name: held, version: '1', disabled: false } : held;
+  const { name, version, disabled, expires } =
+    typeof held === 'string' ? { name: held, version: '1', disabled: false, expires: undefined } : held;
+  const exp = expires === undefined ? scheduled(name) : (expires ?? undefined);
   return {
     name,
     properties: {
       secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}`,
-      attributes: { enabled: disabled !== true },
+      attributes: { enabled: disabled !== true, ...(exp === undefined ? {} : { exp }) },
     },
   };
 };
@@ -1389,7 +1406,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
       return scenario.planned ?? [];
     },
     rangesCurrent: () => scenario.rangesCurrent ?? true,
-    now: () => new Date('2026-09-16T16:42:15Z'),
+    now: () => new Date(RUNS_AT),
     sleep: () => Promise.resolve(),
     makers: quickMakers(),
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
@@ -2095,11 +2112,21 @@ describe('deploy secrets', () => {
     // Our login lists go as none (SA2b), a word, not a secret, which the run's own lines use.
     expect(values.AGENTX_AZURE_ZITADEL_OUR_ACTORS).toBe(NO_LOGIN_IDS);
     done.terminal.neverSaid(Object.values(values).filter((value) => value !== NO_LOGIN_IDS));
+    // PL-25: each with its expiry date, read back: a year or two from the first of the run's month, or none.
     expect(done.terminal.said.slice(-(everything.length + 2), -2)).toEqual(
-      [...everything].sort().map((name) => `  ${name}`),
+      [...everything].sort().map((name) => {
+        const due = scheduled(name);
+        const said =
+          due === undefined ? 'no expiry date' : 'expires ' + new Date(due * 1000).toISOString().slice(0, 10);
+        return `  ${name}: ${said}`;
+      }),
     );
+    expect(done.terminal.said).toContain('  db-app-password: expires 2027-09-01');
+    expect(done.terminal.said).toContain('  key-audit-mac-v1: expires 2028-09-01');
+    expect(done.terminal.said).toContain('  key-payee-index-v1: no expiry date');
+    expect(done.terminal.said).toContain('  zitadel-masterkey: no expiry date');
     expect(done.terminal.said.slice(-2)).toEqual([
-      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again. Every secret this run wrote carries the schedule's expiry date (secret-expiry.json).`,
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
     ]);
   });
@@ -2304,7 +2331,7 @@ describe('deploy secrets', () => {
     ]);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
-      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again.`,
+      `The app's ${String(CREATED_ONCE.length)} keys and public halves, and Zitadel's machine-ID config, are there, and none that was there before was written again. Every secret this run wrote carries the schedule's expiry date (secret-expiry.json).`,
     );
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });
@@ -2332,6 +2359,27 @@ describe('deploy secrets', () => {
     expect(done.terminal.said.at(-1)).toBe(
       "key-audit-anchor-v1 isn't in the vault, so the API won't start: run secrets --keys again",
     );
+  });
+
+  it('PL-25: ends red, before the record, when a secret it wrote lacks the schedule’s expiry date or has one unscheduled', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({
+        before: everything.filter((name) => name !== 'acs-access-key'),
+        after: [
+          ...everything.filter((name) => name !== 'acs-access-key' && name !== 'zitadel-masterkey'),
+          { name: 'acs-access-key', version: '1', expires: null },
+          { name: 'zitadel-masterkey', version: '2', expires: 1 },
+        ],
+      }),
+    });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said).toContain('  acs-access-key: no expiry date');
+    expect(done.terminal.said.slice(-2)).toEqual([
+      "acs-access-key was written with expiry date none, not 2027-09-01 as the schedule says: secrets.bicep didn't set it, so the vault won't say when it is due. Run the same secrets command again; if it stays, fix secrets.bicep in a reviewed PR",
+      "zitadel-masterkey was written with an expiry date (1970-01-01) the schedule doesn't give it: secret-expiry.json and secrets.bicep disagree, so fix them in a reviewed PR",
+    ]);
+    expect(done.az.tags['agentx-deployed-secrets']).toBeUndefined();
   });
 
   it('refuses before asking anything when the foundation has no vault', async () => {

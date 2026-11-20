@@ -134,6 +134,7 @@ const BICEP_READS: ReadonlySet<string> = new Set([
   'dns-allowed.json',
   'mcp-clients.json',
   'auth-door.json',
+  'secret-expiry.json',
   'database-generation.json',
 ]);
 

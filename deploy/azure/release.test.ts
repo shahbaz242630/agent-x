@@ -1141,6 +1141,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/apps.bicep': ['apps'],
       // PL-26: the auth door's routes, which apps.bicep compiles.
       'deploy/azure/auth-door.json': ['apps'],
+      // PL-25: each vault secret's expiry period, which secrets.bicep compiles.
+      'deploy/azure/secret-expiry.json': ['secrets'],
       'deploy/azure/bicepconfig.json': all,
       'deploy/azure/certificates.bicep': ['certificates'],
       // The database server's generation (AZ25), through names.bicep: a change asks for every hand deploy.
