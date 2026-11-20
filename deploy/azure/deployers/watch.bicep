@@ -21,6 +21,7 @@
 // - the activity log reaches the workspace minutes late, so each run reads the
 //   hour before: an Approve deploy emails up to four times, as CI's other alarm
 // - an attempt Azure refused counts too: an identity trying to widen its rights
+// - and, beside it, the alarm on staging's alert rules being rewritten (AL1), here for the same reason
 targetScope = 'resourceGroup'
 
 param tags object
@@ -29,6 +30,9 @@ param location string
 
 @description('The main workspace, which holds the activity log of the subscription.')
 param workspaceId string
+
+@description('Staging\'s resource group, whose alert rules the alert-rules alarm watches.')
+param stagingGroupName string
 
 @description('The alert address, as the foundation has it.')
 param alertEmail string
@@ -61,7 +65,8 @@ var watched = [
 // foundation rewrites the workspace and its two trusts: about three emails an Approve, expected then; one in an
 // Approve with no foundation step is an anomaly. A cap lowered inside an approved foundation looks routine here
 // (AZ5g: a guardrail on the cap). Rewrites of staging's own alert rules and action group are left out on purpose:
-// every foundation rewrites them all (monitoring.bicep's alert-rules alarm emails each one); the deletes are here.
+// every foundation rewrites them all, and the alert-rules alarm below counts them, about two emails a deploy; the
+// deletes are here.
 var blinding = [
   'Microsoft.OperationalInsights/workspaces/write'
   'Microsoft.OperationalInsights/workspaces/delete'
@@ -73,6 +78,33 @@ var blinding = [
   'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/delete'
 ]
 var operations = join(map(watched, operation => '"${operation}"'), ', ')
+
+// The writes to staging's alert rules and action group (AL1, S207), which monitoring.bicep's per-event alarm emailed
+// one by one: every foundation deploy rewrites them all, 38 and 35 emails at two deploys on 20 Nov, and four real
+// SEV-1s the same day went unseen among them. This counts them instead.
+// - each run counts the writes the workspace took in during the last 30 minutes, by when each line arrived, not when
+//   it happened: the activity log reaches the workspace minutes late, so a window on the event's own time would miss
+//   the lines that straddle it. Runs are 15 minutes apart, so a run late by up to 15 leaves no gap, as the login
+//   alerts' band (policy.ts ARRIVED_LATELY); each line is counted by two runs, so a deploy emails about twice
+// - every 15 minutes, as Microsoft reports health only for rules that run that often: the health alarm below
+//   watches this one too
+// - here, in the deployers' group, which foundation deploys never write and CI's infra identity can't reach: so
+//   neither can switch it off, rewrite it or delete it. The deletes stay on Azure's own per-event alarm in
+//   monitoring.bicep, which reads no workspace; a cap lowered or a workspace rewritten by the infra identity is the
+//   path alarm's, and the cap reached is a SEV-1 of its own (monitoring.bicep)
+// - an attempt Azure refused counts too; it counts rules, not log lines (a write logs a start and an end)
+var ruleWrites = join(
+  map(
+    [
+      'Microsoft.Insights/scheduledQueryRules/write'
+      'Microsoft.Insights/metricAlerts/write'
+      'Microsoft.Insights/activityLogAlerts/write'
+      'Microsoft.Insights/actionGroups/write'
+    ],
+    operation => '"${operation}"'
+  ),
+  ', '
+)
 
 // Azure offers no UAE location for action groups (as monitoring.bicep's): the alert carries counts, not data.
 resource partner 'Microsoft.Insights/actionGroups@2023-01-01' = {
@@ -87,6 +119,14 @@ resource partner 'Microsoft.Insights/actionGroups@2023-01-01' = {
         name: 'partner-email'
         emailAddress: alertEmail
         useCommonAlertSchema: true
+      }
+    ]
+    // AL2, S207: a second path beside the email, a push to the Azure mobile app signed in as this address (the
+    // partner's Azure sign-in is the alert address), as monitoring.bicep's group has. Same summary as the email.
+    azureAppPushReceivers: [
+      {
+        name: 'partner-app'
+        emailAddress: alertEmail
       }
     ]
   }
@@ -122,6 +162,44 @@ resource accessChanged 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
       ]
     }
     // Stateless: every window holding one notifies again.
+    autoMitigate: false
+    actions: {
+      actionGroups: [partner.id]
+    }
+  }
+}
+
+resource rulesRewritten 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-agentx-${short}-alert-rules-rewritten'
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Staging\'s alert rules or action group were rewritten'
+    description: 'SEV-1. Alert rules or the action group in staging\'s resource group were written (changed or switched off), or someone tried and Azure refused: the count is how many, among the activity log lines that arrived in the last 30 minutes. Expected about twice for each infrastructure deploy (foundation), which rewrites them all. At any other time someone may be silencing the alarms before acting: the activity log names each rule and who wrote it. Runbook: Incident-Response-Playbook.md section I.'
+    severity: 1
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The lines may arrive late; ingestion_time() picks the run that counts each, and this lets it see a day back.
+    overrideQueryTimeRange: 'P1D'
+    criteria: {
+      allOf: [
+        {
+          query: 'AzureActivity | where ingestion_time() > ago(30m) | where CategoryValue == "Administrative" | where ResourceGroup =~ "${stagingGroupName}" | where OperationNameValue in~ (${ruleWrites}) | summarize Rules = dcount(_ResourceId)'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Rules'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless: every run that counts one notifies again.
     autoMitigate: false
     actions: {
       actionGroups: [partner.id]
@@ -181,7 +259,7 @@ resource alarmUnhealthy 'Microsoft.Insights/activityLogAlerts@2026-01-01' = {
   location: 'Global'
   tags: tags
   properties: {
-    description: 'SEV-1. Azure reports the access alarm degraded or unavailable: its query fails (the workspace unreadable, a table renamed) or it was switched off. Until it runs again, an app changing who may do what tells nobody. Runbook: Incident-Response-Playbook.md section I.'
+    description: 'SEV-1. Azure reports the access alarm or the alert-rules alarm degraded or unavailable: its query fails (the workspace unreadable, a table renamed) or it was switched off. Until it runs again, an app changing who may do what, or anyone rewriting staging\'s alert rules, tells nobody. The email names the alarm. Runbook: Incident-Response-Playbook.md section I.'
     enabled: true
     scopes: [
       resourceGroup().id

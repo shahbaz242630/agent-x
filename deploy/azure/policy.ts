@@ -4340,23 +4340,30 @@ const leaf = (field: string, equals: string): Readonly<Record<string, string>> =
 
 /**
  * The two watches on the alert rules themselves (MO2), each an activity log
- * alert's whole condition: every change that succeeded to an alert rule of any
- * kind or to an action group, and a log alert rule Azure reports degraded or
- * unavailable. Exactly these: one more condition in `allOf` narrows what
- * fires, and one fewer change kind leaves that kind unwatched.
+ * alert's whole condition: every change that succeeded and that no deploy
+ * makes (an alert rule of any kind or an action group deleted, an alert
+ * processing rule written or deleted, a diagnostic setting deleted), and a log
+ * alert rule Azure reports degraded or unavailable. Exactly these: one more
+ * condition in `allOf` narrows what fires, and one fewer change kind leaves
+ * that kind unwatched. The writes to the rules and the action group, which
+ * every foundation deploy makes to them all, are counted by the deployers'
+ * alert-rules alarm (AL1, deployers/watch.bicep; infra.test.ts holds it).
  */
 const RULE_WATCHES: readonly { readonly what: string; readonly condition: unknown }[] = [
   {
-    what: 'a change to any alert rule, action group or alert processing rule, or a diagnostic setting deleted',
+    what: 'any alert rule, action group or alert processing rule deleted, an alert processing rule written, or a diagnostic setting deleted',
     condition: {
       allOf: [
         leaf('category', 'Administrative'),
         leaf('status', 'Succeeded'),
         {
           anyOf: [
-            ...[TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup, PROCESSING_RULE].flatMap(
-              (type) => [leaf('operationName', `${type}/write`), leaf('operationName', `${type}/delete`)],
+            ...[TYPES.alert, TYPES.metricAlert, TYPES.activityAlert, TYPES.actionGroup].map((type) =>
+              leaf('operationName', `${type}/delete`),
             ),
+            // None is ours (guardrails.bicep refuses the type), so a write is never a deploy's.
+            leaf('operationName', `${PROCESSING_RULE}/write`),
+            leaf('operationName', `${PROCESSING_RULE}/delete`),
             // Deploys never delete one; they rewrite every one, so its writes would be noise.
             leaf('operationName', `${TYPES.diagnostics}/delete`),
           ],
