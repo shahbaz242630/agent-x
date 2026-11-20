@@ -113,7 +113,8 @@ describe('the release job', () => {
     expect(job.environment).toBe('staging-whatif');
     expect(job.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
     const runs = (job.steps ?? []).flatMap((step) => (step.run === undefined ? [] : [step.run.trim()]));
-    expect(runs.filter((run) => run.startsWith('node '))).toEqual([command]);
+    // realAz needs the pinned Bicep compiler before any az call (the console watch's first run failed without it, S207).
+    expect(runs.filter((run) => run.startsWith('node '))).toEqual(['node tooling/bicep/install.ts', command]);
     expect(runs.at(-1)).toBe('az account clear');
   });
 
