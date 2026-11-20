@@ -44,7 +44,9 @@
 // copy's stretch whose signature is gone or another is no original: the copy's
 // event is planned back with its signature (a row's columns carry it). A live row numbered below 1, or
 // past a sealed live head at exactly the plan's end, was never the app's: it is
-// planned removed, which writes nothing new either.
+// planned removed, which writes nothing new either. A live head row the copy's
+// replaces is kept in the plan as read (its `liveHead` line), as every row it
+// replaces or removes is.
 import { createHash } from 'node:crypto';
 
 import {
@@ -105,6 +107,12 @@ export type RecoveryPlan =
       readonly rows: readonly PlannedRow[];
       /** The copy's head row, to put in place of the live one; undefined where the live head stays. */
       readonly head: ChainHead | undefined;
+      /**
+       * The live head row the copy's takes the place of, as read, and whether it is sealed by us; undefined where none
+       * is replaced, or the chain has no head row. Kept as evidence: sealed, it is the MAC'd proof of where the live
+       * chain reached (AT9's lost tail, a fork's branch), which the repair overwrites.
+       */
+      readonly liveHeadReplaced: (ChainHead & { readonly sealed: boolean }) | undefined;
       /** Live events past the copy, kept as they are. */
       readonly keptPastCopy: bigint;
       /** Whether a fork was found and its live branch planned away, under `discardFork` alone (E10). */
@@ -308,6 +316,13 @@ function createPlanner(
     return head !== undefined && typeof head !== 'string' && headIsSealed(keys, chain, head) ? head : undefined;
   };
 
+  /** The live head row a put-back head takes the place of, as read, where there is one. */
+  const replacedLiveHead = (replacing: ChainHead | undefined) => {
+    const live = liveHeads.first;
+    if (replacing === undefined || live === undefined || typeof live === 'string') return undefined;
+    return { ...live, sealed: headIsSealed(keys, chain, live) };
+  };
+
   const rows: PlannedRow[] = [];
   const walker = createChainWalker(keys, chain, copied);
   let end: CheckedPoint = copied;
@@ -411,6 +426,7 @@ function createPlanner(
         endsAt: { seq: end.seq, hash: end.hash, macKeyVersion: end.macKeyVersion },
         rows,
         head: replaceHead,
+        liveHeadReplaced: replacedLiveHead(replaceHead),
         keptPastCopy: end.seq - copied.seq,
         forkDiscarded: forked,
         liveFingerprint,
@@ -466,19 +482,21 @@ function planLines(plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | und
         ? { ...at, columns: row.columns, replaced: row.replaced }
         : { ...at, columns: row.columns };
     }),
-    ...(plan.head === undefined
+    ...(plan.liveHeadReplaced === undefined
       ? []
-      : [
-          {
-            k: 'head',
-            seq: plan.head.seq.toString(),
-            hash: hex(plan.head.hash),
-            mac: hex(plan.head.mac),
-            macKeyVersion: plan.head.macKeyVersion,
-          },
-        ]),
+      : [{ ...headLine('liveHead', plan.liveHeadReplaced), sealed: plan.liveHeadReplaced.sealed }]),
+    ...(plan.head === undefined ? [] : [headLine('head', plan.head)]),
   ];
 }
+
+/** A head row as a plan's line holds it: every column, the bytes in hex. */
+export const headLine = (k: string, head: ChainHead) => ({
+  k,
+  seq: head.seq.toString(),
+  hash: hex(head.hash),
+  mac: hex(head.mac),
+  macKeyVersion: head.macKeyVersion,
+});
 
 const ndjson = (lines: readonly object[]): string => lines.map((line) => `${JSON.stringify(line)}\n`).join('');
 

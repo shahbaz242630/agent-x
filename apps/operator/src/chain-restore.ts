@@ -48,6 +48,7 @@ import { type Database, JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platfor
 
 import {
   fingerprintOf,
+  headLine,
   planChainRecovery,
   planDigest,
   type RecoveryPlan,
@@ -192,6 +193,11 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
       // short of it (AT9) names this head in the rebase that gives up the events past it.
       endsAtHash: plan.endsAt.hash.toString('hex'),
       endsShortOf: plan.endsShortOf?.toString() ?? null,
+      // The live head row overwritten, as read: sealed, the proof of where the live chain reached (AT9 review).
+      liveHeadReplaced:
+        plan.liveHeadReplaced === undefined
+          ? null
+          : { ...headLine('liveHead', plan.liveHeadReplaced), sealed: plan.liveHeadReplaced.sealed },
     };
   }
   switch (outcome.reason) {

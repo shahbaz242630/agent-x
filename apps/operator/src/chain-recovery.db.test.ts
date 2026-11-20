@@ -12,7 +12,7 @@ import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createTestDatabase, type TestClient, type TestDatabase, testLogger, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { planChainRecovery, type PlannedRow, planFile, type RecoverySides } from './chain-recovery.ts';
+import { planChainRecovery, planDigest, type PlannedRow, planFile, type RecoverySides } from './chain-recovery.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 
 const server = inject('postgres');
@@ -269,7 +269,8 @@ describe('SEC-DB-12 PL-29 the chain recovery plan puts back only original rows',
   it("the head deleted, its MAC spoiled, or of the wrong type: the copy's head in its place", async () => {
     const head = await copied(2);
     await tamper(live, (admin) => admin.query('delete from audit.heads where org_id = $1', [orgId]));
-    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
+    // No head row to keep: nothing is said replaced.
+    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head }, liveHeadReplaced: undefined });
     // Put back, then its MAC alone spoiled: the same number and hash, but no longer sealed.
     const copyHead = await headOf(theCopy());
     await tamper(live, (admin) =>
@@ -281,7 +282,13 @@ describe('SEC-DB-12 PL-29 the chain recovery plan puts back only original rows',
         copyHead.mac_key_version,
       ]),
     );
-    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head, mac: copyHead.mac } });
+    expect(await plan()).toMatchObject({
+      ok: true,
+      rows: [],
+      head: { seq: head, mac: copyHead.mac },
+      // The spoiled row kept as read, said unsealed.
+      liveHeadReplaced: { seq: head, mac: Buffer.alloc(32), sealed: false },
+    });
     await tamper(live, (admin) => admin.query('alter table audit.heads alter column mac_key_version type bigint'));
     expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
   });
@@ -659,6 +666,7 @@ describe('SEC-DB-12 PL-29 AT9 a copy that holds some lost events but not the anc
     );
     expect(planned.head?.seq).toBe(head);
     expect(planned).toMatchObject({ endsAt: { seq: head }, endsShortOf: anchor.seq, keptPastCopy: 0n });
+    expect(planned.liveHeadReplaced).toMatchObject({ seq: from, hash: earlier.hash, sealed: true });
     // The file says where it ends short, and its digest covers it.
     const facts = { planId: uuidV7Ids.next(), orgId, release: 'r-1', run: null, anchor };
     const [summary] = planFile(planned, facts).toString().split('\n');
@@ -684,6 +692,8 @@ describe('SEC-DB-12 PL-29 AT9 a copy that holds some lost events but not the anc
     expect(planned).toMatchObject({ ok: true, endsAt: { seq: head }, endsShortOf: anchor.seq });
     expect(planned.ok && actions(planned.rows)).toEqual([['remove', head + 1n]]);
     expect(planned.ok && planned.head?.seq).toBe(head);
+    // The lost tail's own sealed head, the only MAC'd proof of where the chain reached, kept as read.
+    expect(planned.ok && planned.liveHeadReplaced).toMatchObject({ seq: anchor.seq, hash: anchor.hash, sealed: true });
   });
 
   it('refuses with the flag a copy whose events don’t link to the live chain’s: another branch, or a broken copy', async () => {
@@ -701,6 +711,8 @@ describe('SEC-DB-12 PL-29 AT9 a copy that holds some lost events but not the anc
       ok: true,
       forkDiscarded: true,
       endsShortOf: anchor.seq,
+      // The fork's own sealed head, kept as read before the copy's takes its place.
+      liveHeadReplaced: { seq: fork + 1n, sealed: true },
     });
 
     await editEvent(theCopy(), 2n);
@@ -752,9 +764,22 @@ describe("the plan's file", () => {
       .trimEnd()
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines.map((line) => line.k)).toEqual(['plan', 'row', 'head']);
+    expect(lines.map((line) => line.k)).toEqual(['plan', 'row', 'liveHead', 'head']);
     expect(lines[0]).toMatchObject({ ok: true, rows: 1, headReplaced: true, anchor: null, orgId });
     expect(lines[1]).toMatchObject({ action: 'put_back', seq: String(BigInt(earlier.seq) + 1n) });
+    // The live head row the copy's overwrites, every column as read: kept as evidence (AT9 review).
+    expect(lines[2]).toEqual({
+      k: 'liveHead',
+      seq: earlier.seq,
+      hash: earlier.hash.toString('hex'),
+      mac: earlier.mac.toString('hex'),
+      macKeyVersion: earlier.mac_key_version,
+      sealed: true,
+    });
+    // The digest covers it: another live head read is another plan.
+    if (!planned.ok || planned.liveHeadReplaced === undefined) throw new Error('A live head should be replaced');
+    const otherHead = { ...planned, liveHeadReplaced: { ...planned.liveHeadReplaced, mac: Buffer.alloc(32, 1) } };
+    expect(planDigest(otherHead, orgId, undefined)).not.toBe(planDigest(planned, orgId, undefined));
   });
 
   it('says why a plan was refused, and nothing more', () => {

@@ -659,6 +659,7 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
       headReplaced: true,
       endsAt: String(head),
       endsShortOf: String(anchor.seq),
+      liveHeadReplaced: { k: 'liveHead', seq: earlier.seq, hash: earlier.hash.toString('hex'), sealed: true },
     });
     // Whole to the copy's head, its rows exactly the copy's; against the anchor it reads wound back: a rebase's case.
     expect(await verifiedLive()).toMatchObject({ ok: true, seq: head });

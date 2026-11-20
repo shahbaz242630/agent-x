@@ -1038,6 +1038,11 @@ async function chainRecovery(
       anchorSeq: anchor?.seq ?? null,
       // AT9: the anchor the plan ends before, its events past endsAt given up by the rebase that follows the repair.
       endsShortOf: plan.endsShortOf,
+      // The live head the copy's would overwrite, by number and hash: its every column is in the plan's file.
+      liveHeadReplaced:
+        plan.liveHeadReplaced === undefined
+          ? null
+          : { seq: plan.liveHeadReplaced.seq, hash: plan.liveHeadReplaced.hash.toString('hex') },
     });
     return 0;
   });
