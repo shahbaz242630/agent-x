@@ -62,7 +62,7 @@ import {
 } from './state-digest.ts';
 
 /** A stretch of a chain a walk read whole: after `from`, up to and at `to`. */
-export interface Stretch {
+interface Stretch {
   readonly from: bigint;
   readonly to: CheckedPoint;
 }
@@ -110,7 +110,7 @@ export interface DigestAnchors {
  * The subject types that grow with use, one or more a payment: given way first under memory, as the authority a payment
  * rests on (agents, keys, mandates, members, policies, suppliers, sources, the hold) is what an attacker rolls back first.
  */
-export const PAYMENT_SUBJECTS: ReadonlySet<string> = new Set([
+const PAYMENT_SUBJECTS: ReadonlySet<string> = new Set([
   'spend_request',
   'instruction',
   'transaction',
