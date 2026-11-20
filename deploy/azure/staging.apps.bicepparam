@@ -24,14 +24,14 @@ param release = readEnvironmentVariable('AGENTX_AZURE_RELEASE')
 // The same image the compose stack runs, so one weekly bump moves both
 // (tooling/checks/images.test.ts keeps them equal). ADR-003 moves the major
 // version by hand.
-param zitadelImage = 'ghcr.io/zitadel/zitadel:v4.20.3@sha256:1b30fea7ed88826dc0a98dacee4e2f2c8b05201fd26f5e4cb5386615b29f7638'
+param zitadelImage = 'ghcr.io/zitadel/zitadel:v4.20.5@sha256:cb21fe73badfe44972bb24a66cf0ebce6a8dc63ab8ed24567af6b731bd8bbf45'
 
 param authHost = readEnvironmentVariable('AGENTX_AZURE_AUTH_HOST')
 param zitadelAdminEmail = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_EMAIL')
 
 // The login pages, the same version and the same reference the compose stack
 // runs (tooling/checks/images.test.ts keeps them equal).
-param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.20.3@sha256:8f730428dfd65cd8979d07ef4e34a59d44978e956692b7dbbc3bba4e4abb4f92'
+param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.20.5@sha256:bbab3b26a44093c1a9636a6b89c3ab31c2f6eb2f2cafc681c6f676e74e96845c'
 
 param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
 
