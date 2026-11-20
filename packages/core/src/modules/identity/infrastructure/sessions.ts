@@ -15,6 +15,14 @@
 // rotation writes the MAC again with the new cookie hash, and only over a row
 // whose MAC held.
 //
+// A row whose MAC holds may still be one the app deleted, put back by the owner
+// as it was (R-15, S207). So each end is signed on the platform chain: a
+// sign-out's (`identity.session_ended`, naming the session) and a person's all
+// ended (`identity.sessions_ended`). A session either names, as ended after its
+// sign-in, is no session and raises the alarm: read in the statement that finds
+// the row, by 0084's by-person index, so no request costs a trip more. A signed
+// end deleted to hide it breaks the platform chain, which the anchor check reads.
+//
 // A session lives while both its timeouts hold: the idle one, from its last
 // use, and the absolute one, from when it opened. `use` finds a live session
 // by its cookie ID and moves its last use on, in one statement, so a session
@@ -34,10 +42,14 @@ import type { Logger } from '@agentx/platform/observability';
 import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
-import { latestPlatformTimeOfRead, type PlatformTransaction } from '../../platform-controls/index.ts';
+import {
+  latestPlatformTimeOfRead,
+  type PlatformControlsTables,
+  type PlatformTransaction,
+} from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import { macHolds, macOf, type RowMacs, rowForged, sessionMessage } from './row-macs.ts';
-import { SESSIONS_ENDED, type SignedEnds } from './signed-ends.ts';
+import { SESSION_ENDED, SESSIONS_ENDED, type SignedEnds } from './signed-ends.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a session lives. */
@@ -52,6 +64,12 @@ export interface SessionTimeouts {
 export interface OpenedSession {
   readonly sessionId: string;
   readonly cookie: string;
+}
+
+/** A session a sign-out deleted, the app's own: its person, and its record for the signed end (sessionEndedEvent). */
+export interface EndedSession {
+  readonly userId: string;
+  readonly sessionId: string;
 }
 
 /** A live session, as a request finds it. */
@@ -84,10 +102,11 @@ export interface Sessions {
    */
   rotate(db: Kysely<IdentityTables>, sessionId: string): Promise<string | undefined>;
   /**
-   * Ends the session this cookie ID belongs to, live or not; its user's ID,
-   * undefined if there is none, or if its MAC doesn't hold (deleted all the same).
+   * Ends the session this cookie ID belongs to, live or not; its person and
+   * record, undefined if there is none, or if its MAC doesn't hold (deleted all
+   * the same). The caller signs the end (sessionEndedEvent) in the same transaction.
    */
-  end(db: Kysely<IdentityTables>, cookie: string): Promise<string | undefined>;
+  end(db: Kysely<IdentityTables>, cookie: string): Promise<EndedSession | undefined>;
   /**
    * Deletes up to `most` sessions no process could use again: past their
    * absolute end, or unused past the longest idle timeout there can be
@@ -158,7 +177,7 @@ export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: str
   return rows.length;
 }
 
-export { SESSIONS_ENDED, sessionsEndedEvent } from './signed-ends.ts';
+export { SESSION_ENDED, sessionEndedEvent, SESSIONS_ENDED, sessionsEndedEvent } from './signed-ends.ts';
 
 /** How far before a sign-in the platform chain is checked for ends: the app's clock and the database's may differ. */
 const CLOCKS_DIFFER_MS = 2 * 60 * 1000;
@@ -267,6 +286,36 @@ export const sessionRowMessage = (row: SessionRow) =>
     endsAt: row.ends_at,
   });
 
+/**
+ * The session's latest signed ends, read with its row (R-15, S207): its own sign-out's, and its person's latest all
+ * ended. Each matched by 0084's by-person index on the row's own columns, as a subquery of the statement.
+ */
+const signedEndsOfRow = (db: Kysely<IdentityTables>) => {
+  const platform = db as unknown as Kysely<PlatformControlsTables>;
+  const person = sql<string>`identity.sessions.user_id::text`;
+  const record = sql<string>`identity.sessions.id::text`;
+  const latest = (kind: { readonly action: string; readonly factsFrom: Record<string, typeof person> }) =>
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ ...kind, facts: {} }])})`;
+  return [
+    latest({ action: SESSION_ENDED, factsFrom: { person, record } }).as('signed_out_at'),
+    latest({ action: SESSIONS_ENDED, factsFrom: { person } }).as('all_ended_at'),
+  ] as const;
+};
+
+/** The row's signed ends, as signedEndsOfRow reads them. */
+interface SignedEndsOfRow {
+  readonly signed_out_at: Date | null;
+  readonly all_ended_at: Date | null;
+}
+
+/**
+ * Whether a signed end names the session: signed out, or its person's sessions all ended after its sign-in. The
+ * sign-in's own rule (sessionsEndedAt): a session whose sign-in was before the end can't be opened after it, and
+ * the end deletes every one opened before.
+ */
+const endedBySignature = (row: SignedEndsOfRow & { readonly auth_time: Date }): boolean =>
+  row.signed_out_at !== null || (row.all_ended_at !== null && row.auth_time < row.all_ended_at);
+
 export function createSessions({
   ids,
   clock,
@@ -298,6 +347,14 @@ export function createSessions({
   const genuine = (row: SessionRow & { readonly mac: Buffer; readonly mac_key_version: number }): boolean => {
     if (macHolds(keys, sessionRowMessage(row), row)) return true;
     rowForged(logger, 'session', row);
+    return false;
+  };
+
+  /** Whether the row is a session of the app's: genuine, and named by no signed end (one put back raises the alarm). */
+  const believed = (row: Parameters<typeof genuine>[0] & SignedEndsOfRow): boolean => {
+    if (!genuine(row)) return false;
+    if (!endedBySignature(row)) return true;
+    rowForged(logger, 'session', row, 'ended');
     return false;
   };
 
@@ -333,9 +390,9 @@ export function createSessions({
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
-        .returning([...SESSION_SEALED, 'last_seen_at'])
+        .returning([...SESSION_SEALED, 'last_seen_at', ...signedEndsOfRow(db)])
         .executeTakeFirst();
-      if (row === undefined || !genuine(row)) return undefined;
+      if (row === undefined || !believed(row)) return undefined;
       const idleEnd = row.last_seen_at.getTime() + idleSeconds * 1000;
       return {
         sessionId: row.id,
@@ -355,12 +412,12 @@ export function createSessions({
       const now = clock.now();
       const row = await db
         .selectFrom('identity.sessions')
-        .select(SESSION_SEALED)
+        .select([...SESSION_SEALED, ...signedEndsOfRow(db)])
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
-      return row !== undefined && genuine(row) ? row.user_id : undefined;
+      return row !== undefined && believed(row) ? row.user_id : undefined;
     },
 
     async rotate(db, sessionId) {
@@ -368,13 +425,13 @@ export function createSessions({
       const now = clock.now();
       const live = await db
         .selectFrom('identity.sessions')
-        .select(SESSION_SEALED)
+        .select([...SESSION_SEALED, ...signedEndsOfRow(db)])
         .where('id', '=', sessionId)
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
-      // Only a row whose MAC held gets a new one: rotating a forged row would make it genuine.
-      if (live === undefined || !genuine(live)) return undefined;
+      // Only a row whose MAC held, and never ended, gets a new one: rotating a forged or put-back row would make it genuine.
+      if (live === undefined || !believed(live)) return undefined;
       const cookie = newCookie();
       const cookieHash = hashOf(cookie);
       const row = await db
@@ -400,7 +457,7 @@ export function createSessions({
         .where('cookie_hash', '=', hashOf(cookie))
         .returning(SESSION_SEALED)
         .executeTakeFirst();
-      return row !== undefined && genuine(row) ? row.user_id : undefined;
+      return row !== undefined && genuine(row) ? { userId: row.user_id, sessionId: row.id } : undefined;
     },
 
     async sweep(db, most) {

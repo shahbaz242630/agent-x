@@ -32,6 +32,7 @@ import {
   endSessionsOf,
   lockSessionsOf,
   type Sessions,
+  SESSION_ENDED,
   SESSIONS_ENDED,
   sessionsEndedAt,
   sessionsEndedEvent,
@@ -482,6 +483,46 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
     expect(await signIn.signOut(done.cookie)).toBeUndefined();
+  });
+
+  it('SEC-DB-14 R-15 signs each session it ends on the platform chain, so the owner putting one back finds it refused (S207)', async () => {
+    const first = await roundTrip();
+    // A sign-in in the same browser ends the session it brought; a sign-out ends the new one.
+    const second = await roundTrip(undefined, first.cookie);
+    const owner = await database.connect('owner');
+    try {
+      const [kept] = await owner.query(
+        'select pg_catalog.row_to_json(s) as kept from identity.sessions s where s.id = $1',
+        [second.sessionId],
+      );
+      await signIn.signOut(second.cookie);
+      // Nothing left to end: nothing more signed.
+      expect(await signIn.signOut(second.cookie)).toBeUndefined();
+
+      const signed = await (app as unknown as Kysely<PlatformControlsTables>)
+        .selectFrom('platform_controls.audit_events')
+        .select('details')
+        .where('action', '=', SESSION_ENDED)
+        .execute();
+      const mine = signed
+        .map(({ details }) => JSON.parse(details) as Record<string, string>)
+        .filter(({ person }) => person === first.userId);
+      expect(mine).toEqual([
+        { person: first.userId, record: first.sessionId, at: START.toISOString() },
+        { person: first.userId, record: second.sessionId, at: START.toISOString() },
+      ]);
+
+      await owner.query(
+        `insert into identity.sessions
+           select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
+        [JSON.stringify(kept?.kept)],
+      );
+    } finally {
+      await owner.end();
+    }
+    // Back in the table, its MAC holding, and still no session (its alarm: sessions-tamper.db).
+    expect(await sessionsOf(first.userId)).toEqual([{ id: second.sessionId }]);
+    expect(await signIn.signedIn(second.cookie)).toBeUndefined();
   });
 
   it('finds the live session a signed-in request names (B2-4b), and none once it is signed out', async () => {
