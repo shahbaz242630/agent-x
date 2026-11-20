@@ -70,20 +70,24 @@ export function authRules(state: DoorShape, appOf: (workload: string) => string,
 }
 
 /**
- * A value read back from Azure without the fields it fills with null (an unset rewrite or pin may come back so): any
- * field with a value is kept, so a rewrite, a pin or anything else Azure holds reads as a change.
+ * A value read back from Azure in one canonical form: each object's fields in name order, since Azure writes them in
+ * its own (a match comes back caseSensitive before prefix, S206: the first plan after PL-26 read staging's door as
+ * neither shape for that alone), and without the fields it fills with null (an unset rewrite or pin may come back so).
+ * Any field with a value is kept, so a rewrite, a pin or anything else Azure holds reads as a change; arrays keep
+ * their order, which is the order Azure tries the rules in.
  */
-function withoutNulls(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutNulls);
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
   if (typeof value !== 'object' || value === null) return value;
   return Object.fromEntries(
     Object.entries(value)
       .filter(([, each]) => each !== null)
-      .map(([field, each]) => [field, withoutNulls(each)]),
+      .toSorted(([one], [other]) => (one < other ? -1 : Number(one > other)))
+      .map(([field, each]) => [field, canonical(each)]),
   );
 }
 
-const asText = (rules: unknown): string => JSON.stringify(withoutNulls(rules ?? null));
+const asText = (rules: unknown): string => JSON.stringify(canonical(rules ?? null));
 
 /**
  * Which shape a door's rules, as Azure gives them back, are in: closed, open, legacy, or neither (undefined).
