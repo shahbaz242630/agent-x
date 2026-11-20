@@ -11,7 +11,9 @@
 // S206 V6: each row's MAC is checked as the page is read (at most a page of
 // them), and its ID held to when it says it was written (the seal's DATED).
 // A row that fails either, planted or edited by the database's owner, is left
-// off the page and raises the integrity alarm, one line a row; the page's
+// off the page and raises the integrity alarm, one line a row (but one from
+// before 0105 with no MAC, left off quietly: the seal's job alarms it once its
+// pass has ended); the page's
 // `next` is still where the rows read end, so no row is read twice.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -100,6 +102,7 @@ export async function orgSecurityEventsPage(
       'created_at',
       'mac',
       'mac_key_version',
+      'before_macs',
       DATED.as('dated'),
     ])
     .where('org_id', '=', orgId.toLowerCase())
@@ -129,7 +132,9 @@ export async function orgSecurityEventsPage(
       createdAt: row.created_at,
     };
     if (!eventMacHolds(keys, facts, row)) {
-      securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
+      // One from before 0105 with no MAC is left off quietly: it may be waiting for its MAC, or left to the sweep, and
+      // the seal's job, which knows which, raises the alarm for it otherwise.
+      if (!row.before_macs || row.mac !== null) securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
       return false;
     }
     if (!row.dated) {

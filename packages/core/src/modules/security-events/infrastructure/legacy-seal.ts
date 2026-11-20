@@ -46,7 +46,7 @@ import {
   platformEventSealed,
   platformEventsSigned,
 } from '../../platform-controls/index.ts';
-import { eventMac, evidenceMessage, firstCheckableDay, rowMac } from './event-seals.ts';
+import { eventMac, evidenceMessage, firstCheckableDay, type LegacyRows, rowMac } from './event-seals.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 /** The platform events that record the sealing: begun, and done. */
@@ -145,6 +145,23 @@ async function recordsIn(tx: Tx, keys: KeyProvider): Promise<Records | 'unsealed
         : { seq: started.seq, hash: started.hash, macKeyVersion: started.mac_key_version, manifest },
     sealedAt: rows.find((row) => row.action === ALL_SEALED)?.seq,
   };
+}
+
+/**
+ * What the day seal is told of the marked rows with no MAC at `now` (event-seals.ts LegacyRows), from the records as
+ * recordsIn reads them, each MAC-checked: awaiting until `all_sealed` is recorded or the cutoff passes; then excused
+ * only if written before the scope `sealing_started` names. `unsealed` for a record that can't be believed: the
+ * caller's alarm. A record deleted can't make rows look awaiting for long: the platform chain's own checks find the
+ * gap or the wound-back head (this pass's next run, the anchor check), and the cutoff ends the wait regardless.
+ */
+export async function legacyRowsAt(tx: Tx, keys: KeyProvider, now: Date): Promise<LegacyRows | 'unsealed'> {
+  const found = await recordsIn(tx, keys);
+  if (found === 'unsealed') return 'unsealed';
+  if (found.sealedAt === undefined) {
+    return now.getTime() < SECURITY_SEAL_BACKFILL_UNTIL ? { awaiting: true } : { awaiting: false, leftBefore: null };
+  }
+  const since = found.started?.manifest.since;
+  return { awaiting: false, leftBefore: since === undefined ? null : new Date(since) };
 }
 
 /** A row as Postgres gives it back, each column as its table declares it. */

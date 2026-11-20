@@ -28,6 +28,7 @@ export {
   brokenSecuritySeal,
   firstCheckableDay,
   evidenceMessage,
+  type LegacyRows,
   nextDayWithRows,
   outOfRange,
   rowMac,
@@ -42,5 +43,11 @@ export {
   securityLogAlarm,
   tallyFrom,
 } from './infrastructure/event-seals.ts';
-export { ALL_SEALED, type LegacySealing, SEALING_STARTED, sealLegacyRows } from './infrastructure/legacy-seal.ts';
+export {
+  ALL_SEALED,
+  legacyRowsAt,
+  type LegacySealing,
+  SEALING_STARTED,
+  sealLegacyRows,
+} from './infrastructure/legacy-seal.ts';
 export type { SecurityEventsTables } from './infrastructure/tables.ts';

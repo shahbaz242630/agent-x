@@ -335,6 +335,29 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
     ]);
   });
 
+  it('leaves off quietly a row from before 0105 still without its MAC; one marked so but with a MAC that fails, alarmed', async () => {
+    await emptyOrgs();
+    capture = new LogCapture();
+    const owner = database.as('admin');
+    const waiting = ids.next();
+    const edited = ids.next();
+    await owner.query(
+      `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count, created_at,
+         before_macs, mac, mac_key_version)
+       values ($1, $2, 'rate_limited', 'per_user', null, null, null, $4, 1, $4, true, null, null),
+         ($1, $3, 'rate_limited', 'per_user', null, null, null, $4, 1, $4, true, $5, 1)`,
+      [ORG_A, waiting, edited, new Date(START.getTime() - 60_000), Buffer.alloc(32, 9)],
+    );
+
+    expect((await pageOf(ORG_A)).rows).toEqual([]);
+    expect(
+      capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed')
+        .map(({ rowId }) => rowId),
+    ).toEqual([edited]);
+  });
+
   /** Each test starts with no organisation's events: each organisation's sweep far in the future takes them all. */
   async function emptyOrgs(): Promise<void> {
     await empty();
