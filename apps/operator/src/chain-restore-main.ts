@@ -6,7 +6,8 @@
 //
 // the file holding, as a JSON list, `chain-restore --org <organisation ID>
 // --plan <plan ID> --digest <the plan's digest> --id <new repair ID>`, and
-// `--discard-fork` last where the plan was made with it. The digest is the
+// `--discard-fork` or `--short-of-anchor` (AT9) last where the plan was made
+// with it. The digest is the
 // one the plan's command logged and wrote in the plan's file (planDigest).
 //
 // It holds the audit chains' MAC key, to check with, and the operator's
@@ -41,7 +42,6 @@ import { createLogger, createStartupLogger, guardOutputs, type Logger } from '@a
 import { outcomeLine, type RestoreFacts, restoreChain, restoreFile } from './chain-restore.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 import {
-  flagAlone,
   type OperatorOptions,
   type OperatorProcess,
   type Problems,
@@ -49,7 +49,7 @@ import {
   REQUEST_FLAG,
   requestWords,
 } from './main.ts';
-import { CHAIN_RESTORE, CHAIN_RESTORE_USAGE, PLAN_DIGEST_HEX, UUID_V7 } from './request.ts';
+import { CHAIN_RESTORE, CHAIN_RESTORE_USAGE, chainFlags, PLAN_DIGEST_HEX, UUID_V7 } from './request.ts';
 import { onRestoreSides, OWNER_LOGIN_NOTE, storedPlanProblems } from './restore-job.ts';
 import { isStateCommand, stateRun } from './state-restore-main.ts';
 
@@ -69,12 +69,13 @@ interface Asked {
   readonly digest: string;
   readonly restoreId: string;
   readonly discardFork: boolean;
+  readonly shortOfAnchor: boolean;
 }
 
 /** The chain repair's request, from its file's words, or the problems: none repeats what the file holds. */
 function restoreAsked(words: readonly string[]): Asked | Problems {
   const [command, orgFlag, orgId, planFlag, planId, digestFlag, digest, idFlag, id, ...more] = words;
-  const flag = flagAlone(more);
+  const flag = chainFlags(more);
   const shaped =
     command === CHAIN_RESTORE &&
     orgFlag === '--org' &&
@@ -121,11 +122,20 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, words: read
     logger.error('operator.refused', { problems: asked.problems });
     return 1;
   }
-  const { orgId, planId, digest, restoreId, discardFork } = asked;
+  const { orgId, planId, digest, restoreId, discardFork, shortOfAnchor } = asked;
   const log = logger.child({ orgId });
   log.info('operator.starting', { command: CHAIN_RESTORE, role: config.db.user, keys: keys.describe() });
   log.info('operator.chain_restore_owner_login', { restoreId, note: OWNER_LOGIN_NOTE });
-  const facts = { restoreId, planId, orgId, digest, discardFork, release: config.release, run: config.run };
+  const facts = {
+    restoreId,
+    planId,
+    orgId,
+    digest,
+    discardFork,
+    shortOfAnchor,
+    release: config.release,
+    run: config.run,
+  };
   return onRestoreSides(
     config,
     keys,
@@ -146,6 +156,7 @@ async function restoreRun(config: OperatorConfig, keys: KeyProvider, words: read
           anchor: anchors.latest({ kind: 'organisation', orgId }),
           digest,
           discardFork,
+          shortOfAnchor,
         }),
       ),
   );
@@ -172,6 +183,15 @@ async function repaired(
   // The outcome is in this line whether or not its record is written: a failed write is an error of its own.
   if (outcome.ok) log.info('operator.chain_restored', { ...line, holdKept: true });
   else log.error('operator.chain_restore_refused', line);
+  // AT9: the chain now ends before its anchor, so the API's check alarms for it until the rebase gives up the rest.
+  if (outcome.ok && outcome.plan.endsShortOf !== null) {
+    log.warn('operator.chain_restored_short_of_anchor', {
+      restoreId: facts.restoreId,
+      endsAt: outcome.plan.endsAt.seq,
+      endsAtHash: outcome.plan.endsAt.hash.toString('hex'),
+      anchorSeq: outcome.plan.endsShortOf,
+    });
+  }
   if ((await store.put(`${name}-outcome.ndjson`, restoreFile(outcome, facts))) === 'there_already') {
     log.error('operator.done_before', { command: CHAIN_RESTORE, restoreId: facts.restoreId });
     return 1;
