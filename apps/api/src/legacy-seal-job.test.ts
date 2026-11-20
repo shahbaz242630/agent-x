@@ -164,6 +164,8 @@ describe('the security rows’ sealing job (S206 V6)', () => {
     clock.advanceBy(LEGACY_SEAL_STALL_MS - 1);
     await job.run();
     expect(stalls()).toEqual([]);
+    // Each run after the first that found it taken hands the sealing that time: no row it seals is newer.
+    expect(sealing.given.map(({ notAfter }) => notAfter)).toEqual([undefined, new Date('2026-11-25T00:00:00.000Z')]);
 
     clock.advanceBy(1);
     await job.run();
