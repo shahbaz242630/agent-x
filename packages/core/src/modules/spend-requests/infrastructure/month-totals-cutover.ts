@@ -1,4 +1,4 @@
-// An organisation made before GM-1a moved to signed month totals (0109;
+// An organisation made before GM-1a moved to signed month totals (0110;
 // R-15), once, in one transaction: every month its spend requests then held
 // capacity in opened as a signed total (`month_total.opened`), counted from
 // the requests' signed states and their decisions' sealed months, never from

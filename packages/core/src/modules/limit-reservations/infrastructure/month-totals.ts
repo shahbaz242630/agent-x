@@ -69,7 +69,7 @@ export type MonthTotalCheck =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 const NONE = Object.freeze({ outcome: 'none' as const });
-/** Minor units from 0, as 0109's check holds them, in canonical text. */
+/** Minor units from 0, as 0110's check holds them, in canonical text. */
 const HELD = /^(0|[1-9][0-9]{0,18})$/;
 
 /** The total a signed read of its row holds. */
@@ -77,7 +77,7 @@ export function monthTotalFrom(check: StateCheck): MonthTotalCheck {
   if (check.outcome === 'tampered') return check;
   if (check.outcome === 'missing') return NONE;
   const held = check.fields.get('held_minor');
-  // 0109's check holds it to a whole number from 0, and the seal to what was written.
+  // 0110's check holds it to a whole number from 0, and the seal to what was written.
   if (typeof held !== 'string' || !HELD.test(held)) throw new Error('A verified month total holds no amount');
   return Object.freeze({ outcome: 'held', held: BigInt(held), state: check });
 }
@@ -201,7 +201,7 @@ export async function recordMonthTotal(
  * ends, as a brake must. One missing is nothing to give back before the
  * organisation's cutover, and after it a mismatch (`holding`): its request
  * held capacity there. One holding less than `amount` is a mismatch too, and
- * goes to nothing, never below (0109's check).
+ * goes to nothing, never below (0110's check).
  */
 export async function givenBack(
   tx: TotalsTransaction,

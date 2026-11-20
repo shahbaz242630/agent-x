@@ -487,7 +487,7 @@ export async function weigh(
   };
 }
 
-/** The keys a month's total is made under (0109): its ID, and its agent, month and currency. */
+/** The keys a month's total is made under (0110): its ID, and its agent, month and currency. */
 const TOTAL_KEYS: ReadonlySet<unknown> = new Set(['month_totals_pkey', 'one_total_a_month']);
 
 /**

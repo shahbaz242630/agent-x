@@ -1,4 +1,4 @@
-// GM-1a (0109; Threat-Model R-15): an agent's monthly total kept as a signed
+// GM-1a (0110; Threat-Model R-15): an agent's monthly total kept as a signed
 // running total, on the real migrated schema as the app role (ADR-012 §2;
 // FX-TAMPER). The database's owner, holding the owner login but none of the
 // app's keys, deleting, zeroing or releasing reservations no longer gives
@@ -67,8 +67,8 @@ const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
 
-const ids = new SequentialIds(0x0109_0000_0000);
-const CORRELATION = '0199a0f0-0000-7000-8000-000000000109';
+const ids = new SequentialIds(0x0110_0000_0000);
+const CORRELATION = '0199a0f0-0000-7000-8000-000000000110';
 const MONTH = '2026-10';
 
 let clock: FixedClock;
