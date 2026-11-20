@@ -34,14 +34,7 @@ import {
   stepUpDetails,
 } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-import {
-  backfillUserMacs,
-  subjectOfUser,
-  USER_MAC_BACKFILL_UNTIL,
-  userForSubject,
-  userOfSubject,
-  UserUnbelieved,
-} from './users.ts';
+import { subjectOfUser, userForSubject, userOfSubject, UserUnbelieved } from './users.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -123,6 +116,10 @@ async function asOwner(text: string, values: readonly unknown[]): Promise<Record
     await owner.end();
   }
 }
+
+/** A person's MAC and its key version as the database holds them. */
+const sealOf = (userId: string) =>
+  app.selectFrom('identity.users').select(['mac', 'mac_key_version']).where('id', '=', userId).executeTakeFirst();
 
 /** Holds the session's challenges and consumes one, in a transaction, as an admin's change does. */
 const consumeFor = (binding: StepUpBinding, challengeId: string) =>
@@ -603,32 +600,42 @@ describe(`the owner can't move a person to its own login account (Postgres ${ser
       expect.objectContaining({ check: 'user', rowId: admin }),
       expect.objectContaining({ check: 'user', rowId: admin }),
     ]);
-    // Nor is the backfill ever a way to make it genuine: it gives a MAC only to a row with none.
-    expect(await backfillUserMacs(app, { keys, clock })).toBe(0);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-own' }, macs())).toBeUndefined();
   });
 
-  it('a person made before 0100 is given their MAC at a start before the cutoff, and then signs in', async () => {
-    const earlier = await personAs('made-before-0100');
-    await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [earlier]);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBeUndefined();
-
-    expect(await backfillUserMacs(app, { keys, clock })).toBe(1);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'made-before-0100' }, macs())).toBe(earlier);
-    expect(await personAs('made-before-0100')).toBe(earlier);
-  });
-
-  it('a person with no MAC is never believed once the cutoff has passed, and none is given', async () => {
-    const late = await personAs('no-mac-after-cutoff');
+  it('SEC-DB-10 R-15 a person whose MAC the owner nulled is never believed, and nothing gives them one again', async () => {
+    const late = await personAs('no-mac');
     await asOwner('update identity.users set mac = null, mac_key_version = null where id = $1', [late]);
-    const after = new FixedClock(new Date(USER_MAC_BACKFILL_UNTIL.getTime() + 1000));
 
-    expect(await backfillUserMacs(app, { keys, clock: after })).toBe(0);
-    await expect(personAs('no-mac-after-cutoff')).rejects.toBeInstanceOf(UserUnbelieved);
-    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'no-mac-after-cutoff' }, macs())).toBeUndefined();
+    await expect(personAs('no-mac')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'no-mac' }, macs())).toBeUndefined();
+    expect(await subjectOfUser(app, late, macs())).toBeUndefined();
     expect(alarms()).toEqual([
       expect.objectContaining({ check: 'user', rowId: late }),
       expect.objectContaining({ check: 'user', rowId: late }),
+      expect.objectContaining({ check: 'user', rowId: late }),
+    ]);
+    expect(await sealOf(late)).toEqual({ mac: null, mac_key_version: null });
+  });
+
+  it("SEC-DB-10 R-15 an admin's MAC nulled and subject moved to the owner's own login account signs no one in as the admin", async () => {
+    // The S207 attack on the deleted start-up backfill: a row with no MAC used to be sealed at the API's next start.
+    const admin = await personAs('admin-unsealed');
+    await asOwner('update identity.users set mac = null, mac_key_version = null, subject = $2 where id = $1', [
+      admin,
+      'owner-login',
+    ]);
+
+    await expect(personAs('owner-login')).rejects.toBeInstanceOf(UserUnbelieved);
+    expect(await userOfSubject(app, { issuer: ISSUER, subject: 'owner-login' }, macs())).toBeUndefined();
+    expect(await subjectOfUser(app, admin, macs())).toBeUndefined();
+    // Nor did any of it seal the row, and no second person was made for the owner's subject.
+    expect(await sealOf(admin)).toEqual({ mac: null, mac_key_version: null });
+    const [count] = await asOwner('select count(*)::int as n from identity.users where subject = $1', ['owner-login']);
+    expect(count?.n).toBe(1);
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'user', reason: 'mac', rowId: admin, userId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
+      expect.objectContaining({ check: 'user', rowId: admin }),
     ]);
   });
 });

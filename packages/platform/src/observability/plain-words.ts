@@ -1022,12 +1022,6 @@ export const PLAIN_WORDS = {
     broke: 'Some old identity re-checks were not deleted this time; none can be used again.',
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
   },
-  'identity.user_mac_backfill_failed': {
-    happened:
-      'At its start, this copy of the API could not give their new integrity seal to people who joined before it.',
-    broke: 'Those people cannot sign in until it succeeds; everyone else is fine.',
-    next: 'It is tried again at every start until 25 November. Check the database, then restart the API.',
-  },
   'idp.impersonated': {
     happened: 'The login service recorded someone acting as another person, which Agent X never turns on.',
     broke: "It was copied to the audit trail. Someone may have misused the login service's admin powers.",

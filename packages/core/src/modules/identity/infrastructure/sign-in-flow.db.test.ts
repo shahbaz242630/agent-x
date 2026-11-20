@@ -1,5 +1,7 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
+import { createHash } from 'node:crypto';
+
 import {
   createTestDatabase,
   FixedClock,
@@ -1399,5 +1401,68 @@ describe(`SEC-DB-16 R-15 the owner can't set a person's sessions' end back (S206
       action: SESSIONS_ENDED,
       details: { person: '0a0b0c0d-0000-4000-8000-000000000001', at: at.toISOString() },
     });
+  });
+});
+
+describe(`SEC-DB-10 R-15 the owner can't send a sign-in's browser to another site (S207, Postgres ${server.version})`, () => {
+  // A flow's return path is kept unsealed. The owner, holding none of the app's keys, can rewrite it; the callback
+  // checks it again, so one that isn't a path of ours sends the browser home, with the alarm.
+  /** Sets the return path of the flow this ID names, as agentx_owner on a connection of its own. */
+  async function returnToAsOwner(flowId: string, returnTo: string): Promise<void> {
+    const owner = await database.connect('owner');
+    try {
+      await owner.query('update identity.login_flows set return_to = $2 where cookie_hash = $1', [
+        createHash('sha256').update(flowId, 'ascii').digest(),
+        returnTo,
+      ]);
+    } finally {
+      await owner.end();
+    }
+  }
+  const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+
+  it('control: a path of our own the owner wrote is where the browser goes, with no alarm', async () => {
+    const { url, flowId } = await signIn.begin('/agents', NETWORK);
+    await returnToAsOwner(flowId, '/approvals');
+    const state = new URL(url).searchParams.get('state') ?? '';
+
+    const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+    expect(done.returnTo).toBe('/approvals');
+    expect(alarms()).toEqual([]);
+  });
+
+  it.each(['https://evil.example/', '//evil.example', '/\\evil.example'])(
+    'a return path rewritten to %s sends the browser home, and raises the alarm',
+    async (foreign) => {
+      const { url, flowId } = await signIn.begin('/agents', NETWORK);
+      await returnToAsOwner(flowId, foreign);
+      const state = new URL(url).searchParams.get('state') ?? '';
+
+      const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+      expect(done.returnTo).toBe('/');
+      // The sign-in itself still stands: the person signed in, only the address was the owner's.
+      expect(await sessions.use(app, done.cookie)).toMatchObject({ userId: done.userId });
+      expect(alarms()).toEqual([expect.objectContaining({ level: 'error', check: 'login_flow', reason: 'return_to' })]);
+    },
+  );
+
+  it('a refused step-up whose return path was rewritten goes home too, with the alarm', async () => {
+    const done = await roundTrip();
+    const challenge = await challenges.open(app, {
+      sessionId: done.sessionId,
+      action: 'members.invite',
+      changeHash: Buffer.alloc(32, 9),
+    });
+    if (challenge === undefined) throw new Error('no challenge');
+    const { flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId, '/members/confirm');
+    await returnToAsOwner(flowId, 'https://evil.example/members/confirm');
+
+    await expect(
+      signIn.complete({ flowId, previousCookie: done.cookie, refused: 'provider_refused' }),
+    ).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      back: { returnTo: '/', challengeId: challenge.challengeId },
+    });
+    expect(alarms()).toEqual([expect.objectContaining({ check: 'login_flow', reason: 'return_to' })]);
   });
 });
