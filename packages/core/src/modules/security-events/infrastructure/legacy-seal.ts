@@ -1,5 +1,5 @@
 // The security rows from before 0105 given their MACs, once (S206 V6), as
-// 0100's people were (S205 backfillUserMacs). From then on a row with no MAC
+// 0100's people were (S205's backfill, deleted S207). From then on a row with no MAC
 // is never believed, whatever its ID or dates: not shown, not counted, and
 // alarmed when met.
 //
@@ -7,7 +7,9 @@
 // after carries its MAC as it is written (the database refuses one without).
 // In the background once the web side serves, never holding up or stopping a
 // start: if the platform chain says every row is sealed
-// (`security_events.all_sealed`), nothing is done. If not, one sealer at a
+// (`security_events.all_sealed`), or that the database was born sealed (its
+// first start already after 0105: databaseBirth, S207), nothing is done; a
+// first start that can't be believed is the alarm. If not, one sealer at a
 // time, under SEALER_LOCK, a session lock held with no transaction open for
 // the whole sealing (a copy that finds it held returns at once, quietly):
 // 0. The platform chain is held to its last anchor, from the write-once store
@@ -33,7 +35,7 @@
 //
 // TODO(S206 AT10-style): delete this, and its call at start, once the release
 // that brings 0105 has started everywhere and every environment holds
-// `all_sealed`, as 0100's people backfill goes.
+// `all_sealed`, as 0100's people backfill went (S207).
 import { createHash, type Hash } from 'node:crypto';
 
 import { limitedTransaction, withTenant } from '@agentx/platform/db';
@@ -56,7 +58,7 @@ export const SEALING_STARTED = 'security_events.sealing_started';
 export const ALL_SEALED = 'security_events.all_sealed';
 
 /**
- * After this, no sealing runs at all (as 0100's people backfill had USER_MAC_BACKFILL_UNTIL): the release has started
+ * After this, no sealing runs at all (as 0100's people backfill had its cutoff): the release has started
  * everywhere well before, so a sealing record missing by then was deleted. A later commit removes the sealing, tracked
  * with AT10.
  */
@@ -73,6 +75,38 @@ export const SECURITY_SEAL_BACKFILL_UNTIL = Date.parse('2026-12-07T00:00:00.000Z
  * past its latest anchor).
  */
 export const ROW_MACS_FROM = 'rowMacsFrom';
+
+/**
+ * What the platform chain's first start says of the database (R-15, S207): `sealed` if it was born sealed, `legacy` if
+ * an API started on it before this release, `unsealed` if that can't be told.
+ *
+ * Born sealed: its first `platform.started`, by the chain's own order, MAC-checked, already records ROW_MACS_FROM. Every
+ * API that records it refuses to start on a database without 0105 (and so 0104), and only the API records a start, so
+ * the database had both before any API wrote to it: no notice from before seals and no security row from before 0105
+ * can be in it, and each legacy pass has nothing to do (production's first start). A row marked from before there is
+ * the owner's, planted, never sealed as genuine. Nothing the owner can edit turns it `legacy`: every later start records
+ * ROW_MACS_FROM too, and one with it removed fails its MAC. Deleting a legacy database's first starts reads as born
+ * sealed: its pass doesn't run, its rows stay unbelieved, a stop, never a grant (and the chain's own walk finds the gap).
+ * No start at all (the API records its own before any pass runs, so they were deleted), or a first one edited, or one
+ * whose ROW_MACS_FROM isn't a time: `unsealed`, the caller's alarm, and nothing sealed or excused.
+ */
+export type DatabaseBirth = 'sealed' | 'legacy' | 'unsealed';
+
+export async function databaseBirth(
+  tx: Transaction<PlatformControlsTables>,
+  keys: KeyProvider,
+): Promise<DatabaseBirth> {
+  const [first] = await platformEventsSigned(tx)
+    .where('e.action', '=', 'platform.started')
+    .orderBy('e.seq')
+    .limit(1)
+    .execute();
+  if (first === undefined || !platformEventSealed(keys, first)) return 'unsealed';
+  const at = (JSON.parse(first.details) as Record<string, unknown>)[ROW_MACS_FROM];
+  if (at === undefined) return 'legacy';
+  // A time as start-record.ts writes it (an ISO string); anything else can't be believed.
+  return typeof at === 'string' && Number.isFinite(Date.parse(at)) ? 'sealed' : 'unsealed';
+}
 
 /** The earliest of the times given (`now` always among them). */
 const earliest = (now: Date, ...others: readonly (Date | undefined)[]): Date =>
@@ -93,11 +127,12 @@ type Tx = Transaction<Tables>;
 type SealAlarm = 'deleted' | 'unsealed' | 'unanchored' | 'manifest';
 
 /**
- * What the sealing found: every row sealed; another sealer at work; or why it stopped short, its alarm raised: its
+ * What the sealing found: every row sealed; a database born sealed, with none to seal (databaseBirth); another sealer
+ * at work; or why it stopped short, its alarm raised: its
  * record deleted past the app, a record or the chain that can't be believed, no anchor to hold the chain to, or rows
  * from before 0105 not the ones it began with.
  */
-export type LegacySealing = 'sealed' | 'busy' | SealAlarm;
+export type LegacySealing = 'sealed' | 'born_sealed' | 'busy' | SealAlarm;
 
 /** A place on the platform chain, its event's MAC checked. */
 export interface ChainPlace {
@@ -186,7 +221,8 @@ async function recordsIn(tx: Tx, keys: KeyProvider): Promise<Records | 'unsealed
  * from the records as recordsIn reads them, each MAC-checked: until `all_sealed` is recorded, rows written before the
  * sealing began (`until`), or before now if it hasn't begun (a first start's minutes; a sealing held up longer is its
  * job's own alarm, legacy-seal-job.ts); once it has ended, rows written before its scope (`since`), left to the sweep;
- * past the cutoff with no end, none. `unsealed` for a record that can't be believed: the caller's alarm. A record
+ * past the cutoff with no end, or on a database born sealed (databaseBirth), none. `unsealed` for a record, or a first
+ * start, that can't be believed: the caller's alarm. A record
  * deleted can't widen the excuse for long: the platform chain's own checks find the gap or the wound-back head (this
  * sealing's next run, the anchor check), and the cutoff ends it regardless.
  */
@@ -198,6 +234,9 @@ export async function legacyRowsAt(tx: Tx, keys: KeyProvider, now: Date): Promis
     return { excusedBefore: started === undefined ? null : new Date(started.manifest.since) };
   }
   if (now.getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return { excusedBefore: null };
+  // Born sealed, no row from before 0105 can be here: none excused, every one planted the alarm.
+  const birth = await databaseBirth(tx, keys);
+  if (birth !== 'legacy') return birth === 'sealed' ? { excusedBefore: null } : 'unsealed';
   if (started !== undefined) return { excusedBefore: started.until };
   const first = await firstStartWithMacs(tx, keys);
   return first === 'unsealed' ? 'unsealed' : { excusedBefore: earliest(now, first) };
@@ -550,6 +589,10 @@ export async function sealLegacyRows(
   // Past the cutoff no sealing runs, nor is one taken up again. A marked row still without a MAC by then is a sealing
   // unfinished or its record deleted: the alarm. With none (a database made after 0105, say) there is nothing to do.
   if (clock.now().getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return (await anyUnsealed()) ? alarm('deleted') : 'sealed';
+  // A database born sealed holds no row from before 0105: one marked so is the owner's, never sealed (R-15, S207).
+  const birth = await plain((tx) => databaseBirth(tx, keys));
+  if (birth === 'unsealed') return alarm('unsealed');
+  if (birth === 'sealed') return 'born_sealed';
   // One sealer at a time: a session lock on a connection of its own, held with no transaction open (so no limit on
   // a transaction left waiting can end it however long the sealing runs), given back at the end; a copy that finds it
   // held leaves the work to that one, quietly. A connection lost takes the lock with it.

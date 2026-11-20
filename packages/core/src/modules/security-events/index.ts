@@ -50,6 +50,7 @@ export {
 } from './infrastructure/event-seals.ts';
 export {
   ALL_SEALED,
+  databaseBirth,
   legacyRowsAt,
   ROW_MACS_FROM,
   type LegacySealing,

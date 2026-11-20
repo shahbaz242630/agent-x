@@ -7,11 +7,19 @@
 // client that never connects is swept a day after it registered; one that
 // did, 90 days after it last connected (0094, 6E3b), when no connection of
 // its can be refreshed any more.
+//
+// What it registered is sealed as it registers (S207 H3, 0107;
+// client-seals.ts): a client read with no seal, or one not its own, is never
+// believed, so no one without the app's keys can add a redirect address or a
+// grant type to it. One registered before 0107 has none: it must register
+// again.
 import { holdTransactionLock, limitStatements } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type ClientRegistration, isGrantType } from './client-metadata.ts';
+import { type ClientJudged, registeredJudged, registeredSealed, sealIn } from './client-seals.ts';
 import { newClientId } from './codes.ts';
 import type { OauthTables } from './tables.ts';
 
@@ -44,6 +52,7 @@ export type Registered =
  */
 export async function registerClient(
   db: Kysely<OauthTables>,
+  keys: KeyProvider,
   registration: ClientRegistration,
   now: Date,
   network: string,
@@ -62,6 +71,7 @@ export async function registerClient(
     if (registered >= MOST_REGISTRATIONS_A_DAY) return { outcome: 'capped', cap: 'server' };
     if (fromNetwork >= MOST_REGISTRATIONS_A_NETWORK_A_DAY) return { outcome: 'capped', cap: 'network' };
     const client: Client = { ...registration, clientId: newClientId(), createdAt: now };
+    const seal = registeredSealed(keys, client);
     await tx
       .insertInto('oauth.clients')
       .values({
@@ -75,28 +85,46 @@ export async function registerClient(
         created_at: now,
         first_connected_at: null,
         network,
+        mac: seal.mac,
+        mac_key_version: seal.keyVersion,
       })
       .execute();
     return { outcome: 'registered', client };
   });
 }
 
-/** The client this ID names, as registered, or undefined. */
+/** A registered client read, as it registered; or one kept but not believed, and why (client-seals.ts). */
+export type ClientRead =
+  | { readonly outcome: 'known'; readonly client: Client }
+  | { readonly outcome: 'unsealed'; readonly judged: Exclude<ClientJudged, 'sound'> };
+
+/** The client this ID names, as registered, where its seal is its own; `unsealed` where it isn't; undefined for none. */
 export async function clientOf(
   db: Kysely<OauthTables> | Transaction<OauthTables>,
+  keys: KeyProvider,
   clientId: string,
-): Promise<Client | undefined> {
+): Promise<ClientRead | undefined> {
   const row = await db.selectFrom('oauth.clients').selectAll().where('client_id', '=', clientId).executeTakeFirst();
   if (row === undefined) return undefined;
-  return {
+  const fields = {
     clientId: row.client_id,
     name: row.name,
+    applicationType: row.application_type,
     redirectUris: row.redirect_uris,
-    applicationType: row.application_type === 'native' ? 'native' : 'web',
-    grantTypes: row.grant_types.filter(isGrantType),
+    grantTypes: row.grant_types,
     softwareId: row.software_id,
     softwareVersion: row.software_version,
     createdAt: row.created_at,
+  };
+  const judged = registeredJudged(keys, fields, sealIn(row.mac, row.mac_key_version));
+  if (judged !== 'sound') return { outcome: 'unsealed', judged };
+  return {
+    outcome: 'known',
+    client: {
+      ...fields,
+      applicationType: fields.applicationType === 'native' ? 'native' : 'web',
+      grantTypes: fields.grantTypes.filter(isGrantType),
+    },
   };
 }
 

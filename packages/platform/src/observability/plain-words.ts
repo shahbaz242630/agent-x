@@ -557,6 +557,11 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet: the app still connects. Past 7 days without a fresh copy, it would be refused.',
     next: 'The reason says why: if the site stays down or refuses for days, tell the app maker.',
   },
+  'oauth.client_unsealed': {
+    happened: "An MCP app's kept record had no seal, so it was not used.",
+    broke: 'An app with its own document is fetched again; an app that registered itself must register again.',
+    next: 'Old records or a key change explain it. Otherwise treat it as tampering.',
+  },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
     broke: 'Those documents stay a little longer; an app in use is fetched again anyway, so nothing is affected.',
@@ -1021,12 +1026,6 @@ export const PLAIN_WORDS = {
     happened: 'The hourly clean-up of expired identity re-checks failed.',
     broke: 'Some old identity re-checks were not deleted this time; none can be used again.',
     next: 'The next clean-up, about an hour later, takes what was left. If it keeps failing, check the database.',
-  },
-  'identity.user_mac_backfill_failed': {
-    happened:
-      'At its start, this copy of the API could not give their new integrity seal to people who joined before it.',
-    broke: 'Those people cannot sign in until it succeeds; everyone else is fine.',
-    next: 'It is tried again at every start until 25 November. Check the database, then restart the API.',
   },
   'idp.impersonated': {
     happened: 'The login service recorded someone acting as another person, which Agent X never turns on.',

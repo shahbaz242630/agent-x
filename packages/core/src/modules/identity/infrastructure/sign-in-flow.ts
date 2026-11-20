@@ -40,6 +40,19 @@
 // (login-flows.ts): every network's together, and the network it comes from.
 // Past either it is SignInBusy, and no flow is kept.
 //
+// S207 (R-15): a flow's return path is kept unsealed, so `complete` checks it
+// again as it takes the flow. Only the app writes one, and only a path of our
+// own, so one that isn't (an address on another site, `//evil.example`) was
+// written past the app: the integrity alarm, and the browser goes home.
+//
+// S207 (R-15): a session a sign-out deletes, or a sign-in ends for the cookie
+// the browser brought, is signed as ended on the platform chain in the same
+// transaction, the platform head its last lock (ADR-006 §6): its row put back by
+// the database's owner is no session (sessions.ts). A sign-out never fails
+// closed: if its end can't be signed (the platform head locked past the limit,
+// or unreadable, which the owner could cause), the session is deleted in a
+// transaction of its own, with the integrity alarm, and the browser signed out.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -48,13 +61,14 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
 import { HOME_PATH, isReturnPath, type Subject } from '../domain/sign-in.ts';
 import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
-import { type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
-import { createSignedEnds } from './signed-ends.ts';
+import { type EndedSession, type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
+import { createSignedEnds, sessionEndedEvent } from './signed-ends.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
@@ -181,12 +195,26 @@ export function createSignIn({
   const macs = { keys, logger };
   /** The people's sessions' ends this process has checked on the platform chain, shared by its sign-ins (R-15). */
   const ends = { logger, signedEnds: createSignedEnds(keys) };
+  const platform = createPlatformChain({ keys, ids });
+  /** Signs the session's end on the platform chain, in the transaction that deleted it, last of its locks (R-15). */
+  const signEnd = async (tx: Kysely<IdentityTables>, ended: EndedSession | undefined): Promise<void> => {
+    // The platform chain's tables are in the same database, and belong to no organisation.
+    if (ended !== undefined)
+      await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
+  };
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
     db.transaction().execute(async (tx) => {
       await limitStatements(tx);
       return work(tx);
     });
+
+  /** The flow as taken, its return path checked again (S207): one that isn't ours raises the alarm and is home instead. */
+  function ownReturn<T extends { readonly returnTo: string }>(taken: T | undefined): T | undefined {
+    if (taken === undefined || isReturnPath(taken.returnTo)) return taken;
+    logger.error('audit.integrity_failed', { check: 'login_flow', reason: 'return_to' });
+    return { ...taken, returnTo: HOME_PATH };
+  }
 
   /** A step-up's way back: the session, the challenge, the ID token, the checks; then the evidence and a new cookie ID. */
   async function completeStepUp(
@@ -263,7 +291,7 @@ export function createSignIn({
     async complete(input) {
       const { flowId, previousCookie } = input;
       // Taken, and committed, before the login service is called: used once, whatever follows.
-      const taken = flowId === undefined ? undefined : await limited((tx) => flows.take(tx, flowId));
+      const taken = flowId === undefined ? undefined : ownReturn(await limited((tx) => flows.take(tx, flowId)));
       if ('refused' in input) {
         const detail = 'the login service sent the browser back without a sign-in';
         // A step-up's: back to the change's page to say so (CO2); a sign-in's, refused as it always was.
@@ -291,7 +319,7 @@ export function createSignIn({
           if (!(error instanceof UserUnbelieved)) throw error;
           throw new SignInFailed('account_unbelieved', error.message);
         }
-        if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
+        const previous = previousCookie === undefined ? undefined : await sessions.end(tx, previousCookie);
         // AG10: a sign-in made before the person's sessions were last all ended (a removal, a factor reset, a change
         // at the login service) opens none, though its flow began before that end.
         const ended = await sessionsEndedAt(tx, userId, ends, evidence.authTime);
@@ -309,16 +337,41 @@ export function createSignIn({
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
         if (verifiedEmail !== undefined) await recordSessionEmail(tx, keys, sessionId, verifiedEmail);
         await keepUserContact(tx, keys, userId, { name, verifiedEmail }, clock.now());
+        await signEnd(tx, previous);
         return { userId, sessionId, cookie, returnTo: taken.returnTo, stepUpChallengeId: undefined };
       });
     },
 
-    signOut(cookie) {
-      if (cookie === undefined) return Promise.resolve(undefined);
-      return limited(async (tx) => {
-        const userId = await sessions.end(tx, cookie);
-        return userId === undefined ? undefined : subjectOfUser(tx, userId, macs);
-      });
+    async signOut(cookie) {
+      if (cookie === undefined) return undefined;
+      // Set inside the transaction, as its end is signed: only a failure from there on is answered by the fallback.
+      const reached = { signing: false };
+      try {
+        return await limited(async (tx) => {
+          const ended = await sessions.end(tx, cookie);
+          if (ended === undefined) return undefined;
+          const subject = await subjectOfUser(tx, ended.userId, macs);
+          reached.signing = true;
+          await signEnd(tx, ended);
+          return subject;
+        });
+      } catch (error) {
+        if (!reached.signing) throw error;
+        // The end couldn't be signed, and its transaction rolled back the delete: the session goes all the same, and
+        // its end unsigned (a row put back would be believed) raises the alarm.
+        return limited(async (tx) => {
+          const ended = await sessions.end(tx, cookie);
+          if (ended === undefined) return undefined;
+          logger.error('audit.integrity_failed', {
+            check: 'session',
+            reason: 'end_unsigned',
+            rowId: ended.sessionId,
+            userId: ended.userId,
+            error: error instanceof Error ? error.name : 'unknown',
+          });
+          return subjectOfUser(tx, ended.userId, macs);
+        });
+      }
     },
 
     signedIn(cookie) {

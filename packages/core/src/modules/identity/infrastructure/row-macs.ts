@@ -167,7 +167,7 @@ export function rowForged(
   logger: Logger,
   check: 'user' | 'session' | 'step_up_challenge',
   row: { readonly id: string; readonly user_id: string },
-  reason: 'mac' | 'already_used' | 'chain_unverified' = 'mac',
+  reason: 'mac' | 'already_used' | 'chain_unverified' | 'ended' = 'mac',
 ): void {
   logger.error('audit.integrity_failed', { check, reason, rowId: row.id, userId: row.user_id });
 }
