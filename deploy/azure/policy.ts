@@ -75,7 +75,6 @@ export type RuleId =
   | 'apps-environment'
   | 'apps-network'
   | 'apps-egress'
-  | 'storage-egress'
   | 'dns-watch'
   | 'dns-allow'
   | 'dns-block-alert'
@@ -165,7 +164,6 @@ const TYPES = {
   group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
-  storagePolicy: 'Microsoft.Network/serviceEndpointPolicies',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
   setting: 'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
   storage: 'Microsoft.Storage/storageAccounts',
@@ -2028,76 +2026,6 @@ const appsNetwork: Check = (snapshot, _expected, add) => {
           "needs rules on its apps subnet that let in only the load balancer's probes (TCP 30000-32767) and the subnet itself, then deny the rest of the network",
       });
     }
-  }
-};
-
-/** A subnet's Storage endpoint policies, by their IDs in lower case. */
-const storagePolicyIdsOf = (subnet: unknown): string[] =>
-  list(at(subnet, 'properties', 'serviceEndpointPolicies')).map((each) => text(at(each, 'id')).toLowerCase());
-
-/** The names of a network's subnets holding a Storage endpoint policy, each policy's ID added to `used`. */
-function subnetsWithStoragePolicies(network: PredictedResource, used: Set<string>): string[] {
-  return list(at(network.properties, 'subnets')).flatMap((subnet) => {
-    const ids = storagePolicyIdsOf(subnet);
-    for (const id of ids) used.add(id);
-    return ids.length > 0 ? [text(at(subnet, 'name'))] : [];
-  });
-}
-
-/**
- * The apps subnet's Storage traffic reaches our own accounts alone (AZ32 c, 6F1 audit h28): one service endpoint policy
- * on it, for Storage, naming exactly the deployment's Storage accounts, each by its own ID (never a subscription or a
- * resource group, which would let in any account made there, nor a service alias). No other subnet holds one: the
- * server archives its write-ahead log to Microsoft's own accounts, which a policy would refuse. A policy no subnet
- * uses is said too: nothing it names is kept to.
- */
-const storageEgress: Check = (snapshot, _expected, add) => {
-  const problem = (resource: string, message: string): void => {
-    add({ rule: 'storage-egress', resource, message });
-  };
-  const ours = JSON.stringify(
-    ofType(snapshot, TYPES.storage)
-      .map((account) => account.id.toLowerCase())
-      .sort(),
-  );
-  const policies = ofType(snapshot, TYPES.storagePolicy);
-  const used = new Set<string>();
-  for (const network of ofType(snapshot, TYPES.network)) {
-    for (const name of subnetsWithStoragePolicies(network, used)) {
-      if (name !== 'apps') {
-        problem(
-          network.name,
-          `its ${name} subnet holds a Storage endpoint policy: the server's write-ahead log goes to Microsoft's own accounts, which a policy refuses`,
-        );
-      }
-    }
-    const ids = storagePolicyIdsOf(appsSubnetOf(network));
-    const policy = ids.length === 1 ? policies.find((each) => each.id.toLowerCase() === ids[0]) : undefined;
-    if (policy === undefined) {
-      problem(
-        network.name,
-        "its apps subnet needs one Storage endpoint policy of this deployment: without it the subnet's Storage endpoint reaches any account in the region",
-      );
-      continue;
-    }
-    const definitions = list(at(policy.properties, 'serviceEndpointPolicyDefinitions'));
-    const named = definitions.flatMap((definition) =>
-      list(at(definition, 'properties', 'serviceResources')).map((id) => text(id).toLowerCase()),
-    );
-    const forStorage = definitions.every(
-      (definition) =>
-        at(definition, 'properties', 'service') === 'Microsoft.Storage' &&
-        at(definition, 'properties', 'serviceAlias') === undefined,
-    );
-    if (!forStorage || JSON.stringify(named.toSorted()) !== ours) {
-      problem(
-        policy.name,
-        `must name, for Storage alone, exactly this deployment's Storage accounts by their own IDs; it names ${named.join(', ') || 'none'}`,
-      );
-    }
-  }
-  for (const policy of policies) {
-    if (!used.has(policy.id.toLowerCase())) problem(policy.name, 'is a Storage endpoint policy no subnet uses');
   }
 };
 
@@ -5267,7 +5195,8 @@ export const ALLOWED_TYPES: readonly string[] = [
   // AZ11's endpoint and its zone group, allowed a foundation ahead of them (AZ11a, as #627's alerts were).
   'Microsoft.Network/privateEndpoints',
   'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
-  // AZ32 (c): the apps subnet's Storage policy. Access lands first, so the foundation that brings it isn't refused.
+  // AZ32 (c)'s stray sep-agentx-staging-apps, unattached since Azure refused it on the apps subnet (S207): goes from
+  // here and guardrails.bicep together at the next access run after it's deleted (a note there would ask for one now).
   'Microsoft.Network/serviceEndpointPolicies',
   'Microsoft.Network/virtualNetworks',
   'Microsoft.OperationalInsights/workspaces',
@@ -6757,7 +6686,6 @@ const CHECKS: readonly Check[] = [
   databaseEgress,
   appsNetwork,
   appsEgress,
-  storageEgress,
   dnsWatch,
   dnsAllow,
   dnsBlockAlert,

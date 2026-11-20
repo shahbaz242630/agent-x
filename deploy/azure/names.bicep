@@ -34,7 +34,6 @@ var jobWorkloads = [
 // The identity Stage G's mark and check jobs run as (4D2e; AZ3), on a Stage G
 // run alone: the owner's, the app's and the backup role's logins, and never the
 // server admin's, which the set-up job's identity they used to run as reads.
-// Given by the runner for the run, never standing (S204-b, stage-g.ts).
 @export()
 var loadWorkloads = [
   'stage-g'
