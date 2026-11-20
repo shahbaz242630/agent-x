@@ -90,6 +90,21 @@ describe('consoleStateOf', () => {
 
   it('reads staging’s pre-PL-26 door, copied from main’s apps.bicep, as legacy, and nothing near it', () => {
     expect(consoleStateOf(LEGACY_DOOR, stagingApp)).toBe('legacy');
+    // Azure's own field order (caseSensitive before prefix) is no change, in any shape; a value changed still is.
+    const reordered = (rules: unknown): unknown =>
+      JSON.parse(
+        JSON.stringify(rules).replace(
+          /"prefix":("[^"]*"),"caseSensitive":(true|false)/g,
+          '"caseSensitive":$2,"prefix":$1',
+        ),
+      ) as unknown;
+    expect(JSON.stringify(reordered(authRules('open', stagingApp)))).toMatch(/"caseSensitive":true,"prefix"/);
+    expect(consoleStateOf(reordered(authRules('open', stagingApp)), stagingApp)).toBe('open');
+    expect(consoleStateOf(reordered(authRules('closed', stagingApp)), stagingApp)).toBe('closed');
+    const widened = JSON.parse(
+      JSON.stringify(LEGACY_DOOR).replace('"caseSensitive":true', '"caseSensitive":false'),
+    ) as unknown;
+    expect(consoleStateOf(widened, stagingApp)).toBeUndefined();
     expect(authRules('legacy', stagingApp)).toEqual(LEGACY_DOOR);
     expect(consoleStateOf(LEGACY_DOOR.slice(1), stagingApp)).toBeUndefined();
     expect(consoleStateOf([...LEGACY_DOOR].reverse(), stagingApp)).toBeUndefined();
