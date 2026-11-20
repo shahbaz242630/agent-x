@@ -35,8 +35,10 @@
 // What it holds is bounded (`mostBytes`), and one organisation's growth never stops another's. Past it, the largest chain
 // gives way first: its payments' objects (`PAYMENT_SUBJECTS`: requests, instructions, transactions, which grow with use),
 // then the whole chain, each with that organisation's alarm. A chain given way reads as before the digest, Tx A
-// included (today's checks), never as a stop; after a restart it is uncovered, and read again from its first event. The
-// anchors' log counts what is held here against its own budget too (`alsoHeld`), and lets its shards go to make room.
+// included (today's checks), never as a stop. How far it gave way is written with what moved and in every snapshot
+// (`g`), so a restart holds it so at once, never as a chain to wait for: given way whole, it reads as before the digest;
+// its payments alone, it stays covered, as a fact missing only loses protection, never raises the alarm. The anchors'
+// log counts what is held here against its own budget too (`alsoHeld`), and lets its shards go to make room.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -219,6 +221,8 @@ interface DigestLine {
   readonly payments: boolean;
   readonly entries: Entries;
   readonly stretch?: Stretch | undefined;
+  /** How much of the chain had given way for memory where the line was written (`g`): kept so across a restart. */
+  readonly gaveWay?: 1 | 2 | undefined;
 }
 
 /** A line's stretch, none where it names none, or `undefined` read as a line not ours where one is half there. */
@@ -232,21 +236,36 @@ function stretchFrom({ f, u, h, k }: Record<string, unknown>): Stretch | 'none' 
 function lineFrom(fields: unknown): DigestLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const said = fields as Record<string, unknown>;
-  const { c, t, e, p } = said;
+  const { c, t, e, p, g } = said;
   const at = timeIn(t);
   const stretch = stretchFrom(said);
   if (typeof c !== 'string' || !CHAIN.test(c) || at === undefined || stretch === undefined) return undefined;
-  if (p !== undefined && p !== 1) return undefined;
+  if ((p !== undefined && p !== 1) || (g !== undefined && g !== 1 && g !== 2)) return undefined;
   const entries = e === undefined ? [] : typeof e === 'string' ? unpackEntries(Buffer.from(e, 'base64')) : undefined;
-  if (entries === undefined || (entries.length === 0 && stretch === 'none')) return undefined;
-  return { chain: c, at, payments: p === 1, entries, ...(stretch === 'none' ? {} : { stretch }) };
+  if (entries === undefined || (entries.length === 0 && stretch === 'none' && g === undefined)) return undefined;
+  return {
+    chain: c,
+    at,
+    payments: p === 1,
+    entries,
+    ...(stretch === 'none' ? {} : { stretch }),
+    ...(g === undefined ? {} : { gaveWay: g }),
+  };
 }
 
 /** A line's text. */
-function lineText(chain: string, at: number, payments: boolean, entries: Entries, stretch?: Stretch): string {
+function lineText(
+  chain: string,
+  at: number,
+  payments: boolean,
+  entries: Entries,
+  stretch?: Stretch,
+  gaveWay?: 1 | 2,
+): string {
   return JSON.stringify({
     c: chain,
     t: new Date(at).toISOString(),
+    ...(gaveWay === undefined ? {} : { g: gaveWay }),
     ...(entries.length === 0 ? {} : { e: packEntries(entries, entries.length).toString('base64') }),
     ...(payments ? { p: 1 } : {}),
     ...(stretch === undefined
@@ -260,13 +279,18 @@ function lineText(chain: string, at: number, payments: boolean, entries: Entries
   });
 }
 
-/** A chain's lines: each class's entries, at most MOST_ENTRIES_A_LINE a line, the stretches on lines of their own. */
+/**
+ * A chain's lines: how much of it gave way for memory, if any, first; each class's entries, at most MOST_ENTRIES_A_LINE a
+ * line; the stretches on lines of their own.
+ */
 function* linesOf(
   chain: string,
   at: number,
   [kept, spent]: readonly [Entries, Entries],
   stretches: readonly Stretch[],
+  gaveWay: 0 | 1 | 2 = 0,
 ): Generator<string> {
+  if (gaveWay !== 0) yield lineText(chain, at, false, [], undefined, gaveWay);
   for (const [payments, entries] of [
     [false, kept],
     [true, spent],
@@ -505,16 +529,20 @@ export function createDigestLog({
 
   /** The chain gives way: its payments' table, or with none or those gone already, all of it. Said. */
   const giveWay = (name: string, held: ChainState): void => {
-    const payments = held.gaveWay === 0 && held.tables[1].size > 0;
-    for (const index of payments ? ([1] as const) : ([0, 1] as const)) {
+    dropTo(held, held.gaveWay === 0 && held.tables[1].size > 0 ? 1 : 2);
+    // Written with what moved, so a restart holds the chain as given way at once, never as a chain to walk again.
+    if (store !== undefined) pendingChain(name, now().getTime()).gaveWay = held.gaveWay;
+    sayGaveWay(name, held);
+  };
+
+  /** The chain held as given way this far: its payments' table let go, or both. */
+  const dropTo = (held: ChainState, level: 1 | 2): void => {
+    for (const index of level === 1 ? ([1] as const) : ([0, 1] as const)) {
       heldBytes -= held.tables[index].bytes;
       held.tables[index] = new ChainDigest(held.bornAt, 1);
       heldBytes += held.tables[index].bytes;
     }
-    held.gaveWay = payments ? 1 : 2;
-    // Nor what waited to be written: a stretch claims every fact in it, some of which are gone.
-    pendingStretches.delete(name);
-    sayGaveWay(name, held);
+    held.gaveWay = level;
   };
 
   /** A line read: passed over if dated before its chain's rebase, else merged. */
@@ -522,6 +550,11 @@ export function createDigestLog({
     if (anchors?.rebasedAfter(chainOfName(line.chain), line.at) === true) return;
     const at = line.at.getTime();
     const held = heldChain(line.chain, at);
+    // Given way where it was written: so here at once, its alarm said again.
+    if (line.gaveWay !== undefined && line.gaveWay > held.gaveWay) {
+      dropTo(held, line.gaveWay);
+      sayGaveWay(line.chain, held);
+    }
     for (const [high, low, place] of line.entries) {
       if (putInto(held, line.payments, high, low, place)) changedSinceSnapshot = true;
     }
@@ -694,7 +727,7 @@ export function createDigestLog({
         held === undefined ? [] : [...held.tables[1].entries()],
       ] as const;
       // Every chain with a stretch has its pending entry too (record makes one), dated by its walk.
-      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? []);
+      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? [], held?.gaveWay);
     }
   }
 
@@ -704,10 +737,12 @@ export function createDigestLog({
    */
   function* snapshotLines(): Generator<string> {
     for (const [name, held] of chains) {
-      if (held.gaveWay === 2) continue;
+      // A chain given way is written as such: its payments given way keep their coverage (a fact missing only loses
+      // protection, never raises the alarm); one given way whole needs none, as it reads as before the digest.
       const coverage =
-        held.gaveWay === 0 && held.covered !== undefined ? [{ from: 0n, to: held.covered }] : ([] as Stretch[]);
-      yield* linesOf(name, held.bornAt, [[...held.tables[0].entries()], [...held.tables[1].entries()]], coverage);
+        held.gaveWay < 2 && held.covered !== undefined ? [{ from: 0n, to: held.covered }] : ([] as Stretch[]);
+      const tables = [[...held.tables[0].entries()], [...held.tables[1].entries()]] as const;
+      yield* linesOf(name, held.bornAt, tables, coverage, held.gaveWay);
     }
   }
 
@@ -735,6 +770,7 @@ export function createDigestLog({
     } catch (error) {
       for (const [name, held] of facts) {
         const kept = pendingChain(name, held.bornAt);
+        if (held.gaveWay > kept.gaveWay) kept.gaveWay = held.gaveWay;
         for (const index of [0, 1] as const) {
           for (const [high, low, place] of held.tables[index].entries()) kept.tables[index].put(high, low, place);
         }
@@ -782,7 +818,7 @@ export function createDigestLog({
    */
   const recordStretch = (name: string, held: ChainState, stretch: Stretch, at: number): void => {
     if (extend(held, stretch)) changedSinceSnapshot = true;
-    if (store === undefined || held.gaveWay !== 0) return;
+    if (store === undefined || held.gaveWay === 2) return;
     pendingChain(name, at);
     pendingStretches.set(name, [...(pendingStretches.get(name) ?? []), stretch]);
   };

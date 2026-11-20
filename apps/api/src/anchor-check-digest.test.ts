@@ -237,6 +237,27 @@ describe('the anchor check keeping the signed states’ digest (AT13)', () => {
     expect(JSON.parse(line ?? '{}')).toMatchObject({ t: AT.toISOString() });
   });
 
+  it('no catch-up while the chain’s own check is still under way past its deadline, and nothing said of it', async () => {
+    const fake = createFakeWriteOnceStore();
+    await process(fake, chainOf({ current: walk(5n) })).check.run();
+    // A process with the anchor and no digest yet: uncovered, but its check hangs past the deadline.
+    const fresh = createFakeWriteOnceStore();
+    for (const [name, bytes] of fake.files) if (!name.includes('/digests/')) fresh.files.set(name, bytes);
+    const walkedFrom: (bigint | undefined)[] = [];
+    const hanging: OrganisationChains = {
+      ...chainOf({ current: walk(5n) }, walkedFrom),
+      verify: (_orgId, anchor) => {
+        walkedFrom.push(anchor?.seq);
+        return new Promise(() => undefined);
+      },
+    };
+    const { check, digest, capture } = process(fresh, hanging, { deadlineMs: 50 });
+    await check.run();
+    expect(walkedFrom).toEqual([5n]);
+    expect(digest.covers(CHAIN, 5n)).toBe(false);
+    expect(capture.lines().filter((line) => line.event === 'audit.state_digest_catch_up_failed')).toEqual([]);
+  });
+
   it('a slow digest write is its own warning, never the anchors’ write failing', async () => {
     const fake = createFakeWriteOnceStore();
     const report = { current: walk(3n, new Map([[subjectKey('agent', AGENT), 2n]])) };

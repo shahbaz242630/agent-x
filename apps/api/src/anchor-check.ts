@@ -665,8 +665,17 @@ export function createAnchorCheck({
       // Its shard held while it is compared, read again first if it was let go (PL-65 PR3): one that can't be waits.
       release = durable === undefined ? () => undefined : await pinFor(durable, chain, alone);
       if (release === undefined) return 'unanchored';
-      const outcome = await checkHeld(checked, signal, { alone, ran, log });
-      if (outcome !== 'failed' && chain.kind === 'organisation') await caughtUp(chain, signal, log);
+      let checkMs = 0;
+      const timed = (ms: number): void => {
+        checkMs = ms;
+        ran(ms);
+      };
+      const outcome = await checkHeld(checked, signal, { alone, ran: timed, log });
+      if (outcome !== 'failed' && chain.kind === 'organisation') {
+        // The catch-up's time is the turn's too, so the turns' order stays fair to the chains that need it.
+        const began = performance.now();
+        if (await caughtUp(chain, signal, log)) ran(checkMs + performance.now() - began);
+      }
       return outcome;
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
@@ -679,18 +688,21 @@ export function createAnchorCheck({
 
   /**
    * The digest's catch-up (AT13): a chain whose digest doesn't cover its anchor (a stretch lost between the anchor's write
-   * and the digest's, a rebase, a chain anchored before the digest, or one given way before a restart) is walked on from
+   * and the digest's, a rebase, or a chain anchored before the digest) is walked on from
    * where it is covered, or its first event, one step a turn, as its check is, until it does; its hand-offs wait meanwhile
-   * (`digest_pending`). Only reads: nothing is anchored, and a walk that fails is the alarm. Never throws.
+   * (`digest_pending`). Only reads: nothing is anchored, and a walk that fails is the alarm. Whether it walked, so its
+   * time counts in the turn's. Never throws.
    */
   const caughtUp = async (
     chain: Chain & { readonly kind: 'organisation' },
     signal: AbortSignal | undefined,
     log: Logger,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const anchor = anchors.latest(chain);
-    if (digest === undefined || organizations === undefined || anchor === undefined) return;
-    if (digest.state() !== 'read' || digest.covers(chain, anchor.seq)) return;
+    if (digest === undefined || organizations === undefined || anchor === undefined) return false;
+    if (digest.state() !== 'read' || digest.covers(chain, anchor.seq)) return false;
+    // Its regular check still under way past its deadline: the catch-up waits for a turn of its own, quietly.
+    if (inFlight.has(keyOf(chain))) return false;
     const from = digest.coverage(chain) ?? CHAIN_START;
     const began = clock.now();
     try {
@@ -702,12 +714,14 @@ export function createAnchorCheck({
       );
       if (!report.ok) {
         alarmed(chain, log, report.problem.reason, report.problem.seq);
-        return;
+        return true;
       }
       const to = { seq: report.seq, hash: report.hash, macKeyVersion: report.macKeyVersion };
       digest.record(chain, report.signed ?? new Map(), began, { from: from.seq, to });
+      return true;
     } catch (error) {
       if (!(error instanceof Stopped)) log.warn('audit.state_digest_catch_up_failed', { err: error });
+      return true;
     }
   };
 

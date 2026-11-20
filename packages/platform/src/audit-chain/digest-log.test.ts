@@ -598,32 +598,58 @@ describe('the digest within its memory: one organisation’s growth never stops 
     expect(log.latest(OTHER, 'agent', AGENT)).toBe(2n);
     expect(log.covers(OTHER, 2n)).toBe(true);
 
-    // A restart reads the chain that gave way as uncovered, to be walked again from its first event.
+    // A restart holds the chain as given way at once: today's checks, never a wait for a walk from its first event.
     time.held.at += 2 * HOUR;
     log.record(OTHER, seen(['agent', KEY, 3n]), time.now(), stretch(2n, 3n));
     await log.flush();
-    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024 });
+    const again = new LogCapture();
+    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024, capture: again });
     await restarted.log.read();
-    expect(restarted.log.covers(CHAIN, 4n)).toBe(false);
+    expect(restarted.log.covers(CHAIN, 99_999n)).toBe(true);
+    expect(restarted.log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
     expect(restarted.log.covers(OTHER, 3n)).toBe(true);
+    expect(again.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.state_digest_chain_gave_way', orgId: ORG, what: 'chain' }),
+    );
   });
 
-  it('a chain whose payments gave way writes no coverage past what it held whole: a restart walks it again', async () => {
+  it('a chain whose payments gave way keeps its coverage and its state across a restart: no wait, payments as before', async () => {
     const { log, fake, time } = digestOn(undefined, { mostBytes: 12_000 });
     await log.read();
     log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
     await log.flush();
     log.record(CHAIN, requests(400), START);
-    // A walk read from its first event after it gave way: true of what is held, not of the payments let go.
+    // A walk after it gave way: its coverage is written, as a payment's fact missing only loses protection.
     log.record(CHAIN, new Map(), START, stretch(0n, 600n));
     expect(log.covers(CHAIN, 600n)).toBe(true);
-    time.held.at += 2 * HOUR;
+    // Within the hour: no snapshot, so the delta alone carries how far it gave way.
+    time.held.at += 10 * MINUTE;
     await log.flush();
     const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024 });
     await restarted.log.read();
-    // Its snapshot carries no coverage at all: uncovered, to be walked again from its first event.
-    expect(restarted.log.covers(CHAIN, 4n)).toBe(false);
-    expect(restarted.log.covers(CHAIN, 600n)).toBe(false);
+    expect(restarted.log.covers(CHAIN, 600n)).toBe(true);
+    expect(restarted.log.latest(CHAIN, 'agent', AGENT)).toBe(3n);
+    // Its payments still given way, though there is room now: what was let go is not all in the store's files.
+    expect(restarted.log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-000000000000')).toBeUndefined();
+    restarted.log.record(CHAIN, requests(1, 2000), START);
+    expect(restarted.log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-0000000007d0')).toBeUndefined();
+  });
+
+  it('a snapshot alone carries how far a chain gave way, and its coverage where only its payments did', async () => {
+    const { log, fake, time } = digestOn(undefined, { mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
+    log.record(CHAIN, requests(400), START, stretch(4n, 600n));
+    time.held.at += 2 * HOUR;
+    await log.flush();
+    for (const name of namesUnder(fake.files, 'deltas')) fake.files.delete(name);
+    const again = new LogCapture();
+    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024, capture: again });
+    await restarted.log.read();
+    expect(restarted.log.covers(CHAIN, 600n)).toBe(true);
+    expect(again.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.state_digest_chain_gave_way', orgId: ORG, what: 'payments' }),
+    );
   });
 
   it('says it is past half, once', async () => {
