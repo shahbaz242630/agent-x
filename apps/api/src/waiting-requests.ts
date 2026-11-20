@@ -42,11 +42,11 @@ export function createWaitingRequests({
         { keys, ids, logger },
         async (tx, states): Promise<WaitingRequest | undefined> => {
           const read = await requestInOrder(tx, states, orgId, requestId);
-          // Only a request still waiting has an expiry (requestInOrder: read from its decision).
-          if (read.outcome !== 'found' || read.shown.expiresAt === null) return undefined;
+          // Only a request still waiting has an expiry (requestInOrder: read from its decision). One naming no
+          // supplier of the organisation's was denied, so has none either (S206 V8): its check only narrows the name.
+          if (read.outcome !== 'found' || read.shown.expiresAt === null || read.shown.supplierName === null)
+            return undefined;
           const { request, agentName, supplierName, expiresAt } = read.shown;
-          // One naming no supplier of the organisation's was denied, so never waits (S206 V8).
-          if (supplierName === null) return undefined;
           return {
             amountMinor: request.amount.minor,
             currency: request.amount.currency,
