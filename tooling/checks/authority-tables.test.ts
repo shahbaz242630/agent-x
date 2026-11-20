@@ -106,7 +106,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a membership's grant summary (OR1), a registered contact (B6-1a), a factor reset (B6-3a), an agent, an agent key (C1-1), a connection (6E3a) and its refresh head (R-15, 0102), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), a proposal to mark that failed (gate H10), and an agent's month total (GM-1a, 0109)", () => {
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a membership's grant summary (OR1), a registered contact (B6-1a), a factor reset (B6-3a), an agent, an agent key (C1-1), a connection (6E3a) and its refresh head (R-15, 0102), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), a supplier's remittance setting (Phase 4 C2a), an agent's month zone (0054, PL-40), a spend request (Phase 2 D1), its instruction and transaction (Phase 4 B3), a proposal to mark that failed (gate H10), and an agent's month total (GM-1a, 0110)", () => {
     // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then each one's grant summary, then contacts, then resets, then agents before their keys, then the keys' connections, then each one's refresh head, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then their remittance settings, then the agents' month zones, then spend requests, then their instructions and transactions, then the proposals to mark those failed, then the agents' month totals.
     const [
       organizations,
@@ -346,7 +346,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fixedAtCreation: ['transaction_id', 'evidence_ref', 'proposed_by', 'created_at'],
         liveStatuses: ['OPEN'],
       },
-      // A month's total moves with each reservation and release (R-15, 0109): no status; its agent, month, currency and making fixed.
+      // A month's total moves with each reservation and release (R-15, 0110): no status; its agent, month, currency and making fixed.
       {
         table: limitReservations.MONTH_TOTALS.table,
         subject: limitReservations.MONTH_TOTALS.subject,

@@ -505,7 +505,7 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
 const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT, currency = 'AED') =>
   inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since, currency }));
 
-describe("an agent's month total (0109, GM-1a)", () => {
+describe("an agent's month total (0110, GM-1a)", () => {
   /** A total row for the agent's month, as the audit module's record adds one before sealing it. */
   const totalRow = (org: Org, overrides: Record<string, unknown> = {}) => ({
     org_id: org.id,

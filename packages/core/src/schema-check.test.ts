@@ -128,7 +128,7 @@ describe('at start-up', () => {
         'transactions.transactions': ['instruction_id', 'created_at'],
         // Gate H10 (0066): a proposal's payment, reference, proposer and when it was made.
         'transactions.failure_proposals': ['transaction_id', 'evidence_ref', 'proposed_by', 'created_at'],
-        // GM-1a (0109): a month total's agent, month, currency and when it was made.
+        // GM-1a (0110): a month total's agent, month, currency and when it was made.
         'limit_reservations.month_totals': ['agent_id', 'month', 'currency', 'created_at'],
       },
     });
