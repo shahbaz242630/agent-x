@@ -117,6 +117,17 @@ describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Po
                  )::text,
                  decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1
           from generate_series(1, ${COPIED}::int) as g`.execute(tx);
+        // One person's many sign-outs, each its own session's record (S207 GM-2: sessions.ts reads one per request).
+        await sql`
+          insert into platform_controls.audit_events
+            (seq, id, recorded_at, actor_type, actor_id, action, details, prev_hash, hash, mac, mac_key_version)
+          select 2000000 + g, gen_random_uuid(), now(), 'system', 'api', 'identity.session_ended',
+                 json_build_object(
+                   'person', 'p-7', 'record', 'r-' || g,
+                   'at', to_char(timestamp '2026-01-01' + g * interval '1 second', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 )::text,
+                 decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode('00', 'hex'), 1
+          from generate_series(1, ${COPIED}::int) as g`.execute(tx);
         await sql`analyze platform_controls.audit_events`.execute(tx);
         for (const [name, read] of Object.entries(reads(tx))) {
           const explained = await sql<{ 'QUERY PLAN': [{ Plan: PlanNode }] }>`explain (format json) ${read}`.execute(
@@ -175,6 +186,21 @@ describe(`the copier's and the restriction's reads, from 0084's indexes (SA2, Po
     expect(indexesOf(plans.restriction)).toEqual(
       expect.arrayContaining(['audit_events_by_person', 'audit_events_by_subject']) as unknown,
     );
+  });
+
+  it('finds a session’s signed sign-out by 0110’s index, one entry however often its person signed out (S207 GM-2)', async () => {
+    const plans = await plansOf((tx) => ({
+      // As sessions.ts asks it: the record and the person read from the session's own row in the same statement.
+      signedOut: platformEventWithRead(
+        tx,
+        'identity.session_ended',
+        {},
+        { record: sql<string | null>`(select 'r-77'::text)`, person: sql<string | null>`(select 'p-7'::text)` },
+      ),
+    }));
+
+    expect(plans.signedOut?.map((node) => node['Node Type'])).not.toContain('Seq Scan');
+    expect(indexesOf(plans.signedOut)).toEqual(['audit_events_by_record']);
   });
 
   it('answers as before through the indexes: the latest time copied, and an event copied or not', async () => {

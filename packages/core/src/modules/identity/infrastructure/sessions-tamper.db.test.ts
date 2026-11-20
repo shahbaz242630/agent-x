@@ -23,10 +23,12 @@ import {
 } from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
+import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
-import { createSessions } from './sessions.ts';
+import { createPlatformChain, type PlatformTransaction } from '../../platform-controls/index.ts';
+import { createSessions, endSessionsOf, lockSessionsOf, sessionEndedEvent, sessionsEndedEvent } from './sessions.ts';
 import {
   createStepUpChallenges,
   type StepUpBinding,
@@ -245,6 +247,114 @@ describe(`the owner can't sign in as a person (Postgres ${server.version})`, () 
         .executeTakeFirst(),
     ).toEqual({ mac_key_version: 2 });
     expect(await sessions(later).use(app, again)).toMatchObject({ sessionId });
+    expect(alarms()).toEqual([]);
+  });
+});
+
+describe(`SEC-DB-14 R-15 the owner can't put back a session that was ended (S207; Postgres ${server.version})`, () => {
+  const platform = createPlatformChain({ keys, ids });
+
+  /** The session's row as the owner reads it, to put back later. */
+  async function keep(sessionId: string): Promise<unknown> {
+    const [kept] = await asOwner('select pg_catalog.row_to_json(s) as kept from identity.sessions s where s.id = $1', [
+      sessionId,
+    ]);
+    return kept?.kept;
+  }
+
+  /** The owner puts the row back exactly as it was, its MAC and all. */
+  const putBack = (kept: unknown) =>
+    asOwner(
+      `insert into identity.sessions
+         select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)`,
+      [JSON.stringify(kept)],
+    );
+
+  /** A sign-out as the app makes one (sign-in-flow.ts): the session deleted and its end signed, in one transaction. */
+  const signOut = (cookie: string) =>
+    app.transaction().execute(async (tx) => {
+      // As the sign-in flow holds it: a transaction on the identity tables alone.
+      const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
+      if (ended !== undefined) {
+        await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
+      }
+      return ended;
+    });
+
+  /** The person's sessions all ended at `at`, as a role change does (membership-changes.ts), the end signed. */
+  const endAll = (userId: string, at: Date) =>
+    app.transaction().execute(async (tx) => {
+      await lockSessionsOf(tx, [userId]);
+      await endSessionsOf(tx, userId, at);
+      await platform.record(tx as unknown as PlatformTransaction, sessionsEndedEvent(userId, at));
+    });
+
+  const rowOf = (sessionId: string) =>
+    app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst();
+
+  it('control: a session never ended, deleted and put back by the owner, is still found, with no alarm', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const kept = await keep(sessionId);
+    await asOwner('delete from identity.sessions where id = $1', [sessionId]);
+    await putBack(kept);
+
+    expect(await sessions().use(app, cookie)).toMatchObject({ sessionId, userId });
+    expect(await sessions().holder(app, cookie)).toBe(userId);
+    expect(await sessions().rotate(app, sessionId)).toBeDefined();
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a session signed out of, put back byte for byte, is no session, and raises the alarm', async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const other = await sessions().open(app, userId, { idpSessionId: 'V1_3', authTime: START, amr: PASSKEY });
+    const kept = await keep(sessionId);
+    expect(await signOut(cookie)).toEqual({ userId, sessionId });
+    expect(await rowOf(sessionId)).toBeUndefined();
+
+    await putBack(kept);
+    expect(await rowOf(sessionId)).toEqual({ id: sessionId });
+    expect(await sessions().use(app, cookie)).toBeUndefined();
+    expect(await sessions().holder(app, cookie)).toBeUndefined();
+    expect(await sessions().rotate(app, sessionId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'session', reason: 'ended', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+    ]);
+    // The person's other session, never signed out of, is still theirs.
+    expect(await sessions().use(app, other.cookie)).toMatchObject({ sessionId: other.sessionId });
+    expect(alarms()).toHaveLength(3);
+  });
+
+  it("a session ended with all its person's, put back, is no session; one signed in after the end is", async () => {
+    const { userId, sessionId, cookie } = await signedIn();
+    const kept = await keep(sessionId);
+    const at = new Date(START.getTime() + 1000);
+    await endAll(userId, at);
+    expect(await rowOf(sessionId)).toBeUndefined();
+
+    await putBack(kept);
+    expect(await sessions().use(app, cookie)).toBeUndefined();
+    expect(await sessions().holder(app, cookie)).toBeUndefined();
+    expect(await sessions().rotate(app, sessionId)).toBeUndefined();
+    expect(alarms()).toEqual([
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+      expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId }),
+    ]);
+    // A sign-in made at the end's moment is not before it (the sign-in's own rule): its session is found.
+    const after = await sessions().open(app, userId, { idpSessionId: 'V1_4', authTime: at, amr: PASSKEY });
+    expect(await sessions().use(app, after.cookie)).toMatchObject({ sessionId: after.sessionId });
+    expect(alarms()).toHaveLength(3);
+  });
+
+  it("another person's ends don't touch this person's session", async () => {
+    const mine = await signedIn();
+    const theirs = await signedIn();
+    await signOut(theirs.cookie);
+    await endAll(theirs.userId, new Date(START.getTime() + 1000));
+
+    expect(await sessions().use(app, mine.cookie)).toMatchObject({ sessionId: mine.sessionId });
     expect(alarms()).toEqual([]);
   });
 });
@@ -644,7 +754,7 @@ describe(`the owner can't end someone else's login sessions, nor open a challeng
   it("control: a sign-out of the app's own session names its person", async () => {
     const { userId, sessionId, cookie } = await signedIn();
 
-    expect(await sessions().end(app, cookie)).toBe(userId);
+    expect(await sessions().end(app, cookie)).toEqual({ userId, sessionId });
     expect(
       await app.selectFrom('identity.sessions').select('id').where('id', '=', sessionId).executeTakeFirst(),
     ).toBeUndefined();

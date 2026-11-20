@@ -48,6 +48,21 @@ export const sessionsEndedEvent = (userId: string, endedAt: Date): PlatformEvent
   details: { person: userId.toLowerCase(), at: endedAt.toISOString() },
 });
 
+/**
+ * The platform chain's signed record of one session ended by a sign-out (S207, R-15): its row is deleted, and the
+ * owner could put it back as it was, its MAC still holding. A session this names is never found again (sessions.ts).
+ */
+export const SESSION_ENDED = 'identity.session_ended';
+
+/** The record of one session's end, for the caller to add to the platform chain in the transaction that deleted it, last of its locks. */
+export const sessionEndedEvent = (ended: { readonly userId: string; readonly sessionId: string }, endedAt: Date) =>
+  ({
+    actor: { type: 'system', id: 'api' },
+    action: SESSION_ENDED,
+    // The session by its record ID, never its cookie's, as `record`: audit rows never hold a fact named for a session.
+    details: { person: ended.userId.toLowerCase(), record: ended.sessionId.toLowerCase(), at: endedAt.toISOString() },
+  }) satisfies PlatformEvent;
+
 /** How long ends are kept past the newest event checked: a login flow's ten minutes, two for clocks, and spare. */
 const KEPT_MS = 20 * 60 * 1000;
 
