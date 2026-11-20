@@ -280,7 +280,7 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
   const pageOf = (orgId: string, asked: Partial<OrgEventsToRead> = {}) =>
     withTenant(app, orgId, (tx) => orgSecurityEventsPage(tx, orgId, { ...RANGE, ...asked }, checked()));
 
-  it('leaves off the page a row planted or edited by the database’s owner, the alarm raised for each (S206 V6)', async () => {
+  it('SEC-DB-18 leaves off the page a row planted or edited by the database’s owner, the alarm raised for each (S206 V6)', async () => {
     await emptyOrgs();
     capture = new LogCapture();
     await at(START.getTime()).record(app, [

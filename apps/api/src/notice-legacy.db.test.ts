@@ -119,7 +119,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`the notices from before seals, sealed once (S206 V4, Postgres ${server.version})`, () => {
+describe(`SEC-DB-17 the notices from before seals, sealed once (S206 V4, Postgres ${server.version})`, () => {
   it('seals those still to be sent, records how many, and never again', async () => {
     const waiting = [await unsealed(), await unsealed()];
     const sent = await unsealed(true);

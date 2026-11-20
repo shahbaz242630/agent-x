@@ -158,7 +158,7 @@ afterEach(async () => {
   await database.drop();
 });
 
-describe('the security events’ daily seals (S206 V6, R-15)', () => {
+describe('SEC-DB-18 the security events’ daily seals (S206 V6, R-15)', () => {
   it('seals each closed day holding rows once, the global table’s and an organisation’s, with no alarm', async () => {
     const w = await shared.world();
     listed = [w.org];

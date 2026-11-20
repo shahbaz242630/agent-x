@@ -696,7 +696,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
-  it('seals the notices from before seals in the background once it answers, and records it (S206 V4)', async () => {
+  it('SEC-DB-17 seals the notices from before seals in the background once it answers, and records it (S206 V4)', async () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
@@ -744,7 +744,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ).toHaveLength(1);
   });
 
-  it('runs the seal pass only where the anchor store is: `jobs`, never `web`, nor with no store set (S206 V4)', async () => {
+  it('SEC-DB-17 runs the seal pass only where the anchor store is: `jobs`, never `web`, nor with no store set (S206 V4)', async () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
@@ -786,7 +786,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     }
   });
 
-  it('raises the alarm, seals nothing and goes on serving when the platform chain has a gap (S206 V4)', async () => {
+  it('SEC-DB-17 raises the alarm, seals nothing and goes on serving when the platform chain has a gap (S206 V4)', async () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');

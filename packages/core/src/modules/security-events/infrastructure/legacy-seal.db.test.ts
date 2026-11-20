@@ -197,7 +197,7 @@ afterEach(async () => {
   await database.drop();
 });
 
-describe('0105: every row written from now on carries a MAC (S206 V6)', () => {
+describe('SEC-DB-18 0105: every row written from now on carries a MAC (S206 V6)', () => {
   it('refuses a row without one in every table, as the release before would write it during the roll-out', async () => {
     const at = new Date('2026-11-25T09:00:00.000Z');
     await expect(
@@ -244,7 +244,7 @@ describe('0105: every row written from now on carries a MAC (S206 V6)', () => {
   });
 });
 
-describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
+describe('SEC-DB-18 the security rows from before 0105 sealed at start (S206 V6)', () => {
   it('gives each row of every table its MAC, once, records it, and a second start does nothing', async () => {
     await legacyRows();
     expect(await unsealed()).toBe('5');

@@ -4931,7 +4931,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
+  it('SEC-DB-18 security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     expect(brokenRules(without(SECURITY_SEAL_ALERT))).toEqual(['security-seal-alert']);
     for (const change of [
