@@ -408,7 +408,13 @@ describe('the hourly look', () => {
       ...w.rail,
       submitApprovedIntent: async (intent) => {
         await marksLost(w);
-        await rediscoveryOf(w.org).run();
+        // On the test's clock, which the checks' "now" is counted by: this process's own runs apart from Postgres's.
+        await createOrgWorkRediscovery({
+          list: () => Promise.resolve([w.org]),
+          database: app,
+          logger: testLogger(capture),
+          clock,
+        }).run();
         return w.rail.submitApprovedIntent(intent);
       },
     };
@@ -425,7 +431,7 @@ describe('the hourly look', () => {
     }).run();
 
     expect(seen.hand_off_sweep?.due_at).toEqual(new Date(created.getTime() + 10 * 60_000));
-    expect(seen.payment_check?.due_at.getTime()).toBeLessThanOrEqual(await serverNow());
+    expect(seen.payment_check?.due_at).toEqual(clock.now());
     expect(lines('org_work.unmarked').map(({ job }) => job as string)).toEqual(['hand_off_sweep', 'payment_check']);
   });
 
