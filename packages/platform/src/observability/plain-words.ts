@@ -930,6 +930,16 @@ export const PLAIN_WORDS = {
     broke: "No organisation's spend requests were checked this run.",
     next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database.',
   },
+  'month_totals.cutover_failed': {
+    happened: "Moving an organisation's monthly spending limits onto signed running totals failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'month_totals.cutover_held': {
+    happened: "An organisation's monthly limits were not moved onto signed totals: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
   'http.framework_log': {
     happened: 'The web server reported a problem of its own while handling a request.',
     broke: 'That request may not have been answered properly.',

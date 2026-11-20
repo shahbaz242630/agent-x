@@ -380,17 +380,22 @@ describe('the holdings check (E1)', () => {
     ],
   ];
 
-  it.each(tampered)('raises the alarm and the hold for %s past the app (SEC-DB-09)', async (_, change, whose) => {
+  it.each(tampered)('raises the alarm and the hold for %s past the app (SEC-DB-09)', async (what, change, whose) => {
     const { w, acting } = await ready();
     const held = await requests(acting, w);
     await pastTheApp(w, (owner) => change(owner, held));
 
     await job(w).run();
 
+    // A reservation's amount cut or taken from its month no longer adds up to the month's signed total (GM-1a) either.
+    const cutsTheMonth = /^a reservation (deleted|released|lowered|moved to another month)$/.test(what);
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held[whose] }),
+      ...(cutsTheMonth ? [expect.objectContaining({ reason: 'holding', subjectType: 'month_total' }) as unknown] : []),
     ]);
-    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 1 })]);
+    expect(lines('holdings_check.passed')).toEqual([
+      expect.objectContaining({ requests: 3, mismatched: 1, totalsMismatched: cutsTheMonth ? 1 : 0 }),
+    ]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
   });
 

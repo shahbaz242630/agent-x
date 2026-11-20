@@ -11,8 +11,10 @@
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
 // an agent's own cancels counted under its cancel lock (8a); its reservation
-// and order claim locked (11); then the move, signed, which
-// takes the audit head (12); then the reservation and claim released, which
+// and order claim locked (11); its month's signed total read for change (11a,
+// GM-1a: a brake's batch locks each of its totals once, in order of ID);
+// then the move, signed, which takes the audit head (12); then its amount
+// given back to the total, and the reservation and claim released, which
 // 0040's `held_for_its_request` and 0039's `claim_guard` allow only once the
 // request has ended. So no lock is taken after the head's.
 //
@@ -26,7 +28,7 @@
 // against the sealed wait (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
 // against a wait of 24 hours or more (E6).
-import { holdTransactionLock } from '@agentx/platform/db';
+import { holdTransactionLock, MOST_ROWS_GATHERED } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
@@ -39,8 +41,14 @@ import {
   type TamperSign,
 } from '../../audit/index.ts';
 import {
+  givenBack,
   type LimitReservationsTables,
   lockReservationsOf,
+  monthTotalGathered,
+  monthTotalId,
+  type MonthTotalKey,
+  type MonthTotalCheck,
+  monthTotalOf,
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
 import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
@@ -48,7 +56,7 @@ import { waitedOut } from '../domain/approval-wait.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, isPending, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
+import { decisionOf, decisionsOf, NO_PAYMENTS, requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -287,12 +295,22 @@ export const voidedWith = (
   key: { readonly orgId: string; readonly id: string },
   causes: readonly ReasonCode[],
   now: Date,
+  total: 'own' | 'caller' = 'own',
 ) =>
-  endHolding(tx, states, keys, key, 'deny', now, {
-    actor: ACTOR,
-    action: VOIDED,
-    details: { causes: causes.join(',') },
-  });
+  endHolding(
+    tx,
+    states,
+    keys,
+    key,
+    'deny',
+    now,
+    {
+      actor: ACTOR,
+      action: VOIDED,
+      details: { causes: causes.join(',') },
+    },
+    total,
+  );
 
 /**
  * A pending request of a mandate's version in force, weighed again under the
@@ -412,16 +430,55 @@ export async function voidPendingOf(
     .limit(most)
     .forNoKeyUpdate()
     .execute();
-  const pending: string[] = [];
+  const found: SpendRequestRecord[] = [];
   for (const { id } of rows) {
     // Locked as pending, so one found is pending: its verified state is its row's.
-    if ((await requestOf(tx, states, { orgId, id }, 'change')).outcome === 'found') pending.push(id);
+    const read = await requestOf(tx, states, { orgId, id }, 'change');
+    if (read.outcome === 'found') found.push(read.request);
   }
-  if (pending.length === 0) return 0;
+  if (found.length === 0) return 0;
+  const pending = found.map(({ id }) => id);
   await lockReservationsOf(tx, pending);
   await lockClaimsOf(tx, pending);
-  for (const id of pending) await voidedWith(tx, states, keys, { orgId, id }, [cause], now);
+  // Their month totals (11a, GM-1a), each locked once, in order of ID, before any move takes the head: two brakes
+  // whose requests share totals take them alike, never crosswise.
+  const held = await heldInOf(tx, states, orgId, found);
+  const totals = await lockedTotalsOf(tx, states, orgId, held);
+  for (const id of pending) await voidedWith(tx, states, keys, { orgId, id }, [cause], now, 'caller');
+  // One record a total, for every request of the batch it held.
+  for (const { key, total, of } of totals) {
+    const amount = of.reduce((sum, request) => sum + request.amount, 0n);
+    const change = givenBackBy({ actor: ACTOR, action: VOIDED, details: {} }, of);
+    await givenBack(tx, states, orgId, { key, total, amount }, { at: now, change });
+  }
   return pending.length;
+}
+
+/**
+ * The distinct month totals `held` names, each read for change in order of its ID, gathered a statement for at most
+ * MOST_ROWS_GATHERED of them (each answered then with no trip): each with the requests it holds.
+ */
+async function lockedTotalsOf(tx: EndingsTransaction, states: SignedStates, orgId: string, held: readonly HeldIn[]) {
+  const byId = new Map<string, { readonly key: MonthTotalKey; readonly of: HeldIn[] }>();
+  for (const request of held) {
+    const id = monthTotalId(orgId, request.key);
+    const entry = byId.get(id) ?? { key: request.key, of: [] };
+    entry.of.push(request);
+    byId.set(id, entry);
+  }
+  const ordered = [...byId.entries()].toSorted(([a], [b]) => (a < b ? -1 : 1)).map(([, entry]) => entry);
+  for (let start = 0; start < ordered.length; start += MOST_ROWS_GATHERED) {
+    const batch = ordered.slice(start, start + MOST_ROWS_GATHERED);
+    await states.gather(
+      tx,
+      orgId,
+      batch.map(({ key }) => monthTotalGathered(orgId, key, 'change')),
+    );
+  }
+  const totals = [];
+  for (const entry of ordered)
+    totals.push({ ...entry, total: await monthTotalOf(tx, states, orgId, entry.key, 'change') });
+  return totals;
 }
 
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
@@ -522,14 +579,76 @@ async function endHolding(
   event: 'expire' | 'cancel' | 'deny',
   at: Date,
   change: SignedChange,
+  total: 'own' | 'caller' = 'own',
 ): Promise<void> {
   await lockReservationsOf(tx, [key.id]);
   await lockClaimsOf(tx, [key.id]);
   // A mismatch is alarmed by the judging itself.
   // Ending before its hand-off: no payment to read.
   await requestHoldingsWhole(tx, states, keys, key.orgId, key.id, NO_PAYMENTS);
+  // Its month's total locked for change (11a) before the move takes the head (12), unless the caller holds it (GM-1a).
+  // Read for change already by every caller, in this transaction: the same row, verified again.
+  const held = total === 'own' ? await lockedTotalOf(tx, states, key, 'change') : null;
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
+  if (held !== null) await givenBack(tx, states, key.orgId, held, { at, change: givenBackBy(change, [held]) });
   await releaseReservationsOf(tx, { requestId: key.id, at });
   await releaseClaim(tx, { requestId: key.id, releasedAt: at });
 }
+
+/** Where a request's capacity is held: its month's total, by its signed state and sealed decision, and its amount. */
+interface HeldIn {
+  readonly requestId: string;
+  readonly key: MonthTotalKey;
+  readonly amount: bigint;
+}
+
+/**
+ * Where each request's capacity is held, by its verified state and its decision as sealed (one statement). One whose
+ * decision sealed no month (decided before E1) has none: no month total counts it (the cutover's rule alike).
+ */
+async function heldInOf(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  orgId: string,
+  requests: readonly SpendRequestRecord[],
+): Promise<readonly HeldIn[]> {
+  const decided = await decisionsOf(
+    tx,
+    states,
+    orgId,
+    requests.map(({ id }) => id),
+  );
+  return requests.flatMap((request) => {
+    const month = decided.get(request.id)?.held?.month;
+    if (month === undefined) return [];
+    const key = { agentId: request.agentId, month, currency: request.amount.currency };
+    return [{ requestId: request.id, key, amount: request.amount.minor }];
+  });
+}
+
+/**
+ * The request's month total, read for change (11a, GM-1a), with what it gives back: its request read through its
+ * signed state (`lock`, as its caller holds it) and its decision's sealed month. Null for none to give back to: a
+ * request that can't be believed (its read raised the alarm) or whose decision sealed no month (before E1).
+ */
+export async function lockedTotalOf(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  lock: 'share' | 'change',
+): Promise<(HeldIn & { readonly total: MonthTotalCheck }) | null> {
+  const read = await requestOf(tx, states, key, lock);
+  const [held] = await heldInOf(tx, states, key.orgId, read.outcome === 'found' ? [read.request] : []);
+  return held === undefined ? null : { ...held, total: await monthTotalOf(tx, states, key.orgId, held.key, 'change') };
+}
+
+/** The total's own event for capacity given back by an ending: the ending's actor, with the requests and amount. */
+const givenBackBy = (change: SignedChange, held: readonly HeldIn[]): SignedChange => ({
+  actor: change.actor,
+  action: 'month_total.released',
+  details: {
+    requestIds: held.map(({ requestId }) => requestId.toLowerCase()).join(','),
+    amountMinor: held.reduce((sum, { amount }) => sum + amount, 0n).toString(),
+  },
+});

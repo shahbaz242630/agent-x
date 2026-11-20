@@ -42,7 +42,8 @@ import {
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { acceptDraft, mandateOf, MANDATES, type MandatesTables, setPolicy } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
-import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { createOrganization, ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { registerOrganization } from '@agentx/core/modules/directory';
 import { createFakeRail, type FakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { addSupplier, supplierOf, type SuppliersTables, verifySupplier } from '@agentx/core/modules/suppliers';
@@ -196,18 +197,36 @@ export function mandateWorld({
     scopes = ['requests:write'],
     supplierName = 'Gulf Office Supplies LLC',
     orgName = 'Acme Trading LLC',
+    madeBeforeMonthTotals = false,
   }: {
     readonly capChosen?: boolean;
     readonly suppliers?: number;
     readonly scopes?: readonly Scope[];
     readonly supplierName?: string;
     readonly orgName?: string;
+    /** Made as an organisation was before GM-1a: its `organization.created` says nothing of month totals, so it waits for its cutover. */
+    readonly madeBeforeMonthTotals?: boolean;
   } = {}): Promise<World> {
     const now = clock().now();
     const org = ids.next();
-    await withSignedStates(app(), org, quiet(), (tx, states) =>
-      createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR }),
-    );
+    await withSignedStates(app(), org, quiet(), async (tx, states) => {
+      if (!madeBeforeMonthTotals) return createOrganization(tx, states, { id: org, name: orgName, actor: OPERATOR });
+      await registerOrganization(tx, org);
+      await tx
+        .insertInto(ORGANIZATIONS.table)
+        .values({ org_id: org, id: org, name: orgName, status: 'ACTIVE' })
+        .execute();
+      const recorded = await states.record(
+        tx,
+        ORGANIZATIONS,
+        { orgId: org, id: org },
+        'new',
+        { status: 'ACTIVE' },
+        { actor: OPERATOR, action: 'organization.created', details: {} },
+      );
+      await states.startIntegrityHold(tx, org, OPERATOR);
+      return recorded;
+    });
     const admin = await member(org, 'admin');
     if (capChosen) {
       await withSignedStates(app(), org, quiet(), (tx, states) =>

@@ -27,12 +27,27 @@
 //
 // A run never throws: each failure is logged, naming the organisation, and
 // the run goes on to the next.
-import { type AuditTables, type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
+import {
+  type AuditTables,
+  createAuditTrail,
+  type SignedStatesServices,
+  withSignedStates,
+} from '@agentx/core/modules/audit';
+import {
+  checkMonthTotals,
+  type LimitReservationsTables,
+  MOST_TOTALS_CHECKED_A_PAGE,
+  type TotalsChecked,
+} from '@agentx/core/modules/limit-reservations';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
-import { checkHoldings, MOST_CHECKED_A_PAGE, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import {
+  checkHoldings,
+  cutOverMonthTotals,
+  MOST_CHECKED_A_PAGE,
+  type SpendRequestsTables,
+} from '@agentx/core/modules/spend-requests';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
-import type { IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, systemClock } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -57,7 +72,10 @@ export function createHoldingsCheck({
   logger,
   page = MOST_CHECKED_A_PAGE,
   pagesARun = PAGES_A_RUN,
+  clock = systemClock,
 }: {
+  /** The time a cutover opens its totals at (GM-1a). */
+  readonly clock?: Clock;
   /** The organisations to look in this run: job-list.ts's, from the marks and the directory. */
   readonly list: () => Promise<readonly string[]>;
   /** One whose pass ended this run, its requests all checked: owed no visit until listed again. */
@@ -74,9 +92,55 @@ export function createHoldingsCheck({
   const progress = new Map<string, string>();
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
+  /**
+   * The organisation cut over to signed month totals, if it isn't yet (GM-1a): its own transaction, before its pages,
+   * so every organisation is at a process's first run. A failure is logged and left for the next run, its decisions
+   * refused busy meanwhile.
+   */
+  const cutOverIn = async (orgId: string, log: Logger): Promise<void> => {
+    try {
+      const trail = createAuditTrail({ keys, ids });
+      const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        cutOverMonthTotals(tx, states, orgId, {
+          payments: paymentHoldsOf,
+          record: (event) => trail.record(tx, orgId, event),
+          at: clock.now(),
+        }),
+      );
+      if (done.outcome === 'cut_over')
+        log.info('month_totals.cut_over', { opened: done.opened, mismatched: done.mismatched });
+      if (done.outcome === 'tampered') log.warn('month_totals.cutover_held', {});
+    } catch (error) {
+      log.error('month_totals.cutover_failed', { err: error });
+    }
+  };
+
+  /**
+   * The organisation's month totals held to their reservations (GM-1a), a page a transaction, once its requests'
+   * pass has ended: each total's mismatch alarmed. Counts what it checked.
+   */
+  const checkTotalsIn = async (orgId: string, log: Logger) => {
+    let after: string | null = null;
+    let totals = 0;
+    let mismatched = 0;
+    let tampered = 0;
+    do {
+      const from: string | null = after;
+      const checked: TotalsChecked = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        checkMonthTotals(tx, states, orgId, { after: from, limit: MOST_TOTALS_CHECKED_A_PAGE }),
+      );
+      totals += checked.totals;
+      mismatched += checked.mismatched;
+      tampered += checked.tampered;
+      after = checked.next;
+    } while (after !== null);
+    return { totals, totalsMismatched: mismatched, totalsTampered: tampered };
+  };
+
   /** Checks the organisation's next pages, up to its share; false if the signal stopped it. */
   const checkIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
+    if (progress.get(orgId) === undefined) await cutOverIn(orgId, log);
     let requests = 0;
     let mismatched = 0;
     let tampered = 0;
@@ -92,8 +156,9 @@ export function createHoldingsCheck({
         tampered += checked.tampered;
         if (checked.next === null) {
           progress.delete(orgId);
+          const totals = await checkTotalsIn(orgId, log);
           done(orgId);
-          log.info('holdings_check.passed', { requests, mismatched, tampered });
+          log.info('holdings_check.passed', { requests, mismatched, tampered, ...totals });
           return true;
         }
         progress.set(orgId, checked.next);

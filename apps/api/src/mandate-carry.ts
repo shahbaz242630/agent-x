@@ -44,7 +44,7 @@
 import { type AuditActor, type AuditDetails, type SignedStates, type VerifiedState } from '@agentx/core/modules/audit';
 import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
-import { lockAgentPeriod, monthsSpent, splitHeld } from '@agentx/core/modules/limit-reservations';
+import { lockAgentPeriod, splitHeld } from '@agentx/core/modules/limit-reservations';
 import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/policies';
 import {
   claimsOnEach,
@@ -72,6 +72,7 @@ import {
   authorityIn,
   type DecisionTables,
   inputOf,
+  monthSpentWeighed,
   type MandateWeighed,
   type PoliciesWeighed,
 } from './spend-request-decisions.ts';
@@ -215,6 +216,7 @@ export async function carryPlan(tx: CarryTx, states: SignedStates, scope: CarryS
   // Those waiting their turn hold capacity too, but are weighed after these: left out of the totals, as these are.
   const outside = await outsideOf(
     tx,
+    states,
     scope,
     authority,
     requests,
@@ -344,14 +346,25 @@ export interface HeldOutside {
  */
 export async function outsideOf(
   tx: CarryTx,
-  { agentId, now }: Pick<WeighScope, 'agentId' | 'now'>,
+  states: SignedStates,
+  { orgId, agentId, now, decides }: WeighScope,
   { mandate, suppliers, held }: HeldAuthority,
   requests: readonly SpendRequestRecord[],
   leftOut: readonly string[] = requests.map(({ id }) => id),
 ): Promise<HeldOutside> {
   const currency = mandate.perOrderLimit.currency;
   const inPlan = leftOut;
-  const spent = await monthsSpent(tx, { agentId, months: monthsOf(held), currency, except: inPlan });
+  // Each month's signed total (GM-1a) less what the requests left out hold in it, by their signed states and sealed
+  // decisions, those not weighed here read first (8), then the totals (11a): for change at a confirm, which may cancel.
+  const leftHeld = await heldByLeftOut(tx, states, orgId, requests, held, leftOut);
+  const spent = new Map<string, bigint>();
+  for (const month of monthsOf(held)) {
+    const own = leftHeld
+      .filter((request) => request.month === month && request.currency === currency)
+      .reduce((sum, { amount }) => sum + amount, 0n);
+    const key = { agentId, month, currency };
+    spent.set(month, await monthSpentWeighed(tx, states, orgId, key, decides ? 'change' : 'share', own));
+  }
   const since = windowStart(now, mandate.splitWindowHours);
   const split = mandate.splitCheck
     ? await splitTotalsOutside(tx, suppliers, { since, currency, except: inPlan })
@@ -367,6 +380,37 @@ export async function outsideOf(
     inPlan,
   );
   return { spent, split, since, orders };
+}
+
+/**
+ * What each request left out of the totals holds, as its signed state and its
+ * decision's sealed month say: those weighed here as already read, the rest
+ * (waiting their turn) read now, FOR SHARE, in two statements. One no longer
+ * pending holds nothing; one that can't be believed is INTEGRITY_FAILED.
+ */
+async function heldByLeftOut(
+  tx: CarryTx,
+  states: SignedStates,
+  orgId: string,
+  requests: readonly SpendRequestRecord[],
+  held: ReadonlyMap<string, HeldSealed>,
+  leftOut: readonly string[],
+): Promise<readonly { readonly month: string; readonly currency: string; readonly amount: bigint }[]> {
+  const weighed = new Map(requests.map((request) => [request.id, request]));
+  const others = leftOut.filter((id) => !weighed.has(id.toLowerCase()));
+  const read: Awaited<ReturnType<typeof requestsOf>> =
+    others.length === 0 ? new Map() : await requestsOf(tx, states, orgId, others);
+  // No trip for none asked.
+  const decided = await decisionsOf(tx, states, orgId, others);
+  return leftOut.flatMap((asked) => {
+    const id = asked.toLowerCase();
+    const found = read.get(id);
+    const request = weighed.get(id) ?? (found?.outcome === 'found' ? found.request : integrityFailed());
+    if (!isPending(request.status)) return [];
+    const month = weighed.has(id) ? held.get(asked)?.month : decided.get(id)?.held?.month;
+    if (month === undefined) return [];
+    return [{ month, currency: request.amount.currency, amount: request.amount.minor }];
+  });
 }
 
 /** One request as weighed in order: the engine's answer, and whether it stays, counted against the younger ones. */

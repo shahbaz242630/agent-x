@@ -87,7 +87,14 @@ import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejectio
 import { MandateRefused } from './mandate-reads.ts';
 import { overMandateLimit } from './over-limit-choice.ts';
 import type { Refused, StepUpAsked } from './refused.ts';
-import { agentAlone, answerOf, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
+import {
+  agentAlone,
+  answerOf,
+  type DecisionTables,
+  monthSpentWeighed,
+  notFrozen,
+  weigh,
+} from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
 import { cancelledSinceOf, isCarried, pausedFromOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
@@ -371,7 +378,14 @@ export async function weighedAgain(
     throw new MandateRefused(503, 'INTEGRITY_FAILED');
   }
 
-  const made = decide(weighed.input);
+  // The month's signed total (GM-1a), read only now its request is locked (8), as it comes after it (11a): for change at
+  // the confirm, which may reject it and give its capacity back. Its own amount, held there, left out: the engine adds it.
+  const own = request.amount.currency === weighed.totalOf?.currency ? request.amount.minor : 0n;
+  const spent =
+    weighed.totalOf === null
+      ? 0n
+      : await monthSpentWeighed(tx, states, orgId, weighed.totalOf, decides ? 'change' : 'share', own);
+  const made = decide(weighed.inputWith(spent));
   const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
   const unchanged =
     key.outcome === 'found' &&

@@ -122,7 +122,10 @@ export async function lockPayment(
   const proposal = await openProposalOf(tx, states, { orgId: key.orgId, transactionId: read.transaction.id }, 'change');
   if (proposal.outcome === 'tampered')
     throw new Error(`A handed-off transaction's proposal can't be believed: ${key.id}`);
-  await lockHoldingsOf(tx, requestId ?? instruction.instruction.spendRequestId);
+  await lockHoldingsOf(tx, states, {
+    orgId: key.orgId,
+    requestId: requestId ?? instruction.instruction.spendRequestId,
+  });
   return {
     transaction: read.transaction,
     instruction: instruction.instruction,
@@ -165,7 +168,7 @@ export async function settlePayment(
   outbox: Outbox,
   { orgId, requestId, transactionId, status, at, openProposal }: PaymentMoved,
 ): Promise<void> {
-  await settleHoldings(tx, { requestId, status, at });
+  await settleHoldings(tx, states, { orgId, requestId, status, at });
   // The bank's answer came first (partner S145): an admin's proposal to mark it failed ends with the move, all told.
   const ended = openProposal !== null && status !== 'UNKNOWN';
   if (ended) {

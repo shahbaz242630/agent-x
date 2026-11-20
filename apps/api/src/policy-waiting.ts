@@ -483,7 +483,7 @@ async function rejectedOf(
     asked.map(({ against }) => against.agentKeyId),
   );
   const requests = asked.map(({ request }) => request);
-  const outside = await outsideOf(tx, { agentId, now }, authority, requests);
+  const outside = await outsideOf(tx, states, { orgId, agentId, now, decides: scope.decides }, authority, requests);
 
   /** The requests weighed in `order` (their indexes), each against those before it, as weighedInOrder does. */
   const inOrder = (

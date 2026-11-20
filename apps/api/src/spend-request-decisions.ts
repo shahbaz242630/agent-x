@@ -44,12 +44,18 @@
 // supplier holding it, which that lock waits for. So a claim taken meanwhile
 // is something past the app, and fails the request (D3's `taken`).
 import { AGENT_KEYS, agentKeyOf, agentOf, AGENTS, isLiveKey } from '@agentx/core/modules/agents';
-import type { AuditTables, SignedStates } from '@agentx/core/modules/audit';
+import type { AlongsideChange, AuditTables, SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, SOURCES, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   AGENT_ZONES,
   keptZoneOf,
   type LimitReservationsTables,
+  MONTH_TOTALS,
+  monthTotalId,
+  type MonthTotalKey,
+  monthTotalOf,
+  monthTotalsCutOver,
+  monthTotalToSend,
   reserveStatement,
   sealNewZone,
   zoneInForce,
@@ -76,6 +82,7 @@ import {
 import {
   claimAnswered,
   claimStatement,
+  type DecisionMonthTotal,
   monthLockedAndTotalsWeighed,
   totalsWeighed,
   type HeldAs,
@@ -428,12 +435,14 @@ export interface PoliciesWeighed {
 /**
  * Levels 4–7 and what the engine weighs, for the simulator (C4) and an approval
  * (a decision reads its own, on fewer trips, and weighs by the same totalsToWeigh and inputWith): the
- * agent's authority, the source and supplier, the agent's month and its
- * total. An approval locks the supplier and the month (`decides`, `monthOf`
- * locking it); the simulator only reads them, and `rules` lets it put
- * proposed policies in place of those in force. `except`: an approval's own
- * request (Phase 3 B4b), whose reservation and claim aren't counted; the split
- * total still counts it, as over the threshold it only asks for an approval.
+ * agent's authority, the source and supplier, the agent's month. An approval
+ * locks the supplier and the month (`decides`, `monthOf` locking it); the
+ * simulator only reads them, and `rules` lets it put proposed policies in
+ * place of those in force. `except`: an approval's own request (Phase 3 B4b),
+ * whose claim isn't counted; the split total still counts it, as over the
+ * threshold it only asks for an approval. The month's signed total is the
+ * caller's to read and hand to `inputWith` (monthSpentWeighed, GM-1a): an
+ * approval may read it only once its request is locked.
  */
 export async function weigh(
   tx: DecisionTx,
@@ -464,8 +473,62 @@ export async function weigh(
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   const read = { asked, now, agent, mandate, policies, source, supplier, order, month, except };
-  const input = inputWith(read, await totalsWeighed(tx, totalsToWeigh(read)));
-  return { input, mandate, supplier, order, month, approvalWait: inForce.approvalWait };
+  // The split total and claims now; the month's signed total by the caller (GM-1a): an approval reads it only once its
+  // request is locked (8), as the total comes after it in the lock order (11a).
+  const others = await totalsWeighed(tx, { ...totalsToWeigh(read), month: null });
+  return {
+    inputWith: (spent: bigint) => inputWith(read, { ...others, spent }),
+    totalOf: month === null ? null : { agentId: agent.id, month, currency: currencyWeighed(read) },
+    mandate,
+    supplier,
+    order,
+    month,
+    approvalWait: inForce.approvalWait,
+  };
+}
+
+/** A decision's month's total as weighed: refused while it can't be believed, or before its organisation's cutover. */
+function monthTotalWeighed(
+  total: DecisionMonthTotal,
+): Extract<DecisionMonthTotal, { readonly outcome: 'held' | 'none' }> {
+  if (total.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (total.outcome === 'busy') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  return total;
+}
+
+/**
+ * What the agent's month holds, from its signed total (GM-1a), for weigh's
+ * callers, locked as asked: the simulator's (`share`), an approval's (for
+ * change at its confirm, which may reject it), a carry's. `own`: what the
+ * requests weighed again hold there, already in the total, left out (the
+ * engine adds each one's amount itself). A total that can't be believed, or
+ * holding less than they do, is INTEGRITY_FAILED (the latter alarmed); one
+ * missing holds nothing once the organisation is cut over (then, with `own`,
+ * a total gone without a trace: alarmed), and is ORGANISATION_BUSY before.
+ */
+export async function monthSpentWeighed(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  key: MonthTotalKey,
+  lock: 'share' | 'change',
+  own = 0n,
+): Promise<bigint> {
+  const total = await monthTotalOf(tx, states, orgId, key, lock);
+  if (total.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  const short = () => {
+    states.mismatch(MONTH_TOTALS.subject, { orgId, id: monthTotalId(orgId, key) });
+    return new MandateRefused(503, 'INTEGRITY_FAILED');
+  };
+  if (total.outcome === 'held') {
+    if (total.held < own) throw short();
+    return total.held - own;
+  }
+  const cutOver = await monthTotalsCutOver(tx, states, orgId);
+  if (cutOver === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (cutOver === 'not_yet') throw new MandateRefused(503, 'ORGANISATION_BUSY');
+  if (own > 0n) throw short();
+  return 0n;
 }
 
 /**
@@ -606,6 +669,75 @@ export function createSpendRequestDecisions({
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
+  /**
+   * The request inserted with its reservation, order claim and month's total (its amount added, GM-1a), all on one
+   * trip, in this order: each needs the one before it, and a failure in one fails those behind it. What its decision
+   * seals of them, and the total's change to sign with it.
+   */
+  async function capacityHeld(
+    tx: DecisionTx,
+    states: SignedStates,
+    request: NewRequest,
+    {
+      mandateId,
+      month,
+      order,
+      monthTotal,
+    }: {
+      readonly mandateId: string;
+      readonly month: string;
+      readonly order: NonNullable<ReadToWeigh['order']>;
+      readonly monthTotal: Extract<DecisionMonthTotal, { readonly outcome: 'held' | 'none' }>;
+    },
+  ): Promise<{ readonly held: HeldAs; readonly totalHeld: AlongsideChange }> {
+    const { orgId, id: requestId, amount, createdAt: now } = request;
+    // In the cap's currency alone, as decide denies any other (CURRENCY_NOT_ALLOWED).
+    if (monthTotal.key.currency !== amount.currency) throw new Error('capacity held in another currency');
+    const claim = { ...order, orgId, id: ids.next(), requestId, claimedAt: now };
+    const total = monthTotalToSend(
+      tx,
+      states,
+      orgId,
+      monthTotal.key,
+      monthTotal.total,
+      monthTotal.spent + amount.minor,
+      now,
+    );
+    const [, , claimAnswer, ...totalAnswers] = await sendTogether(tx, [
+      insertRequestStatement(tx, request),
+      reserveStatement(tx, {
+        orgId,
+        id: ids.next(),
+        requestId,
+        agentId: request.agentId,
+        mandateId,
+        month,
+        supplierId: order.supplierId,
+        payeeKey: order.payeeKey,
+        amountMinor: amount.minor,
+        currency: amount.currency,
+        reservedAt: now,
+      }),
+      claimStatement(tx, claim),
+      ...total.statements,
+    ]);
+    const claimed = await claimAnswered(tx, claim, claimAnswer.rows.length === 1);
+    // The supplier held and its payee key its own alone: see the top of this file.
+    if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
+    return {
+      held: { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) },
+      totalHeld: {
+        sent: total.sent,
+        rows: (totalAnswers.at(-1)?.rows ?? []) as readonly Readonly<Record<string, unknown>>[],
+        change: {
+          actor: { type: 'agent', id: request.agentId },
+          action: 'month_total.held',
+          details: { requestId: requestId.toLowerCase(), amountMinor: amount.minor.toString() },
+        },
+      },
+    };
+  }
+
   /** Everything in the lock order, the decision, and what it makes: the request's ID, with its decision. */
   async function decided(
     tx: DecisionTx,
@@ -634,11 +766,17 @@ export function createSpendRequestDecisions({
     const month = zone === null ? null : periodOf(now, zone.zone).month;
     const read = { asked, now, agent, mandate, policies, source, supplier, order, month };
     const toWeigh = totalsToWeigh(read);
-    // Its lock and the totals on one trip, each its own statement, so the totals see what its holder committed.
-    const totals =
+    // Its lock and the totals on one trip, each its own statement, so the totals see what its holder committed: the
+    // month's the signed total (GM-1a), locked for the change a capacity held makes to it.
+    const weighed =
       toWeigh.month === null
+        ? null
+        : await monthLockedAndTotalsWeighed(tx, states, { orgId, at: now }, { ...toWeigh, month: toWeigh.month });
+    const monthTotal = weighed === null ? null : monthTotalWeighed(weighed.monthTotal);
+    const totals =
+      weighed === null || monthTotal === null
         ? await totalsWeighed(tx, toWeigh)
-        : await monthLockedAndTotalsWeighed(tx, { orgId, at: now }, { ...toWeigh, month: toWeigh.month });
+        : { ...weighed, spent: monthTotal.spent };
     const input = inputWith(read, totals);
     const made = decide(input);
     const requestId = ids.next();
@@ -674,34 +812,20 @@ export function createSpendRequestDecisions({
     };
 
     let held: HeldAs | null = null;
-    if (!holdsCapacity(made.decision)) {
-      await insertRequestStatement(tx, request).execute();
-    } else {
+    let totalHeld: AlongsideChange | undefined;
+    if (holdsCapacity(made.decision)) {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
-      if (mandate === null || month === null || order === null) throw new Error('capacity held with nothing weighed');
-      const claim = { ...order, orgId, id: ids.next(), requestId, claimedAt: now };
-      // One trip, in this order: each needs the one before it, and a failure in one fails those behind it.
-      const [, , claimAnswer] = await sendTogether(tx, [
-        insertRequestStatement(tx, request),
-        reserveStatement(tx, {
-          orgId,
-          id: ids.next(),
-          requestId,
-          agentId: agent.id,
-          mandateId: mandate.id,
-          month,
-          supplierId: order.supplierId,
-          payeeKey: order.payeeKey,
-          amountMinor: asked.amount.minor,
-          currency: asked.amount.currency,
-          reservedAt: now,
-        }),
-        claimStatement(tx, claim),
-      ]);
-      const claimed = await claimAnswered(tx, claim, claimAnswer.rows.length === 1);
-      // The supplier held and its payee key its own alone: see the top of this file.
-      if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
-      held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
+      if (mandate === null || month === null || order === null || monthTotal === null) {
+        throw new Error('capacity held with nothing weighed');
+      }
+      ({ held, totalHeld } = await capacityHeld(tx, states, request, {
+        mandateId: mandate.id,
+        month,
+        order,
+        monthTotal,
+      }));
+    } else {
+      await insertRequestStatement(tx, request).execute();
     }
     // The agent's zone, when this is its first decision: sealed with the request, as the audit head comes last.
     if (zone?.keptNow === true) {
@@ -713,7 +837,7 @@ export function createSpendRequestDecisions({
         actor: { type: 'agent', id: agent.id },
       });
     }
-    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
+    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held, totalHeld);
     // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.
     // Told after it is signed: the notice's record takes the chain head's lock too, which comes last (S206 V4, ADR-006 §6).
     if (made.decision === 'REQUIRE_APPROVAL') {
