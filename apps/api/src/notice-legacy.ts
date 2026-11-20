@@ -52,7 +52,7 @@ import type { Logger } from '@agentx/platform/observability';
 /** The platform chain's record that the notices from before seals were sealed, and how many. */
 export const LEGACY_SEALED = 'notice.legacy_sealed';
 
-/** After this, no pass seals a notice from before seals, whatever it finds (S205's USER_MAC_BACKFILL_UNTIL's way). */
+/** After this, no pass seals a notice from before seals, whatever it finds (the way S205's people backfill had its cutoff). */
 export const NOTICE_SEAL_BACKFILL_UNTIL = new Date('2026-12-07T00:00:00Z');
 
 type LegacyTables = NotificationsTables & PlatformControlsTables & AuditTables;
