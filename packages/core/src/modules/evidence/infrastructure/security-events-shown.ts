@@ -6,6 +6,7 @@ import type { DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
 import type { SignedStates } from '../../audit/index.ts';
+import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import {
   type OrgEventsChecked,
   type OrgEventCursor,
@@ -18,8 +19,8 @@ import {
 import { type ActorName, type ActorsHeld, actorsHeld, nameOf } from './actor-names.ts';
 import type { LogReadTables } from './log-shown.ts';
 
-/** The tables a page of security events reads: its rows, and what names their actors. */
-export type SecurityEventsReadTables = SecurityEventsTables & LogReadTables;
+/** The tables a page of security events reads: its rows, what names their actors, and the platform chain (S206 V6). */
+export type SecurityEventsReadTables = SecurityEventsTables & LogReadTables & PlatformControlsTables;
 
 /** Who each of `rows` is about, for a namer: those that name no one are left out. */
 export const securityEventActorsOf = (rows: readonly OrgSecurityEvent[]) =>

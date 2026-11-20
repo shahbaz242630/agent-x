@@ -1347,6 +1347,11 @@ export const PLAIN_WORDS = {
     broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
     next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
   },
+  'security.legacy_seal_stalled': {
+    happened: 'The sealing of older security records found its lock taken twice running, an hour apart.',
+    broke: 'Old records stay unsealed; a row edited meanwhile may hide.',
+    next: 'Find which database session holds the lock, and treat it as an incident.',
+  },
   'security.legacy_seal_unanchored': {
     happened: 'A record of the older security records’ sealing could not be anchored at once.',
     broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
