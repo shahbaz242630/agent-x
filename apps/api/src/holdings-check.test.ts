@@ -22,6 +22,16 @@ describe('the hold-off wait', () => {
     expect(ended).toBe(2);
   });
 
+  it('ends at once for a job stopped before it began, setting no timer (an aborted signal fires no abort again)', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    let ended = false;
+    void waitUnlessStopped(CUTOVER_HOLD_OFF_MS, stop.signal).then(() => (ended = true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ended).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('ends at once when the job is stopped, its timer cleared', async () => {
     const stop = new AbortController();
     let ended = false;

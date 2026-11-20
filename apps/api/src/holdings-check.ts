@@ -64,9 +64,16 @@ export const HOLDINGS_CHECK_EVERY_MS = 15 * 60_000;
  */
 export const CUTOVER_HOLD_OFF_MS = 30_000;
 
-/** Waits `ms`, or less once `signal` is aborted: a stopping process never waits out the hold-off. */
+/**
+ * Waits `ms`, or less once `signal` is aborted: a stopping process never waits out the hold-off. One aborted already
+ * fires no `abort` again, so it ends at once.
+ */
 export const waitUnlessStopped = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
   new Promise<void>((resolve) => {
+    if (signal?.aborted === true) {
+      resolve();
+      return;
+    }
     const timer = setTimeout(done, ms);
     signal?.addEventListener('abort', done, { once: true });
     function done(): void {
@@ -135,15 +142,18 @@ export function createHoldingsCheck({
     // Not before the process before this one can have stopped (rollout, GM-1a review): it may still commit a decision
     // or an ending made by the code before GM-1a, which keeps no total, for up to its stop deadline after the lease
     // passed here.
+    // Read afresh each time: the process may be told to stop at any await.
+    const stopped = (): boolean => signal?.aborted === true;
     try {
       // Most are cut over already (born so, or done): one look at the log, and no wait for them.
       const now = await withSignedStates(database, orgId, services(log), (tx, states) =>
         monthTotalsCutOver(tx, states, orgId),
       );
-      if (now === 'cut_over') return;
+      // Already cut over, or the process stopping: nothing to wait for.
+      if (now === 'cut_over' || stopped()) return;
       await cutoverHeldOff(signal);
       // Stopped while it waited (the process is going): left for the next run, which tries again.
-      if (signal?.aborted === true) return;
+      if (stopped()) return;
       const trail = createAuditTrail({ keys, ids });
       const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
         cutOverMonthTotals(tx, states, orgId, {
