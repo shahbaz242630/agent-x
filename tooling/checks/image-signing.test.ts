@@ -118,8 +118,9 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
         `${RELEASE_WORKFLOW}: infra-deploy`,
         `${RELEASE_WORKFLOW}: infra-plan`,
         `${RELEASE_WORKFLOW}: release`,
-        // PL-26: the console watch, as the infrastructure plan's read-only identity.
+        // PL-26: the console watch, and the weekly certificate check, as the infrastructure plan's read-only identity.
         '.github/workflows/console-watch.yml: watch',
+        '.github/workflows/security-weekly.yml: certificates',
       ].sort(),
     );
     // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.

@@ -66,6 +66,9 @@ const WATCH_WORKFLOW = '.github/workflows/job-starts.yml';
 /** The console watch (PL-26), which signs in as the infrastructure plan's read-only identity. */
 const CONSOLE_WATCH_WORKFLOW = '.github/workflows/console-watch.yml';
 
+/** The weekly sweep, whose certificate check signs in as that identity too. */
+const WEEKLY_WORKFLOW = '.github/workflows/security-weekly.yml';
+
 describe('the release job', () => {
   it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the two watches', () => {
     const naming = workflows.flatMap(({ file, jobs }) =>
@@ -78,6 +81,7 @@ describe('the release job', () => {
       `${RELEASE_WORKFLOW}: release`,
       `${RELEASE_WORKFLOW}: infra-plan`,
       `${RELEASE_WORKFLOW}: infra-deploy`,
+      `${WEEKLY_WORKFLOW}: certificates`,
     ]);
     const signingIn = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
@@ -91,19 +95,22 @@ describe('the release job', () => {
         `${RELEASE_WORKFLOW}: infra-deploy`,
         `${RELEASE_WORKFLOW}: infra-plan`,
         `${RELEASE_WORKFLOW}: release`,
+        `${WEEKLY_WORKFLOW}: certificates`,
       ].toSorted(),
     );
   });
 
-  it('PL-26: lets the console watch only read the auth door, on main, in staging-whatif, as the plan does', () => {
-    const watchFile = workflows.find(({ file }) => file === CONSOLE_WATCH_WORKFLOW);
-    const watch = watchFile?.jobs.watch;
-    if (watchFile === undefined || watch === undefined) throw new Error(`${CONSOLE_WATCH_WORKFLOW} has no watch job`);
-    expect(watch.if).toBe("github.ref == 'refs/heads/main'");
-    expect(watch.environment).toBe('staging-whatif');
-    expect(watch.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
-    const runs = (watch.steps ?? []).flatMap((step) => (step.run === undefined ? [] : [step.run.trim()]));
-    expect(runs.filter((run) => run.startsWith('node '))).toEqual(['node deploy/azure/console-watch.ts']);
+  it.each([
+    [CONSOLE_WATCH_WORKFLOW, 'watch', 'node deploy/azure/console-watch.ts'],
+    [WEEKLY_WORKFLOW, 'certificates', 'node deploy/azure/certificate-watch.ts'],
+  ])('lets %s %s only read, on main, in staging-whatif, as the plan does', (file, name, command) => {
+    const job = workflows.find((each) => each.file === file)?.jobs[name];
+    if (job === undefined) throw new Error(`${file} has no ${name} job`);
+    expect(job.if).toBe("github.ref == 'refs/heads/main'");
+    expect(job.environment).toBe('staging-whatif');
+    expect(job.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    const runs = (job.steps ?? []).flatMap((step) => (step.run === undefined ? [] : [step.run.trim()]));
+    expect(runs.filter((run) => run.startsWith('node '))).toEqual([command]);
     expect(runs.at(-1)).toBe('az account clear');
   });
 

@@ -4,9 +4,8 @@
 // So staging's auth host must still serve Zitadel's sign-in discovery, and
 // must answer its root, the API's health and Zitadel's system API with the
 // API's JSON 404, never our console's page. The host is the app host's
-// sibling (`app.` becomes `auth.`, as security-weekly.yml's certificate check
-// finds it), so no domain is written here; each line names a path, never the
-// host. Node builtins only.
+// sibling (`app.` becomes `auth.`), so no domain is written here; each line
+// names a path, never the host. Node builtins only.
 import { askAwake, REAL, type Ways } from './ask.ts';
 
 /** The auth host's origin beside the app host's: `https://app.<domain>` gives `https://auth.<domain>`. */
