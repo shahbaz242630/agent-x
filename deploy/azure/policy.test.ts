@@ -318,9 +318,23 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
   return copy;
 }
 
+/**
+ * The rules a snapshot breaks. Rule alert-arrival (S206) is left out: an alert's own test swaps in queries with no
+ * arrival band to break its own rule, and alert-arrival has its own test (arrivalRules).
+ */
 const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
-  ...new Set(policyProblems(snapshotted, expected).map((problem) => problem.rule)),
+  ...new Set(
+    policyProblems(snapshotted, expected)
+      .map((problem) => problem.rule)
+      .filter((rule) => rule !== 'alert-arrival'),
+  ),
 ];
+
+/** The alerts rule alert-arrival names. */
+const arrivalRules = (snapshotted: Snapshot): string[] =>
+  policyProblems(snapshotted, STAGING)
+    .filter((problem) => problem.rule === 'alert-arrival')
+    .map((problem) => problem.resource);
 
 /** A nested object of a resource, for changing it in place. */
 const inside = (value: unknown, ...keys: readonly string[]): Mutable => at(value, ...keys) as Mutable;
@@ -4165,6 +4179,53 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it('alert-arrival: an alert counting the apps’ lines over a window no longer than its interval judges each by when it arrived (S206)', () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const ALL = type('Microsoft.Insights/scheduledQueryRules');
+    expect(arrivalRules(staging)).toEqual([]);
+    // Every such alert on the apps' logs has its band: none judges by a line's own time alone.
+    const counting = staging.predictedResources.filter(
+      (alert) =>
+        ALL(alert) &&
+        String(at(alert.properties, 'criteria', 'allOf', '0', 'query')).startsWith('ContainerAppConsoleLogs') &&
+        at(alert.properties, 'windowSize') === at(alert.properties, 'evaluationFrequency'),
+    );
+    expect(counting.length).toBeGreaterThan(15);
+    for (const alert of counting) {
+      expect(String(at(alert.properties, 'criteria', 'allOf', '0', 'query'))).toMatch(
+        /\| where ingestion_time\(\) > ago\(/,
+      );
+    }
+    const banded = (from: RegExp | string, to: string) => (alert: Mutable) => {
+      criterion(alert).query = String(criterion(alert).query).replace(from, to);
+    };
+    for (const change of [
+      // No band, a band shorter than its interval, or no two days read back for late lines.
+      banded('where ingestion_time() > ago(10m) | ', ''),
+      banded('ingestion_time() > ago(10m)', 'ingestion_time() > ago(4m)'),
+      // Just as long as its interval: a run starting late leaves a gap.
+      banded('ingestion_time() > ago(10m)', 'ingestion_time() > ago(5m)'),
+      banded('ingestion_time() > ago(10m)', 'TimeGenerated > ago(10m)'),
+      (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
+    ]) {
+      expect(arrivalRules(changed(INTEGRITY_ALERT, change))).toEqual([
+        String(staging.predictedResources.find(INTEGRITY_ALERT)?.name),
+      ]);
+    }
+    // The daily summary over 25 hours by arrival; over exactly a day, a run starting late would leave a gap.
+    const DAILY = named(/-daily-words$/);
+    expect(String(at(staging.predictedResources.find(DAILY)?.properties, 'criteria', 'allOf', '0', 'query'))).toContain(
+      '| where ingestion_time() > ago(25h) |',
+    );
+    expect(arrivalRules(changed(DAILY, banded('ago(25h)', 'ago(1d)')))).toEqual([
+      String(staging.predictedResources.find(DAILY)?.name),
+    ]);
+    // A window longer than its interval is the dead-man alerts' shape, judged by its own rule.
+    expect(arrivalRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).windowSize = 'PT15M')))).toEqual([]);
+  });
+
   it("audit-integrity-alert: no alert on the integrity alarm, or one that can't fire, or fires too late or too quietly", () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
@@ -4182,7 +4243,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
       // One line is enough, seen in any minute.
       (alert: Mutable) => (criterion(alert).threshold = 1),
-      ...LATE_OR_BLIND,
+      // Every 5 minutes over the same 5 (S206): slower, a window short of it, or waiting for more than one.
+      (alert: Mutable) => (properties(alert).windowSize = 'PT15M'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
+      (alert: Mutable) => {
+        properties(alert).windowSize = 'PT15M';
+        properties(alert).evaluationFrequency = 'PT15M';
+      },
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 3),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 3),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {
@@ -4213,7 +4282,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // The rule's query names exactly the copier's list, every line of it.
     expect(
       String(at(staging.predictedResources.find(LOGIN_SERVICE_ALERT)?.properties, 'criteria', 'allOf', '0', 'query')),
-    ).toBe(`ContainerAppConsoleLogs | ${listed(LOGIN_SERVICE_ALERT_EVENTS)} | summarize Events = count()`);
+    ).toBe(
+      `ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | ${listed(LOGIN_SERVICE_ALERT_EVENTS)} | summarize Events = count()`,
+    );
     for (const change of [
       ...LOGIN_SERVICE_ALERT_EVENTS.map((left) =>
         counted(listed(LOGIN_SERVICE_ALERT_EVENTS.filter((event) => event !== left))),
@@ -4866,17 +4937,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('SEC-DB-18 security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
+  it('SEC-DB-18 security-seal-alert: no SEV-1 alert on a security day counted or sealed short of its tallies, or one that looks too short a way back, too seldom, or can’t fire (S206 V6)', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     expect(brokenRules(without(SECURITY_SEAL_ALERT))).toEqual(['security-seal-alert']);
     for (const change of [
-      // Another event, or a day short of its own count, or none sealed counted too.
+      // Another event, a day at its own count, a later tally counted too, another log's, or lines arrived long ago.
       edited('"security_seal.tally", ', ''),
-      edited('Tallied > Sealed', 'Tallied >= Sealed'),
-      edited('Seals > 0 and ', ''),
-      edited("by Chain = tostring(Line['orgId']), ", 'by '),
+      edited('Tallied > Rows', 'Tallied >= Rows'),
+      // A tally that read further taken for an earlier one: an older read logged late would page.
+      edited(' and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0 or TimeGenerated - TalliedAt > 60s)', ''),
+      // The newest rows deleted read as an old line logged late, however long after.
+      edited(' or TimeGenerated - TalliedAt > 60s', ''),
+      edited('> 60s', '> 1d'),
+      edited('strcmp(ReadTo, TalliedTo) >= 0', 'strcmp(ReadTo, TalliedTo) > 0'),
+      edited('isempty(ReadTo) or ', ''),
+      edited(' on Chain, Day', ' on Day'),
+      edited('ago(10m)', 'ago(1d)'),
       (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
-      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT6H'),
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'P1D'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
       (alert: Mutable) => (properties(alert).severity = 2),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
@@ -4892,7 +4971,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('security-seal-alert: its query finds a day sealed with fewer rows than tallied, per log, and nothing else', () => {
+  it('security-seal-alert: its query finds a day counted or sealed with fewer rows than tallied before, per log, and nothing else', () => {
     // The query's stages as the alert holds them, the table and the final count around them.
     const stages = kqlStages(
       String(criterion(staging.predictedResources.find(SECURITY_SEAL_ALERT) as unknown as Mutable).query),

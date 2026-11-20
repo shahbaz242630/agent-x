@@ -64,6 +64,7 @@ export type RuleId =
   | 'log-quota-alerts'
   | 'alert-counts-only'
   | 'alert-window'
+  | 'alert-arrival'
   | 'alert-runbook'
   | 'alert-delivery'
   | 'alert-rules-watch'
@@ -1322,6 +1323,20 @@ export function kqlStages(query: string): string[] {
   return stages;
 }
 
+/** An arrival band's stage (`where ingestion_time() > ago(30m)`), and its minutes; rule alert-arrival holds it. */
+const ARRIVAL_STAGE = /^where ingestion_time\(\) > ago\((\d+)([mhd])\)$/;
+
+/**
+ * The stages a rule's own check compares: the arrival band left out unless the check names one itself, as rule
+ * alert-arrival holds every line-counting alert's band (S206).
+ */
+const comparedStages = (query: unknown, filters: readonly string[]): string[] => {
+  const stages = kqlStages(String(query));
+  return filters.some((filter) => ARRIVAL_STAGE.test(filter))
+    ? stages
+    : stages.filter((stage) => !ARRIVAL_STAGE.test(stage));
+};
+
 /**
  * The one column a query's final `summarize Name = aggregation(…)` produces, or
  * undefined if the query ends otherwise, makes more than one column, or groups
@@ -1353,7 +1368,7 @@ export function singleSummaryColumn(query: string): string | undefined {
  * container's name before the words are read. Undefined for any other shape.
  */
 function saysCountColumn(criterion: unknown): string | undefined {
-  const stages = kqlStages(String(at(criterion, 'query')));
+  const stages = comparedStages(at(criterion, 'query'), []);
   const own = SAYS_FROM_OWN.exec(stages.at(-3) ?? '');
   const counted = /^summarize ([A-Za-z_][A-Za-z0-9_]*) = count\(\) by Says$/.exec(stages.at(-1) ?? '');
   const containers = own?.[1]?.split(', ') ?? [];
@@ -1390,7 +1405,7 @@ const totals = (criterion: unknown): boolean => at(criterion, 'timeAggregation')
  * the same stages, in order, whatever the spacing around its pipes.
  */
 const queryIs = (query: unknown, table: string, filters: readonly string[], aggregation: string): boolean => {
-  const stages = kqlStages(String(query));
+  const stages = comparedStages(query, filters);
   const last = stages.at(-1) ?? '';
   return (
     stages.length === filters.length + 2 &&
@@ -3400,8 +3415,51 @@ const ALERT_WINDOWS = new Set(
   ),
 );
 
+/** An ISO 8601 duration of days, hours or minutes (`P2D`, `PT1H`, `PT15M`) in minutes; NaN for any other. */
+const minutesOf = (duration: unknown): number => {
+  const found = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(String(duration));
+  if (found === null || String(duration) === 'P' || String(duration).endsWith('T')) return Number.NaN;
+  const [, days = '0', hours = '0', minutes = '0'] = found;
+  return Number(days) * 1440 + Number(hours) * 60 + Number(minutes);
+};
+
+/** The minutes of a query's arrival band, or undefined for a query with none. */
+const arrivalMinutes = (query: unknown): number | undefined => {
+  const band = kqlStages(String(query))
+    .map((stage) => ARRIVAL_STAGE.exec(stage))
+    .find((found) => found !== null);
+  if (band === undefined) return undefined;
+  const [, count = '0', unit = 'm'] = band;
+  return Number(count) * ({ m: 1, h: 60, d: 1440 } as const)[unit as 'm' | 'h' | 'd'];
+};
+
+/**
+ * Rule alert-arrival (S206): an alert counting the apps' log lines over a window no longer than its interval judges each
+ * line by when it arrived, not its own time. The container tables arrive 4-9 minutes late (S33), and later behind the
+ * daily cap: judged by its own time, a line landing after its window was read is never seen. So each such query keeps
+ * the lines that arrived within longer than its interval (`where ingestion_time() > ago(...)`), reading the two days
+ * before its run (overrideQueryTimeRange) for them.
+ */
+const judgesOnArrival = (alert: PredictedResource, add: (problem: Problem) => void): void => {
+  const criteria = list(at(alert.properties, 'criteria', 'allOf'));
+  const every = minutesOf(at(alert.properties, 'evaluationFrequency'));
+  const reads = criteria.some((criterion) => String(at(criterion, 'query')).includes('ContainerAppConsoleLogs'));
+  if (!reads || minutesOf(at(alert.properties, 'windowSize')) > every) return;
+  // Longer than the interval, never just as long: a run starting late would otherwise leave a gap (MO2).
+  const banded = criteria.every((criterion) => (arrivalMinutes(at(criterion, 'query')) ?? 0) > every);
+  if (!banded || at(alert.properties, 'overrideQueryTimeRange') !== 'P2D') {
+    add({
+      rule: 'alert-arrival',
+      resource: alert.name,
+      message:
+        "counts the apps' log lines over a window no longer than its interval, so it must keep the lines that arrived within longer than that interval (where ingestion_time() > ago(...)) and read two days back for them (overrideQueryTimeRange P2D): lines arrive 4-9 minutes late, and one judged by its own time after its window was read is never seen",
+    });
+  }
+};
+
 const alertRules: Check = (snapshot, expected, add) => {
   for (const alert of ofType(snapshot, TYPES.alert)) {
+    judgesOnArrival(alert, add);
     if (!ALERT_WINDOWS.has(String(at(alert.properties, 'windowSize')))) {
       add({
         rule: 'alert-window',
@@ -3688,7 +3746,7 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion) =>
         saysCountColumn(criterion) !== undefined &&
-        kqlStages(String(at(criterion, 'query')))[1] === ERROR_LINES &&
+        comparedStages(at(criterion, 'query'), [])[1] === ERROR_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
         // One error is enough, in every environment: a record past its event cap logs one and refuses the action (PL-41).
         at(criterion, 'threshold') === 0,
@@ -3715,7 +3773,7 @@ const dailyWordsAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         saysCountColumn(criterion) !== undefined &&
-        kqlStages(String(at(criterion, 'query')))[1] === PROBLEM_LINES &&
+        comparedStages(at(criterion, 'query'), [])[1] === PROBLEM_LINES &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         totals(criterion) &&
@@ -3737,7 +3795,8 @@ const dailyWordsAlert: Check = (snapshot, _expected, add) => {
 /**
  * An enabled, stateless SEV-1 alert on the workspace counts every integrity
  * alarm the apps log (ADR-012 §2, SEC-DB-11): one line is enough to fire it,
- * and it notifies again every window the alarm goes on.
+ * and it notifies again every window the alarm goes on. Every 5 minutes (S206
+ * faster detection), so a tamper found pages within about 10-20 minutes.
  */
 const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -3748,6 +3807,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
+        at(alert.properties, 'evaluationFrequency') === 'PT5M' &&
         watchesEveryWindow(alert, criterion),
     );
     if (!alerted) {
@@ -3755,7 +3815,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         rule: 'audit-integrity-alert',
         resource: environment.name,
         message:
-          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
+          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, every 5 minutes, watching every minute and firing on the first window (ADR-012 §2)",
       });
     }
   }
@@ -4116,19 +4176,25 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
- * The security records' seal shortfall (S206 V6, R-15): each day's highest tallied count before its seal against the
- * count sealed, per log (the global table, or an organisation), counted where a day was sealed with fewer.
+ * The security records' shortfall (S206 V6, R-15; S206 faster detection): each tally or seal line arrived in the last
+ * 10 minutes against every tally of its day, per log (the global table, or an organisation), counted where it has fewer
+ * rows than one that read no further (its last row ID not past this line's; a line of none read nothing): reads ordered
+ * by what they read, never by when they were logged, as two jobs log the same day; one that read less logged over 60
+ * seconds after the tally is a fall too (its newest rows deleted), the jobs' race being seconds.
  */
 export const SECURITY_SEAL_SHORTFALL_LINES = [
   'where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed")',
-  'extend Line = parse_json(Log)',
-  `summarize Tallied = maxif(toint(Line['rows']), tostring(Line['event']) == "security_seal.tally"), Sealed = maxif(toint(Line['requests']), tostring(Line['event']) == "security_events.sealed"), Seals = countif(tostring(Line['event']) == "security_events.sealed") by Chain = tostring(Line['orgId']), Day = tostring(Line['day'])`,
-  'where Seals > 0 and Tallied > Sealed',
+  'extend Line = parse_json(Log), Arrived = ingestion_time()',
+  'where Arrived > ago(10m)',
+  `extend Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Rows = iff(tostring(Line['event']) == "security_seal.tally", toint(Line['rows']), toint(Line['requests'])), ReadTo = tostring(Line['idTo'])`,
+  `join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Tallied = toint(Line['rows']), TalliedTo = tostring(Line['idTo']), TalliedAt = TimeGenerated) on Chain, Day`,
+  'where Tallied > Rows and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0 or TimeGenerated - TalliedAt > 60s)',
 ] as const;
 
 /**
- * An enabled SEV-1 alert on the workspace fires on any security records' day sealed with fewer rows than were tallied,
- * looking back two days (a day's tallies and its seal can be a day and a half apart), checked at least hourly.
+ * An enabled SEV-1 alert on the workspace fires on any security records' line with fewer rows than an earlier tally of
+ * its day, looking back two days (a day's tallies and its seal can be a day and a half apart), every 5 minutes over the
+ * last 10 (S206 faster detection).
  */
 const securitySealAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -4141,8 +4207,9 @@ const securitySealAlert: Check = (snapshot, _expected, add) => {
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         at(alert.properties, 'severity') === 1 &&
-        at(alert.properties, 'windowSize') === 'P2D' &&
-        at(alert.properties, 'evaluationFrequency') === 'PT1H' &&
+        at(alert.properties, 'windowSize') === 'PT10M' &&
+        at(alert.properties, 'overrideQueryTimeRange') === 'P2D' &&
+        at(alert.properties, 'evaluationFrequency') === 'PT5M' &&
         at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
         at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
     );
@@ -4151,7 +4218,7 @@ const securitySealAlert: Check = (snapshot, _expected, add) => {
         rule: 'security-seal-alert',
         resource: environment.name,
         message:
-          "needs an enabled SEV-1 alert on this deployment's workspace that fires on any security records' day sealed with fewer rows than its tallies counted, looking back two days, checked hourly, firing on the first window",
+          "needs an enabled SEV-1 alert on this deployment's workspace that fires on any security records' day counted or sealed with fewer rows than an earlier tally of it, looking back two days, every 5 minutes, firing on the first window",
       });
     }
   }

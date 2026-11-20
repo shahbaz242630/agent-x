@@ -43,9 +43,25 @@
 // A first visit starts just before the organisation's oldest record (read as
 // it is: a wrong place fails the walk's first step); a record hidden at that
 // one moment is the one thing it can't see (R-15).
+//
+// Who is visited (S206, faster detection): every run (5 minutes, job-list.ts)
+// first reads, for every organisation listed, the place of its newest
+// `notice.queued` record, a page of organisations a trip (one index read
+// each, under its own wall). An organisation is visited when that record is
+// past where this process's last visit there reached, when that visit still
+// carried a notice open, or when this process hasn't visited it yet (so every
+// one with a record, at its first run). The rest are passed with no read of
+// their own: nothing of theirs was queued, and nothing is still to be sent.
+// What the last visit reached is this process's memory, never the database's,
+// so the owner can't move it; taking a record away to hide it breaks the
+// chain, the anchor check's alarm, and one planted only brings a visit on.
+// So a notice deleted, marked sent or held back is found within a run, about
+// 5 minutes, and a quiet organisation costs one index read a run. Visits go
+// the nearest first (the fewest events to walk), so an organisation with a
+// long way to walk goes last and holds up no other's.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { limitedTransaction } from '@agentx/platform/db';
+import { JOB_ANSWER_WITHIN_MS, limitedTransaction, readEachTenant } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import {
@@ -78,6 +94,9 @@ const MOST_CARRIED = 19;
 
 /** A walk past this many events records where it stopped, even with no notice in it, so the next walks less. */
 const RECORD_PAST = 50;
+
+/** How many organisations one trip of a run's first read asks of. */
+const PROBE_PAGE = 500;
 
 /** The most notices with no seal one run raises the alarm for. */
 const UNSEALED_A_RUN = 100;
@@ -116,6 +135,31 @@ function asRecorded(recorded: string, row: NoticeRow): boolean {
   const { recipient, recipientId } = recipientOf(row);
   const { kind: saidKind, recipient: saidRecipient, recipientId: saidId } = (said ?? {}) as Record<string, unknown>;
   return saidKind === row.kind && saidRecipient === recipient && saidId === recipientId;
+}
+
+/** Where this process's last visit to an organisation reached, and whether it carried a notice still open. */
+interface Visited {
+  readonly reached: bigint;
+  readonly carrying: boolean;
+}
+
+/** The place of the organisation's newest `notice.queued` record, null for none: one read of events_by_action. */
+const newestQueued = ({ orgId }: { readonly orgId: string }) =>
+  sql<{ seq: string | null }>`
+    select max(e.seq)::text as seq from audit.events e where e.org_id = ${orgId}::uuid and e.action = ${NOTICE_QUEUED}
+  `;
+
+/**
+ * How far an organisation's visit has to walk, or undefined for one owed none: one with a record past where the last
+ * visit reached, or still carrying a notice, or not visited yet by this process; one whose read failed is owed one.
+ */
+function owed(newest: bigint | null | 'missed', last: Visited | undefined): bigint | undefined {
+  if (newest === 'missed') return 0n;
+  // None recorded, or (after a visit) every one taken away: that is the chain's own alarm, the anchor check's.
+  if (newest === null) return undefined;
+  if (last === undefined) return newest;
+  const gap = newest > last.reached ? newest - last.reached : 0n;
+  return gap > 0n || last.carrying ? gap : undefined;
 }
 
 /** The notices, as the outbox keeps them, in one statement. */
@@ -279,8 +323,11 @@ export function createNoticeCheck({
       }),
     );
 
-  /** Checks the organisation's notices recorded since the last visit, and those it carried. */
-  const checkFor = async (orgId: string): Promise<void> => {
+  /**
+   * Checks the organisation's notices recorded since the last visit, and those it carried: where it reached, and
+   * whether it carries one; undefined where it can't go on (none recorded, or an alarm), so the next run visits again.
+   */
+  const checkFor = async (orgId: string): Promise<Visited | undefined> => {
     const correlationId = ids.next();
     const log = logger.child({ orgId, correlationId });
     const alarm = (fields: Readonly<Record<string, unknown>>): void => {
@@ -288,16 +335,16 @@ export function createNoticeCheck({
     };
     const now = clock.now();
     const start = await startOf(orgId, correlationId);
-    if (start === undefined) return;
+    if (start === undefined) return undefined;
     // A record of its own that can't be believed, or reads as no record of where it stopped: nothing to go on from.
     if (start === 'unbelieved') {
       alarm({ reason: 'record' });
-      return;
+      return undefined;
     }
     const walk = await walked(orgId, start.from);
     if ('broken' in walk) {
       alarm({ reason: 'chain', seq: walk.broken.seq.toString(), problem: walk.broken.reason });
-      return;
+      return undefined;
     }
     const since = now.getTime() - JUDGED_WITHIN_MS;
     const fresh = walk.seen
@@ -332,6 +379,7 @@ export function createNoticeCheck({
     if (carriedChanged || (moved > 0n && (fresh.length > 0 || moved > BigInt(RECORD_PAST)))) {
       await passed(orgId, correlationId, reached, carried);
     }
+    return { reached: reached.seq, carrying: carried.length > 0 };
   };
 
   /** The place just before the event at `seq`: its link names the event before, and a wrong one fails the next walk. */
@@ -362,16 +410,52 @@ export function createNoticeCheck({
     }
   };
 
+  /** Where each organisation's last visit by this process reached, by its ID in lower case. */
+  const visited = new Map<string, Visited>();
+
+  /**
+   * The listed organisations owed a visit, the nearest first; the rest finished at once. One read a page of them, each
+   * under its own wall; one that isn't an ID, or whose read failed, is owed a visit, which says what is wrong.
+   */
+  const owedOf = async (listed: readonly string[]): Promise<readonly string[]> => {
+    const asked = [...new Set(listed.filter((orgId) => UUID.test(orgId)).map((orgId) => orgId.toLowerCase()))];
+    const newest = new Map<string, bigint | null | 'missed'>();
+    for (let from = 0; from < asked.length; from += PROBE_PAGE) {
+      const page = asked.slice(from, from + PROBE_PAGE).map((orgId) => ({ orgId }));
+      const reads = await readEachTenant(database, page, newestQueued, { answeredWithinMs: JOB_ANSWER_WITHIN_MS });
+      for (const { item, read } of reads) {
+        const seq = 'failed' in read ? 'missed' : (read.rows[0]?.seq ?? null);
+        newest.set(item.orgId, seq === 'missed' || seq === null ? seq : BigInt(seq));
+      }
+    }
+    const due: { readonly orgId: string; readonly gap: bigint }[] = [];
+    for (const orgId of listed) {
+      const id = orgId.toLowerCase();
+      // Not asked (not an ID) or not answered: owed a visit. A read that found no record is null, owed none.
+      const read = newest.get(id);
+      const gap = owed(read === undefined ? 'missed' : read, visited.get(id));
+      if (gap === undefined) done(orgId);
+      else due.push({ orgId, gap });
+    }
+    return due
+      .toSorted((one, other) => (one.gap < other.gap ? -1 : Number(one.gap > other.gap)))
+      .map(({ orgId }) => orgId);
+  };
+
   return {
     async run(signal) {
       try {
         await unsealedLate();
-        for (const orgId of await list()) {
+        for (const orgId of await owedOf(await list())) {
           if (signal?.aborted === true) return;
+          const id = orgId.toLowerCase();
           try {
-            await checkFor(orgId);
+            const reached = await checkFor(orgId);
+            if (reached === undefined) visited.delete(id);
+            else visited.set(id, reached);
             done(orgId);
           } catch (error) {
+            visited.delete(id);
             logger.child({ orgId }).error('notification.check_failed', { err: error });
           }
         }

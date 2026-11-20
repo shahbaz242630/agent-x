@@ -78,6 +78,7 @@ import { createPersonSealCheck, PERSON_SEAL_CHECK_EVERY_MS } from './person-seal
 import { createPersonSeal, PERSON_SEAL_EVERY_MS } from './person-seal.ts';
 import { createLegacySealJob, LEGACY_SEAL_EVERY_MS } from './legacy-seal-job.ts';
 import { createSecuritySeal, SECURITY_SEAL_EVERY_MS } from './security-seal.ts';
+import { createSecurityTally, SECURITY_TALLY_EVERY_MS } from './security-tally.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
@@ -123,11 +124,11 @@ const HOLDINGS_WHOLE_PASS_EVERY_MS = HOUR_MS;
 /** The seal check's rotation: twelve slots of its run's half hour, so each organisation once in 6 hours (decision 2). */
 const SEAL_CHECK_SLOTS = 12;
 
-/** How often the notice check runs (S206 V4), once the last run has ended. */
-const NOTICE_CHECK_EVERY_MS = 10 * 60_000;
-
-/** The notice check's rotation: six slots of its run's ten minutes, so each organisation once an hour. */
-const NOTICE_CHECK_SLOTS = 6;
+/**
+ * How often the notice check runs (S206 V4), once the last run has ended: each organisation with a notice queued, or
+ * still to be sent, visited every run, the rest passed on one index read each (notice-check.ts).
+ */
+const NOTICE_CHECK_EVERY_MS = 5 * 60_000;
 
 /**
  * The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
@@ -158,7 +159,6 @@ export function integrityPasses({
     sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
     // The security events' seals, recorded and checked as the activity log's are checked: each every 6 hours (S206 V6).
     securitySeal: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: SECURITY_SEAL_EVERY_MS, clock })),
-    noticeCheck: owedPasses(rotation({ all, slots: NOTICE_CHECK_SLOTS, slotMs: NOTICE_CHECK_EVERY_MS, clock })),
     seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
     sweep: owedPasses(eachDay({ all, clock })),
     securitySweep: owedPasses(eachDay({ all, clock })),
@@ -640,8 +640,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       ACTIVITY_SEAL_CHECK_EVERY_MS,
       LONG_MS,
     ),
-    // Each organisation's queued notices held to their records on its chain, once an hour (S206 V4, R-15).
-    job('notice_check', createNoticeCheck({ ...clocked, ...passes.noticeCheck }), NOTICE_CHECK_EVERY_MS, LONG_MS),
+    // Each organisation's queued notices held to their records on its chain, each with one every run (S206 V4, R-15).
+    job('notice_check', createNoticeCheck(clocked), NOTICE_CHECK_EVERY_MS, LONG_MS),
     // Each closed day of the person log sealed on the platform chain, and the seals checked again (6E1a, L8).
     job('person_seal', createPersonSeal(personLog), PERSON_SEAL_EVERY_MS, LONG_MS),
     job('person_seal_check', createPersonSealCheck(personLog), PERSON_SEAL_CHECK_EVERY_MS, LONG_MS),
@@ -655,6 +655,19 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         retentionDays: config.securityEvents.retentionDays,
       }),
       SECURITY_SEAL_EVERY_MS,
+      LONG_MS,
+    ),
+    // Yesterday's and today's security events counted every 5 minutes, a fall the alarm (S206, R-15).
+    job(
+      'security_tally',
+      createSecurityTally({
+        list,
+        database,
+        clock: systemClock,
+        logger,
+        retentionDays: config.securityEvents.retentionDays,
+      }),
+      SECURITY_TALLY_EVERY_MS,
       LONG_MS,
     ),
     // The security rows from before 0105 given their MACs, once, where the anchor store is (S206 V6).

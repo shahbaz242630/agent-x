@@ -1114,7 +1114,7 @@ export const PLAIN_WORDS = {
   'notification.check_run_failed': {
     happened: 'The notice check could not start its run: the list of organisations could not be read.',
     broke: 'No organisation was checked this run for deleted or held-back warning emails.',
-    next: 'The next run tries again in ten minutes. If it repeats, check the database.',
+    next: 'The next run tries again in five minutes. If it repeats, check the database.',
   },
   'notification.failed': {
     happened: 'An email notice could not be sent this time.',
@@ -1372,6 +1372,17 @@ export const PLAIN_WORDS = {
     happened: 'A run of the security records seal stopped early on an error.',
     broke: "Organisations' security records are not sealed or checked until the next run, 30 minutes later.",
     next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
+  'security_tally.missed': {
+    happened: 'The five-minute count of security records could not be read for one organisation, or the shared log.',
+    broke: 'Records deleted there are not noticed until a later count, or the day is sealed.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database.',
+  },
+  'security_tally.run_failed': {
+    happened:
+      'The five-minute count of the security records stopped early: the list of organisations could not be read.',
+    broke: "Records deleted in organisations not yet counted are not noticed until the next run, or the day's seal.",
+    next: 'The next run tries again in five minutes. If it repeats, check the database.',
   },
   'spend_request.organisation_busy': {
     happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",
