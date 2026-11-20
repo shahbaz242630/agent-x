@@ -11,7 +11,7 @@
 // could each wait on for the other.
 import type { Transaction } from 'kysely';
 
-import type { Notice, NoticeKind, NotificationsTables, Outbox } from '../../notifications/index.ts';
+import type { Notice, NoticeKind, Outbox, OutboxTables } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
 
 /** The roles whose grant the admins are told of: a developer or a viewer is not. */
@@ -26,11 +26,7 @@ export interface Grant {
 }
 
 /** Writes a notice of the grant to the organisation's admins, if it is one they are told of. */
-export async function tellAdminsOfGrant(
-  tx: Transaction<NotificationsTables>,
-  outbox: Outbox,
-  grant: Grant,
-): Promise<void> {
+export async function tellAdminsOfGrant(tx: Transaction<OutboxTables>, outbox: Outbox, grant: Grant): Promise<void> {
   const kind: NoticeKind | undefined = grant.rejoined
     ? 'member_rejoined'
     : TOLD_OF.includes(grant.role)
@@ -57,7 +53,7 @@ export interface Removal {
  * viewer's role changed is not told, as its grant isn't.
  */
 export async function tellAdminsOfRemoval(
-  tx: Transaction<NotificationsTables>,
+  tx: Transaction<OutboxTables>,
   outbox: Outbox,
   removal: Removal,
 ): Promise<void> {

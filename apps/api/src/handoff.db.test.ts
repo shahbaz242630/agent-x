@@ -157,7 +157,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resol
     ...(anchoring === undefined ? {} : { anchoring }),
     list,
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -215,7 +215,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -345,7 +345,7 @@ describe('an approved request handed to the partner once (B4)', () => {
     await createHandoff({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,
@@ -428,7 +428,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
     const job = createHandoff({
       list: () => Promise.resolve([w.org]),
       database: unreadable,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,
@@ -491,7 +491,7 @@ describe('the way not clear: the request waits, then goes once (SEC-AV-01, ADR-0
       await createHandoff({
         list: () => Promise.resolve([w.org]),
         database: app,
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         rail,
         keys,
         ids,
@@ -837,7 +837,7 @@ describe('the hand-off’s own failures and walls (SEC-DP-03, -04, SEC-TEN-09, S
     createHandoff({
       list: () => Promise.resolve([w.org]),
       database,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -962,7 +962,7 @@ describe('an answer that never comes: UNKNOWN, never resent (B5; ADR-007 §8, §
     createHandoff({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -1231,7 +1231,7 @@ describe('approved requests left standing, said for the queue-age alert (gate H8
         return Promise.resolve([w.org]);
       },
       database: failing.database,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,
@@ -1575,7 +1575,7 @@ describe('the model: random batches handed off by runs racing each other (D1; SE
             createHandoff({
               list: () => Promise.resolve([w.org]),
               database: app,
-              outbox: createOutbox({ ids, clock }),
+              outbox: createOutbox({ ids, clock, keys }),
               rail,
               keys,
               ids,

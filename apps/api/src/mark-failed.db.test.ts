@@ -132,7 +132,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -146,7 +146,7 @@ const checksOf = (w: World) =>
   createPaymentChecks({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail: w.rail,
     keys,
     ids,
@@ -366,7 +366,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -378,7 +378,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger,
   });
 });
@@ -974,7 +974,7 @@ describe('core’s markFailed, for a caller that didn’t check (its use case re
 
     await expect(
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        markFailed(tx, states, createOutbox({ ids, clock }), {
+        markFailed(tx, states, createOutbox({ ids, clock, keys }), {
           orgId: w.org,
           transactionId: transaction.id,
           userId: w.admin.userId,

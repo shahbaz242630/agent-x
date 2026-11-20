@@ -84,7 +84,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
     AGENTX_AZURE_APP_HOST: 'app.example.invalid',
     AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
-    AGENTX_AZURE_API_OIDC_CLIENT_ID: '338719472394810051',
+    AGENTX_AZURE_API_OIDC_CLIENT_ID: 'stand-in-client-id',
     AGENTX_AZURE_APP_MIN_REPLICAS: '0',
     AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_OWNER_PASSWORD: standIn(24),
@@ -133,6 +133,8 @@ const BICEP_READS: ReadonlySet<string> = new Set([
   'app-keys.json',
   'dns-allowed.json',
   'mcp-clients.json',
+  'auth-door.json',
+  'secret-expiry.json',
   'database-generation.json',
 ]);
 

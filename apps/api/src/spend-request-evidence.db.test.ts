@@ -106,7 +106,7 @@ const { ready, paymentOf } = handoffWorld({
 const runner = (w: World) => ({
   list: () => Promise.resolve([w.org]),
   database: app,
-  outbox: createOutbox({ ids, clock }),
+  outbox: createOutbox({ ids, clock, keys }),
   rail: w.rail,
   keys,
   ids,
@@ -302,7 +302,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,

@@ -377,26 +377,71 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'recipient_contact_id',
         'to_contacts',
         'about_id',
+        // S206 V4 (0104): its seal as queued and as it ended, with a key the database never holds.
+        'mac',
+        'mac_key_version',
+        'end_mac',
+        'end_key_version',
+        // True only for the rows 0104 found, which its checks let stand with no seal; never written by the app.
+        'before_seals',
       ],
       // Added, read, and deleted once done and past its retention; changed
-      // only in its tries and outcome, never in whom or what it tells of.
+      // only in its tries and outcome, and its end's seal, never in whom or what it tells of.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['attempts', 'next_attempt_at', 'sent_at', 'given_up_at', 'last_failure'],
+      appMayUpdate: [
+        'attempts',
+        'next_attempt_at',
+        'sent_at',
+        'given_up_at',
+        'last_failure',
+        // S206 V4 (0104): the end's seal, and the queued seal once ever, for the notices from before seals.
+        'mac',
+        'mac_key_version',
+        'end_mac',
+        'end_key_version',
+      ],
     },
     'security.events': {
       reason:
         'Failed sign-ins and rate-limit hits with the client IP (ADR-005 §6, ADR-011 §7): they happen before any organisation is known, and the address is kept in-country, here alone',
-      columns: ['id', 'kind', 'reason', 'ip', 'user_id', 'window_start', 'count', 'created_at'],
+      columns: [
+        'id',
+        'kind',
+        'reason',
+        'ip',
+        'user_id',
+        'window_start',
+        'count',
+        'created_at',
+        'mac',
+        'mac_key_version',
+        'before_macs',
+      ],
       // Added, read, and deleted once past the retention the config names;
-      // never changed, so a count once written stands.
+      // never changed, so a count once written stands, but for a row from
+      // before 0105 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'security.partner_event_evidence': {
       reason:
         "The partner's refused messages kept as security evidence (0063, SEC-PTR-01): refused before any organisation is known, the body encrypted, the address kept in-country, here alone",
-      columns: ['id', 'reason', 'ip', 'body_ciphertext', 'body_key_version', 'body_bytes', 'received_at'],
-      // Added (the first few an hour per address), read, and deleted once past the security events' retention.
+      columns: [
+        'id',
+        'reason',
+        'ip',
+        'body_ciphertext',
+        'body_key_version',
+        'body_bytes',
+        'received_at',
+        'mac',
+        'mac_key_version',
+        'before_macs',
+      ],
+      // Added (the first few an hour per address), read, and deleted once past the security events' retention; a row
+      // from before 0105 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'provider_events.inbox': {
       reason:

@@ -42,7 +42,7 @@ export const QUIET_NETWORK_SIGN_INS = 3;
 export const MOST_OPEN_SIGN_INS_A_NETWORK = 100;
 
 /** A sign-in's flow kept, with the ID for its cookie; or not: every network's at their cap and this one not quiet, or this one's at its own. */
-export type SignInFlowStarted =
+type SignInFlowStarted =
   { readonly outcome: 'started'; readonly flowId: string } | { readonly outcome: 'full' | 'network_full' };
 
 /** A flow as the callback takes it back. */

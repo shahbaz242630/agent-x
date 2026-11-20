@@ -115,7 +115,7 @@ const acceptance = () =>
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: logger(),
   });
 
@@ -233,7 +233,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: logger() });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -567,7 +567,7 @@ describe('carrying a mandate’s pending requests over to its new version (E4c, 
     await createHandoff({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,

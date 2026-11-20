@@ -363,11 +363,12 @@ export function leadershipOf({ config, logger, database }: Booted): Leadership |
 
 /** What both sides of the API use: none opens a connection or starts a timer as it is made. */
 export function sharedParts({ config, keys, logger, database }: Booted, leadership: Leadership | undefined) {
-  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
+  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock, keys });
   const directory = directoryNamesFrom(config, createOutboundFetch(config.outbound.allowedOrigins));
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
+    keys,
     retentionDays: config.securityEvents.retentionDays,
   });
   return {
@@ -406,6 +407,7 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
       keys,
       ids: uuidV7Ids,
       clock: systemClock,
+      logger,
       retentionDays: config.securityEvents.retentionDays,
     }),
   };

@@ -27,12 +27,10 @@ import path from 'node:path';
 
 import { type ActivityTables, addBackgroundExport } from '@agentx/core/modules/activity';
 import { SCOPES } from '@agentx/core/modules/agents';
-import { holdOrganisation } from '@agentx/core/modules/audit';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import { holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
+import { createStepUpChallenges, draftReset } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { challengeOf, type OauthTables } from '@agentx/core/modules/oauth';
-// The tamper pass's own drafts (tooling/e2e/tamper.e2e.test.ts), shared: core keeps the draft makers to itself.
-import { tamperIdentityFixtures } from '../../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { API_PURPOSES, PURPOSES } from '@agentx/platform/keys';
@@ -647,7 +645,7 @@ beforeAll(async () => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -675,7 +673,7 @@ beforeAll(async () => {
   await createHandoff({
     list: () => Promise.resolve([a.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail: a.rail,
     keys,
     ids,
@@ -691,7 +689,37 @@ beforeAll(async () => {
   const aHeaders = { cookie: `${SESSION_COOKIE}=${aAdmin.cookie}`, [ORGANIZATION_HEADER]: a.org };
   const other = await spend.member(a.org, 'developer');
   // Each a signed draft, as an admin's ask leaves it before the step-up (a reset needs a contact that counts first).
-  const identity = await tamperIdentityFixtures(app, keys, ids, clock, aAdmin, other.membershipId);
+  // A's admin asks for an invitation and a contact as the console does, each kept as a draft for the step-up; a
+  // reset's draft is made past its use case, which asks first for a contact that has counted for 7 days.
+  const drafted = async (url: string, body: unknown, kind: string): Promise<string> => {
+    const asked = await send(aHeaders, 'POST', url, body);
+    expect(asked.statusCode, asked.body).toBe(202);
+    return (JSON.parse(asked.body) as Record<string, { id: string }>)[kind]?.id ?? '';
+  };
+  const reset = ids.next();
+  await withSignedStates(app, a.org, { keys, ids, logger }, (tx, states) =>
+    draftReset(
+      tx,
+      states,
+      {
+        orgId: a.org,
+        id: reset,
+        person: other.membershipId,
+        requestedBy: aAdmin.membershipId,
+        expiresAt: new Date(clock.now().getTime() + 86_400_000),
+      },
+      { stepUpChallengeId: ids.next(), createdAt: clock.now(), actor: { type: 'user', id: aAdmin.userId } },
+    ),
+  );
+  const identity = {
+    invitation: await drafted(
+      '/v1/members/invitations',
+      { email: 'invited@example.test', role: 'developer' },
+      'invitation',
+    ),
+    contact: await drafted('/v1/registered-contacts', { email: 'contact@example.test' }, 'contact'),
+    reset,
+  };
   const linked = await send(aHeaders, 'POST', '/v1/funding-sources/link-sessions', {});
   expect(linked.statusCode, linked.body).toBe(201);
   const link = JSON.parse(linked.body) as { link: { id: string }; authoriseUrl: string };

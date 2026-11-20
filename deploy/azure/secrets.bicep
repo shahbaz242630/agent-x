@@ -26,6 +26,12 @@
 //   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
+// - every secret a run writes gets its expiry date (PL-25) from
+//   secret-expiry.json, Secrets-Register.md's schedule: the first day of the
+//   run's month plus its period, so Azure's what-if reads the same all month.
+//   Key Vault still serves a secret past its date (Microsoft): a date marks
+//   the end of a use period and takes nothing down. A secret not written keeps
+//   the date it has
 import { appKeys, operatorHolds, operatorOnly, publicHalves, resourceNames, restoreHolds, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
@@ -118,7 +124,22 @@ param loginCookieSecret string
 @secure()
 param appKeyValues string
 
+@description('The month this run writes in (yyyy-MM, UTC), which every expiry date counts from (PL-25): always the default.')
+param runMonth string = utcNow('yyyy-MM')
+
 var names = resourceNames(environment, nameSuffix)
+
+// Each secret's expiry period (secret-expiry.json; deploy.ts's secret-expiry.ts reads the same file).
+var expiry = loadJsonContent('secret-expiry.json')
+
+// A written secret's attributes: its expiry date where the schedule gives one, counted from the first day of the
+// run's month, and nothing otherwise. Its value stays a property of its own, which the policy reads.
+func expiring(period string, runMonth string) object =>
+  empty(period) ? {} : { exp: dateTimeToEpoch(dateTimeAdd('${runMonth}-01T00:00:00Z', period)) }
+
+// An app key's period: the keys' own, but for a family never rotated in place (the payee index, ADR-014 §3).
+func keyPeriod(key string, expiry object) string =>
+  contains(expiry.keysNever, substring(key, 0, lastIndexOf(key, '-v'))) ? '' : expiry.keys
 
 // Every secret a run writes when given a value, and who reads each. The
 // set-up job reads every database login, since each of its runs sets them all.
@@ -268,6 +289,7 @@ resource written 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
     name: secret.name
     properties: {
       value: secret.value
+      attributes: expiring(expiry.secrets[secret.name], runMonth)
     }
   }
 ]
@@ -278,6 +300,7 @@ resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   name: masterKey.name
   properties: {
     value: zitadelMasterKey
+    attributes: expiring(expiry.secrets[masterKey.name], runMonth)
   }
 }
 
@@ -287,6 +310,7 @@ resource machineConfigCreated 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   name: machineConfig.name
   properties: {
     value: zitadelMachineConfig
+    attributes: expiring(expiry.secrets[machineConfig.name], runMonth)
   }
 }
 
@@ -300,6 +324,7 @@ resource copied 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   name: copiedKey.name
   properties: {
     value: communication.listKeys().primaryKey
+    attributes: expiring(expiry.secrets[copiedKey.name], runMonth)
   }
 }
 
@@ -311,6 +336,7 @@ resource keys 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
     name: key
     properties: {
       value: keyValues[key]
+      attributes: expiring(keyPeriod(key, expiry), runMonth)
     }
   }
 ]
@@ -324,6 +350,7 @@ resource halves 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
     name: half
     properties: {
       value: keyValues[half]
+      attributes: expiring(expiry.publicHalves, runMonth)
     }
   }
 ]

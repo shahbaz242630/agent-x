@@ -7,6 +7,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 
 import type { SignedStates } from '../../audit/index.ts';
 import {
+  type OrgEventsChecked,
   type OrgEventCursor,
   type OrgEventsToRead,
   orgSecurityEventsPage,
@@ -46,6 +47,7 @@ interface HeldSecurityEventsPage {
  * A page of the organisation's security events and what Agent X holds to name
  * their actors, in the organisation's transaction; `tampered` for an agent
  * that can't be believed (its signed state), the alarm raised as on the logs.
+ * Only rows whose MAC holds are on it (S206 V6, `checked`).
  */
 export async function heldSecurityEventsPage(
   tx: DatabaseTransaction<SecurityEventsReadTables>,
@@ -53,8 +55,9 @@ export async function heldSecurityEventsPage(
   keys: KeyProvider,
   orgId: string,
   asked: OrgEventsToRead,
+  checked: OrgEventsChecked,
 ): Promise<HeldSecurityEventsPage | 'tampered'> {
-  const page = await orgSecurityEventsPage(tx, orgId, asked);
+  const page = await orgSecurityEventsPage(tx, orgId, asked, checked);
   const held = await actorsHeld(tx, states, keys, orgId, securityEventActorsOf(page.rows));
   if (held === 'tampered') return 'tampered';
   return { ...page, held };

@@ -1,4 +1,4 @@
-// SEC-OAUTH-13 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
+// SEC-OAUTH-15 (tamper pass S205): a flow is believed, as opened and as decided, only with its own seals. The
 // database's side, a planted or rewritten row never shown, decided or exchanged, with the alarm, is
 // oauth-connections.db.test.ts.
 import { createKeyProvider, type Message, PURPOSES } from '@agentx/platform/keys';
@@ -104,7 +104,7 @@ function allowedDevice(): DeviceFlowRead {
   return { ...undecidedDevice, ...fields, decided: 'allowed', seal: decisionSealed(keys, undecidedDevice, fields) };
 }
 
-describe('SEC-OAUTH-13 a flow decision’s seal', () => {
+describe('SEC-OAUTH-15 a flow decision’s seal', () => {
   it('is sound for the flow it was made for, either kind, and whatever the IDs’ case', () => {
     expect(decisionJudged(keys, allowedCode())).toBe('sound');
     expect(decisionJudged(keys, allowedDevice())).toBe('sound');
@@ -151,8 +151,9 @@ describe('SEC-OAUTH-13 a flow decision’s seal', () => {
     }
   });
 
-  it('tells a flow with no seal (decided before 0101), and one sealed with a pepper version no longer held', () => {
-    expect(decisionJudged(keys, { ...allowedCode(), seal: null })).toBe('unsealed');
+  it('holds a flow with no seal tampered (every flow is sealed since 0101), and tells one sealed with a pepper version no longer held', () => {
+    expect(decisionJudged(keys, { ...allowedCode(), seal: null })).toBe('tampered');
+    expect(decisionJudged(keys, { ...allowedDevice(), seal: null })).toBe('tampered');
     expect(decisionJudged(keys, { ...allowedCode(), seal: { mac: 'a'.repeat(64), keyVersion: 2 } })).toBe(
       'key_not_held',
     );
@@ -161,7 +162,7 @@ describe('SEC-OAUTH-13 a flow decision’s seal', () => {
   });
 });
 
-describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
+describe('SEC-OAUTH-15 a flow’s seal as it opened', () => {
   it('is sound for the flow its client opened, either kind', () => {
     expect(openJudged(keys, undecided)).toBe('sound');
     expect(openJudged(keys, undecidedDevice)).toBe('sound');
@@ -187,7 +188,7 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
     expect(openJudged(keys, { ...undecidedDevice, userCodeHash: 'f'.repeat(64) })).toBe('tampered');
   });
 
-  it('shows, claims or decides only a pending flow sealed as opened: anything else is the alarm, an error or a warning', () => {
+  it('shows, claims or decides only a pending flow sealed as opened: one changed or with no seal is the alarm', () => {
     const capture = new LogCapture();
     const logger = testLogger(capture);
     expect(pendingFlowSound(keys, logger, undecided)).toBe(true);
@@ -199,10 +200,15 @@ describe('SEC-OAUTH-13 a flow’s seal as it opened', () => {
     );
     expect(capture.lines().map(({ level, event }) => [level, event])).toEqual([
       ['error', 'audit.integrity_failed'],
-      ['warn', 'oauth.flow_unsealed'],
+      ['error', 'audit.integrity_failed'],
       ['error', 'oauth.seal_key_not_held'],
     ]);
-    expect(capture.lines()[0]).toMatchObject({ check: 'oauth_flow', objectId: undecidedDevice.id });
+    expect(capture.lines()[0]).toMatchObject({
+      check: 'oauth_flow',
+      reason: 'open_seal',
+      objectId: undecidedDevice.id,
+    });
+    expect(capture.lines()[1]).toMatchObject({ check: 'oauth_flow', reason: 'open_seal', objectId: opening.id });
   });
 });
 
@@ -249,25 +255,42 @@ describe('SEC-OAUTH-15 a flow’s state, bound by both seals (v2, S206)', () => 
     ]);
   };
 
-  it('never believes a v1 seal, which doesn’t bind the state: one that checks is superseded, even with its state rewritten', () => {
-    expect(openJudged(keys, { ...undecided, openSeal: openedV1(undecided) })).toBe('superseded');
-    expect(openJudged(keys, { ...undecided, state: 'abc', openSeal: openedV1(undecided) })).toBe('superseded');
-    expect(decisionJudged(keys, { ...allowedCode(), seal: decidedV1(undecided) })).toBe('superseded');
-    expect(decisionJudged(keys, { ...allowedCode(), state: null, seal: decidedV1(undecided) })).toBe('superseded');
-    // A v1 seal binds what it always did: anything else changed is still the alarm.
-    const otherClient = { clientId: 'axcl_ffffffffffffffffffffffffffffffff' };
-    expect(openJudged(keys, { ...undecided, ...otherClient, openSeal: openedV1(undecided) })).toBe('tampered');
-    expect(decisionJudged(keys, { ...allowedCode(), ...otherClient, seal: decidedV1(undecided) })).toBe('tampered');
-    // Each label its own: an open v1 seal never stands for a decision's, nor a v1 one for a v2 one.
-    expect(decisionJudged(keys, { ...allowedCode(), seal: openedV1(undecided) })).toBe('tampered');
+  it('seals the v2 messages, each under its own label, the state last of what the flow was opened with', () => {
+    expect(undecided.openSeal).toEqual(sealedAs(['oauth-flow-open-v2', ...v1Parts(undecided), 'xyz']));
+    const done = allowedCode();
+    expect(done.seal).toEqual(
+      sealedAs([
+        'oauth-flow-decision-v2',
+        ...v1Parts(undecided),
+        'xyz',
+        ORG.toLowerCase(),
+        KEY,
+        CODE_HASH,
+        DECIDED.toISOString(),
+        done.codeEndsAt?.toISOString() ?? '',
+      ]),
+    );
   });
 
-  it('refuses a pending flow sealed v1 with a warning, never the alarm', () => {
+  it('never believes a v1 seal, which doesn’t bind the state: tampered, as opened and as decided', () => {
+    expect(openJudged(keys, { ...undecided, openSeal: openedV1(undecided) })).toBe('tampered');
+    expect(openJudged(keys, { ...undecided, state: 'abc', openSeal: openedV1(undecided) })).toBe('tampered');
+    expect(decisionJudged(keys, { ...allowedCode(), seal: decidedV1(undecided) })).toBe('tampered');
+    expect(decisionJudged(keys, { ...allowedCode(), state: null, seal: decidedV1(undecided) })).toBe('tampered');
+  });
+
+  it('refuses a pending flow sealed v1 with the alarm', () => {
     const capture = new LogCapture();
     const logger = testLogger(capture);
     expect(pendingFlowSound(keys, logger, { ...undecided, openSeal: openedV1(undecided) })).toBe(false);
     expect(capture.lines()).toEqual([
-      expect.objectContaining({ level: 'warn', event: 'oauth.flow_seal_superseded', flowId: undecided.id }),
+      expect.objectContaining({
+        level: 'error',
+        event: 'audit.integrity_failed',
+        check: 'oauth_flow',
+        reason: 'open_seal',
+        objectId: undecided.id,
+      }),
     ]);
   });
 });

@@ -203,7 +203,7 @@ export {
   registeredContactsFor,
   TooManyContacts,
 } from './infrastructure/registered-contacts.ts';
-export { FACTOR_RESETS, factorRemovalsDue, resetLinkFor } from './infrastructure/factor-resets.ts';
+export { draftReset, FACTOR_RESETS, factorRemovalsDue, resetLinkFor } from './infrastructure/factor-resets.ts';
 export {
   CONTACT_ADD_CONFIRM_OPERATION,
   CONTACT_ADD_OPERATION,

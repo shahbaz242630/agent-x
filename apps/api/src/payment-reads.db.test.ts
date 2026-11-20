@@ -107,7 +107,7 @@ const handoffOf = (w: World) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail: w.rail,
     keys,
     ids,
@@ -121,7 +121,7 @@ const checksOf = (w: World, rail: FakeRail = w.rail) =>
   createPaymentChecks({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -276,7 +276,7 @@ const lostTrack = (w: World, transactionId: string) =>
       actor: BANK_CHECK,
       details: { via: 'bank_check' },
     });
-    await settlePayment(tx, states, createOutbox({ ids, clock }), {
+    await settlePayment(tx, states, createOutbox({ ids, clock, keys }), {
       orgId: w.org,
       requestId: locked.instruction.spendRequestId,
       transactionId,
@@ -371,7 +371,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -384,7 +384,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger,
   });
 });
@@ -620,7 +620,7 @@ describe('the exception list (Phase 6 C1; BR-17; S196 decision)', () => {
     await withSignedStates(app, w.org, quiet(), (tx) =>
       alertAdmins(
         tx,
-        { keys, ids, outbox: createOutbox({ ids, clock }) },
+        { keys, ids, outbox: createOutbox({ ids, clock, keys }) },
         { orgId: w.org, transactionId: processing.id, alert: 'still_unknown' },
       ),
     );

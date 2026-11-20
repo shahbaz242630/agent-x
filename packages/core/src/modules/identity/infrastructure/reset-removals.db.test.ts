@@ -50,6 +50,7 @@ import { createRemovalRestriction, SECOND_FACTORS_REMOVED } from './removal-rest
 import { activateContact, contactChange, contactToActivate, draftContact } from './registered-contacts.ts';
 import { createResetChanges } from './reset-changes.ts';
 import { createResetRemovals } from './reset-removals.ts';
+import { endsKept } from './sessions-ended.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -262,7 +263,7 @@ const removalsWith = (factors: SecondFactorRemover) => {
     ids,
     clock,
     issuer: ISSUER,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
 };
@@ -295,6 +296,8 @@ const lastEvent = async (org: string) => {
     tx
       .selectFrom('audit.events')
       .select(['action', 'actor_id', 'details'])
+      // The change's own, not the record of a notice it queued (S206 V4).
+      .where('action', '!=', 'notice.queued')
       .orderBy('seq', 'desc')
       .limit(1)
       .executeTakeFirstOrThrow(),
@@ -378,6 +381,11 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     ]);
     // B6-3d: on the platform chain about the person, restricting them from this moment for 7 days.
     const removedAt = clock.now();
+    // R-15: the end signed on the platform chain, at the moment its row keeps.
+    expect(await endsKept(app, who.person.userId)).toEqual({
+      column: removedAt.toISOString(),
+      signed: [removedAt.toISOString()],
+    });
     expect(await removalsRecorded(who.person.userId)).toEqual([
       { actor: 'api', details: { person: who.person.userId, org: who.org, reset: id, at: removedAt.toISOString() } },
     ]);
@@ -465,7 +473,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
         ids,
         clock,
         challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         logger: testLogger(),
       });
       const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
@@ -614,7 +622,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       ids,
       clock,
       challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
     const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
@@ -735,7 +743,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       ids,
       clock,
       challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
     const admin = { orgId: first.org, userId: first.admin.userId, sessionId: first.admin.sessionId };

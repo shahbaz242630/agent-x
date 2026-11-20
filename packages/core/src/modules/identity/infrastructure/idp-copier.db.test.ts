@@ -32,6 +32,7 @@ import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from 
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
 import { createRemovalRestriction } from './removal-restriction.ts';
+import { endsKept } from './sessions-ended.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { changeHashOf, createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -139,7 +140,7 @@ const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurL
     ids,
     clock,
     issuer: ISSUER,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     factors,
     ours,
     logger: testLogger(capture),
@@ -347,7 +348,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     const second = await organization(who.userId);
     const removed = event('user.human.mfa.otp.removed', who.subject);
     const { feed } = feedOf(() => [removed]);
-    const outbox = createOutbox({ ids, clock });
+    const outbox = createOutbox({ ids, clock, keys });
     let failNext = false;
     const failing = {
       ...outbox,
@@ -861,6 +862,9 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(copies).toHaveLength(2);
     // Ended once, on the first organisation's copy: the other's records none.
     expect(copies.filter((copy) => 'signInsEnded' in copy)).toEqual([expect.objectContaining({ signInsEnded: 2 })]);
+    // R-15: the end signed on the platform chain, at the moment its row keeps.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
     // Signed in again since, and joined another organisation: the same event read again, and copied
     // there for the first time, ends nothing.
     await signIn(who.userId);
@@ -871,6 +875,8 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect.arrayContaining([expect.objectContaining({ org: joined })]) as unknown,
     );
     expect(await sessionsOf(who.userId)).toBe(1);
+    // Ended nothing again: still the one signed end.
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
   });
 
   it('ends the sessions of a person in no organisation too', async () => {
@@ -881,6 +887,35 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await copierWith(feedOf(() => [locked]).feed).run();
 
     expect(await sessionsOf(who.userId)).toBe(0);
+    // R-15: signed on the platform chain all the same, which belongs to no organisation.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
+  });
+
+  it("R-15 ends a person's sessions once a run, however many of their changes it copies: one signed end, not one each", async () => {
+    const who = await person();
+    await organization(who.userId);
+    await signIn(who.userId);
+    // Each of these ends sessions on its own (as above): one person's burst of them at the login service.
+    const burst = ['user.human.mfa.otp.removed', 'user.human.password.changed', 'user.locked'].map((type) =>
+      event(type, who.subject),
+    );
+
+    await copierWith(feedOf(() => burst).feed, holding(FIRST_KEY)).run();
+
+    expect(await sessionsOf(who.userId)).toBe(0);
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
+    const copies = await Promise.all(burst.map((one) => platformCopies(`user:${who.subject}:${one.sequence}`)));
+    expect(copies.flat().filter((copy) => 'signInsEnded' in copy)).toEqual([
+      expect.objectContaining({ signInsEnded: 1 }),
+    ]);
+    // A later run's change ends them again, its own end signed: once a run, not once ever.
+    await signIn(who.userId);
+    clock.advanceBy(60_000);
+    await copierWith(feedOf(() => [event('user.locked', who.subject)]).feed, holding(FIRST_KEY)).run();
+    expect(await sessionsOf(who.userId)).toBe(0);
+    expect((await endsKept(app, who.userId)).signed).toEqual([endedAt, clock.now().toISOString()]);
   });
 
   it('ends no session on a login unlocked or a token issued', async () => {

@@ -93,7 +93,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -108,7 +108,7 @@ const checksOf = (w: World, rail: FakeRail = w.rail, list = () => Promise.resolv
   createPaymentChecks({
     list,
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -188,7 +188,7 @@ function startClock(at: Date): void {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -551,7 +551,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     await createPaymentChecks({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: down,
       keys,
       ids,
@@ -586,7 +586,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     await createPaymentChecks({
       list: () => Promise.resolve(worlds.map(({ org }) => org)),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: down,
       keys,
       ids,
@@ -750,7 +750,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
     clock.advanceBy(8 * DAY - 4 * STEP);
     const transactionId = (await transactionOf(w, request.id)).id;
     await withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
-      markFailed(tx, states, createOutbox({ ids, clock }), {
+      markFailed(tx, states, createOutbox({ ids, clock, keys }), {
         orgId: w.org,
         transactionId,
         userId: w.admin.userId,
@@ -898,7 +898,7 @@ describe('when and how often (the partner’s rate limits)', () => {
     await createPaymentChecks({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,
@@ -946,7 +946,7 @@ describe('when and how often (the partner’s rate limits)', () => {
     await createPaymentChecks({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -965,7 +965,7 @@ describe('when and how often (the partner’s rate limits)', () => {
       createPaymentChecks({
         list: () => Promise.resolve([]),
         database: app,
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         rail: {} as FakeRail,
         keys,
         ids,
@@ -1264,7 +1264,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     createPaymentChecks({
       list: () => Promise.resolve(worlds.map(({ org }) => org)),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -1304,7 +1304,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     const run = createPaymentChecks({
       list: () => Promise.resolve([hung.w.org, other.w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock: moving }),
+      outbox: createOutbox({ ids, clock: moving, keys }),
       rail,
       keys,
       ids,
@@ -1312,7 +1312,13 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       logger: testLogger(capture),
       health: breaker(),
       databaseGate: handoffDatabaseGate(6),
-      events: createProviderEvents({ keys, ids, clock: moving, retentionDays: 30 }),
+      events: createProviderEvents({
+        keys,
+        ids,
+        clock: moving,
+        logger: testLogger(),
+        retentionDays: 30,
+      }),
       runBudgetMs: 2_000,
     }).run();
 
@@ -1361,7 +1367,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await createHandoff({
       list: () => Promise.resolve([other.w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: other.w.rail,
       health,
       databaseGate: handoffDatabaseGate(6),
@@ -1480,7 +1486,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
       await createHandoff({
         list: () => Promise.resolve([w.org]),
         database: app,
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         rail: w.rail,
         health,
         databaseGate: handoffDatabaseGate(6),
@@ -1766,7 +1772,7 @@ describe('on lanes, its lookups the breaker’s way open (4D2e F5)', () => {
     await createPaymentChecks({
       list: () => Promise.resolve(['not-an-organisation', w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,

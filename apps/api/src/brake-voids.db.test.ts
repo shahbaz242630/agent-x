@@ -204,7 +204,7 @@ async function superseding(w: World, mandateId: string): Promise<Press> {
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: logger(),
   });
   const terms = termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) });
@@ -240,7 +240,7 @@ const services = () => ({
   ids,
   clock,
   challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-  outbox: createOutbox({ ids, clock }),
+  outbox: createOutbox({ ids, clock, keys }),
   logger: logger(),
 });
 
@@ -604,7 +604,7 @@ beforeEach(() => {
   clock = new FixedClock(new Date());
   capture = new LogCapture();
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: logger() });
-  const outbox = createOutbox({ ids, clock });
+  const outbox = createOutbox({ ids, clock, keys });
   decisions = createSpendRequestDecisions({ database: app, outbox, keys, ids, clock, logger: logger() });
   const challenges = createStepUpChallenges({ ids, clock, keys, logger: testLogger() });
   agents = createAgentChanges({ database: app, keys, ids, clock, challenges, outbox, logger: logger() });
@@ -650,7 +650,7 @@ describe('the brakes void their own pending requests in their transaction (C2b)'
       keys,
       ids,
       clock,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: logger(),
     }).run();
 

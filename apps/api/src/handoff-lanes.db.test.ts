@@ -104,7 +104,7 @@ const handoffOver = (worlds: readonly World[], rail: FakeRail, options: Partial<
   createHandoff({
     list: () => Promise.resolve(worlds.map(({ org }) => org)),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     health,
     keys,
@@ -173,7 +173,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -613,7 +613,7 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
       list: () => Promise.resolve([w.org]),
       database: app,
       rail: w.rail,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       keys,
       ids,
       clock,
@@ -731,7 +731,7 @@ describe('at concurrency: bank slot, database gate, Tx A, the call, Tx B', () =>
     const job = createHandoff({
       list: () => Promise.resolve(allWorlds.map(({ org }) => org)),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: hanging.rail,
       health,
       databaseGate: handoffDatabaseGate(6),

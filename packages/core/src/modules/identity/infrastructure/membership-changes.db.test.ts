@@ -23,6 +23,7 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
+import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import {
@@ -37,12 +38,18 @@ import {
 import { MEMBERSHIP_GRANTS } from './membership-grants.ts';
 import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
 import { leftBehind } from '../membership-changes.helper.test.ts';
+import { endsKept } from './sessions-ended.helper.test.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
-type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
+type Tables = IdentityTables &
+  OrganizationsTables &
+  DirectoryTables &
+  AuditTables &
+  NotificationsTables &
+  PlatformControlsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -214,7 +221,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(),
   });
 });
@@ -267,6 +274,9 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
     expect(await sessions().use(app, other.cookie)).toBeUndefined();
     expect(await challenges().pending(app, theirs?.challengeId ?? '', approver.sessionId)).toBeUndefined();
     expect(await sessionsOf(who.admin.userId)).toBe(1);
+    // R-15: the end signed on the platform chain, at the moment its row keeps.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, approver.userId)).toEqual({ column: endedAt, signed: [endedAt] });
 
     const events = await database
       .as('backup')
@@ -536,6 +546,9 @@ describe(`deactivating a member (B4-5a, SEC-HA-10, Postgres ${server.version})`,
       id: viewer.membershipId,
     });
     expect(await sessionsOf(viewer.userId)).toBe(0);
+    // R-15: the end signed on the platform chain, at the moment its row keeps.
+    const endedAt = clock.now().toISOString();
+    expect(await endsKept(app, viewer.userId)).toEqual({ column: endedAt, signed: [endedAt] });
     const events = await database
       .as('backup')
       .query("select actor_id, details from audit.events where subject_id = $1 and action = 'membership.deactivated'", [
