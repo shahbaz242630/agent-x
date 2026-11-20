@@ -1101,6 +1101,18 @@ describe('the deployers (deployers/deployers.bicep)', () => {
     expect(text('deployers.bicep')).toContain("whatIfSubject: '${repository}:environment:${environment}-whatif'");
   });
 
+  it('tags as every other deployment does: tags.bicep’s resourceTags is names.bicep’s, word for word (AZ5i)', () => {
+    const tagsOf = (file: string): string | undefined =>
+      /@export\(\)\r?\n@description\([^\n]*\)\r?\nfunc resourceTags\(environment string\) object => \{[^}]*\}/.exec(
+        readFileSync(path.join(AZURE_DIR, file), 'utf8'),
+      )?.[0];
+    const own = tagsOf('tags.bicep');
+    expect(own).toContain("'managed-by': 'deploy/azure'");
+    expect(tagsOf('names.bicep')?.replaceAll('\r\n', '\n')).toBe(own?.replaceAll('\r\n', '\n'));
+    // That the deployers no longer read names.bicep at all is what the pinned Bicep says (release.test.ts).
+    expect(text('deployers.bicep')).toContain("import { resourceTags } from '../tags.bicep'");
+  });
+
   it('lets the infra identity give exactly the roles the deployments give, never Owner or a wildcard, never to itself', () => {
     const access = text('staging-access.bicep');
     const words = [...(/var customRoleWords = \[([^\]]*)\]/.exec(access)?.[1] ?? '').matchAll(/'([^']+)'/g)].map(
