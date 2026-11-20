@@ -86,7 +86,7 @@ export interface EndedSession {
 }
 
 /** A session given a new cookie ID: the cookie ID to send the browser, and its row as it was, for the signed rotation (sessionRotatedEvent). */
-export interface RotatedSession {
+interface RotatedSession {
   readonly cookie: string;
   readonly retired: RetiredSession;
 }
