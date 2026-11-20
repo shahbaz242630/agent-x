@@ -1,7 +1,7 @@
 // SA1's smoke checks of the auth host, against a stand-in for staging's door.
 import { describe, expect, it } from 'vitest';
 
-import { authOriginOf, CHECKS, checkAuthDoor } from './auth-door.ts';
+import { authOriginOf, CHECKS, checkAuthDoor, checkSignInLands } from './auth-door.ts';
 
 const AUTH = 'https://auth.example.test';
 const NOW = new Date('2026-11-13T09:00:00Z');
@@ -153,5 +153,95 @@ describe('SA1: the smoke test of the auth host', () => {
     expect(await lineOf('/', [{ status: 502 }], 30_000)).toBe(
       'auth host GET /: answered 502 after 30 s: the auth host did not answer; check the auth door and its apps are running (Incident playbook)',
     );
+  });
+});
+
+describe('PL-26: a sign-in lands on the login pages, never Zitadel’s hosted login', () => {
+  const APP = 'https://app.example.test';
+  const AUTHORIZE = `${AUTH}/oauth/v2/authorize?client_id=c&state=secret-state`;
+
+  /** The API's sign-in and Zitadel's authorize, answering as given; every request kept. */
+  function signIn(authorize: Response | 'drop', started: Response = redirect(AUTHORIZE)) {
+    const calls: { url: string; redirect: string | undefined }[] = [];
+    const fetcher = (url: string, init: { redirect?: 'manual' }) => {
+      calls.push({ url, redirect: init.redirect });
+      if (url === `${APP}/v1/auth/sign-in`) return Promise.resolve(started.clone());
+      if (authorize === 'drop') return Promise.reject(new TypeError('fetch failed'));
+      return Promise.resolve(authorize.clone());
+    };
+    return { calls, fetcher };
+  }
+
+  function redirect(location: string, status = 302): Response {
+    return new Response(null, { status, headers: { location } });
+  }
+
+  const check = (fake: ReturnType<typeof signIn>) => {
+    let now = NOW.getTime();
+    return checkSignInLands(APP, AUTH, {
+      fetcher: fake.fetcher,
+      now: () => new Date(now),
+      wakeMs: 20_000,
+      pause: () => {
+        now += 10_000;
+        return Promise.resolve();
+      },
+    });
+  };
+
+  it('passes a sign-in Zitadel sends to /ui/v2/login, following neither redirect, naming no host or state', async () => {
+    for (const location of ['/ui/v2/login/login?authRequest=V2_1', `${AUTH}/ui/v2/login/login?authRequest=V2_1`]) {
+      const fake = signIn(redirect(location));
+      const said: string[] = [];
+      const result = await checkSignInLands(
+        APP,
+        AUTH,
+        { fetcher: fake.fetcher, now: () => NOW, pause: () => Promise.resolve() },
+        (line) => said.push(line),
+      );
+      expect(result).toEqual({ line: 'auth host GET /oauth/v2/authorize (a sign-in from the API): ok', passed: true });
+      expect(said).toEqual([result.line]);
+      expect(fake.calls).toEqual([
+        { url: `${APP}/v1/auth/sign-in`, redirect: 'manual' },
+        { url: AUTHORIZE, redirect: 'manual' },
+      ]);
+    }
+  });
+
+  it('fails a sign-in sent to the hosted login, another page, another host, or no redirect at all', async () => {
+    const said = async (authorize: Response | 'drop'): Promise<string> => {
+      const result = await check(signIn(authorize));
+      expect(result.passed).toBe(false);
+      expect(result.line).not.toMatch(/example\.test|secret-state/);
+      return result.line;
+    };
+    expect(await said(redirect('/ui/login/login?authRequestID=1'))).toBe(
+      "auth host GET /oauth/v2/authorize (a sign-in from the API): sent the browser to /ui/login/login, not the login pages (/ui/v2/login): a sign-in or an email link may land on Zitadel's hosted login, which the auth door keeps closed; " +
+        "check Zitadel's login v2 is the instance's login (its base URI the auth host's /ui/v2/login) and the auth door sends /oauth/v2/ to Zitadel (deploy/azure/auth-door.json)",
+    );
+    expect(await said(redirect('https://elsewhere.example.test/ui/v2/login'))).toMatch(
+      /sent the browser to another host,/,
+    );
+    expect(await said(new Response('{}', { status: 400 }))).toMatch(/: answered 400, not the login pages/);
+    expect(await said(new Response(null, { status: 404 }))).toMatch(/: answered 404, not the login pages/);
+    expect(await said('drop')).toMatch(/: answered no answer after 20 s: Zitadel did not answer;/);
+  });
+
+  it('fails when the API’s sign-in doesn’t send the browser to the auth host’s authorize', async () => {
+    for (const started of [
+      new Response('{}', { status: 503 }),
+      new Response('{}', { status: 200 }),
+      redirect('https://elsewhere.example.test/oauth/v2/authorize'),
+      redirect(`${AUTH}/oauth/v2/other`),
+      redirect('http://[bad'),
+    ]) {
+      const result = await check(signIn(redirect('/ui/v2/login'), started));
+      expect(result.passed).toBe(false);
+      expect(result.line).toMatch(
+        started.status === 503
+          ? /the API's sign-in answered 503 after 20 s: check the API is running$/
+          : /the API's sign-in answered \d+, not a redirect to the auth host's \/oauth\/v2\/authorize/,
+      );
+    }
   });
 });

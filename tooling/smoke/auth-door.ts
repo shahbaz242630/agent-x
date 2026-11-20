@@ -92,6 +92,59 @@ export const CHECKS: readonly Check[] = [
   },
 ];
 
+/** Where a sign-in must land (PL-26): the login app's pages, never Zitadel's hosted login, which the closed door shuts. */
+const LOGIN_PAGES = '/ui/v2/login';
+
+const NEXT_LOGIN =
+  "check Zitadel's login v2 is the instance's login (its base URI the auth host's /ui/v2/login) and the auth door sends /oauth/v2/ to Zitadel (deploy/azure/auth-door.json)";
+
+/** Where a redirect points, read against the origin it came from; undefined when it isn't one. */
+function redirectOf(answer: Response, from: string): URL | undefined {
+  const location = answer.headers.get('location');
+  if (answer.status < 300 || answer.status > 399 || location === null) return undefined;
+  try {
+    return new URL(location, from);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * PL-26: a sign-in started as a person starts one (the API's /v1/auth/sign-in, which sends the browser to Zitadel's
+ * authorize with the API's own client) must reach the login app's pages on the auth host. Email links and every
+ * sign-in then never depend on Zitadel's hosted login, which the closed door sends to the API's 404. Neither redirect
+ * is followed, and the line names paths alone: the authorize request carries the flow's state.
+ */
+export async function checkSignInLands(
+  appOrigin: string,
+  authOrigin: string,
+  ways: Partial<Ways> = {},
+  say: (line: string) => void = () => undefined,
+): Promise<{ readonly line: string; readonly passed: boolean }> {
+  const all = { ...REAL, ...ways };
+  const init = { headers: { accept: 'text/html' }, redirect: 'manual' as const };
+  const problem = await (async (): Promise<string | undefined> => {
+    const started = await askAwake(`${appOrigin}/v1/auth/sign-in`, init, all);
+    if ('waited' in started) return `the API's sign-in answered ${started.waited}: check the API is running`;
+    const authorize = redirectOf(started.answer, appOrigin);
+    if (authorize?.origin !== authOrigin || authorize.pathname !== '/oauth/v2/authorize') {
+      return `the API's sign-in answered ${String(started.answer.status)}, not a redirect to the auth host's /oauth/v2/authorize: check the API's AGENTX_OIDC_ISSUER is the auth origin`;
+    }
+    const asked = await askAwake(authorize.href, init, all);
+    if ('waited' in asked) return `answered ${asked.waited}: Zitadel did not answer; ${NEXT_LOGIN}`;
+    const landed = redirectOf(asked.answer, authOrigin);
+    if (landed?.origin === authOrigin && landed.pathname.startsWith(LOGIN_PAGES)) return undefined;
+    const where =
+      landed === undefined
+        ? `answered ${String(asked.answer.status)}`
+        : `sent the browser to ${landed.origin === authOrigin ? landed.pathname : 'another host'}`;
+    return `${where}, not the login pages (${LOGIN_PAGES}): a sign-in or an email link may land on Zitadel's hosted login, which the auth door keeps closed; ${NEXT_LOGIN}`;
+  })();
+  const line = `auth host GET /oauth/v2/authorize (a sign-in from the API): ${problem ?? 'ok'}`;
+  say(line);
+  return { line, passed: problem === undefined };
+}
+
 /** Every check's line, said as soon as known, and whether all passed: `<name>: ok`, or what was wrong. */
 export async function checkAuthDoor(
   authOrigin: string,
