@@ -6,6 +6,12 @@
 //   node deploy/azure/stage-g.ts status                    the copy, the jobs, the last step and its verdict
 //   node deploy/azure/stage-g.ts delete [<copy>]           the copy removed, the load jobs with it
 //   node deploy/azure/stage-g.ts delete --anchors          the copies' anchors containers, once their time is up
+//   node deploy/azure/stage-g.ts revoke                    Stage G's reads of the database logins taken back
+//
+// Stage G's identity reads staging's live logins (the owner's, the app's, the
+// backup role's) for a run alone (S204-b): create gives them before the apps
+// line, delete takes them back with the copy, and between runs none stands
+// (CI's plan fails on one, grants.ts).
 //
 // `create` restores staging's server to psql-agentx-stg-g-<id> in its subnet
 // and private zone (playbook L's drill, under Stage G's name), sizes it for the
@@ -72,10 +78,11 @@ const USAGE = `Usage, from your own terminal window:
   node deploy/azure/stage-g.ts run <test> [--from <step>]  run one test step by step: ${STAGE_G_TESTS.join(', ')}
   node deploy/azure/stage-g.ts status                     the copy, the jobs, the last step and its verdict
   node deploy/azure/stage-g.ts delete [<copy>]            remove the copy and the load jobs
-  node deploy/azure/stage-g.ts delete --anchors           remove old copies' anchors containers once their time is up`;
+  node deploy/azure/stage-g.ts delete --anchors           remove old copies' anchors containers once their time is up
+  node deploy/azure/stage-g.ts revoke                     take back Stage G's reads of the database logins, with no copy kept`;
 
 export type Request =
-  | { readonly command: 'create' | 'status' }
+  | { readonly command: 'create' | 'status' | 'revoke' }
   | { readonly command: 'run'; readonly test: StageGTest; readonly from?: string }
   | { readonly command: 'delete'; readonly name?: string }
   | { readonly command: 'anchors' };
@@ -102,13 +109,13 @@ function parseDelete(rest: readonly string[]): Request {
 
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...rest] = argv;
-  if (command === 'create' || command === 'status') {
+  if (command === 'create' || command === 'status' || command === 'revoke') {
     if (rest.length > 0) throw new UsageError(`${command} takes nothing, not ${rest.join(' ')}`);
     return { command };
   }
   if (command === 'run') return parseRun(rest);
   if (command === 'delete') return parseDelete(rest);
-  throw new UsageError(`say create, run, status or delete, not ${command ?? 'nothing'}`);
+  throw new UsageError(`say create, run, status, delete or revoke, not ${command ?? 'nothing'}`);
 }
 
 /** What the runner needs from this machine and the world; tests give their own. */
@@ -331,6 +338,13 @@ const jobsOnCopy = (azure: StageGAzure, server: string): boolean =>
 /** load-mark, once the partner's apps deploy has put the jobs on the copy: the sentinel written and read back. */
 async function mark(steps: StageGSteps, copy: Copy): Promise<Copy> {
   const { azure } = steps;
+  // Before the apps: Azure checks a job's vault references as it deploys it. None stands between runs (S204-b).
+  const given = azure.giveReads();
+  steps.say(
+    given.length > 0
+      ? `Gave Stage G's identity its run's reads (${given.join(', ')}): delete takes them back.`
+      : "Stage G's identity already holds its run's reads: delete takes them back.",
+  );
   steps.say(
     `Now deploy the apps onto the copy, in another terminal window:\n  ${appsLine(copy.server)}\nThis waits until it has (up to two hours), then marks the copy.`,
   );
@@ -884,6 +898,28 @@ async function stopJobs(steps: StageGSteps): Promise<void> {
   }
 }
 
+/** Stage G's reads of the database logins taken back (S204-b), and said. */
+function takeReads(steps: StageGSteps): void {
+  const taken = steps.azure.takeReads();
+  steps.say(
+    taken > 0
+      ? `Took back Stage G's ${String(taken)} read${taken === 1 ? '' : 's'} of the database logins.`
+      : 'Stage G holds no read of the database logins.',
+  );
+}
+
+/** The reads taken back with no copy kept (one left standing, or a run ended by hand): refused while one is kept. */
+function revoke(steps: StageGSteps): number {
+  const kept = readState(steps).copy;
+  if (kept !== undefined) {
+    throw new Error(
+      `Stage G's copy ${kept.server} is kept, and its jobs read these: remove it (node deploy/azure/stage-g.ts delete), which takes them back too. Nothing was taken back.`,
+    );
+  }
+  takeReads(steps);
+  return 0;
+}
+
 async function remove(steps: StageGSteps, named: string | undefined): Promise<number> {
   const state = readState(steps);
   const server = named ?? state.copy?.server;
@@ -901,6 +937,7 @@ async function remove(steps: StageGSteps, named: string | undefined): Promise<nu
     if (azure.servers().includes(server)) throw new Error(`Azure still lists ${server}: run delete again.`);
   }
   steps.say(`${server} is gone.`);
+  if (kept) takeReads(steps);
   const anchors: Anchors = {
     container: throwawayAnchorsContainer(id),
     server,
@@ -974,6 +1011,8 @@ export function stageG(request: Request, steps: StageGSteps): Promise<number> {
       return remove(steps, request.name);
     case 'anchors':
       return Promise.resolve(removeAnchors(steps));
+    case 'revoke':
+      return Promise.resolve(revoke(steps));
   }
 }
 

@@ -29,6 +29,8 @@ import {
   templateProblems,
   DECISION_HEADROOM,
   gateBusy,
+  GRANTS,
+  STAGE_G_RUN_READS,
   LOAD_RUN,
   LOGIN_COPIES,
   MCP_ALERTS,
@@ -927,15 +929,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'migrate reads db-owner-password',
         // 4D2e E10: the chain repair writes as the owner, the one job besides the migration.
         'chain-restore reads db-owner-password',
-        // AZ3: Stage G's mark as the owner, and its checks as the app and the backup role, on its copy alone.
-        'stage-g reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
         // The API's jobs apart from it read what the API reads (4D2e D13).
         'jobs reads db-app-password',
-        'stage-g reads db-app-password',
         'db-setup reads db-backup-password',
-        'stage-g reads db-backup-password',
         'db-setup reads db-operator-password',
         'operator reads db-operator-password',
         'db-setup reads db-zitadel-password',
@@ -5576,27 +5574,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(WATCH_ROLE, starting('Microsoft.App/jobs/stop/action')))).toEqual(['job-watch']);
   });
 
-  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, reading the owner's, the app's and the backup role's logins alone", () => {
+  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, given the owner's, the app's and the backup role's logins for a run alone (S204-b)", () => {
+    // No deployment gives Stage G's identity a read: none stands between runs.
     const grants = staging.predictedResources
       .filter((resource) => ASSIGNMENTS(resource))
-      .map((resource) => String(at(resource.properties, 'description')))
-      .filter((description) => description.startsWith('stage-g reads '));
-    expect(grants).toEqual([
-      'stage-g reads db-owner-password (deploy/azure/secrets.bicep)',
-      'stage-g reads db-app-password (deploy/azure/secrets.bicep)',
-      'stage-g reads db-backup-password (deploy/azure/secrets.bicep)',
-    ]);
-    // The server admin's login, the operator's or Zitadel's, given to it: refused.
-    for (const secret of ['db-admin-password', 'db-operator-password', 'db-zitadel-password']) {
-      const extra = structuredClone(
-        staging.predictedResources.find(READS('stage-g', 'db-owner-password')),
-      ) as unknown as Mutable;
-      const reader = structuredClone(staging.predictedResources.find(READS('db-setup', secret))) as unknown as Mutable;
-      extra.id = String(reader.id).replace(/[^/]+$/, 'stage-g-extra');
+      .map((resource) => String(at(resource.properties, 'description')));
+    expect(grants.filter((description) => description.startsWith('stage-g '))).toEqual([]);
+    expect([...GRANTS].filter((grant) => grant.startsWith('stage-g '))).toEqual([]);
+    // One put back in the templates, of any login, its run's three among them: refused.
+    const identity = staging.predictedResources.find(named(/^id-agentx-stg-stage-g$/));
+    for (const secret of ['db-owner-password', 'db-app-password', 'db-admin-password']) {
+      const extra = structuredClone(staging.predictedResources.find(READS('db-setup', secret))) as unknown as Mutable;
+      const properties = inside(extra, 'properties');
+      properties.principalId = String(properties.principalId).replace(/id-agentx-stg-db-setup/, String(identity?.name));
+      extra.id = String(extra.id).replace(/[^/]+$/, 'stage-g-standing');
       expect(brokenRules(withExtra(extra))).toEqual(['secret-access']);
     }
-    // One of its three left out: refused, as each is needed.
-    expect(brokenRules(without(READS('stage-g', 'db-backup-password')))).toEqual(['secret-access']);
   });
 
   it('release-writes-alert (AZ2): no alert on CI doing anything but a release, or one that lets a write through, fires late or quietly', () => {
@@ -8734,6 +8727,9 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     const reads = (job: string) => declaredSecrets(found(copy.together, JOB(job))).map(({ name }) => name);
     expect(reads('load-mark')).toEqual(['db-owner-password']);
     expect(reads('load-check')).toEqual(['db-app-password', 'db-backup-password', 'load-request']);
+    // What the runner gives Stage G's identity for the run (S204-b) is exactly what these two read.
+    const run = ['load-mark', 'load-check'].flatMap(reads).filter((name) => name !== 'load-request');
+    expect(new Set(run.map((secret) => `stage-g reads ${String(secret)}`))).toEqual(STAGE_G_RUN_READS);
     // The key's vault name built here: a password-named name beside a name with a digit reads to GitGuardian as a secret (S175, #573).
     const macKey = `key-audit-mac-v${String(1)}`;
     expect(reads('load-step')).toEqual(expect.arrayContaining(['db-app-password', macKey, 'load-request']));

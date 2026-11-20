@@ -8,6 +8,7 @@
 // conversion, which playbook L's restore needs MSYS_NO_PATHCONV against, never
 // touches the subnet's and the private zone's IDs here.
 import { ARM, azJson, RESOURCE_GROUP, servedServerOf, signedIn, text } from './deploy.ts';
+import { giveStageGReads, takeStageGReads } from './grants.ts';
 import { baseServerOf } from './server-generation.ts';
 import {
   type Api,
@@ -107,6 +108,10 @@ export interface StageGAzure {
   anchorContainers(account: string): readonly string[];
   /** Removes an anchors container: false when Azure refused (its files' time not up, say). */
   deleteContainer(account: string, container: string): boolean;
+  /** Gives Stage G's identity its run's reads of three logins (S204-b), each it lacks: the secrets it gave. */
+  giveReads(): readonly string[];
+  /** Takes back every read Stage G's identity holds on the vault's secrets: how many it took. */
+  takeReads(): number;
 }
 
 /** The evidence store beside staging's server: both carry the same suffix (names.bicep), the server's `-r<n>` aside (AZ25). */
@@ -399,6 +404,8 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       const containerUrl = `${groupUrl}/Microsoft.Storage/storageAccounts/${account}/blobServices/default/containers/${container}?api-version=2025-01-01`;
       return az.run(['rest', '--method', 'delete', '--url', containerUrl]).status === 0;
     },
+    giveReads: () => giveStageGReads(az, subscription),
+    takeReads: () => takeStageGReads(az, subscription),
   };
 }
 

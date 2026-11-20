@@ -578,10 +578,6 @@ export const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
-  // AZ3: Stage G's mark (as the owner) and checks (as the app and the backup role), on its throwaway copy alone.
-  'stage-g reads db-owner-password',
-  'stage-g reads db-app-password',
-  'stage-g reads db-backup-password',
   // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
@@ -600,6 +596,18 @@ export const GRANTS: ReadonlySet<string> = new Set([
   'login reads login-client-private-key',
   // SA5: the key the login pages sign their sessions cookie with.
   'login reads login-cookie-secret',
+]);
+
+/**
+ * Stage G's reads (AZ3: its mark as the owner, its checks as the app and the backup role), never standing (S204-b,
+ * 6F1 audit h19): staging's live logins, read by an identity that needs them only while a throwaway copy is up. Its
+ * runner gives them as it makes the copy and takes them back as it removes it (stage-g.ts, grants.ts), so the
+ * templates give them to no one and GRANTS leaves them out.
+ */
+export const STAGE_G_RUN_READS: ReadonlySet<string> = new Set([
+  'stage-g reads db-owner-password',
+  'stage-g reads db-app-password',
+  'stage-g reads db-backup-password',
 ]);
 
 const GRANT = / reads /;
@@ -746,7 +754,7 @@ export const LOAD_RUN = {
  * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
  * runs as and what it reads. The mark and the checks as Stage G's own identity (AZ3), which reads the owner's, the
  * app's and the backup role's logins alone, never the server admin's; the step as PL-38's jobs. Each reads a part of
- * its identity's own (a test holds it to GRANTS).
+ * its identity's own (a test holds it to GRANTS, and Stage G's to STAGE_G_RUN_READS).
  */
 const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
   'load-mark': { runsAs: 'stage-g', reads: new Set(['db-owner-password']) },
