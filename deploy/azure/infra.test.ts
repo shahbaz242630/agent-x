@@ -938,6 +938,7 @@ describe('answers, the summary and main', () => {
     // A merge that needs a hand deploy CI doesn't make still plans nothing.
     const byHand = infraOver({ changed: ['db/bootstrap/roles.sql'], door: LEGACY_DOOR, running: 'f'.repeat(40) });
     expect((await plan(byHand.infra, NEW, DIGEST, true)).steps).toEqual([]);
+    expect(byHand.said.join(' ')).not.toMatch(/apps: planned to close/);
   });
 
   it('refuses what it is not asked properly, and says an error as the run’s last word', async () => {
