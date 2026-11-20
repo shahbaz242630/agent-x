@@ -384,6 +384,8 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
 
   it('a start’s record of its time edited by the owner: the day seal is told it can’t be believed, the sealing raises the alarm', async () => {
     await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: AT.toISOString() });
+    // A later event the head, so the chain held to it from there passes: only the start's own MAC can say.
+    await recorded('platform.started', { release: 'r-after' });
     await owner().query(
       `update platform_controls.audit_events set details = '{"release":"r","rowMacsFrom":"2027-01-01T00:00:00.000Z"}'
        where action = 'platform.started' and details like '%rowMacsFrom%'`,
