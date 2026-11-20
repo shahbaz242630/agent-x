@@ -163,6 +163,79 @@ describe(`a supplier's remittance setting (0061, Postgres ${server.version})`, (
     expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
   });
 
+  describe('SEC-DB-10 R-15 as the database owner, holding none of the app keys (S207, GM-2)', () => {
+    /** A supplier of a fresh organisation, set as asked, the owner's session named into that organisation. */
+    async function ownersSupplier(remittanceEmail: RemittanceEmail | 'unset') {
+      const org = await organization();
+      const id = await supplier(org, remittanceEmail);
+      const owner = database.as('owner');
+      await owner.query(ORG_NAMED, [org]);
+      return { org, id, owner };
+    }
+
+    it('control: a setting the owner reads, and writes back as it was, is still believed', async () => {
+      const { org, id, owner } = await ownersSupplier('on');
+      await owner.query('update suppliers.remittance_settings set remittance_email = remittance_email where id = $1', [
+        id,
+      ]);
+
+      expect(await read(org, id)).toMatchObject({ outcome: 'set', remittanceEmail: 'on' });
+    });
+
+    it('switched from on to off, so a payment goes unannounced, is tampered with', async () => {
+      const { org, id, owner } = await ownersSupplier('on');
+      await owner.query("update suppliers.remittance_settings set remittance_email = 'off' where id = $1", [id]);
+
+      expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
+    });
+
+    it.each([
+      [
+        'its signed version moved on',
+        'update suppliers.remittance_settings set state_version = state_version + 1 where id = $1',
+      ],
+      [
+        'its signed event pointed at another supplier’s',
+        'update suppliers.remittance_settings set state_event_id = (select state_event_id from suppliers.remittance_settings where id = $2) where id = $1',
+      ],
+    ])('with %s, is tampered with', async (_, statement) => {
+      const { org, id, owner } = await ownersSupplier('on');
+      const other = await supplier(org, 'on');
+      await owner.query(statement, statement.includes('$2') ? [id, other] : [id]);
+
+      expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
+      // The other supplier's own setting, untouched, still holds.
+      expect(await read(org, other)).toMatchObject({ outcome: 'set', remittanceEmail: 'on' });
+    });
+
+    it('put back whole to its older signed version, its version and event with it, is tampered with', async () => {
+      const { org, id, owner } = await ownersSupplier('on');
+      const [saved] = await owner.query<{ row: string }>(
+        'select pg_catalog.to_jsonb(t)::text as row from suppliers.remittance_settings t where t.id = $1',
+        [id],
+      );
+      await set(org, id, 'off');
+      await owner.query(
+        `update suppliers.remittance_settings t
+           set remittance_email = old.remittance_email, state_version = old.state_version, state_event_id = old.state_event_id
+           from pg_catalog.jsonb_populate_record(null::suppliers.remittance_settings, $2::jsonb) old where t.id = $1`,
+        [id, saved?.row],
+      );
+
+      expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
+    });
+
+    it('planted for a supplier added before 0061, set to off, is tampered with, never read as off', async () => {
+      const { org, id, owner } = await ownersSupplier('unset');
+      await owner.query(
+        `insert into suppliers.remittance_settings (org_id, id, remittance_email, created_at) values ($1, $2, 'off', now())`,
+        [org, id],
+      );
+
+      expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });
+    });
+  });
+
   it('lets the app neither delete a row, nor move its supplier or when it was made', async () => {
     const as = database.as('app');
     await expect(as.query('delete from suppliers.remittance_settings')).rejects.toThrow('permission denied');
