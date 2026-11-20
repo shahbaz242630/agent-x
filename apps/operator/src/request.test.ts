@@ -6,12 +6,14 @@ import { organizationName } from '@agentx/core/modules/organizations';
 import { describe, expect, it } from 'vitest';
 
 import {
+  chainFlags,
   chainRecoveryRequest,
   chainRestoreRequest,
   createOrganizationRequest,
   DISCARD_FORK,
   PLAN_DIGEST_HEX,
   REQUEST_LIMIT_BYTES,
+  SHORT_OF_ANCHOR,
   UUID_V7,
 } from './request.ts';
 
@@ -49,7 +51,9 @@ describe('4D2e E10 the chain repair and its plan, asked with or without the name
       '--id',
       'plan',
     ]);
-    expect((JSON.parse(chainRecoveryRequest('org', 'plan', true)) as string[]).at(-1)).toBe(DISCARD_FORK);
+    expect((JSON.parse(chainRecoveryRequest('org', 'plan', { discardFork: true })) as string[]).at(-1)).toBe(
+      DISCARD_FORK,
+    );
     expect(JSON.parse(chainRestoreRequest(asked))).toEqual([
       'chain-restore',
       '--org',
@@ -61,7 +65,22 @@ describe('4D2e E10 the chain repair and its plan, asked with or without the name
       '--id',
       'id',
     ]);
-    expect((JSON.parse(chainRestoreRequest(asked, true)) as string[]).at(-1)).toBe(DISCARD_FORK);
+    expect((JSON.parse(chainRestoreRequest(asked, { discardFork: true })) as string[]).at(-1)).toBe(DISCARD_FORK);
+    // AT9: the short flag after the fork's, each only when asked.
+    expect((JSON.parse(chainRestoreRequest(asked, { shortOfAnchor: true })) as string[]).at(-1)).toBe(SHORT_OF_ANCHOR);
+    expect(
+      (JSON.parse(chainRecoveryRequest('org', 'plan', { discardFork: true, shortOfAnchor: true })) as string[]).slice(
+        -2,
+      ),
+    ).toEqual([DISCARD_FORK, SHORT_OF_ANCHOR]);
+  });
+
+  it('reads the named flags each at most once, in either order, and nothing else (AT9)', () => {
+    expect(chainFlags([])).toEqual({ discardFork: false, shortOfAnchor: false });
+    expect(chainFlags([SHORT_OF_ANCHOR])).toEqual({ discardFork: false, shortOfAnchor: true });
+    expect(chainFlags([SHORT_OF_ANCHOR, DISCARD_FORK])).toEqual({ discardFork: true, shortOfAnchor: true });
+    expect(chainFlags([DISCARD_FORK, DISCARD_FORK])).toBeUndefined();
+    expect(chainFlags([SHORT_OF_ANCHOR, '--force'])).toBeUndefined();
   });
 
   it("takes a plan's digest as 64 lower-case hex digits alone", () => {

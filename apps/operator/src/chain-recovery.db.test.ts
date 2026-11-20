@@ -12,7 +12,7 @@ import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createTestDatabase, type TestClient, type TestDatabase, testLogger, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { planChainRecovery, type PlannedRow, planFile, type RecoverySides } from './chain-recovery.ts';
+import { planChainRecovery, planDigest, type PlannedRow, planFile, type RecoverySides } from './chain-recovery.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 
 const server = inject('postgres');
@@ -269,7 +269,8 @@ describe('SEC-DB-12 PL-29 the chain recovery plan puts back only original rows',
   it("the head deleted, its MAC spoiled, or of the wrong type: the copy's head in its place", async () => {
     const head = await copied(2);
     await tamper(live, (admin) => admin.query('delete from audit.heads where org_id = $1', [orgId]));
-    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
+    // No head row to keep: nothing is said replaced.
+    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head }, liveHeadReplaced: undefined });
     // Put back, then its MAC alone spoiled: the same number and hash, but no longer sealed.
     const copyHead = await headOf(theCopy());
     await tamper(live, (admin) =>
@@ -281,7 +282,13 @@ describe('SEC-DB-12 PL-29 the chain recovery plan puts back only original rows',
         copyHead.mac_key_version,
       ]),
     );
-    expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head, mac: copyHead.mac } });
+    expect(await plan()).toMatchObject({
+      ok: true,
+      rows: [],
+      head: { seq: head, mac: copyHead.mac },
+      // The spoiled row kept as read, said unsealed.
+      liveHeadReplaced: { seq: head, mac: Buffer.alloc(32), sealed: false },
+    });
     await tamper(live, (admin) => admin.query('alter table audit.heads alter column mac_key_version type bigint'));
     expect(await plan()).toMatchObject({ ok: true, rows: [], head: { seq: head } });
   });
@@ -624,6 +631,126 @@ describe("SEC-DB-12 PL-57 the plan judges the operator's events as every reader 
   });
 });
 
+/**
+ * AT9's damage, but for the cut: two events, the earlier head; three more, the copy made; two more, the live chain's
+ * head then, which the store anchored. The earlier head, the copy's, and that anchor.
+ */
+async function anchoredPastTheCopy(): Promise<{ earlier: HeadRow; head: bigint; anchor: CheckedPoint }> {
+  await record(live, 2);
+  const earlier = await headOf(live);
+  const head = await copied(3);
+  await record(live, 2);
+  const whole = await trail.verifyAlone(appOn(live, true), orgId, undefined);
+  if (!whole.ok) throw new Error('The grown chain should check out');
+  return { earlier, head, anchor: whole };
+}
+
+describe('SEC-DB-12 PL-29 AT9 a copy that holds some lost events but not the anchor', () => {
+  it('refused without the flag; with it, the copy’s events put back to its head, short of the anchor', async () => {
+    const { earlier, head, anchor } = await anchoredPastTheCopy();
+    await windBack(earlier);
+
+    expect(await plan({ anchor })).toEqual({ ok: false, reason: 'behind_anchor', seq: anchor.seq });
+    const planned = await plan({ anchor, shortOfAnchor: true });
+    if (!planned.ok) throw new Error(`refused: ${planned.reason}`);
+    const from = BigInt(earlier.seq);
+    expect(actions(planned.rows)).toEqual([
+      ['put_back', from + 1n],
+      ['put_back', from + 2n],
+      ['put_back', from + 3n],
+    ]);
+    // Every row exactly as the copy holds it, its original MAC with it, and the copy's head row.
+    const onCopy = await chainRowsAlone(appOn(theCopy(), true), keys, orgId, from, 10);
+    expect(planned.rows.map((row) => ('columns' in row ? row.columns : undefined))).toEqual(
+      onCopy.rows.map((row) => row.read?.columns),
+    );
+    expect(planned.head?.seq).toBe(head);
+    expect(planned).toMatchObject({ endsAt: { seq: head }, endsShortOf: anchor.seq, keptPastCopy: 0n });
+    expect(planned.liveHeadReplaced).toMatchObject({ seq: from, hash: earlier.hash, sealed: true });
+    // The file says where it ends short, and its digest covers it.
+    const facts = { planId: uuidV7Ids.next(), orgId, release: 'r-1', run: null, anchor };
+    const [summary] = planFile(planned, facts).toString().split('\n');
+    expect(JSON.parse(String(summary))).toMatchObject({ ok: true, endsShortOf: String(anchor.seq) });
+  });
+
+  it('the lost events deleted under their sealed head, a junk row past the copy: both go with the flag alone', async () => {
+    const { head, anchor } = await anchoredPastTheCopy();
+    await tamper(live, async (admin) => {
+      await admin.query('delete from audit.events where org_id = $1 and seq > $2', [orgId, head]);
+      // A row the app never wrote, past the copy's head: another ID, so its seal fails.
+      await admin.query(
+        `insert into audit.events
+         select org_id, $2, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+                subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 1`,
+        [orgId, head + 1n],
+      );
+    });
+
+    expect(await plan({ anchor })).toEqual({ ok: false, reason: 'new_seal', seq: head + 1n });
+    const planned = await plan({ anchor, shortOfAnchor: true });
+    expect(planned).toMatchObject({ ok: true, endsAt: { seq: head }, endsShortOf: anchor.seq });
+    expect(planned.ok && actions(planned.rows)).toEqual([['remove', head + 1n]]);
+    expect(planned.ok && planned.head?.seq).toBe(head);
+    // The lost tail's own sealed head, the only MAC'd proof of where the chain reached, kept as read.
+    expect(planned.ok && planned.liveHeadReplaced).toMatchObject({ seq: anchor.seq, hash: anchor.hash, sealed: true });
+  });
+
+  it('refuses with the flag a copy whose events don’t link to the live chain’s: another branch, or a broken copy', async () => {
+    await record(live, 1);
+    const earlier = await headOf(live);
+    const head = await copied(3);
+    await windBack(earlier);
+    // The app wrote on after the cut: sealed events the copy holds others in place of.
+    await record(live, 2);
+    const anchor: CheckedPoint = { seq: head + 5n, hash: Buffer.alloc(32, 9), macKeyVersion: 1 };
+    const fork = BigInt(earlier.seq) + 1n;
+    expect(await plan({ anchor, shortOfAnchor: true })).toEqual({ ok: false, reason: 'fork', seq: fork });
+    // Thrown away only with the fork's own flag too, its events kept as evidence in the plan.
+    expect(await plan({ anchor, shortOfAnchor: true, discardFork: true })).toMatchObject({
+      ok: true,
+      forkDiscarded: true,
+      endsShortOf: anchor.seq,
+      // The fork's own sealed head, kept as read before the copy's takes its place.
+      liveHeadReplaced: { seq: fork + 1n, sealed: true },
+    });
+
+    await editEvent(theCopy(), 2n);
+    expect(await plan({ anchor, shortOfAnchor: true })).toMatchObject({ ok: false, reason: 'copy_broken', seq: 2n });
+  });
+
+  it('changes nothing where the copy is an earlier state of the live chain, or the plan holds its anchor', async () => {
+    const head = await copied(2);
+    await record(live, 2);
+    const grown = await plan();
+    if (!grown.ok) throw new Error('The grown plan should pass');
+    // Grown on past the copy: the rebase from the live head gives up nothing this copy holds, so no plan ends short.
+    const past: CheckedPoint = { ...grown.endsAt, seq: head + 5n };
+    expect(await plan({ anchor: past, shortOfAnchor: true })).toEqual({
+      ok: false,
+      reason: 'behind_anchor',
+      seq: head + 5n,
+    });
+    expect(await plan({ anchor: grown.endsAt, shortOfAnchor: true })).toMatchObject({ ok: true, endsShortOf: null });
+    expect(await plan({ shortOfAnchor: true })).toMatchObject({ ok: true, endsShortOf: null });
+  });
+
+  it("still holds an anchor at the copy's own head to its hash with the flag: never short of one it reaches", async () => {
+    await record(live, 1);
+    const earlier = await headOf(live);
+    const head = await copied(2);
+    await windBack(earlier);
+    const reached = await plan();
+    if (!reached.ok) throw new Error('The wound-back plan should pass');
+    expect(await plan({ anchor: reached.endsAt, shortOfAnchor: true })).toMatchObject({ ok: true, endsShortOf: null });
+    expect(await plan({ anchor: { ...reached.endsAt, hash: Buffer.alloc(32, 7) }, shortOfAnchor: true })).toEqual({
+      ok: false,
+      reason: 'anchor',
+      seq: head,
+    });
+  });
+});
+
 describe("the plan's file", () => {
   it('names the plan, then each row, then the head it puts back', async () => {
     await record(live, 1);
@@ -637,9 +764,22 @@ describe("the plan's file", () => {
       .trimEnd()
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(lines.map((line) => line.k)).toEqual(['plan', 'row', 'head']);
+    expect(lines.map((line) => line.k)).toEqual(['plan', 'row', 'liveHead', 'head']);
     expect(lines[0]).toMatchObject({ ok: true, rows: 1, headReplaced: true, anchor: null, orgId });
     expect(lines[1]).toMatchObject({ action: 'put_back', seq: String(BigInt(earlier.seq) + 1n) });
+    // The live head row the copy's overwrites, every column as read: kept as evidence (AT9 review).
+    expect(lines[2]).toEqual({
+      k: 'liveHead',
+      seq: earlier.seq,
+      hash: earlier.hash.toString('hex'),
+      mac: earlier.mac.toString('hex'),
+      macKeyVersion: earlier.mac_key_version,
+      sealed: true,
+    });
+    // The digest covers it: another live head read is another plan.
+    if (!planned.ok || planned.liveHeadReplaced === undefined) throw new Error('A live head should be replaced');
+    const otherHead = { ...planned, liveHeadReplaced: { ...planned.liveHeadReplaced, mac: Buffer.alloc(32, 1) } };
+    expect(planDigest(otherHead, orgId, undefined)).not.toBe(planDigest(planned, orgId, undefined));
   });
 
   it('says why a plan was refused, and nothing more', () => {

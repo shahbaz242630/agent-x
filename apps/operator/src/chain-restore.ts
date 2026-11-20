@@ -12,11 +12,15 @@
 // event), under the chain head's lock, onto the live chain exactly as the plan
 // read it (its fingerprint, read again under the lock), and the whole chain
 // is checked in that transaction before it commits: ending where the plan
-// ends, holding the store's anchor. Any difference rolls everything back.
+// ends, holding the store's anchor. Any difference rolls everything back. A
+// plan made with `--short-of-anchor` (AT9) ends before the anchor, so can't
+// hold it: its chain is checked whole on its own, ending where the plan ends,
+// and the anchor is then moved on to that end by a rebase (E11).
 //
 // Refused, nothing written:
 // - `plan`: the plan made now is itself refused (chain-recovery.ts's reasons);
-//   a fork among them unless the named flag `--discard-fork` was given
+//   a fork among them unless the named flag `--discard-fork` was given, and
+//   `behind_anchor` unless `--short-of-anchor` was
 // - `stale`: the plan made now isn't the one asked for (its digest differs):
 //   either chain, or the anchor, changed since it was read
 // - `signing_start`: where operator signing starts on the chain (PL-57)
@@ -44,6 +48,7 @@ import { type Database, JOB_ANSWER_WITHIN_MS, withTenant } from '@agentx/platfor
 
 import {
   fingerprintOf,
+  headLine,
   planChainRecovery,
   planDigest,
   type RecoveryPlan,
@@ -79,6 +84,8 @@ export interface RestoreSides extends Pick<RecoverySides, 'keys' | 'orgId' | 'an
   readonly digest: string;
   /** The named flag: a fork's live branch discarded rather than the repair refused. */
   readonly discardFork: boolean;
+  /** The named flag (AT9): a plan ending at the copy's head before the anchor applied rather than refused. */
+  readonly shortOfAnchor: boolean;
 }
 
 /** The chain as written failed its check: thrown to roll the repair back. */
@@ -99,9 +106,9 @@ const samePoint = (a: CheckedPoint, b: CheckedPoint): boolean =>
 
 /** Makes the plan again and applies it if it is the one asked for: never throws for what it finds. */
 export async function restoreChain(sides: RestoreSides): Promise<RestoreOutcome> {
-  const { copy, live, anchor, digest, discardFork } = sides;
+  const { copy, live, anchor, digest } = sides;
   const orgId = sides.orgId.toLowerCase();
-  const plan = await planChainRecovery({ ...sides, orgId, discardFork });
+  const plan = await planChainRecovery({ ...sides, orgId });
   if (!plan.ok) return { ok: false, reason: 'plan', plan };
   const madeNow = planDigest(plan, orgId, anchor);
   if (madeNow !== digest) return { ok: false, reason: 'stale', digest: madeNow };
@@ -145,8 +152,10 @@ async function repairIn(
   );
   if (seen !== plan.liveFingerprint) return { ok: false, reason: 'moved' };
   await writeOriginalRows(tx, orgId, plan.rows, plan.head);
-  // The trail's IDs are never used: the check writes nothing.
-  const report = await createAuditTrail({ keys, ids: uuidV7Ids }).verify(tx, orgId, anchor);
+  // The trail's IDs are never used: the check writes nothing. A plan short of its anchor (AT9) is checked whole on its
+  // own: the anchor is past its end, and the rebase that follows moves it there.
+  const against = plan.endsShortOf === null ? anchor : undefined;
+  const report = await createAuditTrail({ keys, ids: uuidV7Ids }).verify(tx, orgId, against);
   if (!report.ok) throw new Unverified(report.problem);
   if (!samePoint(report, plan.endsAt)) throw new Unverified({ reason: 'end', seq: report.seq });
   return { ok: true, plan };
@@ -159,6 +168,7 @@ export interface RestoreFacts {
   readonly orgId: string;
   readonly digest: string;
   readonly discardFork: boolean;
+  readonly shortOfAnchor: boolean;
   readonly release: string;
   readonly run: string | null;
 }
@@ -179,8 +189,15 @@ export function outcomeLine(outcome: RestoreOutcome): Readonly<Record<string, un
       headReplaced: plan.head !== undefined,
       forkDiscarded: plan.forkDiscarded,
       endsAt: plan.endsAt.seq.toString(),
-      // The repaired head's hash, kept as evidence: no rebase follows a repair (AT5, S194), which holds its anchor.
+      // The repaired head's hash, kept as evidence: no rebase follows a repair that holds its anchor (AT5, S194); one
+      // short of it (AT9) names this head in the rebase that gives up the events past it.
       endsAtHash: plan.endsAt.hash.toString('hex'),
+      endsShortOf: plan.endsShortOf?.toString() ?? null,
+      // The live head row overwritten, as read: sealed, the proof of where the live chain reached (AT9 review).
+      liveHeadReplaced:
+        plan.liveHeadReplaced === undefined
+          ? null
+          : { ...headLine('liveHead', plan.liveHeadReplaced), sealed: plan.liveHeadReplaced.sealed },
     };
   }
   switch (outcome.reason) {

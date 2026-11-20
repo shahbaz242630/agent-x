@@ -910,6 +910,39 @@
         "additionalProperties": false,
         "description": "Every refusal and failure has this body: a reason code, the code's public description, and the request's correlation ID. Nothing else."
       },
+      "OauthError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "invalid_client",
+              "invalid_grant",
+              "unauthorized_client",
+              "unsupported_grant_type",
+              "invalid_scope",
+              "invalid_target",
+              "invalid_redirect_uri",
+              "invalid_client_metadata",
+              "temporarily_unavailable",
+              "authorization_pending",
+              "slow_down",
+              "access_denied",
+              "expired_token"
+            ]
+          },
+          "error_description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "error_description"
+        ],
+        "additionalProperties": false,
+        "description": "An OAuth endpoint’s refusal, as OAuth clients read one (RFC 6749 §5.2): sent at 400, or 401 for an unknown client."
+      },
       "Session": {
         "type": "object",
         "properties": {
@@ -1701,39 +1734,6 @@
         "additionalProperties": false,
         "description": "A download of one file of a background download, on the audit log."
       },
-      "OauthError": {
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "string",
-            "enum": [
-              "invalid_request",
-              "invalid_client",
-              "invalid_grant",
-              "unauthorized_client",
-              "unsupported_grant_type",
-              "invalid_scope",
-              "invalid_target",
-              "invalid_redirect_uri",
-              "invalid_client_metadata",
-              "temporarily_unavailable",
-              "authorization_pending",
-              "slow_down",
-              "access_denied",
-              "expired_token"
-            ]
-          },
-          "error_description": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "error",
-          "error_description"
-        ],
-        "additionalProperties": false,
-        "description": "An OAuth endpoint’s refusal, as OAuth clients read one (RFC 6749 §5.2): sent at 400, or 401 for an unknown client."
-      },
       "AgentSelf": {
         "type": "object",
         "properties": {
@@ -2105,7 +2105,10 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "name": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -2256,7 +2259,10 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "name": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -4941,42 +4947,52 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "name": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "version": {
-                "type": "object",
-                "properties": {
-                  "id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "number": {
-                    "type": "integer",
-                    "minimum": -9007199254740991,
-                    "maximum": 9007199254740991
-                  },
-                  "name": {
-                    "type": "string"
-                  },
-                  "verification": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/components/schemas/AuditLogEvent"
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                       },
-                      {
-                        "type": "null"
+                      "number": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "verification": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/AuditLogEvent"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
-                    ]
+                    },
+                    "required": [
+                      "id",
+                      "number",
+                      "name",
+                      "verification"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "id",
-                  "number",
-                  "name",
-                  "verification"
-                ],
-                "additionalProperties": false
+                ]
               }
             },
             "required": [
@@ -4995,13 +5011,22 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "holderName": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "hint": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "partner": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -5646,42 +5671,52 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "name": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "version": {
-                "type": "object",
-                "properties": {
-                  "id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                  },
-                  "number": {
-                    "type": "integer",
-                    "minimum": -9007199254740991,
-                    "maximum": 9007199254740991
-                  },
-                  "name": {
-                    "type": "string"
-                  },
-                  "verification": {
-                    "anyOf": [
-                      {
-                        "$ref": "#/components/schemas/AuditLogEvent"
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
                       },
-                      {
-                        "type": "null"
+                      "number": {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "verification": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/AuditLogEvent"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
-                    ]
+                    },
+                    "required": [
+                      "id",
+                      "number",
+                      "name",
+                      "verification"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
                   }
-                },
-                "required": [
-                  "id",
-                  "number",
-                  "name",
-                  "verification"
-                ],
-                "additionalProperties": false
+                ]
               }
             },
             "required": [
@@ -5700,13 +5735,22 @@
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
               },
               "holderName": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "hint": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "partner": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [

@@ -406,6 +406,16 @@ export const PLAIN_WORDS = {
     broke: 'The person was not signed in and was asked to try again shortly.',
     next: 'It usually clears once the login service wakes up. If it keeps happening, check the login service is up.',
   },
+  'auth.sign_ins_capped': {
+    happened: 'So many sign-ins were under way at once that Agent X let in only networks with few under way.',
+    broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
+    next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
+  },
+  'auth.sign_ins_network_capped': {
+    happened: 'One address or network started more sign-ins at once than its share.',
+    broke: 'Only people on that network were asked to try again shortly; everyone else signs in as usual.',
+    next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
+  },
   'auth.step_up_failed': {
     happened: "A person's check of who they are, before a sensitive change, failed.",
     broke: 'The change was refused; they stay signed in, and it was noted as a security event.',
@@ -1183,6 +1193,12 @@ export const PLAIN_WORDS = {
     happened: "An organisation's audit chain repair was refused or rolled back.",
     broke: 'Nothing was changed, and the organisation stays on hold.',
     next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
+  },
+  'operator.chain_restored_short_of_anchor': {
+    happened:
+      "An organisation's audit chain was repaired from a copy holding only some lost events; it ends before its last trusted point.",
+    broke: 'Later events are still missing: the anchor check keeps alarming and the organisation stays on hold.',
+    next: "Once the rest is accepted as lost, run the chain's rebase (playbook H).",
   },
   'operator.state_recovery_refused': {
     happened: "A recovery plan for an organisation's tampered records was refused.",

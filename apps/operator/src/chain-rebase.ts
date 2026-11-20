@@ -2,7 +2,9 @@
 // audit chain (an organisation's events lost for good, no copy holding them; the
 // platform chain begun again), its anchor in the store can't be met, and the API's
 // check would raise the alarm for good. A repair (E10) never needs one: a plan
-// never ends before the anchor (AT5, S194). This moves the anchor on: it reads the
+// never ends before the anchor (AT5, S194), but for one made with
+// `--short-of-anchor` (AT9), from a copy that holds only some of the lost
+// events: its repaired head is the place this then names. This moves the anchor on: it reads the
 // anchors' store (rebases first, as the API does), checks the live chain whole from
 // its first event, holds its head to the place the request names (the head a person
 // checked: a refused plan prints it, AT8), and writes one signed rebase line

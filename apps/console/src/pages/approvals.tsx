@@ -16,7 +16,7 @@ function Row({ request }: { readonly request: ListedRequest }) {
     <li>
       <Link to="/approvals/$id" params={{ id: request.id }} className="row">
         <span className="row-main">
-          <span>{request.supplier.name}</span>
+          <span>{request.supplier.name ?? t('request.supplierUnknown')}</span>
           <span className="muted">
             {request.agent.name} <span className="mono">{request.agent.id}</span> · {when}
           </span>

@@ -80,7 +80,14 @@ export {
   IdpFactorsUnavailable,
   type SecondFactorRemover,
 } from './infrastructure/idp-factors.ts';
-export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
+export {
+  createLoginFlows,
+  LOGIN_FLOW_SECONDS,
+  type LoginFlows,
+  MOST_OPEN_SIGN_INS,
+  MOST_OPEN_SIGN_INS_A_NETWORK,
+  QUIET_NETWORK_SIGN_INS,
+} from './infrastructure/login-flows.ts';
 export { createLoginSessions, type LoginSessions, LoginSessionsUnavailable } from './infrastructure/login-sessions.ts';
 export { LoginTokenRefused } from './infrastructure/zitadel-call.ts';
 export {
@@ -196,7 +203,7 @@ export {
   registeredContactsFor,
   TooManyContacts,
 } from './infrastructure/registered-contacts.ts';
-export { FACTOR_RESETS, factorRemovalsDue, resetLinkFor } from './infrastructure/factor-resets.ts';
+export { draftReset, FACTOR_RESETS, factorRemovalsDue, resetLinkFor } from './infrastructure/factor-resets.ts';
 export {
   CONTACT_ADD_CONFIRM_OPERATION,
   CONTACT_ADD_OPERATION,
@@ -241,6 +248,7 @@ export {
   createSignIn,
   type SignIn,
   type SignInBegun,
+  SignInBusy,
   type SignInCompleted,
   StepUpFailed,
   type StepUpFailure,

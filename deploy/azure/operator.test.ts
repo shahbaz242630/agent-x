@@ -216,6 +216,7 @@ type Ending =
   | 'resume-refused'
   | 'resumed-other'
   | 'planned'
+  | 'planned-short'
   | 'plan-refused'
   | 'plan-copy-broken'
   | 'plan-behind-anchor'
@@ -226,6 +227,7 @@ type Ending =
   | 'plan-forked-copy'
   | 'restored'
   | 'restored-other'
+  | 'restored-short'
   | 'restore-plan'
   | 'restore-stale'
   | 'restore-signing'
@@ -497,6 +499,22 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     }),
     TERMINATED,
   ],
+  // AT9: a plan made with --short-of-anchor, ending at the copy's head before the anchor.
+  'planned-short': (id) => [
+    said({
+      event: 'operator.chain_recovery_planned',
+      planId: id,
+      digest: 'ab'.repeat(32),
+      putBack: 5,
+      replaced: 0,
+      removed: 0,
+      headReplaced: true,
+      forkDiscarded: false,
+      endsAt: '270',
+      endsShortOf: '273',
+    }),
+    TERMINATED,
+  ],
   'plan-refused': (id) => [
     said({
       event: 'operator.chain_recovery_refused',
@@ -604,6 +622,22 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
       removed: 0,
       endsAt: '9',
       endsAtHash: 'cd'.repeat(32),
+      holdKept: true,
+    }),
+    TERMINATED,
+  ],
+  // AT9: a repair short of its anchor, its head the rebase names.
+  'restored-short': (id) => [
+    said({ event: 'operator.chain_restore_owner_login', restoreId: id }),
+    said({
+      event: 'operator.chain_restored',
+      restoreId: id,
+      putBack: 5,
+      replaced: 0,
+      removed: 0,
+      endsAt: '270',
+      endsAtHash: 'cd'.repeat(32),
+      endsShortOf: '273',
       holdKept: true,
     }),
     TERMINATED,
@@ -2705,6 +2739,19 @@ describe("4D2e E9 a chain recovery plan, on the operator's job", () => {
     expect(done.said.at(-1)).toMatch(/ --discard-fork$/);
   });
 
+  it("passes --short-of-anchor through, says where the plan ends short, and names it in the repair's command (AT9)", async () => {
+    const done = await drill(['chain-recovery-plan', '--org', PLAN_ORG, '--short-of-anchor', '--discard-fork'], {
+      ending: 'planned-short',
+    });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    expect(words.slice(-2)).toEqual(['--discard-fork', '--short-of-anchor']);
+    expect(done.said.at(-2)).toBe(
+      `Planned ${String(words[4])}: 5 rows to put back, 0 to replace, 0 to remove; the head put back; it ends at 270, short of the anchor at 273: the events between are held by no copy, and a rebase gives them up after the repair. Nothing was changed. The plan and its rows are in the evidence store as ${PLAN_ORG}/chain-recovery-${String(words[4])}.ndjson.`,
+    );
+    expect(done.said.at(-1)).toMatch(/ --digest (ab)+ --discard-fork --short-of-anchor$/);
+  });
+
   it('says why a plan was refused, and ends 1', async () => {
     const fork = await drill(['chain-recovery-plan', '--org', PLAN_ORG], {
       ending: 'plan-refused',
@@ -2749,7 +2796,7 @@ describe("4D2e E9 a chain recovery plan, on the operator's job", () => {
       states: ['Failed'],
     });
     expect(ahead.said.at(-1)).toBe(
-      "Its anchor is at 273, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either (from the copy's head: anchor at 270): it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches 273 (playbook H); if none does, no tool yet puts this copy's events back before a rebase (AT9): stop there and call Claude.",
+      `Its anchor is at 273, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either (from the copy's head: anchor at 270): it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches 273 (playbook H). If none does, this plan puts back the events this copy holds and ends at its head, short of the anchor; a copy on another branch is refused as a fork: node deploy/azure/operator.ts chain-recovery-plan --org ${PLAN_ORG} --short-of-anchor`,
     );
     expect(ahead.said.join(' ')).not.toContain('chain-rebase');
     // A copy on another branch, shorter than live: the numbers alone would have offered a rebase.
@@ -2790,14 +2837,17 @@ describe("4D2e E9 a chain recovery plan, on the operator's job", () => {
   });
 
   it.each([
-    [['chain-recovery-plan'], 'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else'],
+    [
+      ['chain-recovery-plan'],
+      'say chain-recovery-plan --org <organisation ID> [--discard-fork] [--short-of-anchor], and nothing else',
+    ],
     [
       ['chain-recovery-plan', '--org', PLAN_ORG, '--force'],
-      'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else',
+      'say chain-recovery-plan --org <organisation ID> [--discard-fork] [--short-of-anchor], and nothing else',
     ],
     [
       ['chain-recovery-plan', '--org', PLAN_ORG, '--discard-fork', '--discard-fork'],
-      'say chain-recovery-plan --org <organisation ID> [--discard-fork], and nothing else',
+      'say chain-recovery-plan --org <organisation ID> [--discard-fork] [--short-of-anchor], and nothing else',
     ],
     [['chain-recovery-plan', '--org', 'ORG'], "--org takes the organisation's ID: a UUIDv7, in lower case"],
   ])('refuses %j before anything is sent', async (argv, problem) => {
@@ -2852,10 +2902,21 @@ describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
     expect(old.said.at(-1)).toMatch(/^No rebase is needed/);
   });
 
+  it('says the rebase that gives up the rest after a repair short of its anchor, and passes the flag through (AT9)', async () => {
+    const done = await drill(restore('--short-of-anchor'), { restore: true, ending: 'restored-short' });
+    expect(done.status).toBe(0);
+    const words = JSON.parse(String(done.az.heldAtStart)) as string[];
+    expect(words.at(-1)).toBe('--short-of-anchor');
+    expect(done.said.at(-1)).toBe(
+      `The chain ends before its anchor at 273: no copy held the events between, and the anchor check alarms for it until they are given up. Only once the investigation accepts that they are lost for good, the rebase that gives them up: node deploy/azure/operator.ts chain-rebase --chain ${PLAN_ORG} --seq 270 --hash ${'cd'.repeat(32)} --reason repaired --evidence <incident reference>`,
+    );
+    expect(done.said.join(' ')).not.toContain('No rebase is needed');
+  });
+
   it('passes --discard-fork and an earlier --id through only when given', async () => {
     const done = await drill(restore('--id', EARLIER_ID, '--discard-fork'), { restore: true, ending: 'restored' });
     expect(done.az.heldAtStart).toBe(
-      chainRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id: EARLIER_ID }, true),
+      chainRestoreRequest({ orgId: PLAN_ORG, planId: PLAN_ID, digest: DIGEST, id: EARLIER_ID }, { discardFork: true }),
     );
     const plain = await drill(restore('--id', EARLIER_ID), { restore: true, ending: 'restored' });
     expect(JSON.parse(String(plain.az.heldAtStart))).not.toContain('--discard-fork');
@@ -2937,7 +2998,7 @@ describe('4D2e E10 a chain repair, on its own job, as the owner', () => {
     expect(az.calls).toEqual([]);
     expect(lines[0]).toBe(
       kind === 'shape'
-        ? `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork], and nothing else\n${USAGE}`
+        ? `say chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork] [--short-of-anchor], and nothing else\n${USAGE}`
         : `--org takes the organisation's ID: a UUIDv7, in lower case; --plan takes the plan's ID: a UUIDv7, in lower case; --digest takes the plan's digest: 64 lower-case hex digits; --id takes the ID an earlier run gave: a UUIDv7, in lower case\n${USAGE}`,
     );
   });

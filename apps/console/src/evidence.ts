@@ -60,21 +60,23 @@ export interface Evidence {
     readonly organizationPolicyVersionId: string | null;
     readonly mandatePolicyVersionId: string | null;
   };
+  /** Its name and version null for a supplier the organisation doesn't have (S206 V8). */
   readonly supplier: {
     readonly id: string;
-    readonly name: string;
+    readonly name: string | null;
     readonly version: {
       readonly id: string;
       readonly number: number;
       readonly name: string;
       readonly verification: LogEvent | null;
-    };
+    } | null;
   };
+  /** Its details null for one the organisation doesn't have (S206 V8). */
   readonly fundingSource: {
     readonly id: string;
-    readonly holderName: string;
-    readonly hint: string;
-    readonly partner: string;
+    readonly holderName: string | null;
+    readonly hint: string | null;
+    readonly partner: string | null;
   };
   readonly approval: PersonDecision | null;
   readonly rejection: (PersonDecision & { readonly reason: string }) | null;
