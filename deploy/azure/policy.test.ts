@@ -4945,7 +4945,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       edited('"security_seal.tally", ', ''),
       edited('Tallied > Rows', 'Tallied >= Rows'),
       // A tally that read further taken for an earlier one: an older read logged late would page.
-      edited(' and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0)', ''),
+      edited(' and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0 or TimeGenerated - TalliedAt > 60s)', ''),
+      // The newest rows deleted read as an old line logged late, however long after.
+      edited(' or TimeGenerated - TalliedAt > 60s', ''),
+      edited('> 60s', '> 1d'),
       edited('strcmp(ReadTo, TalliedTo) >= 0', 'strcmp(ReadTo, TalliedTo) > 0'),
       edited('isempty(ReadTo) or ', ''),
       edited(' on Chain, Day', ' on Day'),

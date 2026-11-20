@@ -4185,15 +4185,16 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
  * The security records' shortfall (S206 V6, R-15; S206 faster detection): each tally or seal line arrived in the last
  * 10 minutes against every tally of its day, per log (the global table, or an organisation), counted where it has fewer
  * rows than one that read no further (its last row ID not past this line's; a line of none read nothing): reads ordered
- * by what they read, never by when they were logged, as two jobs log the same day.
+ * by what they read, never by when they were logged, as two jobs log the same day; one that read less logged over 60
+ * seconds after the tally is a fall too (its newest rows deleted), the jobs' race being seconds.
  */
 export const SECURITY_SEAL_SHORTFALL_LINES = [
   'where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed")',
   'extend Line = parse_json(Log), Arrived = ingestion_time()',
   'where Arrived > ago(10m)',
   `extend Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Rows = iff(tostring(Line['event']) == "security_seal.tally", toint(Line['rows']), toint(Line['requests'])), ReadTo = tostring(Line['idTo'])`,
-  `join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Tallied = toint(Line['rows']), TalliedTo = tostring(Line['idTo'])) on Chain, Day`,
-  'where Tallied > Rows and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0)',
+  `join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Tallied = toint(Line['rows']), TalliedTo = tostring(Line['idTo']), TalliedAt = TimeGenerated) on Chain, Day`,
+  'where Tallied > Rows and (isempty(ReadTo) or strcmp(ReadTo, TalliedTo) >= 0 or TimeGenerated - TalliedAt > 60s)',
 ] as const;
 
 /**

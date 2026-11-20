@@ -21,7 +21,8 @@
 //   environment's alert holds each new line, and each seal, to every tally of
 //   its day that read no further (its last ID not past this one's): so a fall
 //   is found even across a restart, which forgets the memory, within the
-//   alert's own few minutes, and an older read logged late is no fall.
+//   alert's own few minutes, and an older read logged within a minute of a
+//   newer one is no fall.
 //
 // And once an hour, every retained day of each log counted again (S206,
 // faster detection): its rows by their ID's day, dated or not, one statement a
