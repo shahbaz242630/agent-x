@@ -21,6 +21,10 @@ describe('the digest’s table of one chain (AT13)', () => {
     expect(table.put(1, 2, 9)).toBe(true);
     expect(table.get(1, 2)).toBe(9);
     expect(table.get(1, 3)).toBeUndefined();
+    const small = new ChainDigest(0, 4);
+    for (let high = 1; high <= 4; high += 1) small.put(high, high, 1);
+    // A fourth object in four slots: grown first, at most three in four used.
+    expect(small.bytes).toBe(8 * 4 * 2 + 8 * 8);
     const before = table.bytes;
     // Objects whose low halves all land on the same slot, each found past the others.
     for (let high = 2; high < 40; high += 1) table.put(high, 2, high);

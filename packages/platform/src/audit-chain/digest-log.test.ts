@@ -370,7 +370,8 @@ describe('the digest kept in the write-once store (AT13)', () => {
     log.record(CHAIN, many(40, 0), START);
     expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'audit.state_digest_near_memory' }));
     expect(log.known(CHAIN)).toBe(true);
-    log.record(CHAIN, many(400, 100), START);
+    // 150 objects in 256 slots: just past 4,000 bytes.
+    log.record(CHAIN, many(110, 100), START);
     expect(capture.lines()).toContainEqual(
       expect.objectContaining({ level: 'error', event: 'audit.state_digest_beyond_memory' }),
     );
@@ -396,9 +397,22 @@ describe('the digest kept in the write-once store (AT13)', () => {
     );
     delete fake.instead.put;
     await log.flush();
+    // Kept as a delta, not only in the hour's snapshot: a snapshot is never the one copy of a fact.
+    expect(namesUnder(fake.files, 'deltas')).toHaveLength(1);
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
     const restarted = digestOn(fake, { time });
     await restarted.log.read();
     expect(restarted.log.latest(CHAIN, 'agent', AGENT)).toBe(4n);
+  });
+
+  it('writes no snapshot before a whole read, as it would stand for the whole: only the delta', async () => {
+    const { log, fake } = digestOn();
+    fake.instead.list = () => Promise.reject(new Error('store away'));
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 4n]), START);
+    await log.flush();
+    expect(namesUnder(fake.files, 'deltas')).toHaveLength(1);
+    expect(namesUnder(fake.files, 'snapshots')).toEqual([]);
   });
 
   it('a read that fails leaves it unknown, a warning, and tries again whole next time', async () => {
