@@ -221,7 +221,7 @@ beforeEach(async () => {
   clock.set(START);
 });
 
-describe(`a queued warning, as the database's owner can change it (S206 V4, Postgres ${server.version})`, () => {
+describe(`SEC-DB-17 a queued warning, as the database's owner can change it (S206 V4, Postgres ${server.version})`, () => {
   it('raises nothing for a notice sent on time, now or a day on, and records it on the chain', async () => {
     const id = await queued();
     expect(await send()).toEqual(['victim@example.test']);

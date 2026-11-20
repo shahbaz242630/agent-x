@@ -971,7 +971,7 @@ describe("the operator's events, believed only signed with its own key (PL-57)",
   });
 });
 
-describe('R-15 a stretch of the chain checked in place, from a moment or a place (S206)', () => {
+describe('SEC-DB-16 R-15 a stretch of the chain checked in place, from a moment or a place (S206)', () => {
   /** Four events, each recorded a few milliseconds after the last, so each has its own time. */
   async function four() {
     const recorded = [];

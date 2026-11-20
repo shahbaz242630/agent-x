@@ -157,20 +157,19 @@ var secrets = [
     name: 'db-owner-password'
     value: dbOwnerPassword
     // The chain repair writes as the owner (4D2e E10), the one job besides the migration.
-    // Stage G's mark writes its sentinel as the owner, on the throwaway copy alone (AZ3).
-    readers: ['db-setup', 'migrate', 'chain-restore', 'stage-g']
+    // Stage G's identity reads none of these three standing (S204-b): its runner gives it them for a run alone
+    // (stage-g.ts create) and takes them back with the copy (stage-g.ts delete).
+    readers: ['db-setup', 'migrate', 'chain-restore']
   }
   {
     name: 'db-app-password'
     value: dbAppPassword
-    // Stage G's checks read through the tenant walls as the app, on the throwaway copy alone (AZ3).
-    readers: ['db-setup', 'api', 'jobs', 'stage-g']
+    readers: ['db-setup', 'api', 'jobs']
   }
   {
     name: 'db-backup-password'
     value: dbBackupPassword
-    // Stage G's checks read past the tenant walls as the backup role, on the throwaway copy alone (AZ3).
-    readers: ['db-setup', 'stage-g']
+    readers: ['db-setup']
   }
   {
     name: 'db-operator-password'

@@ -214,6 +214,12 @@ module network 'modules/network.bicep' = {
     tags: tags
     addressSpace: networkAddressSpace
     mcpOauth: mcpOauth
+    // Named here, as the endpoints' rules are: only the foundation uses it.
+    storagePolicyName: 'sep-agentx-${environment}-apps'
+    storageAccountIds: [
+      resourceId(subscription().subscriptionId, group.name, 'Microsoft.Storage/storageAccounts', evidenceAccountName(short, nameSuffix))
+      resourceId(subscription().subscriptionId, group.name, 'Microsoft.Storage/storageAccounts', activityDownloadsAccountName(short, nameSuffix))
+    ]
   }
 }
 

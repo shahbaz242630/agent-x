@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
-import { checkGrants, grantDrift, grantLines, type LiveGrants, readLiveGrants } from './grants.ts';
-import { GRANTS } from './policy.ts';
+import {
+  checkGrants,
+  giveStageGReads,
+  grantDrift,
+  grantLines,
+  type LiveGrants,
+  readLiveGrants,
+  takeStageGReads,
+} from './grants.ts';
+import { GRANTS, STAGE_G_RUN_READS } from './policy.ts';
 
 const SUB = '00000000-0000-0000-0000-000000000001';
 const VAULT = `/subscriptions/${SUB}/resourceGroups/rg-agentx-staging/providers/Microsoft.KeyVault/vaults/kv-agentx-stg-abcdef`;
@@ -140,5 +148,100 @@ describe("the vault's grants against GRANTS (AZ32)", () => {
     expect(checkGrants(cli([on('db-app-password', API)]).az, SUB, (line) => fine.push(line))).toBe(0);
     expect(fine[0]).toMatch(/^The vault lacks \d+ grants the repository lists \(the next secrets run makes them\)/);
     expect(fine.at(-1)).toBe("The vault's grants: none beyond the repository's list (GRANTS, policy.ts).");
+  });
+});
+
+describe("Stage G's reads, for a run alone (S204-b)", () => {
+  const STAGE_G = '55555555-5555-5555-5555-555555555555';
+  /** A CLI holding the given assignments (each with its own ID), recording every write sent. */
+  const azure = (held: readonly ReturnType<typeof on>[], refuse = false, stageG = STAGE_G) => {
+    const writes: { method: string; url: string; body?: unknown }[] = [];
+    const ok = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+    const az: Az = {
+      interactive: () => 0,
+      run: (args) => {
+        if (args[0] === 'keyvault') return ok([VAULT]);
+        if (args[0] === 'identity') {
+          return ok([
+            { name: 'id-agentx-stg-api', principalId: API },
+            { name: 'id-agentx-stg-stage-g', principalId: stageG },
+          ]);
+        }
+        const method = args[args.indexOf('--method') + 1] ?? '';
+        const url = args[args.indexOf('--url') + 1] ?? '';
+        if (method === 'get') {
+          return ok({
+            value: held.map((properties, index) => ({
+              id: `${properties.scope}/providers/Microsoft.Authorization/roleAssignments/a${String(index)}`,
+              properties,
+            })),
+          });
+        }
+        const body = args.includes('--body')
+          ? (JSON.parse(args[args.indexOf('--body') + 1] ?? '') as unknown)
+          : undefined;
+        writes.push({ method, url, body });
+        return refuse ? { status: 1, stdout: '', stderr: 'Forbidden' } : ok({});
+      },
+    };
+    return { az, writes };
+  };
+
+  it('gives the three it lacks, each on its own secret as Secrets User, and none twice', () => {
+    const { az, writes } = azure([on('db-owner-password', STAGE_G), on('db-app-password', API)]);
+    expect(giveStageGReads(az, SUB, () => 'n1')).toEqual(['db-app-password', 'db-backup-password']);
+    expect(writes).toEqual(
+      ['db-app-password', 'db-backup-password'].map((secret) => ({
+        method: 'put',
+        url: `https://management.azure.com${VAULT}/secrets/${secret}/providers/Microsoft.Authorization/roleAssignments/n1?api-version=2022-04-01`,
+        body: { properties: { roleDefinitionId: USER, principalId: STAGE_G, principalType: 'ServicePrincipal' } },
+      })),
+    );
+    // Exactly the run's reads, which GRANTS leaves out: none stands between runs.
+    expect(STAGE_G_RUN_READS).toEqual(
+      new Set(
+        ['db-owner-password', 'db-app-password', 'db-backup-password'].map((secret) => `stage-g reads ${secret}`),
+      ),
+    );
+    for (const read of STAGE_G_RUN_READS) expect(GRANTS.has(read)).toBe(false);
+    expect(() => giveStageGReads(azure([], true).az, SUB)).toThrow(/Azure refused stage-g's read of db-owner-password/);
+  });
+
+  it("takes back every read of Stage G's on a secret, another's and the vault's own left alone", () => {
+    const { az, writes } = azure([
+      on('db-owner-password', STAGE_G),
+      on('db-backup-password', STAGE_G, OTHER_ROLE),
+      on('db-app-password', API),
+      { scope: VAULT, principalId: STAGE_G, roleDefinitionId: USER },
+      on('db-app-password', STAGE_G, role(READER)),
+    ]);
+    expect(takeStageGReads(az, SUB)).toBe(2);
+    expect(writes.map(({ method, url }) => `${method} ${url}`)).toEqual([
+      `delete https://management.azure.com${VAULT}/secrets/db-owner-password/providers/Microsoft.Authorization/roleAssignments/a0?api-version=2022-04-01`,
+      `delete https://management.azure.com${VAULT}/secrets/db-backup-password/providers/Microsoft.Authorization/roleAssignments/a1?api-version=2022-04-01`,
+    ]);
+    expect(() => takeStageGReads(azure([on('db-owner-password', STAGE_G)], true).az, SUB)).toThrow(
+      /Azure refused to take back stage-g's grant on db-owner-password: run it again/,
+    );
+  });
+
+  it('refuses with no Stage G identity, changing nothing', () => {
+    // Its identity listed without a principal is no identity of ours.
+    const { az, writes } = azure([on('db-app-password', API)], false, '');
+    expect(() => giveStageGReads(az, SUB)).toThrow(/has no identity for stage-g: nothing was changed/);
+    expect(() => takeStageGReads(az, SUB)).toThrow(/has no identity for stage-g/);
+    expect(writes).toEqual([]);
+  });
+
+  it('fails the plan on a read left standing, saying to revoke it', () => {
+    const said: string[] = [];
+    const { az } = azure([on('db-owner-password', STAGE_G)]);
+    expect(checkGrants(az, SUB, (line) => said.push(line))).toBe(1);
+    expect(said.at(-1)).toMatch(/^What broke: these are Stage G's run reads.*node deploy\/azure\/stage-g\.ts revoke/);
+    // Beside a grant of anyone else's, the alarm is the full one: it is no run's read.
+    const mixed: string[] = [];
+    const both = azure([on('db-owner-password', STAGE_G), on('db-admin-password', API)]).az;
+    expect(checkGrants(both, SUB, (line) => mixed.push(line))).toBe(1);
+    expect(mixed.at(-1)).toMatch(/^What broke: each is a way into a secret nobody decided on/);
   });
 });

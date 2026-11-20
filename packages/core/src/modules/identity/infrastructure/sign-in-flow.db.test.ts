@@ -1048,7 +1048,7 @@ describe(`a person's kept name and address (E10d, decision 25, Postgres ${server
   });
 });
 
-describe(`R-15 the owner can't set a person's sessions' end back (S206, Postgres ${server.version})`, () => {
+describe(`SEC-DB-16 R-15 the owner can't set a person's sessions' end back (S206, Postgres ${server.version})`, () => {
   // The end is signed on the platform chain as the column is written, in the same transaction, as every caller does
   // (membership-changes, reset-removals, idp-copier). The owner, holding no key, can set the column back or empty it,
   // but not the signed record: a sign-in begun before the end is still refused, and the alarm raised.

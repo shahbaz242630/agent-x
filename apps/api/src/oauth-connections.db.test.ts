@@ -1033,7 +1033,7 @@ describe(`SEC-OAUTH-05, -08 a refresh token rotated, used once (Postgres ${serve
   });
 });
 
-describe(`R-15 (S206): a refresh token’s use hidden by the database’s owner (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-16 R-15 (S206): a refresh token’s use hidden by the database’s owner (Postgres ${server.version})`, () => {
   /** A connection whose first refresh token (the one stolen) was used once by its app: that token, and the pair. */
   async function rotatedOnce() {
     const org = await organization();

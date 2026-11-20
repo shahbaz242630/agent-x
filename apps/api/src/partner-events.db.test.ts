@@ -984,7 +984,7 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
       expect(await kept()).toHaveLength(5);
     });
 
-    it('counts no row the database’s owner planted or edited: dated ahead, with no MAC, or changed (S206 V6)', async () => {
+    it('SEC-DB-18 counts no row the database’s owner planted or edited: dated ahead, with no MAC, or changed (S206 V6)', async () => {
       const owner = database.as('admin');
       await owner.query(DROP_EVIDENCE_RULE);
       const plant = (receivedAt: Date) =>

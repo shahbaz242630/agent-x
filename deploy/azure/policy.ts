@@ -75,6 +75,7 @@ export type RuleId =
   | 'apps-environment'
   | 'apps-network'
   | 'apps-egress'
+  | 'storage-egress'
   | 'dns-watch'
   | 'dns-allow'
   | 'dns-block-alert'
@@ -164,6 +165,7 @@ const TYPES = {
   group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
+  storagePolicy: 'Microsoft.Network/serviceEndpointPolicies',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
   setting: 'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
   storage: 'Microsoft.Storage/storageAccounts',
@@ -576,10 +578,6 @@ export const GRANTS: ReadonlySet<string> = new Set([
   'db-setup reads db-operator-password',
   'db-setup reads db-zitadel-password',
   'migrate reads db-owner-password',
-  // AZ3: Stage G's mark (as the owner) and checks (as the app and the backup role), on its throwaway copy alone.
-  'stage-g reads db-owner-password',
-  'stage-g reads db-app-password',
-  'stage-g reads db-backup-password',
   // 4D2e E10 (PL-29): the chain repair writes as the owner, the one job besides the migration; it checks the chain
   // with the MAC key and the operator's signatures with their public halves, and holds no other key.
   'chain-restore reads db-owner-password',
@@ -598,6 +596,18 @@ export const GRANTS: ReadonlySet<string> = new Set([
   'login reads login-client-private-key',
   // SA5: the key the login pages sign their sessions cookie with.
   'login reads login-cookie-secret',
+]);
+
+/**
+ * Stage G's reads (AZ3: its mark as the owner, its checks as the app and the backup role), never standing (S204-b,
+ * 6F1 audit h19): staging's live logins, read by an identity that needs them only while a throwaway copy is up. Its
+ * runner gives them as it makes the copy and takes them back as it removes it (stage-g.ts, grants.ts), so the
+ * templates give them to no one and GRANTS leaves them out.
+ */
+export const STAGE_G_RUN_READS: ReadonlySet<string> = new Set([
+  'stage-g reads db-owner-password',
+  'stage-g reads db-app-password',
+  'stage-g reads db-backup-password',
 ]);
 
 const GRANT = / reads /;
@@ -744,7 +754,7 @@ export const LOAD_RUN = {
  * Stage G's jobs (4D2e; apps.bicep `stageGJobs`, tooling/load/stageg-job.ts), only on its throwaway copy: who each
  * runs as and what it reads. The mark and the checks as Stage G's own identity (AZ3), which reads the owner's, the
  * app's and the backup role's logins alone, never the server admin's; the step as PL-38's jobs. Each reads a part of
- * its identity's own (a test holds it to GRANTS).
+ * its identity's own (a test holds it to GRANTS, and Stage G's to STAGE_G_RUN_READS).
  */
 const STAGE_G_JOBS: Readonly<Record<string, { readonly runsAs: string; readonly reads: ReadonlySet<string> }>> = {
   'load-mark': { runsAs: 'stage-g', reads: new Set(['db-owner-password']) },
@@ -2018,6 +2028,76 @@ const appsNetwork: Check = (snapshot, _expected, add) => {
           "needs rules on its apps subnet that let in only the load balancer's probes (TCP 30000-32767) and the subnet itself, then deny the rest of the network",
       });
     }
+  }
+};
+
+/** A subnet's Storage endpoint policies, by their IDs in lower case. */
+const storagePolicyIdsOf = (subnet: unknown): string[] =>
+  list(at(subnet, 'properties', 'serviceEndpointPolicies')).map((each) => text(at(each, 'id')).toLowerCase());
+
+/** The names of a network's subnets holding a Storage endpoint policy, each policy's ID added to `used`. */
+function subnetsWithStoragePolicies(network: PredictedResource, used: Set<string>): string[] {
+  return list(at(network.properties, 'subnets')).flatMap((subnet) => {
+    const ids = storagePolicyIdsOf(subnet);
+    for (const id of ids) used.add(id);
+    return ids.length > 0 ? [text(at(subnet, 'name'))] : [];
+  });
+}
+
+/**
+ * The apps subnet's Storage traffic reaches our own accounts alone (AZ32 c, 6F1 audit h28): one service endpoint policy
+ * on it, for Storage, naming exactly the deployment's Storage accounts, each by its own ID (never a subscription or a
+ * resource group, which would let in any account made there, nor a service alias). No other subnet holds one: the
+ * server archives its write-ahead log to Microsoft's own accounts, which a policy would refuse. A policy no subnet
+ * uses is said too: nothing it names is kept to.
+ */
+const storageEgress: Check = (snapshot, _expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'storage-egress', resource, message });
+  };
+  const ours = JSON.stringify(
+    ofType(snapshot, TYPES.storage)
+      .map((account) => account.id.toLowerCase())
+      .sort(),
+  );
+  const policies = ofType(snapshot, TYPES.storagePolicy);
+  const used = new Set<string>();
+  for (const network of ofType(snapshot, TYPES.network)) {
+    for (const name of subnetsWithStoragePolicies(network, used)) {
+      if (name !== 'apps') {
+        problem(
+          network.name,
+          `its ${name} subnet holds a Storage endpoint policy: the server's write-ahead log goes to Microsoft's own accounts, which a policy refuses`,
+        );
+      }
+    }
+    const ids = storagePolicyIdsOf(appsSubnetOf(network));
+    const policy = ids.length === 1 ? policies.find((each) => each.id.toLowerCase() === ids[0]) : undefined;
+    if (policy === undefined) {
+      problem(
+        network.name,
+        "its apps subnet needs one Storage endpoint policy of this deployment: without it the subnet's Storage endpoint reaches any account in the region",
+      );
+      continue;
+    }
+    const definitions = list(at(policy.properties, 'serviceEndpointPolicyDefinitions'));
+    const named = definitions.flatMap((definition) =>
+      list(at(definition, 'properties', 'serviceResources')).map((id) => text(id).toLowerCase()),
+    );
+    const forStorage = definitions.every(
+      (definition) =>
+        at(definition, 'properties', 'service') === 'Microsoft.Storage' &&
+        at(definition, 'properties', 'serviceAlias') === undefined,
+    );
+    if (!forStorage || JSON.stringify(named.toSorted()) !== ours) {
+      problem(
+        policy.name,
+        `must name, for Storage alone, exactly this deployment's Storage accounts by their own IDs; it names ${named.join(', ') || 'none'}`,
+      );
+    }
+  }
+  for (const policy of policies) {
+    if (!used.has(policy.id.toLowerCase())) problem(policy.name, 'is a Storage endpoint policy no subnet uses');
   }
 };
 
@@ -5187,6 +5267,8 @@ export const ALLOWED_TYPES: readonly string[] = [
   // AZ11's endpoint and its zone group, allowed a foundation ahead of them (AZ11a, as #627's alerts were).
   'Microsoft.Network/privateEndpoints',
   'Microsoft.Network/privateEndpoints/privateDnsZoneGroups',
+  // AZ32 (c): the apps subnet's Storage policy. Access lands first, so the foundation that brings it isn't refused.
+  'Microsoft.Network/serviceEndpointPolicies',
   'Microsoft.Network/virtualNetworks',
   'Microsoft.OperationalInsights/workspaces',
   'Microsoft.OperationalInsights/workspaces/savedSearches',
@@ -6675,6 +6757,7 @@ const CHECKS: readonly Check[] = [
   databaseEgress,
   appsNetwork,
   appsEgress,
+  storageEgress,
   dnsWatch,
   dnsAllow,
   dnsBlockAlert,

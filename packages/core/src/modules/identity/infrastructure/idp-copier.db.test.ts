@@ -892,7 +892,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await endsKept(app, who.userId)).toEqual({ column: endedAt, signed: [endedAt] });
   });
 
-  it("R-15 ends a person's sessions once a run, however many of their changes it copies: one signed end, not one each", async () => {
+  it("SEC-DB-16 R-15 ends a person's sessions once a run, however many of their changes it copies: one signed end, not one each", async () => {
     const who = await person();
     await organization(who.userId);
     await signIn(who.userId);

@@ -47,7 +47,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`the sealing job and the anchor check on one anchor store (S206 V6, Postgres ${server.version})`, () => {
+describe(`SEC-DB-18 the sealing job and the anchor check on one anchor store (S206 V6, Postgres ${server.version})`, () => {
   it('anchor the platform chain in turn, each anchor following the last, none refused', async () => {
     const capture = new LogCapture();
     const logger = testLogger(capture);
