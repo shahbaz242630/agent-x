@@ -201,6 +201,7 @@ describe(`a supplier's remittance setting (0061, Postgres ${server.version})`, (
     ])('with %s, is tampered with', async (_, statement) => {
       const { org, id, owner } = await ownersSupplier('on');
       const other = await supplier(org, 'on');
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text from the table above; every value is bound.
       await owner.query(statement, statement.includes('$2') ? [id, other] : [id]);
 
       expect(await read(org, id)).toMatchObject({ outcome: 'tampered' });

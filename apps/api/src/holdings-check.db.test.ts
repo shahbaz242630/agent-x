@@ -688,6 +688,7 @@ describe('the holdings check (E1)', () => {
       await job(w).run();
       expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
 
+      // eslint-disable-next-line agentx/no-string-built-sql -- Fixed text from the table above; every value is bound.
       await pastTheApp(w, (owner) => owner.query(change, [allowed]));
       await job(w).run();
 
