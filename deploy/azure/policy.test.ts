@@ -4182,7 +4182,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
       // One line is enough, seen in any minute.
       (alert: Mutable) => (criterion(alert).threshold = 1),
-      ...LATE_OR_BLIND,
+      // Every 5 minutes over the same 5 (S206): slower, a window short of it, or waiting for more than one.
+      (alert: Mutable) => (properties(alert).windowSize = 'PT15M'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
+      (alert: Mutable) => {
+        properties(alert).windowSize = 'PT15M';
+        properties(alert).evaluationFrequency = 'PT15M';
+      },
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 3),
+      (alert: Mutable) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 3),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {

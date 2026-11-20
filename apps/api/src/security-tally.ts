@@ -22,6 +22,17 @@
 //   count logged of its day before it: so a fall is found even across a
 //   restart, which forgets the memory, within the alert's own few minutes.
 //
+// And once an hour, every retained day of each log counted again (S206,
+// faster detection): its rows by their ID's day, dated or not, one statement a
+// log, each day a count over its range of the ID's index (dayCountsRead), from the first day
+// the seal still checks (firstCheckableDay, well inside the retention, so the
+// sweep never makes a day fall). A day before yesterday with fewer rows than
+// this process counted of it an hour before is the same alarm, `count_fell`:
+// a sealed day's rows deleted are found within the hour, beside the seal
+// check's own visit (each organisation every 6 hours). No line is logged for
+// those days: the alarm is enough, and a restart's first count would log them
+// all at once.
+//
 // One organisation slow or failing holds up only its own page's trip, each
 // statement within its answer's limit; a page that fails is read again one
 // organisation at a time (readEachTenant), and one that still fails says so
@@ -30,10 +41,13 @@ import {
   type DayTally,
   type SecurityEventsTables,
   type SecurityLog,
+  dayCountsRead,
+  firstCheckableDay,
   securityLogAlarm,
   talliesOf,
   tallyRead,
 } from '@agentx/core/modules/security-events';
+import { nextDay } from '@agentx/core/modules/activity';
 import { type Clock, DAY_MS, UUID } from '@agentx/core/shared-kernel';
 import { type Database, JOB_ANSWER_WITHIN_MS, limitedTransaction, readEachTenant } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
@@ -46,6 +60,9 @@ const PAGE = 500;
 
 /** A day that only grew is logged again at most this often. */
 const LOG_AGAIN_MS = 60 * 60_000;
+
+/** How often every retained day is counted. */
+const WHOLE_EVERY_MS = 60 * 60_000;
 
 /** A day's count as this process last read it, and as it last logged it. */
 interface Seen {
@@ -62,6 +79,13 @@ export interface SecurityTally {
 /** The UTC day of `ms`. */
 const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
+/** Every day from `first` to `last`, in order. */
+function daysBetween(first: string, last: string): readonly string[] {
+  const days: string[] = [];
+  for (let day = first; day <= last; day = nextDay(day)) days.push(day);
+  return days;
+}
+
 /** A day's count held to the one read before: whether it fell, whether its line is due, and what is kept of it now. */
 function judged(was: Seen | undefined, rows: number, now: number) {
   const logged = { rows, loggedRows: rows, loggedAt: now };
@@ -76,6 +100,7 @@ export function createSecurityTally({
   database,
   clock,
   logger,
+  retentionDays,
   page = PAGE,
 }: {
   /** Every organisation. */
@@ -83,6 +108,8 @@ export function createSecurityTally({
   readonly database: Database<SecurityEventsTables>;
   readonly clock: Clock;
   readonly logger: Logger;
+  /** AGENTX_SECURITY_EVENT_RETENTION_DAYS: the hourly count reads from the first day still well inside it. */
+  readonly retentionDays: number;
   /** PAGE, but for the tests. */
   readonly page?: number;
 }): SecurityTally {
@@ -93,9 +120,7 @@ export function createSecurityTally({
   const judge = (log: SecurityLog, tallies: readonly DayTally[], from: string, now: number): void => {
     const chain = log === 'global' ? '' : log.orgId;
     const before = seen.get(chain) ?? new Map<string, Seen>();
-    const counted = new Map<string, DayTally | { readonly day: string; readonly rows: 0; readonly idTo: null }>(
-      tallies.map((tally) => [tally.day, tally]),
-    );
+    const counted = new Map(tallies.map((tally) => [tally.day, tally]));
     // A day read before with rows and none now: every one of them deleted.
     for (const day of before.keys())
       if (day >= from && !counted.has(day)) counted.set(day, { day, rows: 0, idTo: null });
@@ -110,17 +135,45 @@ export function createSecurityTally({
     seen.set(chain, after);
   };
 
-  /** Every listed organisation's days counted, a page a trip; one whose read failed says so and keeps its counts. */
-  const countOrganisations = async (from: string, now: number, signal: AbortSignal | undefined): Promise<void> => {
-    const asked = [...new Set((await list()).filter((orgId) => UUID.test(orgId)).map((id) => id.toLowerCase()))];
+  /** Each log's every retained day as the last hourly count read it, keyed as `seen`. */
+  const whole = new Map<string, ReadonlyMap<string, number>>();
+  let wholeAt: number | undefined;
+
+  /** Holds the log's every retained day to the last hourly count: the alarm for a day before `older` that fell. */
+  const judgeWhole = (log: SecurityLog, tallies: readonly DayTally[], from: string, older: string): void => {
+    const chain = log === 'global' ? '' : log.orgId;
+    const counted = new Map(tallies.map(({ day, rows }) => [day, rows]));
+    // Yesterday and today are the five-minute tally's: their fall is its alarm already.
+    for (const [day, was] of whole.get(chain) ?? []) {
+      if (day >= from && day < older && (counted.get(day) ?? 0) < was) securityLogAlarm(logger, log, 'count_fell', day);
+    }
+    whole.set(chain, counted);
+  };
+
+  /**
+   * The global table's days as `read` reads them, then every listed organisation's, a page a trip, each held by `hold`; one
+   * whose read failed says so and keeps what was read of it before.
+   */
+  const countEvery = async (
+    asked: readonly string[],
+    read: (log: SecurityLog) => ReturnType<typeof tallyRead>,
+    hold: (log: SecurityLog, tallies: readonly DayTally[]) => void,
+    signal: AbortSignal | undefined,
+  ): Promise<void> => {
+    try {
+      const { rows } = await limitedTransaction(database, (tx) => read('global').execute(tx));
+      hold('global', talliesOf(rows));
+    } catch (error) {
+      logger.warn('security_tally.missed', { err: error });
+    }
     for (let at = 0; at < asked.length && signal?.aborted !== true; at += page) {
       const items = asked.slice(at, at + page).map((orgId) => ({ orgId }));
-      const reads = await readEachTenant(database, items, ({ orgId }) => tallyRead({ orgId }, from), {
+      const reads = await readEachTenant(database, items, ({ orgId }) => read({ orgId }), {
         answeredWithinMs: JOB_ANSWER_WITHIN_MS,
       });
       for (const { item, read } of reads) {
         if ('failed' in read) logger.child({ orgId: item.orgId }).warn('security_tally.missed', { err: read.failed });
-        else judge({ orgId: item.orgId }, talliesOf(read.rows), from, now);
+        else hold({ orgId: item.orgId }, talliesOf(read.rows));
       }
     }
   };
@@ -130,13 +183,26 @@ export function createSecurityTally({
       const now = clock.now().getTime();
       const from = dayOf(now - DAY_MS);
       try {
-        const { rows } = await limitedTransaction(database, (tx) => tallyRead('global', from).execute(tx));
-        judge('global', talliesOf(rows), from, now);
-      } catch (error) {
-        logger.warn('security_tally.missed', { err: error });
-      }
-      try {
-        await countOrganisations(from, now, signal);
+        const asked = [...new Set((await list()).filter((orgId) => UUID.test(orgId)).map((id) => id.toLowerCase()))];
+        await countEvery(
+          asked,
+          (log) => tallyRead(log, from),
+          (log, tallies) => {
+            judge(log, tallies, from, now);
+          },
+          signal,
+        );
+        if (wholeAt !== undefined && now - wholeAt < WHOLE_EVERY_MS) return;
+        wholeAt = now;
+        const checkable = firstCheckableDay(new Date(now), retentionDays);
+        await countEvery(
+          asked,
+          (log) => dayCountsRead(log, daysBetween(checkable, dayOf(now))),
+          (log, tallies) => {
+            judgeWhole(log, tallies, checkable, from);
+          },
+          signal,
+        );
       } catch (error) {
         logger.error('security_tally.run_failed', { err: error });
       }

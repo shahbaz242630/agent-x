@@ -3,7 +3,9 @@
 // rows as the admin role. A row of yesterday or today deleted, from the
 // global table or an organisation's, is the alarm at the next run, and its
 // day's lower count is logged at once; a day that only grew is logged again
-// at most hourly; a log the database refuses says so and keeps its counts.
+// at most hourly; a log the database refuses says so and keeps its counts. And
+// hourly, every retained day counted: a sealed day's row deleted is the alarm
+// at the next hourly count, a day leaving the retention is none.
 import { v7Floor } from '@agentx/core/modules/activity';
 import { createSecurityEvents, type SecurityEvent } from '@agentx/core/modules/security-events';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
@@ -60,7 +62,7 @@ const written = (at: string, events: readonly SecurityEvent[]) => {
 };
 
 const tally = (list = () => Promise.resolve([org])) =>
-  createSecurityTally({ list, database: app, clock, logger: testLogger(capture), page: 2 });
+  createSecurityTally({ list, database: app, clock, logger: testLogger(capture), retentionDays: 30, page: 2 });
 
 const owner = () => database.as('admin');
 
@@ -206,5 +208,49 @@ describe('the security events’ five-minute tally (S206, R-15)', () => {
 
     await tally(() => Promise.reject(new Error('the directory is away'))).run();
     expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'security_tally.run_failed' }));
+  });
+
+  it('every retained day counted hourly: an older day’s row deleted is the alarm at the next hourly count, not before', async () => {
+    const OLDER = '2027-01-12';
+    await written(`${OLDER}T09:00:00.000Z`, [
+      failed(`${OLDER}T09:00:00.000Z`, { orgId: org }),
+      failed(`${OLDER}T09:00:00.000Z`, { orgId: org, ip: '203.0.113.9' }),
+    ]);
+    const run = tally();
+    await run.run();
+    const rows = await owner().query<{ id: string }>(
+      'select id from security.org_events where org_id = $1 and id < $2::uuid order by id limit 1',
+      [org, v7Floor(Date.parse(`${YESTERDAY}T00:00:00Z`))],
+    );
+    await owner().query('delete from security.org_events where id = $1', [rows[0]?.id]);
+    clock.advanceBy(HOUR_MS - 1);
+    await run.run();
+    expect(alarms()).toEqual([]);
+    clock.advanceBy(1);
+    await run.run();
+    expect(alarms()).toEqual([[org, 'count_fell', OLDER]]);
+    // No line for an older day: the alarm alone.
+    expect(lines().filter(([, day]) => day === OLDER)).toEqual([]);
+    // Yesterday's fall is the five-minute tally's alarm alone, not the hourly count's too.
+    await owner().query('delete from security.events');
+    clock.advanceBy(HOUR_MS);
+    await run.run();
+    expect(alarms()).toEqual([
+      [org, 'count_fell', OLDER],
+      ['', 'count_fell', YESTERDAY],
+    ]);
+  });
+
+  it('a day leaving the retention, the sweep’s to take, is no alarm', async () => {
+    await written('2026-12-24T09:00:00.000Z', [failed('2026-12-24T09:00:00.000Z', { orgId: org })]);
+    const run = tally();
+    await run.run();
+    clock.advanceBy(DAY_MS);
+    await owner().query('delete from security.org_events where org_id = $1 and id < $2::uuid', [
+      org,
+      v7Floor(Date.parse('2026-12-25T00:00:00Z')),
+    ]);
+    await run.run();
+    expect(alarms()).toEqual([]);
   });
 });

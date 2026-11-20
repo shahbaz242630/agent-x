@@ -297,7 +297,9 @@ resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // `audit.anchor_check_crashed`). A start refused on a broken platform chain
 // logs the first too, and so does the operator's command wherever the API
 // would (B1c): its job logs to the same table. Only the count leaves the
-// workspace; the lines say which chain and why.
+// workspace; the lines say which chain and why. Every 5 minutes over the last
+// 5 (S206 faster detection): with the checks finding a change within about 5
+// minutes and lines 4-9 minutes late, a tamper pages within about 10-20.
 resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: integrityAlertName
   location: location
@@ -309,8 +311,8 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     severity: 1
     enabled: true
     scopes: [workspaceId]
-    evaluationFrequency: 'PT15M'
-    windowSize: 'PT15M'
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {

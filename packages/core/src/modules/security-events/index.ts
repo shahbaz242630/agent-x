@@ -44,6 +44,7 @@ export {
   tallyFrom,
   tallyRead,
   type DayTally,
+  dayCountsRead,
 } from './infrastructure/event-seals.ts';
 export { ALL_SEALED, type LegacySealing, SEALING_STARTED, sealLegacyRows } from './infrastructure/legacy-seal.ts';
 export type { SecurityEventsTables } from './infrastructure/tables.ts';

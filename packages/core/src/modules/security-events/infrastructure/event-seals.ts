@@ -362,13 +362,13 @@ export async function anythingToSeal(tx: SealTx, orgId: string): Promise<boolean
 export interface DayTally {
   readonly day: string;
   readonly rows: number;
-  readonly idTo: string;
+  readonly idTo: string | null;
 }
 
 /** tallyFrom's statement, not run: readEachTenant sends it for a page of organisations at once (security-tally.ts). */
 export function tallyRead(log: SecurityLog, day: string) {
   const { table, own } = scopeOf(log);
-  return sql<{ day: string; rows: number; id_to: string }>`
+  return sql<TallyRow>`
     select pg_catalog.to_char(pg_catalog.to_timestamp(${ID_MS} / 1000.0) at time zone 'UTC', 'YYYY-MM-DD') as day,
       pg_catalog.count(*)::int as rows, pg_catalog.max(id::text) as id_to
     from ${table}
@@ -377,8 +377,37 @@ export function tallyRead(log: SecurityLog, day: string) {
   `;
 }
 
+/**
+ * Every row of each of `days`, dated or not, counted by its ID's range alone (security-tally.ts's hourly count of every
+ * retained day): one statement, each day a count over its range of the ID's index (an index-only scan where the
+ * table is vacuumed), so no row is read and nothing is sorted. A day with none counts 0; no last ID is read.
+ */
+export function dayCountsRead(log: SecurityLog, days: readonly string[]) {
+  const { table, own } = scopeOf(log);
+  const bounds = sql.join(
+    days.map((day) => {
+      const { from, to } = idsOfDay(day);
+      return sql`(${day}::text, ${from}::uuid, ${to}::uuid)`;
+    }),
+  );
+  return sql<TallyRow>`
+    select d.day,
+      (select pg_catalog.count(*)::int from ${table} where ${own} and id >= d.lo and id < d.hi) as rows,
+      null::text as id_to
+    from (values ${bounds}) as d (day, lo, hi)
+    order by d.day
+  `;
+}
+
+/** A day's count as a tally reads it: its day, rows and last ID (none where not read). */
+interface TallyRow {
+  readonly day: string;
+  readonly rows: number;
+  readonly id_to: string | null;
+}
+
 /** A tally's rows as the tally line logs them. */
-export const talliesOf = (rows: readonly { day: string; rows: number; id_to: string }[]): readonly DayTally[] =>
+export const talliesOf = (rows: readonly TallyRow[]): readonly DayTally[] =>
   rows.map((row) => ({ day: row.day, rows: row.rows, idTo: row.id_to }));
 
 /** The dated rows of each day from `day` on, by day (one statement, on the ID's index): what the tally line logs. */

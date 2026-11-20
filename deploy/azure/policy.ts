@@ -3743,7 +3743,8 @@ const dailyWordsAlert: Check = (snapshot, _expected, add) => {
 /**
  * An enabled, stateless SEV-1 alert on the workspace counts every integrity
  * alarm the apps log (ADR-012 §2, SEC-DB-11): one line is enough to fire it,
- * and it notifies again every window the alarm goes on.
+ * and it notifies again every window the alarm goes on. Every 5 minutes (S206
+ * faster detection), so a tamper found pages within about 10-20 minutes.
  */
 const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -3754,6 +3755,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
+        at(alert.properties, 'evaluationFrequency') === 'PT5M' &&
         watchesEveryWindow(alert, criterion),
     );
     if (!alerted) {
@@ -3761,7 +3763,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         rule: 'audit-integrity-alert',
         resource: environment.name,
         message:
-          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
+          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, every 5 minutes, watching every minute and firing on the first window (ADR-012 §2)",
       });
     }
   }

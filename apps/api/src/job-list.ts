@@ -660,7 +660,13 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Yesterday's and today's security events counted every 5 minutes, a fall the alarm (S206, R-15).
     job(
       'security_tally',
-      createSecurityTally({ list, database, clock: systemClock, logger }),
+      createSecurityTally({
+        list,
+        database,
+        clock: systemClock,
+        logger,
+        retentionDays: config.securityEvents.retentionDays,
+      }),
       SECURITY_TALLY_EVERY_MS,
       LONG_MS,
     ),
