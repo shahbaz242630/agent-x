@@ -91,6 +91,8 @@ export {
   type InvestigationRecording,
   type LogPage,
   type RecordedState,
+  type AlongsideChange,
+  type ChangeToSend,
   type SignedChange,
   SignedStateFailed,
   type SignedStates,

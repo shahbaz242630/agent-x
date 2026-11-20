@@ -59,7 +59,9 @@ import {
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
+  signedRowWriting,
   writeSignedRow,
+  type WrittenRow,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -328,6 +330,19 @@ export interface RecordedState {
   readonly recordedAt: Date;
 }
 
+/** A change changeToSend made ready: the statement to send. Only the signed states that made it can record it. */
+export interface ChangeToSend {
+  readonly statement: SentTogether;
+}
+
+/** A change sent (changeToSend) and its answer, to be recorded with recordNewAndMove's events: who made it, and why. */
+export interface AlongsideChange {
+  readonly sent: ChangeToSend;
+  /** The rows the statement gave back, as sendTogether answered it. */
+  readonly rows: readonly Readonly<Record<string, unknown>>[];
+  readonly change: SignedChange;
+}
+
 /** A status change with its signed event: as a status change, or refused on the row's verified state. */
 /** A status change that moved the row. */
 type SignedStatusChanged<State extends string> = Extract<SignedStatusChange<State>, { outcome: 'changed' }>;
@@ -537,7 +552,26 @@ export interface SignedStates {
     change: SignedChange,
     event: NoInfer<Event>,
     moveChange: SignedChange,
+    alongside?: AlongsideChange,
   ): Promise<SignedStatusChanged<State>>;
+  /**
+   * A change to another row, not run (GM-1a: a decision's month total): its
+   * write, for the caller to send on a trip it makes anyway (sendTogether),
+   * then recorded by recordNewAndMove's `alongside`, its event first in the
+   * same step of the chain and its pointer in the same statement, so it costs
+   * no trip of its own. From the state verifiedState last gave for change on
+   * the row, with this table, here; or `new`, for a row this transaction's
+   * last read, locked for change, found neither in the table nor in the log,
+   * and which it inserts on the same trip, ahead of the write (`set` naming
+   * every field). No status: a status moves only through changeStatus.
+   */
+  changeToSend(
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
+  ): ChangeToSend;
   /**
    * One batch of a growing table's whole history (Phase 2 D1c): the objects
    * after `after` (null from the start), its rows in every status and every
@@ -798,6 +832,8 @@ interface Held {
   wrote?: { readonly table: SignedStateTable; readonly state: VerifiedState };
   /** Its last read found no row: no lock is held by that read, so making it raises none (4D2e C6). */
   none?: true;
+  /** That read was verifiedState's, judging it missing: nothing signed for it in the log either (changeToSend's `new`). */
+  missing?: true;
 }
 
 /** A history as gatherHistories keeps it: the organisation and every field of the find, a seq as its text. */
@@ -1110,7 +1146,7 @@ export function createSignedStates({
     const quick = takeGathered(tx, name, lock) ?? (await inOneStatement(tx, table, key, lock));
     const checked = quick ?? (await inTwoStatements(tx, table, key, lock));
     if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
-    if (checked.outcome === 'missing') rows.set(name, { lock: held?.lock ?? lock, none: true });
+    if (checked.outcome === 'missing') rows.set(name, { lock: held?.lock ?? lock, none: true, missing: true });
     return checked;
   };
 
@@ -1282,6 +1318,64 @@ export function createSignedStates({
     return writtenOver(tx, table, key, from, set);
   };
 
+  /** Each change changeToSend made ready, kept here alone, so only these signed states record it, once. */
+  const changesToSend = new WeakMap<
+    ChangeToSend,
+    {
+      readonly tx: AuditTransaction;
+      readonly table: SignedStateTable;
+      readonly key: SignedRowKey;
+      readonly from: VerifiedState | 'new';
+      readonly written: (rows: readonly Record<string, unknown>[]) => WrittenRow;
+    }
+  >();
+
+  const changeToSend = (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
+  ): ChangeToSend => {
+    notTheHold(table);
+    if (Object.hasOwn(set, STATUS)) throw new RangeError('A status changes through changeStatus');
+    const rows = heldIn(tx);
+    const name = rowName(table, key);
+    const held = rows.get(name);
+    const basis =
+      from === 'new'
+        ? held?.lock === 'change' && held.missing === true
+        : held?.from?.state === from && held.from.table === table;
+    if (!basis) {
+      throw new SignedStateFailed(
+        'basis',
+        'A change sent on a trip of its own goes from the state last verified for change on its row, with its table, here; or makes a row whose last read here, locked for change, found it missing',
+      );
+    }
+    // As `written`: neither the row nor any history is answered from an earlier gather once it is written.
+    gathered.get(tx)?.delete(name);
+    historiesGathered.delete(tx);
+    rows.set(name, { lock: 'change' });
+    const writing = signedRowWriting(table, key, from, set);
+    const sent: ChangeToSend = Object.freeze({ statement: writing.statement });
+    changesToSend.set(sent, { tx, table, key, from, written: writing.written });
+    return sent;
+  };
+
+  /** A change changeToSend made ready in this transaction, as its answer left the row: once, and only as asked. */
+  const sentChange = (tx: AuditTransaction, orgId: string, { sent, rows, change }: AlongsideChange) => {
+    const kept = changesToSend.get(sent);
+    changesToSend.delete(sent);
+    if (kept?.tx !== tx || kept.key.orgId.toLowerCase() !== orgId.toLowerCase()) {
+      throw new SignedStateFailed(
+        'basis',
+        "A change recorded alongside is one these signed states made ready in this transaction, on the same organisation's chain, recorded once",
+      );
+    }
+    noSealGiven(change);
+    return { ...kept, row: wroteAsAsked(kept.table, kept.key, kept.from, kept.written(rows)), change };
+  };
+
   /** The write itself, and the row read back: from new, or from a version and pointer, with the fields it held. */
   const writtenOver = async (
     tx: AuditTransaction,
@@ -1289,8 +1383,15 @@ export function createSignedStates({
     key: SignedRowKey,
     from: 'new' | (Pick<VerifiedState, 'version' | 'fields'> & { readonly eventId: string | null }),
     set: SignedFieldValues,
-  ): Promise<FoundRow> => {
-    const { row, written: values } = await writeSignedRow(tx, table, key, from, set);
+  ): Promise<FoundRow> => wroteAsAsked(table, key, from, await writeSignedRow(tx, table, key, from, set));
+
+  /** The row a write gave back, once it holds exactly what it was written from, with the values written. */
+  const wroteAsAsked = (
+    table: SignedStateTable,
+    key: SignedRowKey,
+    from: 'new' | (Pick<VerifiedState, 'version' | 'fields'> & { readonly eventId: string | null }),
+    { row, written: values }: WrittenRow,
+  ): FoundRow => {
     const expectedVersion = from === 'new' ? 1 : from.version + 1;
     if (row.outcome !== 'found' || row.version !== expectedVersion || row.eventId !== null) {
       return notApplied(table, key, "The row didn't move on from the state it was verified in");
@@ -1714,6 +1815,7 @@ export function createSignedStates({
     verifiedState,
     gather,
     gatherBehind,
+    changeToSend,
 
     verifiedStates,
     pageStates,
@@ -1852,10 +1954,13 @@ export function createSignedStates({
       change: SignedChange,
       event: NoInfer<Event>,
       moveChange: SignedChange,
+      alongside?: AlongsideChange,
     ): Promise<SignedStatusChanged<State>> {
       sealsStatus(table);
       noSealGiven(change);
       noSealGiven(moveChange);
+      // Judged first: a row that didn't take its write as asked fails everything here, with its alarm.
+      const other = alongside === undefined ? undefined : sentChange(tx, key.orgId, alongside);
       const first = await written(tx, table, key, 'new', set);
       const firstFields = new Map(first.fields);
       const moved = await movedFrom(tx, table, key, event, firstFields);
@@ -1868,14 +1973,29 @@ export function createSignedStates({
         { version: first.version, eventId: null, fields: firstFields },
         { [STATUS]: moved.to },
       );
-      const { recorded, along } = await trail.recordAllAlong(
+      // The other row's event goes first, its pointer in the same statement as this row's (`also`).
+      const { recorded, along, alsoAlong } = await trail.recordAllAlong(
         tx,
         key.orgId,
-        [sealedEvent(table, key, first, change), sealedEvent(table, key, row, withMove(moveChange, moved))],
+        [
+          ...(other === undefined ? [] : [sealedEvent(other.table, other.key, other.row, other.change)]),
+          sealedEvent(table, key, first, change),
+          sealedEvent(table, key, row, withMove(moveChange, moved)),
+        ],
         (eventId, gate) => signedRowPointing(table, key, { version: row.version, eventId }, gate),
+        other === undefined
+          ? {}
+          : {
+              also: ([eventId], gate) =>
+                signedRowPointing(other.table, other.key, { version: other.row.version, eventId: eventId ?? '' }, gate),
+            },
       );
       const last = recorded.at(-1);
       if (last === undefined) throw new Error('Two events asked and none recorded');
+      const [otherRecorded] = recorded;
+      if (other !== undefined && otherRecorded !== undefined) {
+        pointedState(tx, other.table, other.key, other.row, otherRecorded, alsoAlong);
+      }
       const state = pointedState(tx, table, key, row, last, along);
       return Object.freeze({
         outcome: 'changed',

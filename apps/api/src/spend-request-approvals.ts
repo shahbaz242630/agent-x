@@ -64,7 +64,7 @@
 import { agentKeyOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import { lockAgentPeriod } from '@agentx/core/modules/limit-reservations';
+import { lockAgentPeriod, lockReservationsOf, type MonthTotalKey } from '@agentx/core/modules/limit-reservations';
 import { decide, type Decision } from '@agentx/core/modules/policies';
 import {
   approveRequest,
@@ -73,6 +73,7 @@ import {
   expireRequest,
   decisionOf,
   holdsCapacity,
+  lockClaimsOf,
   rejectRequest,
   requestOf,
   type SpendRequestRecord,
@@ -87,7 +88,14 @@ import { rejectedFor, rejectionNote, type RuleDenial } from './approval-rejectio
 import { MandateRefused } from './mandate-reads.ts';
 import { overMandateLimit } from './over-limit-choice.ts';
 import type { Refused, StepUpAsked } from './refused.ts';
-import { agentAlone, answerOf, type DecisionTables, notFrozen, weigh } from './spend-request-decisions.ts';
+import {
+  agentAlone,
+  answerOf,
+  type DecisionTables,
+  monthSpentWeighed,
+  notFrozen,
+  weigh,
+} from './spend-request-decisions.ts';
 import { DECIDING_ROLES } from './spend-request-rejects.ts';
 import { cancelledSinceOf, isCarried, pausedFromOf } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
@@ -300,6 +308,28 @@ function recheckShown(
 }
 
 /**
+ * What the request's month holds but the request, from its signed total (GM-1a), read only now its request is locked
+ * (8), as the total comes after it (11a): for change at the confirm, which may reject it and give its capacity back.
+ * Its own amount, held there, is left out: the engine adds it. At the confirm its reservation and claim are locked
+ * first (11), as the reject an ending makes would take them, so the order stays 8 → 11 → 11a → 12 whichever way it goes.
+ */
+async function approvalSpent(
+  tx: ApproveTx,
+  states: SignedStates,
+  { orgId, requestId, decides }: { readonly orgId: string; readonly requestId: string; readonly decides: boolean },
+  request: SpendRequestRecord,
+  weighed: { readonly totalOf: MonthTotalKey | null },
+): Promise<bigint> {
+  if (weighed.totalOf === null) return 0n;
+  if (decides) {
+    await lockReservationsOf(tx, [requestId]);
+    await lockClaimsOf(tx, [requestId]);
+  }
+  const own = request.amount.currency === weighed.totalOf.currency ? request.amount.minor : 0n;
+  return monthSpentWeighed(tx, states, orgId, weighed.totalOf, decides ? 'change' : 'share', own);
+}
+
+/**
  * Levels 3–8 in order, the waiting request weighed again as its approver's
  * confirm (`decides`) or ask weighs it, after the caller's levels 2 and 2a:
  * its verified read, the engine's decision under the policies in force, where
@@ -371,7 +401,9 @@ export async function weighedAgain(
     throw new MandateRefused(503, 'INTEGRITY_FAILED');
   }
 
-  const made = decide(weighed.input);
+  const made = decide(
+    weighed.inputWith(await approvalSpent(tx, states, { orgId, requestId, decides }, request, weighed)),
+  );
   const supplierNow = await supplierMoveOf(tx, states, orgId, weighed.supplier, against.supplierVersionId);
   const unchanged =
     key.outcome === 'found' &&
