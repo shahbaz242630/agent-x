@@ -2638,10 +2638,19 @@ describe("the head's check under the tenant wall (S178)", () => {
 
 describe("the organisation's events since a time, the chain checked through them (eventsSinceChecked; S206, R-15)", () => {
   const since = (orgId: string, at: Date) => withTenant(app, orgId, (tx) => eventsSinceChecked(tx, keys, at));
-  /** The database's own time, which the events are recorded at. */
+  /**
+   * A time by the database's own clock that every event recorded so far is before, and every one recorded next is at
+   * or after. Events are stamped to the whole millisecond, so a plain clock reading can share the last event's
+   * millisecond and take it into the window: the next whole millisecond is used, and the database waits until it.
+   */
   const dbNow = async (): Promise<Date> => {
-    const [row] = await attacker.query('select pg_catalog.clock_timestamp() as now', []);
-    return row?.now as Date;
+    const [row] = await attacker.query(
+      "select pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) + interval '1 millisecond' as at",
+      [],
+    );
+    const at = row?.at as Date;
+    await attacker.query('select pg_catalog.pg_sleep_until($1::timestamptz)', [at]);
+    return at;
   };
   const START = new Date('2026-11-19T09:00:00Z');
   const steps = (check: Awaited<ReturnType<typeof since>>) =>

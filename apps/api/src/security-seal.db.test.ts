@@ -12,7 +12,17 @@
 // from many addresses never queues: not behind another's open write, nor
 // behind the seal's lock, which the seal itself does queue behind.
 import { v7Floor } from '@agentx/core/modules/activity';
-import { createSecurityEvents, SECURITY_EVENTS_SEALED, type SecurityEvent } from '@agentx/core/modules/security-events';
+import { createPlatformChain } from '@agentx/core/modules/platform-controls';
+import {
+  createSecurityEvents,
+  orgSecurityEventsPage,
+  ROW_MACS_FROM,
+  SEALING_STARTED,
+  sealLegacyRows,
+  SECURITY_EVENTS_SEALED,
+  securityDigestOfDay,
+  type SecurityEvent,
+} from '@agentx/core/modules/security-events';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, holdTransactionLock, withTenant } from '@agentx/platform/db';
 import {
@@ -27,6 +37,7 @@ import {
 } from '@agentx/testing';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { createLegacySealJob } from './legacy-seal-job.ts';
 import { keys, mandateWorld, type MandateWorldTables, type World } from './mandate-world.helper.test.ts';
 import { createSecuritySeal, SECURITY_SEAL_LOCK, type SecuritySealTables } from './security-seal.ts';
 
@@ -516,5 +527,356 @@ describe('SEC-DB-18 the security events’ daily seals (S206 V6, R-15)', () => {
       await holder;
     }
     expect(await globalSeals()).toEqual([['2027-01-20', 1]]);
+  });
+});
+
+// The staging start of 20 Nov 2026: the day seal ran before the pass giving
+// the rows from before 0105 their MACs (legacy-seal.ts), sealing their days
+// as they stood, a 'mac' alarm raised for each; once the pass gave the MACs,
+// every such seal failed its digest at each check. Nothing was tampered with.
+// Each order is forced here, step by step.
+describe('the day seal and the pass giving the rows from before 0105 their MACs, in either order (S206 V6)', () => {
+  /** Before the pass's cutoff, as staging was: its scope from 28 days back (the retention less two), 2026-10-23T08:00. */
+  const NOW = '2026-11-20T08:00:00.000Z';
+
+  /** A row as the release before 0105 wrote it: no MAC, marked `before_macs`, its ID made at `at`; an organisation's if named. */
+  const fromBefore = async (at: string, orgId?: string) => {
+    const id = idAt(Date.parse(at));
+    await (orgId === undefined
+      ? owner().query(
+          `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+           values ($1, 'sign_in_failed', 'state_mismatch', '203.0.113.7', null, $2, 1, $2, true)`,
+          [id, new Date(at)],
+        )
+      : owner().query(
+          `insert into security.org_events (org_id, id, kind, reason, ip, user_id, agent_id, window_start, count,
+             created_at, before_macs)
+           values ($1, $2, 'rate_limited', 'per_user', null, null, null, $3, 1, $3, true)`,
+          [orgId, id, new Date(at)],
+        ));
+    return id;
+  };
+
+  /** The platform chain's head, as the anchor check would have anchored it. */
+  const headNow = async () => {
+    const [head] = await owner().query<{ seq: string; hash: Buffer; mac_key_version: number }>(
+      'select seq, hash, mac_key_version from platform_controls.audit_head',
+    );
+    return head === undefined
+      ? undefined
+      : { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: head.mac_key_version };
+  };
+
+  /** The pass, as the jobs' copy runs it, the chain held to its head. */
+  const legacyPass = () =>
+    sealLegacyRows(app, {
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      orgs: () => Promise.resolve(listed),
+      retentionDays: RETENTION,
+      anchor: headNow,
+      anchorNow: () => Promise.resolve(),
+    });
+
+  /** An event of the API's on the platform chain, as a start records it: a chain under way, for its head to be anchored. */
+  const platformStarted = () =>
+    app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: {},
+      }),
+    );
+
+  /** A seal whose check reads every seal of each log, not a few from a point at random. */
+  const checkingAll = () =>
+    createSecuritySeal({
+      list: () => Promise.resolve(listed),
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      retentionDays: RETENTION,
+      batch: 2,
+      pick: (below) => below + 1n,
+    });
+
+  /** The global day as digested now. */
+  const digestNow = (day: string) =>
+    securityDigestOfDay((work) => app.transaction().execute(work), keys, 'global', day, {
+      batch: 2,
+      legacy: { excusedBefore: null },
+    });
+
+  /** A global seal recorded as the first release recorded it: form 1, with the digest given. */
+  const formOneSeal = async (day: string, digest: string) => {
+    const { requests, idFrom, idTo } = await digestNow(day);
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: SECURITY_EVENTS_SEALED,
+        details: { day, requests, digest, idFrom, idTo, form: 1 },
+      }),
+    );
+  };
+
+  const forms = async () =>
+    (
+      await app
+        .selectFrom('platform_controls.audit_events')
+        .select('details')
+        .where('action', '=', SECURITY_EVENTS_SEALED)
+        .orderBy('seq')
+        .execute()
+    ).map((row) => (JSON.parse(row.details) as Record<string, unknown>).form);
+
+  const withoutMac = async () =>
+    (await owner().query<{ id: string }>('select id from security.events where mac is null order by id')).map(
+      ({ id }) => id,
+    );
+
+  /** Each alarm once, however many times a check met it. */
+  const alarmsOnce = (): unknown[] =>
+    [...new Set(alarms().map((alarm) => JSON.stringify(alarm)))].map((line): unknown => JSON.parse(line));
+
+  beforeEach(() => {
+    clock = new FixedClock(new Date(NOW));
+  });
+
+  it('the day seal first: days sealed with no alarm; the pass after; every seal still holds, nothing alarmed', async () => {
+    const w = await shared.world();
+    listed = [w.org];
+    // Before the pass's scope, on the first day still checked: left to the sweep, never given a MAC.
+    const leftToSweep = await fromBefore('2026-10-23T03:00:00.000Z');
+    await fromBefore('2026-11-18T09:00:00.000Z');
+    await fromBefore('2026-11-18T10:00:00.000Z');
+    await fromBefore('2026-11-19T09:00:00.000Z');
+    await fromBefore('2026-11-18T09:00:00.000Z', w.org);
+
+    await checkingAll().run();
+    expect(await globalSeals()).toEqual([
+      ['2026-10-23', 1],
+      ['2026-11-18', 2],
+      ['2026-11-19', 1],
+    ]);
+    expect(await orgSeals(w)).toEqual([['2026-11-18', 1]]);
+    expect(alarms()).toEqual([]);
+
+    expect(await legacyPass()).toBe('sealed');
+    expect(await withoutMac()).toEqual([leftToSweep]);
+
+    clock.advanceBy(30 * 60_000);
+    await checkingAll().run();
+    expect(alarms()).toEqual([]);
+    expect(await forms()).toEqual([2, 2, 2]);
+  });
+
+  it('staging’s own: form 1 seals made before the pass hold after it, though their old reading no longer would', async () => {
+    await fromBefore('2026-11-18T09:00:00.000Z');
+    await fromBefore('2026-11-18T10:00:00.000Z');
+    await fromBefore('2026-11-19T09:00:00.000Z');
+    // Each day sealed as the first release sealed it: every row's MAC as it stood, none yet.
+    const sealedAs = (await digestNow('2026-11-18')).formOne;
+    await formOneSeal('2026-11-18', sealedAs);
+    await formOneSeal('2026-11-19', (await digestNow('2026-11-19')).formOne);
+
+    expect(await legacyPass()).toBe('sealed');
+    // What staging's check read: the rows' new MACs in each line, so the seal no longer held ('digest').
+    expect((await digestNow('2026-11-18')).formOne).not.toBe(sealedAs);
+
+    await checkingAll().run();
+    expect(alarms()).toEqual([]);
+    expect(await globalSeals()).toEqual([
+      ['2026-11-18', 2],
+      ['2026-11-19', 1],
+    ]);
+  });
+
+  it('a form 1 seal made after the pass, the MACs in its lines, holds too; one matching neither reading is the alarm', async () => {
+    await fromBefore('2026-11-18T09:00:00.000Z');
+    await fromBefore('2026-11-19T09:00:00.000Z');
+    await platformStarted();
+    expect(await legacyPass()).toBe('sealed');
+    await formOneSeal('2026-11-18', 'f'.repeat(64));
+    await formOneSeal('2026-11-19', (await digestNow('2026-11-19')).formOne);
+
+    await checkingAll().run();
+    expect(alarmsOnce()).toEqual([{ chain: 'platform', reason: 'digest', day: '2026-11-18' }]);
+  });
+
+  it('once the pass has ended, a MAC nulled by the owner is the alarm, and a day of such rows is sealed, never waited on', async () => {
+    const row = await fromBefore('2026-11-18T09:00:00.000Z');
+    await checkingAll().run();
+    expect(await legacyPass()).toBe('sealed');
+
+    await owner().query('update security.events set mac = null, mac_key_version = null where id = $1', [row]);
+    // A new day of rows planted so: the owner's try at holding the seal up.
+    const planted = await fromBefore('2026-11-20T09:00:00.000Z');
+    clock.advanceBy(DAY_MS);
+    await checkingAll().run();
+
+    expect(alarmsOnce()).toEqual([
+      { chain: 'platform', reason: 'mac', day: '2026-11-20', rowId: planted },
+      { chain: 'platform', reason: 'mac', day: '2026-11-18', rowId: row },
+    ]);
+    expect((await globalSeals()).map(([day]) => day)).toEqual(['2026-11-18', '2026-11-20']);
+  });
+
+  it('a record of the pass edited by the owner: the alarm, and no row excused, the one left to the sweep alarmed too', async () => {
+    const leftToSweep = await fromBefore('2026-10-23T03:00:00.000Z');
+    await fromBefore('2026-11-18T09:00:00.000Z');
+    await checkingAll().run();
+    expect(await legacyPass()).toBe('sealed');
+
+    await owner().query(`update platform_controls.audit_events set details = '{}' where action = $1`, [
+      SEALING_STARTED,
+    ]);
+    await checkingAll().run();
+
+    expect(alarmsOnce()).toEqual([
+      { chain: 'platform', reason: 'unsealed', day: null },
+      { chain: 'platform', reason: 'mac', day: '2026-10-23', rowId: leftToSweep },
+    ]);
+  });
+
+  it('before the pass has ended, only a marked row with no MAC is excused: one unmarked with none, or a marked one whose MAC fails, is the alarm', async () => {
+    await fromBefore('2026-11-18T08:00:00.000Z');
+    const unmarked = await planted('2026-11-18T09:00:00.000Z');
+    const edited = idAt(Date.parse('2026-11-19T09:00:00.000Z'));
+    await owner().query(
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs, mac,
+         mac_key_version)
+       values ($1, 'sign_in_failed', 'state_mismatch', null, null, $2, 1, $2, true, $3, 1)`,
+      [edited, new Date('2026-11-19T09:00:00.000Z'), Buffer.alloc(32, 9)],
+    );
+    await checkingAll().run();
+
+    expect(alarmsOnce()).toEqual([
+      { chain: 'platform', reason: 'mac', day: '2026-11-18', rowId: unmarked },
+      { chain: 'platform', reason: 'mac', day: '2026-11-19', rowId: edited },
+    ]);
+  });
+
+  it('the pass held up by the owner taking its lock: a row he marks and strips after the pass began is still the alarm, the old ones excused', async () => {
+    await fromBefore('2026-11-18T09:00:00.000Z');
+    // A pass begun at NOW and stopped part way, as a stop leaves it.
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: SEALING_STARTED,
+        details: { since: '2026-10-23T08:00:00.000Z', until: NOW, days: '{}' },
+      }),
+    );
+    await written('2026-11-20T09:00:00.000Z', [failed('2026-11-20T09:00:00.000Z')]);
+    const [genuine] = await rowsOf('2026-11-20');
+    // A session of the owner's own holds the sealer's lock, so every pass after is 'busy'.
+    const holder = await database.connect('admin');
+    await holder.query(
+      "select pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('security-events-legacy-sealer', 0))",
+    );
+    try {
+      expect(await legacyPass()).toBe('busy');
+      await owner().query(
+        'update security.events set before_macs = true, mac = null, mac_key_version = null, count = 99 where id = $1',
+        [genuine?.id],
+      );
+      clock.advanceBy(DAY_MS);
+      await checkingAll().run();
+      expect(await legacyPass()).toBe('busy');
+    } finally {
+      await holder.end();
+    }
+
+    expect(alarmsOnce()).toEqual([{ chain: 'platform', reason: 'mac', day: '2026-11-20', rowId: genuine?.id }]);
+    expect((await globalSeals()).map(([day]) => day)).toEqual(['2026-11-18', '2026-11-20']);
+  });
+
+  it('the owner taking the pass’s lock before it ever ran: a row he strips after the first start is the alarm, and once he lets go the pass never gives it a MAC', async () => {
+    const old = await fromBefore('2026-11-18T09:00:00.000Z');
+    // The first start on this release, as boot records it: its time.
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: { release: 'r', [ROW_MACS_FROM]: NOW },
+      }),
+    );
+    const holder = await database.connect('admin');
+    await holder.query(
+      "select pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('security-events-legacy-sealer', 0))",
+    );
+    let genuine: string | undefined;
+    try {
+      expect(await legacyPass()).toBe('busy');
+      await written('2026-11-20T09:00:00.000Z', [failed('2026-11-20T09:00:00.000Z')]);
+      genuine = (await rowsOf('2026-11-20'))[0]?.id;
+      await owner().query(
+        'update security.events set before_macs = true, mac = null, mac_key_version = null, count = 99 where id = $1',
+        [genuine],
+      );
+      clock.advanceBy(DAY_MS);
+      await checkingAll().run();
+    } finally {
+      await holder.end();
+    }
+    expect(alarmsOnce()).toEqual([{ chain: 'platform', reason: 'mac', day: '2026-11-20', rowId: genuine }]);
+
+    expect(await legacyPass()).toBe('sealed');
+    expect(await withoutMac()).toEqual([genuine]);
+    expect((await withoutMac()).includes(old)).toBe(false);
+  });
+
+  it('the admins’ page once the pass has ended: a row it left to the sweep left off quietly, an organisation’s MAC nulled by the owner the alarm', async () => {
+    const w = await shared.world();
+    listed = [w.org];
+    await fromBefore('2026-10-23T03:00:00.000Z', w.org);
+    const stripped = await fromBefore('2026-11-18T09:00:00.000Z', w.org);
+    await checkingAll().run();
+    await platformStarted();
+    expect(await legacyPass()).toBe('sealed');
+    await owner().query('update security.org_events set mac = null, mac_key_version = null where id = $1', [stripped]);
+
+    const page = await withTenant(app, w.org, (tx) =>
+      orgSecurityEventsPage(
+        tx,
+        w.org,
+        { from: new Date('2026-10-01T00:00:00.000Z'), to: new Date('2026-12-01T00:00:00.000Z'), limit: 10 },
+        { keys, logger: testLogger(capture), clock },
+      ),
+    );
+
+    expect(page.rows).toEqual([]);
+    expect(alarmsOnce()).toEqual([{ chain: 'organisation', reason: 'mac', day: null, orgId: w.org, rowId: stripped }]);
+  });
+
+  it('past the pass’s cutoff with no end recorded, a row with no MAC is the alarm as its day is sealed, and at its check', async () => {
+    clock = new FixedClock(new Date('2026-12-08T08:00:00.000Z'));
+    const row = await fromBefore('2026-12-05T09:00:00.000Z');
+    await sealer().run();
+
+    const alarm = { chain: 'platform', reason: 'mac', day: '2026-12-05', orgId: undefined, rowId: row };
+    expect(alarms()).toEqual([alarm, alarm]);
+    expect(await globalSeals()).toEqual([['2026-12-05', 1]]);
+  });
+
+  it('with no anchor store (a machine of our own) the pass never runs, and a new database’s days still seal clean', async () => {
+    await written('2026-11-18T09:00:00.000Z', [failed('2026-11-18T09:00:00.000Z')]);
+    await createLegacySealJob({
+      database: app,
+      anchors: undefined,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+      retentionDays: RETENTION,
+    }).run();
+
+    await checkingAll().run();
+    expect(capture.lines().find((line) => line.event === 'security.legacy_seal_done')?.outcome).toBe('no_anchor_store');
+    expect(await globalSeals()).toEqual([['2026-11-18', 1]]);
+    expect(alarms()).toEqual([]);
   });
 });

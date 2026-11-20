@@ -311,6 +311,7 @@ export async function boot(host: ApiProcess, options: RunOptions): Promise<Boote
       configHash: fingerprint.configHash,
       release: config.release,
       gateRef: gateRefOf(config.partner),
+      at: systemClock.now(),
     });
   } catch (error) {
     // The platform chain refused the event or the database did: either way no

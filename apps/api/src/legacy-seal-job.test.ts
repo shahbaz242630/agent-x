@@ -5,7 +5,7 @@
 import { FixedClock, LogCapture, SequentialIds, testLogger } from '@agentx/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createLegacySealJob } from './legacy-seal-job.ts';
+import { createLegacySealJob, LEGACY_SEAL_STALL_MS } from './legacy-seal-job.ts';
 
 /** What the job hands the sealing, and what the sealing answers. */
 const sealing = vi.hoisted(() => ({
@@ -62,13 +62,13 @@ function anchorStore({ state = 'read', latest = ANCHOR }: { readonly state?: str
 }
 
 let capture: LogCapture;
-const jobWith = (anchors: unknown) =>
+const jobWith = (anchors: unknown, clock = new FixedClock(new Date('2026-11-25T00:00:00.000Z'))) =>
   createLegacySealJob({
     database: {} as never,
     anchors: anchors as never,
     keys: {} as never,
     ids: new SequentialIds(1),
-    clock: new FixedClock(new Date('2026-11-25T00:00:00.000Z')),
+    clock,
     logger: testLogger(capture),
     retentionDays: 30,
   });
@@ -151,5 +151,37 @@ describe('SEC-DB-18 the security rows’ sealing job (S206 V6)', () => {
     await anchorNow();
 
     expect(unanchored()).toHaveLength(1);
+  });
+
+  it('the sealer’s lock found taken on two runs an hour apart: the stall is the alarm, each run it stays so, until a run gets it', async () => {
+    const clock = new FixedClock(new Date('2026-11-25T00:00:00.000Z'));
+    const job = jobWith(anchorStore().log, clock);
+    const stalls = () => capture.lines().filter(({ event }) => event === 'security.legacy_seal_stalled');
+    sealing.answer = () => Promise.resolve('busy');
+
+    await job.run();
+    // Another copy sealing a moment later still holds it: no alarm yet.
+    clock.advanceBy(LEGACY_SEAL_STALL_MS - 1);
+    await job.run();
+    expect(stalls()).toEqual([]);
+    // Each run after the first that found it taken hands the sealing that time: no row it seals is newer.
+    expect(sealing.given.map(({ notAfter }) => notAfter)).toEqual([undefined, new Date('2026-11-25T00:00:00.000Z')]);
+
+    clock.advanceBy(1);
+    await job.run();
+    clock.advanceBy(60 * 60_000);
+    await job.run();
+    expect(stalls().map(({ level, busySince }) => [level, busySince])).toEqual([
+      ['error', '2026-11-25T00:00:00.000Z'],
+      ['error', '2026-11-25T00:00:00.000Z'],
+    ]);
+
+    // A run that gets it ends the stall; the lock taken again starts it over.
+    sealing.answer = () => Promise.resolve('sealed');
+    await job.run();
+    sealing.answer = () => Promise.resolve('busy');
+    clock.advanceBy(60 * 60_000);
+    await job.run();
+    expect(stalls()).toHaveLength(2);
   });
 });

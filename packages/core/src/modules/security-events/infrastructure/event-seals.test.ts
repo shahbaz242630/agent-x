@@ -102,7 +102,15 @@ describe('SEC-DB-18 the seal check’s rules (S206 V6)', () => {
     form: SECURITY_SEAL_FORM,
   });
   const digest = (day: string) =>
-    Promise.resolve({ day, requests: 1, digest: `digest-${day}`, idFrom: 'a', idTo: 'b', misdated: null });
+    Promise.resolve({
+      day,
+      requests: 1,
+      digest: `digest-${day}`,
+      formOne: `form-one-${day}`,
+      idFrom: 'a',
+      idTo: 'b',
+      misdated: null,
+    });
   const asked: [string, string][] = [];
   const rules = (rowsIn: readonly string[] = [], checkableFrom = '2027-01-01') => ({
     digest,
@@ -130,6 +138,17 @@ describe('SEC-DB-18 the seal check’s rules (S206 V6)', () => {
       why: 'unsealed_day',
     });
     expect(await brokenSecuritySeal([{ ...sealOf('x'), day: 7 }], rules())).toEqual({ day: 'unnamed', why: 'digest' });
+  });
+
+  it('holds a form 1 seal to the day either way, with the old rows’ MACs or without; a form 2 seal only without', async () => {
+    const day = '2027-01-20';
+    const formOne = (sealed: string) => ({ ...sealOf(day, sealed), form: 1 });
+    expect(await brokenSecuritySeal([formOne(`digest-${day}`)], rules())).toBeUndefined();
+    expect(await brokenSecuritySeal([formOne(`form-one-${day}`)], rules())).toBeUndefined();
+    expect(await brokenSecuritySeal([formOne('other')], rules())).toEqual({ day, why: 'digest' });
+    expect(await brokenSecuritySeal([sealOf(day, `form-one-${day}`)], rules())).toEqual({ day, why: 'digest' });
+    // Nor any other form, though its digest matches.
+    expect(await brokenSecuritySeal([{ ...sealOf(day), form: 3 }], rules())).toEqual({ day, why: 'digest' });
   });
 
   it('checks no seal past the retention, nor any older than it', async () => {

@@ -7,8 +7,8 @@
 //   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
 //   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
-//   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
-//   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
+//   node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork] [--short-of-anchor]
+//   node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork] [--short-of-anchor]
 //   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
 //   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
 //   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
@@ -55,7 +55,9 @@
 // what the app wrote on a wound-back chain; it is never assumed. A repaired
 // chain holds its anchor again, so no rebase follows a repair (AT5, S194). A
 // refused plan says the live head, checked whole (AT8); refused `behind_anchor`,
-// the rebase's command that gives up the events past it.
+// the rebase's command that gives up the events past it, or, where the copy
+// holds events past the live head, the plan with --short-of-anchor (AT9): it
+// puts those back, and the repair then says the rebase that gives up the rest.
 //
 // chain-rebase (4D2e E11) moves a chain's anchor on to its checked head after a
 // sanctioned change (events lost for good, or the platform chain begun again), signed with
@@ -140,7 +142,11 @@ import {
   chainRebaseRequest,
   chainRecoveryRequest,
   chainRestoreRequest,
-  DISCARD_FORK,
+  CHAIN_FLAG_WORDS,
+  type ChainFlags,
+  chainFlags,
+  chainFlagWords,
+  SHORT_OF_ANCHOR,
   COUNTING_CONTACTS,
   COUNTING_CONTACTS_USAGE,
   countingContactsRequest,
@@ -262,8 +268,8 @@ export const USAGE = `Usage:
   node deploy/azure/operator.ts activity-export --org <organisation ID> --from <time> --to <time> --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-pause --reason <case reference> [--id <ID>]
   node deploy/azure/operator.ts handoff-resume --reason <case reference> [--id <ID>]
-  node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork]
-  node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork]
+  node deploy/azure/operator.ts chain-recovery-plan --org <organisation ID> [--discard-fork] [--short-of-anchor]
+  node deploy/azure/operator.ts chain-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>] [--discard-fork] [--short-of-anchor]
   node deploy/azure/operator.ts chain-rebase --chain <platform | organisation ID> --seq <head number> --hash <head hash> --reason <repaired | recovered> --evidence <incident reference> [--id <ID>]
   node deploy/azure/operator.ts state-recovery-plan --org <organisation ID>
   node deploy/azure/operator.ts state-restore --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]
@@ -1128,47 +1134,48 @@ export function countingContacts(asked: CountingContactsArguments, steps: JobSte
   }));
 }
 
-/** A chain recovery plan the partner asked for (4D2e E9): the organisation, and whether a fork may be planned away. */
-export interface RecoveryPlanArguments {
+/**
+ * A chain recovery plan the partner asked for (4D2e E9): the organisation, whether a fork may be planned away, and
+ * whether the plan may end short of its anchor (AT9).
+ */
+export interface RecoveryPlanArguments extends ChainFlags {
   readonly orgId: string;
-  readonly discardFork: boolean;
 }
 
-/** Whether the words after a command's own are nothing, or the named flag alone; undefined for anything else. */
-const forkFlag = (rest: readonly string[]): boolean | undefined => {
-  if (rest.length === 0) return false;
-  return rest.length === 1 && rest[0] === DISCARD_FORK ? true : undefined;
-};
+/** The named flags as the last words of a command the partner typed, said back: only those given. */
+const flagsSaid = (flags: ChainFlags): string =>
+  chainFlagWords(flags)
+    .map((word) => ` ${word}`)
+    .join('');
 
 const ORG_PROBLEM = "--org takes the organisation's ID: a UUIDv7, in lower case";
 
 /** What was asked for, or a UsageError saying why it can't be done. */
 export function parseRecoveryPlan(argv: readonly string[]): RecoveryPlanArguments {
   const [command, orgFlag, orgId, ...rest] = argv;
-  const discardFork = forkFlag(rest);
-  if (command !== 'chain-recovery-plan' || orgFlag !== '--org' || orgId === undefined || discardFork === undefined) {
-    throw new UsageError(`say chain-recovery-plan --org <organisation ID> [${DISCARD_FORK}], and nothing else`);
+  const flags = chainFlags(rest);
+  if (command !== 'chain-recovery-plan' || orgFlag !== '--org' || orgId === undefined || flags === undefined) {
+    throw new UsageError(`say chain-recovery-plan --org <organisation ID> ${CHAIN_FLAG_WORDS}, and nothing else`);
   }
   if (!UUID_V7.test(orgId)) throw new UsageError(ORG_PROBLEM);
-  return { orgId, discardFork };
+  return { orgId, ...flags };
 }
 
 /** A chain repair the partner asked for (4D2e E10): the plan by its ID and digest, and the repair's ID if one ran before. */
-export interface RestoreArguments {
+export interface RestoreArguments extends ChainFlags {
   readonly orgId: string;
   readonly planId: string;
   readonly digest: string;
   readonly id: string | undefined;
-  readonly discardFork: boolean;
 }
 
 /** What was asked for, or a UsageError saying why it can't be done. */
 export function parseRestore(argv: readonly string[]): RestoreArguments {
-  return repairAsked(argv, 'chain-restore', ` [${DISCARD_FORK}]`);
+  return repairAsked(argv, 'chain-restore', ` ${CHAIN_FLAG_WORDS}`);
 }
 
 /**
- * A repair's words, the chain's (`chain-restore`, which may take the named flag
+ * A repair's words, the chain's (`chain-restore`, which may take the named flags
  * last) or the authority rows' (`state-restore`, which never does): the plan by
  * its ID and digest, and the repair's ID if one ran before.
  */
@@ -1177,7 +1184,7 @@ function repairAsked(argv: readonly string[], named: string, forkWords: string):
   const ided = rest[0] === '--id';
   const id = ided ? rest[1] : undefined;
   const afterId = rest.slice(ided ? 2 : 0);
-  const discardFork = forkWords === '' && afterId.length > 0 ? undefined : forkFlag(afterId);
+  const flags = forkWords === '' && afterId.length > 0 ? undefined : chainFlags(afterId);
   const shaped =
     command === named &&
     orgFlag === '--org' &&
@@ -1185,7 +1192,7 @@ function repairAsked(argv: readonly string[], named: string, forkWords: string):
     digestFlag === '--digest' &&
     digest !== undefined &&
     (!ided || id !== undefined) &&
-    discardFork !== undefined;
+    flags !== undefined;
   if (!shaped) {
     throw new UsageError(
       `say ${named} --org <organisation ID> --plan <plan ID> --digest <digest> [--id <ID>]${forkWords}, and nothing else`,
@@ -1198,7 +1205,7 @@ function repairAsked(argv: readonly string[], named: string, forkWords: string):
     ...(id === undefined || UUID_V7.test(id) ? [] : ['--id takes the ID an earlier run gave: a UUIDv7, in lower case']),
   ];
   if (problems.length > 0) throw new UsageError(problems.join('; '));
-  return { orgId: String(orgId), planId: String(planId), digest, id, discardFork };
+  return { orgId: String(orgId), planId: String(planId), digest, id, ...flags };
 }
 
 /** A chain's rebase the partner asked for (4D2e E11): the chain, its checked head, why, the incident, and an earlier ID. */
@@ -1339,7 +1346,7 @@ export function parseStatePlan(argv: readonly string[]): StatePlanArguments {
 }
 
 /** An authority rows' repair the partner asked for: the plan by its ID and digest, and the repair's ID if one ran before. */
-export type StateRestoreArguments = Omit<RestoreArguments, 'discardFork'>;
+export type StateRestoreArguments = Omit<RestoreArguments, keyof ChainFlags>;
 
 /** What was asked for, or a UsageError saying why it can't be done. */
 export function parseStateRestore(argv: readonly string[]): StateRestoreArguments {
@@ -1353,12 +1360,16 @@ function planOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Recovery
   const about = (event: string) => said.find((line) => line.event === event && line.planId === planId);
   const planned = about('operator.chain_recovery_planned');
   if (planned !== undefined) {
-    const fork = asked.discardFork ? ` ${DISCARD_FORK}` : '';
+    // AT9: the anchor the plan ends before, said so the loss past the copy's head is read before the repair.
+    const short =
+      typeof planned.endsShortOf === 'string'
+        ? `; it ends at ${String(planned.endsAt)}, short of the anchor at ${planned.endsShortOf}: the events between are held by no copy, and a rebase gives them up after the repair`
+        : '';
     steps.say(
-      `Planned ${planId}: ${String(planned.putBack)} rows to put back, ${String(planned.replaced)} to replace, ${String(planned.removed)} to remove; the head ${planned.headReplaced === true ? 'put back' : 'left as it is'}${planned.forkDiscarded === true ? "; the app's events on a fork thrown away" : ''}. Nothing was changed. The plan and its rows are in the evidence store as ${asked.orgId}/chain-recovery-${planId}.ndjson.`,
+      `Planned ${planId}: ${String(planned.putBack)} rows to put back, ${String(planned.replaced)} to replace, ${String(planned.removed)} to remove; the head ${planned.headReplaced === true ? 'put back' : 'left as it is'}${planned.forkDiscarded === true ? "; the app's events on a fork thrown away" : ''}${short}. Nothing was changed. The plan and its rows are in the evidence store as ${asked.orgId}/chain-recovery-${planId}.ndjson.`,
     );
     steps.say(
-      `Once read, the repair is: node deploy/azure/operator.ts chain-restore --org ${asked.orgId} --plan ${planId} --digest ${String(planned.digest)}${fork}`,
+      `Once read, the repair is: node deploy/azure/operator.ts chain-restore --org ${asked.orgId} --plan ${planId} --digest ${String(planned.digest)}${flagsSaid(asked)}`,
     );
     return 0;
   }
@@ -1424,7 +1435,7 @@ function sayLiveHead(steps: JobSteps, line: Readonly<Record<string, unknown>>, o
   if (fromCopy.seq === undefined) {
     const why = fromCopy.problem === undefined ? '' : ` (from the copy's head: ${fromCopy.problem})`;
     steps.say(
-      `Its anchor is at ${String(line.seq)}, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either${why}: it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches ${String(line.seq)} (playbook H); if none does, no tool yet puts this copy's events back before a rebase (AT9): stop there and call Claude.`,
+      `Its anchor is at ${String(line.seq)}, and this copy doesn't reach it, but the copy isn't an earlier state of the live chain either${why}: it holds events past the live head, or another branch. A rebase now would give up events this copy holds, so none is offered. Look for a later copy that reaches ${String(line.seq)} (playbook H). If none does, this plan puts back the events this copy holds and ends at its head, short of the anchor; a copy on another branch is refused as a fork: node deploy/azure/operator.ts chain-recovery-plan --org ${orgId} ${SHORT_OF_ANCHOR}`,
     );
     return;
   }
@@ -1473,7 +1484,15 @@ function restoreOutcome(steps: JobSteps, lines: readonly LogLine[], asked: Resto
     steps.say(
       `Repaired: ${String(restored.putBack)} rows put back, ${String(restored.replaced)} replaced, ${String(restored.removed)} removed; the chain checks whole to ${String(restored.endsAt)}. The records are in the evidence store as ${records}. The organisation stays on hold: its admin clears it with a step-up once the investigation is recorded.`,
     );
-    // No rebase follows a repair (AT5, S194): a plan never ends before the store's anchor, so the repaired chain holds it.
+    // AT9: a repair short of its anchor ends on the copy's head; the rebase to that head gives up only the events past it.
+    if (typeof restored.endsShortOf === 'string' && typeof restored.endsAtHash === 'string') {
+      steps.say(
+        `The chain ends before its anchor at ${restored.endsShortOf}: no copy held the events between, and the anchor check alarms for it until they are given up. Only once the investigation accepts that they are lost for good, the rebase that gives them up: node deploy/azure/operator.ts chain-rebase --chain ${asked.orgId} --seq ${String(restored.endsAt)} --hash ${restored.endsAtHash} --reason repaired --evidence <incident reference>`,
+      );
+      return 0;
+    }
+    // No rebase follows any other repair (AT5, S194): such a plan never ends before the store's anchor, so the
+    // repaired chain holds it.
     steps.say(
       "No rebase is needed: a plan never ends before the chain's anchor, so the repaired chain holds it again. If the anchor check still alarms for this chain, treat it as new damage and make a new plan (playbook H); a rebase is only for events lost for good.",
     );
@@ -1507,7 +1526,7 @@ export function recoveryPlan(asked: RecoveryPlanArguments, steps: JobSteps): Pro
   const planId = uuidV7Ids.next();
   const again = 'Run the same command again: a plan only reads, so nothing is done twice.';
   return runRequest(steps, () => ({
-    text: chainRecoveryRequest(asked.orgId, planId, asked.discardFork),
+    text: chainRecoveryRequest(asked.orgId, planId, asked),
     intro: `Planning ${planId} for ${asked.orgId} from the drill's copy, read-only on both servers.`,
     tryAgain: again,
     mayStillHold: `The request may still be on ${jobName('operator')}: it only reads. ${again} It takes the request off at its end, as does deploy.ts apps.`,
@@ -1522,10 +1541,7 @@ export function chainRestore(asked: RestoreArguments, steps: JobSteps): Promise<
   return runRequest(
     steps,
     () => ({
-      text: chainRestoreRequest(
-        { orgId: asked.orgId, planId: asked.planId, digest: asked.digest, id },
-        asked.discardFork,
-      ),
+      text: chainRestoreRequest({ orgId: asked.orgId, planId: asked.planId, digest: asked.digest, id }, asked),
       intro: `Repairing ${asked.orgId}'s chain from plan ${asked.planId}, as repair ${id}. ${OWNER_LOGIN_SAID}`,
       tryAgain: again,
       mayStillHold: `The request may still be on ${jobName('chain-restore')}. It names ${id}, so it can't repair twice. ${again} It takes the request off at its end, as does deploy.ts apps.`,
