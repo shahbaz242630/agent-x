@@ -223,7 +223,7 @@ export const NOTICES_A_RUN = 20;
 const FAILURE = /^[a-z][a-z_]{0,63}$/;
 
 /** Why a notice whose seal doesn't hold was given up unsent (S206 V4). */
-export const SEAL_FAILED = 'seal_failed';
+const SEAL_FAILED = 'seal_failed';
 
 export interface NoticeSender {
   /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. Never throws: says if it failed. */
