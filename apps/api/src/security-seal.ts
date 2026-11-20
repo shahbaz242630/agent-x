@@ -24,6 +24,8 @@
 //   its dated rows and last ID), as each day sealed is (`security_events.sealed`).
 //   The log is off the database: an alert fires when a day is sealed with
 //   fewer rows than a tally of it counted, so rows deleted before their seal show.
+//   Yesterday's and today's rows are also counted every 5 minutes, a fall the
+//   alarm at once (security-tally.ts), so those are found within a run of it.
 //
 // A seal or a chain that can't be believed raises the alarm (the platform
 // chain's here, an organisation's by its signed states, which hold it, as any

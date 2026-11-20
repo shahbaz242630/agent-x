@@ -4122,19 +4122,23 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
- * The security records' seal shortfall (S206 V6, R-15): each day's highest tallied count before its seal against the
- * count sealed, per log (the global table, or an organisation), counted where a day was sealed with fewer.
+ * The security records' shortfall (S206 V6, R-15; S206 faster detection): each tally or seal line arrived in the last
+ * 10 minutes against every earlier tally of its day, per log (the global table, or an organisation), counted where it
+ * has fewer rows than one of them.
  */
 export const SECURITY_SEAL_SHORTFALL_LINES = [
   'where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed")',
-  'extend Line = parse_json(Log)',
-  `summarize Tallied = maxif(toint(Line['rows']), tostring(Line['event']) == "security_seal.tally"), Sealed = maxif(toint(Line['requests']), tostring(Line['event']) == "security_events.sealed"), Seals = countif(tostring(Line['event']) == "security_events.sealed") by Chain = tostring(Line['orgId']), Day = tostring(Line['day'])`,
-  'where Seals > 0 and Tallied > Sealed',
+  'extend Line = parse_json(Log), Arrived = ingestion_time()',
+  'where Arrived > ago(10m)',
+  `extend Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Rows = iff(tostring(Line['event']) == "security_seal.tally", toint(Line['rows']), toint(Line['requests']))`,
+  `join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line['orgId']), Day = tostring(Line['day']), Tallied = toint(Line['rows']), TalliedAt = TimeGenerated) on Chain, Day`,
+  'where TalliedAt < TimeGenerated and Tallied > Rows',
 ] as const;
 
 /**
- * An enabled SEV-1 alert on the workspace fires on any security records' day sealed with fewer rows than were tallied,
- * looking back two days (a day's tallies and its seal can be a day and a half apart), checked at least hourly.
+ * An enabled SEV-1 alert on the workspace fires on any security records' line with fewer rows than an earlier tally of
+ * its day, looking back two days (a day's tallies and its seal can be a day and a half apart), every 5 minutes over the
+ * last 10 (S206 faster detection).
  */
 const securitySealAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -4147,8 +4151,9 @@ const securitySealAlert: Check = (snapshot, _expected, add) => {
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         at(alert.properties, 'severity') === 1 &&
-        at(alert.properties, 'windowSize') === 'P2D' &&
-        at(alert.properties, 'evaluationFrequency') === 'PT1H' &&
+        at(alert.properties, 'windowSize') === 'PT10M' &&
+        at(alert.properties, 'overrideQueryTimeRange') === 'P2D' &&
+        at(alert.properties, 'evaluationFrequency') === 'PT5M' &&
         at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
         at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1,
     );
@@ -4157,7 +4162,7 @@ const securitySealAlert: Check = (snapshot, _expected, add) => {
         rule: 'security-seal-alert',
         resource: environment.name,
         message:
-          "needs an enabled SEV-1 alert on this deployment's workspace that fires on any security records' day sealed with fewer rows than its tallies counted, looking back two days, checked hourly, firing on the first window",
+          "needs an enabled SEV-1 alert on this deployment's workspace that fires on any security records' day counted or sealed with fewer rows than an earlier tally of it, looking back two days, every 5 minutes, firing on the first window",
       });
     }
   }

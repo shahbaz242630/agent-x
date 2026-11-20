@@ -4866,17 +4866,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
+  it('security-seal-alert: no SEV-1 alert on a security day counted or sealed short of its tallies, or one that looks too short a way back, too seldom, or can’t fire (S206 V6)', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     expect(brokenRules(without(SECURITY_SEAL_ALERT))).toEqual(['security-seal-alert']);
     for (const change of [
-      // Another event, or a day short of its own count, or none sealed counted too.
+      // Another event, a day at its own count, a later tally counted too, another log's, or lines arrived long ago.
       edited('"security_seal.tally", ', ''),
-      edited('Tallied > Sealed', 'Tallied >= Sealed'),
-      edited('Seals > 0 and ', ''),
-      edited("by Chain = tostring(Line['orgId']), ", 'by '),
+      edited('Tallied > Rows', 'Tallied >= Rows'),
+      edited('TalliedAt < TimeGenerated and ', ''),
+      edited(' on Chain, Day', ' on Day'),
+      edited('ago(10m)', 'ago(1d)'),
       (alert: Mutable) => (properties(alert).windowSize = 'P1D'),
-      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT6H'),
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'P1D'),
+      (alert: Mutable) => (properties(alert).evaluationFrequency = 'PT15M'),
       (alert: Mutable) => (properties(alert).severity = 2),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
@@ -4892,7 +4894,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('security-seal-alert: its query finds a day sealed with fewer rows than tallied, per log, and nothing else', () => {
+  it('security-seal-alert: its query finds a day counted or sealed with fewer rows than tallied before, per log, and nothing else', () => {
     // The query's stages as the alert holds them, the table and the final count around them.
     const stages = kqlStages(
       String(criterion(staging.predictedResources.find(SECURITY_SEAL_ALERT) as unknown as Mutable).query),

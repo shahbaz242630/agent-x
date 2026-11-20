@@ -648,3 +648,93 @@ describe(`a queued warning, as the database's owner can change it (S206 V4, Post
     expect(await stops()).toBe(1);
   });
 });
+
+describe('the notice check every 5 minutes, visiting only organisations with a notice to judge (S206, faster detection)', () => {
+  /** One check kept across runs, as the job keeps it, over `listed`; each run's statements counted as Kysely sends them. */
+  const kept = (listed: readonly string[], done?: (orgId: string) => void) => {
+    let sent = 0;
+    const counted = app.withPlugin({
+      transformQuery: ({ node }) => {
+        sent += 1;
+        return node;
+      },
+      transformResult: ({ result }) => Promise.resolve(result),
+    });
+    const job = createNoticeCheck({
+      list: () => Promise.resolve(listed),
+      ...(done === undefined ? {} : { done }),
+      database: counted,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(capture),
+    });
+    return {
+      /** Runs it at `at`: the alarms it raised, and how many statements it sent. */
+      async at(at: Date) {
+        clock.set(at);
+        const before = alarms().length;
+        sent = 0;
+        await job.run();
+        expect(capture.lines().filter(({ event }) => event === 'notification.check_failed')).toEqual([]);
+        return {
+          found: alarms()
+            .slice(before)
+            .map(({ noticeId, reason }) => ({ noticeId, reason })),
+          sent,
+        };
+      },
+    };
+  };
+
+  /** Another organisation of the test's, with nothing queued. */
+  const quiet = async (): Promise<string> => {
+    const id = ids.next();
+    await sql`insert into directory.orgs (org_id) values (${id})`.execute(app);
+    return id;
+  };
+
+  it('a notice queued and deleted after a visit is found at the next run, 5 minutes on; a quiet run costs one read a page', async () => {
+    const still = await quiet();
+    await queued();
+    expect(await send()).toEqual(['victim@example.test']);
+    const job = kept([org, still]);
+    const first = await job.at(later(5 * 60_000));
+    expect(first.found).toEqual([]);
+
+    // Nothing queued since, nothing still to be sent: no visit, only the unsent notices' read and one trip for both
+    // organisations, each its wall's setting and its read, the setting cleared after.
+    const idle = await job.at(later(10 * 60_000));
+    expect(idle).toEqual({ found: [], sent: 6 });
+    expect(idle.sent).toBeLessThan(first.sent);
+
+    const id = await queued();
+    await asOwner('delete from notifications.outbox where id = $1', [id]);
+    expect((await job.at(later(15 * 60_000))).found).toEqual([{ noticeId: id, reason: 'gone' }]);
+    expect(await job.at(later(20 * 60_000))).toEqual({ found: [], sent: 6 });
+  });
+
+  it('a notice still to be sent is looked at every run: marked sent by the owner, it is found at the next', async () => {
+    const id = await queued();
+    const job = kept([org]);
+    expect((await job.at(later(5 * 60_000))).found).toEqual([]);
+    await asOwner('update notifications.outbox set sent_at = $2, before_seals = true where id = $1', [
+      id,
+      later(6 * 60_000),
+    ]);
+    expect((await job.at(later(10 * 60_000))).found).toEqual([{ noticeId: id, reason: 'end_seal' }]);
+  });
+
+  it('visits the organisation with the fewest events to walk first, and passes one never queued to with no visit', async () => {
+    const near = await quiet();
+    const never = await quiet();
+    for (let n = 0; n < 3; n += 1) await queued();
+    const farther = org;
+    org = near;
+    await queued();
+    const finished: string[] = [];
+    const job = kept([farther, near, never], (done) => finished.push(done));
+    expect((await job.at(later(5 * 60_000))).found).toEqual([]);
+    expect(finished).toEqual([never, near, farther]);
+  });
+});

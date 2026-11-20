@@ -365,17 +365,25 @@ export interface DayTally {
   readonly idTo: string;
 }
 
-/** The dated rows of each day from `day` on, by day (one statement, on the ID's index): what the tally line logs. */
-export async function tallyFrom(tx: SealTx, log: SecurityLog, day: string): Promise<readonly DayTally[]> {
+/** tallyFrom's statement, not run: readEachTenant sends it for a page of organisations at once (security-tally.ts). */
+export function tallyRead(log: SecurityLog, day: string) {
   const { table, own } = scopeOf(log);
-  const { rows } = await sql<{ day: string; rows: number; id_to: string }>`
+  return sql<{ day: string; rows: number; id_to: string }>`
     select pg_catalog.to_char(pg_catalog.to_timestamp(${ID_MS} / 1000.0) at time zone 'UTC', 'YYYY-MM-DD') as day,
       pg_catalog.count(*)::int as rows, pg_catalog.max(id::text) as id_to
     from ${table}
     where ${own} and id >= ${idsOfDay(day).from}::uuid and ${DATED}
     group by 1 order by 1
-  `.execute(tx);
-  return rows.map((row) => ({ day: row.day, rows: row.rows, idTo: row.id_to }));
+  `;
+}
+
+/** A tally's rows as the tally line logs them. */
+export const talliesOf = (rows: readonly { day: string; rows: number; id_to: string }[]): readonly DayTally[] =>
+  rows.map((row) => ({ day: row.day, rows: row.rows, idTo: row.id_to }));
+
+/** The dated rows of each day from `day` on, by day (one statement, on the ID's index): what the tally line logs. */
+export async function tallyFrom(tx: SealTx, log: SecurityLog, day: string): Promise<readonly DayTally[]> {
+  return talliesOf((await tallyRead(log, day).execute(tx)).rows);
 }
 
 /**
@@ -447,7 +455,8 @@ export async function brokenSecuritySeal(
 }
 
 /** Why the log can't be believed: a seal or record, a row's MAC, a row misdated or out of the seal's reach, or a seal broken. */
-type SecurityLogBroken = 'unsealed' | 'mac' | 'misdated' | 'out_of_range' | SecuritySealBroken;
+/** `count_fell`: a day's rows fewer than this process counted of it before (security-tally.ts): some were deleted. */
+type SecurityLogBroken = 'unsealed' | 'mac' | 'misdated' | 'out_of_range' | 'count_fell' | SecuritySealBroken;
 
 /**
  * Raises the integrity alarm for the log (`check: 'security_event'`), naming the day and the row where one is known.

@@ -794,33 +794,39 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   dependsOn: [appLogs]
 }
 
-// Security records deleted before their day was sealed (S206 V6, R-15): the
-// API's seal job logs each day not yet sealed with its row count
-// (`security_seal.tally`), and each day it seals with the count sealed
+// Security records deleted (S206 V6, R-15; S206 faster detection): the API
+// counts yesterday's and today's rows every 5 minutes and logs each day's
+// count (`security_seal.tally`: when first counted, when it fell, and when it
+// grew, at most hourly), and each day it seals with the count sealed
 // (`security_events.sealed`), for the global table and each organisation. The
-// log is off the database: a day sealed with fewer rows than a tally of it
-// counted lost rows in between, past the app. A day's tallies and its seal can
-// be a day and a half apart, so the window is two days, checked hourly.
-// Stateless, as every SEV-1: it notifies each hour while the window holds such a day.
+// log is off the database: a line with fewer rows than an earlier tally of its
+// day lost rows in between, past the app. Each line is judged as it arrives
+// (in the last 10 minutes, as lines come 4-9 minutes late), against the
+// tallies of the two days before (a day's tallies and its seal can be a day and
+// a half apart), every 5 minutes: a fall pages within about 10-20 minutes of
+// the deletion. Stateless, as every SEV-1: each line that shows a fall
+// notifies once or twice (its 10 minutes span two runs).
 resource securitySealAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: securitySealAlertName
   location: location
   tags: tags
   kind: 'LogAlert'
   properties: {
-    displayName: 'Security records: a day sealed with fewer rows than were seen'
-    description: 'SEV-1. A day of failed sign-ins or rate-limit hits was sealed with fewer rows than the seal job counted earlier (security_seal.tally against security_events.sealed): rows were deleted from the database past the app before the seal. Runbook: Incident-Response-Playbook.md section H.'
+    displayName: 'Security records: a day with fewer rows than were seen'
+    description: 'SEV-1. A day of failed sign-ins or rate-limit hits was counted or sealed with fewer rows than the API counted earlier (security_seal.tally, security_events.sealed): rows were deleted from the database past the app. Runbook: Incident-Response-Playbook.md section H.'
     severity: 1
     enabled: true
     scopes: [workspaceId]
-    evaluationFrequency: 'PT1H'
-    windowSize: 'P2D'
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT10M'
+    // Two days back for the tallies a line is held to; the line itself judged as it arrives (the query's own band).
+    overrideQueryTimeRange: 'P2D'
     // The table appears with the first app's first log line, after this rule exists.
     skipQueryValidation: true
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log) | summarize Tallied = maxif(toint(Line[\'rows\']), tostring(Line[\'event\']) == "security_seal.tally"), Sealed = maxif(toint(Line[\'requests\']), tostring(Line[\'event\']) == "security_events.sealed"), Seals = countif(tostring(Line[\'event\']) == "security_events.sealed") by Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']) | where Seals > 0 and Tallied > Sealed | summarize Shortfalls = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("security_seal.tally", "security_events.sealed") | extend Line = parse_json(Log), Arrived = ingestion_time() | where Arrived > ago(10m) | extend Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Rows = iff(tostring(Line[\'event\']) == "security_seal.tally", toint(Line[\'rows\']), toint(Line[\'requests\'])) | join kind=inner (ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "security_seal.tally" | extend Line = parse_json(Log) | project Chain = tostring(Line[\'orgId\']), Day = tostring(Line[\'day\']), Tallied = toint(Line[\'rows\']), TalliedAt = TimeGenerated) on Chain, Day | where TalliedAt < TimeGenerated and Tallied > Rows | summarize Shortfalls = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Shortfalls'
           operator: 'GreaterThan'
