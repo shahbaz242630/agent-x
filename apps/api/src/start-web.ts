@@ -147,6 +147,7 @@ export async function startWeb(
   const capabilities = capabilitiesOf(config.http.publicOrigin, metadataOrigins.length > 0);
   const oauthClients = createOauthClients({
     database,
+    keys,
     clock: systemClock,
     logger,
     metadata:

@@ -330,7 +330,7 @@ beforeEach(async () => {
   capture = new LogCapture();
   noted = [];
   const logger = testLogger(capture);
-  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  const clients = createOauthClients({ database: app, keys, clock, logger, metadata: undefined });
   oauthClients = clients;
   authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
   grants = createOauthGrants({
@@ -808,7 +808,7 @@ describe(`SEC-OAUTH-02, -03, -11, -12 the authorization request (Postgres ${serv
       ids,
       logger,
       capabilities,
-      clients: createOauthClients({ database: failing, clock, logger, metadata: undefined }),
+      clients: createOauthClients({ database: failing, keys, clock, logger, metadata: undefined }),
     });
     const answer = await busy.authorize({ ...asked, client_id: clientId }, undefined, fresh());
     if (answer.outcome !== 'refused') throw new Error(`not refused: ${JSON.stringify(answer)}`);
@@ -2244,7 +2244,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
       ids,
       logger: testLogger(capture),
       capabilities,
-      clients: createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata: undefined }),
+      clients: createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata: undefined }),
     });
 
   /** A device's codes, asked for by the registered client. */
@@ -2651,7 +2651,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
         return Promise.resolve(answer());
       },
     };
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     const viaDocument = createOauthAuthorizing({
       database: app,
       keys,
@@ -2785,6 +2785,7 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
       },
     });
     const clients = createOauthClients({
+      keys,
       database: counted,
       clock,
       logger: testLogger(capture),
@@ -2817,11 +2818,13 @@ describe(`SEC-OAUTH-09 a client named by its metadata document (6E3c; Postgres $
     const id = 'https://claude.ai/oauth/delisted';
     await keepClientMetadata(
       app,
+      keys,
       { clientId: id, name: 'Old', redirectUris: [CLAUDE_BACK], grantTypes: ['authorization_code'] },
       clock.now(),
     );
     const fetched: string[] = [];
     const clients = createOauthClients({
+      keys,
       database: app,
       clock,
       logger: testLogger(capture),
@@ -2863,7 +2866,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
         grant_types: [DEVICE_CODE_GRANT],
       },
     }));
-    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock, logger: testLogger(capture), metadata });
     const device = createOauthDevice({
       database: app,
       keys,
@@ -2898,7 +2901,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
       outcome: 'fetched',
       document: { client_id: id, client_name: 'Claude', redirect_uris: ['https://claude.ai/cb'] },
     }));
-    const clients = createOauthClients({ database: app, clock, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock, logger: testLogger(capture), metadata });
     const device = createOauthDevice({
       database: app,
       keys,
@@ -2918,7 +2921,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
   it('fetches a document refused for what it says again only after 5 minutes', async () => {
     const at = new FixedClock(START);
     const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'not_json' }));
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     const id = 'https://claude.ai/oauth/refused-once';
     expect(await clients.find(id)).toBeUndefined();
     expect(await clients.find(id)).toBeUndefined();
@@ -2943,11 +2946,11 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const { metadata, fetched } = listedFetch((id) =>
       id === real ? realDocument(id) : { outcome: 'refused', reason: 'status' },
     );
-    const before = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const before = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     expect(await before.find(real)).toMatchObject({ clientId: real });
     // A day on, in another copy of the API (nothing remembered but the row kept): junk fills the origin's minute.
     at.advanceBy(DAY_MS + 1000);
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     for (let path = 0; path <= MOST_FETCHES_A_MINUTE; path += 1) {
       await clients.find(`https://claude.ai/oauth/junk-${String(path)}`);
     }
@@ -2964,7 +2967,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const { metadata, fetched } = listedFetch((id) =>
       down ? { outcome: 'refused', reason: 'status' } : realDocument(id),
     );
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     await clients.find(real);
     at.advanceBy(DAY_MS + 1000);
     down = true;
@@ -2992,7 +2995,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const { metadata, fetched } = listedFetch((id) =>
       changed ? { outcome: 'fetched', document: { client_id: 'https://claude.ai/other' } } : realDocument(id),
     );
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     await clients.find(real);
     at.advanceBy(DAY_MS + 1000);
     changed = true;
@@ -3003,6 +3006,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     // Not at the consent's confirm either, nor in another copy of the API: the kept one is retired.
     expect(await clients.kept(app, real)).toBeUndefined();
     const elsewhere = createOauthClients({
+      keys,
       database: app,
       clock: at,
       logger: testLogger(capture),
@@ -3018,7 +3022,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const { metadata, fetched } = listedFetch((id) =>
       down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id),
     );
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     await clients.find(real);
     await database.as('admin').query('delete from oauth.client_metadata where client_id = $1', [real]);
     down = true;
@@ -3035,10 +3039,10 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
     const real = 'https://claude.ai/oauth/real-long-gone';
     let down = false;
     const { metadata } = listedFetch((id) => (down ? { outcome: 'refused', reason: 'timeout' } : realDocument(id)));
-    await createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata }).find(real);
+    await createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata }).find(real);
     at.advanceBy(DAY_MS + CLIENT_METADATA_STALE_MS);
     down = true;
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     expect(await clients.find(real)).toBeUndefined();
     expect(lines('oauth.client_metadata_stale')).toEqual([]);
   });
@@ -3046,7 +3050,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
   it(`fetches one origin at most ${String(MOST_FETCHES_A_MINUTE)} times a minute, saying so once`, async () => {
     const at = new FixedClock(START);
     const { metadata, fetched } = listedFetch(() => ({ outcome: 'refused', reason: 'status' }));
-    const clients = createOauthClients({ database: app, clock: at, logger: testLogger(capture), metadata });
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
     for (let path = 0; path <= MOST_FETCHES_A_MINUTE + 2; path += 1) {
       await clients.find(`https://claude.ai/oauth/varied-${String(path)}`);
     }
@@ -3154,22 +3158,26 @@ describe(`SEC-OAUTH-15 (S205 tamper pass): the database's owner can't grant a co
   );
 
   it.each(SEALS)(
-    '(b) a device flow planted as allowed, %s, its client given the device grant, is refused invalid_grant',
+    '(b) a device flow planted as allowed, %s, for a client registered with the device grant, is refused invalid_grant',
     async (_, seal, raised) => {
       const { org, keyId } = await victim();
       const ownDeviceCode = own('axd');
       const now = clock.now();
-      await owner().query('update oauth.clients set grant_types = $2 where client_id = $1', [
-        clientId,
-        ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT],
-      ]);
+      // Registered so, as anyone may: the owner widening a client's grant types is refused before (SEC-OAUTH-17).
+      const registered = await authorizing.register(
+        { redirect_uris: [REDIRECT], client_name: 'Hermes', grant_types: [DEVICE_CODE_GRANT] },
+        CORRELATION,
+        fresh(),
+      );
+      if (registered.outcome !== 'registered') throw new Error('registered');
+      const deviceClient = registered.client.clientId;
       await owner().query(
         `insert into oauth.flows (id, kind, client_id, scopes_asked, resource, device_hash, user_code_hash,
          interval_s, created_at, ends_at, decided_at, outcome, org_id, key_id, decision_mac, decision_key_version)
        values ($1, 'device', $2, 'requests:read', $3, $4, $5, 5, $6, $7, $6, 'allowed', $8, $9, $10, $11)`,
         [
           ids.next(),
-          clientId,
+          deviceClient,
           capabilities.resource,
           sha256(ownDeviceCode),
           sha256(ownDeviceCode.toUpperCase()),
@@ -3181,7 +3189,8 @@ describe(`SEC-OAUTH-15 (S205 tamper pass): the database's owner can't grant a co
           seal?.version ?? null,
         ],
       );
-      expect(await grants.exchangeDevice({ deviceCode: ownDeviceCode, clientId }, CALLER)).toMatchObject({
+      const exchanged = await grants.exchangeDevice({ deviceCode: ownDeviceCode, clientId: deviceClient }, CALLER);
+      expect(exchanged).toMatchObject({
         outcome: 'refused',
         status: 400,
         error: 'invalid_grant',
@@ -3538,5 +3547,203 @@ describe(`SEC-OAUTH-14 V7 (PL-67) an outsider holding only a connection's IDs (P
       await shared.destroy();
     }
     expect(lines('db.organisation_busy')).toEqual([]);
+  });
+});
+
+// SEC-OAUTH-17 (S207 H3, R-15; 0107): the database's owner adds its own address to a client's redirect addresses, as
+// kept, so a person allowing that client's request would send their code there. A client so changed is never believed:
+// a registered one is unknown, with the alarm; a document's is fetched again from its own address, with the alarm, and
+// never stands in stale. One with no seal (before 0107) is let go with a warning, never the alarm.
+describe(`SEC-OAUTH-17 a client's kept facts rewritten by the database's owner (Postgres ${server.version})`, () => {
+  const EVIL = 'https://attacker.example/cb';
+  /** Claude's document's address: one of each case's own, as a document kept stays kept from case to case. */
+  let claudeId = '';
+  let documents = 0;
+  beforeEach(() => {
+    documents += 1;
+    claudeId = `https://claude.ai/oauth/sealed-${String(documents)}`;
+  });
+  const CLAUDE_BACK = 'https://claude.ai/api/mcp/auth_callback';
+  const owner = () => database.as('owner');
+
+  const askFor = (via: OauthAuthorizing, client: string, redirectUri: string) =>
+    via.authorize(
+      {
+        response_type: 'code',
+        client_id: client,
+        redirect_uri: redirectUri,
+        state: 'xyz',
+        code_challenge: challengeOf(VERIFIER),
+        code_challenge_method: 'S256',
+      },
+      undefined,
+      fresh(),
+    );
+
+  const alarmed = (named: Record<string, string>) => {
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'oauth', check: 'oauth_client', ...named }),
+    ]);
+  };
+
+  it('a registered client with an address planted: unknown, to its own address too, and the alarm', async () => {
+    await owner().query(
+      'update oauth.clients set redirect_uris = array_append(redirect_uris, $2) where client_id = $1',
+      [clientId, EVIL],
+    );
+    for (const back of [EVIL, REDIRECT]) {
+      expect(await askFor(authorizing, clientId, back)).toEqual({
+        outcome: 'not_redirectable',
+        problem: 'unknown_client',
+      });
+    }
+    expect(lines('audit.integrity_failed')).toHaveLength(2);
+    expect(lines('audit.integrity_failed')[0]).toMatchObject({ reason: 'registered', objectId: clientId });
+    expect(lines('oauth.client_unsealed')).toEqual([]);
+  });
+
+  it('a registered client widened to the device flow: its device code refused unauthorized_client, the alarm', async () => {
+    await owner().query('update oauth.clients set grant_types = $2 where client_id = $1', [
+      clientId,
+      ['authorization_code', 'refresh_token', DEVICE_CODE_GRANT],
+    ]);
+    const deviceCode = `axd_${randomBytes(32).toString('base64url')}`;
+    const now = clock.now();
+    await owner().query(
+      `insert into oauth.flows (id, kind, client_id, scopes_asked, resource, device_hash, user_code_hash, interval_s,
+         created_at, ends_at)
+       values ($1, 'device', $2, 'requests:read', $3, $4, $5, 5, $6, $7)`,
+      [
+        ids.next(),
+        clientId,
+        capabilities.resource,
+        createHash('sha256').update(deviceCode, 'utf8').digest('hex'),
+        createHash('sha256').update(deviceCode.toUpperCase(), 'utf8').digest('hex'),
+        now,
+        new Date(now.getTime() + 15 * 60_000),
+      ],
+    );
+    expect(await grants.exchangeDevice({ deviceCode, clientId }, CALLER)).toMatchObject({
+      outcome: 'refused',
+      error: 'unauthorized_client',
+    });
+    alarmed({ reason: 'registered', objectId: clientId });
+  });
+
+  it('a registered client tampered after its flow opened: its request shows no name of its own', async () => {
+    const flow = await opened();
+    await owner().query(`update oauth.clients set name = 'Claude (official)' where client_id = $1`, [clientId]);
+    expect(await consents.request(flow, 'a person')).toMatchObject({
+      client: { id: clientId, name: expect.not.stringContaining('Claude') as unknown, verifiedBy: null },
+    });
+    alarmed({ reason: 'registered', objectId: clientId });
+  });
+
+  it('a registered client from before 0107, with no seal: unknown, with a warning, never the alarm', async () => {
+    await owner().query('update oauth.clients set mac = null, mac_key_version = null where client_id = $1', [clientId]);
+    expect(await askFor(authorizing, clientId, REDIRECT)).toEqual({
+      outcome: 'not_redirectable',
+      problem: 'unknown_client',
+    });
+    expect(lines('oauth.client_unsealed')).toEqual([
+      expect.objectContaining({ level: 'warn', kind: 'registered', reason: 'unsealed', objectId: clientId }),
+    ]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    // Registering again, as an MCP client does when it is unknown, connects it once more.
+    const again = await authorizing.register(
+      { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },
+      CORRELATION,
+      fresh(),
+    );
+    if (again.outcome !== 'registered') throw new Error('registered');
+    expect(await askFor(authorizing, again.client.clientId, REDIRECT)).toMatchObject({ outcome: 'opened' });
+  });
+
+  /** Clients over a stand-in fetcher of Claude's real document, or of a failure once `down`. */
+  function documentClients(at: FixedClock = clock) {
+    const state = { fetched: 0, down: false };
+    const metadata: ClientMetadataFetch = {
+      listed: (id) => id.startsWith('https://claude.ai/'),
+      fetch: (id) => {
+        state.fetched += 1;
+        return Promise.resolve(
+          state.down
+            ? { outcome: 'refused', reason: 'status' }
+            : { outcome: 'fetched', document: { client_id: id, client_name: 'Claude', redirect_uris: [CLAUDE_BACK] } },
+        );
+      },
+    };
+    const clients = createOauthClients({ database: app, keys, clock: at, logger: testLogger(capture), metadata });
+    const via = createOauthAuthorizing({
+      database: app,
+      keys,
+      clock: at,
+      ids,
+      logger: testLogger(capture),
+      capabilities,
+      clients,
+    });
+    return { state, clients, via };
+  }
+
+  /** The owner's edit: its own address added to Claude's kept document, and kept 30 days longer. */
+  const planted = () =>
+    owner().query(
+      `update oauth.client_metadata
+       set redirect_uris = array_append(redirect_uris, $2), expires_at = expires_at + interval '30 days'
+       where client_id = $1`,
+      [claudeId, EVIL],
+    );
+
+  it('a kept document with an address planted: fetched again from its own address, the planted one refused, the alarm', async () => {
+    const { state, via } = documentClients();
+    expect(await askFor(via, claudeId, CLAUDE_BACK)).toMatchObject({ outcome: 'opened' });
+    expect(state.fetched).toBe(1);
+    await planted();
+    expect(await askFor(via, claudeId, EVIL)).toEqual({
+      outcome: 'not_redirectable',
+      problem: 'unregistered_redirect',
+    });
+    expect(state.fetched).toBe(2);
+    alarmed({ reason: 'document', origin: 'https://claude.ai' });
+    // Kept again, sealed, as fetched: believed once more, and not fetched again within its day.
+    expect(await askFor(via, claudeId, CLAUDE_BACK)).toMatchObject({ outcome: 'opened' });
+    expect(state.fetched).toBe(2);
+    expect(lines('audit.integrity_failed')).toHaveLength(1);
+  });
+
+  it('a stale document with an address planted never stands in while its site is down', async () => {
+    const at = new FixedClock(START);
+    await documentClients(at).clients.find(claudeId);
+    at.advanceBy(DAY_MS + 1);
+    await planted();
+    const { state, clients, via } = documentClients(at);
+    state.down = true;
+    expect(await clients.find(claudeId)).toBeUndefined();
+    expect(await askFor(via, claudeId, EVIL)).toEqual({ outcome: 'not_redirectable', problem: 'unknown_client' });
+    expect(lines('oauth.client_metadata_stale')).toEqual([]);
+    expect(lines('audit.integrity_failed').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a document kept before 0107, with no seal: fetched again, with a warning, never the alarm', async () => {
+    const { state, clients } = documentClients();
+    await clients.find(claudeId);
+    await owner().query('update oauth.client_metadata set mac = null, mac_key_version = null where client_id = $1', [
+      claudeId,
+    ]);
+    expect(await clients.find(claudeId)).toMatchObject({ redirectUris: [CLAUDE_BACK], verifiedBy: 'claude.ai' });
+    expect(state.fetched).toBe(2);
+    expect(lines('oauth.client_unsealed')).toEqual([
+      expect.objectContaining({ level: 'warn', kind: 'document', reason: 'unsealed', origin: 'https://claude.ai' }),
+    ]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a document tampered while its flow waits: the consent’s own read in its transaction believes none', async () => {
+    const { clients } = documentClients();
+    await clients.find(claudeId);
+    await planted();
+    expect(await clients.kept(app, claudeId)).toBeUndefined();
+    alarmed({ reason: 'document', origin: 'https://claude.ai' });
   });
 });
