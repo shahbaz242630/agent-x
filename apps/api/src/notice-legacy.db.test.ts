@@ -348,6 +348,7 @@ describe(`SEC-DB-17 a database born sealed: no pass (R-15, S207, Postgres ${serv
     expect(await sealedOf(planted)).toBe(false);
     expect(await passes()).toEqual([]);
     expect(capture.lines().filter(({ level }) => level === 'warn' || level === 'error')).toEqual([]);
+    expect(capture.lines().filter(({ event }) => event === 'notification.legacy_born_sealed')).toHaveLength(2);
 
     await createNoticeCheck({
       list: () => Promise.resolve([]),
@@ -401,5 +402,52 @@ describe(`SEC-DB-17 a database born sealed: no pass (R-15, S207, Postgres ${serv
     await sealed();
     expect(await sealedOf(planted)).toBe(false);
     expect(startAlarm()).toHaveLength(1);
+  });
+
+  it('a first start whose time is a string but no time: seals nothing, the alarm', async () => {
+    await createPlatformChain({ keys, ids }).recordAlone(app, {
+      actor: { type: 'system', id: 'api' },
+      action: 'platform.started',
+      details: { release: 'r', rowMacsFrom: 'not a time' },
+    });
+    const planted = await unsealed();
+    await anchorCheck();
+
+    await sealed();
+    expect(await sealedOf(planted)).toBe(false);
+    expect(startAlarm()).toHaveLength(1);
+  });
+
+  it('a database from before, its first start deleted by the owner before the pass: reads as born sealed, nothing sealed or recorded, and the notice check and the chain’s whole walk catch it', async () => {
+    await recordStart(app, keys, ids, { configHash: `sha256:${'0'.repeat(64)}`, release: 'r', gateRef: undefined });
+    await startedWithTime();
+    const waiting = await unsealed();
+    await database.as('admin').query('delete from platform_controls.audit_events where seq = 1');
+
+    await sealed();
+    // A stop, never a grant: the notice from before stays unsealed, never claimed, and no pass is recorded.
+    expect(await sealedOf(waiting)).toBe(false);
+    expect(await passes()).toEqual([]);
+    expect(capture.lines().filter(({ event }) => event === 'notification.legacy_born_sealed')).toHaveLength(1);
+
+    await createNoticeCheck({
+      list: () => Promise.resolve([]),
+      database: app,
+      keys,
+      ids,
+      clock: { now: () => new Date(AT.getTime() + 2 * 24 * 60 * 60_000) },
+      logger: testLogger(capture),
+    }).run();
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        check: 'notice',
+        reason: 'unsealed',
+        noticeId: waiting,
+      }),
+    );
+    // The gap the deletion leaves fails the platform chain's walk from its start (the daily walk's alarm).
+    const walk = await app.transaction().execute((tx) => createPlatformChain({ keys, ids }).verify(tx, undefined));
+    expect(walk.ok).toBe(false);
   });
 });

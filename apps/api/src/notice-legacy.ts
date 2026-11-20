@@ -165,7 +165,11 @@ export async function sealLegacyNotices(
       logger.error('audit.integrity_failed', { chain: 'platform', check: 'start_record' });
       return;
     }
-    if (birth === 'sealed') return;
+    if (birth === 'sealed') {
+      // As sealLegacyRows' `born_sealed`: nothing from before seals can be here, so nothing is sealed.
+      logger.info('notification.legacy_born_sealed');
+      return;
+    }
     const anchor = await anchors?.latest();
     if (anchors === undefined || anchor === undefined) {
       logger.warn('notification.legacy_seal_no_anchor');

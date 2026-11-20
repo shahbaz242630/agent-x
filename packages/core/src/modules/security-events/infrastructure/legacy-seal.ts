@@ -104,7 +104,8 @@ export async function databaseBirth(
   if (first === undefined || !platformEventSealed(keys, first)) return 'unsealed';
   const at = (JSON.parse(first.details) as Record<string, unknown>)[ROW_MACS_FROM];
   if (at === undefined) return 'legacy';
-  return typeof at === 'string' ? 'sealed' : 'unsealed';
+  // A time as start-record.ts writes it (an ISO string); anything else can't be believed.
+  return typeof at === 'string' && Number.isFinite(Date.parse(at)) ? 'sealed' : 'unsealed';
 }
 
 /** The earliest of the times given (`now` always among them). */
