@@ -83,8 +83,10 @@ export function createSecurityEventPages({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: SecurityEventsRefused });
   return {
     async page(orgId, asked, correlationId) {
+      // Each row's MAC checked as it is read (S206 V6).
+      const checked = { keys, logger: logger.child({ correlationId }) };
       const read = await work.answered(orgId, correlationId, async (tx, states) => {
-        const page = await heldSecurityEventsPage(tx, states, keys, orgId, asked);
+        const page = await heldSecurityEventsPage(tx, states, keys, orgId, asked, checked);
         if (page === 'tampered') throw new SecurityEventsRefused(503, 'INTEGRITY_FAILED');
         return { outcome: 'page' as const, ...page };
       });

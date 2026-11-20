@@ -50,22 +50,51 @@ export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK])
  */
 export const DISCARD_FORK = '--discard-fork';
 
+/**
+ * The named flag (AT9) that lets a plan end at the copy's head before the
+ * chain's anchor, where no copy reaches it: the copy's events put back, then a
+ * rebase gives up only the ones past it. Like the fork's, never assumed.
+ */
+export const SHORT_OF_ANCHOR = '--short-of-anchor';
+
+/** The named flags a chain's plan and its repair take, each given or not. */
+export interface ChainFlags {
+  readonly discardFork: boolean;
+  readonly shortOfAnchor: boolean;
+}
+
+/** How a usage line shows the named flags. */
+export const CHAIN_FLAG_WORDS = `[${DISCARD_FORK}] [${SHORT_OF_ANCHOR}]`;
+
+/** The named flags from the words that end a request: each at most once, in either order; undefined for anything else. */
+export function chainFlags(words: readonly string[]): ChainFlags | undefined {
+  const named: readonly string[] = [DISCARD_FORK, SHORT_OF_ANCHOR];
+  if (words.some((word, at) => !named.includes(word) || words.indexOf(word) !== at)) return undefined;
+  return { discardFork: words.includes(DISCARD_FORK), shortOfAnchor: words.includes(SHORT_OF_ANCHOR) };
+}
+
+/** The named flags as a request's last words: only those given. */
+export const chainFlagWords = (flags: Partial<ChainFlags>): string[] => [
+  ...(flags.discardFork === true ? [DISCARD_FORK] : []),
+  ...(flags.shortOfAnchor === true ? [SHORT_OF_ANCHOR] : []),
+];
+
 /** What a request file holds to plan an organisation's chain recovery from the drill's copy (4D2e E9, PL-29): only ever a file. */
-export const CHAIN_RECOVERY_USAGE = `chain-recovery-plan --org <organisation ID> --id <new plan ID> [${DISCARD_FORK}]`;
+export const CHAIN_RECOVERY_USAGE = `chain-recovery-plan --org <organisation ID> --id <new plan ID> ${CHAIN_FLAG_WORDS}`;
 
 /** Why a chain recovery plan can't be made without the anchors' store and the public keys its lines are checked with. */
 export const NO_ANCHORS_PROBLEM =
   "no store of the chains' anchors is set to check a plan against: AGENTX_AUDIT_ANCHORS_URL deployed, or AGENTX_AUDIT_ANCHORS_DIR in development and test, each with AGENTX_AUDIT_ANCHOR_PUBLIC_KEYS";
 
 /** The request for a chain recovery plan, as its file holds it. */
-export const chainRecoveryRequest = (orgId: string, id: string, discardFork = false): string =>
-  JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id, ...(discardFork ? [DISCARD_FORK] : [])]);
+export const chainRecoveryRequest = (orgId: string, id: string, flags: Partial<ChainFlags> = {}): string =>
+  JSON.stringify(['chain-recovery-plan', '--org', orgId, '--id', id, ...chainFlagWords(flags)]);
 
 /** The chain repair's command word (4D2e E10, PL-29): its own job, as the owner. */
 export const CHAIN_RESTORE = 'chain-restore';
 
 /** What the chain repair's request file holds: the plan the operator read, by its ID and digest, and the repair's own ID. */
-export const CHAIN_RESTORE_USAGE = `${CHAIN_RESTORE} --org <organisation ID> --plan <plan ID> --digest <the plan's digest, 64 hex> --id <new repair ID> [${DISCARD_FORK}]`;
+export const CHAIN_RESTORE_USAGE = `${CHAIN_RESTORE} --org <organisation ID> --plan <plan ID> --digest <the plan's digest, 64 hex> --id <new repair ID> ${CHAIN_FLAG_WORDS}`;
 
 /** The authority rows' recovery plan's command word (PL-29 follow-up): the chain repair's job, as the owner, read-only. */
 export const STATE_RECOVERY = 'state-recovery-plan';
@@ -108,7 +137,7 @@ export const PLAN_DIGEST_HEX = /^[0-9a-f]{64}$/;
 /** The request for a chain repair, as its file holds it. */
 export const chainRestoreRequest = (
   asked: { readonly orgId: string; readonly planId: string; readonly digest: string; readonly id: string },
-  discardFork = false,
+  flags: Partial<ChainFlags> = {},
 ): string =>
   JSON.stringify([
     CHAIN_RESTORE,
@@ -120,7 +149,7 @@ export const chainRestoreRequest = (
     asked.digest,
     '--id',
     asked.id,
-    ...(discardFork ? [DISCARD_FORK] : []),
+    ...chainFlagWords(flags),
   ]);
 
 /** What a request file holds to move a chain's anchor on after a sanctioned change to it (4D2e E11): only ever a file. */

@@ -1,3 +1,5 @@
+import type { Generated } from 'kysely';
+
 // The provider-events tables (db/migrations/0063_provider_events.sql), as Kysely sees them.
 
 export interface ProviderEventsTables {
@@ -23,5 +25,10 @@ export interface ProviderEventsTables {
     body_key_version: number;
     body_bytes: number;
     received_at: Date;
+    /** 0105 (S206 V6): its MAC with `session-mac`, and the key's version; null on a row from before. */
+    mac: Buffer | null;
+    mac_key_version: number | null;
+    /** 0105: a row from before it, which alone may have no MAC (and is never believed without one). */
+    before_macs: Generated<boolean>;
   };
 }

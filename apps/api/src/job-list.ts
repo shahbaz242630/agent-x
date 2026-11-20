@@ -76,6 +76,8 @@ import {
 import { eachDay, owedPasses, rotation } from './org-passes.ts';
 import { createPersonSealCheck, PERSON_SEAL_CHECK_EVERY_MS } from './person-seal-check.ts';
 import { createPersonSeal, PERSON_SEAL_EVERY_MS } from './person-seal.ts';
+import { createLegacySealJob, LEGACY_SEAL_EVERY_MS } from './legacy-seal-job.ts';
+import { createSecuritySeal, SECURITY_SEAL_EVERY_MS } from './security-seal.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
 import { createRailHealth } from './rail-health.ts';
 import { createRemittances } from './remittances.ts';
@@ -154,6 +156,8 @@ export function integrityPasses({
       ),
     ),
     sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
+    // The security events' seals, recorded and checked as the activity log's are checked: each every 6 hours (S206 V6).
+    securitySeal: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: SECURITY_SEAL_EVERY_MS, clock })),
     noticeCheck: owedPasses(rotation({ all, slots: NOTICE_CHECK_SLOTS, slotMs: NOTICE_CHECK_EVERY_MS, clock })),
     seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
     sweep: owedPasses(eachDay({ all, clock })),
@@ -641,6 +645,29 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // Each closed day of the person log sealed on the platform chain, and the seals checked again (6E1a, L8).
     job('person_seal', createPersonSeal(personLog), PERSON_SEAL_EVERY_MS, LONG_MS),
     job('person_seal_check', createPersonSealCheck(personLog), PERSON_SEAL_CHECK_EVERY_MS, LONG_MS),
+    // Each closed day of the security events sealed, the global table's on the platform chain and each organisation's
+    // on its own, and the seals checked again (S206 V6, R-15).
+    job(
+      'security_seal',
+      createSecuritySeal({
+        ...clocked,
+        ...passes.securitySeal,
+        retentionDays: config.securityEvents.retentionDays,
+      }),
+      SECURITY_SEAL_EVERY_MS,
+      LONG_MS,
+    ),
+    // The security rows from before 0105 given their MACs, once, where the anchor store is (S206 V6).
+    job(
+      'security_legacy_seal',
+      createLegacySealJob({
+        ...clocked,
+        anchors: anchorLog,
+        retentionDays: config.securityEvents.retentionDays,
+      }),
+      LEGACY_SEAL_EVERY_MS,
+      LONG_MS,
+    ),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).
     job(
       'org_work_rediscovery',

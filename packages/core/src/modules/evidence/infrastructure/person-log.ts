@@ -99,13 +99,20 @@ export async function newestPersonSeal(
   return { day: typeof day === 'string' ? day : null };
 }
 
-/** A page of the person log's seals, newest first, before `beforeSeq` when named; `next` the seq the next page starts before. */
+/**
+ * A page of the person log's seals (or another daily seal's, by its `action`), newest first, before `beforeSeq` when
+ * named; `next` the seq the next page starts before.
+ */
 export async function personSealsPage(
   tx: PlatformTx,
   keys: KeyProvider,
-  { beforeSeq, limit }: { readonly beforeSeq?: bigint | undefined; readonly limit: number },
+  {
+    beforeSeq,
+    limit,
+    action = PERSON_SEALED,
+  }: { readonly beforeSeq?: bigint | undefined; readonly limit: number; readonly action?: string },
 ): Promise<{ readonly events: readonly PersonLogEvent[]; readonly next: bigint | null } | 'unsealed'> {
-  let query = platformEventsSigned(tx).where('e.action', '=', PERSON_SEALED);
+  let query = platformEventsSigned(tx).where('e.action', '=', action);
   if (beforeSeq !== undefined) query = query.where('e.seq', '<', beforeSeq);
   // One more than the page, to know whether another follows.
   const rows = await query

@@ -229,8 +229,11 @@ const SPEND_REQUEST_LISTED = z
       .object({ id: z.uuid(), name: z.string() })
       .describe('The AI agent that asked: its ID, and the name the team gave it.'),
     supplier: z
-      .object({ id: z.uuid(), name: z.string() })
-      .describe('The supplier to pay: its ID, and the name its current verified details give it.'),
+      .object({ id: z.uuid(), name: z.string().nullable() })
+      .describe(
+        'The supplier to pay: its ID, and the name its current verified details give it; null when the organisation ' +
+          'has no such supplier (the agent named one it doesn’t have, so the request was denied).',
+      ),
     fundingSourceId: z.uuid(),
     mandateId: z
       .uuid()

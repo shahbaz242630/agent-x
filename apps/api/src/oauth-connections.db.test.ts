@@ -2520,7 +2520,7 @@ describe(`device flow (6E3c, RFC 8628; Postgres ${server.version})`, () => {
     });
   });
 
-  describe('SEC-OAUTH-13 (S205 fix round): a claimed device flow’s device code rewritten by the database’s owner', () => {
+  describe('SEC-OAUTH-15 (S205 fix round): a claimed device flow’s device code rewritten by the database’s owner', () => {
     /** A device code of the owner's own making, written over the person's flow: the owner then polls with it. */
     const rewritten = async (flowId: string) => {
       const ownDeviceCode = `axd_${randomBytes(32).toString('base64url')}`;
@@ -3058,7 +3058,7 @@ describe(`6E3c review: a document's name never vouches for a device, and its fet
   });
 });
 
-describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a connection's tokens by writing a flow (Postgres ${server.version})`, () => {
+describe(`SEC-OAUTH-15 (S205 tamper pass): the database's owner can't grant a connection's tokens by writing a flow (Postgres ${server.version})`, () => {
   // The owner holds none of the app's keys, but owns oauth.flows (global, no row security): it can write any row.
   const ELSEWHERE = 'https://attacker.example/cb';
   const OWN_VERIFIER = 'w'.repeat(43);
@@ -3076,13 +3076,13 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
 
   /**
    * What the owner plants as the decision's seal, and what it raises: a MAC made up, the integrity alarm; one naming a
-   * pepper version not held, our fault's error; none at all, as a flow decided before 0101 (or by the release before,
-   * while this one rolls out) has, a warning. Each refused all the same.
+   * pepper version not held, our fault's error; none at all, the alarm too (S206 AT11: every flow is sealed since
+   * 0101). Each refused all the same.
    */
   const SEALS = [
     ['a seal made up', { mac: 'e'.repeat(64), version: 1 }, 'audit.integrity_failed'],
     ['a seal of a pepper version not held', { mac: 'e'.repeat(64), version: 9 }, 'oauth.seal_key_not_held'],
-    ['no seal', null, 'oauth.decision_unsealed'],
+    ['no seal', null, 'audit.integrity_failed'],
   ] as const;
 
   /** The one line a planted flow raised: the alarm for the connection it named, or its own. */
@@ -3304,7 +3304,7 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
     alarmed(keyId);
   });
 
-  it('SEC-OAUTH-15 a flow decided by the release before (sealed v1) is refused invalid_grant, with a warning, never the alarm', async () => {
+  it('SEC-OAUTH-15 a flow sealed v1, which doesn’t bind the state, is refused invalid_grant, with the alarm', async () => {
     const { flowId, code, keyId } = await decided();
     const flow = await flowById(app, flowId);
     if (flow?.kind !== 'code' || flow.decidedAt === null || flow.codeEndsAt === null) throw new Error('decided');
@@ -3333,8 +3333,7 @@ describe(`SEC-OAUTH-13 (S205 tamper pass): the database's owner can't grant a co
       keyVersion,
     ]);
     expect(await exchange(code)).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
-    expect(lines('audit.integrity_failed')).toEqual([]);
-    expect(lines('oauth.flow_seal_superseded')).toEqual([expect.objectContaining({ level: 'warn', flowId, keyId })]);
+    alarmed(keyId);
   });
 });
 

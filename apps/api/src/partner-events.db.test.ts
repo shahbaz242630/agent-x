@@ -11,6 +11,7 @@
 // from an address, and alerted (-01).
 import { createHash } from 'node:crypto';
 
+import { v7Floor } from '@agentx/core/modules/activity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { createProviderEvents } from '@agentx/core/modules/provider-events';
@@ -81,7 +82,14 @@ const { ready, paymentOf } = handoffWorld({
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 const STEP = 60_000;
 
-const events = () => createProviderEvents({ keys, ids, clock, retentionDays: 30 });
+const events = () =>
+  createProviderEvents({
+    keys,
+    ids,
+    clock,
+    logger: testLogger(capture),
+    retentionDays: 30,
+  });
 
 const handoffOf = (w: World) =>
   createHandoff({
@@ -938,6 +946,9 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
   describe('the store’s caps, for every process together', () => {
     const body = Buffer.from('{}');
     const keep = (ip: string | undefined) => events().keepRefused(app, { reason: 'signature', ip, body });
+    /** The owner's first step: 0105's rule that every row written carries a MAC dropped, to plant one without. */
+    const DROP_EVIDENCE_RULE =
+      'alter table security.partner_event_evidence drop constraint if exists evidence_mac_required';
 
     it('keeps the first 5 an hour from one network, the first of them said first, the rest capped', async () => {
       const answers = [];
@@ -971,6 +982,47 @@ describe('what the front door refuses or can’t place (SEC-PTR-01, -05, -06)', 
       expect(answers.filter((answer) => answer !== 'capped')).toHaveLength(5);
       expect(answers.filter((answer) => answer === 'first')).toHaveLength(1);
       expect(await kept()).toHaveLength(5);
+    });
+
+    it('counts no row the database’s owner planted or edited: dated ahead, with no MAC, or changed (S206 V6)', async () => {
+      const owner = database.as('admin');
+      await owner.query(DROP_EVIDENCE_RULE);
+      const plant = (receivedAt: Date) =>
+        owner.query(
+          `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+           values ($1, 'signature', '203.0.113.7', $2, 1, 2, $3)`,
+          [ids.next(), Buffer.alloc(40, 1), receivedAt],
+        );
+      // Ahead of now (an hour's cap for good, never swept), and inside the hour with no MAC.
+      for (let n = 0; n < 6; n += 1) await plant(new Date('2200-01-01T00:00:00.000Z'));
+      for (let n = 0; n < 6; n += 1) await plant(clock.now());
+
+      // Neither caps the network, nor quiets its first alert.
+      expect(await keep('203.0.113.7')).toBe('first');
+      // A kept row edited past the app counts for nothing either.
+      await owner.query("update security.partner_event_evidence set reason = 'stale' where mac is not null");
+      expect(await keep('203.0.113.7')).toBe('first');
+      const alarms = capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed' && line.check === 'partner_event_evidence');
+      // One line a message, the planted rows counted in it: the six inside the hour, then the edited one too.
+      expect(alarms.map(({ rows }) => rows)).toEqual([6, 7]);
+    });
+
+    it('counts no row without a MAC however old its ID, received now: the alarm instead', async () => {
+      const lastYear = `${v7Floor(clock.now().getTime() - 365 * 86_400_000).slice(0, 14)}7000-8000-00000000abcd`;
+      await database.as('admin').query(DROP_EVIDENCE_RULE);
+      await database.as('admin').query(
+        `insert into security.partner_event_evidence (id, reason, ip, body_ciphertext, body_key_version, body_bytes, received_at)
+         values ($1, 'signature', '203.0.113.7', $2, 1, 2, $3)`,
+        [lastYear, Buffer.alloc(40, 1), clock.now()],
+      );
+
+      expect(await keep('203.0.113.7')).toBe('first');
+      const alarms = capture
+        .lines()
+        .filter((line) => line.event === 'audit.integrity_failed' && line.check === 'partner_event_evidence');
+      expect(alarms.map(({ rowId }) => rowId)).toEqual([lastYear]);
     });
 
     it('keeps again an hour on', async () => {

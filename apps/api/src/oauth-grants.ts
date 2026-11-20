@@ -41,7 +41,7 @@
 //   transaction), and a poll after that is `invalid_grant`. A device code
 //   never travels through a browser, so a second use revokes nothing.
 // - Either kind, before anything else is believed of it (tamper pass S205,
-//   SEC-OAUTH-13): the flow held must be the one its organisation's
+//   SEC-OAUTH-15): the flow held must be the one its organisation's
 //   transaction was opened for, and its decision's seal its own
 //   (oauth/flow-seals.ts), made with a key the database never holds. A
 //   flow planted or changed in the database is refused as any other code is,
@@ -392,9 +392,9 @@ export function createOauthGrants({
 
   /**
    * Why the flow held for its tokens is not one this server decided for the organisation and key the transaction was
-   * opened for, if it isn't (S205): a seal not its own raises the integrity alarm for that connection (the hold
-   * follows once the transaction ends); a pepper version no longer held is ours to fix, an error; a flow with no seal,
-   * decided before 0101 or by the release before while this one rolls out, or sealed v1 (S206), a warning.
+   * opened for, if it isn't (S205): a seal not its own, or none at all, raises the integrity alarm for that connection
+   * (the hold follows once the transaction ends), a v1 seal (S206) among them; a pepper version no longer held is ours
+   * to fix, an error.
    */
   const unsealed = (
     flow: AnyFlowRead,
@@ -406,10 +406,6 @@ export function createOauthGrants({
     if (judged === 'sound') return undefined;
     const log = logger.child({ correlationId: caller.correlationId, orgId });
     if (judged === 'tampered') states.mismatch(CONNECTIONS.subject, { orgId, id: keyId });
-    // Never the alarm: the release before this one decides flows unsealed until it is swapped out (0101).
-    else if (judged === 'unsealed') log.warn('oauth.decision_unsealed', { flowId: flow.id, keyId });
-    // Sealed v1 by the release before this one (S206), which didn't bind its `state`: refused, but no alarm.
-    else if (judged === 'superseded') log.warn('oauth.flow_seal_superseded', { flowId: flow.id, keyId });
     else log.error('oauth.seal_key_not_held', { flowId: flow.id, keyId, keyVersion: flow.seal?.keyVersion });
     return `decision_${judged}`;
   };

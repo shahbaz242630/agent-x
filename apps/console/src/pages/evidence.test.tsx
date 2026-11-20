@@ -307,6 +307,59 @@ describe('a request’s evidence page (6C2, 6C2c)', () => {
     expect(posts()).toHaveLength(0);
   });
 
+  it('S206 V8 shows the agent’s words as text, never markup, each isolated so a direction override can’t reorder the page', async () => {
+    // Built here, so no file holds a raw control: a right-to-left override, a right-to-left isolate, a left-to-right one.
+    const [override, isolate, leftIsolate] = [0x20_2e, 0x20_67, 0x20_66].map((point) => String.fromCodePoint(point));
+    const written = {
+      purpose: `<img src=x onerror="alert(1)">Toner ${override}gnp.exe`,
+      orderReference: `INV-${isolate}<script>alert(2)</script>`,
+      idempotencyKey: `key-${leftIsolate}<b>bold</b>`,
+    };
+    const evidence = handedOff();
+    signedIn();
+    answer(`GET ${READ}`, {
+      status: 200,
+      body: { evidence: { ...evidence, spendRequest: { ...evidence.spendRequest, ...written } } },
+    });
+    open(`/approvals/${ID}/evidence`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    for (const text of Object.values(written)) {
+      const shown = screen.getByText(text);
+      expect(shown.tagName).toBe('BDI');
+      expect(shown.textContent).toBe(text);
+      expect(shown.children).toHaveLength(0);
+      expect(shown.closest('dl')?.querySelector('img, script, b')).toBeNull();
+    }
+  });
+
+  it('S206 V8 shows a request denied for a supplier the organisation doesn’t have: not one of yours, no details', async () => {
+    const evidence = handedOff();
+    signedIn();
+    answer(`GET ${READ}`, {
+      status: 200,
+      body: { evidence: { ...evidence, supplier: { id: evidence.supplier.id, name: null, version: null } } },
+    });
+    open(`/approvals/${ID}/evidence`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    expect(fact('Supplier and bank account', 'Supplier')).toBe('Not one of your suppliers');
+    expect(fact('Supplier and bank account', 'Details decided under')).toBe('None');
+    expect(fact('Supplier and bank account', 'Those details verified')).toBe('None');
+  });
+
+  it('S206 V8 shows a request denied for a bank account the organisation doesn’t have: not one of yours', async () => {
+    const evidence = handedOff();
+    signedIn();
+    const fundingSource = { id: evidence.fundingSource.id, holderName: null, hint: null, partner: null };
+    answer(`GET ${READ}`, { status: 200, body: { evidence: { ...evidence, fundingSource } } });
+    open(`/approvals/${ID}/evidence`);
+
+    expect(await screen.findByRole('heading', { name: 'AED 2,500.00' })).toBeDefined();
+    expect(fact('Supplier and bank account', 'Paid from')).toBe('Not one of your bank accounts');
+    expect(fact('Supplier and bank account', 'Linked through')).toBe('None');
+  });
+
   it('reads it again, and still downloads nothing, when the page remounts after the shell failed and came back', async () => {
     signedIn();
     answer(`GET ${READ}`, { status: 200, body: { evidence: handedOff() } });

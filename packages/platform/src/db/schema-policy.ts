@@ -325,6 +325,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'created_at',
         'ends_at',
         'step_up_challenge_id',
+        // The network a sign-in came from, counted against its cap (S206 V8, 0106); never in a log line.
+        'network_key',
       ],
       // Added, and taken once (deleted as it is read); never changed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
@@ -402,17 +404,44 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'security.events': {
       reason:
         'Failed sign-ins and rate-limit hits with the client IP (ADR-005 §6, ADR-011 §7): they happen before any organisation is known, and the address is kept in-country, here alone',
-      columns: ['id', 'kind', 'reason', 'ip', 'user_id', 'window_start', 'count', 'created_at'],
+      columns: [
+        'id',
+        'kind',
+        'reason',
+        'ip',
+        'user_id',
+        'window_start',
+        'count',
+        'created_at',
+        'mac',
+        'mac_key_version',
+        'before_macs',
+      ],
       // Added, read, and deleted once past the retention the config names;
-      // never changed, so a count once written stands.
+      // never changed, so a count once written stands, but for a row from
+      // before 0105 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'security.partner_event_evidence': {
       reason:
         "The partner's refused messages kept as security evidence (0063, SEC-PTR-01): refused before any organisation is known, the body encrypted, the address kept in-country, here alone",
-      columns: ['id', 'reason', 'ip', 'body_ciphertext', 'body_key_version', 'body_bytes', 'received_at'],
-      // Added (the first few an hour per address), read, and deleted once past the security events' retention.
+      columns: [
+        'id',
+        'reason',
+        'ip',
+        'body_ciphertext',
+        'body_key_version',
+        'body_bytes',
+        'received_at',
+        'mac',
+        'mac_key_version',
+        'before_macs',
+      ],
+      // Added (the first few an hour per address), read, and deleted once past the security events' retention; a row
+      // from before 0105 given its MAC, once, at the first start on it (S206 V6).
       appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['mac', 'mac_key_version'],
     },
     'provider_events.inbox': {
       reason:

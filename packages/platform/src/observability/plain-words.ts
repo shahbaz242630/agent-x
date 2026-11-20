@@ -406,6 +406,16 @@ export const PLAIN_WORDS = {
     broke: 'The person was not signed in and was asked to try again shortly.',
     next: 'It usually clears once the login service wakes up. If it keeps happening, check the login service is up.',
   },
+  'auth.sign_ins_capped': {
+    happened: 'So many sign-ins were under way at once that Agent X let in only networks with few under way.',
+    broke: 'People on a busy network were asked to try again shortly; everyone else signs in as usual.',
+    next: 'Look for many addresses starting sign-ins over and over. They end within ten minutes.',
+  },
+  'auth.sign_ins_network_capped': {
+    happened: 'One address or network started more sign-ins at once than its share.',
+    broke: 'Only people on that network were asked to try again shortly; everyone else signs in as usual.',
+    next: 'Nothing if rare: an office can share an address. If it goes on, block it at the front door.',
+  },
   'auth.step_up_failed': {
     happened: "A person's check of who they are, before a sensitive change, failed.",
     broke: 'The change was refused; they stay signed in, and it was noted as a security event.',
@@ -486,21 +496,6 @@ export const PLAIN_WORDS = {
     happened: "An MCP app's sign-in was turned away: the key version it was sealed with is no longer held.",
     broke: 'That app got no tokens; the person must connect it again.',
     next: 'It stops by itself 15 minutes after a key rotation. If not, restore the retired key version.',
-  },
-  'oauth.decision_unsealed': {
-    happened: "An MCP app's sign-in was turned away: the person's consent it named carried no seal from this server.",
-    broke: 'That app got no tokens; the person must connect it again.',
-    next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
-  },
-  'oauth.flow_unsealed': {
-    happened: "An MCP app's sign-in under way carried no seal from this server, so it was not shown.",
-    broke: 'The person was told it was not found; they must connect the app again.',
-    next: 'Expected for a few minutes during the release that added the seals. At any other time, treat it as possible tampering with the database.',
-  },
-  'oauth.flow_seal_superseded': {
-    happened: "An MCP app's sign-in was turned away: it carried the older seal of the release before this one.",
-    broke: 'That app got no tokens; the person must connect it again.',
-    next: 'Expected for a few minutes after a release. At any other time, treat it as possible tampering with the database.',
   },
   'oauth.registrations_capped': {
     happened: 'MCP apps registered more times today than Agent X allows in all, so this one was refused.',
@@ -1199,6 +1194,12 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was changed, and the organisation stays on hold.',
     next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
   },
+  'operator.chain_restored_short_of_anchor': {
+    happened:
+      "An organisation's audit chain was repaired from a copy holding only some lost events; it ends before its last trusted point.",
+    broke: 'Later events are still missing: the anchor check keeps alarming and the organisation stays on hold.',
+    next: "Once the rest is accepted as lost, run the chain's rebase (playbook H).",
+  },
   'operator.state_recovery_refused': {
     happened: "A recovery plan for an organisation's tampered records was refused.",
     broke:
@@ -1340,6 +1341,32 @@ export const PLAIN_WORDS = {
     happened: 'Security counts could not be saved to the database.',
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
+  },
+  'security.legacy_seal_failed': {
+    happened: 'The API could not seal the security records from before this release.',
+    broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
+    next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
+  },
+  'security.legacy_seal_unanchored': {
+    happened: 'A record of the older security records’ sealing could not be anchored at once.',
+    broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
+    next: 'Nothing to do if the next anchor check succeeds. If anchoring keeps failing, check the anchor store.',
+  },
+  'security_event_seal.failed': {
+    happened: 'The daily seal of the security records could not be made or checked this run.',
+    broke: 'A change to them is not caught until the next run, 30 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database and the audit chains.',
+  },
+  'security_event_seal.moved': {
+    happened: 'A day of the security records changed while it was being sealed.',
+    broke:
+      'That day and every later one stay unsealed. A closed day never changes: a server clock is far off, or this is tampering.',
+    next: "Check the servers' clocks and the database for changes made outside the app.",
+  },
+  'security_event_seal.run_failed': {
+    happened: 'A run of the security records seal stopped early on an error.',
+    broke: "Organisations' security records are not sealed or checked until the next run, 30 minutes later.",
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
   },
   'spend_request.organisation_busy': {
     happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",

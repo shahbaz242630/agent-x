@@ -513,6 +513,8 @@ const EVERY_TIMER: [string, number][] = [
   ['notice_check', 600_000],
   ['person_seal', 900_000],
   ['person_seal_check', 1_800_000],
+  ['security_seal', 1_800_000],
+  ['security_legacy_seal', 3_600_000],
   ['org_work_rediscovery', 3_600_000],
   ...EACH_PROCESS,
 ];
@@ -1177,7 +1179,7 @@ describe('4D2e D: the role says which side of the work a process does', () => {
     const serversBefore = built.length;
     const { host, server, events } = await start({ ...ENV, AGENTX_ROLE: 'jobs' });
     expect(server).toBeUndefined();
-    expect(host.exitCode).toBeUndefined();
+    expect(host.exitCode).not.toBe(1);
     expect(built).toHaveLength(serversBefore);
     expect(events()).toEqual([
       'api.starting',

@@ -114,19 +114,22 @@ describe('the integrity passes as the jobs side wires them, each bound (4D2e D11
     expect(await listedOnce(passes.holdings)).toEqual(ALL);
   });
 
-  it('the seal check: each organisation once in 6 hours, by half-hour slots', async () => {
-    const { clock, passes } = passesAt('2026-11-04T00:00:00.000Z');
-    expect(await listedOnce(passes.sealCheck)).toEqual(ALL);
-    const seen: string[] = [];
-    for (let run = 0; run < 12; run += 1) {
-      clock.advanceBy(30 * MINUTE);
-      seen.push(...(await listedOnce(passes.sealCheck)));
-    }
-    expect(seen.toSorted()).toEqual(ALL.toSorted());
-    // A slot is half an hour: a run a moment short of the next lists none.
-    clock.advanceBy(30 * MINUTE - 1);
-    expect(await listedOnce(passes.sealCheck)).toEqual([]);
-  });
+  it.each(['sealCheck', 'securitySeal'] as const)(
+    'the %s: each organisation once in 6 hours, by half-hour slots',
+    async (pass) => {
+      const { clock, passes } = passesAt('2026-11-04T00:00:00.000Z');
+      expect(await listedOnce(passes[pass])).toEqual(ALL);
+      const seen: string[] = [];
+      for (let run = 0; run < 12; run += 1) {
+        clock.advanceBy(30 * MINUTE);
+        seen.push(...(await listedOnce(passes[pass])));
+      }
+      expect(seen.toSorted()).toEqual(ALL.toSorted());
+      // A slot is half an hour: a run a moment short of the next lists none.
+      clock.advanceBy(30 * MINUTE - 1);
+      expect(await listedOnce(passes[pass])).toEqual([]);
+    },
+  );
 
   it('the activity seal: every organisation once a UTC day, once yesterday can be sealed, at 00:15', async () => {
     const { clock, passes } = passesAt('2026-11-04T00:10:00.000Z');

@@ -1055,7 +1055,7 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     const typed = await run(['chain-recovery-plan', '--org', uuidV7Ids.next(), '--id', uuidV7Ids.next()]);
     expect(typed.line('operator.refused')).toMatchObject({
       problems: [
-        'chain-recovery-plan runs only from a request file: chain-recovery-plan --org <organisation ID> --id <new plan ID> [--discard-fork]',
+        'chain-recovery-plan runs only from a request file: chain-recovery-plan --org <organisation ID> --id <new plan ID> [--discard-fork] [--short-of-anchor]',
       ],
     });
     const asked = path.join(folder, 'badly-asked');
@@ -1069,7 +1069,7 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     writeFileSync(asked, JSON.stringify(['chain-recovery-plan', '--org', uuidV7Ids.next()]));
     expect((await run(['--request', asked])).line('operator.refused')).toMatchObject({
       problems: [
-        'the request file holds chain-recovery-plan --org <organisation ID> --id <new plan ID> [--discard-fork] as a JSON list, and nothing else',
+        'the request file holds chain-recovery-plan --org <organisation ID> --id <new plan ID> [--discard-fork] [--short-of-anchor] as a JSON list, and nothing else',
       ],
     });
     // A flag after its words: the named one alone.
@@ -1086,7 +1086,7 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
     const { orgId } = await organisation();
     const planId = uuidV7Ids.next();
     const asked = path.join(folder, `plan-${planId}`);
-    writeFileSync(asked, chainRecoveryRequest(orgId, planId, true));
+    writeFileSync(asked, chainRecoveryRequest(orgId, planId, { discardFork: true }));
     const { code, line } = await run(['--request', asked], recoveryEnv());
     expect(code).toBe(0);
     const [summary] = planLines(orgId, planId);
@@ -1097,6 +1097,28 @@ describe('4D2e E9 the chain recovery plan, run as the job runs it', () => {
       digest: summary?.digest,
     });
     expect(summary?.digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('plans short of the anchor with the named flag alone, and says where it ends (AT9)', async () => {
+    const { orgId, head } = await organisation();
+    await anchored(orgId, { ...head, seq: head.seq + 3n });
+    const planId = uuidV7Ids.next();
+    const asked = path.join(folder, `plan-${planId}`);
+    writeFileSync(asked, chainRecoveryRequest(orgId, planId, { shortOfAnchor: true }));
+    const { code, line } = await run(['--request', asked], recoveryEnv());
+    expect(code).toBe(0);
+    // The copy is the live server here: nothing to put back, the plan ending at its head, short of the anchor.
+    expect(line('operator.chain_recovery_planned')).toMatchObject({
+      planId,
+      discardFork: false,
+      shortOfAnchor: true,
+      putBack: 0,
+      endsAt: String(head.seq),
+      endsShortOf: String(head.seq + 3n),
+    });
+    expect(planLines(orgId, planId)).toEqual([
+      expect.objectContaining({ k: 'plan', ok: true, endsShortOf: String(head.seq + 3n) }),
+    ]);
   });
 });
 

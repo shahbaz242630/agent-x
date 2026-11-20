@@ -26,6 +26,10 @@
 // - At either, a login service that can't be reached (on staging, often one
 //   still waking from zero) is SIGN_IN_UNAVAILABLE, 503 with Retry-After: a
 //   failure on our side, so no security event, never the 500 it was (S47).
+//   So is a sign-in started while too many are under way (S206 V8,
+//   login-flows.ts): every network's together, or the caller's network's. No
+//   flow is kept, and the cap's warning is said at most once a minute, as the
+//   OAuth flows' caps are (capWarning).
 // - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
 //   a step-up for a challenge of the signed-in person's own session: a flow
 //   cookie, and off to the login service to sign in again (`prompt=login`).
@@ -57,13 +61,17 @@
 // must neither start a flow nor use one up.
 import {
   type LoginSessions,
+  MOST_OPEN_SIGN_INS,
+  MOST_OPEN_SIGN_INS_A_NETWORK,
   RETURN_PATH,
   type SignIn,
+  SignInBusy,
   SignInFailed,
   type SignInFailure,
   StepUpFailed,
   type Subject,
 } from '@agentx/core/modules/identity';
+import { type Clock, systemClock } from '@agentx/core/shared-kernel';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -71,6 +79,8 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { capWarning } from './oauth-authorizing.ts';
+import { clientSite } from './rate-limit.ts';
 import type { SecurityEventSink } from './security-recorder.ts';
 
 export const FLOW_COOKIE = '__Host-agentx-flow';
@@ -92,6 +102,8 @@ export interface SignInRoutesOptions {
   readonly logger: Logger;
   /** Where each failed sign-in is noted. */
   readonly securityEvents: SecurityEventSink;
+  /** When a cap's warning was last said (S206 V8); the system's clock when not given. */
+  readonly clock?: Clock;
 }
 
 /** The attributes both cookies share: a `__Host-` cookie must be Secure, on Path=/, with no Domain. */
@@ -215,9 +227,14 @@ const UNAVAILABLE_RETRY_SECONDS = 15;
 
 export function registerSignIn(
   app: FastifyInstance,
-  { signIn, sessionSeconds, loginSessions, logger, securityEvents }: SignInRoutesOptions,
+  { signIn, sessionSeconds, loginSessions, logger, securityEvents, clock = systemClock }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+  // S206 V8: each cap's refusals said at most once a minute, with how many, so a flood is a line a minute.
+  const capped = {
+    full: capWarning(logger, clock, 'auth.sign_ins_capped', { most: MOST_OPEN_SIGN_INS }),
+    network_full: capWarning(logger, clock, 'auth.sign_ins_network_capped', { most: MOST_OPEN_SIGN_INS_A_NETWORK }),
+  };
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
   const failed = (request: FastifyRequest, reply: FastifyReply, failure: SignInFailure, reason?: string) => {
     logger
@@ -280,10 +297,19 @@ export function registerSignIn(
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
     let begun;
     try {
-      begun = await signIn.begin(request.query.returnTo);
+      begun = await signIn.begin(request.query.returnTo, clientSite(request.ip));
     } catch (thrown) {
       if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
         return unavailable(request, reply, thrown.message);
+      }
+      if (thrown instanceof SignInBusy) {
+        capped[thrown.cap]();
+        return sendErrorBody(
+          reply.header('retry-after', String(UNAVAILABLE_RETRY_SECONDS)),
+          503,
+          'SIGN_IN_UNAVAILABLE',
+          request.id,
+        );
       }
       throw thrown;
     }
