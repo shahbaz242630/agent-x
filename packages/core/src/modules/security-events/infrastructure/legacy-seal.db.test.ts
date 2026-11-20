@@ -24,6 +24,7 @@ import { DAY_MS } from '../../../shared-kernel/index.ts';
 import {
   ALL_SEALED,
   type ChainPlace,
+  databaseBirth,
   legacyManifest,
   legacyRowsAt,
   ROW_MACS_FROM,
@@ -740,5 +741,137 @@ describe('SEC-DB-18 the security rows from before 0105 sealed at start (S206 V6)
     expect(await seal()).toBe('unsealed');
     expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+});
+
+// R-15, S207: a database whose first start was already 0105's release's (production's) holds no row from before 0105.
+// Every row marked so is the owner's: never sealed as genuine, never excused, whatever dates it says.
+describe('SEC-DB-18 a database born sealed: no pass, no excuse (R-15, S207)', () => {
+  const told = (now = STARTS) => app.transaction().execute((tx) => legacyRowsAt(tx, keys, now));
+
+  /** The platform chain begun again with no start: this database's first start is the next recorded. */
+  const freshChain = () => owner().query('truncate platform_controls.audit_events, platform_controls.audit_head');
+
+  /** A first start as boot records it from 0105's release on: with its time, ROW_MACS_FROM. */
+  const bornSealed = async () => {
+    await freshChain();
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: STARTS.toISOString() });
+  };
+
+  it('the owner plants marked rows with no MAC, dated in scope: nothing sealed, nothing recorded, none excused', async () => {
+    await bornSealed();
+    await legacyRows();
+
+    expect(await seal()).toBe('born_sealed');
+    expect(await unsealed()).toBe('5');
+    expect(await records()).toEqual([]);
+    expect(anchoredAt).toEqual([]);
+    expect(alarms()).toEqual([]);
+    // The day seal and the admins' page excuse none: each planted row is the alarm as they meet it.
+    expect(await told()).toEqual({ excusedBefore: null });
+    // A later start, whatever it records, changes nothing: the first one decides.
+    await recorded('platform.started', { release: 'r-before' });
+    expect(await seal()).toBe('born_sealed');
+    expect(await told()).toEqual({ excusedBefore: null });
+  });
+
+  it('a genuine row, its MAC stripped and the row marked and edited by the owner: never given a MAC again', async () => {
+    await bornSealed();
+    const id = ids.next();
+    const written = new Date(AT.getTime() - DAY_MS);
+    const { mac, mac_key_version: version } = eventMac(keys, {
+      id,
+      orgId: null,
+      kind: 'sign_in_failed',
+      reason: 'state_mismatch',
+      ip: null,
+      userId: null,
+      agentId: null,
+      windowStart: written,
+      count: 1,
+      createdAt: written,
+    });
+    await owner().query(
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, mac, mac_key_version)
+       values ($1, 'sign_in_failed', 'state_mismatch', null, null, $2, 1, $2, $3, $4)`,
+      [id, written, mac, version],
+    );
+    await ownerDropsRule();
+    await owner().query(
+      'update security.events set before_macs = true, mac = null, mac_key_version = null, count = 99 where id = $1',
+      [id],
+    );
+
+    expect(await seal()).toBe('born_sealed');
+    expect(await unsealed()).toBe('1');
+  });
+
+  it('no start on the chain at all (each start records its own before any pass, so they were deleted): the alarm, nothing sealed, none excused', async () => {
+    await freshChain();
+    await recorded('notice.legacy_sealed', { notices: 0 });
+    await legacyRows();
+
+    expect(await told()).toBe('unsealed');
+    expect(await seal()).toBe('unsealed');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('the first start’s time removed by the owner, to pass for a database from before: can’t be believed, the alarm', async () => {
+    await bornSealed();
+    await legacyRows();
+    await owner().query(`update platform_controls.audit_events set details = '{"release":"r"}' where seq = 1`);
+
+    // Read by its own MAC, never as the edited row says: not a database from before.
+    expect(await app.transaction().execute((tx) => databaseBirth(tx, keys))).toBe('unsealed');
+    expect(await told()).toBe('unsealed');
+    expect(await seal()).toBe('unsealed');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('a first start whose time isn’t a time: can’t be believed, the alarm', async () => {
+    await freshChain();
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: 7 });
+    await legacyRows();
+
+    expect(await seal()).toBe('unsealed');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('a first start whose time is a string but no time: can’t be believed, the alarm', async () => {
+    await freshChain();
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: 'not a time' });
+    await legacyRows();
+
+    expect(await app.transaction().execute((tx) => databaseBirth(tx, keys))).toBe('unsealed');
+    expect(await seal()).toBe('unsealed');
+    expect(await unsealed()).toBe('5');
+    expect(alarms()).toEqual(['seal_record_unsealed']);
+  });
+
+  it('a database from before, its first start deleted by the owner before any sealing: reads as born sealed, so nothing is sealed or excused, and the chain’s whole walk and the day seal catch it', async () => {
+    // The legacy first start is seq 1 (beforeEach); a later start records its time.
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: STARTS.toISOString() });
+    await legacyRows();
+    await owner().query('delete from platform_controls.audit_events where seq = 1');
+
+    // A stop, never a grant: no row given a MAC, no record of a sealing, no row excused (each the day seal's `mac` alarm).
+    expect(await seal()).toBe('born_sealed');
+    expect(await unsealed()).toBe('5');
+    expect(await records()).toEqual([]);
+    expect(await told()).toEqual({ excusedBefore: null });
+    // The gap the deletion leaves fails the platform chain's walk from its start (the daily walk's alarm).
+    const walk = await app.transaction().execute((tx) => createPlatformChain({ keys, ids }).verify(tx, undefined));
+    expect(walk.ok).toBe(false);
+  });
+
+  it('a database from before, its first start with no time and a later one with it: sealed once, as staging’s was', async () => {
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: STARTS.toISOString() });
+    await legacyRows();
+
+    expect(await seal()).toBe('sealed');
+    expect(await unsealed()).toBe('0');
   });
 });
