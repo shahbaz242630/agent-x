@@ -396,6 +396,28 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(alarms()).toEqual(['seal_record_unsealed']);
   });
 
+  it('a start’s time removed from its record by the owner, to pass for a start from before: can’t be believed, at once', async () => {
+    await recorded('platform.started', { release: 'r-before' });
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: AT.toISOString() });
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: STARTS.toISOString() });
+    const told = () => app.transaction().execute((tx) => legacyRowsAt(tx, keys, STARTS));
+    expect(await told()).toEqual({ excusedBefore: AT });
+
+    await owner().query(
+      `update platform_controls.audit_events set details = '{"release":"r"}'
+       where action = 'platform.started' and details like $1`,
+      [`%${AT.toISOString()}%`],
+    );
+    expect(await told()).toBe('unsealed');
+  });
+
+  it('a start’s time that isn’t a time is never read as one', async () => {
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: 7 });
+    await recorded('platform.started', { release: 'r', [ROW_MACS_FROM]: STARTS.toISOString() });
+
+    expect(await app.transaction().execute((tx) => legacyRowsAt(tx, keys, STARTS))).toBe('unsealed');
+  });
+
   it('leaves a row within two days of the retention to the sweep, unsealed (never believed): it would go before a start took a sealing up again', async () => {
     await legacyRows();
     const old = new Date(AT.getTime() - (RETENTION - 1) * DAY_MS);

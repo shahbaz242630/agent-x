@@ -68,8 +68,9 @@ export const SECURITY_SEAL_BACKFILL_UNTIL = Date.parse('2026-12-07T00:00:00.000Z
  * is newer than the first start that records it, and it holds where nothing else does yet: before any sealing has
  * begun, its lock taken by the owner from the first start on. A bound read off the rows themselves (the first row
  * written with a MAC, say) won't do: the owner strips the earliest such row of its MAC, and the bound moves past it.
- * This one is sealed with the chain: one edited fails its MAC (here, or, with its detail removed, the chain's own
- * check, which the anchor check walks), one deleted leaves a gap.
+ * This one is sealed with the chain: one edited, or with its detail removed, fails its MAC here at once (every start
+ * up to it is checked), one deleted leaves a gap (the daily walk of the whole chain; the anchor check walks only
+ * past its latest anchor).
  */
 export const ROW_MACS_FROM = 'rowMacsFrom';
 
@@ -203,19 +204,18 @@ export async function legacyRowsAt(tx: Tx, keys: KeyProvider, now: Date): Promis
 }
 
 /**
- * The time the first start of the API to record ROW_MACS_FROM gives, MAC-checked; undefined for none yet (a database
- * no such API has started on: tests, a laptop's first run), `unsealed` for one that can't be believed.
+ * The time the first start of the API to record ROW_MACS_FROM gives; undefined for none yet (a database no such API
+ * has started on: tests, a laptop's first run). Every start up to it is MAC-checked, so one whose detail the owner
+ * removed, to pass for a start from before, is `unsealed` at once, as is one edited. One start a boot: few rows.
  */
 async function firstStartWithMacs(tx: Tx, keys: KeyProvider): Promise<Date | undefined | 'unsealed'> {
-  const first = await platformEventsSigned(tx)
-    .where('e.action', '=', 'platform.started')
-    .where(sql<boolean>`(e.details::jsonb ->> ${ROW_MACS_FROM}) is not null`)
-    .orderBy('e.seq')
-    .limit(1)
-    .executeTakeFirst();
-  if (first === undefined) return undefined;
-  const at = (JSON.parse(first.details) as Record<string, unknown>)[ROW_MACS_FROM];
-  return platformEventSealed(keys, first) && typeof at === 'string' ? new Date(at) : 'unsealed';
+  const starts = await platformEventsSigned(tx).where('e.action', '=', 'platform.started').orderBy('e.seq').execute();
+  for (const start of starts) {
+    if (!platformEventSealed(keys, start)) return 'unsealed';
+    const at = (JSON.parse(start.details) as Record<string, unknown>)[ROW_MACS_FROM];
+    if (at !== undefined) return typeof at === 'string' ? new Date(at) : 'unsealed';
+  }
+  return undefined;
 }
 
 /** A row as Postgres gives it back, each column as its table declares it. */
