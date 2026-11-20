@@ -140,7 +140,7 @@ const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld, ours?: OurL
     ids,
     clock,
     issuer: ISSUER,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     factors,
     ours,
     logger: testLogger(capture),
@@ -348,7 +348,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     const second = await organization(who.userId);
     const removed = event('user.human.mfa.otp.removed', who.subject);
     const { feed } = feedOf(() => [removed]);
-    const outbox = createOutbox({ ids, clock });
+    const outbox = createOutbox({ ids, clock, keys });
     let failNext = false;
     const failing = {
       ...outbox,

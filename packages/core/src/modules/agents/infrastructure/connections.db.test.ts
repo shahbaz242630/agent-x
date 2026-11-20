@@ -16,11 +16,13 @@ import {
   waitUntilQueued,
 } from '@agentx/testing';
 import {
+  asAgentTraffic,
   createDatabase,
   type Database,
   noStatementTimes,
   OrganisationBusy,
   timingStatements,
+  withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { randomBytes } from 'node:crypto';
@@ -381,6 +383,55 @@ describe(`SEC-OAUTH-14 trip parity with a key (Postgres ${server.version})`, () 
       expect(await timingStatements(times, () => check(wrong))).toEqual({ outcome: 'refused' });
       expect(times.trips).toBe(2);
     }
+  });
+
+  it('V7 (PL-67): answers a flood of wrong tokens, listed keys and not, while the organisation holds its whole share: none waits for a place (forced)', async () => {
+    const keyId = await connect(await newAgent());
+    const { accessToken } = await tokens(keyId);
+    const presented = parseConnectionToken(accessToken, 'access');
+    if (presented === undefined) throw new Error('not a token');
+    const shared = createDatabase<Tables>(
+      { ...database.connection('app'), maxConnections: 8, organisationShare: 2 },
+      testLogger(capture),
+    );
+    const sharedCheck = createConnectionTokenCheck({ database: shared, keys, ids, clock, logger: testLogger(capture) });
+    const letGo = Promise.withResolvers<undefined>();
+    const opened = [Promise.withResolvers<undefined>(), Promise.withResolvers<undefined>()];
+    const held = opened.map(({ resolve }) =>
+      asAgentTraffic(() =>
+        withTenant(shared, org, async () => {
+          resolve(undefined);
+          await letGo.promise;
+        }),
+      ),
+    );
+    try {
+      await Promise.race([Promise.all(opened.map(({ promise }) => promise)), Promise.all(held)]);
+      // The real token ID with a wrong secret, a guessed token ID, and a key not listed. No deadline: one that took a
+      // place would wait out the share's bound and be told busy, never refused.
+      const flood = [
+        connectionTokenText('access', keyId, presented.tokenId, Buffer.alloc(32, 0xee)),
+        connectionTokenText('access', keyId, ids.next(), Buffer.alloc(32, 0xee)),
+        connectionTokenText('access', ids.next(), ids.next(), Buffer.alloc(32, 0xee)),
+      ];
+      const answers = await Promise.allSettled(flood.map((text) => sharedCheck.check(text, CORRELATION, RESOURCE)));
+      expect(answers).toEqual(flood.map(() => ({ status: 'fulfilled', value: { outcome: 'refused' } })));
+    } finally {
+      letGo.resolve(undefined);
+      await Promise.all(held);
+    }
+    try {
+      // The share given back whole: the connection's own token goes on at once.
+      expect(await sharedCheck.check(accessToken, CORRELATION, RESOURCE)).toMatchObject({ outcome: 'accepted' });
+    } finally {
+      await shared.destroy();
+    }
+    expect(
+      lines('connection_token.refused')
+        .map(({ reason }) => String(reason))
+        .sort(),
+    ).toEqual(['missing', 'unlisted', 'wrong_secret']);
+    expect(lines('db.organisation_busy')).toEqual([]);
   });
 
   it('never logs the token, only its key’s and its own IDs', async () => {

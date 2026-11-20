@@ -157,7 +157,9 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
   });
 
   it("sends a due notice end to end: the user's subject, their verified address from Zitadel, one signed send to ACS", async () => {
-    const notice: ClaimedNotice = {
+    // As the outbox claims it: its seal judged sound (S206 V4).
+    const notice: ClaimedNotice & { readonly seal: 'sound' } = {
+      seal: 'sound',
       id: '01a0f000-0000-7000-8000-0000000000c1',
       orgId: ORG,
       recipientUserId: '01a0f000-0000-7000-8000-0000000000d1',

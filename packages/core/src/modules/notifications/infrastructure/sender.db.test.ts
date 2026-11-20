@@ -9,14 +9,15 @@
 // address its own row gives (B6-1b); a contact asked to confirm a reset sent
 // its link, read at send time, or the notice given up once the reset no
 // longer waits (B6-3b). Its log never holds an address, nor a link.
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { NoticeMessage, PaidRemittance, ResetLink, WaitingRequest } from '../domain/messages.ts';
 import type { Notice, NoticeRole } from '../domain/notice.ts';
-import { createOutbox, MOST_ATTEMPTS } from './outbox.ts';
+import { createOutbox, MOST_ATTEMPTS, type OutboxTables } from './outbox.ts';
 import {
   type AddressBook,
   type Admin,
@@ -31,11 +32,10 @@ import {
   type WaitingRequests,
   type SendOutcome,
 } from './sender.ts';
-import type { NotificationsTables } from './tables.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<NotificationsTables>;
+let app: Database<OutboxTables>;
 
 const START = new Date('2026-09-26T09:00:00Z');
 const ids = new SequentialIds(0xb5b0);
@@ -97,7 +97,12 @@ const CONTACT_ADDRESSES = new Map([
 ]);
 
 const clock = { now: (): Date => START };
-const outbox = createOutbox({ ids, clock });
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
+const outbox = createOutbox({ ids, clock, keys });
 
 const notice = (recipientUserId: string | null): Notice => ({
   orgId: ORG,
@@ -319,7 +324,7 @@ function sender(
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<NotificationsTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  app = createDatabase<OutboxTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
   await sql`insert into directory.orgs (org_id) values (${ORG})`.execute(app);
   for (const [id, subject] of [
     [ADMIN, 'sender-admin'],
@@ -340,7 +345,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`delete from notifications.outbox`.execute(app);
-  await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN)]));
+  await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN)]));
 });
 
 describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
@@ -422,7 +427,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('turns a notice to the admins into one to each but the member it is about, and sends them in the same run', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(null)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(null)]));
     const { sent, service } = notifier();
 
     const { capture, run } = sender(service);
@@ -439,7 +444,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('tries a notice to the admins again when they cannot be read, writing none', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(null)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(null)]));
     const { sent, service } = notifier();
 
     await sender(
@@ -458,7 +463,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await sql`delete from notifications.outbox`.execute(app);
     // Direct to the admin, now gone; fanned out to the admins (the member it is about left out), the admin gone and the
     // other one now only a viewer, so neither is told; a mandate's to its admins and approvers, the approver still one.
-    await app.transaction().execute((tx) =>
+    await withTenant(app, ORG, (tx) =>
       outbox.add(tx, [
         notice(ADMIN),
         notice(null),
@@ -500,7 +505,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
   it('AG10 reads an organisation’s roles once a run, however many notices to its people it sends', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     // Two direct notices, and one fanned out to the admins, sent in the same run.
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN), notice(null)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(ADMIN), notice(OTHER_ADMIN), notice(null)]));
     const { sent, service } = notifier();
     let reads = 0;
     const counted = () => {
@@ -518,7 +523,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(sent).toHaveLength(4);
     expect(reads).toBe(1);
     // The next run reads them again: what a run read is never kept past it.
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(ADMIN)]));
     await run.run();
     expect(reads).toBe(2);
   });
@@ -545,7 +550,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('AG10 tries a notice to one person again when their role cannot be read as it is sent', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [notice(ADMIN)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [notice(ADMIN)]));
     const { sent, service } = notifier();
     const away = () => new Error('tampered');
 
@@ -570,7 +575,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: ADMIN,
     } as const;
-    await app.transaction().execute((tx) =>
+    await withTenant(app, ORG, (tx) =>
       outbox.add(tx, [
         { ...aboutAdmin, recipientUserId: ADMIN },
         { ...aboutAdmin, recipientUserId: null },
@@ -598,7 +603,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: ADMIN,
     } as const;
-    await app.transaction().execute((tx) =>
+    await withTenant(app, ORG, (tx) =>
       outbox.add(tx, [
         { ...aboutAdmin, recipientUserId: ADMIN },
         { ...aboutAdmin, recipientUserId: null },
@@ -616,7 +621,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B6-3b sends a contact asked to confirm a reset its own link, read at send time, and never logs it', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [resetLinkTo(CONTACT)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [resetLinkTo(CONTACT)]));
     const { sent, service } = notifier();
 
     const { capture, run } = sender(service);
@@ -634,7 +639,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B6-3b gives a link notice up once its reset no longer waits for a contact, and tries again when links can’t be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [resetLinkTo(OTHER_CONTACT), resetLinkTo(CONTACT)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [resetLinkTo(OTHER_CONTACT), resetLinkTo(CONTACT)]));
     const { sent, service } = notifier();
 
     await sender(
@@ -659,7 +664,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B6-1b turns a notice to the contacts into one to each ACTIVE contact, each sent to its own address', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true })]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [aboutAContact({ contacts: true })]));
     const { sent, service } = notifier();
 
     const { capture, run } = sender(service);
@@ -701,7 +706,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('E2-2b sends a notice about a supplier to every active member, whatever their role, and to the contacts that count now', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
     const { sent, service } = notifier();
 
     await sender(service).run.run();
@@ -720,7 +725,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     await sql`delete from notifications.outbox`.execute(app);
     const person = '0199a0f0-0000-7000-8000-00000000c0a2';
     const support: Notice = { ...aboutASupplier(false), kind: 'factor_reset_by_support', aboutId: person };
-    await app.transaction().execute((tx) => outbox.add(tx, [support, { ...support, toContacts: true }]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [support, { ...support, toContacts: true }]));
     const { sent, service } = notifier();
     const { run, capture } = sender(service);
 
@@ -750,7 +755,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: '0199a0f0-0000-7000-8000-00000000c0a3',
     };
-    await app.transaction().execute((tx) => outbox.add(tx, [support]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [support]));
     const { sent, service } = notifier();
     const unreadable = people(() => Promise.reject(new Error('a field key away')));
     const { run, capture } = sender(
@@ -784,7 +789,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: MANDATE,
     };
-    await app.transaction().execute((tx) => outbox.add(tx, [accepted]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [accepted]));
     const { sent, service } = notifier();
 
     await sender(service).run.run();
@@ -805,7 +810,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     async (kind, aboutId, about) => {
       await sql`delete from notifications.outbox`.execute(app);
       const changed: Notice = { orgId: ORG, recipientUserId: null, kind, membershipId: null, role: null, aboutId };
-      await app.transaction().execute((tx) => outbox.add(tx, [changed]));
+      await withTenant(app, ORG, (tx) => outbox.add(tx, [changed]));
       const { sent, service } = notifier();
 
       await sender(service).run.run();
@@ -825,7 +830,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: ENTRY,
     };
-    await app.transaction().execute((tx) => outbox.add(tx, [exported]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [exported]));
     const { sent, service } = notifier();
 
     await sender(service).run.run();
@@ -845,7 +850,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId: REQUEST,
     };
-    await app.transaction().execute((tx) => outbox.add(tx, [waiting]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [waiting]));
     const { sent, service } = notifier();
 
     await sender(service).run.run();
@@ -869,7 +874,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       role: null,
       aboutId,
     });
-    await app.transaction().execute((tx) => outbox.add(tx, [about(REQUEST, ADMIN), about(DECIDED, APPROVER)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [about(REQUEST, ADMIN), about(DECIDED, APPROVER)]));
     const { sent, service } = notifier();
 
     await sender(
@@ -898,7 +903,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('C2b sends a remittance to its paid supplier alone, with the payment read as it is sent, and never logs the address', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE]));
     const { sent, service } = notifier();
     const logged: string[] = [];
 
@@ -936,7 +941,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
   it('C2b logs a remittance the provider refused as given up, with why (gate H2), and one it can’t log still sent once', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b03';
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
     const logged: string[] = [];
     const gaveUp: string[][] = [];
     // The first payment's supplier refused by the provider; the second's sent, its event not kept.
@@ -994,7 +999,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
   it('C2b gives a remittance up, logged with why, once its setting is off or the payment no longer SUCCEEDED', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b02';
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
     const { sent, service } = notifier();
 
     const { capture, run } = sender(
@@ -1024,7 +1029,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('C2b tells every admin instead when the paid supplier has no email, sent in the same run (decision 34c)', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE]));
     const { sent, service } = notifier();
 
     const { capture, run } = sender(
@@ -1058,7 +1063,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('C2b tries a remittance again when its payment cannot be read or believed', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE]));
     const { sent, service } = notifier();
 
     await sender(
@@ -1080,7 +1085,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
   it('H2 logs a remittance as given up only once its tries are spent: its payment unread on the last, or every send failed', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     const OTHER_PAYMENT = '0199a0f0-0000-7000-8000-0000000c2b04';
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE, { ...REMITTANCE, aboutId: OTHER_PAYMENT }]));
     const gaveUp: string[][] = [];
     // The provider away every time: a failure a later try could mend.
     const { service } = notifier(() => ({ outcome: 'failed', failure: 'provider_unavailable', lasting: false }));
@@ -1119,7 +1124,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('H2 logs a remittance given up once its last send threw, as a send error', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE]));
     await sql`update notifications.outbox set attempts = ${MOST_ATTEMPTS - 1}`.execute(app);
     const gaveUp: string[][] = [];
     const { service } = notifier(() => new Error('the provider dropped the connection'));
@@ -1142,7 +1147,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('H2 says so when a remittance given up can’t be kept in the audit log, and never sends it again', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE]));
     const { sent, service } = notifier(() => ({ outcome: 'failed', failure: 'address_refused', lasting: true }));
 
     const { capture, run } = sender(
@@ -1165,7 +1170,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('H2 logs a remittance given up because its last try’s lease ran out, once, and sends nothing (review)', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [REMITTANCE, notice(ADMIN)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [REMITTANCE, notice(ADMIN)]));
     // Both last tries' senders died: the leases ran out.
     await sql`update notifications.outbox set attempts = ${MOST_ATTEMPTS}, next_attempt_at = ${START}`.execute(app);
     const gaveUp: string[][] = [];
@@ -1201,7 +1206,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) =>
+    await withTenant(app, ORG, (tx) =>
       outbox.add(tx, [
         {
           orgId: ORG,
@@ -1224,7 +1229,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('E2-2b tries a notice about a supplier again when its members, or its counting contacts, cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app.transaction().execute((tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
+    await withTenant(app, ORG, (tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
     const { sent, service } = notifier();
     const away = () => new Error('tampered');
 
@@ -1239,11 +1244,9 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B6-1b sends a notice to one contact to the address its row gives, and gives it up when it has none', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app
-      .transaction()
-      .execute((tx) =>
-        outbox.add(tx, [aboutAContact({ contact: CONTACT }), aboutAContact({ contact: OTHER_CONTACT })]),
-      );
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [aboutAContact({ contact: CONTACT }), aboutAContact({ contact: OTHER_CONTACT })]),
+    );
     const { sent, service } = notifier();
 
     await sender(
@@ -1267,9 +1270,9 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
 
   it('B6-1b tries a notice to the contacts again when they cannot be read, or a contact’s address can’t', async () => {
     await sql`delete from notifications.outbox`.execute(app);
-    await app
-      .transaction()
-      .execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true }), aboutAContact({ contact: CONTACT })]));
+    await withTenant(app, ORG, (tx) =>
+      outbox.add(tx, [aboutAContact({ contacts: true }), aboutAContact({ contact: CONTACT })]),
+    );
     const { sent, service } = notifier();
 
     await sender(

@@ -104,7 +104,7 @@ const changes = () =>
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
 
@@ -275,7 +275,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: testLogger(capture) });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,

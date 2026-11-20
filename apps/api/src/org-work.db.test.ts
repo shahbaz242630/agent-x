@@ -62,7 +62,7 @@ const handoffOf = (w: World, rail: FakeRail = w.rail) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -137,7 +137,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,

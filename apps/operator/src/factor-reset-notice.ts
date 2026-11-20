@@ -118,7 +118,7 @@ function record(
   const { orgId, userId, reason, noticeId, release, run } = request;
   const trail = createAuditTrail({ keys: services.keys, ids: theNoticeId(noticeId) });
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
-  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
+  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock, keys: services.keys });
   return withSignedStates(database, orgId, services, async (tx, states) => {
     if (await recordedBefore(tx, states, request)) return false;
     if ((await listedMembership(tx, orgId, userId)) === undefined) {

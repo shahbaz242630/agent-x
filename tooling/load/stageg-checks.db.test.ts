@@ -54,7 +54,7 @@ beforeEach(async () => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger: testLogger() });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,

@@ -16,6 +16,7 @@ import {
 } from '@agentx/core/modules/audit';
 import { listedByShard, listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
+import { createNoticeCheck } from '@agentx/core/modules/notifications';
 import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
   activeContactsFor,
@@ -120,6 +121,12 @@ const HOLDINGS_WHOLE_PASS_EVERY_MS = HOUR_MS;
 /** The seal check's rotation: twelve slots of its run's half hour, so each organisation once in 6 hours (decision 2). */
 const SEAL_CHECK_SLOTS = 12;
 
+/** How often the notice check runs (S206 V4), once the last run has ended. */
+const NOTICE_CHECK_EVERY_MS = 10 * 60_000;
+
+/** The notice check's rotation: six slots of its run's ten minutes, so each organisation once an hour. */
+const NOTICE_CHECK_SLOTS = 6;
+
 /**
  * The integrity passes that look in every organisation, an idle one less often, never left out (4D2e D11, Stage D's
  * decision 2), each listing every one at its first run and visiting again next run any it didn't finish
@@ -147,6 +154,7 @@ export function integrityPasses({
       ),
     ),
     sealCheck: owedPasses(rotation({ all, slots: SEAL_CHECK_SLOTS, slotMs: ACTIVITY_SEAL_CHECK_EVERY_MS, clock })),
+    noticeCheck: owedPasses(rotation({ all, slots: NOTICE_CHECK_SLOTS, slotMs: NOTICE_CHECK_EVERY_MS, clock })),
     seal: owedPasses(eachDay({ all, startsAfterMs: SEAL_GRACE_MS, clock })),
     sweep: owedPasses(eachDay({ all, clock })),
     securitySweep: owedPasses(eachDay({ all, clock })),
@@ -628,6 +636,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       ACTIVITY_SEAL_CHECK_EVERY_MS,
       LONG_MS,
     ),
+    // Each organisation's queued notices held to their records on its chain, once an hour (S206 V4, R-15).
+    job('notice_check', createNoticeCheck({ ...clocked, ...passes.noticeCheck }), NOTICE_CHECK_EVERY_MS, LONG_MS),
     // Each closed day of the person log sealed on the platform chain, and the seals checked again (6E1a, L8).
     job('person_seal', createPersonSeal(personLog), PERSON_SEAL_EVERY_MS, LONG_MS),
     job('person_seal_check', createPersonSealCheck(personLog), PERSON_SEAL_CHECK_EVERY_MS, LONG_MS),

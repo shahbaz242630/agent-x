@@ -966,7 +966,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     });
 
@@ -1195,7 +1195,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
         ids: new SequentialIds(0x30_0000),
         clock,
         challenges: challenges(),
-        outbox: createOutbox({ ids, clock }),
+        outbox: createOutbox({ ids, clock, keys }),
         logger: testLogger(),
       }).handOverConfirm(
         admin,
@@ -1223,7 +1223,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
     }).handOverConfirm(
       admin,

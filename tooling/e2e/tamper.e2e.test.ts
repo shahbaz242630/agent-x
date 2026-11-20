@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { SCOPES } from '../../packages/core/src/modules/agents/index.ts';
@@ -28,7 +28,7 @@ import { mayFund, sourceOf } from '../../packages/core/src/modules/funding-sourc
 import { createSessions, type Role } from '../../packages/core/src/modules/identity/index.ts';
 import { tamperIdentityFixtures } from '../../packages/core/src/modules/identity/tamper-fixtures.helper.test.ts';
 import type { InstructionsTables } from '../../packages/core/src/modules/instructions/index.ts';
-import { createOutbox } from '../../packages/core/src/modules/notifications/index.ts';
+import { createNoticeCheck, createOutbox } from '../../packages/core/src/modules/notifications/index.ts';
 import {
   changeHandoffPause,
   createPlatformChain,
@@ -150,7 +150,7 @@ const shared = mandateWorld({ app: () => database, clock: () => clock, ids: uuid
 const registry = createMandateRegistry({ database, keys, ids: uuidV7Ids, clock, logger: testLogger() });
 const decisions = createSpendRequestDecisions({
   database,
-  outbox: createOutbox({ ids: uuidV7Ids, clock }),
+  outbox: createOutbox({ ids: uuidV7Ids, clock, keys }),
   keys,
   ids: uuidV7Ids,
   clock,
@@ -506,7 +506,7 @@ async function seedPayment(): Promise<string> {
     await createHandoff({
       list: () => Promise.resolve([w.org]),
       database,
-      outbox: createOutbox({ ids: uuidV7Ids, clock }),
+      outbox: createOutbox({ ids: uuidV7Ids, clock, keys }),
       rail: w.rail,
       keys,
       ids: uuidV7Ids,
@@ -1273,6 +1273,34 @@ beforeAll(async () => {
   await resetOwn();
   payment = await seedPayment();
   await controls(admin.userId);
+  // The setup's own background work on the foreign chain, settled before its snapshot (S206 V4): the sender turns each
+  // notice to a group (a spend request waiting, to its admins and approvers) into one to each, which records each on
+  // the chain; and the notice check records where it stopped the first time it walks past them, at the organisation's
+  // slot within the hour, here run first as that job would. With nothing new, neither writes again, so any change to
+  // the foreign chain after the snapshot is still a request's.
+  await vi.waitFor(
+    async () => {
+      const groups = await database
+        .selectFrom('notifications.outbox')
+        .select('id')
+        .where('org_id', '=', foreign.world.org)
+        .where('recipient_user_id', 'is', null)
+        .where('recipient_contact_id', 'is', null)
+        .where('sent_at', 'is', null)
+        .where('given_up_at', 'is', null)
+        .execute();
+      expect(groups).toEqual([]);
+    },
+    { timeout: 180_000, interval: 2_000 },
+  );
+  await createNoticeCheck({
+    list: () => Promise.resolve([foreign.world.org]),
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock,
+    logger: testLogger(),
+  }).run();
   foreignBefore = await foreignChain();
   expect(foreignBefore.events).toBeGreaterThan(0);
 });
