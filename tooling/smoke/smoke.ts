@@ -7,7 +7,7 @@
 // path and status, never a body or a host. Node builtins only.
 import { originOf } from '../dast/scan.ts';
 import { askAwake, REAL, type Ways } from './ask.ts';
-import { authOriginOf, checkAuthDoor } from './auth-door.ts';
+import { authOriginOf, checkAuthDoor, checkSignInLands } from './auth-door.ts';
 
 /** The one shape a smoke key may have: reads alone, so a leaked key can ask for nothing. */
 export const SMOKE_SCOPES = ['sources:read', 'suppliers:read'] as const;
@@ -124,7 +124,8 @@ async function main(): Promise<number> {
   }
   // The auth door needs no key, so it is checked whatever the key's state.
   const door = await checkAuthDoor(authOrigin, {}, say);
-  return passed && door.passed ? 0 : 1;
+  const signIn = await checkSignInLands(origin, authOrigin, {}, say);
+  return passed && door.passed && signIn.passed ? 0 : 1;
 }
 
 if (import.meta.main) process.exitCode = await main();

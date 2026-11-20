@@ -1,0 +1,129 @@
+{
+  "about": "The auth host's public door (SA1, PL-26), in one place: apps.bicep compiles it, and the policy (public-doors), deploy.ts console and the infrastructure plan read it through auth-door.ts. Each route is one path prefix, in its one case unless anyCase (Zitadel's paths are case-sensitive, so another case would only widen the door), to one app, first match wins. `browser` is always open: what a person's browser needs to sign in, nothing more. The login app (v4.20.3) calls Zitadel only from its server, inside the environment (ZITADEL_API_URL): its browser code holds no gRPC-web client and no Zitadel service name (checked in the pinned image's .next/static, S206), so no gRPC service is in `browser`. /assets/v1/ is, since the login pages show the instance's branding (logo, font) from there. `console` is Zitadel's own console, its hosted login and the gRPC-web services its browser code calls (grpc.service.ts at v4.17.3, unchanged in v4.19.5 and v4.20.3, makes every client it has): closed by default, so Zitadel's admin and management APIs are reachable from nowhere outside. It is opened only for a piece of work and closed straight after (node deploy/azure/deploy.ts console --open, then --close), and apps always deploys it closed. When open, its routes sit after `browser` and before `fallback`. `fallback` sends every other path to the API, which answers every request on the auth host with a plain 404 (apps/api/src/login-host.ts).",
+  "browser": [
+    {
+      "description": "Zitadel's debug pages on the auth host get the API's 404",
+      "prefix": "/debug",
+      "anyCase": true,
+      "reaches": "api"
+    },
+    {
+      "description": "The login pages on the auth host go to the login app",
+      "prefix": "/ui/v2/login",
+      "anyCase": false,
+      "reaches": "login"
+    },
+    {
+      "description": "Zitadel's OpenID discovery on the auth host",
+      "prefix": "/.well-known/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "Zitadel's OAuth endpoints on the auth host",
+      "prefix": "/oauth/v2/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "Zitadel's OpenID Connect endpoints on the auth host",
+      "prefix": "/oidc/v1/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "Zitadel's branding assets on the auth host",
+      "prefix": "/assets/v1/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    }
+  ],
+  "console": [
+    {
+      "description": "Zitadel's console on the auth host",
+      "prefix": "/ui/console",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "Zitadel's hosted login on the auth host",
+      "prefix": "/ui/login",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's AdminService (v1) on the auth host",
+      "prefix": "/zitadel.admin.v1.AdminService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's ManagementService (v1) on the auth host",
+      "prefix": "/zitadel.management.v1.ManagementService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's AuthService (v1) on the auth host",
+      "prefix": "/zitadel.auth.v1.AuthService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's UserService (v2) on the auth host",
+      "prefix": "/zitadel.user.v2.UserService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's SessionService (v2) on the auth host",
+      "prefix": "/zitadel.session.v2.SessionService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's FeatureService (v2) on the auth host",
+      "prefix": "/zitadel.feature.v2.FeatureService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's ActionService (v2) on the auth host",
+      "prefix": "/zitadel.action.v2.ActionService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's WebKeyService (v2) on the auth host",
+      "prefix": "/zitadel.webkey.v2.WebKeyService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's OrganizationService (v2) on the auth host",
+      "prefix": "/zitadel.org.v2.OrganizationService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's AuthorizationService (v2) on the auth host",
+      "prefix": "/zitadel.authorization.v2.AuthorizationService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    },
+    {
+      "description": "The console's ApplicationService (v2) on the auth host",
+      "prefix": "/zitadel.application.v2.ApplicationService/",
+      "anyCase": false,
+      "reaches": "zitadel"
+    }
+  ],
+  "fallback": [
+    {
+      "description": "Every other path on the auth host goes to the API, which answers 404 on this host",
+      "prefix": "/",
+      "anyCase": false,
+      "reaches": "api"
+    }
+  ]
+}

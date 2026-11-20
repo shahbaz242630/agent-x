@@ -93,8 +93,10 @@ jobs:
   # - an hour at most: the release's own waits end within about 46 minutes (10
   #   to settle each update, the job's 15 and 5 more for its run, 5 to serve),
   #   and Azure's sign-in token isn't refreshed, so it is taken just before
-  # - the three Azure IDs are the GitHub environment's variables (none of them
-  #   is a secret); each is masked in the log before anything could print it
+  # - the three Azure IDs (AZURE_CLIENT_ID, AZURE_TENANT_ID,
+  #   AZURE_SUBSCRIPTION_ID) are secrets of each job's GitHub environment, never
+  #   variables, which a step's env prints in the public log (S68); each is
+  #   masked too, and a missing one stops the job naming it
   # - the three pins are the environment's secrets (AZ2c H3, AZ2d), each the
   #   SHA-256 of a value only the partner's shell gives `apps`: the auth host,
   #   the app host and the API's client ID. The release holds the live API's
@@ -135,17 +137,21 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        # Each by name, and every one checked before any stops the job: a value is never printed, only masked.
         run: |
-          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
-            if [ -z "${id}" ]; then
-              echo "::error::One of staging's three Azure IDs (client, tenant, subscription) is not set. Nothing was deployed. Set it in GitHub: Settings, Environments, staging, Variables; then re-run this job."
-              exit 1
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The staging environment has no secret ${name}. Nothing was deployed. Add it in GitHub: Settings, Environments, staging, Environment secrets (a secret, never a variable: a variable is printed in this public log); then re-run this job."
+              missing=1
+            else
+              echo "::add-mask::${!name}"
             fi
-            echo "::add-mask::${id}"
           done
+          exit "${missing}"
 
       # The Azure CLI the release tool runs uses this pinned compiler, never one it downloads.
       - name: Install the pinned Bicep compiler
@@ -158,9 +164,9 @@ jobs:
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Release this commit to staging
         env:
@@ -300,17 +306,21 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        # Each by name, and every one checked before any stops the job: a value is never printed, only masked.
         run: |
-          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
-            if [ -z "${id}" ]; then
-              echo "::error::One of staging-whatif's three Azure IDs (client, tenant, subscription) is not set, so no plan was made and nothing was deployed. Set it in GitHub: Settings, Environments, staging-whatif, Variables; then re-run this job."
-              exit 1
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The staging-whatif environment has no secret ${name}, so no plan was made and nothing was deployed. Add it in GitHub: Settings, Environments, staging-whatif, Environment secrets (a secret, never a variable: a variable is printed in this public log); then re-run this job."
+              missing=1
+            else
+              echo "::add-mask::${!name}"
             fi
-            echo "::add-mask::${id}"
           done
+          exit "${missing}"
 
       - name: Install the pinned Bicep compiler
         run: node tooling/bicep/install.ts
@@ -321,9 +331,9 @@ jobs:
 
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Plan the infrastructure deploy this merge needs
         id: plan
@@ -382,17 +392,21 @@ jobs:
 
       - name: Mask the Azure IDs in the log
         env:
-          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
-          TENANT: ${{ vars.AZURE_TENANT_ID }}
-          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        # Each by name, and every one checked before any stops the job: a value is never printed, only masked.
         run: |
-          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
-            if [ -z "${id}" ]; then
-              echo "::error::One of staging-infra's three Azure IDs (client, tenant, subscription) is not set, so nothing was deployed and the release did not run. Set it in GitHub: Settings, Environments, staging-infra, Variables; then re-run this job."
-              exit 1
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::The staging-infra environment has no secret ${name}, so nothing was deployed and the release did not run. Add it in GitHub: Settings, Environments, staging-infra, Environment secrets (a secret, never a variable: a variable is printed in this public log); then re-run this job."
+              missing=1
+            else
+              echo "::add-mask::${!name}"
             fi
-            echo "::add-mask::${id}"
           done
+          exit "${missing}"
 
       - name: Install the pinned Bicep compiler
         run: node tooling/bicep/install.ts
@@ -403,9 +417,9 @@ jobs:
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'foundation')
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy the foundation, as approved
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'foundation')
@@ -420,9 +434,9 @@ jobs:
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'secrets')
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy the secrets' machine part (secrets --keys), as approved
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'secrets')
@@ -437,9 +451,9 @@ jobs:
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'apps')
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy the apps, their migration first, as approved
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'apps')
@@ -454,9 +468,9 @@ jobs:
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         if: contains(fromJSON(needs.infra-plan.outputs.plan).steps, 'db-setup')
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # Each job reads its own secrets from the vault: nothing secret passes through here (jobs.ts).
       - name: Run the set-up job, as approved
