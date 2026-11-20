@@ -89,16 +89,17 @@ async function ready(options: Parameters<typeof world>[0] = {}) {
 }
 
 let keysUsed = 0;
-const asking = (w: World, amount: bigint): SpendAskedByAgent => ({
+/** To `supplierId` when given, else to the world's two suppliers by turns. */
+const asking = (w: World, amount: bigint, supplierId?: string): SpendAskedByAgent => ({
   amount: AED(amount),
-  supplierId: w.suppliers[keysUsed % 2] ?? '',
+  supplierId: supplierId ?? w.suppliers[keysUsed % 2] ?? '',
   fundingSourceId: w.source,
   orderReference: `INV-${String(keysUsed)}`,
   purpose: 'Printer paper',
 });
-const ask = (acting: AgentActing, w: World, amount: bigint) => {
+const ask = (acting: AgentActing, w: World, amount: bigint, supplierId?: string) => {
   keysUsed += 1;
-  const asked = asking(w, amount);
+  const asked = asking(w, amount, supplierId);
   return decisions.decideAndReserve(
     acting,
     {
@@ -113,8 +114,8 @@ const ask = (acting: AgentActing, w: World, amount: bigint) => {
   );
 };
 /** The decision a request was answered with. */
-const decisionOf = async (acting: AgentActing, w: World, amount: bigint) => {
-  const answer = await ask(acting, w, amount);
+const decisionOf = async (acting: AgentActing, w: World, amount: bigint, supplierId?: string) => {
+  const answer = await ask(acting, w, amount, supplierId);
   if (answer.outcome !== 'decided') throw new Error(`not decided: ${JSON.stringify(answer)}`);
   return answer.request;
 };
@@ -427,6 +428,57 @@ describe('capacity given back to the total', () => {
       await voidedWith(tx, states, keys, { orgId: w.org, id: first.id }, ['AGENT_SUSPENDED'], clock.now());
     });
     expect(await heldIn(w)).toBe(max / 4n);
+  });
+});
+
+describe("two brakes over the same totals, in the totals' ID order, forced", () => {
+  it('makes a brake take the lower total first and wait for the higher, and a second brake wait for it: neither deadlocks', async () => {
+    const { w, acting, max } = await ready();
+    const theirs = await shared.secondAgent(registry, w);
+    const [first = '', second = ''] = w.suppliers;
+    // Each agent holds capacity to both suppliers: each supplier's brake voids a request in each agent's month.
+    for (const agent of [acting, theirs]) {
+      await decisionOf(agent, w, max / 4n, first);
+      await decisionOf(agent, w, max / 4n, second);
+    }
+    const [low = '', high = ''] = [monthTotalId(w.org, key(w)), monthTotalId(w.org, key(w, theirs.agentId))].toSorted();
+    const highAgent = high === monthTotalId(w.org, key(w)) ? w.agent : theirs.agentId;
+
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The higher total held for change, as a decision holds it with its month.
+    const holder = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      await monthTotalOf(tx, states, w.org, key(w, highAgent), 'change');
+      holding(undefined);
+      await gate;
+    });
+    await held;
+    const brake = (supplierId: string) =>
+      within(
+        20_000,
+        withSignedStates(app, w.org, quiet(), (tx, states) =>
+          voidPendingOf(tx, states, keys, w.org, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now()),
+        ),
+        `the brake on ${supplierId}`,
+      );
+    const one = brake(first);
+    await waitUntilQueued(database.as('admin'), 1);
+    // It holds the lower total already, waiting only for the higher.
+    await expect(
+      database
+        .as('admin')
+        .query('select 1 from limit_reservations.month_totals where id = $1 for no key update nowait', [low]),
+    ).rejects.toMatchObject({ code: '55P03' });
+    const other = brake(second);
+    // The second waits for the lower total, behind the first: never holding one the first waits for.
+    await waitUntilQueued(database.as('admin'), 2);
+    open(undefined);
+    await holder;
+
+    expect(await one).toBe(2);
+    expect(await other).toBe(2);
+    expect(await heldIn(w)).toBe(0n);
+    expect(await heldIn(w, theirs.agentId)).toBe(0n);
   });
 });
 
