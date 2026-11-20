@@ -9,7 +9,7 @@
 // to it; the holdings check holds it to its reservations; and an organisation
 // made before GM-1a is refused busy until its cutover opens its months from
 // its signed requests.
-import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import {
   CUTOVER_ACTION,
   CUTOVER_SUBJECT,
@@ -21,16 +21,20 @@ import {
 } from '@agentx/core/modules/limit-reservations';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
+  cancelRequest,
   cutOverMonthTotals,
+  expireRequest,
   lockedTotalOf,
+  rejectRequest,
   requestOf,
+  settleCarried,
   SPEND_REQUESTS,
   type SpendRequestsTables,
   voidedWith,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -44,7 +48,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createHoldingsCheck } from './holdings-check.ts';
+import { createHoldingsCheck, CUTOVER_HOLD_OFF_MS } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
 import {
@@ -54,6 +58,7 @@ import {
   monthSpentWeighed,
   type SpendAskedByAgent,
   type SpendRequestDecisions,
+  totalMadeMeanwhile,
 } from './spend-request-decisions.ts';
 
 type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables & PaymentsTables;
@@ -647,6 +652,7 @@ describe('an organisation made before GM-1a, until its cutover', () => {
       ids,
       logger: testLogger(capture),
       clock,
+      cutoverHoldOffMs: 0,
     }).run();
 
   it('is refused busy, never weighed from its reservations, until its cutover, with nothing to open', async () => {
@@ -760,5 +766,287 @@ describe('an organisation made before GM-1a, until its cutover', () => {
 
     await visit(w);
     expect(await heldIn(w)).toBe(max / 2n);
+  });
+
+  /** The organisation's cutover events: none while it is refused. */
+  const cutoverEvents = async (w: World) =>
+    (await eventsAbout(w.org, w.org, CUTOVER_SUBJECT)).filter(({ action }) => action === CUTOVER_ACTION);
+
+  it('refuses a cutover over a decision the owner edited: nothing opened, no cutover recorded, alarmed and held', async () => {
+    const { w, acting, max } = await ready({ madeBeforeMonthTotals: true });
+    await cutOverByHand(w);
+    const edited = await decisionOf(acting, w, max);
+    await asBeforeGm1a(w, [w.agent]);
+    await asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        "update audit.events set details = pg_catalog.replace(details, '\"heldMonth\"', '\"heldMonthX\"') where subject_id = $1 and action = 'spend_request.decided'",
+        [edited.id],
+      );
+      await owner.query('alter table audit.events enable trigger user');
+    });
+
+    await visit(w);
+    expect(lines('month_totals.cut_over')).toEqual([]);
+    expect(lines('month_totals.cutover_held')).toHaveLength(1);
+    expect(await cutoverEvents(w)).toEqual([]);
+    expect(await heldIn(w)).toBe('none');
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('refuses a cutover over a request still holding whose decision was deleted', async () => {
+    const { w, acting, max } = await ready({ madeBeforeMonthTotals: true });
+    await cutOverByHand(w);
+    const bare = await decisionOf(acting, w, max);
+    await asBeforeGm1a(w, [w.agent]);
+    await asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query("delete from audit.events where subject_id = $1 and action = 'spend_request.decided'", [
+        bare.id,
+      ]);
+      await owner.query('alter table audit.events enable trigger user');
+    });
+
+    await visit(w);
+    expect(lines('month_totals.cutover_held')).toHaveLength(1);
+    expect(await cutoverEvents(w)).toEqual([]);
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('leaves a request decided before E1 (its decision sealing no month) out of the totals and the reservations alike', async () => {
+    const { w, acting, max } = await ready({ madeBeforeMonthTotals: true });
+    await cutOverByHand(w);
+    const legacy = await decisionOf(acting, w, max);
+    await decisionOf(acting, w, max / 2n);
+    await asBeforeGm1a(w, [w.agent]);
+    // Its newest decided event as one made before E1: no month, no instant (the app's own keys, as the log's).
+    await withSignedStates(app, w.org, quiet(), (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: 'spend_request.decided',
+        subject: { type: SPEND_REQUESTS.subject, id: legacy.id, version: 2 },
+        details: {},
+      }),
+    );
+
+    await visit(w);
+    expect(lines('month_totals.cut_over')).toEqual([expect.objectContaining({ opened: 1, mismatched: 0 })]);
+    expect(await heldIn(w)).toBe(max / 2n);
+    // And on every pass after, no alarm for its reservation (decision 49).
+    await visit(w);
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ totalsMismatched: 0, totalsMissing: 0 });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('waits out the hold-off once, at its first run, before cutting any organisation over; none for one cut over', async () => {
+    const waits: number[] = [];
+    const check = (w: World) =>
+      createHoldingsCheck({
+        list: () => Promise.resolve([w.org]),
+        database: app,
+        keys,
+        ids,
+        logger: testLogger(capture),
+        clock,
+        wait: (ms) => {
+          waits.push(ms);
+          return Promise.resolve();
+        },
+      });
+    const born = await ready();
+    await check(born.w).run();
+    expect(waits).toEqual([]);
+
+    const old = await ready({ madeBeforeMonthTotals: true });
+    const job = check(old.w);
+    await job.run();
+    expect(waits).toEqual([CUTOVER_HOLD_OFF_MS]);
+    expect(lines('month_totals.cut_over')).toHaveLength(1);
+    expect(CUTOVER_HOLD_OFF_MS).toBeGreaterThan(25_000);
+  });
+});
+
+describe('a decision racing a total made meanwhile, forced', () => {
+  it('is answered busy, never a 500, when the total its month read empty is made before it adds its own', async () => {
+    const { w, acting, max } = await ready();
+    // Its zone kept by a first decision; then next month: its period there, its total not yet.
+    await decisionOf(acting, w, max / 4n);
+    clock.advanceBy(30 * 24 * 3_600_000);
+    const next = { agentId: w.agent, month: '2026-11', currency: 'AED' };
+    await asOwner(w, (owner) =>
+      owner.query(
+        'insert into limit_reservations.agent_periods (org_id, agent_id, month, created_at) values ($1, $2, $3, now())',
+        [w.org, w.agent, next.month],
+      ),
+    );
+    const { promise: inserted, resolve: inserting } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // Another's total for the month, inserted and not yet committed, as a cutover's would be.
+    const maker = withSignedStates(app, w.org, quiet(), async (tx) => {
+      await tx
+        .insertInto('limit_reservations.month_totals')
+        .values({
+          org_id: w.org,
+          id: monthTotalId(w.org, next),
+          agent_id: w.agent,
+          month: next.month,
+          currency: 'AED',
+          held_minor: 0n,
+          created_at: clock.now(),
+        })
+        .execute();
+      inserting(undefined);
+      await gate;
+    });
+    await inserted;
+    const deciding = within(20_000, ask(acting, w, max / 4n), 'the decision');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await maker;
+    // Its key taken by the time it adds its own: busy, so the agent asks again and is weighed against that total.
+    expect(await deciding).toEqual(refused(503, 'ORGANISATION_BUSY'));
+  });
+
+  it('maps the total key taken to ORGANISATION_BUSY, any other error as it was', () => {
+    const taken = Object.assign(new Error('duplicate key'), { code: '23505', constraint: 'month_totals_pkey' });
+    expect(totalMadeMeanwhile(taken)).toMatchObject({ status: 503, code: 'ORGANISATION_BUSY' });
+    const byMonth = Object.assign(new Error('duplicate key'), { code: '23505', constraint: 'one_total_a_month' });
+    expect(totalMadeMeanwhile(byMonth)).toMatchObject({ code: 'ORGANISATION_BUSY' });
+    const other = Object.assign(new Error('duplicate key'), { code: '23505', constraint: 'one_reservation_a_request' });
+    expect(totalMadeMeanwhile(other)).toBe(other);
+    expect(totalMadeMeanwhile(null)).toBeNull();
+  });
+});
+
+describe('the holdings check, a total gone without a trace', () => {
+  it('alarms a month whose reservations hold capacity with no total and nothing signed for one', async () => {
+    const { w, acting, max } = await ready();
+    await decisionOf(acting, w, max / 2n);
+    const id = monthTotalId(w.org, key(w));
+    await asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query('delete from limit_reservations.month_totals where id = $1', [id]);
+      await owner.query("delete from audit.events where subject_type = 'month_total' and subject_id = $1", [id]);
+      await owner.query('alter table audit.events enable trigger user');
+    });
+    await createHoldingsCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    }).run();
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ totals: 0, totalsMissing: 1 });
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+});
+
+describe('every ending gives its amount back to its month, the holdings check finding nothing apart', () => {
+  type Ending = (w: World, acting: AgentActing, requestId: string) => Promise<unknown>;
+  /** A person ending it, by their user ID (the use cases check their role; these core steps don't). */
+  const OPERATOR_USER = '0199a0f0-0000-7000-8000-0000000000aa';
+  const inOrg = <Result>(w: World, work: (tx: DatabaseTransaction<Tables>, states: SignedStates) => Promise<Result>) =>
+    withSignedStates(app, w.org, quiet(), work);
+  const endings: [string, Ending][] = [
+    [
+      'an expiry',
+      // Past its 72-hour wait from its decision, whose time the chain seals by the database's clock.
+      (w, _acting, id) =>
+        inOrg(w, (tx, states) =>
+          expireRequest(tx, states, keys, { orgId: w.org, id }, new Date(Date.now() + 73 * 3_600_000)),
+        ),
+    ],
+    [
+      "its agent's cancel",
+      (w, acting, id) =>
+        inOrg(w, (tx, states) =>
+          cancelRequest(
+            tx,
+            states,
+            keys,
+            { orgId: w.org, id },
+            { kind: 'agent', agentId: acting.agentId, agentKeyId: acting.keyId },
+            clock.now(),
+          ),
+        ),
+    ],
+    [
+      "a person's cancel",
+      (w, _acting, id) =>
+        inOrg(w, (tx, states) =>
+          cancelRequest(tx, states, keys, { orgId: w.org, id }, { kind: 'user', userId: OPERATOR_USER }, clock.now()),
+        ),
+    ],
+    [
+      "a person's reject (an approver's, or a waiting rejection's)",
+      (w, _acting, id) =>
+        inOrg(w, async (tx, states) => {
+          await requestOf(tx, states, { orgId: w.org, id }, 'change');
+          await rejectRequest(
+            tx,
+            states,
+            keys,
+            { orgId: w.org, id },
+            { userId: OPERATOR_USER, reason: 'Not this month', stepUp: {} },
+            clock.now(),
+          );
+        }),
+    ],
+    [
+      "a hand-off's void (its key ended, its supplier changed)",
+      (w, _acting, id) =>
+        inOrg(w, async (tx, states) => {
+          await requestOf(tx, states, { orgId: w.org, id }, 'change');
+          await voidedWith(tx, states, keys, { orgId: w.org, id }, ['AGENT_KEY_ENDED'], clock.now());
+        }),
+    ],
+    [
+      "a carry's cancel",
+      (w, _acting, id) =>
+        inOrg(w, async (tx, states) => {
+          await requestOf(tx, states, { orgId: w.org, id }, 'change');
+          await settleCarried(
+            tx,
+            states,
+            keys,
+            { orgId: w.org, id },
+            { outcome: 'cancel', causes: ['MANDATE_NOT_IN_FORCE'] },
+            clock.now(),
+          );
+        }),
+    ],
+    [
+      "a brake's void",
+      (w, acting) =>
+        inOrg(w, (tx, states) =>
+          voidPendingOf(tx, states, keys, w.org, { agentId: acting.agentId }, 'AGENT_SUSPENDED', clock.now(), 1),
+        ),
+    ],
+  ];
+
+  it.each(endings)('%s', async (_what, end) => {
+    const w = await world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    const max = 800_000n;
+    // Approvals from AED 1,000: both wait for one, so every ending can take the first.
+    await shared.inForce(registry, w, {
+      perOrderLimit: AED(max),
+      monthlyLimit: AED(2n * max),
+      approvalThreshold: AED(100_000n),
+    });
+    const acting = await agentKey(w);
+    const ended = await decisionOf(acting, w, max / 2n);
+    expect(ended.decision).toBe('REQUIRE_APPROVAL');
+    await decisionOf(acting, w, max / 4n);
+    await end(w, acting, ended.id);
+    expect(await heldIn(w)).toBe(max / 4n);
+    await createHoldingsCheck({
+      list: () => Promise.resolve([w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+    }).run();
+    expect(lines('holdings_check.passed').at(-1)).toMatchObject({ totals: 1, totalsMismatched: 0, totalsMissing: 0 });
   });
 });

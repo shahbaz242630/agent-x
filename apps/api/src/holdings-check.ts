@@ -36,7 +36,9 @@ import {
 import {
   checkMonthTotals,
   type LimitReservationsTables,
+  monthTotalsCutOver,
   MOST_TOTALS_CHECKED_A_PAGE,
+  totalsMissing,
   type TotalsChecked,
 } from '@agentx/core/modules/limit-reservations';
 import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
@@ -54,6 +56,13 @@ import type { Logger } from '@agentx/platform/observability';
 
 /** How often the organisations a run lists are checked against what they hold, once the last run has ended. */
 export const HOLDINGS_CHECK_EVERY_MS = 15 * 60_000;
+
+/**
+ * How long after its first run a process waits before it cuts any organisation over (GM-1a): past boot.ts's stop
+ * deadline (25 s), so the process before it, still running the code before GM-1a as a rollout hands the lease over,
+ * has stopped, and no decision of its commits after the cutover read the requests.
+ */
+export const CUTOVER_HOLD_OFF_MS = 30_000;
 
 /** How many pages one run checks an organisation: about 10,000 requests a run. */
 const PAGES_A_RUN = 50;
@@ -73,9 +82,14 @@ export function createHoldingsCheck({
   page = MOST_CHECKED_A_PAGE,
   pagesARun = PAGES_A_RUN,
   clock = systemClock,
+  cutoverHoldOffMs = CUTOVER_HOLD_OFF_MS,
+  wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 }: {
-  /** The time a cutover opens its totals at (GM-1a). */
+  /** The time a cutover opens its totals at (GM-1a), and the hold-off it is measured by. */
   readonly clock?: Clock;
+  /** CUTOVER_HOLD_OFF_MS and a timer's wait, but for the tests. */
+  readonly cutoverHoldOffMs?: number;
+  readonly wait?: (ms: number) => Promise<void>;
   /** The organisations to look in this run: job-list.ts's, from the marks and the directory. */
   readonly list: () => Promise<readonly string[]>;
   /** One whose pass ended this run, its requests all checked: owed no visit until listed again. */
@@ -90,6 +104,14 @@ export function createHoldingsCheck({
 }): HoldingsCheck {
   /** The last request checked in each organisation's pass so far: none for one starting from the beginning. */
   const progress = new Map<string, string>();
+  /** When this process's first run started, which it does once it holds the jobs' lease (job-list.ts). */
+  let firstRunAt: number | undefined;
+  /** Waits until CUTOVER_HOLD_OFF_MS has passed since the first run started: at once after that. */
+  const cutoverHeldOff = async (): Promise<void> => {
+    firstRunAt ??= clock.now().getTime();
+    const left = firstRunAt + cutoverHoldOffMs - clock.now().getTime();
+    if (left > 0) await wait(left);
+  };
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
   /**
@@ -98,7 +120,16 @@ export function createHoldingsCheck({
    * refused busy meanwhile.
    */
   const cutOverIn = async (orgId: string, log: Logger): Promise<void> => {
+    // Not before the process before this one can have stopped (rollout, GM-1a review): it may still commit a decision
+    // or an ending made by the code before GM-1a, which keeps no total, for up to its stop deadline after the lease
+    // passed here.
     try {
+      // Most are cut over already (born so, or done): one look at the log, and no wait for them.
+      const now = await withSignedStates(database, orgId, services(log), (tx, states) =>
+        monthTotalsCutOver(tx, states, orgId),
+      );
+      if (now === 'cut_over') return;
+      await cutoverHeldOff();
       const trail = createAuditTrail({ keys, ids });
       const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
         cutOverMonthTotals(tx, states, orgId, {
@@ -134,7 +165,10 @@ export function createHoldingsCheck({
       tampered += checked.tampered;
       after = checked.next;
     } while (after !== null);
-    return { totals, totalsMismatched: mismatched, totalsTampered: tampered };
+    const missing = await withSignedStates(database, orgId, services(log), (tx, states) =>
+      totalsMissing(tx, states, orgId),
+    );
+    return { totals, totalsMismatched: mismatched, totalsTampered: tampered, totalsMissing: missing };
   };
 
   /** Checks the organisation's next pages, up to its share; false if the signal stopped it. */

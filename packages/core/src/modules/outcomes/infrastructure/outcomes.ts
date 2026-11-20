@@ -42,11 +42,23 @@ type LockedTotal = Awaited<ReturnType<typeof lockedTotalOf>>;
 export async function lockHoldingsOf(
   tx: HoldingsTransaction,
   states: SignedStates,
-  { orgId, requestId }: { readonly orgId: string; readonly requestId: string },
+  {
+    orgId,
+    requestId,
+    givesBack = true,
+  }: {
+    readonly orgId: string;
+    readonly requestId: string;
+    /** False for a move that can only keep capacity held (to UNKNOWN): no total read or locked, no trip for it. */
+    readonly givesBack?: boolean;
+  },
 ): Promise<void> {
   await lockReservationsOf(tx, [requestId]);
   await lockClaimsOf(tx, [requestId]);
-  // A handed-off request's status never moves again: read FOR SHARE.
+  if (!givesBack) return;
+  // Read FOR SHARE (8) after the payment (10) and these (11), against the order: safe, as a handed-off request's status
+  // never moves again, so no one takes it for change (an ending, a carry, a void take only pending ones), and this read
+  // neither waits on nor blocks any holder of 10 or 11. Its total (11a) comes after, before the move's head (12).
   const locked = await lockedTotalOf(tx, states, { orgId, id: requestId }, 'share');
   const ofTx = totalsLocked.get(tx) ?? new Map<string, LockedTotal>();
   ofTx.set(requestId.toLowerCase(), locked);

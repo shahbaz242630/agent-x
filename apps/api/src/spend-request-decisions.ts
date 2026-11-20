@@ -487,6 +487,19 @@ export async function weigh(
   };
 }
 
+/** The keys a month's total is made under (0109): its ID, and its agent, month and currency. */
+const TOTAL_KEYS: ReadonlySet<unknown> = new Set(['month_totals_pkey', 'one_total_a_month']);
+
+/**
+ * A month's total made by another while this decision read the month empty (its organisation's cutover committing
+ * just then, GM-1a review): ORGANISATION_BUSY, so the agent asks again and is weighed against it. Any other error as
+ * it was.
+ */
+export function totalMadeMeanwhile(error: unknown): unknown {
+  const pg = error as { readonly code?: unknown; readonly constraint?: unknown } | null;
+  return pg?.code === '23505' && TOTAL_KEYS.has(pg.constraint) ? new MandateRefused(503, 'ORGANISATION_BUSY') : error;
+}
+
 /** A decision's month's total as weighed: refused while it can't be believed, or before its organisation's cutover. */
 function monthTotalWeighed(
   total: DecisionMonthTotal,
@@ -823,6 +836,8 @@ export function createSpendRequestDecisions({
         month,
         order,
         monthTotal,
+      }).catch((error: unknown) => {
+        throw totalMadeMeanwhile(error);
       }));
     } else {
       await insertRequestStatement(tx, request).execute();

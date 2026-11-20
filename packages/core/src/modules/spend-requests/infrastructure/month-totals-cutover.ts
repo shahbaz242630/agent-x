@@ -9,9 +9,14 @@
 // What a request holds is the holdings check's rule (domain/holdings.ts):
 // waiting, approved or ready, its whole amount; handed off, as its payment
 // says, nothing once a verified failure or cancellation released it (a
-// payment that can't be believed is counted, the safer side). A request whose
-// decision sealed no month (decided before E1) is counted in none, as an
-// ending gives none back for it. Where the reservations hold other than the
+// payment that can't be believed is counted, the safer side). A request still
+// holding whose decisions can't be read, or with no decision at all, stops the
+// cutover (tampered, alarmed): nothing is opened and no cutover recorded, so
+// its organisation stays busy rather than counting it as nothing. One whose
+// decision is read whole yet seals no month was decided before E1 (every
+// decision holding capacity since seals one, and the chain's MAC keeps an
+// event as written): no total counts it, and the reservations compared leave
+// it out alike (reservationsHeldIn). Where the reservations hold other than the
 // requests do, the total is opened from the requests all the same, and the
 // mismatch alarmed (`holding`): the organisation is held until an admin looks.
 //
@@ -31,6 +36,7 @@ import {
   MONTH_TOTALS,
   monthTotalId,
   type MonthTotalKey,
+  monthTotalKeyFrom,
   monthTotalKeyText,
   monthTotalOf,
   monthTotalsCutOver,
@@ -41,7 +47,7 @@ import {
 } from '../../limit-reservations/index.ts';
 import { holdsNow } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
-import { decisionsOf, type PaymentsOf } from './holdings-check.ts';
+import { decisionsRead, type PaymentsOf } from './holdings-check.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -83,20 +89,26 @@ export async function cutOverMonthTotals<Tx extends CutoverTransaction>(
   const apart = [...new Set([...signed.keys(), ...reserved.keys()])].filter(
     (text) => amountIn(signed, text) !== amountIn(reserved, text),
   );
-  for (const text of apart) states.mismatch(MONTH_TOTALS.subject, { orgId, id: monthTotalId(orgId, keyOf(text)) });
+  for (const text of apart) {
+    states.mismatch(MONTH_TOTALS.subject, { orgId, id: monthTotalId(orgId, monthTotalKeyFrom(text)) });
+  }
   const mismatched = apart.length;
   // Each a new row, made while decisions are refused, so no order among them matters. Every request holds at least
-  // 1 minor unit, so each month listed has something to open.
+  // 1 minor unit, so each month listed has something to open. Each read first, every one before any is opened, so a
+  // total found before the cutover (planted past the app: its read raised the alarm) opens none of them.
   const opening = [...held.values()];
+  const totals = [];
   for (const { key, amount } of opening) {
     // Its period added if it isn't there (the total points at it), not locked: the requests are, and decisions are
-    // refused until the cutover commits. One decision that read the month empty as the cutover committed then fails on
-    // the total's key: never over its limit.
+    // refused until the cutover commits. One decision that read the month empty as the cutover committed is answered
+    // busy on the total's key: never over its limit.
     const [added] = agentMonthLocking(tx, { orgId, agentId: key.agentId, month: key.month, at });
     await added.execute();
     const total = await monthTotalOf(tx, states, orgId, key, 'change');
-    // A total before the cutover is one planted past the app (its read raised the alarm): nothing is opened.
     if (total.outcome !== 'none') return TAMPERED;
+    totals.push({ key, amount, total });
+  }
+  for (const { key, amount, total } of totals) {
     await recordMonthTotal(tx, states, orgId, key, total, amount, {
       at,
       change: { actor: OPENER, action: 'month_total.opened', details: {} },
@@ -119,12 +131,6 @@ const TAMPERED = Object.freeze({ outcome: 'tampered' as const });
 
 /** What one side holds in the month the text names: nothing where it holds none. */
 const amountIn = (side: ReadonlyMap<string, bigint>, text: string): bigint => side.get(text) ?? 0n;
-
-/** The key monthTotalKeyText wrote: agent, month and currency, `|` between (none holds one). */
-const keyOf = (text: string): MonthTotalKey => {
-  const [agentId, month, currency] = text.split('|') as [string, string, string];
-  return { agentId, month, currency };
-};
 
 /**
  * What the organisation's signed spend requests hold in each month, by
@@ -149,7 +155,7 @@ async function heldBySigned<Tx extends CutoverTransaction>(
     );
     const holding = await holdingOf(tx, states, orgId, listed.ids);
     if (holding === 'tampered') return 'tampered';
-    await addHeld(tx, states, orgId, payments, holding, held);
+    if ((await addHeld(tx, states, orgId, payments, holding, held)) === 'tampered') return 'tampered';
     after = listed.next;
   } while (after !== null);
   return held;
@@ -171,7 +177,11 @@ async function holdingOf(
   return holding;
 }
 
-/** Each request's amount added to its month's, by its decision's sealed month; none once its payment ended. */
+/**
+ * Each request's amount added to its month's, by its decision's sealed month; none once its payment ended.
+ * `tampered` when the decisions can't be read (their alarm raised), or a request still holding has no decision with a
+ * sealed month (alarmed here, `holding`): never taken for "nothing held", which would open no total for it.
+ */
 async function addHeld<Tx extends CutoverTransaction>(
   tx: Tx,
   states: SignedStates,
@@ -179,20 +189,27 @@ async function addHeld<Tx extends CutoverTransaction>(
   payments: PaymentsOf<Tx>,
   holding: readonly SpendRequestRecord[],
   held: HeldByMonth,
-): Promise<void> {
+): Promise<'added' | 'tampered'> {
   const handedOff = holding.filter(({ status }) => status === 'HANDED_OFF').map(({ id }) => id);
   const paid = await payments(tx, states, orgId, handedOff);
-  const decided = await decisionsOf(
+  const decided = await decisionsRead(
     tx,
     states,
     orgId,
     holding.map(({ id }) => id),
   );
-  for (const request of holding) {
-    const month = decided.get(request.id)?.held?.month;
-    if (paid.get(request.id) === 'ended' || month === undefined) continue;
-    const key = { agentId: request.agentId, month, currency: request.amount.currency };
+  if (decided === 'tampered') return 'tampered';
+  for (const request of holding.filter(({ id }) => paid.get(id) !== 'ended')) {
+    const decision = decided.get(request.id);
+    if (decision === undefined) {
+      states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
+      return 'tampered';
+    }
+    // Its decision read whole and sealing no month: written before E1, which no total counts.
+    if (decision.held === null) continue;
+    const key = { agentId: request.agentId, month: decision.held.month, currency: request.amount.currency };
     const text = monthTotalKeyText(key);
     held.set(text, { key, amount: (held.get(text)?.amount ?? 0n) + request.amount.minor });
   }
+  return 'added';
 }

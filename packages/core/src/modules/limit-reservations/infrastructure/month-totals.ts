@@ -16,7 +16,7 @@
 // over by the API's job, which opens every month then held from the signed
 // spend requests in the same transaction as its cutover event. Before that,
 // every check of a month is refused (busy), never read from the reservations.
-import type { GatheredRow, SentTogether, SignedStateTable } from '@agentx/platform/db';
+import { type GatheredRow, MOST_SIGNED_ROWS_READ, type SentTogether, type SignedStateTable } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import type {
@@ -233,12 +233,20 @@ export async function givenBack(
 export const monthTotalKeyText = ({ agentId, month, currency }: MonthTotalKey): string =>
   `${agentId.toLowerCase()}|${month}|${currency}`;
 
+/** The key monthTotalKeyText wrote: agent, month and currency, `|` between (none holds one). */
+export const monthTotalKeyFrom = (text: string): MonthTotalKey => {
+  const [agentId, month, currency] = text.split('|') as [string, string, string];
+  return { agentId, month, currency };
+};
+
 /**
  * What the reservations hold in each month asked (every state but RELEASED,
  * 0040's rule), by monthTotalKeyText, in one statement; or, with none asked,
  * in every month of the organisation's they hold anything in. Unsealed: only
  * ever compared with the signed totals (the holdings check, the cutover),
- * never weighed.
+ * never weighed. A reservation whose request's decision sealed no month
+ * (decided before E1) is left out, as no total counts it: one whose decision
+ * was deleted is left out here too, and its request's own check alarms it.
  */
 export async function reservationsHeldIn(
   tx: TotalsTransaction,
@@ -249,6 +257,14 @@ export async function reservationsHeldIn(
     .selectFrom('limit_reservations.reservations')
     .select(['agent_id', 'month', 'currency', sql<string>`pg_catalog.sum(amount_minor)::text`.as('held')])
     .where('state', '<>', 'RELEASED')
+    .where(
+      // Its request's newest decided event, the one the holdings check reads (decisionsOf), sealing a month.
+      sql<boolean>`coalesce((
+        select pg_catalog.strpos(e.details, '"heldMonth"') > 0 from audit.events e
+        where e.org_id = limit_reservations.reservations.org_id and e.subject_type = 'spend_request'
+          and e.subject_id = limit_reservations.reservations.request_id and e.action = 'spend_request.decided'
+        order by e.seq desc limit 1), false)`,
+    )
     .where(
       keys === 'all'
         ? sql<boolean>`true`
@@ -328,4 +344,36 @@ export async function checkMonthTotals(
     }
   }
   return { totals: ids.length, mismatched, tampered, next };
+}
+
+/**
+ * Every month whose reservations hold capacity yet that has no total at all,
+ * no row and nothing signed (a total deleted with its events, and no decision
+ * since), once the organisation is cut over: each alarmed (`holding`), with
+ * how many. One gone with its events still in the log reads `deleted`,
+ * alarmed by its read. A month whose reservations were deleted too is the
+ * requests' own check's to find (each holding request's reservation missing).
+ * The reservations in one statement, the totals a few at a time
+ * (verifiedStates, FOR SHARE). Before the cutover there is none to look for.
+ */
+export async function totalsMissing(tx: TotalsTransaction, states: SignedStates, orgId: string): Promise<number> {
+  if ((await monthTotalsCutOver(tx, states, orgId)) !== 'cut_over') return 0;
+  const ids = [...(await reservationsHeldIn(tx, 'all')).keys()].map((text) =>
+    monthTotalId(orgId, monthTotalKeyFrom(text)),
+  );
+  let missing = 0;
+  for (let start = 0; start < ids.length; start += MOST_SIGNED_ROWS_READ) {
+    const checks = await states.verifiedStates(
+      tx,
+      MONTH_TOTALS,
+      orgId,
+      ids.slice(start, start + MOST_SIGNED_ROWS_READ),
+    );
+    for (const [id, check] of checks) {
+      if (check.outcome !== 'missing') continue;
+      states.mismatch(MONTH_TOTALS.subject, { orgId, id });
+      missing += 1;
+    }
+  }
+  return missing;
 }

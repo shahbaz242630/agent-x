@@ -44,7 +44,7 @@
 import { type AuditActor, type AuditDetails, type SignedStates, type VerifiedState } from '@agentx/core/modules/audit';
 import { type SourceCheck, sourceOf } from '@agentx/core/modules/funding-sources';
 import { changeHashOf } from '@agentx/core/modules/identity';
-import { lockAgentPeriod, splitHeld } from '@agentx/core/modules/limit-reservations';
+import { lockAgentPeriod, lockReservationsOf, monthTotalId, splitHeld } from '@agentx/core/modules/limit-reservations';
 import { type Decision, decide, type DecisionMade } from '@agentx/core/modules/policies';
 import {
   claimsOnEach,
@@ -357,12 +357,22 @@ export async function outsideOf(
   // Each month's signed total (GM-1a) less what the requests left out hold in it, by their signed states and sealed
   // decisions, those not weighed here read first (8), then the totals (11a): for change at a confirm, which may cancel.
   const leftHeld = await heldByLeftOut(tx, states, orgId, requests, held, leftOut);
+  // At a confirm the requests weighed may be cancelled, an ending that takes their reservations (11): taken here first,
+  // before the totals, so the order stays 8 → 11 → 11a → 12. The totals in order of their IDs, as every holder of
+  // several takes them (a brake's batch alike).
+  if (decides)
+    await lockReservationsOf(
+      tx,
+      requests.map(({ id }) => id),
+    );
+  const months = monthsOf(held)
+    .map((month) => ({ month, key: { agentId, month, currency } }))
+    .toSorted((a, b) => (monthTotalId(orgId, a.key) < monthTotalId(orgId, b.key) ? -1 : 1));
   const spent = new Map<string, bigint>();
-  for (const month of monthsOf(held)) {
+  for (const { month, key } of months) {
     const own = leftHeld
       .filter((request) => request.month === month && request.currency === currency)
       .reduce((sum, { amount }) => sum + amount, 0n);
-    const key = { agentId, month, currency };
     spent.set(month, await monthSpentWeighed(tx, states, orgId, key, decides ? 'change' : 'share', own));
   }
   const since = windowStart(now, mandate.splitWindowHours);

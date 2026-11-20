@@ -108,6 +108,8 @@ export async function lockPayment(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   requestId?: string,
+  /** False where the move to come can only keep capacity held (to UNKNOWN): its month total not locked (GM-1a). */
+  givesBack = true,
 ): Promise<LockedPayment> {
   const read = await transactionOf(tx, states, key, 'change');
   if (read.outcome !== 'found') throw new Error(`A handed-off transaction can't be believed: ${key.id}`);
@@ -125,6 +127,7 @@ export async function lockPayment(
   await lockHoldingsOf(tx, states, {
     orgId: key.orgId,
     requestId: requestId ?? instruction.instruction.spendRequestId,
+    givesBack,
   });
   return {
     transaction: read.transaction,

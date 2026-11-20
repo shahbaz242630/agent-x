@@ -23,6 +23,7 @@ export {
   monthTotalFrom,
   monthTotalGathered,
   monthTotalId,
+  monthTotalKeyFrom,
   monthTotalKeyText,
   type MonthTotalKey,
   monthTotalOf,
@@ -32,6 +33,7 @@ export {
   recordMonthTotal,
   reservationsHeldIn,
   type TotalsChecked,
+  totalsMissing,
 } from './infrastructure/month-totals.ts';
 export {
   agentMonth,
