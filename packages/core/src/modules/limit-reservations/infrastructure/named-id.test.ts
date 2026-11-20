@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { UUID } from './ids.ts';
+import { UUID } from '../../../shared-kernel/index.ts';
 import { namedId } from './named-id.ts';
 
 describe('namedId', () => {

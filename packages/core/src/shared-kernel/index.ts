@@ -9,7 +9,6 @@ export { type Clock, DAY_MS, HOUR_MS, systemClock } from './clock.ts';
 export { asciiDigits } from './digits.ts';
 export { type IdGenerator, UUID, uuidV7Ids } from './ids.ts';
 export { isIpAddress } from './ip-address.ts';
-export { namedId } from './named-id.ts';
 export { plainLine } from './plain-line.ts';
 export { compare, type Money, money, MoneyRefused, moneyFromJson, plus, total, withinLimit } from './money.ts';
 export { DEFAULT_TIME_ZONE, type Period, periodOf, timeZoneOf, windowStart } from './period.ts';

@@ -28,7 +28,7 @@ import type {
   TamperSign,
   VerifiedState,
 } from '../../audit/index.ts';
-import { namedId } from '../../../shared-kernel/index.ts';
+import { namedId } from './named-id.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 type TotalsTransaction = Transaction<LimitReservationsTables & AuditTables>;

@@ -1,7 +1,7 @@
 // An ID named by what it is the row of (GM-1a): the same parts always give the
 // same ID, so a row the app finds gone can be told from one never made: its
 // signed events are still in the log under that ID. Every other row ID is made
-// at random by time (ids.ts, ADR-007).
+// at random by time (the shared kernel's ids.ts, ADR-007); kept here, not in the shared kernel, which may import nothing but uuid (ADR-004).
 import { createHash } from 'node:crypto';
 
 /**
