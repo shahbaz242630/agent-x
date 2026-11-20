@@ -460,7 +460,7 @@ function summaryOf(response: LightMyRequestResponse) {
 async function connectionOf(owner: Member, agentId: string): Promise<string> {
   const logger = testLogger();
   const capabilities = capabilitiesOf(ORIGIN);
-  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  const clients = createOauthClients({ database: app, keys, clock, logger, metadata: undefined });
   const authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
   const consents = createConnectionConsents({
     database: app,

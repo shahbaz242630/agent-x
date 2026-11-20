@@ -124,12 +124,15 @@ afterAll(async () => {
 
 describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
   it('registers a client, reads it back, notes when it connects at most hourly, and sweeps it once unused', async () => {
-    const registered = await registerClient(app, registration(), NOW, fresh());
+    const registered = await registerClient(app, keys, registration(), NOW, fresh());
     if (registered.outcome !== 'registered') throw new Error('registered');
     const { clientId } = registered.client;
     expect(clientId).toMatch(/^axcl_[0-9a-f]{32}$/);
-    expect(await clientOf(app, clientId)).toEqual({ ...registration(), clientId, createdAt: NOW });
-    expect(await clientOf(app, 'axcl_ffffffffffffffffffffffffffffffff')).toBeUndefined();
+    expect(await clientOf(app, keys, clientId)).toEqual({
+      outcome: 'known',
+      client: { ...registration(), clientId, createdAt: NOW },
+    });
+    expect(await clientOf(app, keys, 'axcl_ffffffffffffffffffffffffffffffff')).toBeUndefined();
     const at = (ms: number) => new Date(NOW.getTime() + ms);
     const seen = async () => {
       const [row] = await database
@@ -141,7 +144,7 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
       return row;
     };
 
-    const unused = await registerClient(app, registration(), NOW, fresh());
+    const unused = await registerClient(app, keys, registration(), NOW, fresh());
     await clientSeen(app, clientId, at(1000)).execute();
     expect(await seen()).toEqual({ first: at(1000), last: at(1000) });
     // Within the hour, the row isn't written again: a busy client costs one write an hour.
@@ -152,13 +155,13 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     // A day on, the one never connected goes; the connected one stays.
     expect(await sweepClients(app, at(DAY_MS - 1), 10)).toBe(0);
     expect(await sweepClients(app, at(DAY_MS), 10)).toBe(1);
-    expect(await clientOf(app, clientId)).toBeDefined();
-    if (unused.outcome === 'registered') expect(await clientOf(app, unused.client.clientId)).toBeUndefined();
+    expect(await clientOf(app, keys, clientId)).toBeDefined();
+    if (unused.outcome === 'registered') expect(await clientOf(app, keys, unused.client.clientId)).toBeUndefined();
     // 90 days after its last connection, no connection of its can be refreshed: it goes too.
     const kept = 1000 + HOUR_MS + CLIENT_KEPT_DAYS * DAY_MS;
     expect(await sweepClients(app, at(kept - 1), 10)).toBe(0);
     expect(await sweepClients(app, at(kept), 10)).toBe(1);
-    expect(await clientOf(app, clientId)).toBeUndefined();
+    expect(await clientOf(app, keys, clientId)).toBeUndefined();
     await expect(sweepClients(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 
@@ -171,11 +174,13 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
        from generate_series(1, $2::int) as n`,
       [day, MOST_REGISTRATIONS_A_DAY],
     );
-    expect(await registerClient(app, registration(), new Date(day.getTime() + 1000), fresh())).toEqual({
+    expect(await registerClient(app, keys, registration(), new Date(day.getTime() + 1000), fresh())).toEqual({
       outcome: 'capped',
       cap: 'server',
     });
-    expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1), fresh())).toMatchObject({
+    expect(
+      await registerClient(app, keys, registration(), new Date(day.getTime() + DAY_MS + 1), fresh()),
+    ).toMatchObject({
       outcome: 'registered',
     });
   });
@@ -184,17 +189,22 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     const day = new Date('2027-01-01T09:00:00Z');
     const network = fresh();
     for (let made = 0; made < MOST_REGISTRATIONS_A_NETWORK_A_DAY; made += 1) {
-      expect(await registerClient(app, registration(), day, network)).toMatchObject({ outcome: 'registered' });
+      expect(await registerClient(app, keys, registration(), day, network)).toMatchObject({ outcome: 'registered' });
     }
-    expect(await registerClient(app, registration(), day, network)).toEqual({ outcome: 'capped', cap: 'network' });
-    expect(await registerClient(app, registration(), day, fresh())).toMatchObject({ outcome: 'registered' });
+    expect(await registerClient(app, keys, registration(), day, network)).toEqual({
+      outcome: 'capped',
+      cap: 'network',
+    });
+    expect(await registerClient(app, keys, registration(), day, fresh())).toMatchObject({ outcome: 'registered' });
     const [row] = await database
       .as('admin')
       .query<{ registered: number }>('select count(*)::int as registered from oauth.clients where network = $1', [
         network,
       ]);
     expect(row).toEqual({ registered: MOST_REGISTRATIONS_A_NETWORK_A_DAY });
-    expect(await registerClient(app, registration(), new Date(day.getTime() + DAY_MS + 1), network)).toMatchObject({
+    expect(
+      await registerClient(app, keys, registration(), new Date(day.getTime() + DAY_MS + 1), network),
+    ).toMatchObject({
       outcome: 'registered',
     });
   });
@@ -204,7 +214,7 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     // The cases before registered from networks of their own, days before: theirs go first, as the sweep's own job.
     await sweepClientNetworks(app, day, 1000);
     const network = fresh();
-    const registered = await registerClient(app, registration(), day, network);
+    const registered = await registerClient(app, keys, registration(), day, network);
     if (registered.outcome !== 'registered') throw new Error('registered');
     const { clientId } = registered.client;
     const networkOf = async () => {
@@ -217,7 +227,7 @@ describe(`SEC-OAUTH-13 clients registered (Postgres ${server.version})`, () => {
     expect(await networkOf()).toBe(network);
     expect(await sweepClientNetworks(app, new Date(day.getTime() + DAY_MS), 1000)).toBeGreaterThanOrEqual(1);
     expect(await networkOf()).toBeNull();
-    expect(await clientOf(app, clientId)).toMatchObject({ clientId });
+    expect(await clientOf(app, keys, clientId)).toMatchObject({ client: { clientId } });
     // Cleared once: a second sweep has nothing of it left to clear.
     expect(await sweepClientNetworks(app, new Date(day.getTime() + DAY_MS), 1000)).toBe(0);
     await expect(sweepClientNetworks(app, day, 0)).rejects.toBeInstanceOf(RangeError);
@@ -533,26 +543,34 @@ describe(`SEC-OAUTH-09 client metadata documents kept a day (6E3c; Postgres ${se
   };
 
   it('keeps a document for a day, fetched again over its own row, and sweeps it once past its day', async () => {
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toBeUndefined();
-    await keepClientMetadata(app, DOCUMENT, NOW);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, NOW)).toEqual({ document: DOCUMENT, fresh: true });
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, NOW)).toBeUndefined();
+    await keepClientMetadata(app, keys, DOCUMENT, NOW);
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, NOW)).toEqual({
+      outcome: 'kept',
+      document: DOCUMENT,
+      fresh: true,
+    });
     const dayOn = new Date(NOW.getTime() + CLIENT_METADATA_KEPT_MS);
     // Past its day: stale, still kept for 7 days to stand in while it can't be fetched again.
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toEqual({ document: DOCUMENT, fresh: false });
-    const staleEnd = new Date(dayOn.getTime() + CLIENT_METADATA_STALE_MS);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, new Date(staleEnd.getTime() - 1))).toMatchObject({
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, dayOn)).toEqual({
+      outcome: 'kept',
+      document: DOCUMENT,
       fresh: false,
     });
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, staleEnd)).toBeUndefined();
-    await keepClientMetadata(app, { ...DOCUMENT, name: 'Claude (new)' }, dayOn);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toMatchObject({
+    const staleEnd = new Date(dayOn.getTime() + CLIENT_METADATA_STALE_MS);
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, new Date(staleEnd.getTime() - 1))).toMatchObject({
+      fresh: false,
+    });
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, staleEnd)).toBeUndefined();
+    await keepClientMetadata(app, keys, { ...DOCUMENT, name: 'Claude (new)' }, dayOn);
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, dayOn)).toMatchObject({
       document: { name: 'Claude (new)' },
       fresh: true,
     });
     const sweptFrom = new Date(dayOn.getTime() + CLIENT_METADATA_KEPT_MS + CLIENT_METADATA_STALE_MS);
     expect(await sweepClientMetadata(app, new Date(sweptFrom.getTime() - 1), 10)).toBe(0);
     expect(await sweepClientMetadata(app, sweptFrom, 10)).toBe(1);
-    expect(await keptClientMetadata(app, DOCUMENT.clientId, dayOn)).toBeUndefined();
+    expect(await keptClientMetadata(app, keys, DOCUMENT.clientId, dayOn)).toBeUndefined();
     await expect(sweepClientMetadata(app, NOW, 0)).rejects.toBeInstanceOf(RangeError);
   });
 
@@ -573,5 +591,204 @@ describe(`SEC-OAUTH-09 client metadata documents kept a day (6E3c; Postgres ${se
       code: '23514',
       constraint: 'kept_after_it_was_fetched',
     });
+  });
+});
+
+// SEC-OAUTH-17 (S207 H3, R-15; 0107): the database's owner, holding none of the app's keys, rewrites what a client
+// registered or a document said, or how long it is kept: a client so changed is never believed. Each field the seal
+// binds, one at a time, so a field left out of the MAC fails here.
+describe(`SEC-OAUTH-17 a client's facts rewritten by the database's owner are never believed (Postgres ${server.version})`, () => {
+  const EVIL = 'https://attacker.example/cb';
+  const DEVICE = 'urn:ietf:params:oauth:grant-type:device_code';
+  /** Past every other case's registrations, which a day's cap counts from any time after a day ago. */
+  const REGISTERED_AT = new Date('2027-06-01T09:00:00Z');
+  const owner = () => database.as('owner');
+
+  /** A client registered as the app registers one, sealed: its ID. */
+  const registeredId = async (): Promise<string> => {
+    const registered = await registerClient(app, keys, registration(), REGISTERED_AT, fresh());
+    if (registered.outcome !== 'registered') throw new Error('registered');
+    return registered.client.clientId;
+  };
+
+  /** The owner's edits of a registered client, each by its ID. */
+  const CLIENT_EDITS: readonly (readonly [string, (id: string) => Promise<unknown>])[] = [
+    [
+      'a redirect address planted',
+      (id) =>
+        owner().query('update oauth.clients set redirect_uris = array_append(redirect_uris, $2) where client_id = $1', [
+          id,
+          EVIL,
+        ]),
+    ],
+    [
+      'its redirect addresses replaced',
+      (id) =>
+        owner().query('update oauth.clients set redirect_uris = array[$2::text] where client_id = $1', [id, EVIL]),
+    ],
+    [
+      'its grant types widened',
+      (id) =>
+        owner().query(`update oauth.clients set grant_types = array['authorization_code', $2] where client_id = $1`, [
+          id,
+          DEVICE,
+        ]),
+    ],
+    [
+      'its name changed',
+      (id) => owner().query(`update oauth.clients set name = 'Claude (official)' where client_id = $1`, [id]),
+    ],
+    [
+      'its application type changed',
+      (id) => owner().query(`update oauth.clients set application_type = 'native' where client_id = $1`, [id]),
+    ],
+    [
+      'its software named',
+      (id) => owner().query(`update oauth.clients set software_id = 'planted' where client_id = $1`, [id]),
+    ],
+    [
+      'its software version named',
+      (id) => owner().query(`update oauth.clients set software_version = '9' where client_id = $1`, [id]),
+    ],
+    [
+      'when it registered moved',
+      (id) =>
+        owner().query(`update oauth.clients set created_at = created_at - interval '1 second' where client_id = $1`, [
+          id,
+        ]),
+    ],
+  ];
+
+  it.each(CLIENT_EDITS)('a registered client with %s: tampered', async (_, edit) => {
+    const clientId = await registeredId();
+    expect(await clientOf(app, keys, clientId)).toMatchObject({ outcome: 'known' });
+    await edit(clientId);
+    expect(await clientOf(app, keys, clientId)).toEqual({ outcome: 'unsealed', judged: 'tampered' });
+  });
+
+  it('a registered client with its seal taken out, or of a pepper version not held: never believed', async () => {
+    const clientId = await registeredId();
+    await owner().query('update oauth.clients set mac_key_version = 9 where client_id = $1', [clientId]);
+    expect(await clientOf(app, keys, clientId)).toEqual({ outcome: 'unsealed', judged: 'key_not_held' });
+    await owner().query('update oauth.clients set mac = null, mac_key_version = null where client_id = $1', [clientId]);
+    expect(await clientOf(app, keys, clientId)).toEqual({ outcome: 'unsealed', judged: 'unsealed' });
+  });
+
+  it('a registered client planted with another client’s seal, the same facts but its own ID: tampered', async () => {
+    const real = await registeredId();
+    const planted = 'axcl_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+    await owner().query(
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, software_id,
+         software_version, created_at, mac, mac_key_version)
+       select $2, name, redirect_uris, application_type, grant_types, software_id, software_version, created_at, mac,
+         mac_key_version
+       from oauth.clients where client_id = $1`,
+      [real, planted],
+    );
+    expect(await clientOf(app, keys, planted)).toEqual({ outcome: 'unsealed', judged: 'tampered' });
+    expect(await clientOf(app, keys, real)).toMatchObject({ outcome: 'known' });
+  });
+
+  it('a registered client from before 0107, with no seal: never believed', async () => {
+    const legacy = 'axcl_dddddddddddddddddddddddddddddddd';
+    await owner().query(
+      `insert into oauth.clients (client_id, name, redirect_uris, application_type, grant_types, created_at)
+       values ($1, 'Claude', array['https://claude.ai/api/mcp/auth_callback'], 'web', array['authorization_code'], $2)`,
+      [legacy, NOW],
+    );
+    expect(await clientOf(app, keys, legacy)).toEqual({ outcome: 'unsealed', judged: 'unsealed' });
+  });
+
+  /** A document as a fetch finds it, for a client of its own. */
+  let documents = 0;
+  const document = (clientId?: string) => {
+    documents += 1;
+    return {
+      clientId: clientId ?? `https://claude.ai/oauth/sealed-${String(documents)}`,
+      name: 'Claude',
+      redirectUris: ['https://claude.ai/api/mcp/auth_callback'],
+      grantTypes: ['authorization_code', 'refresh_token'] as const,
+    };
+  };
+  /** A document kept as the app keeps one, sealed: its client ID. */
+  const keptId = async (): Promise<string> => {
+    const kept = document();
+    await keepClientMetadata(app, keys, kept, NOW);
+    return kept.clientId;
+  };
+
+  /** The owner's edits of a kept document, each by its client ID. */
+  const DOCUMENT_EDITS: readonly (readonly [string, (id: string) => Promise<unknown>])[] = [
+    [
+      'a redirect address planted',
+      (id) =>
+        owner().query(
+          'update oauth.client_metadata set redirect_uris = array_append(redirect_uris, $2) where client_id = $1',
+          [id, EVIL],
+        ),
+    ],
+    [
+      'its grant types widened',
+      (id) =>
+        owner().query(
+          `update oauth.client_metadata set grant_types = array['authorization_code', $2] where client_id = $1`,
+          [id, DEVICE],
+        ),
+    ],
+    [
+      'its name changed',
+      (id) => owner().query(`update oauth.client_metadata set name = 'Claude (official)' where client_id = $1`, [id]),
+    ],
+    [
+      'its day extended',
+      (id) =>
+        owner().query(
+          `update oauth.client_metadata set expires_at = expires_at + interval '30 days' where client_id = $1`,
+          [id],
+        ),
+    ],
+    [
+      'when it was fetched moved',
+      (id) =>
+        owner().query(
+          `update oauth.client_metadata set fetched_at = fetched_at + interval '1 second' where client_id = $1`,
+          [id],
+        ),
+    ],
+  ];
+
+  it.each(DOCUMENT_EDITS)('a kept document with %s: tampered, fresh or stale', async (_, edit) => {
+    const clientId = await keptId();
+    expect(await keptClientMetadata(app, keys, clientId, NOW)).toMatchObject({ outcome: 'kept' });
+    await edit(clientId);
+    const stale = new Date(NOW.getTime() + CLIENT_METADATA_KEPT_MS + 1);
+    for (const at of [NOW, stale]) {
+      expect(await keptClientMetadata(app, keys, clientId, at)).toEqual({ outcome: 'unsealed', judged: 'tampered' });
+    }
+  });
+
+  it('a kept document with its seal taken out, or of a pepper version not held: never believed till kept again', async () => {
+    const clientId = await keptId();
+    await owner().query('update oauth.client_metadata set mac_key_version = 9 where client_id = $1', [clientId]);
+    expect(await keptClientMetadata(app, keys, clientId, NOW)).toEqual({ outcome: 'unsealed', judged: 'key_not_held' });
+    await owner().query('update oauth.client_metadata set mac = null, mac_key_version = null where client_id = $1', [
+      clientId,
+    ]);
+    expect(await keptClientMetadata(app, keys, clientId, NOW)).toEqual({ outcome: 'unsealed', judged: 'unsealed' });
+    // Kept again over its own row, as a fetch keeps it: sealed again, believed.
+    await keepClientMetadata(app, keys, document(clientId), NOW);
+    expect(await keptClientMetadata(app, keys, clientId, NOW)).toMatchObject({ outcome: 'kept', fresh: true });
+  });
+
+  it('a document’s seal copied to another client’s row, the same facts: tampered', async () => {
+    const real = await keptId();
+    const other = await keptId();
+    await owner().query(
+      `update oauth.client_metadata set mac = (select mac from oauth.client_metadata where client_id = $1)
+       where client_id = $2`,
+      [real, other],
+    );
+    expect(await keptClientMetadata(app, keys, other, NOW)).toEqual({ outcome: 'unsealed', judged: 'tampered' });
+    expect(await keptClientMetadata(app, keys, real, NOW)).toMatchObject({ outcome: 'kept' });
   });
 });
