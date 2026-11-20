@@ -11,21 +11,22 @@
 //
 // Only the door's shape is printed: never its host, which names the domain in
 // CI's public log.
+import type { DoorShape } from './auth-door.ts';
 import { type Az, azJson, CONSOLE_SAID, readConsoleDoor, realAz, text } from './deploy.ts';
 
 /**
- * Reads the auth door and says what its shape means. 1 when it is in neither shape, or when it is open and `openIsRed`
- * (the watch); otherwise 0.
+ * Reads the auth door and says what its shape means: its shape (undefined: neither), and 1 when it is in neither
+ * shape, or when the console is reachable (open, or the pre-PL-26 legacy door) and `openIsRed` (the watch); otherwise 0.
  */
 export function checkConsoleDoor(
   az: Az,
   subscription: string,
   say: (line: string) => void,
   openIsRed: boolean,
-): number {
+): { readonly status: number; readonly shape: DoorShape | undefined } {
   const { state } = readConsoleDoor(az, subscription);
   say(CONSOLE_SAID[state ?? 'neither']);
-  return state === undefined || (state === 'open' && openIsRed) ? 1 : 0;
+  return { status: state === undefined || (state !== 'closed' && openIsRed) ? 1 : 0, shape: state };
 }
 
 if (import.meta.main) {
@@ -39,7 +40,7 @@ if (import.meta.main) {
         console.log(line);
       },
       true,
-    );
+    ).status;
   } catch {
     // Azure's message names the request's URL, and so the subscription: not repeated in the public log.
     console.log(

@@ -64,7 +64,7 @@ import {
 import { NO_LOGIN_IDS, readLoginIds } from '../../packages/platform/src/config/login-ids.ts';
 import { MACHINE_ID_HEADER } from '../../packages/platform/src/config/machine-id-header.ts';
 import { APP_KEYS, newAppKeys, PUBLIC_HALVES } from './app-keys.ts';
-import { type ConsoleState, consolePatch, consoleStateOf } from './auth-door.ts';
+import { type ConsoleState, consolePatch, consoleStateOf, type DoorShape } from './auth-door.ts';
 import { expiryLine, expiryProblems } from './secret-expiry.ts';
 
 /** The app's keys and the operator's key's public half (PL-57): each created once, never written again. */
@@ -2490,7 +2490,7 @@ export const stagingApp = (workload: string): string => `ca-agentx-stg-${workloa
 
 /** The auth door as Azure holds it: which shape its rules are in (none of the two: undefined), and its host as read. */
 export interface ConsoleDoor {
-  readonly state: ConsoleState | undefined;
+  readonly state: DoorShape | undefined;
   readonly customDomains: unknown;
 }
 
@@ -2506,10 +2506,12 @@ export function readConsoleDoor(az: Az, subscription: string): ConsoleDoor {
 }
 
 /** What each reading of the auth door means, in plain words: what it is, what it breaks, what next. */
-export const CONSOLE_SAID: Readonly<Record<ConsoleState | 'neither', string>> = {
+export const CONSOLE_SAID: Readonly<Record<DoorShape | 'neither', string>> = {
   closed:
     "Zitadel's console is closed on the auth host: a browser can sign in, and Zitadel's console and its admin and management services can't be reached from the internet (the normal shape).",
   open: "Zitadel's console is OPEN on the auth host: its console and its admin and management services can be reached from the internet, behind Zitadel's own sign-in. Once the work is done, close it: node deploy/azure/deploy.ts console --close (an apps deploy closes it too).",
+  legacy:
+    "The auth host's door still routes as every apps deploy sent it before PL-26: Zitadel's console and its admin and management services can be reached from the internet. What next: an apps deploy closes it (the infrastructure plan plans one), or node deploy/azure/deploy.ts console --close does now.",
   neither:
     "The auth host's door routes neither as auth-door.json's closed shape nor its open one: something changed it outside deploy.ts. What broke: paths nobody decided on may be open to the internet, or sign-in may be broken. What next: find who changed it in the resource group's activity log (Microsoft.App/managedEnvironments/httpRouteConfigs/write); if it was not one of us, treat it as Incident-Response-Playbook section B; then run apps, which puts the door back closed.",
 };

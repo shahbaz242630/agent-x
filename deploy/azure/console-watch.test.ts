@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { authRules, type ConsoleState } from './auth-door.ts';
 import { checkConsoleDoor } from './console-watch.ts';
+import { LEGACY_DOOR } from './legacy-door.fixture.ts';
 import {
   type Az,
   type AzResult,
@@ -148,6 +149,16 @@ describe('deploy.ts console (PL-26)', () => {
     }
   });
 
+  it('says the pre-PL-26 door for --status, and closes it like an open one', async () => {
+    const status = await console_(['console', '--status'], new DoorAz(LEGACY_DOOR));
+    expect(status.said.at(-1)).toBe(CONSOLE_SAID.legacy);
+    const az = new DoorAz(LEGACY_DOOR);
+    const done = await console_(['console', '--close'], az, ['y']);
+    expect(done.status).toBe(0);
+    expect(az.patches).toEqual([{ properties: { customDomains: HOSTS, rules: authRules('closed', stagingApp) } }]);
+    expect(done.said.at(-1)).toBe(CONSOLE_SAID.closed);
+  });
+
   it('sends nothing unless the operator answers yes', async () => {
     const az = new DoorAz('closed');
     const done = await console_(['console', '--open'], az, ['n']);
@@ -172,18 +183,21 @@ describe('deploy.ts console (PL-26)', () => {
 describe('checkConsoleDoor', () => {
   const check = (start: ConsoleState | unknown[], openIsRed: boolean) => {
     const said: string[] = [];
-    const status = checkConsoleDoor(new DoorAz(start), SUBSCRIPTION, (line) => said.push(line), openIsRed);
-    return { status, said };
+    const { status, shape } = checkConsoleDoor(new DoorAz(start), SUBSCRIPTION, (line) => said.push(line), openIsRed);
+    return { status, shape, said };
   };
 
-  it('passes a closed door, and fails an open one only for the watch, saying so either way', () => {
-    expect(check('closed', true)).toEqual({ status: 0, said: [CONSOLE_SAID.closed] });
-    expect(check('open', true)).toEqual({ status: 1, said: [CONSOLE_SAID.open] });
-    expect(check('open', false)).toEqual({ status: 0, said: [CONSOLE_SAID.open] });
+  it('passes a closed door, and fails an open or pre-PL-26 one only for the watch, saying so either way', () => {
+    expect(check('closed', true)).toEqual({ status: 0, shape: 'closed', said: [CONSOLE_SAID.closed] });
+    expect(check('open', true)).toEqual({ status: 1, shape: 'open', said: [CONSOLE_SAID.open] });
+    expect(check('open', false)).toEqual({ status: 0, shape: 'open', said: [CONSOLE_SAID.open] });
+    expect(check(LEGACY_DOOR, true)).toEqual({ status: 1, shape: 'legacy', said: [CONSOLE_SAID.legacy] });
+    expect(check(LEGACY_DOOR, false)).toEqual({ status: 0, shape: 'legacy', said: [CONSOLE_SAID.legacy] });
+    expect(CONSOLE_SAID.legacy).toMatch(/an apps deploy closes it/);
   });
 
   it('fails a door in neither shape for the watch and the plan alike', () => {
-    expect(check([], true)).toEqual({ status: 1, said: [CONSOLE_SAID.neither] });
-    expect(check([], false)).toEqual({ status: 1, said: [CONSOLE_SAID.neither] });
+    expect(check([], true)).toEqual({ status: 1, shape: undefined, said: [CONSOLE_SAID.neither] });
+    expect(check([], false)).toEqual({ status: 1, shape: undefined, said: [CONSOLE_SAID.neither] });
   });
 });

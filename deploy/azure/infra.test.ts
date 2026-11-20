@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import { IMAGE_REPOSITORY } from '../image/verify.ts';
 import { authRules, type ConsoleState } from './auth-door.ts';
+import { LEGACY_DOOR } from './legacy-door.fixture.ts';
 import { type Az, type AzResult, CONSOLE_SAID, type Request, stagingApp, type Steps, type Terminal } from './deploy.ts';
 import type { History } from './git.ts';
 import {
@@ -908,6 +909,35 @@ describe('answers, the summary and main', () => {
     expect(stray.said).toContain(CONSOLE_SAID.neither);
     expect(written).toEqual([]);
     expect(stray.requests).toEqual([]);
+  });
+
+  it('PL-26: plans the apps deploy that closes staging’s pre-PL-26 door, even for a merge needing nothing else', async () => {
+    const written: { file: string; text: string }[] = [];
+    const outlets = {
+      env: { ...ENV, GITHUB_OUTPUT: 'out' },
+      append: (file: string, text: string) => written.push({ file, text }),
+    };
+    const planned = (): Promise<number> => Promise.reject(new Planned('apps', 'a'.repeat(64)));
+    for (const changed of [[], ['deploy/azure/apps.bicep'], ['deploy/azure/main.bicep']]) {
+      written.length = 0;
+      const legacy = infraOver({ changed, door: LEGACY_DOOR, deploy: planned });
+      expect(
+        await main(['plan', NEW, DIGEST], outlets, (say) => ({
+          ...legacy.infra,
+          say: (line) => {
+            legacy.said.push(line);
+            say(line);
+          },
+        })),
+      ).toBe(0);
+      expect(legacy.said).toContain(CONSOLE_SAID.legacy);
+      const plan = JSON.parse(written[0]?.text.split('\n')[0]?.slice('plan='.length) ?? '{}') as { steps?: string[] };
+      expect(plan.steps).toEqual(changed.includes('deploy/azure/main.bicep') ? ['foundation', 'apps'] : ['apps']);
+      expect(legacy.requests.map(({ request }) => request.command)).toContain('apps');
+    }
+    // A merge that needs a hand deploy CI doesn't make still plans nothing.
+    const byHand = infraOver({ changed: ['db/bootstrap/roles.sql'], door: LEGACY_DOOR, running: 'f'.repeat(40) });
+    expect((await plan(byHand.infra, NEW, DIGEST, true)).steps).toEqual([]);
   });
 
   it('refuses what it is not asked properly, and says an error as the run’s last word', async () => {

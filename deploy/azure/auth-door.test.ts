@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { authRoutes, authRules, consolePatch, consoleStateOf, readAuthDoor } from './auth-door.ts';
 import { stagingApp } from './deploy.ts';
+import { LEGACY_DOOR } from './legacy-door.fixture.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
 /** The auth door as staging's apps deployment sends it, from the pinned Bicep's own snapshot. */
@@ -85,6 +86,13 @@ describe('consoleStateOf', () => {
       targets: rule.targets.map((target) => ({ ...target, revision: null, label: null })),
     }));
     expect(consoleStateOf(echoed, stagingApp)).toBe('open');
+  });
+
+  it('reads staging’s pre-PL-26 door, copied from main’s apps.bicep, as legacy, and nothing near it', () => {
+    expect(consoleStateOf(LEGACY_DOOR, stagingApp)).toBe('legacy');
+    expect(authRules('legacy', stagingApp)).toEqual(LEGACY_DOOR);
+    expect(consoleStateOf(LEGACY_DOOR.slice(1), stagingApp)).toBeUndefined();
+    expect(consoleStateOf([...LEGACY_DOOR].reverse(), stagingApp)).toBeUndefined();
   });
 
   it('reads anything else as neither shape', () => {

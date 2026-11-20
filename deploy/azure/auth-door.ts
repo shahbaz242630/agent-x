@@ -35,16 +35,33 @@ export const readAuthDoor = (): DoorFile => JSON.parse(readFileSync(DOOR_FILE, '
 
 export type ConsoleState = 'closed' | 'open';
 
+/**
+ * A shape a live door may be found in: one of the two, or `legacy`, the door every apps deploy sent before PL-26
+ * (the console open, its pages before the branding assets). Never sent again; read so the first plan after PL-26
+ * plans the apps deploy that closes it, rather than stopping red on a door it knows.
+ */
+export type DoorShape = ConsoleState | 'legacy';
+
 /** The door's routes in order, in the shape asked for. */
-export function authRoutes(state: ConsoleState, door: DoorFile = readAuthDoor()): readonly DoorRoute[] {
-  return state === 'open' ? [...door.browser, ...door.console, ...door.fallback] : [...door.browser, ...door.fallback];
+export function authRoutes(state: DoorShape, door: DoorFile = readAuthDoor()): readonly DoorRoute[] {
+  if (state === 'closed') return [...door.browser, ...door.fallback];
+  if (state === 'open') return [...door.browser, ...door.console, ...door.fallback];
+  // Before PL-26 the console's page and hosted login sat after the OpenID routes and before the branding assets.
+  const assets = door.browser.findIndex((route) => route.prefix === '/assets/v1/');
+  return [
+    ...door.browser.slice(0, assets),
+    ...door.console.slice(0, 2),
+    ...door.browser.slice(assets),
+    ...door.console.slice(2),
+    ...door.fallback,
+  ];
 }
 
 /**
  * The rules Azure takes for a shape, exactly as apps.bicep writes them (its `publicDoors` map): one route and one
  * target each, case as the file says, nothing rewritten, nothing pinned. `appOf` names a workload's app.
  */
-export function authRules(state: ConsoleState, appOf: (workload: string) => string, door: DoorFile = readAuthDoor()) {
+export function authRules(state: DoorShape, appOf: (workload: string) => string, door: DoorFile = readAuthDoor()) {
   return authRoutes(state, door).map((route) => ({
     description: route.description,
     routes: [{ match: { prefix: route.prefix, caseSensitive: !route.anyCase } }],
@@ -69,16 +86,17 @@ function withoutNulls(value: unknown): unknown {
 const asText = (rules: unknown): string => JSON.stringify(withoutNulls(rules ?? null));
 
 /**
- * Which shape a door's rules, as Azure gives them back, are in: closed, open, or neither (undefined). Compared whole,
- * field for field and in order, so a route added, dropped, moved, widened or pointed elsewhere is neither.
+ * Which shape a door's rules, as Azure gives them back, are in: closed, open, legacy, or neither (undefined).
+ * Compared whole, field for field and in order, so a route added, dropped, moved, widened or pointed elsewhere is
+ * neither.
  */
 export function consoleStateOf(
   rules: unknown,
   appOf: (workload: string) => string,
   door: DoorFile = readAuthDoor(),
-): ConsoleState | undefined {
+): DoorShape | undefined {
   const live = asText(rules);
-  return (['closed', 'open'] as const).find((state) => asText(authRules(state, appOf, door)) === live);
+  return (['closed', 'open', 'legacy'] as const).find((state) => asText(authRules(state, appOf, door)) === live);
 }
 
 /** The PATCH body that moves the door to a shape: its rules alone, and its host sent back exactly as read. */

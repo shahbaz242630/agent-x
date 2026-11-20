@@ -573,8 +573,8 @@ async function planStep(infra: InfraSteps, step: Sent, commit: string, secretsFi
 }
 
 /** The plan for a merge: nothing when it needs no hand deploy, or one only a person may run. */
-export async function plan(infra: InfraSteps, commit: string, digest: string): Promise<Plan> {
-  const needs = await needsAt(infra, commit, digest);
+export async function plan(infra: InfraSteps, commit: string, digest: string, closeDoor = false): Promise<Plan> {
+  const needs = withAppsToClose(await needsAt(infra, commit, digest), closeDoor, infra.say);
   if (needs.byHand.length > 0) {
     infra.say('This merge needs a hand deploy CI does not make, so nothing is planned:');
     for (const line of needs.byHand) infra.say(`  ${line}`);
@@ -596,6 +596,13 @@ export async function plan(infra: InfraSteps, commit: string, digest: string): P
     else whatIf[step] = await planStep(infra, step, commit, needs.steps.includes('secrets'));
   }
   return { steps: needs.steps, whatIf };
+}
+
+/** The needs, with apps among them, in STEPS' order, when the auth door's pre-PL-26 shape is to be closed (PL-26). */
+function withAppsToClose(needs: Needs, closeDoor: boolean, say: (line: string) => void): Needs {
+  if (!closeDoor || needs.byHand.length > 0 || needs.steps.includes('apps')) return needs;
+  say("apps: planned to close the auth door's pre-PL-26 shape, which leaves Zitadel's console open to the internet.");
+  return { ...needs, steps: STEPS.filter((step) => step === 'apps' || needs.steps.includes(step)) };
 }
 
 /** A plan as the plan job left it, or an error: only the shape it writes, each hash a SHA-256. */
@@ -667,8 +674,10 @@ async function runPlan(infra: InfraSteps, args: readonly string[], outlets: Outl
   if (checkGrants(infra.az, subscription, infra.say) !== 0) return 1;
   // PL-26: the auth door in one of auth-door.json's two shapes. An open console is said (a person is working in it,
   // and an approved apps deploy will close it); a door in neither shape stops the plan red, as a stray grant does.
-  if (checkConsoleDoor(infra.az, subscription, infra.say, false) !== 0) return 1;
-  const planned = await plan(infra, commit, digest);
+  const door = checkConsoleDoor(infra.az, subscription, infra.say, false);
+  if (door.status !== 0) return 1;
+  // The door every apps deploy sent before PL-26 is closed by the next one: planned even when the merge needs no other.
+  const planned = await plan(infra, commit, digest, door.shape === 'legacy');
   const output = outlets.env.GITHUB_OUTPUT;
   // `needed` alone decides whether the approval job runs at all: a merge needing none never waits for the partner.
   if (output !== undefined) {
