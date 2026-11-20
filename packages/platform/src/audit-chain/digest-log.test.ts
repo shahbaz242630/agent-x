@@ -57,6 +57,7 @@ function digestOn(
     anchors = anchorsWith(),
     capture = new LogCapture(),
     mostBytes = 64 * 1024 * 1024,
+    mostFileBytes = undefined as number | undefined,
     signing = keys,
   } = {},
 ) {
@@ -69,6 +70,7 @@ function digestOn(
     anchors,
     alertAfterMs: 15 * MINUTE,
     mostBytes,
+    ...(mostFileBytes === undefined ? {} : { mostFileBytes }),
   });
   return { log, fake, time, capture };
 }
@@ -105,7 +107,7 @@ describe('the signed states’ digest in memory alone (no store)', () => {
       mostBytes: 1024 * 1024,
     });
     expect(log.state()).toBe('read');
-    expect(log.known(CHAIN)).toBe(true);
+    expect(log.covers(CHAIN, 0n)).toBe(true);
     log.record(CHAIN, seen(['agent', AGENT, 5n], ['agent_key', KEY, 3n]), START);
     log.record(CHAIN, seen(['agent', AGENT, 4n]), START);
     log.record(CHAIN, seen(['agent', AGENT.toUpperCase(), 9n]), START);
@@ -155,10 +157,10 @@ describe('the digest kept in the write-once store (AT13)', () => {
   it('is unknown until its first read has ended whole, and an empty store reads as nothing known', async () => {
     const { log } = digestOn();
     expect(log.state()).toBe('unread');
-    expect(log.known(CHAIN)).toBe(false);
+    expect(log.covers(CHAIN, 0n)).toBe(false);
     await log.read();
     expect(log.state()).toBe('read');
-    expect(log.known(CHAIN)).toBe(true);
+    expect(log.covers(CHAIN, 0n)).toBe(true);
     expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
   });
 
@@ -350,35 +352,10 @@ describe('the digest kept in the write-once store (AT13)', () => {
     log.record(CHAIN, seen(['agent', AGENT, 9n]), START);
     letGo.add(ORG);
     expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
-    expect(log.known(CHAIN)).toBe(false);
-    expect(log.known(OTHER)).toBe(true);
+    expect(log.covers(CHAIN, 0n)).toBe(false);
+    expect(log.covers(OTHER, 0n)).toBe(true);
     letGo.delete(ORG);
     expect(log.latest(CHAIN, 'agent', AGENT)).toBe(9n);
-  });
-
-  it('past half its memory says so, and past all of it keeps nothing more and stands for no chain', async () => {
-    const capture = new LogCapture();
-    const { log } = digestOn(undefined, { capture, mostBytes: 4000 });
-    await log.read();
-    const many = (count: number, from: number) =>
-      new Map(
-        Array.from({ length: count }, (_, at) => [
-          subjectKey('spend_request', `0199a0f0-0000-7000-8000-${(from + at).toString(16).padStart(12, '0')}`),
-          BigInt(from + at + 1),
-        ]),
-      );
-    log.record(CHAIN, many(40, 0), START);
-    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'audit.state_digest_near_memory' }));
-    expect(log.known(CHAIN)).toBe(true);
-    // 150 objects in 256 slots: just past 4,000 bytes.
-    log.record(CHAIN, many(110, 100), START);
-    expect(capture.lines()).toContainEqual(
-      expect.objectContaining({ level: 'error', event: 'audit.state_digest_beyond_memory' }),
-    );
-    expect(log.known(CHAIN)).toBe(false);
-    const held = log.memoryHeld().objects;
-    log.record(OTHER, many(10, 1000), START);
-    expect(log.memoryHeld().objects).toBe(held);
   });
 
   it('a write that fails keeps what moved for the next, a warning, and past the alert time the alert', async () => {
@@ -420,7 +397,7 @@ describe('the digest kept in the write-once store (AT13)', () => {
     fake.instead.list = () => Promise.reject(new Error('store away'));
     await log.read();
     expect(log.state()).toBe('unread');
-    expect(log.known(CHAIN)).toBe(false);
+    expect(log.covers(CHAIN, 0n)).toBe(false);
     expect(capture.lines()).toContainEqual(
       expect.objectContaining({ level: 'warn', event: 'audit.state_digest_store_failed', what: 'read' }),
     );
@@ -461,5 +438,244 @@ describe('the digest kept in the write-once store (AT13)', () => {
     const restarted = digestOn(fake, { time });
     await restarted.log.read();
     expect(ids.every((id, at) => restarted.log.latest(CHAIN, 'spend_request', id) === BigInt(at + 1))).toBe(true);
+  });
+});
+
+/** A place of the chain, as a walk's report gives it. */
+const point = (seq: bigint) => ({ seq, hash: Buffer.alloc(32, Number(seq % 200n)), macKeyVersion: 1 });
+/** A stretch a walk read whole, after `from` up to `to`. */
+const stretch = (from: bigint, to: bigint) => ({ from, to: point(to) });
+
+/** `count` spend requests' facts, from the `from`th. */
+const requests = (count: number, from = 0) =>
+  new Map(
+    Array.from({ length: count }, (_, at) => [
+      subjectKey('spend_request', `0199a0f0-0000-7000-8000-${(from + at).toString(16).padStart(12, '0')}`),
+      BigInt(from + at + 1),
+    ]),
+  );
+
+describe('the digest’s coverage: Tx A goes on a chain only as far as its walks join up from its first event (AT13)', () => {
+  it('covers a chain to where its stretches join from the start; a gap leaves it uncovered until filled', async () => {
+    const { log } = digestOn();
+    await log.read();
+    expect(log.covers(CHAIN, 0n)).toBe(true);
+    expect(log.covers(CHAIN, 1n)).toBe(false);
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 5n));
+    expect(log.covers(CHAIN, 5n)).toBe(true);
+    expect(log.covers(CHAIN, 6n)).toBe(false);
+    expect(log.coverage(CHAIN)).toEqual(point(5n));
+    // Read whole from 8 to 12, with 5 to 8 never read: not covered past 5.
+    log.record(CHAIN, new Map(), START, stretch(8n, 12n));
+    expect(log.covers(CHAIN, 12n)).toBe(false);
+    // The gap read: joined up to 12 at once.
+    log.record(CHAIN, new Map(), START, stretch(5n, 8n));
+    expect(log.covers(CHAIN, 12n)).toBe(true);
+    expect(log.coverage(CHAIN)).toEqual(point(12n));
+    // A stretch inside what is covered moves nothing back.
+    log.record(CHAIN, new Map(), START, stretch(0n, 2n));
+    expect(log.coverage(CHAIN)).toEqual(point(12n));
+  });
+
+  it('keeps at most a few stretches beyond a gap, the nearest first', async () => {
+    const { log } = digestOn();
+    await log.read();
+    for (let far = 20n; far >= 2n; far -= 1n) log.record(CHAIN, new Map(), START, stretch(far * 10n, far * 10n + 5n));
+    log.record(CHAIN, new Map(), START, stretch(0n, 20n));
+    // The nearest far side kept joins at once: the farthest were let go, and later walks bring them again.
+    expect(log.coverage(CHAIN)).toEqual(point(25n));
+  });
+
+  it('writes the stretches with the facts and reads them back: a restart covers what was covered', async () => {
+    const { log, fake, time } = digestOn();
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 5n));
+    log.record(CHAIN, new Map(), START, stretch(5n, 9n));
+    await log.flush();
+    const restarted = digestOn(fake, { time });
+    expect(restarted.log.covers(CHAIN, 0n)).toBe(false);
+    await restarted.log.read();
+    expect(restarted.log.covers(CHAIN, 9n)).toBe(true);
+    expect(restarted.log.coverage(CHAIN)).toEqual(point(9n));
+  });
+
+  it('an anchor written and the digest’s delta lost: a restart leaves the chain uncovered past what was written', async () => {
+    const { log, fake, time } = digestOn();
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 5n));
+    await log.flush();
+    // The next walk's delta never reaches the store: the process stops before its write.
+    log.record(CHAIN, seen(['agent', AGENT, 7n]), START, stretch(5n, 9n));
+    const restarted = digestOn(fake, { time });
+    await restarted.log.read();
+    expect(restarted.log.covers(CHAIN, 5n)).toBe(true);
+    expect(restarted.log.covers(CHAIN, 9n)).toBe(false);
+    expect(restarted.log.coverage(CHAIN)).toEqual(point(5n));
+  });
+
+  it('a spoiled delta breaks coverage at its stretch: facts after it never stand for the chain whole', async () => {
+    const { log, fake, time } = digestOn();
+    await log.read();
+    log.record(CHAIN, new Map(), START, stretch(0n, 5n));
+    await log.flush();
+    time.held.at += MINUTE;
+    log.record(CHAIN, seen(['agent', AGENT, 7n]), time.now(), stretch(5n, 9n));
+    await log.flush();
+    time.held.at += MINUTE;
+    log.record(CHAIN, new Map(), time.now(), stretch(9n, 12n));
+    await log.flush();
+    const [, middle] = namesUnder(fake.files, 'deltas');
+    if (middle === undefined) throw new Error('Three deltas were written');
+    fake.files.set(middle, Buffer.from('spoiled'));
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
+    const restarted = digestOn(fake, { time });
+    await restarted.log.read();
+    expect(restarted.log.covers(CHAIN, 5n)).toBe(true);
+    expect(restarted.log.covers(CHAIN, 12n)).toBe(false);
+  });
+
+  it('a rebase sets the chain’s coverage aside with its facts, until walks read it again from its first event', async () => {
+    const rebases = new Map<string, Date>();
+    const { log } = digestOn(undefined, { anchors: anchorsWith(rebases) });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    rebases.set(ORG, new Date(START.getTime() + MINUTE));
+    expect(log.covers(CHAIN, 10n)).toBe(false);
+    expect(log.coverage(CHAIN)).toBeUndefined();
+    // A walk that began before the rebase read the chain as it was: nothing of it counts.
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    expect(log.covers(CHAIN, 10n)).toBe(false);
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+    log.record(CHAIN, seen(['agent', AGENT, 4n]), new Date(START.getTime() + 2 * MINUTE), stretch(0n, 6n));
+    expect(log.covers(CHAIN, 6n)).toBe(true);
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(4n);
+  });
+});
+
+describe('the digest within its memory: one organisation’s growth never stops another’s (AT13; S165, S170)', () => {
+  it('the largest chain gives way, its payments first, then all of it, each with its own alarm; the small one keeps all', async () => {
+    const capture = new LogCapture();
+    const { log, fake, time } = digestOn(undefined, { capture, mostBytes: 12_000 });
+    await log.read();
+    log.record(OTHER, seen(['agent', AGENT, 2n]), START, stretch(0n, 2n));
+    log.record(CHAIN, seen(['agent', AGENT, 3n], ['agent_key', KEY, 4n]), START, stretch(0n, 4n));
+    expect(capture.lines()).toEqual([]);
+    // The busy organisation's requests outgrow what may be held: its payments give way.
+    log.record(CHAIN, requests(400), START, stretch(4n, 500n));
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        level: 'error',
+        event: 'audit.state_digest_chain_gave_way',
+        orgId: ORG,
+        what: 'payments',
+      }),
+    );
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-000000000000')).toBeUndefined();
+    // Its authority is still held to the digest, and both chains still go on.
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(3n);
+    expect(log.latest(OTHER, 'agent', AGENT)).toBe(2n);
+    expect(log.covers(CHAIN, 500n)).toBe(true);
+    expect(log.covers(OTHER, 2n)).toBe(true);
+    expect(log.memoryHeld().bytes).toBeLessThanOrEqual(12_000);
+    expect(log.bytesHeld()).toBe(log.memoryHeld().bytes);
+    // More payments of it are kept no more.
+    log.record(CHAIN, requests(10, 1000), START);
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-0000000003e8')).toBeUndefined();
+
+    // Its authority alone outgrowing it too: the whole chain gives way, read as before the digest, never a stop.
+    const agents = new Map(
+      Array.from({ length: 600 }, (_, at) => [
+        subjectKey('agent', `0199a0f0-0000-7000-8000-${(5000 + at).toString(16).padStart(12, '0')}`),
+        BigInt(at + 600),
+      ]),
+    );
+    log.record(CHAIN, agents, START, stretch(500n, 1200n));
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.state_digest_chain_gave_way', orgId: ORG, what: 'chain' }),
+    );
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+    expect(log.covers(CHAIN, 99_999n)).toBe(true);
+    expect(log.latest(OTHER, 'agent', AGENT)).toBe(2n);
+    expect(log.covers(OTHER, 2n)).toBe(true);
+
+    // A restart reads the chain that gave way as uncovered, to be walked again from its first event.
+    time.held.at += 2 * HOUR;
+    log.record(OTHER, seen(['agent', KEY, 3n]), time.now(), stretch(2n, 3n));
+    await log.flush();
+    const restarted = digestOn(fake, { time, mostBytes: 1024 * 1024 });
+    await restarted.log.read();
+    expect(restarted.log.covers(CHAIN, 4n)).toBe(false);
+    expect(restarted.log.covers(OTHER, 3n)).toBe(true);
+  });
+
+  it('says it is past half, once', async () => {
+    const capture = new LogCapture();
+    const { log } = digestOn(undefined, { capture, mostBytes: 16_000 });
+    await log.read();
+    log.record(CHAIN, requests(300), START);
+    log.record(CHAIN, requests(10, 1000), START);
+    expect(capture.lines().filter((line) => line.event === 'audit.state_digest_near_memory')).toHaveLength(1);
+    expect(capture.lines().filter((line) => line.event === 'audit.state_digest_chain_gave_way')).toEqual([]);
+  });
+
+  it('writes no snapshot larger than a start fetches: the deltas are read instead', async () => {
+    const capture = new LogCapture();
+    const { log, fake, time } = digestOn(undefined, { capture, mostFileBytes: 1500 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 1n]), START);
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+    // Small deltas over the hour, and the hour's snapshot of all of them past what a start fetches.
+    for (let delta = 0; delta < 5; delta += 1) {
+      time.held.at += 13 * MINUTE;
+      log.record(CHAIN, requests(30, delta * 100), time.now());
+      await log.flush();
+    }
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'audit.state_digest_snapshot_too_large' }));
+    const restarted = digestOn(fake, { time, mostFileBytes: 1500 });
+    await restarted.log.read();
+    expect(restarted.log.memoryHeld().objects).toBe(151);
+  });
+});
+
+describe('the digest in a process that loses the lease (AT13)', () => {
+  it('says nothing and forgets all it holds while it doesn’t lead, and reads the store again whole when it does', async () => {
+    const leads = { now: true };
+    const rebases = new Map<string, Date>();
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      anchors: anchorsWith(rebases),
+      leading: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    leads.now = false;
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+    expect(log.covers(CHAIN, 10n)).toBe(false);
+    expect(log.coverage(CHAIN)).toBeUndefined();
+    expect(log.state()).toBe('unread');
+    // A walk while it doesn't lead records nothing, and it doesn't read the store.
+    log.record(CHAIN, seen(['agent', KEY, 3n]), START, stretch(0n, 3n));
+    await log.read();
+    expect(log.memoryHeld().chains).toBe(0);
+    // Meanwhile another copy leads, and the chain is rebased: nothing of the old facts comes back here.
+    time.held.at += 2 * MINUTE;
+    rebases.set(ORG, new Date(START.getTime() + MINUTE));
+    leads.now = true;
+    expect(log.covers(CHAIN, 10n)).toBe(false);
+    await log.read();
+    expect(log.state()).toBe('read');
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+    expect(log.covers(CHAIN, 10n)).toBe(false);
   });
 });

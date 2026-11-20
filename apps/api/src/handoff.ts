@@ -394,11 +394,12 @@ export function createHandoff({
      */
     readonly pin?: (chain: Chain) => Promise<(() => void) | undefined>;
     /**
-     * The signed states' digest every read in Tx A is held to (AT13): while it can't stand for the chain (not read yet
-     * since the start, or past its memory), the request waits, `digest_pending`, as for an anchor not made yet. None,
+     * The signed states' digest every read in Tx A is held to (AT13): while it doesn't cover the chain to the anchor
+     * compared with (not read yet since the start, a stretch missing, a rebase), the request waits, `digest_pending`,
+     * that organisation alone, as for an anchor not made yet. A chain given way for memory goes on today's checks. None,
      * and nothing waits for it.
      */
-    readonly digest?: Pick<StateDigest, 'known'>;
+    readonly digest?: Pick<StateDigest, 'covers'>;
   };
 }): Handoff {
   // Refused at start (ADR-007 §10): a wait no longer than the call could mark UNKNOWN one whose answer is on its way.
@@ -542,7 +543,7 @@ export function createHandoff({
     const chain = { kind: 'organisation', orgId } as const;
     const anchor = anchoring.anchors.latest(chain);
     if (anchor === undefined) return 'anchor_pending';
-    if (anchoring.digest?.known(chain) === false) return 'digest_pending';
+    if (anchoring.digest?.covers(chain, anchor.seq) === false) return 'digest_pending';
     return (await states.anchorKept(tx, orgId, anchor)).outcome === 'kept' ? undefined : 'hold_tampered';
   };
 

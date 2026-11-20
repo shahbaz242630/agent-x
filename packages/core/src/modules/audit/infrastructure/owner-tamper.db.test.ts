@@ -413,7 +413,7 @@ function heldTo(kept: DigestLog): SignedStates {
 async function walked(from: CheckedPoint = CHAIN_START, into: DigestLog = digest): Promise<CheckedPoint> {
   const step = await trail.checkFromAnchor(app, org, from);
   if (!step.ok) throw new Error('The chain should have checked out before the tampering');
-  if (step.signed !== undefined) into.record({ kind: 'organisation', orgId: org }, step.signed, AT13_AT);
+  into.record({ kind: 'organisation', orgId: org }, step.signed ?? new Map(), AT13_AT, { from: from.seq, to: step });
   return { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
 }
 
@@ -587,6 +587,52 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     expect(alarms()).toEqual([expect.objectContaining({ reason: 'log', objectId: id, seq: String(revocation) })]);
   });
 
+  it('the revocation put back (chain-restore puts events back, no rebase): verified again, no further alarm', async () => {
+    const { id, savedRow, revocation } = await revokedThen(3);
+    await owner.query(
+      'create temporary table kept_event as select * from audit.events where org_id = $1 and seq = $2',
+      [org, String(revocation)],
+    );
+    try {
+      await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+      await unrevoked(id, savedRow);
+      await caughtAtDecision(id, revocation);
+      // The repair: the event back from the copy, the row as the revocation left it.
+      await owner.query('insert into audit.events select * from kept_event');
+      await owner.withoutStatusGuard(() => owner.setColumn(id, 'status', 'REVOKED'));
+      await owner.query('update probe.agents set state_version = 2 where org_id = $1 and id = $2', [org, id]);
+      await owner.query(
+        'update probe.agents set state_event_id = (select id from kept_event) where org_id = $1 and id = $2',
+        [org, id],
+      );
+      expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
+      expect(alarms()).toHaveLength(2);
+    } finally {
+      await owner.query('drop table kept_event');
+    }
+  });
+
+  it('a gathered read never raises the alarm on its own ask of the digest: a row not believed is read again alone', async () => {
+    const id = await newAgent();
+    await walked();
+    // As if a walk had kept a later place between the gather's statement and its ask: the ask after it alone sees it.
+    const asks = { count: 0 };
+    const racing = heldTo({
+      ...digest,
+      latest: (chain, type, objectId) => {
+        asks.count += 1;
+        return asks.count === 1 ? 99n : digest.latest(chain, type, objectId);
+      },
+    });
+    const check = await withTenant(app, org, async (tx) => {
+      await racing.gather(tx, org, [{ table: AGENTS, id: { id }, lock: 'share' }]);
+      return racing.verifiedState(tx, AGENTS, { orgId: org, id }, 'share');
+    });
+    expect(check).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(asks.count).toBeGreaterThan(1);
+    expect(alarms()).toEqual([]);
+  });
+
   it('the agent and every event about it deleted: refused at decision time as rolled back, never read as missing', async () => {
     const { id, revocation } = await revokedThen(3);
     await owner.query('delete from audit.events where org_id = $1 and subject_id = $2', [org, id]);
@@ -677,7 +723,7 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
       id,
     ]);
     await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
-    expect(kept.known({ kind: 'organisation', orgId: org })).toBe(false);
+    expect(kept.covers({ kind: 'organisation', orgId: org }, 1n)).toBe(false);
     expect(await heldCheck(id, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
     const unread = createDigestLog({
       store: createFakeWriteOnceStore().store,
@@ -688,7 +734,7 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
       alertAfterMs: 60_000,
       mostBytes: 1024 * 1024,
     });
-    expect(unread.known({ kind: 'organisation', orgId: org })).toBe(false);
+    expect(unread.covers({ kind: 'organisation', orgId: org }, 1n)).toBe(false);
     expect(await heldCheck(id, 'share', heldTo(unread))).toMatchObject({ outcome: 'verified', version: 1 });
   });
 

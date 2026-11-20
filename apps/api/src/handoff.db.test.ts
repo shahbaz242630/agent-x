@@ -2368,7 +2368,7 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     const chain = { kind: 'organisation', orgId: w.org } as const;
     const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
     if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
-    digest.record(chain, step.signed, clock.now());
+    digest.record(chain, step.signed, clock.now(), { from: 0n, to: step });
     const anchors = createMemoryAnchorStore();
     anchors.keep(signAnchor(keys, chain, step, clock.now()));
     return { anchors, digest };

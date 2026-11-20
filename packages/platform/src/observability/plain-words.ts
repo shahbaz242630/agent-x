@@ -293,10 +293,20 @@ export const PLAIN_WORDS = {
     broke: 'Nothing yet. If it doubles, payments wait until the process is given more memory.',
     next: 'Plan more memory for the process in good time: the line says how much is held, and the limit.',
   },
-  'audit.state_digest_beyond_memory': {
-    happened: 'The record of each signed record’s latest version, kept with the audit anchors, outgrew its memory.',
-    broke: 'Payments wait for every organisation until a restart with more memory. Other decisions go on as before.',
-    next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
+  'audit.state_digest_chain_gave_way': {
+    happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
+    broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
+    next: 'Give the process more memory, then restart it, and the organisation is read again whole.',
+  },
+  'audit.state_digest_snapshot_too_large': {
+    happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',
+    broke: 'Nothing: it was not written, and a start reads the smaller files instead, more slowly.',
+    next: 'Give the process more memory, so the copy fits again.',
+  },
+  'audit.state_digest_catch_up_failed': {
+    happened: 'A walk to bring one organisation’s record of signed records’ latest versions up to date failed.',
+    broke: 'That organisation’s payments wait until it is up to date. Others go on.',
+    next: 'Nothing: it is tried again at its next turn. If it repeats, read the reason on the line.',
   },
   'audit.state_digest_store_failed': {
     happened: 'The record of each signed record’s latest version could not be read from or written to the store.',

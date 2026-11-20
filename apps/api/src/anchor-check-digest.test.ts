@@ -1,6 +1,8 @@
 // The anchor check keeping the signed states' digest (AT13): each walk under a new anchor records what it read, written
 // beside the anchors and read back after them by a process started since. The decisions held to it, on the real
 // tables, are in owner-tamper.db.test.ts (core) and handoff.db.test.ts.
+import { gunzipSync } from 'node:zlib';
+
 import {
   type ChainReport,
   createAnchorLog,
@@ -33,13 +35,23 @@ const walk = (seq: bigint, signed?: ReadonlyMap<string, bigint>): WalkedReport =
   ...(signed === undefined ? {} : { signed }),
 });
 
-/** One organisation's chain answering whatever `report` holds now. */
-function chainOf(report: { current: WalkedReport | ChainReport }): OrganisationChains {
+/** One organisation's chain answering whatever `report` holds now, each place it was walked from kept in `from`. */
+function chainOf(
+  report: { current: WalkedReport | ChainReport },
+  from: (bigint | undefined)[] = [],
+  holds: string[] = [],
+): OrganisationChains {
   return {
     list: () => Promise.resolve([ORG]),
     recorded: () => Promise.resolve([ORG]),
-    verify: () => Promise.resolve(report.current),
-    hold: () => Promise.resolve(),
+    verify: (_orgId, anchor) => {
+      from.push(anchor?.seq);
+      return Promise.resolve(report.current);
+    },
+    hold: (_orgId, failure) => {
+      if (failure !== undefined) holds.push(failure);
+      return Promise.resolve();
+    },
   };
 }
 
@@ -86,9 +98,9 @@ describe('the anchor check keeping the signed states’ digest (AT13)', () => {
     expect(digestFiles(fake).length).toBeGreaterThan(0);
 
     const restarted = process(fake, chainOf(report));
-    expect(restarted.digest.known(CHAIN)).toBe(false);
+    expect(restarted.digest.covers(CHAIN, 5n)).toBe(false);
     await restarted.check.run();
-    expect(restarted.digest.known(CHAIN)).toBe(true);
+    expect(restarted.digest.covers(CHAIN, 5n)).toBe(true);
     expect(restarted.digest.latest(CHAIN, 'agent', AGENT)).toBe(4n);
   });
 
@@ -128,6 +140,112 @@ describe('the anchor check keeping the signed states’ digest (AT13)', () => {
     expect(capture.lines()).toContainEqual(
       expect.objectContaining({ level: 'warn', event: 'audit.state_digest_store_failed', what: 'read' }),
     );
-    expect(digest.known(CHAIN)).toBe(false);
+    expect(digest.covers(CHAIN, 3n)).toBe(false);
+  });
+
+  it('an anchor written and its digest delta lost: a restart leaves it uncovered until the catch-up walk reads on', async () => {
+    const fake = createFakeWriteOnceStore();
+    const report: { current: WalkedReport } = { current: walk(5n, new Map([[subjectKey('agent', AGENT), 4n]])) };
+    const first = process(fake, chainOf(report));
+    await first.check.run();
+    // The next walk anchors at 9, and the anchor is written; the digest's write never lands.
+    report.current = walk(9n, new Map([[subjectKey('agent', AGENT), 8n]]));
+    const put = fake.real.put.bind(fake.real);
+    fake.instead.put = (name, bytes) =>
+      name.includes('/digests/') ? Promise.reject(new Error('stopped')) : put(name, bytes);
+    await first.check.run();
+    delete fake.instead.put;
+
+    const walkedFrom: (bigint | undefined)[] = [];
+    const after = process(fake, chainOf(report, walkedFrom));
+    await after.log.read();
+    await after.digest.read();
+    expect(after.log.latest(CHAIN)?.seq).toBe(9n);
+    // Tx A asks to 9: not covered, so it waits (digest_pending), this organisation alone.
+    expect(after.digest.covers(CHAIN, 9n)).toBe(false);
+    expect(after.digest.coverage(CHAIN)?.seq).toBe(5n);
+    await after.check.run();
+    // Its turn compares with the anchor, then walks on from where the digest is covered: 5.
+    expect(walkedFrom).toEqual([9n, 5n]);
+    expect(after.digest.covers(CHAIN, 9n)).toBe(true);
+    expect(after.digest.latest(CHAIN, 'agent', AGENT)).toBe(8n);
+  });
+
+  it('a catch-up walk that fails is the alarm, and leaves the chain uncovered', async () => {
+    const fake = createFakeWriteOnceStore();
+    const report: { current: WalkedReport | ChainReport } = { current: walk(5n) };
+    const first = process(fake, chainOf(report));
+    await first.check.run();
+    // A process whose digest is empty, as after a rebase: its catch-up walks from the first event, and finds it broken.
+    const fresh = createFakeWriteOnceStore();
+    for (const [name, bytes] of fake.files) if (!name.includes('/digests/')) fresh.files.set(name, bytes);
+    const walkedFrom: (bigint | undefined)[] = [];
+    const after = process(fresh, chainOf(report, walkedFrom));
+    await after.log.read();
+    let calls = 0;
+    const answers: (WalkedReport | ChainReport)[] = [walk(5n), { ok: false, problem: { reason: 'hash', seq: 2n } }];
+    const organizations = chainOf(report, walkedFrom);
+    const failing: OrganisationChains = {
+      ...organizations,
+      verify: (orgId, anchor) => {
+        report.current = answers[Math.min(calls, 1)] ?? walk(5n);
+        calls += 1;
+        return organizations.verify(orgId, anchor);
+      },
+    };
+    const check = createAnchorCheck({
+      chains: [],
+      organizations: failing,
+      keys,
+      clock: after.clock,
+      logger: testLogger(after.capture),
+      staleAfterMs: STALE_MS,
+      deadlineMs: 120_000,
+      durable: after.log,
+      digest: after.digest,
+    });
+    await check.run();
+    expect(walkedFrom).toEqual([5n, 0n]);
+    expect(after.digest.covers(CHAIN, 5n)).toBe(false);
+    expect(after.capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'audit.integrity_failed', reason: 'hash', seq: '2' }),
+    );
+  });
+
+  it('dates what a walk read when the walk began, so a rebase landing during it sets it aside', async () => {
+    const fake = createFakeWriteOnceStore();
+    const clocked: { advance?: () => void } = {};
+    const { check, digest, clock } = process(fake, {
+      ...chainOf({ current: walk(3n) }),
+      verify: () => {
+        // The walk takes ten seconds: the anchor is signed at its end.
+        clocked.advance?.();
+        return Promise.resolve(walk(3n, new Map([[subjectKey('agent', AGENT), 2n]])));
+      },
+    });
+    clocked.advance = () => {
+      clock.advanceBy(10_000);
+    };
+    await check.run();
+    expect(digest.latest(CHAIN, 'agent', AGENT)).toBe(2n);
+    const [delta] = digestFiles(fake).filter((name) => name.includes('/deltas/'));
+    const [line] = gunzipSync(fake.files.get(delta ?? '') ?? Buffer.alloc(0))
+      .toString('utf8')
+      .split('\n');
+    expect(JSON.parse(line ?? '{}')).toMatchObject({ t: AT.toISOString() });
+  });
+
+  it('a slow digest write is its own warning, never the anchors’ write failing', async () => {
+    const fake = createFakeWriteOnceStore();
+    const report = { current: walk(3n, new Map([[subjectKey('agent', AGENT), 2n]])) };
+    const { check, capture } = process(fake, chainOf(report), { deadlineMs: 50 });
+    const put = fake.real.put.bind(fake.real);
+    fake.instead.put = (name, bytes) => (name.includes('/digests/') ? new Promise(() => undefined) : put(name, bytes));
+    await check.run();
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'warn', event: 'audit.state_digest_store_failed', what: 'write' }),
+    );
+    expect(capture.lines().filter((line) => String(line.event).startsWith('audit.anchor_store_write'))).toEqual([]);
+    expect([...fake.files.keys()].some((name) => !name.includes('/digests/'))).toBe(true);
   });
 });

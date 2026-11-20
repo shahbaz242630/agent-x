@@ -264,7 +264,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
   // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
   // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
-  const kept = anchorsKeptOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs });
+  // A copy that loses the lease says nothing from its digest, and reads it again whole when it leads (AT13).
+  const leading = (): boolean => leadership.leading();
+  const kept = anchorsKeptOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs }, leading);
   const anchorLog = kept?.log;
   const anchorStore = anchorLog ?? createMemoryAnchorStore();
   // The signed states' digest (AT13): kept beside the anchors, in memory alone where they are. Every signed state this
@@ -278,6 +280,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       epoch: config.audit.anchorEpoch,
       alertAfterMs: staleAfterMs,
       mostBytes: MEMORY_DIGEST_BYTES,
+      leading,
     });
   checkStatesWith(digest);
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });

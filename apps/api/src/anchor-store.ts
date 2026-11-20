@@ -36,6 +36,8 @@ export function anchorLogOf(config: Config, services: StoreServices): AnchorLog 
 export function anchorsKeptOf(
   { environment, anchorStore: { directory, container }, audit: { anchorEpoch: epoch } }: Config,
   { clock, ...services }: StoreServices,
+  /** Whether this process leads the jobs: one that doesn't says nothing from its digest (digest-log.ts). */
+  leading?: () => boolean,
 ): { readonly log: AnchorLog; readonly digest: DigestLog } | undefined {
   let store: WriteOnceStore;
   if (container !== null) {
@@ -58,7 +60,7 @@ export function anchorsKeptOf(
     now,
     cutOver: true,
     evicts: true,
-    alsoHeld: () => kept.digest?.memoryHeld().bytes ?? 0,
+    alsoHeld: () => kept.digest?.bytesHeld() ?? 0,
   });
   const digest = createDigestLog({
     ...services,
@@ -66,6 +68,7 @@ export function anchorsKeptOf(
     epoch,
     now,
     anchors: log,
+    leading,
     mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
   });
   kept.digest = digest;

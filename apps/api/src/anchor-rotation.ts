@@ -574,6 +574,7 @@ export function createRotation({
     const { cursor, target } = passing;
     if (cursor.seq < target.seq) {
       const most = smallest(PASS_STEP, budget, target.seq - cursor.seq);
+      const stepBegan = clock.now();
       const step = await read(orgId, 'pass', () => checks.passStep(orgId, cursor, target, Number(most)), signal);
       if (step === MISSED) return MISSED;
       retryFirst.delete(orgId);
@@ -585,8 +586,12 @@ export function createRotation({
         return FAILED;
       }
       const { seq, hash, macKeyVersion } = step;
-      // Every event the step read is sealed and in its place below the anchor: as true a fact as the walk's (AT13).
-      if (step.signed !== undefined) digest?.record(chainOf(orgId), step.signed, clock.now());
+      // Every event the step read is sealed and in its place below the anchor: as true a fact as the walk's, and the
+      // stretch it read, dated when it began (AT13).
+      digest?.record(chainOf(orgId), step.signed ?? new Map(), stepBegan, {
+        from: cursor.seq,
+        to: { seq, hash, macKeyVersion },
+      });
       underWay.set(orgId, { ...passing, cursor: { seq, hash, macKeyVersion } });
       passed += seq - cursor.seq;
       if (seq < target.seq) return seq - cursor.seq;
