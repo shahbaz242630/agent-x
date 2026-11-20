@@ -510,6 +510,7 @@ describe('the reasons that end a lane’s turn', () => {
     'hold_tampered',
     'hold_bank',
     'anchor_pending',
+    'digest_pending',
     'pause_paused',
     'pause_unread',
   ])('%s is the whole organisation’s', (why) => {

@@ -685,6 +685,7 @@ export function createAnchorLog({
   mostFileBytes = heapsFileBytes(),
   cutOver = false,
   evicts = false,
+  alsoHeld = () => 0,
 }: {
   readonly store: WriteOnceStore;
   readonly keys: KeyProvider;
@@ -706,6 +707,11 @@ export function createAnchorLog({
    * `pin`. The operator's tools read a chain's anchor after a read and would take nothing for none: theirs never are.
    */
   readonly evicts?: boolean;
+  /**
+   * What else this process holds of the store, in bytes, counted against the same budget (AT13: the signed states'
+   * digest, digest-log.ts, which keeps itself to half of it): shards go to make room for it as for anchors.
+   */
+  readonly alsoHeld?: () => number;
 }): AnchorLog {
   const folder = (kind: Kind): string => `e${String(epoch)}/${kind}/`;
   // Every table packed (packed-lines.ts, PL-65): each line a record, not an object. Where the same object stood in two
@@ -858,7 +864,8 @@ export function createAnchorLog({
     (unsent?.stamps.length ?? 0) * UNSENT_LINE_BYTES +
     (written.size + awaited.size + refusedChanges.size + readSinceWalk.size + unlisted.size + lost.size) *
       WRITTEN_NAME_BYTES +
-    seenElsewhere.size * SEEN_NAME_BYTES;
+    seenElsewhere.size * SEEN_NAME_BYTES +
+    alsoHeld();
   /** What is held, by the budget's count, with `staging` lines a read has yet to merge. */
   const heldBytes = (staging: number): number => (linesHeld() + staging) * KEPT_LINE_BYTES + besideLines();
   /** A line this process made, read back from its own text: `readsBack` held when the file was made, so it does. */

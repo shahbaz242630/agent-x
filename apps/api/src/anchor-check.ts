@@ -83,6 +83,14 @@
 // (handoff.ts `chainStops`), so events past that anchor can be taken away unseen until
 // the chain's next turn.
 //
+// Each walk under a new anchor also records, for each signed object it read, where its
+// newest signed event is (the signed states' digest, AT13, digest-log.ts), kept with the
+// anchors and read back with them; the full pass's steps add what they read, so a chain
+// anchored before the digest comes into it. Every decision's read of a signed state is
+// held to it (audit-trail.ts): an object's newest signed events deleted or moved below
+// the anchor, past the last 1,000, with its row rolled back, are refused at once, not
+// only at the day's count or the full pass, which stay as defence in depth.
+//
 // After the organisations' turns, the rotation (anchor-rotation.ts, 4D2e E7): each
 // organisation's daily count and walk, and the full pass's share, within what is left
 // of the run, one read at a time, inside the lanes' share of the connections. It is
@@ -128,7 +136,9 @@ import {
   type CheckedPoint,
   createMemoryAnchorStore,
   createMemoryPassRecord,
+  type DigestLog,
   sameAnchor,
+  type SignedSeen,
   signAnchor,
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -139,10 +149,13 @@ import { createTurns, shuffledAfresh, startAnywhere } from './anchor-turns.ts';
 import { shardOfOrganisation, shardWalk } from './anchor-walk.ts';
 import { PastDeadline, scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
+/** A check's report, and for a walk that holds, the signed objects it read (the trail's WalkedStep, AT13). */
+export type WalkedReport = ChainReport & { readonly signed?: SignedSeen };
+
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
   readonly chain: Chain;
-  readonly verify: (anchor: CheckedPoint | undefined) => Promise<ChainReport>;
+  readonly verify: (anchor: CheckedPoint | undefined) => Promise<WalkedReport>;
 }
 
 /** What the probe found of one organisation's chain against its anchor, or that its read failed (the trail's probeHeads). */
@@ -174,7 +187,7 @@ export interface OrganisationChains {
   /** Every organisation the platform chain records as created, by ID: each must be listed. */
   recorded(): Promise<readonly string[]>;
   /** Checks one organisation's chain from its last anchor, or from its start where it has none. */
-  verify(orgId: string, anchor: CheckedPoint | undefined): Promise<ChainReport>;
+  verify(orgId: string, anchor: CheckedPoint | undefined): Promise<WalkedReport>;
   /**
    * Each chain's head read against its anchor at a run's start (4D2e E8), in pages, stopping between them once `signal`
    * aborts. None given, every organisation is read in its turn.
@@ -219,6 +232,11 @@ export interface AnchorCheckOptions {
   readonly anchors?: AnchorStore;
   /** The same anchors, where they are kept durable: read and written around each run. None in development with no store. */
   readonly durable?: AnchorLog;
+  /**
+   * The signed states' digest (AT13): each chain's walk under a new anchor records the signed objects it read into it,
+   * read and written with the anchors. None, and nothing is recorded.
+   */
+  readonly digest?: DigestLog;
   /** How long the last write may take as the API stops: the store's calls may take 30 seconds, and the stop has 25 in all. */
   readonly stopFlushMs?: number;
   /** How many organisations are checked at once. */
@@ -347,6 +365,7 @@ export function createAnchorCheck({
   pastCapStart = startAnywhere,
   deadlineMs,
   durable,
+  digest,
   anchors = durable ?? createMemoryAnchorStore(),
   stopFlushMs = STOP_FLUSH_MS,
   lanes = LANES,
@@ -475,7 +494,7 @@ export function createAnchorCheck({
   };
 
   /** What a completed check comes to: the alarm, nothing moved, or the chain anchored where it stands. */
-  const afterCheck = (chain: Chain, log: Logger, report: ChainReport, last: Anchor | undefined): Outcome => {
+  const afterCheck = (chain: Chain, log: Logger, report: WalkedReport, last: Anchor | undefined): Outcome => {
     if (!report.ok) return alarmed(chain, log, report.problem.reason, report.problem.seq);
     // A store's read past its deadline, or another copy's anchor, can land during the check, and the head read before
     // it says nothing against it: an honest copy may have moved on since. The next run compares with it, the alarm a run
@@ -498,6 +517,9 @@ export function createAnchorCheck({
     if (storeUnread(chain)) return 'unanchored';
     const anchor = signAnchor(keys, chain, report, clock.now(), durable?.epoch);
     anchors.keep(anchor);
+    // What the walk to it read of each signed object, kept with it (AT13): facts as true as the anchor, as a decision
+    // will hold the database to them.
+    if (report.signed !== undefined) digest?.record(chain, report.signed, anchor.at);
     log.info('audit.anchored', {
       chain: chain.kind,
       seq: report.seq,
@@ -511,7 +533,7 @@ export function createAnchorCheck({
   const compared = (
     chain: Chain,
     log: Logger,
-    report: ChainReport,
+    report: WalkedReport,
     last: Anchor | undefined,
     alone: boolean,
   ): Outcome => {
@@ -530,7 +552,7 @@ export function createAnchorCheck({
   const landedLate = (
     chain: Chain,
     log: Logger,
-    report: ChainReport,
+    report: WalkedReport,
     last: Anchor | undefined,
     alone: boolean,
   ): void => {
@@ -653,7 +675,7 @@ export function createAnchorCheck({
   ): Promise<Outcome> => {
     const key = keyOf(chain);
     const last = anchors.latest(chain);
-    let report: ChainReport;
+    let report: WalkedReport;
     let cutOff = false;
     const began = performance.now();
     try {
@@ -1198,7 +1220,17 @@ export function createAnchorCheck({
       leftOffAt = from.lastFileAt();
     }
     for (const orgId of from.organisations()) remember(orgId);
+    // The digest after the anchors, which read the rebases it passes lines over by (AT13). Its own failures it says itself.
+    if (digest === undefined) return;
+    try {
+      await withinDeadline(digest.read(), deadlineMs, signal);
+    } catch (error) {
+      if (!(error instanceof Stopped)) logger.warn('audit.state_digest_store_failed', { what: 'read', err: error });
+    }
   };
+
+  /** What the digest holds unwritten into the store, beside the anchors' write (AT13). Never throws; it says its own. */
+  const flushDigest = (): Promise<void> => digest?.flush() ?? Promise.resolve();
 
   /**
    * What has moved so far into the store. A run stopped leaves it to `finish`. Never throws. `twice`: a write is under way,
@@ -1207,7 +1239,7 @@ export function createAnchorCheck({
   const writeStore = async (to: AnchorLog, stop: AbortSignal | undefined, twice = false): Promise<void> => {
     try {
       const writing = twice ? to.flush().then(() => to.flush()) : to.flush();
-      await withinDeadline(writing, Math.min(deadlineMs, WRITE_WITHIN_MS), stop);
+      await withinDeadline(Promise.all([writing, flushDigest()]), Math.min(deadlineMs, WRITE_WITHIN_MS), stop);
     } catch (error) {
       if (!(error instanceof Stopped)) to.writeFailed(error);
     }
@@ -1276,6 +1308,7 @@ export function createAnchorCheck({
           },
           // Its shards pinned for each step, where the log lets them go (PL-65 PR3).
           ...(durable === undefined ? {} : { shards: durable }),
+          digest,
           failed: (orgId, check, { reason, seq }) => rotationFailed(from, orgId, check, reason, seq),
           missed: async (orgId, check, error) => {
             // A database that refuses the read is the alarm, as for any check; anything else a warning, and next run.
@@ -1330,7 +1363,7 @@ export function createAnchorCheck({
       try {
         // Twice: a run's write may be under way, and the first joins it.
         const writing = durable.flush().then(() => durable.flush());
-        await withinDeadline(writing, stopFlushMs, undefined);
+        await withinDeadline(Promise.all([writing, flushDigest()]), stopFlushMs, undefined);
       } catch (error) {
         durable.writeFailed(error);
       }
@@ -1365,7 +1398,7 @@ export function createAnchorCheck({
       if (signal?.aborted !== true) sayLeft(cap);
       if (durable !== undefined) {
         // A run stopped ends at once: `flush` never throws, and `finish`, where the API is stopping, joins it.
-        if (signal?.aborted === true) void durable.flush();
+        if (signal?.aborted === true) void Promise.all([durable.flush(), flushDigest()]);
         else await writeStore(durable, signal, writingAlong);
       }
       const count = (outcome: Outcome): number => outcomes.filter((each) => each === outcome).length;

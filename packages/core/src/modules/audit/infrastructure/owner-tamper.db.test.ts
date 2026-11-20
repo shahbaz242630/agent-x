@@ -14,6 +14,7 @@
 // a policy (the guard), and the chain wound back to an earlier sealed head
 // (the anchor). The final describe block is what the owner is refused outright.
 import {
+  createFakeWriteOnceStore,
   createTestDatabase,
   LogCapture,
   type OwnerTamper,
@@ -30,9 +31,16 @@ import {
   type SignedStateTable,
   withTenant,
 } from '@agentx/platform/db';
-import { CHAIN_START, type CheckedPoint } from '@agentx/platform/audit-chain';
+import {
+  CHAIN_START,
+  type CheckedPoint,
+  createDigestLog,
+  type DigestAnchors,
+  type DigestLog,
+} from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { sql } from 'kysely';
+import type { WriteOnceStore } from '@agentx/platform/storage';
+import { sql, type Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -365,14 +373,79 @@ describe('FX-TAMPER as the owner: what gets past the row check alone, and what c
   });
 });
 
-describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, with the row rolled back (4D2e E8, decisions 1 and 2b)', () => {
+/**
+ * The signed states' digest (AT13) as the anchor check keeps it, and signed states whose reads are held to it, as
+ * withSignedStates builds them where a process keeps one. Their alarms hand on to `found`, as the others' do.
+ */
+let digest: DigestLog;
+let held: SignedStates;
+
+/** A digest in memory alone, or kept in `store`, as the anchor check's: read whole first where it is kept. */
+async function newDigest(store?: WriteOnceStore, anchors?: DigestAnchors): Promise<DigestLog> {
+  const made = createDigestLog({
+    store,
+    anchors,
+    keys,
+    logger: testLogger(capture),
+    now: () => new Date(),
+    epoch: 1,
+    alertAfterMs: 60_000,
+    mostBytes: 64 * 1024 * 1024,
+  });
+  await made.read();
+  return made;
+}
+
+/** Signed states whose reads are held to `kept`. */
+function heldTo(kept: DigestLog): SignedStates {
+  return createSignedStates({
+    keys,
+    trail: createAuditTrail({ keys, ids: new SequentialIds(0x900), digest: kept }),
+    logger: testLogger(capture),
+    onTamper: (finding) => found.push(finding),
+    unrecorded: () => undefined,
+  });
+}
+
+/** The anchor check's walk from `from` to the head, kept in the digest as a new anchor keeps it: its anchor. */
+async function walked(from: CheckedPoint = CHAIN_START, into: DigestLog = digest): Promise<CheckedPoint> {
+  const step = await trail.checkFromAnchor(app, org, from);
+  if (!step.ok) throw new Error('The chain should have checked out before the tampering');
+  if (step.signed !== undefined) into.record({ kind: 'organisation', orgId: org }, step.signed, new Date());
+  return { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
+}
+
+const heldCheck = (id: string, lock: 'share' | 'change' = 'share', states = held) =>
+  withTenant(app, org, (tx) => states.verifiedState(tx, AGENTS, { orgId: org, id }, lock));
+
+/** Refused at decision time, for a decision and for a change, each with its alarm naming where the event should be. */
+async function caughtAtDecision(id: string, seq: bigint, states = held): Promise<void> {
+  expect(await heldCheck(id, 'share', states)).toEqual({ outcome: 'tampered', sign: 'log' });
+  expect(await heldCheck(id, 'change', states)).toEqual({ outcome: 'tampered', sign: 'log' });
+  const named = expect.objectContaining({
+    event: 'audit.integrity_failed',
+    check: 'state',
+    reason: 'log',
+    subjectType: 'agent',
+    objectId: id,
+    seq: String(seq),
+  });
+  expect(alarms()).toEqual([named, named]);
+}
+
+describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, with the row rolled back (4D2e E8, decisions 1 and 2b; AT13)', () => {
   /** How many of a chain's last events the probe counts and the day walks. */
   const LAST = 1000;
 
+  beforeEach(async () => {
+    digest = await newDigest();
+    held = heldTo(digest);
+  });
+
   /**
    * An agent revoked, its row saved as it stood before, then `after` events about something else: the revocation that
-   * many from the head. The anchor is where the anchor check would have put it, at the head. Past the last 1,000 is
-   * one more: the day's walk reads the event before its window whole, as its start.
+   * many from the head. The anchor is where the anchor check would have put it, at the head, its walk kept in the
+   * digest. Past the last 1,000 is one more: the day's walk reads the event before its window whole, as its start.
    */
   async function revokedThen(after: number) {
     const id = await newAgent();
@@ -392,29 +465,29 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
         });
       }
     });
-    const head = await verifyChain();
-    if (!head.ok || revocation === undefined) throw new Error('The chain should have checked out before the tampering');
-    const anchor = { seq: head.seq, hash: head.hash, macKeyVersion: head.macKeyVersion };
+    if (revocation === undefined) throw new Error('The revocation should be in the log');
+    const anchor = await walked();
     return { id, savedRow, revocation: BigInt(revocation.seq), anchor };
   }
 
   const probe = async (anchor: CheckedPoint) => (await trail.probeHeads(app, [{ orgId: org, from: anchor }])).get(org);
 
-  /** The row rolled back to before the revocation: the agent reads as active again to every decision. */
+  /** The row rolled back to before the revocation: the row check alone reads the agent as active again. */
   async function unrevoked(id: string, savedRow: SavedRow): Promise<void> {
     await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
     expect(await check(id)).toMatchObject({ outcome: 'verified', version: 1 });
   }
 
-  it("deleted among the last 1,000: the next run's probe finds it", async () => {
+  it("deleted among the last 1,000: refused at decision time, and the next run's probe finds it", async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(3);
     await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
     await unrevoked(id, savedRow);
 
+    await caughtAtDecision(id, revocation);
     expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
   });
 
-  it('deleted among the last 1,000 and made up for by a copy of another, the keys dropped: the probe counts numbers, not rows', async () => {
+  it('deleted among the last 1,000 and made up for by a copy of another, the keys dropped: refused at decision time, and the probe counts numbers, not rows', async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(3);
     await owner.query('alter table audit.events drop constraint events_pkey');
     await owner.query('alter table audit.events drop constraint events_org_id_id_key');
@@ -427,6 +500,7 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
       ]);
       await unrevoked(id, savedRow);
 
+      await caughtAtDecision(id, revocation);
       expect(await probe(anchor)).toEqual({ kind: 'failed', problem: { reason: 'gap', seq: 1n } });
       expect(await trail.countStep(app, org, 0n, anchor.seq)).toEqual({ reason: 'gap', seq: 1n });
     } finally {
@@ -436,17 +510,18 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     }
   });
 
-  it("deleted older than the last 1,000: past the probe, which says so, and the day's count finds it", async () => {
+  it("deleted older than the last 1,000: past the probe, refused at decision time, and the day's count finds it too", async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(LAST + 1);
     await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
     await unrevoked(id, savedRow);
 
-    // The stated limit (decision 1): the probe counts the last 1,000 alone.
+    // Decision 1's limit, closed by the digest: the probe counts the last 1,000 alone.
+    await caughtAtDecision(id, revocation);
     expect(await probe(anchor)).toEqual({ kind: 'same' });
     expect(await trail.countStep(app, org, 0n, anchor.seq)).toEqual({ reason: 'gap', seq: 1n });
   });
 
-  it("moved off its agent among the last 1,000: the count still exact, the day's walk finds it", async () => {
+  it("moved off its agent among the last 1,000: refused at decision time, the count still exact, the day's walk finds it", async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(3);
     await owner.query('update audit.events set subject_id = $3 where org_id = $1 and seq = $2', [
       org,
@@ -455,6 +530,7 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     ]);
     await unrevoked(id, savedRow);
 
+    await caughtAtDecision(id, revocation);
     expect(await probe(anchor)).toEqual({ kind: 'same' });
     expect(await trail.countStep(app, org, 0n, anchor.seq)).toBeUndefined();
     expect(await trail.walkLast(app, org, anchor, Number(anchor.seq))).toEqual({
@@ -463,7 +539,7 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     });
   });
 
-  it("moved off its agent older than the last 1,000: past the day's walk, and the full pass finds it", async () => {
+  it("moved off its agent older than the last 1,000: past the day's walk, refused at decision time, and the full pass finds it too", async () => {
     const { id, savedRow, revocation, anchor } = await revokedThen(LAST + 1);
     await owner.query('update audit.events set subject_id = $3 where org_id = $1 and seq = $2', [
       org,
@@ -472,13 +548,199 @@ describe('FX-TAMPER as the owner: a revocation deleted, or moved off its agent, 
     ]);
     await unrevoked(id, savedRow);
 
+    // Decision 2b's limit, closed by the digest: the day walks the last 1,000 alone.
+    await caughtAtDecision(id, revocation);
     expect(await probe(anchor)).toEqual({ kind: 'same' });
-    // The stated limit (decision 2b): the day walks the last 1,000 alone.
     expect(await trail.walkLast(app, org, anchor, LAST)).toMatchObject({ ok: true, seq: anchor.seq });
     expect(await trail.passStep(app, org, CHAIN_START, anchor, 2000)).toEqual({
       ok: false,
       problem: { reason: 'hash', seq: revocation },
     });
+  });
+
+  it('deleted and a junk row put at its number, the keys kept: refused at decision time, whatever the row says', async () => {
+    const { id, savedRow, revocation } = await revokedThen(3);
+    await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+    // Another event's row moved to the revocation's number under a new ID: the count is whole again.
+    await owner.query(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select org_id, $3, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version
+       from audit.events where org_id = $1 and seq = $2`,
+      [org, String(revocation + 1n), String(revocation)],
+    );
+    await unrevoked(id, savedRow);
+
+    await caughtAtDecision(id, revocation);
+    expect(await trail.countStep(app, org, 0n, revocation + 3n)).toBeUndefined();
+  });
+
+  it('a list read of the agents (verifiedStates) is refused the same way, the alarm in its order', async () => {
+    const { id, savedRow, revocation } = await revokedThen(LAST + 1);
+    await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, String(revocation)]);
+    await unrevoked(id, savedRow);
+    const checks = await withTenant(app, org, (tx) => held.verifiedStates(tx, AGENTS, org, [id]));
+    expect(checks.get(id)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'log', objectId: id, seq: String(revocation) })]);
+  });
+
+  it('the agent and every event about it deleted: refused at decision time as rolled back, never read as missing', async () => {
+    const { id, revocation } = await revokedThen(3);
+    await owner.query('delete from audit.events where org_id = $1 and subject_id = $2', [org, id]);
+    await owner.query('delete from probe.agents where org_id = $1 and id = $2', [org, id]);
+    expect(await check(id)).toEqual({ outcome: 'missing' });
+
+    expect(await heldCheck(id)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'log', objectId: id, seq: String(revocation) })]);
+  });
+});
+
+describe('AT13: the digest’s edges, as the owner tampers', () => {
+  beforeEach(async () => {
+    digest = await newDigest();
+    held = heldTo(digest);
+  });
+
+  it('an object signed past the anchor is not in the digest yet: it reads as ever, and the next walk is what refuses it', async () => {
+    const id = await newAgent();
+    const anchor = await walked();
+    const savedRow = await owner.saveRow(id);
+    await changeStatus(id, 'revoke');
+    // A change after the anchor reads as itself: the digest knows an older place, never a later one.
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
+    const fresh = await newAgent();
+    expect(await heldCheck(fresh)).toMatchObject({ outcome: 'verified', version: 1 });
+
+    // The revocation, past the anchor, deleted and the row rolled back: the stated limit (anchor-check.ts), the next turn.
+    const [revocation] = await owner.query<{ seq: string }>(
+      "select seq::text as seq from audit.events where org_id = $1 and subject_id = $2 and action = 'agent.revoke'",
+      [org, id],
+    );
+    await owner.query('delete from audit.events where org_id = $1 and seq = $2', [org, revocation?.seq]);
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(await trail.checkFromAnchor(app, org, anchor)).toMatchObject({ ok: false });
+  });
+
+  it('kept in the store and read back by a process started since: still refused at decision time', async () => {
+    const fake = createFakeWriteOnceStore();
+    const kept = await newDigest(fake.store);
+    const id = await newAgent();
+    const savedRow = await owner.saveRow(id);
+    await changeStatus(id, 'revoke');
+    await walked(CHAIN_START, kept);
+    await kept.flush();
+    await owner.query("delete from audit.events where org_id = $1 and subject_id = $2 and action = 'agent.revoke'", [
+      org,
+      id,
+    ]);
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+
+    const restarted = await newDigest(fake.store);
+    expect(restarted.latest({ kind: 'organisation', orgId: org }, 'agent', id)).toBe(2n);
+    await caughtAtDecision(id, 2n, heldTo(restarted));
+  });
+
+  it('a rebase of the chain after the walk sets its digest aside: the chain as rebased reads as before the digest', async () => {
+    const rebased = new Map<string, Date>();
+    const anchors: DigestAnchors = {
+      rebasedAfter: (_, at) => (rebased.get(org) ?? new Date(0)) > at,
+      holds: () => true,
+    };
+    const kept = await newDigest(undefined, anchors);
+    const id = await newAgent();
+    const savedRow = await owner.saveRow(id);
+    await changeStatus(id, 'revoke');
+    await walked(CHAIN_START, kept);
+    await owner.query("delete from audit.events where org_id = $1 and subject_id = $2 and action = 'agent.revoke'", [
+      org,
+      id,
+    ]);
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+    // The operator rebases the chain where it now stands (E11): what the digest knew of it before no longer holds.
+    rebased.set(org, new Date(Date.now() + 1000));
+    expect(await heldCheck(id, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+  });
+
+  it('a digest that knows nothing of the chain (unread, its shard let go) leaves the read as before', async () => {
+    const letGo: DigestAnchors = { rebasedAfter: () => false, holds: () => false };
+    const kept = await newDigest(undefined, letGo);
+    const id = await newAgent();
+    const savedRow = await owner.saveRow(id);
+    await changeStatus(id, 'revoke');
+    await walked(CHAIN_START, kept);
+    await owner.query("delete from audit.events where org_id = $1 and subject_id = $2 and action = 'agent.revoke'", [
+      org,
+      id,
+    ]);
+    await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
+    expect(kept.known({ kind: 'organisation', orgId: org })).toBe(false);
+    expect(await heldCheck(id, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
+    const unread = createDigestLog({
+      store: createFakeWriteOnceStore().store,
+      keys,
+      logger: testLogger(capture),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 1024 * 1024,
+    });
+    expect(unread.known({ kind: 'organisation', orgId: org })).toBe(false);
+    expect(await heldCheck(id, 'share', heldTo(unread))).toMatchObject({ outcome: 'verified', version: 1 });
+  });
+
+  /** A transaction of its own held open at `begun` until `release`: the order forced, never left to chance. */
+  function heldOpen<T>(work: (tx: Transaction<Tables>, begun: () => void, gate: Promise<void>) => Promise<T>) {
+    let release = (): void => undefined;
+    let began = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const begun = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    const done = withTenant(app, org, (tx) => work(tx, began, gate));
+    return { begun, release: () => release(), done };
+  }
+
+  it('forced order: a decision whose transaction began before a change, read after the walk kept it, reads the change', async () => {
+    const id = await newAgent();
+    await walked();
+    const decision = heldOpen(async (tx, begun, gate) => {
+      // The decision's transaction has begun and read already, before the change below commits.
+      await tx.selectFrom('probe.agents').select('id').where('id', '=', id).execute();
+      begun();
+      await gate;
+      return held.verifiedState(tx, AGENTS, { orgId: org, id }, 'share');
+    });
+    await decision.begun;
+    await changeStatus(id, 'suspend');
+    await walked();
+    expect(digest.latest({ kind: 'organisation', orgId: org }, 'agent', id)).toBe(2n);
+    decision.release();
+    // Each statement reads on a snapshot taken after the digest was asked: the suspension is there.
+    expect(await decision.done).toMatchObject({ outcome: 'verified', version: 2 });
+  });
+
+  it('forced order: a walk while a change is under way keeps only what had committed, and the change reads as itself after', async () => {
+    const id = await newAgent();
+    const anchor = await walked();
+    const changing = heldOpen(async (tx, begun, gate) => {
+      await states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      begun();
+      await gate;
+    });
+    await changing.begun;
+    // Not committed: the walk, on a connection of its own, reads the chain as it was.
+    const step = await trail.checkFromAnchor(app, org, anchor);
+    expect(step).toMatchObject({ ok: true, seq: anchor.seq });
+    expect(step.signed).toBeUndefined();
+    changing.release();
+    await changing.done;
+    await walked(anchor);
+    expect(digest.latest({ kind: 'organisation', orgId: org }, 'agent', id)).toBe(2n);
+    expect(await heldCheck(id)).toMatchObject({ outcome: 'verified', version: 2 });
   });
 });
 

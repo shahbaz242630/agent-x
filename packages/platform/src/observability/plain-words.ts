@@ -287,6 +287,29 @@ export const PLAIN_WORDS = {
     broke: 'After a start, payments wait for every organisation. Nobody is held.',
     next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
+  'audit.state_digest_near_memory': {
+    happened:
+      'The record of each signed record’s latest version, kept with the audit anchors, has passed half its memory.',
+    broke: 'Nothing yet. If it doubles, payments wait until the process is given more memory.',
+    next: 'Plan more memory for the process in good time: the line says how much is held, and the limit.',
+  },
+  'audit.state_digest_beyond_memory': {
+    happened: 'The record of each signed record’s latest version, kept with the audit anchors, outgrew its memory.',
+    broke:
+      'Payments wait for every organisation until a restart with more memory. Other decisions go on checked as before.',
+    next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
+  },
+  'audit.state_digest_store_failed': {
+    happened:
+      'The record of each signed record’s latest version could not be read from or written to the anchor store.',
+    broke: 'Nothing yet: it is tried again each run. After a start, payments wait until it has been read once.',
+    next: 'Nothing if it passes. If it repeats, check the anchor store as for the anchors: playbook section H.',
+  },
+  'audit.state_digest_store_failing': {
+    happened: 'The record of each signed record’s latest version has failed to reach the anchor store for some time.',
+    broke: 'After a start, payments wait for every organisation. Unwritten parts are kept in memory meanwhile.',
+    next: 'Check the anchor store and the API’s access to it, as for the anchors: playbook section H.',
+  },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',
