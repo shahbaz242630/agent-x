@@ -772,11 +772,34 @@ describe('an organisation made before GM-1a, until its cutover', () => {
   const cutoverEvents = async (w: World) =>
     (await eventsAbout(w.org, w.org, CUTOVER_SUBJECT)).filter(({ action }) => action === CUTOVER_ACTION);
 
-  it('refuses a cutover over a decision the owner edited: nothing opened, no cutover recorded, alarmed and held', async () => {
-    const { w, acting, max } = await ready({ madeBeforeMonthTotals: true });
+  /**
+   * An organisation before GM-1a holding one approved request: its newest signed state the approval's, so its decided
+   * event can be changed or moved with its row still verifying, and only the cutover's reading of decisions sees it.
+   */
+  const approvedBeforeGm1a = async () => {
+    const w = await world({ madeBeforeMonthTotals: true });
+    for (const id of w.suppliers) await shared.verified(w, id);
+    await shared.inForce(registry, w, {
+      perOrderLimit: AED(800_000n),
+      monthlyLimit: AED(1_600_000n),
+      approvalThreshold: AED(100_000n),
+    });
+    const acting = await agentKey(w);
     await cutOverByHand(w);
-    const edited = await decisionOf(acting, w, max);
+    const approved = await decisionOf(acting, w, 400_000n);
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: approved.id }, 'approve', {
+        actor: { type: 'system', id: 'test' },
+        action: 'spend_request.approved',
+        details: {},
+      }),
+    );
     await asBeforeGm1a(w, [w.agent]);
+    return { w, approved };
+  };
+
+  it('refuses a cutover over a decision the owner edited: nothing opened, no cutover recorded, alarmed and held', async () => {
+    const { w, approved: edited } = await approvedBeforeGm1a();
     await asOwner(w, async (owner) => {
       await owner.query('alter table audit.events disable trigger user');
       await owner.query(
@@ -792,6 +815,29 @@ describe('an organisation made before GM-1a, until its cutover', () => {
     expect(await cutoverEvents(w)).toEqual([]);
     expect(await heldIn(w)).toBe('none');
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+    // Refused by the decisions' read itself (their log not believed), not by reading them as absent.
+    alarmedOn('organisation', 'log');
+    expect(lines('audit.integrity_failed')).not.toContainEqual(
+      expect.objectContaining({ subjectType: SPEND_REQUESTS.subject, reason: 'holding' }),
+    );
+  });
+
+  it('refuses a cutover over a request still holding with no decision at all, its log otherwise whole', async () => {
+    const { w, approved } = await approvedBeforeGm1a();
+    // Its decided event moved off to a subject type nothing reads as a spend request's.
+    await asOwner(w, async (owner) => {
+      await owner.query('alter table audit.events disable trigger user');
+      await owner.query(
+        "update audit.events set subject_type = 'spend_request_elsewhere' where subject_id = $1 and action = 'spend_request.decided'",
+        [approved.id],
+      );
+      await owner.query('alter table audit.events enable trigger user');
+    });
+
+    await visit(w);
+    expect(lines('month_totals.cutover_held')).toHaveLength(1);
+    expect(await cutoverEvents(w)).toEqual([]);
+    alarmedOn(SPEND_REQUESTS.subject, 'holding');
   });
 
   it('refuses a cutover over a request still holding whose decision was deleted', async () => {

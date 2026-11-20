@@ -1746,6 +1746,32 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
     ]);
   });
 
+  it("gives a verified cancellation's amount back to its month's total once (GM-1a), the rest still held", async () => {
+    const { w, acting } = await ready();
+    const cancelled = await ask(acting, w, { amount: SMALL(2n) });
+    const kept = await ask(acting, w, { amount: SMALL(2n) });
+    await handoffOf(w).run();
+    const heldBefore = await spentOf(w, acting);
+
+    await settledBy(w, cancelled.id, 'cancel');
+
+    expect(await holdingsOf(w, cancelled.id)).toEqual({ reservation: 'RELEASED', released: true });
+    expect(await holdingsOf(w, kept.id)).toEqual(HOLDS_AFTER.UNKNOWN);
+    expect(await spentOf(w, acting)).toBe(heldBefore - SMALL(2n).minor);
+    const released = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('action')
+        .where('subject_type', '=', 'month_total')
+        .where('action', '=', 'month_total.released')
+        .execute(),
+    );
+    expect(released).toHaveLength(1);
+    expect(await holdingsChecked(w)).toEqual([
+      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0, totalsMissing: 0 }),
+    ]);
+  });
+
   it('SEC-LIM-02: an unknown payment still uses the month and blocks its order; a failed one gives both back', async () => {
     const { w, acting } = await ready();
     const unknown = await ask(acting, w, { amount: SMALL(2n), orderReference: 'INV-C3-UNKNOWN' });
