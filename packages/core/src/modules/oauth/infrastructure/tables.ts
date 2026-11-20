@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094, 0095, 0096, 0099, 0101), as Kysely sees them. */
+/** The oauth schema's tables (db/migrations/0093_connections.sql, 0094, 0095, 0096, 0099, 0101, 0107), as Kysely sees them. */
 export interface OauthTables {
   'oauth.clients': ClientsTable;
   'oauth.flows': FlowsTable;
@@ -14,6 +14,8 @@ interface ClientMetadataTable {
   grant_types: string[];
   fetched_at: Date;
   expires_at: Date;
+  mac: string | null;
+  mac_key_version: number | null;
 }
 
 interface ClientsTable {
@@ -28,6 +30,8 @@ interface ClientsTable {
   first_connected_at: Date | null;
   last_connected_at: Date | null;
   network: string | null;
+  mac: string | null;
+  mac_key_version: number | null;
 }
 
 interface FlowsTable {

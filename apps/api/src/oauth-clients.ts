@@ -22,18 +22,28 @@
 //   reason of the network or the site (a status, a refusal, a timeout), the
 //   document kept stands in, stale, for up to 7 days past its day, and the
 //   fetch is tried again a minute later.
+//
+// Each is believed only as the app sealed it (S207 H3, R-15; client-seals.ts):
+// a registered client or kept document whose seal is not its own raises the
+// integrity alarm and is never shown or used; one with no seal (kept before
+// 0107) is let go with a warning. A document is then fetched again from its
+// own address, as one never kept; a registered client is unknown, and must
+// register again.
 import {
   checkClientMetadataDocument,
+  type ClientJudged,
   type ClientMetadataDocument,
   clientOf,
   type GrantType,
   keepClientMetadata,
+  type KeptDocument,
   keptClientMetadata,
   type OauthTables,
   retireClientMetadata,
 } from '@agentx/core/modules/oauth';
 import type { Clock } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import type { ClientMetadataFetch } from './oauth-client-metadata.ts';
@@ -97,11 +107,14 @@ function remember<V>(memory: Map<string, V>, key: string, value: V): void {
 
 export function createOauthClients({
   database,
+  keys,
   clock,
   logger,
   metadata,
 }: {
   readonly database: Database<OauthTables>;
+  /** Seals each client as it is kept, and checks it as it is read (client-seals.ts). */
+  readonly keys: KeyProvider;
   readonly clock: Clock;
   readonly logger: Logger;
   /** None while nothing is trusted (AGENTX_OAUTH_CLIENT_METADATA_ORIGINS): an address names no client then. */
@@ -130,13 +143,44 @@ export function createOauthClients({
     return counted.count <= MOST_FETCHES_A_MINUTE;
   };
 
+  /**
+   * The line for a client kept but not believed: one whose seal is not its own, the integrity alarm (a client comes
+   * before any organisation, so none is held for it); one with none, or of a pepper version no longer held, a warning.
+   * A document's client is named by its origin alone, as on every other line of these.
+   */
+  const notBelieved = (judged: Exclude<ClientJudged, 'sound'>, clientId: string, kind: 'registered' | 'document') => {
+    const named = kind === 'registered' ? { objectId: clientId } : { origin: new URL(clientId).origin };
+    if (judged === 'tampered') {
+      logger.error('audit.integrity_failed', { chain: 'oauth', check: 'oauth_client', reason: kind, ...named });
+    } else {
+      logger.warn('oauth.client_unsealed', { kind, reason: judged, ...named });
+    }
+  };
+
+  /** The document kept for a listed client, believed only as sealed; the line said for one that isn't. */
+  const keptDocument = async (
+    db: Database<OauthTables> | DatabaseTransaction<OauthTables>,
+    clientId: string,
+    now: Date,
+  ): Promise<KeptDocument | undefined> => {
+    const read = await keptClientMetadata(db, keys, clientId, now);
+    if (read?.outcome !== 'unsealed') return read;
+    notBelieved(read.judged, clientId, 'document');
+    return undefined;
+  };
+
   const kept: OauthClients['kept'] = async (db, clientId) => {
     if (metadata?.listed(clientId) === true) {
-      const document = await keptClientMetadata(db, clientId, clock.now());
+      const document = await keptDocument(db, clientId, clock.now());
       return document === undefined ? undefined : fromDocument(document.document);
     }
-    const client = await clientOf(db, clientId);
-    return client === undefined ? undefined : { ...client, verifiedBy: null };
+    const read = await clientOf(db, keys, clientId);
+    if (read === undefined) return undefined;
+    if (read.outcome === 'unsealed') {
+      notBelieved(read.judged, clientId, 'registered');
+      return undefined;
+    }
+    return { ...read.client, verifiedBy: null };
   };
 
   /**
@@ -152,7 +196,7 @@ export function createOauthClients({
     const checked = answer.outcome === 'fetched' ? checkClientMetadataDocument(clientId, answer.document) : answer;
     const now = clock.now().getTime();
     if (checked.outcome === 'valid') {
-      await keepClientMetadata(database, checked.document, clock.now());
+      await keepClientMetadata(database, keys, checked.document, clock.now());
       remember(onceValid, clientId, 0);
       return fromDocument(checked.document);
     }
@@ -180,7 +224,7 @@ export function createOauthClients({
       // Anything but a listed address is never fetched (SEC-OAUTH-09): an unknown client, as a mistyped `axcl_` is.
       if (metadata?.listed(clientId) !== true) return kept(database, clientId);
       const now = clock.now();
-      const keptNow = await keptClientMetadata(database, clientId, now);
+      const keptNow = await keptDocument(database, clientId, now);
       if (keptNow?.fresh === true) return fromDocument(keptNow.document);
       const under = fetching.get(clientId);
       if (under !== undefined) return under;
