@@ -16,6 +16,7 @@ import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import {
   createSecurityEvents,
   orgSecurityEventsPage,
+  ROW_MACS_FROM,
   SEALING_STARTED,
   sealLegacyRows,
   SECURITY_EVENTS_SEALED,
@@ -791,6 +792,41 @@ describe('the day seal and the pass giving the rows from before 0105 their MACs,
 
     expect(alarmsOnce()).toEqual([{ chain: 'platform', reason: 'mac', day: '2026-11-20', rowId: genuine?.id }]);
     expect((await globalSeals()).map(([day]) => day)).toEqual(['2026-11-18', '2026-11-20']);
+  });
+
+  it('the owner taking the pass’s lock before it ever ran: a row he strips after the first start is the alarm, and once he lets go the pass never gives it a MAC', async () => {
+    const old = await fromBefore('2026-11-18T09:00:00.000Z');
+    // The first start on this release, as boot records it: its time.
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: { release: 'r', [ROW_MACS_FROM]: NOW },
+      }),
+    );
+    const holder = await database.connect('admin');
+    await holder.query(
+      "select pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('security-events-legacy-sealer', 0))",
+    );
+    let genuine: string | undefined;
+    try {
+      expect(await legacyPass()).toBe('busy');
+      await written('2026-11-20T09:00:00.000Z', [failed('2026-11-20T09:00:00.000Z')]);
+      genuine = (await rowsOf('2026-11-20'))[0]?.id;
+      await owner().query(
+        'update security.events set before_macs = true, mac = null, mac_key_version = null, count = 99 where id = $1',
+        [genuine],
+      );
+      clock.advanceBy(DAY_MS);
+      await checkingAll().run();
+    } finally {
+      await holder.end();
+    }
+    expect(alarmsOnce()).toEqual([{ chain: 'platform', reason: 'mac', day: '2026-11-20', rowId: genuine }]);
+
+    expect(await legacyPass()).toBe('sealed');
+    expect(await withoutMac()).toEqual([genuine]);
+    expect((await withoutMac()).includes(old)).toBe(false);
   });
 
   it('the admins’ page once the pass has ended: a row it left to the sweep left off quietly, an organisation’s MAC nulled by the owner the alarm', async () => {

@@ -109,6 +109,7 @@ export function createLegacySealJob({
           retentionDays,
           anchor: () => platformAnchorIn(anchors),
           anchorNow: () => anchorNow(anchors),
+          notAfter: busySince,
         });
         logger.info('security.legacy_seal_done', { outcome });
         busySince = outcome === 'busy' ? (busySince ?? clock.now()) : undefined;

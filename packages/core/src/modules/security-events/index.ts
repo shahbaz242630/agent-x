@@ -47,6 +47,7 @@ export {
 export {
   ALL_SEALED,
   legacyRowsAt,
+  ROW_MACS_FROM,
   type LegacySealing,
   SEALING_STARTED,
   sealLegacyRows,

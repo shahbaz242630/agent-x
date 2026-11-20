@@ -62,6 +62,21 @@ export const ALL_SEALED = 'security_events.all_sealed';
  */
 export const SECURITY_SEAL_BACKFILL_UNTIL = Date.parse('2026-12-07T00:00:00.000Z');
 
+/**
+ * The detail each start of the API records on the platform chain (`platform.started`, start-record.ts) from this
+ * release on: its own time. The schema guard keeps any start off a database without 0105, so no row from before 0105
+ * is newer than the first start that records it, and it holds where nothing else does yet: before any sealing has
+ * begun, its lock taken by the owner from the first start on. A bound read off the rows themselves (the first row
+ * written with a MAC, say) won't do: the owner strips the earliest such row of its MAC, and the bound moves past it.
+ * This one is sealed with the chain: one edited fails its MAC (here, or, with its detail removed, the chain's own
+ * check, which the anchor check walks), one deleted leaves a gap.
+ */
+export const ROW_MACS_FROM = 'rowMacsFrom';
+
+/** The earliest of the times given (`now` always among them). */
+const earliest = (now: Date, ...others: readonly (Date | undefined)[]): Date =>
+  new Date(Math.min(now.getTime(), ...others.flatMap((at) => (at === undefined ? [] : [at.getTime()]))));
+
 /** The advisory lock the one sealer at a time holds, its whole sealing long. */
 export const SEALER_LOCK = 'security-events-legacy-sealer';
 
@@ -182,7 +197,25 @@ export async function legacyRowsAt(tx: Tx, keys: KeyProvider, now: Date): Promis
     return { excusedBefore: started === undefined ? null : new Date(started.manifest.since) };
   }
   if (now.getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return { excusedBefore: null };
-  return { excusedBefore: started === undefined ? now : started.until };
+  if (started !== undefined) return { excusedBefore: started.until };
+  const first = await firstStartWithMacs(tx, keys);
+  return first === 'unsealed' ? 'unsealed' : { excusedBefore: earliest(now, first) };
+}
+
+/**
+ * The time the first start of the API to record ROW_MACS_FROM gives, MAC-checked; undefined for none yet (a database
+ * no such API has started on: tests, a laptop's first run), `unsealed` for one that can't be believed.
+ */
+async function firstStartWithMacs(tx: Tx, keys: KeyProvider): Promise<Date | undefined | 'unsealed'> {
+  const first = await platformEventsSigned(tx)
+    .where('e.action', '=', 'platform.started')
+    .where(sql<boolean>`(e.details::jsonb ->> ${ROW_MACS_FROM}) is not null`)
+    .orderBy('e.seq')
+    .limit(1)
+    .executeTakeFirst();
+  if (first === undefined) return undefined;
+  const at = (JSON.parse(first.details) as Record<string, unknown>)[ROW_MACS_FROM];
+  return platformEventSealed(keys, first) && typeof at === 'string' ? new Date(at) : 'unsealed';
 }
 
 /** A row as Postgres gives it back, each column as its table declares it. */
@@ -389,6 +422,7 @@ export async function sealLegacyRows(
     retentionDays,
     anchor,
     anchorNow,
+    notAfter,
   }: {
     readonly keys: KeyProvider;
     readonly ids: IdGenerator;
@@ -403,6 +437,8 @@ export async function sealLegacyRows(
     readonly anchor: () => Promise<ChainPlace | undefined>;
     /** Anchors the chain at its head now, as the anchor check does; never throws (a failure is its own to say). */
     readonly anchorNow: () => Promise<void>;
+    /** When its job first found the lock taken, if it is so now: a new sealing's rows were all written before it. */
+    readonly notAfter?: Date | undefined;
   },
 ): Promise<LegacySealing> {
   const plain = <T>(work: (tx: Tx) => Promise<T>) => limitedTransaction(db, work);
@@ -478,10 +514,13 @@ export async function sealLegacyRows(
     const unanchored = await anchoredProblem();
     if (unanchored !== undefined) return alarm(unanchored);
     // A new sealing's scope: the rows two days or more inside the retention; one taken up again keeps its own.
-    // ...and before it began: taken before the rows are read, every row from before 0105 already written by then.
+    // ...and before it began: no later than the first start that records ROW_MACS_FROM, nor than its job first found
+    // the lock taken (a sealing held up, then let go), every row from before 0105 written before either.
+    const first = now.started === undefined ? await plain((tx) => firstStartWithMacs(tx, keys)) : undefined;
+    if (first === 'unsealed') return alarm('unsealed');
     const scope: SealScope = {
       since: new Date(now.started?.manifest.since ?? clock.now().getTime() - (retentionDays - 2) * DAY_MS),
-      until: now.started?.until ?? clock.now(),
+      until: now.started?.until ?? earliest(clock.now(), first, notAfter),
     };
     const manifest = await legacyManifest(db, orgs, scope.since);
     if (now.started === undefined) {
