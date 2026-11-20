@@ -282,17 +282,28 @@ async function paymentObjectsOf(tx: EvidenceTx, orgId: string, requestId: string
 async function fundingAndPayment(tx: EvidenceTx, states: SignedStates, orgId: string, request: RequestPart) {
   const { fundingSourceId, supplierId, id } = request.shown.request;
   const source = await sourceOf(tx, states, { orgId, id: fundingSourceId }, 'share');
-  if (source.outcome !== 'found') throw integrityFailed();
-  // A request names no version only for a supplier not the organisation's (0039), which requestInOrder never finds.
+  // A source none of the organisation's (none at all, or another's) is named only by a request its decision denied
+  // as unusable (S206 V8), by its sealed decision and reasons, never its status now (a reject or a void is DENIED
+  // too): nothing of it to show. A row of the organisation's gone while its events stay reads as tampered.
+  // (SOURCE_NOT_USABLE fails a decision, so its request was DENIED from the start: never approved, rejected or voided.)
+  const noneOfOurs = source.outcome === 'missing' && request.shown.request.reasons.includes('SOURCE_NOT_USABLE');
+  if (source.outcome !== 'found' && !noneOfOurs) throw integrityFailed();
+  // A request names no version only for a supplier not the organisation's (0039): denied for it, it has none to show,
+  // as requestInOrder found (S206 V8).
   const versionId = fieldOf(request.state, 'supplier_version_id');
-  if (versionId === null) throw integrityFailed();
-  const version = await versionOf(tx, states, { orgId, id: versionId }, supplierId);
-  if (version.outcome !== 'found') throw integrityFailed();
+  const version = versionId === null ? null : await versionOf(tx, states, { orgId, id: versionId }, supplierId);
+  if (version !== null && version.outcome !== 'found') throw integrityFailed();
   const objects = await paymentObjectsOf(tx, orgId, id);
   const payment = objects === undefined ? null : await paymentInOrder(tx, states, orgId, objects.transactionId);
   // Found by its instruction's request, a signed field: a row moved to another request fails its seal there.
   if (payment !== null && payment.outcome !== 'found') throw integrityFailed();
-  return { source: source.source, sourceEventId: source.state.eventId, version: version.version, payment };
+  const found = source.outcome === 'found' ? source : null;
+  return {
+    source: found?.source ?? null,
+    sourceEventId: found?.state.eventId ?? null,
+    version: version?.version ?? null,
+    payment,
+  };
 }
 
 type FundingAndPayment = Awaited<ReturnType<typeof fundingAndPayment>>;
@@ -315,8 +326,10 @@ const objectsOfPayment = (payment: NonNullable<PaymentRead>): PaymentObjects => 
 function rowsReadOf(request: RequestPart, { source, sourceEventId, payment }: FundingAndPayment): SignedRowRead[] {
   const rows: SignedRowRead[] = [
     { subject: { type: SPEND_REQUESTS.subject, id: request.shown.request.id }, eventId: request.state.eventId },
-    { subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId },
   ];
+  if (source !== null && sourceEventId !== null) {
+    rows.push({ subject: { type: SOURCES.subject, id: source.id }, eventId: sourceEventId });
+  }
   // The payment as the reservation was judged with it: settled since (its reservation moved by no signed event of
   // the request's), its transaction's newer event shows it moved.
   const judged = request.paymentJudged;
@@ -462,18 +475,16 @@ function bundleOf(
     supplier: {
       id: asked.supplierId,
       name: shown.supplierName,
-      version: {
-        id: version.id,
-        number: version.version,
-        name: version.displayName,
-        verification: logged.verification,
-      },
+      version:
+        version === null
+          ? null
+          : { id: version.id, number: version.version, name: version.displayName, verification: logged.verification },
     },
     fundingSource: {
-      id: source.id,
-      holderName: source.summary.holderName,
-      hint: source.summary.hint,
-      partner: source.partner,
+      id: asked.fundingSourceId,
+      holderName: source?.summary.holderName ?? null,
+      hint: source?.summary.hint ?? null,
+      partner: source?.partner ?? null,
     },
     approval: approved === undefined ? null : personDecisionOf(approved),
     rejection:
@@ -568,7 +579,8 @@ export function createSpendRequestEvidence({
       readonly mandate: AuditSubjectKey | null;
       readonly mandateVersionId: string | null;
       readonly supplierId: string;
-      readonly versionId: string;
+      /** None for a supplier not the organisation's (S206 V8): no verification to find. */
+      readonly versionId: string | null;
     },
     correlationId: string,
   ): Promise<LoggedPart> => {
@@ -614,7 +626,8 @@ export function createSpendRequestEvidence({
         ? undefined
         : await basisFound(mandate, MANDATE_ACCEPTED, 'versionId', mandateVersionId);
     const supplier = { type: SUPPLIERS.subject, id: supplierId };
-    const verified = await basisFound(supplier, VERIFIER_RECORDED, 'verifiedVersionId', versionId);
+    const verified =
+      versionId === null ? undefined : await basisFound(supplier, VERIFIER_RECORDED, 'verifiedVersionId', versionId);
     return {
       events: events.toReversed(),
       names,
@@ -639,7 +652,7 @@ export function createSpendRequestEvidence({
           mandate: mandateId === null ? null : { type: MANDATES.subject, id: mandateId },
           mandateVersionId,
           supplierId,
-          versionId: rows.version.id,
+          versionId: rows.version?.id ?? null,
         },
         reading.correlationId,
       );
@@ -820,7 +833,13 @@ const BUNDLE = {
   supplier: z
     .object({
       id: z.uuid().describe('The supplier to pay.'),
-      name: z.string().describe('The name its current verified details give it.'),
+      name: z
+        .string()
+        .nullable()
+        .describe(
+          'The name its current verified details give it; null when the organisation has no such supplier (the agent ' +
+            'named one it doesn’t have, so the request was denied).',
+        ),
       version: z
         .object({
           id: z.uuid().describe('The supplier’s details it was decided under, by their ID.'),
@@ -830,19 +849,33 @@ const BUNDLE = {
             'The signed verification of those details, as the log holds it; null if they were never verified as such.',
           ),
         })
-        .describe('The supplier’s details it was decided under.'),
+        .nullable()
+        .describe('The supplier’s details it was decided under; null when it is none of the organisation’s.'),
     })
     .describe('The supplier, never its payee’s reference or account.'),
   fundingSource: z
     .object({
       id: z.uuid().describe('The bank account it pays from, by its ID.'),
-      holderName: z.string().describe('The account holder’s name, as the partner gave it.'),
+      holderName: z
+        .string()
+        .nullable()
+        .describe('The account holder’s name, as the partner gave it; null when it is none of the organisation’s.'),
       hint: z
         .string()
-        .describe('The country and the account number’s last four characters, masked, such as `AE…6026`.'),
-      partner: z.string().describe('The payment partner the account is linked through.'),
+        .nullable()
+        .describe(
+          'The country and the account number’s last four characters, masked, such as `AE…6026`; null when it is ' +
+            'none of the organisation’s.',
+        ),
+      partner: z
+        .string()
+        .nullable()
+        .describe('The payment partner the account is linked through; null when it is none of the organisation’s.'),
     })
-    .describe('The funding source chosen, as the console shows it: never its consent or full account number.'),
+    .describe(
+      'The funding source chosen, as the console shows it: never its consent or full account number. Only its ID ' +
+        'when it is none of the organisation’s (the agent named one it doesn’t have, so the request was denied).',
+    ),
   approval: z
     .object(PERSON_DECISION)
     .nullable()

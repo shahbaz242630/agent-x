@@ -21,6 +21,13 @@
 // carries its reject, from the signed event: who, when and why (B4a,
 // decision 6); a voided one its void: when, and the causes (C2b).
 //
+// S206 V8: an agent's ask naming a supplier its organisation doesn't have
+// (none at all, or another organisation's) is DENIED, as every ask is
+// decided, and sealed naming no version of the supplier's details (0039).
+// Such a request is shown with no supplier name (null), never another
+// organisation's, and never fails the read: one sealed naming a version whose
+// supplier is gone is still one that can't be believed.
+//
 // The agent reads its own requests (B4c, partner S106), one by its ID: its
 // own alone (another agent's is NOT_FOUND, as none), as it stands now, so it
 // learns that one waiting was approved, rejected, cancelled, expired or
@@ -66,7 +73,8 @@ export interface RequestShown {
   /** When a waiting one expires: its sealed wait from its decision's sealed time (D7, E6), never a later event's (E4b); else null. */
   readonly expiresAt: Date | null;
   readonly agentName: string;
-  readonly supplierName: string;
+  /** Null for a supplier not the organisation's: the request was denied for it, naming no version (S206 V8). */
+  readonly supplierName: string | null;
   /** Waiting, carried to its supplier's new details: its approver re-checks it before approving (E5a). */
   readonly needsRecheck: boolean;
 }
@@ -149,7 +157,9 @@ export async function requestInOrder(
   if (named === undefined) return { outcome: 'none' };
   const agent = await agentOf(tx, states, { orgId, id: named.agent_id }, 'share');
   const supplier = await supplierOf(tx, states, { orgId, id: named.supplier_id }, 'share');
-  if (agent.outcome !== 'found' || supplier.outcome !== 'found') return { outcome: 'unbelieved' };
+  if (agent.outcome !== 'found') return { outcome: 'unbelieved' };
+  if (supplier.outcome === 'missing') return unknownSupplierRequest(tx, states, orgId, requestId, agent.agent);
+  if (supplier.outcome !== 'found') return { outcome: 'unbelieved' };
   const version = await versionOf(tx, states, { orgId, id: supplier.supplier.currentVersionId }, supplier.supplier.id);
   const read = await requestOf(tx, states, { orgId, id: requestId });
   if (version.outcome !== 'found' || read.outcome !== 'found') return { outcome: 'unbelieved' };
@@ -188,6 +198,41 @@ export async function requestInOrder(
 }
 
 /**
+ * A request whose supplier isn't the organisation's (S206 V8), read on from requestInOrder in its transaction: shown,
+ * its supplier unnamed, only when its sealed state names no version of the supplier's details, as a decision seals
+ * one denied for a supplier not the organisation's (0039); one naming a version, its supplier gone, is `unbelieved`.
+ */
+async function unknownSupplierRequest(
+  tx: ReadTx,
+  states: SignedStates,
+  orgId: string,
+  requestId: string,
+  agent: Parameters<typeof agentsShown>[2][number],
+): Promise<
+  | { readonly outcome: 'found'; readonly shown: RequestShown; readonly state: VerifiedState }
+  | { readonly outcome: 'unbelieved' }
+> {
+  const read = await requestOf(tx, states, { orgId, id: requestId });
+  if (read.outcome !== 'found' || decidedAgainst(read.state).supplierVersionId !== null)
+    return { outcome: 'unbelieved' };
+  // Its row is the one named, its seal holding the agent read first; denied, it never waits: no expiry, no re-check.
+  const { request } = read;
+  const [shown] = (await agentsShown(tx, orgId, [agent])) as [AgentShown];
+  return {
+    outcome: 'found',
+    state: read.state,
+    shown: {
+      request,
+      changedAt: read.state.recordedAt,
+      expiresAt: null,
+      agentName: shown.name,
+      supplierName: null,
+      needsRecheck: false,
+    },
+  };
+}
+
+/**
  * The reject or void of a request read as DENIED, from its signed event, in
  * the caller's transaction; both null for any other status, or one its
  * decision denied.
@@ -216,6 +261,9 @@ const toldToAgent = ({ rejection, voiding }: Denial): readonly ReasonCode[] | nu
  * can't be believed is a broken chain, a tamper: the list is refused, 503
  * INTEGRITY_FAILED, as for any record it names (its alarm raised).
  */
+/** Whether a listed request was sealed naming its supplier's details: all but one denied for a supplier not the organisation's. */
+const namesVersion = (item: SpendRequestListed): boolean => item.supplierVersionId !== null;
+
 async function carriedFrom(
   tx: ReadTx,
   states: SignedStates,
@@ -272,8 +320,9 @@ export function createSpendRequestReads({
           ...new Set(listed.items.map(({ request }) => request.agentId)),
         ]);
         if (agents.outcome === 'tampered') return agents;
+        // Only those sealed naming a version: one naming none was denied for a supplier not the organisation's.
         const suppliers = await suppliersNamed(tx, states, orgId, [
-          ...new Set(listed.items.map(({ request }) => request.supplierId)),
+          ...new Set(listed.items.filter(namesVersion).map(({ request }) => request.supplierId)),
         ]);
         if (suppliers.outcome === 'tampered') return suppliers;
         const carried = await carriedFrom(tx, states, orgId, listed.items, suppliers.suppliers);
@@ -283,6 +332,7 @@ export function createSpendRequestReads({
       if (named.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       const { agents, suppliers, carried } = named;
       const needsRecheck = (item: SpendRequestListed) => {
+        if (!namesVersion(item)) return false;
         const supplier = pointedTo(suppliers.suppliers, item.request.supplierId);
         return (
           item.request.status === 'APPROVAL_REQUIRED' &&
@@ -292,9 +342,11 @@ export function createSpendRequestReads({
       const expiresAt = ({ request }: { readonly request: SpendRequestRecord }) =>
         expiresOf(request, decisions.get(request.id.toLowerCase()));
       // A waiting one with no decision to believe is left out and named, as one that can't be checked (A1b).
-      const stuck = (item: { readonly request: SpendRequestRecord }) =>
+      const stuck = (item: SpendRequestListed) =>
         agents.stuck.has(item.request.agentId) ||
         suppliers.stuck.has(item.request.supplierId) ||
+        // Sealed naming a version (only those are asked for), its supplier gone: not believed, so left out and named.
+        suppliers.missing.has(item.request.supplierId) ||
         expiresAt(item) === undefined;
       return {
         outcome: 'listed',
@@ -305,7 +357,9 @@ export function createSpendRequestReads({
             changedAt: item.changedAt,
             expiresAt: expiresAt(item) ?? null,
             agentName: pointedTo(agents.agents, item.request.agentId).name,
-            supplierName: pointedTo(suppliers.suppliers, item.request.supplierId).displayName,
+            supplierName: namesVersion(item)
+              ? pointedTo(suppliers.suppliers, item.request.supplierId).displayName
+              : null,
             needsRecheck: needsRecheck(item),
           })),
         next: listed.next,
