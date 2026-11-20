@@ -210,7 +210,7 @@ export function createOauthAuthorizing({
     async register(asked, correlationId, ip) {
       const checked = checkRegistration(asked);
       if (checked.outcome === 'invalid') return checked;
-      const registered = await registerClient(database, checked.client, clock.now(), clientNetwork(ip));
+      const registered = await registerClient(database, keys, checked.client, clock.now(), clientNetwork(ip));
       if (registered.outcome === 'registered') return registered;
       if (registered.cap === 'server') logger.child({ correlationId }).warn('oauth.registrations_capped');
       else networkRegistrationsCapped();

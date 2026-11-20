@@ -9,8 +9,6 @@ import { join } from 'node:path';
 import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import { type DirectoryTables, registerOrganization } from '@agentx/core/modules/directory';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { sealLegacyRows, type SecurityEventsTables } from '@agentx/core/modules/security-events';
-import { CHAIN_START } from '@agentx/platform/audit-chain';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, withTenant } from '@agentx/platform/db';
 import { API_PURPOSES, loadKeys } from '@agentx/platform/keys';
@@ -18,7 +16,6 @@ import { createLogger, type Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   findLeaks,
-  FixedClock,
   LogCapture,
   type TestDatabase,
   testLogger,
@@ -37,36 +34,23 @@ const keys = writeTestKeys(API_PURPOSES);
 let database: TestDatabase;
 
 beforeAll(async () => {
+  // Born sealed, as production's: each start records ROW_MACS_FROM, so no legacy pass runs (databaseBirth, S207). The
+  // tests of the notices' pass make theirs one from before (startedBefore0105).
   database = await createTestDatabase(server, { schema: 'migrated' });
-  // The security rows sealed once, as a first start does in the background (S206 V6): later starts find it done at
-  // once, so one stopped at any moment leaves no sealing half written. Tests that empty the chain seal afresh.
-  await sealedAhead();
 });
 
-/** The security rows' sealing done and recorded on the platform chain, as a first start does it (S206 V6). */
-async function sealedAhead(): Promise<void> {
-  const app = createDatabase<SecurityEventsTables & PlatformControlsTables>(database.connection('app'), testLogger());
+/**
+ * A first start as an API before 0105's release recorded it, with no ROW_MACS_FROM: the database one from before, as
+ * staging's is, so its legacy passes run (a database born sealed has none to run: databaseBirth, S207).
+ */
+async function startedBefore0105(): Promise<void> {
+  const app = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
   try {
-    await sealLegacyRows(app, {
-      keys: loadKeys({ directory: keys.directory, current: {} }, API_PURPOSES),
-      ids: uuidV7Ids,
-      // Before the cutoff, whatever the day the tests run.
-      clock: new FixedClock(new Date('2026-11-25T00:00:00.000Z')),
-      logger: testLogger(),
-      orgs: () => Promise.resolve([]),
-      retentionDays: 90,
-      anchorNow: () => Promise.resolve(),
-      // Held to the chain as it stands, as the anchor check would have anchored it.
-      anchor: async () => {
-        const [head] = await database
-          .as('admin')
-          .query<{ seq: string; hash: Buffer; mac_key_version: number }>(
-            'select seq, hash, mac_key_version from platform_controls.audit_head',
-          );
-        return head === undefined
-          ? CHAIN_START
-          : { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: head.mac_key_version };
-      },
+    const signing = loadKeys({ directory: keys.directory, current: {} }, API_PURPOSES);
+    await recordStart(app, signing, uuidV7Ids, {
+      configHash: `sha256:${'0'.repeat(64)}`,
+      release: 'r',
+      gateRef: undefined,
     });
   } finally {
     await app.destroy();
@@ -336,9 +320,8 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   });
 
   it('SEC-OPS-05 writes each start to the platform audit chain, with the hash it logged, in order', async () => {
-    // The security rows too, and their sealing recorded first (seq 1 and 2), as a first start would (S206 V6).
+    // The security rows too: a database born sealed, whose starts seal nothing (S207).
     await database.as('admin').query(TRUNCATE_CHAIN_AND_SECURITY_ROWS);
-    await sealedAhead();
     const first = await start(envFor('app'));
     await stop(first);
     const second = await start(envFor('app', { AGENTX_RELEASE: 'r-second' }));
@@ -352,18 +335,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         'select seq, actor_id, action, details from platform_controls.audit_events order by seq',
       );
 
-    // The security rows' sealing recorded before (S206 V6), then each start, in order; neither start seals again.
+    // Each start, in order; neither seals the security rows, the database born sealed (S207).
     expect(rows).toEqual([
       {
         seq: '1',
-        actor_id: 'api',
-        action: 'security_events.sealing_started',
-        // Its manifest of the rows it began with: none here.
-        details: expect.stringContaining('"days":"{}"') as unknown,
-      },
-      { seq: '2', actor_id: 'api', action: 'security_events.all_sealed', details: '{}' },
-      {
-        seq: '3',
         actor_id: 'api',
         action: 'platform.started',
         // Its time too (S206 V6): no security row from before 0105 is newer.
@@ -372,7 +347,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         ) as unknown,
       },
       {
-        seq: '4',
+        seq: '2',
         actor_id: 'api',
         action: 'platform.started',
         details: expect.stringContaining(
@@ -380,7 +355,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         ) as unknown,
       },
     ]);
-    expect(first.capture.lines().find((line) => line.event === 'api.start_recorded')?.seq).toBe('3');
+    expect(first.capture.lines().find((line) => line.event === 'api.start_recorded')?.seq).toBe('1');
 
     // The chain checks out with the keys the API loaded.
     const reader = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
@@ -391,7 +366,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
         ok: true,
-        seq: 4n,
+        seq: 2n,
       });
     } finally {
       await reader.destroy();
@@ -416,13 +391,12 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   });
 
   it('anchors the platform chain once it listens, where the start it recorded is the head (ADR-012 §2)', async () => {
+    // Born sealed, no sealing records after it: the start is the head whenever the anchor runs (S207).
     await database.as('admin').query(TRUNCATE_CHAIN_AND_SECURITY_ROWS);
-    // The security rows' sealing recorded first (seq 1 and 2), so the start is the head whenever the anchor runs.
-    await sealedAhead();
     const run = await start(envFor('app'));
     await vi.waitFor(() => {
       expect(run.capture.lines().find((line) => line.event === 'audit.anchored')).toEqual(
-        expect.objectContaining({ level: 'info', chain: 'platform', seq: '3' }),
+        expect.objectContaining({ level: 'info', chain: 'platform', seq: '1' }),
       );
     });
     await stop(run);
@@ -705,6 +679,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
+    await startedBefore0105();
     const orgId = '0199a0f0-0000-7000-8000-0000000b5204';
     const id = '0199a0f0-0000-7000-8000-0000000b5205';
     await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
@@ -753,6 +728,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
+    await startedBefore0105();
     const orgId = '0199a0f0-0000-7000-8000-0000000b5208';
     const id = '0199a0f0-0000-7000-8000-0000000b5209';
     await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
@@ -795,6 +771,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const admin = database.as('admin');
     await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
     await admin.query('delete from notifications.outbox');
+    await startedBefore0105();
     const env = envFor('app', { AGENTX_AUDIT_ANCHORS_DIR: mkdtempSync(join(tmpdir(), 'v4-anchors-')) });
     const anchoring = await start(env);
     await vi.waitFor(() => {
@@ -802,8 +779,9 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     });
     await stop(anchoring);
     await stop(await start(env));
-    // The first start's record gone, and the pass's own if one ran: a gap behind the chain's anchor.
-    await admin.query('delete from platform_controls.audit_events where seq = 1 or action = $1', [
+    // The first boot's start record gone (the one from before 0105 kept: the database stays one from before), and the
+    // pass's own if one ran: a gap behind the chain's anchor.
+    await admin.query('delete from platform_controls.audit_events where seq = 2 or action = $1', [
       'notice.legacy_sealed',
     ]);
     const orgId = '0199a0f0-0000-7000-8000-0000000b5206';

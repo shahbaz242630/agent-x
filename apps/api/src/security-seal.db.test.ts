@@ -642,8 +642,10 @@ describe('the day seal and the pass giving the rows from before 0105 their MACs,
   const alarmsOnce = (): unknown[] =>
     [...new Set(alarms().map((alarm) => JSON.stringify(alarm)))].map((line): unknown => JSON.parse(line));
 
-  beforeEach(() => {
+  beforeEach(async () => {
     clock = new FixedClock(new Date(NOW));
+    // Staging's first start, before 0105's release: no ROW_MACS_FROM, so the database is one with rows from before.
+    await platformStarted();
   });
 
   it('the day seal first: days sealed with no alarm; the pass after; every seal still holds, nothing alarmed', async () => {
@@ -878,5 +880,32 @@ describe('the day seal and the pass giving the rows from before 0105 their MACs,
     expect(capture.lines().find((line) => line.event === 'security.legacy_seal_done')?.outcome).toBe('no_anchor_store');
     expect(await globalSeals()).toEqual([['2026-11-18', 1]]);
     expect(alarms()).toEqual([]);
+  });
+
+  it('a database born sealed (R-15, S207): rows the owner marks from before 0105, backdated into scope, are never sealed and each the alarm', async () => {
+    // Production's: the chain's first start already records its time; staging's first start, above, is gone.
+    await owner().query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await app.transaction().execute((tx) =>
+      createPlatformChain({ keys, ids }).record(tx, {
+        actor: { type: 'system', id: 'api' },
+        action: 'platform.started',
+        details: { release: 'r', [ROW_MACS_FROM]: NOW },
+      }),
+    );
+    const w = await shared.world();
+    listed = [w.org];
+    const planted = await fromBefore('2026-11-18T09:00:00.000Z');
+    const orgPlanted = await fromBefore('2026-11-18T10:00:00.000Z', w.org);
+
+    expect(await legacyPass()).toBe('born_sealed');
+    expect(await withoutMac()).toEqual([planted]);
+    await checkingAll().run();
+
+    expect(alarmsOnce()).toEqual([
+      { chain: 'platform', reason: 'mac', day: '2026-11-18', rowId: planted },
+      { chain: 'organisation', reason: 'mac', day: '2026-11-18', orgId: w.org, rowId: orgPlanted },
+    ]);
+    expect(await legacyPass()).toBe('born_sealed');
+    expect(await withoutMac()).toEqual([planted]);
   });
 });
