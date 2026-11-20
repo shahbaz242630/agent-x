@@ -1095,10 +1095,11 @@ async function suppliersShown(
  * The suppliers named, verified together with their current versions (each
  * locked `share`) and named by them, by ID in lower case, in the caller's
  * transaction, which must be withSignedStates' for the organisation: for a
- * list naming the suppliers its own verified rows point to (Phase 3 B3), so
- * one missing is a bug and throws. One that can't be checked now, or whose
- * version can't, is in `stuck` (A1b: the list shows the rest); tampered
- * with, at the first that is.
+ * list naming the suppliers its own verified rows point to (Phase 3 B3). One
+ * not there (S206 V8: never thrown for, so one row can't fail a whole list)
+ * is in `missing`, for the caller to judge by what its row was sealed with.
+ * One that can't be checked now, or whose version can't, is in `stuck` (A1b:
+ * the list shows the rest); tampered with, at the first that is.
  */
 export async function suppliersNamed(
   tx: SuppliersTransaction,
@@ -1110,22 +1111,29 @@ export async function suppliersNamed(
       readonly outcome: 'named';
       readonly suppliers: ReadonlyMap<string, SupplierShown>;
       readonly stuck: ReadonlySet<string>;
+      readonly missing: ReadonlySet<string>;
     }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
   const checks = await states.pageStates(tx, SUPPLIERS, orgId, ids);
   const suppliers: SupplierRecord[] = [];
   const stuck = new Set<string>();
+  const missing = new Set<string>();
   for (const [id, check] of checks) {
     if (check.outcome === 'tampered') return check;
-    if (check.outcome === 'missing') throw new Error(`A supplier a verified row names is missing: ${id}`);
-    if (check.outcome === 'backlog') stuck.add(id);
+    if (check.outcome === 'missing') missing.add(id);
+    else if (check.outcome === 'backlog') stuck.add(id);
     else suppliers.push(supplierFrom(id, check));
   }
   const shown = await suppliersShown(tx, states, orgId, suppliers);
   if (shown.outcome === 'tampered') return shown;
   for (const id of shown.unchecked ?? []) stuck.add(id);
-  return { outcome: 'named', suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])), stuck };
+  return {
+    outcome: 'named',
+    suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])),
+    stuck,
+    missing,
+  };
 }
 
 /**

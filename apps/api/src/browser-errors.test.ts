@@ -153,3 +153,85 @@ describe('POST /v1/client-errors', () => {
     expect(logged()).toEqual([]);
   });
 });
+
+// S206 V8 (ADR-013, SEC-AV-09): anyone may send a report, so a flood of them is the cheapest way to try to fill the
+// log's budget and hide something else. One address is held to its own rate limit; many addresses together fill only
+// the anonymous report's own per-minute cap, counted exactly once the minute is over, and every other event still
+// gets out: a signed-in person's report, the rate limit's own refusal line.
+describe('POST /v1/client-errors under a flood of anonymous reports', () => {
+  const PER_ADDRESS = 20;
+  const CAP = 10;
+  const MINUTE = 60_000;
+
+  async function flooded() {
+    const capture = new LogCapture();
+    // The log's own clock, held still, so the whole flood is one of its minutes until the test moves it on.
+    let now = Date.parse('2026-11-20T09:00:05.000Z');
+    const config = {
+      http: {
+        host: '127.0.0.1',
+        port: 0,
+        publicOrigin: PUBLIC_ORIGIN,
+        trustedProxies: [],
+        rateLimitPerMinute: PER_ADDRESS,
+        rateLimitPerUserPerMinute: 1000,
+        rateLimitPerAgentPerMinute: 1000,
+        rateLimitPerOrganisationPerMinute: 1000,
+        webCopies: 1,
+        mcpOauth: false,
+      },
+      log: { level: 'info' as const, eventCapPerMinute: CAP },
+    };
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', ...config },
+      destination: capture,
+      now: () => now,
+    });
+    const app = await routeServer({ live: LIVE, logger, config });
+    return {
+      app,
+      linesOf: (event: string) => capture.lines().filter((line) => line.event === event),
+      nextMinute: () => {
+        now += MINUTE;
+      },
+    };
+  }
+
+  const from = (address: string, cookie?: string) => ({
+    ...post(REPORT, PUBLIC_ORIGIN, cookie),
+    remoteAddress: address,
+  });
+
+  it('holds one address to its rate limit, and many to the anonymous report’s own cap, which hides no other event', async () => {
+    const { app, linesOf, nextMinute } = await flooded();
+
+    const oneAddress = [];
+    for (let sent = 0; sent < PER_ADDRESS + 5; sent += 1) {
+      oneAddress.push((await app.inject(from('203.0.113.7'))).statusCode);
+    }
+    expect(oneAddress).toEqual([...Array<number>(PER_ADDRESS).fill(202), ...Array<number>(5).fill(429)]);
+
+    // Then as many again, each from an address of its own, every one under its limit: each answered as any other.
+    const manyAddresses = await Promise.all(
+      Array.from({ length: PER_ADDRESS }, (_, at) => app.inject(from(`198.51.100.${String(at + 1)}`))),
+    );
+    expect(manyAddresses.map(({ statusCode }) => statusCode)).toEqual(Array<number>(PER_ADDRESS).fill(202));
+
+    // A signed-in person's report, from an address the flood never used, still gets out, as does the refusal's line.
+    expect((await app.inject(from('192.0.2.44', signedIn))).statusCode).toBe(202);
+    expect(linesOf(ANONYMOUS_BROWSER_ERROR)).toHaveLength(CAP);
+    expect(linesOf(BROWSER_ERROR)).toEqual([expect.objectContaining({ level: 'error', actor: LIVE.userId })]);
+    expect(linesOf('http.request_rate_limited').length).toBeGreaterThan(0);
+
+    // Once the minute is over, what was held back is said with its exact count: the flood is seen, never silent.
+    nextMinute();
+    await app.inject(from('192.0.2.45'));
+    expect(linesOf('log.suppressed')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ suppressedEvent: ANONYMOUS_BROWSER_ERROR, suppressedCount: 2 * PER_ADDRESS - CAP }),
+      ]),
+    );
+    expect(linesOf('log.suppressed').map(({ suppressedEvent }) => suppressedEvent)).not.toContain(BROWSER_ERROR);
+  });
+});
