@@ -88,7 +88,7 @@ beforeEach(() => {
   chain.step = { ok: true, seq: 9n, to: 9n, hash: Buffer.alloc(32, 9), macKeyVersion: 1 };
 });
 
-describe('the security rows’ sealing job (S206 V6)', () => {
+describe('SEC-DB-18 the security rows’ sealing job (S206 V6)', () => {
   it('seals nothing where no anchor store is: said', async () => {
     await jobWith(undefined).run();
 

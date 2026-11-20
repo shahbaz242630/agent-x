@@ -88,7 +88,7 @@ describe('SEC-OAUTH-14 what a token’s MAC is taken over', () => {
     expect(message[0]).not.toBe(keySecretMessage(KEY_ID, RANDOM_PART)[0]);
   });
 
-  it('R-15: makes a token’s secret from its kind, key and ID under a label of its own', () => {
+  it('SEC-OAUTH-16 R-15: makes a token’s secret from its kind, key and ID under a label of its own', () => {
     expect(connectionTokenSecretMessage({ kind: 'refresh', keyId: KEY_ID.toUpperCase(), tokenId: TOKEN_ID })).toEqual([
       'connection-token-secret',
       'refresh',

@@ -42,6 +42,16 @@ export const ALLOWED: readonly Allowed[] = [
     why: "a copy's own anchors container once its files' lock is up; staging's audit-anchors never fits",
   },
   {
+    file: 'deploy/azure/grants.ts',
+    match: "'rest', '--method', 'delete', '--url', `${ARM}${id.slice(1)}?api-version=${ASSIGNMENTS_API}`",
+    guard: 'each.principalId === principalId &&',
+    proof: {
+      file: 'deploy/azure/grants.test.ts',
+      title: "takes back every read of Stage G's on a secret, another's and the vault's own left alone",
+    },
+    why: "Stage G's own reads on the vault's secrets only (S204-b revoke); the API's and every other identity's grants never match",
+  },
+  {
     file: 'deploy/azure/deploy.ts',
     match: 'az resource delete --ids ${alert.id}',
     guard: "steps.terminal.ask('Delete them now so this run recreates them? [y/N] ')",

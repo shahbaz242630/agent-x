@@ -29,6 +29,8 @@ import {
   templateProblems,
   DECISION_HEADROOM,
   gateBusy,
+  GRANTS,
+  STAGE_G_RUN_READS,
   LOAD_RUN,
   LOGIN_COPIES,
   MCP_ALERTS,
@@ -662,6 +664,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-database',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-endpoints',
+      // AZ32 (c): the apps subnet's Storage to our own accounts alone.
+      'Microsoft.Network/serviceEndpointPolicies sep-agentx-staging-apps',
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
       'Microsoft.Network/privateDnsZones agentx-staging.private.postgres.database.azure.com',
       'Microsoft.Network/privateDnsZones/virtualNetworkLinks agentx-staging.private.postgres.database.azure.com/vnet-agentx-staging',
@@ -927,15 +931,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'migrate reads db-owner-password',
         // 4D2e E10: the chain repair writes as the owner, the one job besides the migration.
         'chain-restore reads db-owner-password',
-        // AZ3: Stage G's mark as the owner, and its checks as the app and the backup role, on its copy alone.
-        'stage-g reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
         // The API's jobs apart from it read what the API reads (4D2e D13).
         'jobs reads db-app-password',
-        'stage-g reads db-app-password',
         'db-setup reads db-backup-password',
-        'stage-g reads db-backup-password',
         'db-setup reads db-operator-password',
         'operator reads db-operator-password',
         'db-setup reads db-zitadel-password',
@@ -2876,9 +2876,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['activity-downloads']);
-    // A second store, or a Storage account named as neither.
+    // A second store, or a Storage account named as neither (which the apps subnet's Storage policy doesn't name).
     expect(only(withExtra({ ...structuredClone(store), id: `${String(store?.id)}-second` }))).toEqual([
       'required',
+      'storage-egress',
       'activity-downloads',
     ]);
     expect(
@@ -2889,7 +2890,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
           name: String(store?.name).replace(/stagentxdl/, 'stagentxother'),
         }),
       ),
-    ).toEqual(['required', 'evidence-store']);
+    ).toEqual(['required', 'storage-egress', 'evidence-store']);
     expect(only(without(DOWNLOADS_STORE))).toContain('activity-downloads');
 
     // The role: read and write a file, nothing more; never delete, list keys or any action.
@@ -3823,6 +3824,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'database-network',
       'apps-network',
       'apps-egress',
+      'storage-egress',
       'vault',
       'evidence-store',
       'activity-downloads',
@@ -4046,6 +4048,69 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(problems.map((problem) => problem.message)).toEqual([
       'its database subnet must let out Tcp to Storage.uaenorth on 443, for the write-ahead log and backups, in this region alone',
       'its database subnet lets out Tcp to Storage on 443, which nothing it runs needs',
+    ]);
+  });
+
+  it("storage-egress (AZ32 c): the apps subnet's Storage let out to any account but our own", () => {
+    const POLICY = type('Microsoft.Network/serviceEndpointPolicies');
+    const definitions = (policy: Mutable): Mutable[] =>
+      inside(policy, 'properties').serviceEndpointPolicyDefinitions as Mutable[];
+    const first = (policy: Mutable): Mutable => inside(nth(definitions(policy), 0), 'properties');
+    const named = (policy: Mutable): string[] => first(policy).serviceResources as string[];
+    const policyOn = (name: string) => (network: Mutable) => {
+      const properties = inside(subnet(network, name), 'properties');
+      properties.serviceEndpointPolicies = structuredClone(
+        inside(subnet(network, 'apps'), 'properties').serviceEndpointPolicies,
+      );
+    };
+    // Staging's as it is: one policy, on the apps subnet, naming both stores.
+    expect(brokenRules(staging)).not.toContain('storage-egress');
+    for (const change of [
+      // One store left out, a stranger's added, or a whole subscription or group let in.
+      (policy: Mutable) => named(policy).pop(),
+      (policy: Mutable) => named(policy).push(String(named(policy)[0]).replace(/stagentx/, 'stattacker')),
+      (policy: Mutable) => (named(policy)[0] = String(named(policy)[0]).replace(/\/providers\/.*$/, '')),
+      (policy: Mutable) => (first(policy).serviceResources = []),
+      // Another service, an alias reaching Microsoft's accounts, or no definitions at all.
+      (policy: Mutable) => (first(policy).service = 'Microsoft.Sql'),
+      (policy: Mutable) => (first(policy).serviceAlias = '/services/Azure'),
+      (policy: Mutable) => (inside(policy, 'properties').serviceEndpointPolicyDefinitions = []),
+    ]) {
+      expect(brokenRules(changed(POLICY, change))).toEqual(['storage-egress']);
+    }
+    // Azure reads IDs without case: the same stores in upper case are still ours.
+    expect(
+      brokenRules(
+        changed(POLICY, (policy) => (first(policy).serviceResources = named(policy).map((id) => id.toUpperCase()))),
+      ),
+    ).toEqual([]);
+    // The apps subnet without it, with a second, or pointing at one the deployment doesn't make.
+    expect(
+      brokenRules(
+        changed(NETWORK, (network) => delete inside(subnet(network, 'apps'), 'properties').serviceEndpointPolicies),
+      ),
+    ).toEqual(['storage-egress']);
+    expect(
+      brokenRules(
+        changed(NETWORK, (network) => {
+          const policies = inside(subnet(network, 'apps'), 'properties').serviceEndpointPolicies as Mutable[];
+          policies.push({ id: `${String(nth(policies, 0).id)}-second` });
+        }),
+      ),
+    ).toEqual(['storage-egress']);
+    // The database subnet given one: the server's write-ahead log would be refused.
+    expect(brokenRules(changed(NETWORK, policyOn('database')))).toEqual(['storage-egress']);
+    // The policy left on no subnet.
+    expect(
+      brokenRules(withExtra({ ...structuredClone(staging.predictedResources.find(POLICY)), id: 'other' })),
+    ).toEqual(['storage-egress']);
+    const problems = policyProblems(
+      changed(NETWORK, (network) => delete inside(subnet(network, 'apps'), 'properties').serviceEndpointPolicies),
+      STAGING,
+    ).filter((problem) => problem.rule === 'storage-egress');
+    expect(problems.map(describeProblem)).toEqual([
+      "vnet-agentx-staging [storage-egress] its apps subnet needs one Storage endpoint policy of this deployment: without it the subnet's Storage endpoint reaches any account in the region",
+      'sep-agentx-staging-apps [storage-egress] is a Storage endpoint policy no subnet uses',
     ]);
   });
 
@@ -4868,7 +4933,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     );
   });
 
-  it('security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
+  it('SEC-DB-18 security-seal-alert: no SEV-1 alert on a security day sealed short of its tallies, or one that looks too short a way back or can’t fire (S206 V6)', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     expect(brokenRules(without(SECURITY_SEAL_ALERT))).toEqual(['security-seal-alert']);
     for (const change of [
@@ -5511,27 +5576,22 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(WATCH_ROLE, starting('Microsoft.App/jobs/stop/action')))).toEqual(['job-watch']);
   });
 
-  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, reading the owner's, the app's and the backup role's logins alone", () => {
+  it("SEC-DB-07 Stage G's mark and checks (AZ3): their own identity, given the owner's, the app's and the backup role's logins for a run alone (S204-b)", () => {
+    // No deployment gives Stage G's identity a read: none stands between runs.
     const grants = staging.predictedResources
       .filter((resource) => ASSIGNMENTS(resource))
-      .map((resource) => String(at(resource.properties, 'description')))
-      .filter((description) => description.startsWith('stage-g reads '));
-    expect(grants).toEqual([
-      'stage-g reads db-owner-password (deploy/azure/secrets.bicep)',
-      'stage-g reads db-app-password (deploy/azure/secrets.bicep)',
-      'stage-g reads db-backup-password (deploy/azure/secrets.bicep)',
-    ]);
-    // The server admin's login, the operator's or Zitadel's, given to it: refused.
-    for (const secret of ['db-admin-password', 'db-operator-password', 'db-zitadel-password']) {
-      const extra = structuredClone(
-        staging.predictedResources.find(READS('stage-g', 'db-owner-password')),
-      ) as unknown as Mutable;
-      const reader = structuredClone(staging.predictedResources.find(READS('db-setup', secret))) as unknown as Mutable;
-      extra.id = String(reader.id).replace(/[^/]+$/, 'stage-g-extra');
+      .map((resource) => String(at(resource.properties, 'description')));
+    expect(grants.filter((description) => description.startsWith('stage-g '))).toEqual([]);
+    expect([...GRANTS].filter((grant) => grant.startsWith('stage-g '))).toEqual([]);
+    // One put back in the templates, of any login, its run's three among them: refused.
+    const identity = staging.predictedResources.find(named(/^id-agentx-stg-stage-g$/));
+    for (const secret of ['db-owner-password', 'db-app-password', 'db-admin-password']) {
+      const extra = structuredClone(staging.predictedResources.find(READS('db-setup', secret))) as unknown as Mutable;
+      const properties = inside(extra, 'properties');
+      properties.principalId = String(properties.principalId).replace(/id-agentx-stg-db-setup/, String(identity?.name));
+      extra.id = String(extra.id).replace(/[^/]+$/, 'stage-g-standing');
       expect(brokenRules(withExtra(extra))).toEqual(['secret-access']);
     }
-    // One of its three left out: refused, as each is needed.
-    expect(brokenRules(without(READS('stage-g', 'db-backup-password')))).toEqual(['secret-access']);
   });
 
   it('release-writes-alert (AZ2): no alert on CI doing anything but a release, or one that lets a write through, fires late or quietly', () => {
@@ -8669,6 +8729,9 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     const reads = (job: string) => declaredSecrets(found(copy.together, JOB(job))).map(({ name }) => name);
     expect(reads('load-mark')).toEqual(['db-owner-password']);
     expect(reads('load-check')).toEqual(['db-app-password', 'db-backup-password', 'load-request']);
+    // What the runner gives Stage G's identity for the run (S204-b) is exactly what these two read.
+    const run = ['load-mark', 'load-check'].flatMap(reads).filter((name) => name !== 'load-request');
+    expect(new Set(run.map((secret) => `stage-g reads ${String(secret)}`))).toEqual(STAGE_G_RUN_READS);
     // The key's vault name built here: a password-named name beside a name with a digit reads to GitGuardian as a secret (S175, #573).
     const macKey = `key-audit-mac-v${String(1)}`;
     expect(reads('load-step')).toEqual(expect.arrayContaining(['db-app-password', macKey, 'load-request']));

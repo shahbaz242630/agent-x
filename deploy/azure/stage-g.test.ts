@@ -133,6 +133,8 @@ interface World {
   partialReadings?: number;
   /** Readings of a step's decisions that find none yet; Infinity: never. */
   noDecisionReadings?: number;
+  /** Stage G's reads of the logins Azure holds before this run (S204-b). */
+  reads?: string[];
 }
 
 /** Azure as stage-g.ts asks it, kept as a real one would keep it. */
@@ -273,6 +275,24 @@ class FakeAzure implements StageGAzure {
     this.removedContainers.push(container);
     return true;
   }
+  /** Stage G's reads of the logins as Azure holds them (S204-b), from none, or from what the world says stands. */
+  get reads(): Set<string> {
+    this.#reads ??= new Set(this.world.reads ?? []);
+    return this.#reads;
+  }
+  #reads: Set<string> | undefined;
+  giveReads() {
+    const given = ['db-owner-password', 'db-app-password', 'db-backup-password'].filter(
+      (each) => !this.reads.has(each),
+    );
+    for (const each of given) this.reads.add(each);
+    return given;
+  }
+  takeReads() {
+    const taken = this.reads.size;
+    this.reads.clear();
+    return taken;
+  }
 }
 
 let dir: string;
@@ -387,7 +407,9 @@ describe('the command line', () => {
     expect(parseArguments(['delete'])).toEqual({ command: 'delete' });
     expect(parseArguments(['delete', COPY])).toEqual({ command: 'delete', name: COPY });
     expect(parseArguments(['delete', '--anchors'])).toEqual({ command: 'anchors' });
+    expect(parseArguments(['revoke'])).toEqual({ command: 'revoke' });
     for (const wrong of [
+      ['revoke', 'all'],
       [],
       ['make'],
       ['create', 'now'],
@@ -430,6 +452,20 @@ describe('create', () => {
     expect(keptCopy()).toMatchObject({ server: COPY, runId: `stage-g-${ID}`, sized: true, marked: true, paused: true });
     expect(done.said[0]).toContain('node deploy/azure/operator.ts handoff-pause --reason <case reference>');
     expect(done.text).toContain('node deploy/azure/stage-g.ts run smoke');
+    // S204-b: the run's reads given before the apps line (Azure checks a job's vault references as it deploys it).
+    expect([...done.azure.reads]).toEqual(['db-owner-password', 'db-app-password', 'db-backup-password']);
+    const gave = done.said.findIndex((line) => line.startsWith("Gave Stage G's identity its run's reads"));
+    const apps = done.said.findIndex((line) => line.includes('deploy.ts apps --load-run'));
+    expect(gave).toBeGreaterThanOrEqual(0);
+    expect(gave).toBeLessThan(apps);
+  });
+
+  it('S204-b: says so when Stage G already holds its reads, giving none twice', async () => {
+    const reads = ['db-owner-password', 'db-app-password', 'db-backup-password'];
+    const again = await run(['create'], { reads });
+    expect(again.error).toBeUndefined();
+    expect(again.text).toContain("Stage G's identity already holds its run's reads");
+    expect([...again.azure.reads]).toEqual(reads);
   });
 
   it("refuses a copy made with staging's hand-offs running: remove it, pause staging, make it again", async () => {
@@ -845,8 +881,12 @@ describe('delete', () => {
     const done = await run(['delete'], {
       servers: [COPY],
       going: { 'load-step': ['job-agentx-stg-load-step-x1 (Running)'] },
+      reads: ['db-owner-password', 'db-app-password', 'db-backup-password'],
     });
     expect(done.error).toBeUndefined();
+    // S204-b: the run's reads go with the copy.
+    expect([...done.azure.reads]).toEqual([]);
+    expect(done.text).toContain("Took back Stage G's 3 reads of the database logins.");
     expect(done.azure.stopped).toEqual(['job-agentx-stg-load-step-x1']);
     expect(done.finished()).toBe(1);
     expect(done.azure.deleted).toEqual([COPY]);
@@ -882,10 +922,12 @@ describe('delete', () => {
   it('removes another copy by name without touching the load jobs of the one kept', async () => {
     markedCopy();
     const other = 'psql-agentx-stg-g-zzzz9999';
-    const done = await run(['delete', other], { servers: [COPY, other] });
+    const done = await run(['delete', other], { servers: [COPY, other], reads: ['db-owner-password'] });
     expect(done.code).toBe(0);
     expect(done.finished()).toBe(0);
     expect(done.azure.deleted).toEqual([other]);
+    // The kept copy's jobs still read theirs.
+    expect([...done.azure.reads]).toEqual(['db-owner-password']);
     expect(keptCopy().server).toBe(COPY);
     expect(done.text).not.toContain('put staging back');
   });
@@ -900,6 +942,19 @@ describe('delete', () => {
     const named = await run(['delete', 'psql-agentx-stg-g-zzzz9999']);
     expect(named.code).toBe(0);
     expect(named.azure.deleted).toEqual([]);
+  });
+
+  it('S204-b revoke: takes back the reads with no copy kept, and refuses while one is', async () => {
+    const left = await run(['revoke'], { reads: ['db-owner-password'] });
+    expect(left.code).toBe(0);
+    expect([...left.azure.reads]).toEqual([]);
+    expect(left.text).toBe("Took back Stage G's 1 read of the database logins.");
+    const none = await run(['revoke']);
+    expect(none.text).toBe('Stage G holds no read of the database logins.');
+    markedCopy();
+    const kept = await run(['revoke'], { reads: ['db-owner-password'] });
+    expect(String(kept.error)).toContain(`Stage G's copy ${COPY} is kept`);
+    expect([...kept.azure.reads]).toEqual(['db-owner-password']);
   });
 
   it('removes only the anchors containers whose copy is gone and whose time is up', async () => {

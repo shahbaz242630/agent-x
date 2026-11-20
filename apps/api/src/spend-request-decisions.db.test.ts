@@ -998,7 +998,7 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
   });
 
-  it('counts a decision sent for approval, its notice told, as the allowed one and its notice alone (S206 V4)', async () => {
+  it('SEC-DB-17 counts a decision sent for approval, its notice told, as the allowed one and its notice alone (S206 V4)', async () => {
     const { w, acting } = await ready({ terms: { approvalThreshold: AED(500_000n) } });
     decidedOf(await ask(acting, asking(w)));
     decidedOf(await ask(acting, asking(w, { orderReference: 'INV-WAITS-ONE-TRIP' })));

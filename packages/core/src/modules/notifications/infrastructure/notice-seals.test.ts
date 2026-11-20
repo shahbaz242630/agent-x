@@ -43,7 +43,7 @@ const sealed = (row: QueuedColumns, with_: KeyProvider = keys) => {
   return { ...row, mac, mac_key_version: keyVersion };
 };
 
-describe('a notice sealed as it is queued (S206 V4)', () => {
+describe('SEC-DB-17 a notice sealed as it is queued (S206 V4)', () => {
   it('holds for the notice as queued, whatever the case of its IDs', () => {
     expect(queuedJudged(keys, sealed(QUEUED))).toBe('sound');
     expect(queuedJudged(keys, { ...sealed(QUEUED), id: QUEUED.id.toLowerCase() })).toBe('sound');
@@ -86,7 +86,7 @@ describe('a notice sealed as it is queued (S206 V4)', () => {
   });
 });
 
-describe('a notice’s end sealed (S206 V4)', () => {
+describe('SEC-DB-17 a notice’s end sealed (S206 V4)', () => {
   const ID = QUEUED.id;
   const AT = new Date('2026-12-02T09:05:00.000Z');
   const ended = (end: Parameters<typeof endSeal>[2]) => {
