@@ -190,9 +190,13 @@ describe(`the API process (Postgres ${server.version})`, () => {
       for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
     });
     try {
+      // The anchor check's first anchor, and the legacy sealing's (S206 V6) done: it anchors the platform chain at its
+      // start and its end, each a write of its own, racing the check's. Waited for, so the writes are all made.
       await vi.waitFor(
         () => {
-          expect(said.map((line) => line.event)).toContain('audit.anchors_written');
+          expect(said.map((line) => line.event)).toEqual(
+            expect.arrayContaining(['audit.anchors_written', 'security.legacy_seal_done']),
+          );
         },
         { timeout: 30_000, interval: 100 },
       );
@@ -200,20 +204,27 @@ describe(`the API process (Postgres ${server.version})`, () => {
       // PR2's sharded store: the platform chain's snapshot in its shard's folder, a signed list of it under `changes/`.
       const shard = shardHex(shardOf('platform'));
       expect(readdirSync(path.join(folder, 'e1', 'shards')).toSorted()).toEqual(['changes', shard].toSorted());
-      expect(readdirSync(path.join(folder, 'e1', 'shards', 'changes'))).toHaveLength(1);
+      // A signed list for each write the store said it made, however the check's and the sealing's fell.
+      const writes = () => said.filter((line) => line.event === 'audit.anchors_written').length;
+      await vi.waitFor(() => {
+        expect(readdirSync(path.join(folder, 'e1', 'shards', 'changes'))).toHaveLength(writes());
+      });
+      expect(writes()).toBeGreaterThanOrEqual(1);
+      // A file in the shard for each write, a snapshot (`-s`) among them, each a gzipped, signed line of the chain.
       const files = readdirSync(path.join(folder, 'e1', 'shards', shard));
-      expect(files).toEqual([expect.stringMatching(SHARD_FILE)]);
-      expect(String(files[0])).toMatch(/-s$/);
-      const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'shards', shard, String(files[0])))).toString(
-        'utf8',
-      );
-      expect(
-        text.split('\n').map((line) => {
-          if (line === '') return 'end';
-          const { chain, k } = JSON.parse(line) as { chain?: string; k: string };
-          return chain ?? k;
-        }),
-      ).toEqual(['platform', 'c', 'end']);
+      expect(files).toEqual(files.map(() => expect.stringMatching(SHARD_FILE) as unknown));
+      expect(files).toHaveLength(writes());
+      expect(files.filter((file) => file.endsWith('-s')).length).toBeGreaterThanOrEqual(1);
+      for (const file of files) {
+        const text = gunzipSync(readFileSync(path.join(folder, 'e1', 'shards', shard, file))).toString('utf8');
+        expect(
+          text.split('\n').map((line) => {
+            if (line === '') return 'end';
+            const { chain, k } = JSON.parse(line) as { chain?: string; k: string };
+            return chain ?? k;
+          }),
+        ).toEqual(['platform', 'c', 'end']);
+      }
     } finally {
       jobs.kill();
       await new Promise((resolve) => jobs.once('exit', resolve));
