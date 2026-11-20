@@ -138,6 +138,15 @@ export interface Sessions {
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
 
+/**
+ * From when a last use whose MAC doesn't hold raises the integrity alarm (0111, S207 GM-4). Before it, the release
+ * before this one may still be serving, or be rolled back to: its `use` moves the last use without its MAC, and its
+ * `rotate` changes the cookie's hash without one, so an honest session's MAC wouldn't hold. Such a session is ended all
+ * the same, with a warning, so an attack still fails, but no one is paged for a rollout (decision 49).
+ * TODO(S207 GM-4): delete this grace path, and its warning, after the date.
+ */
+export const LAST_USE_ALARM_FROM = new Date('2026-12-05T00:00:00Z');
+
 /** The cookie ID's size: 256 bits. */
 const COOKIE_BYTES = 32;
 /** Its text: 32 bytes in base64url, unpadded. */
@@ -427,7 +436,12 @@ export function createSessions({
     }
     const sealed = { mac: lastUse.mac, mac_key_version: lastUse.version };
     if (macHolds(keys, lastUseMessage(row.cookie_hash, lastUse.at), sealed)) return true;
-    rowForged(logger, 'session', row, 'last_use');
+    // Ended either way; only what is said differs while the release before can still write the row (decision 49).
+    if (clock.now() < LAST_USE_ALARM_FROM) {
+      logger.warn('identity.session_last_use_mismatch', { rowId: row.id, userId: row.user_id });
+    } else {
+      rowForged(logger, 'session', row, 'last_use');
+    }
     return false;
   };
 
