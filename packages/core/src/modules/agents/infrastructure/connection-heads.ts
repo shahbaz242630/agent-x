@@ -9,8 +9,8 @@
 //
 // A connection gets its row as it is made, naming its first refresh token
 // (the code's or device's exchange); each refresh moves it to the refresh
-// token it issued. One made before 0102 has none (`unset`) until its next
-// refresh adds it.
+// token it issued. One made before 0102 has none (`unset`), and from S207 is
+// never refreshed (oauth-grants.ts): its client connects again.
 import type { SignedStateTable } from '@agentx/platform/db';
 
 import type { SignedStates, StateCheck, TamperSign, VerifiedState } from '../../audit/index.ts';
@@ -23,7 +23,7 @@ export const CONNECTION_HEADS = {
   fields: [{ column: 'refresh_id', type: 'uuid' }],
 } as const satisfies SignedStateTable;
 
-/** The head, verified; none yet (`unset`: a connection not refreshed since 0102); or tampered with (its alarm raised). */
+/** The head, verified; none yet (`unset`: a connection being made, or one made before 0102); or tampered with (its alarm raised). */
 export type HeadCheck =
   | { readonly outcome: 'set'; readonly refreshId: string; readonly state: VerifiedState }
   | { readonly outcome: 'unset' }
@@ -80,13 +80,3 @@ export async function headMoved(
     .execute();
   await states.record(tx, CONNECTION_HEADS, { orgId, id }, 'new', fields, change);
 }
-
-/**
- * Whether a write failed because the connection's head was made by another transaction first: two refreshes of a
- * connection that had none (made before 0102) at once, the second's insert refused by the table's key.
- */
-export const isHeadTaken = (error: unknown): boolean =>
-  typeof error === 'object' &&
-  error !== null &&
-  (error as { code?: unknown }).code === '23505' &&
-  (error as { constraint?: unknown }).constraint === 'connection_heads_pkey';

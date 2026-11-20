@@ -19,7 +19,6 @@ import {
   AGENTS,
   addConnection,
   CONNECTIONS,
-  headMoved,
   issueTokens,
   keySecretMessage,
   ENDED_CONNECTIONS_SHOWN_DAYS,
@@ -1149,7 +1148,7 @@ describe(`SEC-OAUTH-16 R-15 (S206): a refresh token’s use hidden by the databa
     await headRefused(rotated, rotated.second.refreshToken);
   });
 
-  it('two live refresh tokens of a connection made before 0102: the second to make its head is a reuse', async () => {
+  it('SEC-OAUTH-16 R-15 a connection made before 0102, with no head: never refreshed, its used token’s use cleared or not, so its client connects again (S207, GM-2)', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const agentId = await agent(org, admin);
@@ -1198,33 +1197,36 @@ describe(`SEC-OAUTH-16 R-15 (S206): a refresh token’s use hidden by the databa
           },
         ),
       );
-    const [one, two] = [await pair(), await pair()];
-    // The first refresh's head made and held uncommitted, so the second's waits on the table's key.
-    const made = Promise.withResolvers<undefined>();
-    const letGo = Promise.withResolvers<undefined>();
-    const first = withSignedStates(app, org, quiet(), async (tx, states) => {
-      await headMoved(
-        tx,
-        states,
-        { outcome: 'unset' },
-        { orgId: org, id: keyId, refreshId: one.refreshTokenId, at: clock.now() },
-      );
-      made.resolve(undefined);
-      await letGo.promise;
-    });
-    await made.promise;
-    const second = grants.refresh(
-      { refreshToken: two.refreshToken, clientId, scope: undefined, resource: undefined },
-      CALLER,
-    );
-    await waitUntilQueued(database.as('admin'), 1);
-    letGo.resolve(undefined);
-    await first;
-    expect(await second).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
-    expect(await accepted(one.accessToken)).toEqual({ outcome: 'refused' });
-    expect(lines('audit.integrity_failed')).toEqual([
-      expect.objectContaining({ level: 'error', orgId: org, check: 'refresh_token', reason: 'not_head' }),
+    // The first pair's refresh token used before 0102 (the one stolen), the second the app's current pair.
+    const [used, current] = [await pair(), await pair()];
+    const owner = await tamperAsOwner(database, CONNECTIONS, org);
+    const tokensOfKey = async () =>
+      (
+        await owner.query<{ n: number }>('select count(*)::int as n from agents.connection_tokens where key_id = $1', [
+          keyId,
+        ])
+      )[0]?.n;
+    const before = await tokensOfKey();
+    // Its use cleared by the owner: the token reads as never used.
+    await owner.query('update agents.connection_tokens set used_at = now() where id = $1', [used.refreshTokenId]);
+    await owner.query('update agents.connection_tokens set used_at = null where id = $1', [used.refreshTokenId]);
+
+    for (const { refreshToken } of [used, current]) {
+      expect(
+        await grants.refresh({ refreshToken, clientId, scope: undefined, resource: undefined }, CALLER),
+      ).toMatchObject({ outcome: 'refused', error: 'invalid_grant' });
+    }
+    // Nothing issued, no head made, nothing revoked: the app's access token works until it ends, and it connects again.
+    expect(await tokensOfKey()).toBe(before);
+    expect(await owner.query('select id from agents.connection_heads where id = $1', [keyId])).toEqual([]);
+    expect(await accepted(current.accessToken)).toMatchObject({ outcome: 'accepted' });
+    expect(lines('oauth.grant_refused')).toEqual([
+      expect.objectContaining({ reason: 'no_head', keyId }),
+      expect.objectContaining({ reason: 'no_head', keyId }),
     ]);
+    expect(lines('oauth.refresh_reused')).toEqual([]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+    await owner.end();
   });
 
   it('its use cleared: not the signed head, so a reuse, the connection revoked, with the alarm', async () => {
