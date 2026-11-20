@@ -52,6 +52,9 @@
 // closed: if its end can't be signed (the platform head locked past the limit,
 // or unreadable, which the owner could cause), the session is deleted in a
 // transaction of its own, with the integrity alarm, and the browser signed out.
+// A step-up's new cookie ID is signed the same way (`identity.session_rotated`,
+// S207 GM-4), in its own transaction: the row as it was, put back, is no
+// session. If that can't be signed, the step-up fails and nothing changes.
 //
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
@@ -68,7 +71,7 @@ import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { type EndedSession, type LiveSession, type Sessions, sessionsEndedAt } from './sessions.ts';
-import { createSignedEnds, sessionEndedEvent } from './signed-ends.ts';
+import { createSignedEnds, sessionEndedEvent, sessionRotatedEvent } from './signed-ends.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { keepUserContact } from './user-contacts.ts';
@@ -262,7 +265,9 @@ export function createSignIn({
         idTokenHash,
       });
       if (!recorded) throw failed('challenge_missing', 'the challenge ran out of time', userId);
-      return { userId, sessionId, cookie: rotated, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
+      // The row as it was, signed as retired, last of the locks (S207 GM-4): put back, it finds nothing for the old cookie.
+      await platform.record(tx as unknown as PlatformTransaction, sessionRotatedEvent(rotated.retired, clock.now()));
+      return { userId, sessionId, cookie: rotated.cookie, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
     });
   }
 

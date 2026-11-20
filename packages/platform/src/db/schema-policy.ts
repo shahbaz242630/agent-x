@@ -293,7 +293,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     'identity.sessions': {
       reason:
-        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs",
+        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs. It keeps the MAC of its last use with its cookie's hash, with a key the database never holds, and that key's version (0111, S207 GM-4): a last use moved by anyone without the app's keys ends the session",
       columns: [
         'id',
         'user_id',
@@ -306,12 +306,22 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'ends_at',
         'mac',
         'mac_key_version',
+        'last_use_mac',
+        'last_use_mac_key_version',
       ],
       // Opened, read and ended; changed only in its cookie ID (rotated, its
-      // MAC made again with it: 0100) and its last-seen time, never moved to
-      // another person, nor what it proved or when it ends.
+      // MAC made again with it: 0100) and its last-seen time (its MAC made
+      // again with it: 0111), never moved to another person, nor what it
+      // proved or when it ends.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
-      appMayUpdate: ['cookie_hash', 'last_seen_at', 'mac', 'mac_key_version'],
+      appMayUpdate: [
+        'cookie_hash',
+        'last_seen_at',
+        'mac',
+        'mac_key_version',
+        'last_use_mac',
+        'last_use_mac_key_version',
+      ],
     },
     'identity.login_flows': {
       reason:

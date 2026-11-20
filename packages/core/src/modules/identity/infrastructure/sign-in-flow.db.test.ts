@@ -34,6 +34,7 @@ import {
   lockSessionsOf,
   type Sessions,
   SESSION_ENDED,
+  SESSION_ROTATED,
   SESSIONS_ENDED,
   sessionsEndedAt,
   sessionsEndedEvent,
@@ -678,6 +679,37 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
       idpSessionId: 'V1_fresh',
       idTokenHash: Buffer.alloc(32, 7),
     });
+  });
+
+  it('signs the rotation on the platform chain, so the row as it was before, put back by the owner, finds nothing (R-15, GM-4)', async () => {
+    const { done, challenge } = await signedInWithChallenge();
+    const owner = database.as('owner');
+    const [kept] = await owner.query<{ kept: unknown; mac: Buffer }>(
+      'select pg_catalog.row_to_json(s) as kept, s.mac from identity.sessions s where s.id = $1',
+      [done.sessionId],
+    );
+
+    const stepped = await stepUp(done.sessionId, challenge.challengeId, done.cookie);
+
+    const signed = await (app as unknown as Kysely<PlatformControlsTables>)
+      .selectFrom('platform_controls.audit_events')
+      .select('details')
+      .where('action', '=', SESSION_ROTATED)
+      .execute();
+    expect(
+      signed
+        .map(({ details }) => JSON.parse(details) as Record<string, string>)
+        .filter((d) => d.record === done.sessionId),
+    ).toEqual([
+      { person: done.userId, record: done.sessionId, retired: kept?.mac.toString('hex'), at: START.toISOString() },
+    ]);
+    await owner.query('delete from identity.sessions where id = $1', [done.sessionId]);
+    await owner.query(
+      'insert into identity.sessions select * from pg_catalog.json_populate_record(null::identity.sessions, $1::json)',
+      [JSON.stringify(kept?.kept)],
+    );
+    expect(await sessions.use(app, done.cookie)).toBeUndefined();
+    expect(await sessions.use(app, stepped.cookie)).toBeUndefined();
   });
 
   it('refuses to begin one for a challenge of another session, starting nothing', async () => {

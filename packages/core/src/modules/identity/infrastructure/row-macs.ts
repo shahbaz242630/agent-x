@@ -12,8 +12,11 @@
 // for, and the key version it was made with. A row is believed only if its MAC
 // holds with that version; one that doesn't is no session or no challenge, and
 // raises the integrity alarm (`audit.integrity_failed`), as an audit chain's
-// break does. A session's last use is left out: it moves on every request, and
-// moving it only keeps alive a session whose cookie the mover still lacks.
+// break does. A session's last use is left out: it moves on every request,
+// written where the session's other facts aren't known. It has a MAC of its
+// own instead (0111, S207 GM-4), over the cookie's hash and the last use, both
+// known before the request's one statement: the owner holding a stolen cookie
+// could otherwise move an idle session's last use on and sign in with it again.
 import { KeyError, type KeyProvider, type Message } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -74,6 +77,7 @@ export interface ChallengeFacts {
 /** Each message's label: a session's MAC can never stand for a challenge's, nor either for another key's work. */
 const USER_LABEL = 'agentx/identity.user/v1';
 const SESSION_LABEL = 'agentx/identity.session/v1';
+const LAST_USE_LABEL = 'agentx/identity.session-last-use/v1';
 const CHALLENGE_LABEL = 'agentx/identity.step-up-challenge/v1';
 
 const time = (at: Date): string => String(at.getTime());
@@ -100,6 +104,13 @@ export const sessionMessage = (facts: SessionFacts): Message => [
   ...list(facts.amr),
   time(facts.createdAt),
   time(facts.endsAt),
+];
+
+/** A session's last use, bound to its cookie's hash: that hash is unique, and the session's own MAC covers it. */
+export const lastUseMessage = (cookieHash: Buffer, lastUse: Date): Message => [
+  LAST_USE_LABEL,
+  cookieHash,
+  time(lastUse),
 ];
 
 export function challengeMessage(facts: ChallengeFacts): Message {
@@ -159,15 +170,17 @@ export function macHolds(
  * challenge whose MAC holds but whose use the audit trail already records,
  * put back after its change deleted it (`already_used`), or one whose use
  * can't be told because the audit chain since it opened fails its check
- * (`chain_unverified`). Names the row and
- * its person, never the cookie, so the incident can find who was being
- * impersonated.
+ * (`chain_unverified`), or a session the platform chain signs as ended
+ * (`ended`), one put back as it was before a step-up gave it a new cookie ID
+ * (`rotated`), or one whose last use the app didn't write (`last_use`). Names
+ * the row and its person, never the cookie, so the incident can find who was
+ * being impersonated.
  */
 export function rowForged(
   logger: Logger,
   check: 'user' | 'session' | 'step_up_challenge',
   row: { readonly id: string; readonly user_id: string },
-  reason: 'mac' | 'already_used' | 'chain_unverified' | 'ended' = 'mac',
+  reason: 'mac' | 'already_used' | 'chain_unverified' | 'ended' | 'rotated' | 'last_use' = 'mac',
 ): void {
   logger.error('audit.integrity_failed', { check, reason, rowId: row.id, userId: row.user_id });
 }
