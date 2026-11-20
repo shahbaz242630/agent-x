@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { IMAGE_REPOSITORY } from '../image/verify.ts';
-import type { Az, AzResult, Request, Steps, Terminal } from './deploy.ts';
+import { authRules, type ConsoleState } from './auth-door.ts';
+import { LEGACY_DOOR } from './legacy-door.fixture.ts';
+import { type Az, type AzResult, CONSOLE_SAID, type Request, stagingApp, type Steps, type Terminal } from './deploy.ts';
 import type { History } from './git.ts';
 import {
   ANSWER_VARIABLES,
@@ -622,6 +624,8 @@ function infraOver(options: {
   readonly since?: Readonly<Record<string, readonly string[]>>;
   /** The role assignments on the vault (AZ32): none unless given. */
   readonly grants?: readonly { scope: string; principalId: string; roleDefinitionId: string }[];
+  /** The auth door's rules (PL-26): closed unless given. */
+  readonly door?: ConsoleState | readonly unknown[];
 }) {
   const said: string[] = [];
   const requests: { request: Request; steps: Steps }[] = [];
@@ -634,6 +638,10 @@ function infraOver(options: {
       const url = args[args.indexOf('--url') + 1] ?? '';
       if (url.includes('/roleAssignments'))
         return ok({ value: (options.grants ?? []).map((properties) => ({ properties })) });
+      if (url.includes('/httpRouteConfigs/')) {
+        const door = options.door ?? 'closed';
+        return ok({ properties: { rules: typeof door === 'string' ? authRules(door, stagingApp) : door } });
+      }
       const workload = url.includes('/jobs/') ? 'migrate' : 'api';
       return ok({
         properties: { template: { containers: [container(workload, options.running ?? OLD, options.role)] } },
@@ -843,7 +851,7 @@ describe('answers, the summary and main', () => {
     // The vault's grants are read first (AZ32): this stand-in's vault holds none, so each listed one is said lacking.
     expect(written[1]?.file).toBe('sum');
     expect(written[1]?.text).toMatch(
-      /^```\nThe vault lacks \d+ grants .*\nThe vault's grants: none beyond the repository's list \(GRANTS, policy\.ts\)\.\nThis merge needs no infrastructure deploy: the release goes on by itself\.\n```\n$/,
+      /^```\nThe vault lacks \d+ grants .*\nThe vault's grants: none beyond the repository's list \(GRANTS, policy\.ts\)\.\nZitadel's console is closed on the auth host: .*\nThis merge needs no infrastructure deploy: the release goes on by itself\.\n```\n$/,
     );
     const HASH = 'f'.repeat(64);
     const deploying = infraOver({});
@@ -867,6 +875,70 @@ describe('answers, the summary and main', () => {
     expect(await main(['plan', NEW, DIGEST], outlets, (say) => ({ ...made.infra, say }))).toBe(1);
     expect(written).toEqual([]);
     expect(made.requests).toEqual([]);
+  });
+
+  it('PL-26: says an open console and plans on; a door in neither shape plans nothing and ends red', async () => {
+    const written: { file: string; text: string }[] = [];
+    const outlets = {
+      env: { ...ENV, GITHUB_OUTPUT: 'out' },
+      append: (file: string, text: string) => written.push({ file, text }),
+    };
+    const open = infraOver({ changed: [], door: 'open' });
+    expect(
+      await main(['plan', NEW, DIGEST], outlets, (say) => ({
+        ...open.infra,
+        say: (line) => {
+          open.said.push(line);
+          say(line);
+        },
+      })),
+    ).toBe(0);
+    expect(open.said).toContain(CONSOLE_SAID.open);
+    expect(written).toEqual([{ file: 'out', text: 'plan={"steps":[],"whatIf":{}}\nneeded=false\n' }]);
+    written.length = 0;
+    const stray = infraOver({ changed: ['deploy/azure/apps.bicep'], door: authRules('closed', stagingApp).slice(1) });
+    expect(
+      await main(['plan', NEW, DIGEST], outlets, (say) => ({
+        ...stray.infra,
+        say: (line) => {
+          stray.said.push(line);
+          say(line);
+        },
+      })),
+    ).toBe(1);
+    expect(stray.said).toContain(CONSOLE_SAID.neither);
+    expect(written).toEqual([]);
+    expect(stray.requests).toEqual([]);
+  });
+
+  it('PL-26: plans the apps deploy that closes staging’s pre-PL-26 door, even for a merge needing nothing else', async () => {
+    const written: { file: string; text: string }[] = [];
+    const outlets = {
+      env: { ...ENV, GITHUB_OUTPUT: 'out' },
+      append: (file: string, text: string) => written.push({ file, text }),
+    };
+    const planned = (): Promise<number> => Promise.reject(new Planned('apps', 'a'.repeat(64)));
+    for (const changed of [[], ['deploy/azure/apps.bicep'], ['deploy/azure/main.bicep']]) {
+      written.length = 0;
+      const legacy = infraOver({ changed, door: LEGACY_DOOR, deploy: planned });
+      expect(
+        await main(['plan', NEW, DIGEST], outlets, (say) => ({
+          ...legacy.infra,
+          say: (line) => {
+            legacy.said.push(line);
+            say(line);
+          },
+        })),
+      ).toBe(0);
+      expect(legacy.said).toContain(CONSOLE_SAID.legacy);
+      const plan = JSON.parse(written[0]?.text.split('\n')[0]?.slice('plan='.length) ?? '{}') as { steps?: string[] };
+      expect(plan.steps).toEqual(changed.includes('deploy/azure/main.bicep') ? ['foundation', 'apps'] : ['apps']);
+      expect(legacy.requests.map(({ request }) => request.command)).toContain('apps');
+    }
+    // A merge that needs a hand deploy CI doesn't make still plans nothing.
+    const byHand = infraOver({ changed: ['db/bootstrap/roles.sql'], door: LEGACY_DOOR, running: 'f'.repeat(40) });
+    expect((await plan(byHand.infra, NEW, DIGEST, true)).steps).toEqual([]);
+    expect(byHand.said.join(' ')).not.toMatch(/apps: planned to close/);
   });
 
   it('refuses what it is not asked properly, and says an error as the run’s last word', async () => {
@@ -1027,6 +1099,18 @@ describe('the deployers (deployers/deployers.bicep)', () => {
     expect(text('deployers.bicep')).toContain(`var repository = '${String(repository)}'`);
     expect(text('deployers.bicep')).toContain("infraSubject: '${repository}:environment:${environment}-infra'");
     expect(text('deployers.bicep')).toContain("whatIfSubject: '${repository}:environment:${environment}-whatif'");
+  });
+
+  it('tags as every other deployment does: tags.bicep’s resourceTags is names.bicep’s, word for word (AZ5i)', () => {
+    const tagsOf = (file: string): string | undefined =>
+      /@export\(\)\r?\n@description\([^\n]*\)\r?\nfunc resourceTags\(environment string\) object => \{[^}]*\}/.exec(
+        readFileSync(path.join(AZURE_DIR, file), 'utf8'),
+      )?.[0];
+    const own = tagsOf('tags.bicep');
+    expect(own).toContain("'managed-by': 'deploy/azure'");
+    expect(tagsOf('names.bicep')?.replaceAll('\r\n', '\n')).toBe(own?.replaceAll('\r\n', '\n'));
+    // That the deployers no longer read names.bicep at all is what the pinned Bicep says (release.test.ts).
+    expect(text('deployers.bicep')).toContain("import { resourceTags } from '../tags.bicep'");
   });
 
   it('lets the infra identity give exactly the roles the deployments give, never Owner or a wildcard, never to itself', () => {

@@ -1,9 +1,16 @@
 // B2-3a-1: the sign-in flows under way (0011), on the real migrated schema, as the app role.
 import { createTestDatabase, FixedClock, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLoginFlows, LOGIN_FLOW_SECONDS } from './login-flows.ts';
+import {
+  createLoginFlows,
+  LOGIN_FLOW_SECONDS,
+  MOST_OPEN_SIGN_INS_A_NETWORK,
+  QUIET_NETWORK_SIGN_INS,
+  signInsUnderWay,
+} from './login-flows.ts';
 import type { LoginFlow } from './oidc-client.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -197,6 +204,8 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
       { return_to: '' },
       { state: '' },
       { ends_at: START },
+      { network_key: '' },
+      { network_key: 'n'.repeat(65) },
     ]) {
       await expect(
         app
@@ -205,5 +214,126 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
           .execute(),
       ).rejects.toMatchObject({ code: '23514' });
     }
+  });
+});
+
+// S206 V8 (0106): anyone can start a sign-in with an anonymous GET, so its flows are held to a cap, every network's
+// together and each network's own, as the OAuth flows are. A step-up's flow is never counted. Each test at a time of
+// its own, after every other test's flows have ended, so each count is its own.
+describe(`the sign-ins under way, held to their caps (S206 V8, Postgres ${server.version})`, () => {
+  const openFrom = (network: string) =>
+    app
+      .selectFrom('identity.login_flows')
+      .select(['network_key', 'step_up_challenge_id'])
+      .where('network_key', '=', network)
+      .execute();
+
+  it(`holds one network to ${String(MOST_OPEN_SIGN_INS_A_NETWORK)} sign-ins under way, keeping none past it`, async () => {
+    const clock = new FixedClock(new Date('2027-01-01T09:00:00Z'));
+    const store = createLoginFlows({ clock });
+    const network = '198.51.100.7';
+    for (let open = 1; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
+      expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    }
+    // A step-up's flow is never counted: it needs a live session, and a flood of sign-ins must never stop it.
+    await store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c2');
+    const last = await store.start(app, newFlow(), '/agents', network);
+    if (last.outcome !== 'started') throw new Error(`not started: ${last.outcome}`);
+    expect(await store.take(app, last.flowId)).toMatchObject({ returnTo: '/agents' });
+    // Taken at its callback, its place is free again.
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+
+    expect(await store.start(app, newFlow(), '/', network)).toEqual({ outcome: 'network_full' });
+    expect(await openFrom(network)).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
+    expect((await openFrom(network)).every((row) => row.step_up_challenge_id === null)).toBe(true);
+    // Another network is not held by it; a step-up still starts; once its flows end, this one isn't held either.
+    expect(await store.start(app, newFlow(), '/', '198.51.100.8')).toMatchObject({ outcome: 'started' });
+    await expect(
+      store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c3'),
+    ).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
+    clock.advanceBy(LOGIN_FLOW_SECONDS * 1000);
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+  });
+
+  it(`past every network's backstop, still lets a quiet network in and refuses only a busy one: no lockout`, async () => {
+    const at = new Date('2027-02-01T09:00:00Z');
+    // A backstop of 50 here rather than add MOST_OPEN_SIGN_INS rows: the rule is the same at any size.
+    const store = createLoginFlows({ clock: new FixedClock(at), mostOpen: 50 });
+    const admin = database.as('admin');
+    // Each from a network of its own, as a crowd filling the table would be. Beside them, step-ups' flows, never
+    // counted: were they, the busy network's fourth below would be refused too.
+    const added = (count: number, stepUp: boolean) =>
+      admin.query(
+        `insert into identity.login_flows
+           (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at, network_key, step_up_challenge_id)
+         select pg_catalog.sha256(('s206-v8-' || $4::text || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/',
+           $1, $2, 'net-' || n,
+           case when $4::boolean then ('0199a0f0-0000-7000-8000-' || pg_catalog.lpad(n::text, 12, '0'))::uuid end
+         from pg_catalog.generate_series(1, $3::int) as n`,
+        [at, new Date(at.getTime() + 1000), count, stepUp],
+      );
+    await added(46, false);
+    await added(5, true);
+    const busy = '203.0.113.9';
+    const start = (network: string) => store.start(app, newFlow(), '/', network);
+    try {
+      // Under the backstop, the busy network's first four start (50 under way after the fourth).
+      for (let open = 0; open < QUIET_NETWORK_SIGN_INS + 1; open += 1) {
+        expect(await start(busy)).toMatchObject({ outcome: 'started' });
+      }
+      // At it, the busy network is refused, keeping nothing more,
+      expect(await start(busy)).toEqual({ outcome: 'full' });
+      expect(await openFrom(busy)).toHaveLength(QUIET_NETWORK_SIGN_INS + 1);
+      // while a quiet one is let in, up to its few, and only then refused.
+      const quiet = '203.0.113.10';
+      for (let open = 0; open < QUIET_NETWORK_SIGN_INS; open += 1) {
+        expect(await start(quiet)).toMatchObject({ outcome: 'started' });
+      }
+      expect(await start(quiet)).toEqual({ outcome: 'full' });
+      // Ended, they hold nothing: the backstop counts only the sign-ins under way.
+      const later = createLoginFlows({ clock: new FixedClock(new Date(at.getTime() + 1000)), mostOpen: 50 });
+      expect(await later.start(app, newFlow(), '/', busy)).toMatchObject({ outcome: 'started' });
+    } finally {
+      await admin.query("delete from identity.login_flows where network_key like 'net-%' or created_at = $1", [at]);
+    }
+  });
+
+  it('counts a quiet network’s start on its own few alone, never every network’s; a busy one’s against each cap', async () => {
+    const at = new Date('2027-03-01T09:00:00Z');
+    const store = createLoginFlows({ clock: new FixedClock(at) });
+    // Every statement the store sends, by its kind: a count is a select.
+    const sent: string[] = [];
+    const counting = app.withPlugin({
+      transformQuery: (args) => {
+        sent.push(args.node.kind);
+        return args.node;
+      },
+      transformResult: (args) => Promise.resolve(args.result),
+    });
+    const network = '198.51.100.30';
+    const selects = () => sent.filter((kind) => kind === 'SelectQueryNode').length;
+
+    expect(await store.start(counting, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    expect(selects()).toBe(1);
+    for (let open = 1; open < QUIET_NETWORK_SIGN_INS; open += 1) await store.start(app, newFlow(), '/', network);
+    sent.length = 0;
+    expect(await store.start(counting, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    // Busy now: its own few, its cap, then the backstop.
+    expect(selects()).toBe(3);
+  });
+
+  it('counts the sign-ins under way from the partial indexes alone, never reading the rows', async () => {
+    // The very statements the caps run, planned as the app role on one connection, so its settings hold for both:
+    // no scan of the table, nor a bitmap over it, to fall back on.
+    await app.connection().execute(async (db) => {
+      await sql`set enable_seqscan = off`.execute(db);
+      await sql`set enable_bitmapscan = off`.execute(db);
+      const planOf = async (network?: string) =>
+        (await signInsUnderWay(db, 100, START, network).explain()).map((row) => String(row['QUERY PLAN'])).join(' ');
+      expect(await planOf()).toMatch(/Index Only Scan using login_flows_(sign_ins_open|by_network)/);
+      expect(await planOf('203.0.113.9')).toMatch(/Index Only Scan using login_flows_by_network/);
+      await sql`reset enable_seqscan`.execute(db);
+      await sql`reset enable_bitmapscan`.execute(db);
+    });
   });
 });

@@ -6,7 +6,10 @@ import {
   type LiveSession,
   type LoginSessions,
   LoginSessionsUnavailable,
+  MOST_OPEN_SIGN_INS,
+  MOST_OPEN_SIGN_INS_A_NETWORK,
   type SignIn,
+  SignInBusy,
   SignInFailed,
   StepUpFailed,
   type Subject,
@@ -23,6 +26,7 @@ import { type FindMembership, ORGANIZATION_HEADER, SESSION_CHALLENGE } from './a
 import { errorBody } from './errors.ts';
 import { liveSession, ONE_TIME_CODE } from './live-session.helper.test.ts';
 import type { SecurityEventNote } from './security-recorder.ts';
+import { clientSite } from './rate-limit.ts';
 import { buildServer } from './server.ts';
 import { cookieValue, FLOW_COOKIE, SESSION_COOKIE } from './sign-in.ts';
 
@@ -51,8 +55,12 @@ class StandIn implements SignIn {
   looked: string[] = [];
   lookupFails: Error | undefined;
 
-  begin(returnTo?: string) {
+  /** The network each sign-in was begun from (S206 V8). */
+  networks: string[] = [];
+
+  begin(returnTo: string | undefined, network: string) {
     this.begun.push(returnTo);
+    this.networks.push(network);
     if (this.beginFailsWith !== undefined) return Promise.reject(this.beginFailsWith);
     return Promise.resolve({ url: LOGIN_URL, flowId: FLOW_ID });
   }
@@ -365,6 +373,45 @@ describe('S47 a login service that cannot be reached, such as one still waking f
       expect(capture.lines()).toContainEqual(
         expect.objectContaining({ event: 'auth.sign_in_unavailable', level: 'warn' }),
       );
+    },
+  );
+
+  it.each([
+    ['203.0.113.7', '203.0.113.7'],
+    ['2001:db8:1:2:3:4:5:6', clientSite('2001:db8:1::')],
+  ])('S206 V8 begins a sign-in from %s as from its network, as the OAuth flows count one', async (address, network) => {
+    const standIn = new StandIn();
+    const { app } = await server(standIn);
+
+    expect((await app.inject({ url: '/v1/auth/sign-in', remoteAddress: address })).statusCode).toBe(302);
+    expect(standIn.networks).toEqual([network]);
+  });
+
+  it.each([
+    ['every network’s', 'full', 'auth.sign_ins_capped', MOST_OPEN_SIGN_INS],
+    ['its network’s', 'network_full', 'auth.sign_ins_network_capped', MOST_OPEN_SIGN_INS_A_NETWORK],
+  ] as const)(
+    'S206 V8 answers a sign-in past %s cap SIGN_IN_UNAVAILABLE, 503 and Retry-After, its warning once a minute',
+    async (_what, cap, event, most) => {
+      const standIn = new StandIn();
+      standIn.beginFailsWith = new SignInBusy(cap);
+      const { app, capture, noted } = await server(standIn);
+
+      for (let sent = 0; sent < 3; sent += 1) {
+        const response = await app.inject('/v1/auth/sign-in');
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toEqual(
+          errorBody('SIGN_IN_UNAVAILABLE', response.headers['x-correlation-id'] as string),
+        );
+        expect(response.headers['retry-after']).toBe('15');
+        expect(response.headers['set-cookie']).toBeUndefined();
+      }
+      expect(noted).toEqual([]);
+      // A flood is a line a minute, never one a request: the first refusal said at once, the rest counted for later.
+      expect(capture.lines().filter((line) => line.event === event)).toEqual([
+        expect.objectContaining({ level: 'warn', most, refused: 1 }),
+      ]);
+      expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_in_unavailable');
     },
   );
 

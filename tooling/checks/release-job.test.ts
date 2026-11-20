@@ -63,29 +63,58 @@ const AZURE_LOGIN = /^azure\/login@[0-9a-f]{40}$/;
 /** The job-start watch (Carry-Forward S175), the one other job that signs in to Azure. */
 const WATCH_WORKFLOW = '.github/workflows/job-starts.yml';
 
+/** The console watch (PL-26), which signs in as the infrastructure plan's read-only identity. */
+const CONSOLE_WATCH_WORKFLOW = '.github/workflows/console-watch.yml';
+
+/** The weekly sweep, whose certificate check signs in as that identity too. */
+const WEEKLY_WORKFLOW = '.github/workflows/security-weekly.yml';
+
+/** Each Azure sign-in's three IDs, secrets of the job's environment: a variable in a step's env is printed in the public log (S68). */
+const AZURE_IDS = ['AZURE_CLIENT_ID', 'AZURE_SUBSCRIPTION_ID', 'AZURE_TENANT_ID'];
+
 describe('the release job', () => {
-  it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the job-start watch', () => {
+  it('is, with the infrastructure plan and deploy (AZ5), the only job anywhere that names an environment or signs in to Azure but the two watches', () => {
     const naming = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => job.environment !== undefined)
         .map(([name]) => `${file}: ${name}`),
     );
     expect(naming).toEqual([
+      `${CONSOLE_WATCH_WORKFLOW}: watch`,
       `${RELEASE_WORKFLOW}: release`,
       `${RELEASE_WORKFLOW}: infra-plan`,
       `${RELEASE_WORKFLOW}: infra-deploy`,
+      `${WEEKLY_WORKFLOW}: certificates`,
     ]);
     const signingIn = workflows.flatMap(({ file, jobs }) =>
       Object.entries(jobs)
         .filter(([, job]) => (job.steps ?? []).some((step) => step.uses?.startsWith('azure/') === true))
         .map(([name]) => `${file}: ${name}`),
     );
-    expect(signingIn.toSorted()).toEqual([
-      `${WATCH_WORKFLOW}: watch`,
-      `${RELEASE_WORKFLOW}: infra-deploy`,
-      `${RELEASE_WORKFLOW}: infra-plan`,
-      `${RELEASE_WORKFLOW}: release`,
-    ]);
+    expect(signingIn.toSorted()).toEqual(
+      [
+        `${CONSOLE_WATCH_WORKFLOW}: watch`,
+        `${WATCH_WORKFLOW}: watch`,
+        `${RELEASE_WORKFLOW}: infra-deploy`,
+        `${RELEASE_WORKFLOW}: infra-plan`,
+        `${RELEASE_WORKFLOW}: release`,
+        `${WEEKLY_WORKFLOW}: certificates`,
+      ].toSorted(),
+    );
+  });
+
+  it.each([
+    [CONSOLE_WATCH_WORKFLOW, 'watch', 'node deploy/azure/console-watch.ts'],
+    [WEEKLY_WORKFLOW, 'certificates', 'node deploy/azure/certificate-watch.ts'],
+  ])('lets %s %s only read, on main, in staging-whatif, as the plan does', (file, name, command) => {
+    const job = workflows.find((each) => each.file === file)?.jobs[name];
+    if (job === undefined) throw new Error(`${file} has no ${name} job`);
+    expect(job.if).toBe("github.ref == 'refs/heads/main'");
+    expect(job.environment).toBe('staging-whatif');
+    expect(job.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    const runs = (job.steps ?? []).flatMap((step) => (step.run === undefined ? [] : [step.run.trim()]));
+    expect(runs.filter((run) => run.startsWith('node '))).toEqual([command]);
+    expect(runs.at(-1)).toBe('az account clear');
   });
 
   it('runs only on a push to main, after CI’s image is published and attested, in the staging environment', () => {
@@ -127,9 +156,9 @@ describe('the release job', () => {
     expect(masking).toBeGreaterThan(0);
     expect(signingIn).toBeGreaterThan(masking);
     expect(steps[masking]?.env).toEqual({
-      CLIENT: '${{ vars.AZURE_CLIENT_ID }}',
-      TENANT: '${{ vars.AZURE_TENANT_ID }}',
-      SUBSCRIPTION: '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+      AZURE_CLIENT_ID: '${{ secrets.AZURE_CLIENT_ID }}',
+      AZURE_TENANT_ID: '${{ secrets.AZURE_TENANT_ID }}',
+      AZURE_SUBSCRIPTION_ID: '${{ secrets.AZURE_SUBSCRIPTION_ID }}',
     });
   });
 
@@ -138,18 +167,21 @@ describe('the release job', () => {
     expect(logins).toHaveLength(1);
     expect(logins[0]?.uses).toMatch(AZURE_LOGIN);
     expect(logins[0]?.with).toEqual({
-      'client-id': '${{ vars.AZURE_CLIENT_ID }}',
-      'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
-      'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+      'client-id': '${{ secrets.AZURE_CLIENT_ID }}',
+      'tenant-id': '${{ secrets.AZURE_TENANT_ID }}',
+      'subscription-id': '${{ secrets.AZURE_SUBSCRIPTION_ID }}',
     });
     // No stored credential: a client secret or certificate would be one to leak. The job's only secrets are the
-    // three pins, given to the release step alone (below).
+    // three pins, given to the release step alone (below), and its three Azure IDs, secrets so the public log never
+    // prints them (S68).
     const named = [...JSON.stringify(release).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
-    expect(named.toSorted()).toEqual([
+    expect([...new Set(named)].toSorted()).toEqual([
       'AGENTX_APP_HOST_SHA256',
       'AGENTX_AUTH_HOST_SHA256',
       'AGENTX_OIDC_CLIENT_ID_SHA256',
+      ...AZURE_IDS,
     ]);
+    expect(JSON.stringify(release)).not.toMatch(/\bvars\./);
   });
 
   it('releases the commit it runs for, with the digest CI’s image job left, the three pins, and signs out whatever happens', () => {
@@ -352,9 +384,9 @@ describe('the infrastructure plan and its approved deploy', () => {
   ];
   const answersEnv = Object.fromEntries(ANSWERS.map((name) => [name, `\${{ secrets.${name} }}`]));
   const LOGIN = {
-    'client-id': '${{ vars.AZURE_CLIENT_ID }}',
-    'tenant-id': '${{ vars.AZURE_TENANT_ID }}',
-    'subscription-id': '${{ vars.AZURE_SUBSCRIPTION_ID }}',
+    'client-id': '${{ secrets.AZURE_CLIENT_ID }}',
+    'tenant-id': '${{ secrets.AZURE_TENANT_ID }}',
+    'subscription-id': '${{ secrets.AZURE_SUBSCRIPTION_ID }}',
   };
 
   it('plans on a push to main alone, after CI’s image, in staging-whatif, reading the code and asking Azure’s token', () => {
@@ -392,10 +424,11 @@ describe('the infrastructure plan and its approved deploy', () => {
     }
   });
 
-  it('names no secret but the five answers, each in the step that runs infra.ts, never the job’s environment', () => {
+  it('names no secret but the five answers, each in the step that runs infra.ts, never the job’s environment, and its three IDs', () => {
     for (const job of [infraPlan, infraDeploy]) {
       const named = [...JSON.stringify(job).matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]);
-      expect([...new Set(named)].toSorted()).toEqual(ANSWERS.toSorted());
+      expect([...new Set(named)].toSorted()).toEqual([...ANSWERS, ...AZURE_IDS].toSorted());
+      expect(JSON.stringify(job)).not.toMatch(/\bvars\./);
     }
     expect(JSON.stringify(infraDeploy.env ?? {})).not.toMatch(/secrets\./);
     expect(planSteps.filter((step) => step.env?.AGENTX_AZURE_AUTH_HOST !== undefined)).toEqual([

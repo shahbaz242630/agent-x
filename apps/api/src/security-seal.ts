@@ -10,7 +10,10 @@
 //   in order, at most MOST_DAYS_A_RUN, by the activity log's steps
 //   (seal-days.ts sealDay: digested in batches, then recorded under the seal's
 //   lock only if the newest seal and the day's count still stand). A row whose
-//   MAC doesn't hold raises the alarm, then its day is sealed as it stands; a
+//   MAC doesn't hold raises the alarm, then its day is sealed as it stands
+//   (one from before 0105 still waiting for its MAC excused: core's
+//   legacyRowsAt, read once a run, says when, so the seal never depends on
+//   which of the two jobs ran first); a
 //   row misdated (an ID far from its time written) is left out of its day,
 //   the alarm raised, and the day sealed without it.
 // - Checks: the newest two seals and a few older from a point picked at
@@ -51,6 +54,8 @@ import {
   brokenSecuritySeal,
   anythingToSeal,
   firstCheckableDay,
+  legacyRowsAt,
+  type LegacyRows,
   nextDayWithRows,
   outOfRange,
   rowsBetween,
@@ -126,10 +131,11 @@ interface OrgHeld {
   readonly states: SignedStates;
 }
 
-/** What one run reads by: its time, and the first day still checked. */
+/** What one run reads by: its time, the first day still checked, and what is said of a row from before 0105 with no MAC. */
 interface RunMoment {
   readonly now: Date;
   readonly checkableFrom: string;
+  readonly legacy: LegacyRows;
 }
 
 export interface SecuritySeal {
@@ -250,16 +256,16 @@ export function createSecuritySeal({
    * The day's digest; a row whose MAC doesn't hold, or one left out misdated, raising the alarm: as the day is sealed
    * (it is sealed as it stands), and as its seal is checked, so one planted into a day sealed already shows too.
    */
-  const digestOf = async <Held>(chain: SealChain<Held>, day: string) => {
-    const digest = await securityDigestOfDay(readerOf(chain), keys, chain.log, day, batch);
+  const digestOf = async <Held>(chain: SealChain<Held>, day: string, legacy: LegacyRows) => {
+    const digest = await securityDigestOfDay(readerOf(chain), keys, chain.log, day, { batch, legacy });
     if (digest.forged !== null) securityLogAlarm(chain.logger, chain.log, 'mac', day, digest.forged);
     if (digest.leftOut !== null) securityLogAlarm(chain.logger, chain.log, 'misdated', day, digest.leftOut);
     return digest;
   };
 
   /** The log's seal, its steps on its own chain under its own lock (seal-days.ts). */
-  const sealingOf = <Held>(chain: SealChain<Held>): DaySealing<Held> => ({
-    digest: (day) => digestOf(chain, day),
+  const sealingOf = <Held>(chain: SealChain<Held>, legacy: LegacyRows): DaySealing<Held> => ({
+    digest: (day) => digestOf(chain, day, legacy),
     // Never asked: a misdated row is left out of its day's digest (core's securityDigestOfDay), not a reason to stop.
     misdated: () => Promise.resolve(),
     locked: (work) =>
@@ -285,7 +291,7 @@ export function createSecuritySeal({
     // A day older than the retention allows is never sealed: the sweep may be part way through it.
     const { checkableFrom, now } = moment;
     let from = newest.day === null || nextDay(newest.day) < checkableFrom ? checkableFrom : nextDay(newest.day);
-    const sealing = sealingOf(chain);
+    const sealing = sealingOf(chain, moment.legacy);
     let finished = false;
     for (let sealed = 0; sealed < MOST_DAYS_A_RUN && signal?.aborted !== true; sealed += 1) {
       const day = await readerOf(chain)((tx) => nextDayWithRows(tx, chain.log, from));
@@ -312,7 +318,7 @@ export function createSecuritySeal({
     const older = await pageOf(chain, olderARun, pick(first.seq));
     if (older === undefined) return;
     const rules = {
-      digest: (day: string) => digestOf(chain, day),
+      digest: (day: string) => digestOf(chain, day, moment.legacy),
       between: (from: string, to: string) => readerOf(chain)((tx) => rowsBetween(tx, chain.log, from, to)),
       checkableFrom: moment.checkableFrom,
     };
@@ -331,11 +337,29 @@ export function createSecuritySeal({
     return finished;
   };
 
+  /**
+   * What the run is told of a row from before 0105 with no MAC, from the platform chain's records of their pass; for
+   * a record that can't be believed, the alarm, and no row excused.
+   */
+  const legacyRowsOf = async (log: Logger, now: Date): Promise<LegacyRows> => {
+    const found = await limitedTransaction(database, (tx) => legacyRowsAt(tx, keys, now));
+    if (found !== 'unsealed') return found;
+    securityLogAlarm(log, 'global', 'unsealed', null);
+    return { excusedBefore: null };
+  };
+
   return {
     async run(signal) {
       const log = logger.child({ correlationId: ids.next() });
       const now = clock.now();
-      const moment: RunMoment = { now, checkableFrom: firstCheckableDay(now, retentionDays) };
+      let moment: RunMoment;
+      try {
+        moment = { now, checkableFrom: firstCheckableDay(now, retentionDays), legacy: await legacyRowsOf(log, now) };
+      } catch (error) {
+        // Nothing is sealed or checked without it: a row from before 0105 could raise a false alarm.
+        log.error('security_event_seal.failed', { err: error });
+        return;
+      }
       try {
         await visit(globalChain(log), moment, signal);
       } catch (error) {

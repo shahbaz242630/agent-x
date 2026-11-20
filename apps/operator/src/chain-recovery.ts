@@ -24,7 +24,14 @@
 //   an event past the copy's head missing or damaged, a sealed live head past
 //   where the plan could end, or no head row for the plan's end
 // - `behind_anchor`, `anchor`: the result wouldn't hold the store's anchor: it
-//   would end before it, or hold another event where it was anchored
+//   would end before it, or hold another event where it was anchored. Where no
+//   copy reaches the anchor, the named flag `--short-of-anchor` (AT9,
+//   `shortOfAnchor`) lets a plan end at the copy's head before it: the copy's
+//   events put back, each proven ours by its MAC (and operator's signature) and
+//   linked by the copy's own whole check to the live events the plan keeps;
+//   every live row past the copy's head is lost for good (the live head's
+//   among them, a junk row removed), and the rebase that follows (E11) gives up
+//   only the events past the copy's head, not the ones it put back
 // - `moved`: a head changed while the chains were read; run it again
 // - `too_large`: more rows than one plan writes
 //
@@ -37,7 +44,9 @@
 // copy's stretch whose signature is gone or another is no original: the copy's
 // event is planned back with its signature (a row's columns carry it). A live row numbered below 1, or
 // past a sealed live head at exactly the plan's end, was never the app's: it is
-// planned removed, which writes nothing new either.
+// planned removed, which writes nothing new either. A live head row the copy's
+// replaces is kept in the plan as read (its `liveHead` line), as every row it
+// replaces or removes is.
 import { createHash } from 'node:crypto';
 
 import {
@@ -98,12 +107,23 @@ export type RecoveryPlan =
       readonly rows: readonly PlannedRow[];
       /** The copy's head row, to put in place of the live one; undefined where the live head stays. */
       readonly head: ChainHead | undefined;
+      /**
+       * The live head row the copy's takes the place of, as read, and whether it is sealed by us; undefined where none
+       * is replaced, or the chain has no head row. Kept as evidence: sealed, it is the MAC'd proof of where the live
+       * chain reached (AT9's lost tail, a fork's branch), which the repair overwrites.
+       */
+      readonly liveHeadReplaced: (ChainHead & { readonly sealed: boolean }) | undefined;
       /** Live events past the copy, kept as they are. */
       readonly keptPastCopy: bigint;
       /** Whether a fork was found and its live branch planned away, under `discardFork` alone (E10). */
       readonly forkDiscarded: boolean;
       /** The live chain as the plan read it, every row and the head (fingerprintOf): a repair writes only onto this. */
       readonly liveFingerprint: string;
+      /**
+       * The anchor's number the plan ends before, under `shortOfAnchor` alone (AT9): the rebase then gives up the events
+       * past `endsAt`. Null where the plan holds its anchor.
+       */
+      readonly endsShortOf: bigint | null;
     }
   | {
       readonly ok: false;
@@ -177,6 +197,8 @@ export interface RecoverySides {
   readonly mostRows?: number;
   /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
   readonly discardFork?: boolean;
+  /** The named flag (AT9): a plan ending at the copy's head before the anchor, rather than refused `behind_anchor`. */
+  readonly shortOfAnchor?: boolean;
   /** How a page is read, and its size: the module's own read, but for a test that moves a chain between pages. */
   readonly readPage?: typeof chainRowsAlone;
   readonly pageSize?: number;
@@ -270,7 +292,7 @@ const COPY_UNSIGNED =
 
 /** The plan's row by row judgement, then its end. */
 function createPlanner(
-  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS, discardFork = false }: RecoverySides,
+  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS, discardFork = false, shortOfAnchor = false }: RecoverySides,
   copied: CheckedPoint,
   liveHeads: { first?: ChainHead | string },
 ) {
@@ -294,6 +316,13 @@ function createPlanner(
     return head !== undefined && typeof head !== 'string' && headIsSealed(keys, chain, head) ? head : undefined;
   };
 
+  /** The live head row a put-back head takes the place of, as read, where there is one. */
+  const replacedLiveHead = (replacing: ChainHead | undefined) => {
+    const live = liveHeads.first;
+    if (replacing === undefined || live === undefined || typeof live === 'string') return undefined;
+    return { ...live, sealed: headIsSealed(keys, chain, live) };
+  };
+
   const rows: PlannedRow[] = [];
   const walker = createChainWalker(keys, chain, copied);
   let end: CheckedPoint = copied;
@@ -301,6 +330,13 @@ function createPlanner(
   // A fork's live branch, found and planned away under discardFork alone.
   let forked = false;
   let atAnchor: CheckedPoint | undefined;
+
+  /**
+   * The anchor's number where the plan ends short of it, as asked (AT9): at the copy's head, the anchor past it; null
+   * otherwise. Every live row past that head then goes: the lost events' rows were deleted, any other is no original.
+   */
+  const shortOf = (): bigint | null =>
+    shortOfAnchor && anchor !== undefined && anchor.seq > end.seq && end.seq === copied.seq ? anchor.seq : null;
 
   const plan = (row: PlannedRow): Refused | undefined => {
     rows.push(row);
@@ -341,8 +377,8 @@ function createPlanner(
     if (forked) return plan({ action: 'remove', seq, stored: live.stored });
     const head = liveHead();
     // Never the app's: not sealed by us, and past a sealed head that stands exactly where the plan ends (every row
-    // here is past that end).
-    if (!sealedHere(live) && head?.seq === end.seq) {
+    // here is past that end), or past the copy's head where the plan ends short of its anchor (AT9).
+    if (!sealedHere(live) && (head?.seq === end.seq || shortOf() !== null)) {
       return plan({ action: 'remove', seq, stored: live.stored });
     }
     return refused('new_seal', end.seq + 1n);
@@ -359,9 +395,12 @@ function createPlanner(
 
     finish(copyHead: ChainHead, liveFingerprint: string): RecoveryPlan {
       const head = liveHead();
+      const endsShortOf = shortOf();
+      const short = endsShortOf !== null;
       // The live head is sealed past where the plan can end: events the copy doesn't hold are lost. A fork's
-      // branch is discarded whole, the plan ending at the copy's head.
-      if (head !== undefined && head.seq > end.seq && !forked) return refused('new_seal', end.seq + 1n);
+      // branch is discarded whole, the plan ending at the copy's head; so is the lost tail of a plan short of its
+      // anchor (AT9), the rebase giving it up.
+      if (head !== undefined && head.seq > end.seq && !forked && !short) return refused('new_seal', end.seq + 1n);
       let replaceHead: ChainHead | undefined;
       if (end.seq === copied.seq) {
         const live = liveHeads.first;
@@ -370,8 +409,9 @@ function createPlanner(
         // Grown on past the copy, but no original head row stands at its end (a hash names its event's number too).
         return refused('new_seal', end.seq);
       }
-      if (anchor !== undefined && anchor.seq > end.seq) return refused('behind_anchor', anchor.seq);
+      if (anchor !== undefined && anchor.seq > end.seq && !short) return refused('behind_anchor', anchor.seq);
       if (
+        !short &&
         anchor !== undefined &&
         anchor.seq > 0n &&
         (atAnchor === undefined ||
@@ -386,9 +426,11 @@ function createPlanner(
         endsAt: { seq: end.seq, hash: end.hash, macKeyVersion: end.macKeyVersion },
         rows,
         head: replaceHead,
+        liveHeadReplaced: replacedLiveHead(replaceHead),
         keptPastCopy: end.seq - copied.seq,
         forkDiscarded: forked,
         liveFingerprint,
+        endsShortOf,
       };
     },
   };
@@ -430,6 +472,8 @@ function planLines(plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | und
       keptPastCopy: plan.keptPastCopy.toString(),
       forkDiscarded: plan.forkDiscarded,
       liveFingerprint: plan.liveFingerprint,
+      // Only where it ends short (AT9), so a plan that holds its anchor reads, and digests, as before.
+      ...(plan.endsShortOf === null ? {} : { endsShortOf: plan.endsShortOf.toString() }),
     },
     ...plan.rows.map((row) => {
       const at = { k: 'row', action: row.action, seq: row.seq.toString() };
@@ -438,19 +482,21 @@ function planLines(plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | und
         ? { ...at, columns: row.columns, replaced: row.replaced }
         : { ...at, columns: row.columns };
     }),
-    ...(plan.head === undefined
+    ...(plan.liveHeadReplaced === undefined
       ? []
-      : [
-          {
-            k: 'head',
-            seq: plan.head.seq.toString(),
-            hash: hex(plan.head.hash),
-            mac: hex(plan.head.mac),
-            macKeyVersion: plan.head.macKeyVersion,
-          },
-        ]),
+      : [{ ...headLine('liveHead', plan.liveHeadReplaced), sealed: plan.liveHeadReplaced.sealed }]),
+    ...(plan.head === undefined ? [] : [headLine('head', plan.head)]),
   ];
 }
+
+/** A head row as a plan's line holds it: every column, the bytes in hex. */
+export const headLine = (k: string, head: ChainHead) => ({
+  k,
+  seq: head.seq.toString(),
+  hash: hex(head.hash),
+  mac: hex(head.mac),
+  macKeyVersion: head.macKeyVersion,
+});
 
 const ndjson = (lines: readonly object[]): string => lines.map((line) => `${JSON.stringify(line)}\n`).join('');
 

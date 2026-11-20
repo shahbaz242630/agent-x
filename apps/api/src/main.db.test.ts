@@ -366,13 +366,18 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         seq: '3',
         actor_id: 'api',
         action: 'platform.started',
-        details: JSON.stringify({ configHash: logged[0], release: 'local' }),
+        // Its time too (S206 V6): no security row from before 0105 is newer.
+        details: expect.stringContaining(
+          `{"configHash":"${String(logged[0])}","release":"local","rowMacsFrom":"`,
+        ) as unknown,
       },
       {
         seq: '4',
         actor_id: 'api',
         action: 'platform.started',
-        details: JSON.stringify({ configHash: logged[1], release: 'r-second' }),
+        details: expect.stringContaining(
+          `{"configHash":"${String(logged[1])}","release":"r-second","rowMacsFrom":"`,
+        ) as unknown,
       },
     ]);
     expect(first.capture.lines().find((line) => line.event === 'api.start_recorded')?.seq).toBe('3');

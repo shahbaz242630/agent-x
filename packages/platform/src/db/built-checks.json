@@ -128,6 +128,7 @@
   {"table":"identity.invitations","name":"invitations_status_check","expression":"(status = ANY (ARRAY['DRAFT'::text, 'OPEN'::text, 'AWAITING_CONFIRMATION'::text, 'ACCEPTED'::text, 'DECLINED'::text]))"},
   {"table":"identity.login_flows","name":"flow_ends_after_it_begins","expression":"(ends_at > created_at)"},
   {"table":"identity.login_flows","name":"login_flows_cookie_hash_check","expression":"(octet_length(cookie_hash) = 32)"},
+  {"table":"identity.login_flows","name":"login_flows_network_key_check","expression":"((char_length(network_key) >= 1) AND (char_length(network_key) <= 64))"},
   {"table":"identity.login_flows","name":"login_flows_nonce_check","expression":"((char_length(nonce) >= 1) AND (char_length(nonce) <= 255))"},
   {"table":"identity.login_flows","name":"login_flows_return_to_check","expression":"((char_length(return_to) >= 1) AND (char_length(return_to) <= 512))"},
   {"table":"identity.login_flows","name":"login_flows_state_check","expression":"((char_length(state) >= 1) AND (char_length(state) <= 255))"},

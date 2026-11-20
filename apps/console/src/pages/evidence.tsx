@@ -72,11 +72,12 @@ function Request({ evidence }: { readonly evidence: Evidence }) {
     <Part title={t('evidence.request')}>
       <dl className="facts">
         <Fact label={t('evidence.status')} value={t(`status.${asked.status}`)} />
-        <Fact label={t('request.supplier')} value={evidence.supplier.name} />
-        <Fact label={t('request.invoice')} value={asked.orderReference} mono />
-        <Fact label={t('request.purpose')} value={asked.purpose} />
+        <Fact label={t('request.supplier')} value={evidence.supplier.name ?? t('request.supplierUnknown')} />
+        {/* The agent's own words, each isolated (<bdi>): a right-to-left mark or override in them can't reorder the page around them. */}
+        <Fact label={t('request.invoice')} value={<bdi>{asked.orderReference}</bdi>} mono />
+        <Fact label={t('request.purpose')} value={<bdi>{asked.purpose}</bdi>} />
         <Fact label={t('request.bankReference')} value={asked.bankReference} mono />
-        <Fact label={t('evidence.idempotencyKey')} value={asked.idempotencyKey} mono />
+        <Fact label={t('evidence.idempotencyKey')} value={<bdi>{asked.idempotencyKey}</bdi>} mono />
         <Fact label={t('request.changed')} value={timeText(asked.changedAt)} />
         <Fact label={t('request.expires')} value={timeOrNone(asked.expiresAt)} />
         <Fact label={t('request.id')} value={asked.id} mono />
@@ -117,14 +118,29 @@ function Supplier({ evidence }: { readonly evidence: Evidence }) {
   return (
     <Part title={t('evidence.supplier')}>
       <dl className="facts">
-        <Fact label={t('request.supplier')} value={supplier.name} />
+        <Fact label={t('request.supplier')} value={supplier.name ?? t('request.supplierUnknown')} />
         <Fact label={t('evidence.supplierId')} value={supplier.id} mono />
+        {/* None for a supplier the organisation doesn't have (S206 V8): no details it was decided under. */}
         <Fact
           label={t('evidence.supplierVersion')}
-          value={t('evidence.versionNamed', { number: String(supplier.version.number), name: supplier.version.name })}
+          value={
+            supplier.version === null
+              ? null
+              : t('evidence.versionNamed', { number: String(supplier.version.number), name: supplier.version.name })
+          }
         />
-        <Fact label={t('evidence.verification')} value={<Signed event={supplier.version.verification} />} />
-        <Fact label={t('evidence.source')} value={`${fundingSource.holderName} · ${fundingSource.hint}`} />
+        <Fact
+          label={t('evidence.verification')}
+          value={supplier.version === null ? null : <Signed event={supplier.version.verification} />}
+        />
+        <Fact
+          label={t('evidence.source')}
+          value={
+            fundingSource.holderName === null
+              ? t('evidence.sourceUnknown')
+              : `${fundingSource.holderName} · ${fundingSource.hint ?? ''}`
+          }
+        />
         <Fact label={t('evidence.sourcePartner')} value={fundingSource.partner} />
         <Fact label={t('evidence.sourceId')} value={fundingSource.id} mono />
       </dl>

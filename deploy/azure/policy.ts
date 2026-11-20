@@ -17,6 +17,7 @@ import { MCP_PATH, PROTOCOLS } from '../../apps/api/src/mcp-protocols.ts';
 import { OLD_EDIT_DAYS } from '../../packages/platform/src/audit-chain/limits.ts';
 import { LOGIN_SERVICE_ALERT_EVENTS } from '../../packages/platform/src/observability/login-service-alert.ts';
 import { APP_KEYS, operatorOnly, PUBLIC_HALVES } from './app-keys.ts';
+import { authRoutes, type DoorRoute } from './auth-door.ts';
 import { readRanges } from './github-ranges.ts';
 import { mcpNames, mcpPrefixes, readMcpClients } from './mcp-clients.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
@@ -860,6 +861,10 @@ const ZITADEL_POOL = { setting: 'ZITADEL_DATABASE_POSTGRES_MAXOPENCONNS', unset:
 /** Beside the apps: one job's connection (they are run one at a time, Azure.md "The jobs"), and one to spare. */
 const ONE_JOB_AND_ONE_MORE = 2;
 
+/** A route of auth-door.json as `routeLine` writes it. */
+const doorLine = (route: DoorRoute): string =>
+  `prefix ${JSON.stringify(route.prefix)}${route.anyCase ? ' in any case' : ''} to ${route.reaches}`;
+
 /**
  * The public doors (ADR-002 Amendment G2e), by the part of the name `doorName`
  * gives each after the environment's: each door's routing, rule by rule in the
@@ -870,38 +875,19 @@ const ONE_JOB_AND_ONE_MORE = 2;
  */
 const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
   app: ['prefix "/" to api'],
-  // Zitadel's debug pages go to the API (a 404 there), whatever their case; its login
-  // pages go to the login app; then an allow-list (SA1): only what a browser
-  // needs from Zitadel, each prefix in its one case, and everything else to the
-  // API, which answers every request on the auth host with a plain 404
-  // (apps/api/src/login-host.ts). Zitadel's system API, instance services, REST gateways,
-  // reflection, /openapi, /saml and /idps are never public.
-  auth: [
-    'prefix "/debug" in any case to api',
-    'prefix "/ui/v2/login" to login',
-    ...[
-      '/.well-known/',
-      '/oauth/v2/',
-      '/oidc/v1/',
-      '/ui/console',
-      '/ui/login',
-      '/assets/v1/',
-      // The gRPC-web services the console's browser code calls (its grpc.service.ts at v4.17.3, unchanged in v4.19.5 and v4.20.3).
-      '/zitadel.admin.v1.AdminService/',
-      '/zitadel.management.v1.ManagementService/',
-      '/zitadel.auth.v1.AuthService/',
-      '/zitadel.user.v2.UserService/',
-      '/zitadel.session.v2.SessionService/',
-      '/zitadel.feature.v2.FeatureService/',
-      '/zitadel.action.v2.ActionService/',
-      '/zitadel.webkey.v2.WebKeyService/',
-      '/zitadel.org.v2.OrganizationService/',
-      '/zitadel.authorization.v2.AuthorizationService/',
-      '/zitadel.application.v2.ApplicationService/',
-    ].map((prefix) => `prefix "${prefix}" to zitadel`),
-    'prefix "/" to api',
-  ],
+  // The auth door closed to Zitadel's console (SA1, PL-26; auth-door.json says why each route is there): what a
+  // browser needs to sign in, and everything else to the API, which answers every request on the auth host with a
+  // plain 404 (apps/api/src/login-host.ts). Zitadel's system API, instance services, REST gateways, reflection,
+  // /openapi, /saml and /idps are never public, and its console and admin and management services not from a deploy.
+  auth: authRoutes('closed').map(doorLine),
 };
+
+/**
+ * The auth door open to Zitadel's console: a shape deploy.ts console --open
+ * gives the live door for a piece of work, never one a deployment sends (every
+ * apps deploy closes it), so a deployment routing so is told where it belongs.
+ */
+const CONSOLE_OPEN: readonly string[] = authRoutes('open').map(doorLine);
 
 /** How a door binds its host's certificate: a managed one once it exists, or one it names. `Disabled` is plain http. */
 const SECURE_BINDINGS: ReadonlySet<unknown> = new Set(['Auto', 'SniEnabled']);
@@ -6309,7 +6295,9 @@ const publicDoors: Check = (snapshot, _expected, add) => {
     const routing = routingOf(door, workloadsByApp);
     if (listed !== undefined && routing.join('\n') !== listed.join('\n')) {
       problem(
-        `must route exactly as PUBLIC_DOORS says, in order: ${listed.join('; ')}. It routes: ${routing.join('; ') || 'nothing'}`,
+        publicDoorOf(door.name) === 'auth' && routing.join('\n') === CONSOLE_OPEN.join('\n')
+          ? "opens Zitadel's console to the internet: a deployment always sends the auth door closed (auth-door.json's browser and fallback routes alone); open it for a piece of work with deploy.ts console --open, and close it with --close"
+          : `must route exactly as PUBLIC_DOORS says, in order: ${listed.join('; ')}. It routes: ${routing.join('; ') || 'nothing'}`,
       );
     }
   }

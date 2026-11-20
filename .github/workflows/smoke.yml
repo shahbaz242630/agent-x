@@ -7,7 +7,9 @@
 # would print; the key holds the two read scopes alone, which the test checks.
 # Then the auth host beside it (tooling/smoke/auth-door.ts, SA1): Zitadel's
 # sign-in discovery reached, and its root, the API's health and Zitadel's
-# system API all the API's plain 404. Its host is masked too.
+# system API all the API's plain 404; and a sign-in started at the API lands on
+# the login app's pages (PL-26), never Zitadel's hosted login, which the auth
+# door keeps closed. Its host is masked too.
 name: Smoke (staging)
 
 on:

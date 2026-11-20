@@ -272,7 +272,14 @@ export async function startWeb(
     auditLog: createAuditLog({ database, keys, ids: uuidV7Ids, logger, directory }),
     auditLogExports: createAuditLogExports({ database, keys, ids: uuidV7Ids, clock: systemClock, logger, directory }),
     activityPages: createActivityPages({ database, keys, ids: uuidV7Ids, logger, directory }),
-    securityEventPages: createSecurityEventPages({ database, keys, ids: uuidV7Ids, logger, directory }),
+    securityEventPages: createSecurityEventPages({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+      directory,
+    }),
     backgroundExports: downloads.exports,
     downloadFiles: downloads.files,
     activityLogExports: createActivityLogExports({

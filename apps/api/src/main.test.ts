@@ -759,7 +759,9 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     const { capture } = await start();
     const starting = capture.lines().find((line) => line.event === 'api.starting');
 
-    expect(startRecord.written).toEqual([{ configHash: starting?.configHash, release: starting?.release }]);
+    expect(startRecord.written).toEqual([
+      { configHash: starting?.configHash, release: starting?.release, at: expect.any(Date) as unknown },
+    ]);
     expect(starting?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(capture.lines().find((line) => line.event === 'api.start_recorded')).toEqual(
       expect.objectContaining({ level: 'info', seq: '7' }),
@@ -983,7 +985,9 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
       expect.objectContaining({ level: 'info', mode: 'live' }),
     );
     // What start-record.ts writes as platform.started's details (main.db.test.ts reads them back from the chain).
-    expect(startRecord.written).toEqual([{ configHash: starting?.configHash, release: 'r-live', gateRef: GATE_REF }]);
+    expect(startRecord.written).toEqual([
+      { configHash: starting?.configHash, release: 'r-live', gateRef: GATE_REF, at: expect.any(Date) as unknown },
+    ]);
     expect(startedLive()).toBe(true);
   });
 

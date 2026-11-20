@@ -585,8 +585,20 @@ describe("the month's total from its index alone (0081, S180)", () => {
     await withoutPayments(async () => {
       await moved(org, 'RELEASED');
     });
-    // Its pages marked all visible, as autovacuum leaves a settled month: the index alone then answers.
-    await database.as('admin').query('vacuum (analyze) limit_reservations.reservations');
+    // Its pages marked all visible, as autovacuum leaves a settled month: the index alone then answers. A vacuum marks
+    // no page while another session of this database holds an older snapshot (in CI, autovacuum's own ANALYZE of some
+    // other table: the 3 heap fetches seen), so it is run until every page is marked, as autovacuum's next pass would.
+    // FREEZE makes it wait for a page someone has pinned rather than pass over it unmarked.
+    const everyPageMarked = async () => {
+      await database.as('admin').query('vacuum (freeze, analyze) limit_reservations.reservations');
+      const [table] = await database
+        .as('admin')
+        .query<{ marked: boolean }>(
+          "select relallvisible = relpages as marked from pg_catalog.pg_class where oid = 'limit_reservations.reservations'::regclass",
+        );
+      return table?.marked;
+    };
+    await expect.poll(everyPageMarked).toBe(true);
 
     for (const [month, total] of [
       [{ agentId: org.agent, month: MONTH, currency: 'AED' }, 50_000n],
