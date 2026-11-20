@@ -12,6 +12,15 @@
 // write that fails is the store's own line and alert. Either way the record
 // stays unanchored until the anchor check's next run anchors it.
 //
+// A sealing held up is loud. Until it ends, the day seal excuses a marked row
+// with no MAC written before it began (or before now, if it hasn't): the
+// database's owner holding the sealer's lock in a session of his own would
+// keep that excuse up until the cutoff. The lock is held only while a sealing
+// runs, a few minutes even for every row, so finding it taken on two runs in
+// a row, an hour apart, is never a sealing at work: `security.legacy_seal_stalled`,
+// an error, each run it stays so. Kept in memory: no one but this copy
+// runs the jobs, and a restart only delays it by an hour.
+//
 // TODO(S206 AT10-style): delete this with sealLegacyRows once every environment holds its `all_sealed` record.
 import { type SecurityEventsTables, sealLegacyRows } from '@agentx/core/modules/security-events';
 import { type PlatformControlsTables, createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -24,6 +33,9 @@ import type { Logger } from '@agentx/platform/observability';
 
 /** How often the sealing is tried: a no-op once done. */
 export const LEGACY_SEAL_EVERY_MS = 60 * 60_000;
+
+/** How long the sealer's lock may be found taken before it is the alarm: under two runs, so the second one says it. */
+export const LEGACY_SEAL_STALL_MS = 50 * 60_000;
 
 const PLATFORM = { kind: 'platform' } as const;
 
@@ -60,6 +72,8 @@ export function createLegacySealJob({
   readonly retentionDays: number;
 }): { run(): Promise<void> } {
   const platform = createPlatformChain({ keys, ids });
+  /** When the sealer's lock was first found taken, in this run of finding it so; undefined once a run got it. */
+  let busySince: Date | undefined;
 
   /** The chain anchored at its head now, its check run from the last anchor first. Never throws: a failure is said. */
   const anchorNow = async (store: AnchorLog): Promise<void> => {
@@ -97,6 +111,10 @@ export function createLegacySealJob({
           anchorNow: () => anchorNow(anchors),
         });
         logger.info('security.legacy_seal_done', { outcome });
+        busySince = outcome === 'busy' ? (busySince ?? clock.now()) : undefined;
+        if (busySince !== undefined && clock.now().getTime() - busySince.getTime() >= LEGACY_SEAL_STALL_MS) {
+          logger.error('security.legacy_seal_stalled', { busySince: busySince.toISOString() });
+        }
       } catch (error) {
         logger.error('security.legacy_seal_failed', { err: error });
       }

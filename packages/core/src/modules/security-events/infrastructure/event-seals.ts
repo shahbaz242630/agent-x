@@ -39,10 +39,17 @@
 // failing its digest). So a marked row's line in the digest never holds its
 // MAC (form 2): the seal is the same whenever the pass ran, and the MAC is
 // still checked on its own each time the day is digested. A marked row with no
-// MAC raises no alarm while the pass hasn't ended (no `all_sealed` recorded,
-// before its cutoff), nor after for one written before the pass's scope began,
-// which it left to the sweep (legacyExcused). Any other is the alarm: once
-// `all_sealed` is recorded, the owner nulling a MAC is caught, never waited for.
+// MAC raises no alarm only if written before the time LegacyRows names
+// (legacyExcused): while the pass hasn't ended, before the moment it began
+// (`sealing_started`'s `until`), or now if it hasn't begun; once it has ended,
+// before its scope began, the rows it left to the sweep. Any other is the
+// alarm: a row the owner marks and strips today is caught, never waited for,
+// and a pass held up (its lock taken) is its job's own alarm.
+//
+// So the mark is no longer quite nothing, as 0105's header says it is (a
+// migration can't change): a marked row with no MAC, written early enough, is
+// excused the alarm, though never believed, shown or counted. The bounds above
+// keep the excuse to rows from before 0105.
 //
 // Rows deleted before their day is sealed are not in any digest; each run
 // logs the count of every day not yet sealed (tallyFrom), and an alert holds
@@ -79,11 +86,19 @@ export const SECURITY_SEAL_FORM = 2;
 
 /**
  * What the pass giving the rows from before 0105 their MACs (legacy-seal.ts) says of a marked row with no MAC, read
- * once a run from its records on the platform chain, each MAC-checked: `awaiting` while the pass hasn't ended, no
- * alarm; once it has, none either for one written before `leftBefore`, where its scope began (the sweep's); any other
- * is the alarm. A record that can't be believed, or a pass past its cutoff with no end recorded: `leftBefore` null.
+ * from its records on the platform chain, each MAC-checked (legacyRowsAt): one written before `excusedBefore` raises no
+ * alarm; any other does. Null excuses none: a record that can't be believed, or a pass past its cutoff with no end.
  */
-export type LegacyRows = { readonly awaiting: true } | { readonly awaiting: false; readonly leftBefore: Date | null };
+export interface LegacyRows {
+  readonly excusedBefore: Date | null;
+}
+
+/** Whether a row from before 0105 with no MAC is excused the alarm (LegacyRows): any other row whose MAC fails isn't. */
+export const legacyExcused = (
+  row: { readonly before_macs: boolean; readonly mac: unknown; readonly created_at: Date },
+  legacy: LegacyRows,
+): boolean =>
+  row.before_macs && row.mac === null && legacy.excusedBefore !== null && row.created_at < legacy.excusedBefore;
 
 /** Which table: the global one (0012), or one organisation's rows of 0091. */
 export type SecurityLog = { readonly orgId: string } | 'global';
@@ -309,12 +324,6 @@ export interface SecurityDayDigest extends BothForms {
   readonly forged: string | null;
   readonly leftOut: string | null;
 }
-
-/** Whether a row from before 0105 with no MAC is excused the alarm: the pass not ended, or the row left to the sweep. */
-const legacyExcused = (row: SealedRow, legacy: LegacyRows): boolean =>
-  row.before_macs &&
-  row.mac === null &&
-  (legacy.awaiting || (legacy.leftBefore !== null && row.created_at < legacy.leftBefore));
 
 /**
  * The log's digest of `day`: SHA-256 over one line a dated row, by ID, each the JSON of lineOf and a newline (in each

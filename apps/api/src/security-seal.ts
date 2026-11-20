@@ -343,7 +343,7 @@ export function createSecuritySeal({
     const found = await limitedTransaction(database, (tx) => legacyRowsAt(tx, keys, now));
     if (found !== 'unsealed') return found;
     securityLogAlarm(log, 'global', 'unsealed', null);
-    return { awaiting: false, leftBefore: null };
+    return { excusedBefore: null };
   };
 
   return {

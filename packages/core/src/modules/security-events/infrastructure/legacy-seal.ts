@@ -18,7 +18,9 @@
 //    begins none can; one found means the chain's record was deleted past the
 //    app: the alarm, and nothing sealed, so no row the owner planted or
 //    tampered with since is blessed. Else it records `sealing_started`, with
-//    its manifest: the count and digest of every marked row in its scope.
+//    its manifest: the count and digest of every marked row in its scope,
+//    and the time it began (`until`): a row written from then on is never
+//    in its scope, so a row the owner marks later is never given a MAC.
 // 2. It gives each marked row in scope without a MAC its MAC, a page at a
 //    time, then records `all_sealed`. A sealing begun and left (a stop, a
 //    failure part way) is taken up again by the next start only if the marked
@@ -110,8 +112,18 @@ export interface Manifest {
 
 /** The records on the platform chain, each sealed: where sealing began and its manifest, if it did; where it ended. */
 interface Records {
-  readonly started: (ChainPlace & { readonly manifest: Manifest }) | undefined;
+  readonly started: (ChainPlace & { readonly manifest: Manifest; readonly until: Date }) | undefined;
   readonly sealedAt: bigint | undefined;
+}
+
+/**
+ * When the sealing began, as its record holds it: the time it took before reading the rows (`until`), or, for a record
+ * written before it kept one, the chain's own time of the record. No row written from then on is one from before
+ * 0105: the sealing never gives one a MAC, and the day seal never excuses one.
+ */
+function untilIn(details: string, recordedAt: Date): Date {
+  const { until } = JSON.parse(details) as Record<string, unknown>;
+  return typeof until === 'string' ? new Date(until) : recordedAt;
 }
 
 /** The manifest a record's details hold, or undefined for none. */
@@ -142,26 +154,35 @@ async function recordsIn(tx: Tx, keys: KeyProvider): Promise<Records | 'unsealed
     started:
       started === undefined || manifest === undefined
         ? undefined
-        : { seq: started.seq, hash: started.hash, macKeyVersion: started.mac_key_version, manifest },
+        : {
+            seq: started.seq,
+            hash: started.hash,
+            macKeyVersion: started.mac_key_version,
+            manifest,
+            until: untilIn(started.details, started.recorded_at),
+          },
     sealedAt: rows.find((row) => row.action === ALL_SEALED)?.seq,
   };
 }
 
 /**
- * What the day seal is told of the marked rows with no MAC at `now` (event-seals.ts LegacyRows), from the records as
- * recordsIn reads them, each MAC-checked: awaiting until `all_sealed` is recorded or the cutoff passes; then excused
- * only if written before the scope `sealing_started` names. `unsealed` for a record that can't be believed: the
- * caller's alarm. A record deleted can't make rows look awaiting for long: the platform chain's own checks find the
- * gap or the wound-back head (this pass's next run, the anchor check), and the cutoff ends the wait regardless.
+ * What the day seal and the admins' page are told of the marked rows with no MAC at `now` (event-seals.ts LegacyRows),
+ * from the records as recordsIn reads them, each MAC-checked: until `all_sealed` is recorded, rows written before the
+ * sealing began (`until`), or before now if it hasn't begun (a first start's minutes; a sealing held up longer is its
+ * job's own alarm, legacy-seal-job.ts); once it has ended, rows written before its scope (`since`), left to the sweep;
+ * past the cutoff with no end, none. `unsealed` for a record that can't be believed: the caller's alarm. A record
+ * deleted can't widen the excuse for long: the platform chain's own checks find the gap or the wound-back head (this
+ * sealing's next run, the anchor check), and the cutoff ends it regardless.
  */
 export async function legacyRowsAt(tx: Tx, keys: KeyProvider, now: Date): Promise<LegacyRows | 'unsealed'> {
   const found = await recordsIn(tx, keys);
   if (found === 'unsealed') return 'unsealed';
-  if (found.sealedAt === undefined) {
-    return now.getTime() < SECURITY_SEAL_BACKFILL_UNTIL ? { awaiting: true } : { awaiting: false, leftBefore: null };
+  const { started } = found;
+  if (found.sealedAt !== undefined) {
+    return { excusedBefore: started === undefined ? null : new Date(started.manifest.since) };
   }
-  const since = found.started?.manifest.since;
-  return { awaiting: false, leftBefore: since === undefined ? null : new Date(since) };
+  if (now.getTime() >= SECURITY_SEAL_BACKFILL_UNTIL) return { excusedBefore: null };
+  return { excusedBefore: started === undefined ? now : started.until };
 }
 
 /** A row as Postgres gives it back, each column as its table declares it. */
@@ -228,17 +249,27 @@ const EVIDENCE: LegacyTable = {
     ),
 };
 
+/**
+ * The rows a sealing gives MACs: those written from `since` (older ones left to the sweep) and before `until`, when it
+ * began, so a row marked after that (by the owner: no release writes one) is never blessed.
+ */
+interface SealScope {
+  readonly since: Date;
+  readonly until: Date;
+}
+
 /** Seals the table's next page of rows without a MAC, after `after`: the last ID it read, or undefined at the end. */
 async function sealPage(
   tx: Tx,
   keys: KeyProvider,
   legacy: LegacyTable,
-  since: Date,
+  { since, until }: SealScope,
   after: string,
 ): Promise<string | undefined> {
   const { rows } = await sql<Row>`
     select ${legacy.columns} from ${legacy.table}
-    where mac is null and before_macs and ${legacy.written} >= ${since} and id > ${after}::uuid
+    where mac is null and before_macs and ${legacy.written} >= ${since} and ${legacy.written} < ${until}
+      and id > ${after}::uuid
     order by id limit ${PAGE}
   `.execute(tx);
   const last = rows.at(-1);
@@ -266,12 +297,12 @@ async function sealTable(
   open: <T>(work: (tx: Tx) => Promise<T>) => Promise<T>,
   keys: KeyProvider,
   legacy: LegacyTable,
-  since: Date,
+  scope: SealScope,
 ): Promise<void> {
   let after: string | undefined = BEFORE_ALL;
   while (after !== undefined) {
     const from: string = after;
-    after = await open((tx) => sealPage(tx, keys, legacy, since, from));
+    after = await open((tx) => sealPage(tx, keys, legacy, scope, from));
   }
 }
 
@@ -447,19 +478,27 @@ export async function sealLegacyRows(
     const unanchored = await anchoredProblem();
     if (unanchored !== undefined) return alarm(unanchored);
     // A new sealing's scope: the rows two days or more inside the retention; one taken up again keeps its own.
-    const since = new Date(now.started?.manifest.since ?? clock.now().getTime() - (retentionDays - 2) * DAY_MS);
-    const manifest = await legacyManifest(db, orgs, since);
+    // ...and before it began: taken before the rows are read, every row from before 0105 already written by then.
+    const scope: SealScope = {
+      since: new Date(now.started?.manifest.since ?? clock.now().getTime() - (retentionDays - 2) * DAY_MS),
+      until: now.started?.until ?? clock.now(),
+    };
+    const manifest = await legacyManifest(db, orgs, scope.since);
     if (now.started === undefined) {
       if (await anySigned()) return alarm('deleted');
-      await recordAlone(SEALING_STARTED, { since: manifest.since, days: JSON.stringify(manifest.days) });
+      await recordAlone(SEALING_STARTED, {
+        since: manifest.since,
+        until: scope.until.toISOString(),
+        days: JSON.stringify(manifest.days),
+      });
       // Anchored at once: deleting the record is then a chain wound back past an anchor, which step 0 refuses.
       await anchorNow();
     } else if (!manifestHolds(now.started.manifest, manifest, firstCheckableDay(clock.now(), retentionDays))) {
       return alarm('manifest');
     }
-    await sealTable(plain, keys, GLOBAL_EVENTS, since);
-    await sealTable(plain, keys, EVIDENCE, since);
-    for (const orgId of await orgs()) await sealTable(inOrg(orgId), keys, ORG_EVENTS, since);
+    await sealTable(plain, keys, GLOBAL_EVENTS, scope);
+    await sealTable(plain, keys, EVIDENCE, scope);
+    for (const orgId of await orgs()) await sealTable(inOrg(orgId), keys, ORG_EVENTS, scope);
     await recordAlone(ALL_SEALED);
     await anchorNow();
     return 'sealed';

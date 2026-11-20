@@ -25,6 +25,7 @@ import {
   ALL_SEALED,
   type ChainPlace,
   legacyManifest,
+  legacyRowsAt,
   SEALER_LOCK,
   SEALING_STARTED,
   SECURITY_SEAL_BACKFILL_UNTIL,
@@ -48,6 +49,8 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0x1e9a_0000_0000);
 const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const AT = new Date('2026-11-25T09:00:00.000Z');
+/** When a start's sealing runs: a minute after the rows from before 0105 were written. */
+const STARTS = new Date(AT.getTime() + 60_000);
 
 const owner = () => database.as('admin');
 
@@ -144,7 +147,7 @@ const eventMacOf = (row: Row | undefined) =>
 let anchoredAt: string[] = [];
 
 /** A sealing at `now`, the chain held to `anchor` (its head as the sealing reads it, unless named). */
-const seal = (now = AT, anchor: () => Promise<ChainPlace | undefined> = headNow) =>
+const seal = (now = STARTS, anchor: () => Promise<ChainPlace | undefined> = headNow) =>
   sealLegacyRows(app, {
     keys,
     ids,
@@ -174,7 +177,7 @@ const manifestNow = async () => {
     () => Promise.resolve([ORG]),
     new Date(AT.getTime() - (RETENTION - 2) * DAY_MS),
   );
-  return { since: manifest.since, days: JSON.stringify(manifest.days) };
+  return { since: manifest.since, until: STARTS.toISOString(), days: JSON.stringify(manifest.days) };
 };
 
 const alarms = () =>
@@ -288,6 +291,53 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     expect(await unsealed()).toBe('5');
     expect(await records()).toEqual([SEALING_STARTED, ALL_SEALED]);
     expect(alarms()).toEqual([]);
+  });
+
+  it('gives no MAC to a marked row written after the sealing began (no release writes one): its time is recorded, the row left unbelieved', async () => {
+    await legacyRows();
+    const later = ids.next();
+    await owner().query(
+      `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at, before_macs)
+       values ($1, 'sign_in_failed', 'state_mismatch', null, null, $2, 1, $2, true)`,
+      [later, new Date(STARTS.getTime() + 1)],
+    );
+
+    expect(await seal()).toBe('sealed');
+    expect(
+      (await owner().query<{ id: string }>('select id from security.events where mac is null')).map(({ id }) => id),
+    ).toEqual([later]);
+    const [started] = await owner().query<{ details: string }>(
+      'select details from platform_controls.audit_events where action = $1',
+      [SEALING_STARTED],
+    );
+    expect((JSON.parse(started?.details ?? '{}') as Record<string, unknown>).until).toBe(STARTS.toISOString());
+  });
+
+  it('tells the day seal which marked rows with no MAC to excuse: before the start, the start’s time, the scope; none past the cutoff or for a record that can’t be believed', async () => {
+    const told = (now = STARTS) => app.transaction().execute((tx) => legacyRowsAt(tx, keys, now));
+    expect(await told()).toEqual({ excusedBefore: STARTS });
+    expect(await told(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toEqual({ excusedBefore: null });
+
+    // A record from before it kept its time: the chain's own time of it.
+    await recorded(SEALING_STARTED, { since: '2026-10-28T09:00:00.000Z', days: '{}' });
+    const [{ recorded_at: recordedAt } = { recorded_at: undefined }] = await owner().query<{ recorded_at: Date }>(
+      'select recorded_at from platform_controls.audit_events where action = $1',
+      [SEALING_STARTED],
+    );
+    expect(await told()).toEqual({ excusedBefore: recordedAt });
+    await owner().query('delete from platform_controls.audit_events where action = $1', [SEALING_STARTED]);
+
+    await recorded(SEALING_STARTED, await manifestNow());
+    expect(await told(new Date(STARTS.getTime() + DAY_MS))).toEqual({ excusedBefore: STARTS });
+    await recorded(ALL_SEALED);
+    expect(await told(new Date(SECURITY_SEAL_BACKFILL_UNTIL))).toEqual({
+      excusedBefore: new Date(AT.getTime() - (RETENTION - 2) * DAY_MS),
+    });
+
+    await owner().query(`update platform_controls.audit_events set details = '{"since":"x"}' where action = $1`, [
+      SEALING_STARTED,
+    ]);
+    expect(await told()).toBe('unsealed');
   });
 
   it('leaves a row within two days of the retention to the sweep, unsealed (never believed): it would go before a start took a sealing up again', async () => {
@@ -417,7 +467,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     await owner().query('delete from security.partner_event_evidence');
     await legacyRows();
 
-    expect(await seal(AT, () => Promise.resolve(anchored))).toBe('unsealed');
+    expect(await seal(STARTS, () => Promise.resolve(anchored))).toBe('unsealed');
     expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual(['seal_record_unsealed']);
   });
@@ -425,7 +475,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
   it('no anchor to hold the chain to: nothing sealed, the alarm', async () => {
     await legacyRows();
 
-    expect(await seal(AT, () => Promise.resolve(undefined))).toBe('unanchored');
+    expect(await seal(STARTS, () => Promise.resolve(undefined))).toBe('unanchored');
     expect(await unsealed()).toBe('5');
     expect(alarms()).toEqual(['seal_record_unanchored']);
   });
@@ -438,7 +488,7 @@ describe('the security rows from before 0105 sealed at start (S206 V6)', () => {
     const long = sealLegacyRows(app, {
       keys,
       ids,
-      clock: new FixedClock(AT),
+      clock: new FixedClock(STARTS),
       logger: testLogger(capture),
       // The sealing held part way, as a long one is between steps.
       orgs: async () => {

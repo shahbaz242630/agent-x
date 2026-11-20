@@ -12,14 +12,18 @@
 // them), and its ID held to when it says it was written (the seal's DATED).
 // A row that fails either, planted or edited by the database's owner, is left
 // off the page and raises the integrity alarm, one line a row (but one from
-// before 0105 with no MAC, left off quietly: the seal's job alarms it once its
-// pass has ended); the page's
+// before 0105 with no MAC that the seal's rule excuses, event-seals.ts
+// legacyExcused, left off quietly; the platform chain's records it reads
+// once a page, only when the page holds such a row); the page's
 // `next` is still where the rows read end, so no row is read twice.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 
-import { DATED, eventMacHolds, securityLogAlarm } from './event-seals.ts';
+import type { Clock } from '../../../shared-kernel/index.ts';
+import type { PlatformControlsTables } from '../../platform-controls/index.ts';
+import { DATED, eventMacHolds, legacyExcused, type LegacyRows, securityLogAlarm } from './event-seals.ts';
+import { legacyRowsAt } from './legacy-seal.ts';
 import { ORG_EVENT_KINDS } from './security-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
@@ -71,10 +75,25 @@ const actorOf = (userId: string | null, agentId: string | null): OrgEventActor |
   return agentId === null ? null : { type: 'agent', id: agentId };
 };
 
-/** What a page's rows are checked with: the MAC key, and the alarm's logger. */
+/** What a page's rows are checked with: the MAC key, the alarm's logger, and the clock the seal's rule reads by. */
 export interface OrgEventsChecked {
   readonly keys: KeyProvider;
   readonly logger: Logger;
+  readonly clock: Clock;
+}
+
+/**
+ * What the seal's rule says of a marked row with no MAC on this page: read only if the page holds one. A record that
+ * can't be believed excuses none; its alarm is the seal job's, raised each run.
+ */
+async function legacyRowsOf(
+  tx: Transaction<SecurityEventsTables & PlatformControlsTables>,
+  rows: readonly { readonly before_macs: boolean; readonly mac: unknown }[],
+  { keys, clock }: OrgEventsChecked,
+): Promise<LegacyRows> {
+  if (!rows.some((row) => row.before_macs && row.mac === null)) return { excusedBefore: null };
+  const found = await legacyRowsAt(tx, keys, clock.now());
+  return found === 'unsealed' ? { excusedBefore: null } : found;
 }
 
 /**
@@ -82,11 +101,12 @@ export interface OrgEventsChecked {
  * only rows whose MAC holds and whose ID agrees with when they were written, each other raising the alarm.
  */
 export async function orgSecurityEventsPage(
-  tx: Transaction<SecurityEventsTables>,
+  tx: Transaction<SecurityEventsTables & PlatformControlsTables>,
   orgId: string,
   asked: OrgEventsToRead,
-  { keys, logger }: OrgEventsChecked,
+  checked: OrgEventsChecked,
 ): Promise<{ readonly rows: readonly OrgSecurityEvent[]; readonly next: OrgEventCursor | null }> {
+  const { keys, logger } = checked;
   let query = tx
     .selectFrom('security.org_events')
     .select([
@@ -118,6 +138,7 @@ export async function orgSecurityEventsPage(
     .limit(asked.limit + 1)
     .execute();
   const read = found.slice(0, asked.limit);
+  const legacy = await legacyRowsOf(tx, read, checked);
   const believed = read.filter((row) => {
     const facts = {
       id: row.id,
@@ -132,9 +153,8 @@ export async function orgSecurityEventsPage(
       createdAt: row.created_at,
     };
     if (!eventMacHolds(keys, facts, row)) {
-      // One from before 0105 with no MAC is left off quietly: it may be waiting for its MAC, or left to the sweep, and
-      // the seal's job, which knows which, raises the alarm for it otherwise.
-      if (!row.before_macs || row.mac !== null) securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
+      // One from before 0105 with no MAC that the seal's rule excuses is left off quietly: waiting for its MAC, or the sweep's.
+      if (!legacyExcused(row, legacy)) securityLogAlarm(logger, { orgId }, 'mac', null, row.id);
       return false;
     }
     if (!row.dated) {

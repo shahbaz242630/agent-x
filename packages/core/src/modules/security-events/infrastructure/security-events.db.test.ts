@@ -25,10 +25,11 @@ import {
 } from './security-events.ts';
 import { type OrgEventsToRead, orgSecurityEventsPage } from './org-events.ts';
 import type { SecurityEventsTables } from './tables.ts';
+import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<SecurityEventsTables>;
+let app: Database<SecurityEventsTables & PlatformControlsTables>;
 
 const START = new Date('2026-09-24T09:00:00Z');
 const RETENTION = 90;
@@ -61,7 +62,10 @@ const all = () => app.selectFrom('security.events').selectAll().orderBy('created
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<SecurityEventsTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
+  app = createDatabase<SecurityEventsTables & PlatformControlsTables>(
+    { ...database.connection('app'), maxConnections: 2 },
+    testLogger(),
+  );
 });
 
 afterAll(async () => {
@@ -274,7 +278,12 @@ describe(`an organisation's own security events (6E1b, CO7b, 0091; Postgres ${se
 
   /** Each row's MAC checked, every row written by the app having one (S206 V6): none is believed without. */
   let capture = new LogCapture();
-  const checked = () => ({ keys, logger: testLogger(capture) });
+  // The clock a day on: a row from before 0105 with no MAC is excused while no sealing of them has begun (legacyRowsAt).
+  const checked = () => ({
+    keys,
+    logger: testLogger(capture),
+    clock: new FixedClock(new Date(START.getTime() + DAY_MS)),
+  });
 
   /** One organisation's page, read inside its own transaction as the admins' route reads it. */
   const pageOf = (orgId: string, asked: Partial<OrgEventsToRead> = {}) =>

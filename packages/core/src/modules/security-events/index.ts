@@ -28,6 +28,7 @@ export {
   brokenSecuritySeal,
   firstCheckableDay,
   evidenceMessage,
+  legacyExcused,
   type LegacyRows,
   nextDayWithRows,
   outOfRange,
