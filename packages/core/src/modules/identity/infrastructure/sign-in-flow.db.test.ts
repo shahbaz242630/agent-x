@@ -7,6 +7,7 @@ import {
   FixedClock,
   LogCapture,
   SequentialIds,
+  type TestClient,
   type TestDatabase,
   testLogger,
   waitUntilQueued,
@@ -523,6 +524,54 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     // Back in the table, its MAC holding, and still no session (its alarm: sessions-tamper.db).
     expect(await sessionsOf(first.userId)).toEqual([{ id: second.sessionId }]);
     expect(await signIn.signedIn(second.cookie)).toBeUndefined();
+  });
+
+  describe('SEC-DB-14 R-15 a sign-out whose end cannot be signed still signs out, with the alarm (S207)', () => {
+    /** Signs out of a fresh session while `hinder` stands in the platform chain's way, and says what came of it. */
+    async function signOutHindered(hinder: (admin: TestClient) => Promise<() => Promise<void>>) {
+      // A sign-out first, so the platform chain has its head.
+      await signIn.signOut((await roundTrip()).cookie);
+      const done = await roundTrip();
+      const admin = await database.connect('admin');
+      const undo = await hinder(admin);
+      try {
+        expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
+      } finally {
+        await undo();
+        await admin.end();
+      }
+      expect(await sessionsOf(done.userId)).toEqual([]);
+      expect(await signIn.signedIn(done.cookie)).toBeUndefined();
+      expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([
+        expect.objectContaining({
+          level: 'error',
+          check: 'session',
+          reason: 'end_unsigned',
+          rowId: done.sessionId,
+          userId: done.userId,
+        }),
+      ]);
+    }
+
+    it('the platform head held past the limit: the session deleted all the same', async () => {
+      await signOutHindered(async (admin) => {
+        await admin.query('begin');
+        await admin.query('select seq from platform_controls.audit_head for update');
+        return async () => {
+          await admin.query('rollback');
+        };
+      });
+    }, 30_000);
+
+    it('the platform head tampered with: the session deleted all the same', async () => {
+      await signOutHindered(async (admin) => {
+        const [head] = await admin.query<{ mac: Buffer }>('select mac from platform_controls.audit_head');
+        await admin.query("update platform_controls.audit_head set mac = '\\x00'::bytea");
+        return async () => {
+          await admin.query('update platform_controls.audit_head set mac = $1', [head?.mac]);
+        };
+      });
+    });
   });
 
   it('finds the live session a signed-in request names (B2-4b), and none once it is signed out', async () => {

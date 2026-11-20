@@ -48,7 +48,10 @@
 // S207 (R-15): a session a sign-out deletes, or a sign-in ends for the cookie
 // the browser brought, is signed as ended on the platform chain in the same
 // transaction, the platform head its last lock (ADR-006 §6): its row put back by
-// the database's owner is no session (sessions.ts).
+// the database's owner is no session (sessions.ts). A sign-out never fails
+// closed: if its end can't be signed (the platform head locked past the limit,
+// or unreadable, which the owner could cause), the session is deleted in a
+// transaction of its own, with the integrity alarm, and the browser signed out.
 //
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
@@ -339,15 +342,36 @@ export function createSignIn({
       });
     },
 
-    signOut(cookie) {
-      if (cookie === undefined) return Promise.resolve(undefined);
-      return limited(async (tx) => {
-        const ended = await sessions.end(tx, cookie);
-        if (ended === undefined) return undefined;
-        const subject = await subjectOfUser(tx, ended.userId, macs);
-        await signEnd(tx, ended);
-        return subject;
-      });
+    async signOut(cookie) {
+      if (cookie === undefined) return undefined;
+      // Set inside the transaction, as its end is signed: only a failure from there on is answered by the fallback.
+      const reached = { signing: false };
+      try {
+        return await limited(async (tx) => {
+          const ended = await sessions.end(tx, cookie);
+          if (ended === undefined) return undefined;
+          const subject = await subjectOfUser(tx, ended.userId, macs);
+          reached.signing = true;
+          await signEnd(tx, ended);
+          return subject;
+        });
+      } catch (error) {
+        if (!reached.signing) throw error;
+        // The end couldn't be signed, and its transaction rolled back the delete: the session goes all the same, and
+        // its end unsigned (a row put back would be believed) raises the alarm.
+        return limited(async (tx) => {
+          const ended = await sessions.end(tx, cookie);
+          if (ended === undefined) return undefined;
+          logger.error('audit.integrity_failed', {
+            check: 'session',
+            reason: 'end_unsigned',
+            rowId: ended.sessionId,
+            userId: ended.userId,
+            error: error instanceof Error ? error.name : 'unknown',
+          });
+          return subjectOfUser(tx, ended.userId, macs);
+        });
+      }
     },
 
     signedIn(cookie) {
