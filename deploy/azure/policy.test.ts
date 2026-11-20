@@ -569,6 +569,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'main.bicep',
       'names.bicep',
       'secrets.bicep',
+      // The deployers' tags (AZ5i), linted here with the rest.
+      'tags.bicep',
     ]);
     for (const [file, { lint: run }] of [...bicepFiles, ...params])
       expect({ file, ...run }).toEqual({ file, status: 0, output: '', stdout: '' });
