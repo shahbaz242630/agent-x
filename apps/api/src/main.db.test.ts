@@ -2,6 +2,9 @@
 // app's role, the role check refuses the migration role, a wrong login is
 // reported without the login, and a stop closes every connection.
 import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
 import { type DirectoryTables, registerOrganization } from '@agentx/core/modules/directory';
@@ -672,9 +675,11 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     ] as const;
     for (const [id, age, sent] of notices) {
       await admin.query(
-        `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at)
+        // Rows from before 0104's seals (before_seals), which only the sweep touches here.
+        `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at,
+           before_seals)
          values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now() - $3::interval, 1,
-                 pg_catalog.now() + interval '1 day', case when $4 then pg_catalog.now() - $3::interval end)`,
+                 pg_catalog.now() + interval '1 day', case when $4 then pg_catalog.now() - $3::interval end, true)`,
         [id, orgId, age, sent],
       );
     }
@@ -689,6 +694,135 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       await admin.query<{ id: string }>('select id from notifications.outbox where org_id = $1 order by id', [orgId]),
     ).toEqual([{ id: notices[1][0] }, { id: notices[2][0] }]);
     await stop(run);
+  });
+
+  it('seals the notices from before seals in the background once it answers, and records it (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5204';
+    const id = '0199a0f0-0000-7000-8000-0000000b5205';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+
+    // An anchor store: the pass checks the platform chain by its anchor, which the jobs' first run takes.
+    const env = envFor('app', { AGENTX_AUDIT_ANCHORS_DIR: mkdtempSync(join(tmpdir(), 'v4-anchors-')) });
+    const first = await start(env);
+    expect((await first.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
+    await vi.waitFor(() => {
+      expect(first.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
+    });
+    await stop(first);
+    // The first start's pass may have run before its jobs anchored: then it sealed nothing, said so, and the next does.
+    const sealedBy = [first];
+    if (!first.capture.lines().some((line) => line.event === 'notification.legacy_sealed')) {
+      expect(first.capture.lines()).toContainEqual(
+        expect.objectContaining({ event: 'notification.legacy_seal_no_anchor' }),
+      );
+      const second = await start(env);
+      await vi.waitFor(() => {
+        expect(second.capture.lines().find((line) => line.event === 'notification.legacy_sealed')).toBeDefined();
+      });
+      await stop(second);
+      sealedBy.push(second);
+    }
+    expect(
+      sealedBy
+        .at(-1)
+        ?.capture.lines()
+        .find((line) => line.event === 'notification.legacy_sealed'),
+    ).toEqual(expect.objectContaining({ level: 'info', notices: 1 }));
+    expect(await admin.query('select id from notifications.outbox where id = $1 and mac is not null', [id])).toEqual([
+      { id },
+    ]);
+    expect(
+      await admin.query('select seq from platform_controls.audit_events where action = $1', ['notice.legacy_sealed']),
+    ).toHaveLength(1);
+  });
+
+  it('runs the seal pass only where the anchor store is: `jobs`, never `web`, nor with no store set (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5208';
+    const id = '0199a0f0-0000-7000-8000-0000000b5209';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+    const passLines = (run: Awaited<ReturnType<typeof start>>) =>
+      run.capture
+        .lines()
+        .filter(
+          (line) => String(line.event).startsWith('notification.legacy') || line.event === 'audit.anchor_store_not_set',
+        );
+    const anchorsDir = mkdtempSync(join(tmpdir(), 'v4-anchors-'));
+    try {
+      // `web` keeps no anchors: no pass, with a store set or not.
+      const web = await start(envFor('app', { AGENTX_ROLE: 'web', AGENTX_AUDIT_ANCHORS_DIR: anchorsDir }));
+      expect((await web.api?.inject({ url: '/health' }))?.statusCode).toBeDefined();
+      await stop(web);
+      expect(passLines(web)).toEqual([]);
+      // No store set: no pass, and no word of a store missing.
+      const bare = await start(envFor('app'));
+      await stop(bare);
+      expect(passLines(bare)).toEqual([]);
+      expect(await admin.query('select id from notifications.outbox where mac is null')).toEqual([{ id }]);
+      // `jobs`, with the store: the pass runs there.
+      const jobs = await start(envFor('app', { AGENTX_ROLE: 'jobs', AGENTX_AUDIT_ANCHORS_DIR: anchorsDir }));
+      await vi.waitFor(() => {
+        expect(passLines(jobs).length).toBeGreaterThan(0);
+      });
+      await stop(jobs);
+    } finally {
+      await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+      await admin.query('delete from notifications.outbox');
+    }
+  });
+
+  it('raises the alarm, seals nothing and goes on serving when the platform chain has a gap (S206 V4)', async () => {
+    const admin = database.as('admin');
+    await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    await admin.query('delete from notifications.outbox');
+    const env = envFor('app', { AGENTX_AUDIT_ANCHORS_DIR: mkdtempSync(join(tmpdir(), 'v4-anchors-')) });
+    const anchoring = await start(env);
+    await vi.waitFor(() => {
+      expect(anchoring.capture.lines().find((line) => line.event === 'audit.anchored')).toBeDefined();
+    });
+    await stop(anchoring);
+    await stop(await start(env));
+    // The first start's record gone, and the pass's own if one ran: a gap behind the chain's anchor.
+    await admin.query('delete from platform_controls.audit_events where seq = 1 or action = $1', [
+      'notice.legacy_sealed',
+    ]);
+    const orgId = '0199a0f0-0000-7000-8000-0000000b5206';
+    const id = '0199a0f0-0000-7000-8000-0000000b5207';
+    await admin.query('insert into directory.orgs (org_id) values ($1) on conflict do nothing', [orgId]);
+    await admin.query(
+      `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at,
+         before_seals) values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now(), 0, pg_catalog.now(), true)`,
+      [id, orgId],
+    );
+    try {
+      const run = await start(env);
+      await vi.waitFor(() => {
+        expect(
+          run.capture.lines().find((line) => line.event === 'audit.integrity_failed' && line.check === 'start_record'),
+        ).toEqual(expect.objectContaining({ level: 'error', chain: 'platform' }));
+      });
+      expect((await run.api?.inject({ url: '/health' }))?.statusCode).toBe(200);
+      await stop(run);
+      expect(await admin.query('select id from notifications.outbox where mac is null')).toEqual([{ id }]);
+    } finally {
+      await admin.query('truncate platform_controls.audit_events, platform_controls.audit_head');
+      await admin.query('delete from notifications.outbox');
+    }
   });
 
   it('writes the rate-limit refusals it counted as it stops, before the pool closes (B2-5b)', async () => {

@@ -13,7 +13,7 @@ import {
   createAcsNotifier,
   createNoticeSender,
   type NoticeSender,
-  type NotificationsTables,
+  type OutboxTables,
   type Outbox,
   type People,
   type Remittances,
@@ -95,7 +95,7 @@ export function noticeSenderFrom({
   logger,
 }: {
   readonly config: Config;
-  readonly db: Database<IdentityTables & NotificationsTables>;
+  readonly db: Database<IdentityTables & OutboxTables>;
   readonly outbox: Outbox;
   readonly listMembers: (orgId: string) => Promise<MembersList>;
   /** The organisation's ACTIVE registered contacts' IDs, verified (identity's activeContactsFor). */

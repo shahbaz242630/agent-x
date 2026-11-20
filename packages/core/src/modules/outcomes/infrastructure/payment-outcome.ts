@@ -166,15 +166,19 @@ export async function settlePayment(
   { orgId, requestId, transactionId, status, at, openProposal }: PaymentMoved,
 ): Promise<void> {
   await settleHoldings(tx, { requestId, status, at });
-  if (status === 'SUCCEEDED') await outbox.add(tx, [remittanceOf(orgId, transactionId)]);
   // The bank's answer came first (partner S145): an admin's proposal to mark it failed ends with the move, all told.
-  if (openProposal !== null && status !== 'UNKNOWN') {
+  const ended = openProposal !== null && status !== 'UNKNOWN';
+  if (ended) {
     await moveProposal(tx, states, { orgId, id: openProposal.id }, 'end', {
       actor: { type: 'system', id: 'api' },
       details: { status },
     });
-    await outbox.add(tx, [endedOf(orgId, transactionId)]);
   }
+  // The notices last: each one's record takes the chain head's lock, which comes after the proposal's (S206 V4).
+  await outbox.add(tx, [
+    ...(status === 'SUCCEEDED' ? [remittanceOf(orgId, transactionId)] : []),
+    ...(ended ? [endedOf(orgId, transactionId)] : []),
+  ]);
 }
 
 /** Every admin told that the bank's answer ended a proposal to mark the payment failed (0066). */

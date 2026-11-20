@@ -126,7 +126,7 @@ const builderFor = (w: World, change: Partial<Parameters<typeof createActivityEx
     keys,
     ids,
     store: folderBlockStore(folder),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     directory: undefined,
     logger: testLogger(capture),
     batch: 2,

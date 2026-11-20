@@ -16,8 +16,8 @@
 //   a token sent with its row deleted or changed still shows it was issued.
 // - The door's read (tokenRowRead, tokenProven): the row read alone, unlocked,
 //   outside any share, and its secret checked with exactly one verifyMac
-//   whatever is found, a MAC of zeros for no row, so a token's ID not in use
-//   takes as long as a wrong secret. The row grants nothing: its connection
+//   whatever is found, a MAC of zeros for no row: a token's ID not in use takes
+//   the same trip and the same one verifyMac as a wrong secret. The row grants nothing: its connection
 //   and key are then read through their signed states.
 import { type SentTogether, sendTogether, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';

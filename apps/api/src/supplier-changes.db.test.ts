@@ -264,7 +264,11 @@ beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry({ ...services, clock });
-  changes = createSupplierChanges({ ...services, challenges: challenges(), outbox: createOutbox({ ids, clock }) });
+  changes = createSupplierChanges({
+    ...services,
+    challenges: challenges(),
+    outbox: createOutbox({ ids, clock, keys }),
+  });
 });
 
 /** The organisation's notices about its suppliers, by kind, then contacts last. */

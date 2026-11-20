@@ -120,9 +120,14 @@ afterAll(async () => {
   await database.drop();
 });
 
-beforeEach(async () => {
-  clock = new FixedClock(START);
-  capture = new LogCapture();
+interface Limits {
+  readonly rateLimitPerMinute: number;
+  readonly rateLimitPerAgentPerMinute: number;
+  readonly rateLimitPerOrganisationPerMinute: number;
+}
+
+/** The whole server with the real key check, its limits as given; `checked` counts every key it was asked about. */
+async function serverWith(limits: Limits, checked: { count: number } = { count: 0 }): Promise<FastifyInstance> {
   const logger = loggerFor(capture);
   const config = {
     http: {
@@ -130,24 +135,36 @@ beforeEach(async () => {
       port: 0,
       publicOrigin: 'https://app.agentx.example',
       trustedProxies: [],
-      rateLimitPerMinute: 1000,
       rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-      rateLimitPerOrganisationPerMinute: 100_000,
+      ...limits,
       webCopies: 1,
       mcpOauth: false,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
   const keyCheck = createAgentKeyCheck({ database: app, keys, ids, clock, logger });
-  api = await buildServer({
+  const built = await buildServer({
     config,
     logger,
     ids: new SequentialIds(),
     healthChecks: [],
-    checkAgentKey: keyCheck.check.bind(keyCheck),
+    checkAgentKey: (text, correlationId) => {
+      checked.count += 1;
+      return keyCheck.check(text, correlationId);
+    },
   });
-  await api.ready();
+  await built.ready();
+  return built;
+}
+
+beforeEach(async () => {
+  clock = new FixedClock(START);
+  capture = new LogCapture();
+  api = await serverWith({
+    rateLimitPerMinute: 1000,
+    rateLimitPerAgentPerMinute: 1000,
+    rateLimitPerOrganisationPerMinute: 100_000,
+  });
 });
 
 afterEach(async () => {
@@ -207,5 +224,80 @@ describe(`an agent's request with its key (C2-1, Postgres ${server.version})`, (
     // Only the correlation ID tells the two answers apart.
     expect(wrong.body.replace(/"correlationId":"[^"]+"/, '')).toBe(expired.body.replace(/"correlationId":"[^"]+"/, ''));
     expect(lines('agent_key.refused').map((line) => line.reason)).toEqual(['wrong_secret', 'expired']);
+  });
+});
+
+describe(`SEC-AG-01 V7 (PL-67) an outsider holding only a key's ID, over HTTP (Postgres ${server.version})`, () => {
+  /** Where the outsider sends from: its own address, apart from the agent's. */
+  const OUTSIDER = '203.0.113.7';
+  const wrongSecret = Buffer.alloc(32, 0xee);
+
+  const sent = async (target: FastifyInstance, text: string, remoteAddress = '127.0.0.1') => {
+    const response = await target.inject({
+      url: '/v1/agent',
+      remoteAddress,
+      headers: { authorization: `Bearer ${text}` },
+    });
+    return {
+      status: response.statusCode,
+      challenge: response.headers['www-authenticate'],
+      body: response.body.replace(/"correlationId":"[^"]+"/, ''),
+    };
+  };
+
+  it('answers an unlisted ID and a listed ID with a wrong secret alike: the one 401, challenge and body', async () => {
+    const agent = await agentWithKey();
+    const listed = await sent(api, agentKeyText(agent.keyId, wrongSecret), OUTSIDER);
+    const unlisted = await sent(api, agentKeyText(ids.next(), wrongSecret), OUTSIDER);
+
+    expect(listed).toEqual(unlisted);
+    expect(listed).toMatchObject({ status: 401, challenge: `${AGENT_CHALLENGE}, error="invalid_token"` });
+    expect(lines('agent_key.refused').map((line) => line.reason)).toEqual(['wrong_secret', 'unlisted']);
+  });
+
+  it('takes nothing of the organisation’s or its agent’s allowance: after a flood of wrong secrets the agent still gets every request of its limit', async () => {
+    const agent = await agentWithKey();
+    const limited = await serverWith({
+      rateLimitPerMinute: 1000,
+      rateLimitPerAgentPerMinute: 3,
+      rateLimitPerOrganisationPerMinute: 3,
+    });
+    try {
+      const flood = await Promise.all(
+        Array.from({ length: 20 }, (_, index) =>
+          sent(limited, agentKeyText(index % 2 === 0 ? agent.keyId : ids.next(), wrongSecret), OUTSIDER),
+        ),
+      );
+      expect(new Set(flood.map(({ status }) => status))).toEqual(new Set([401]));
+
+      const own = [];
+      for (let request = 0; request < 4; request += 1) own.push((await sent(limited, agent.text)).status);
+      // Its whole limit of three, then the limit's own answer: the limit is real, and none of it went to the flood.
+      expect(own).toEqual([200, 200, 200, 429]);
+    } finally {
+      await limited.close();
+    }
+    expect(lines('db.organisation_busy')).toEqual([]);
+  });
+
+  it('bounds an outsider by its address before any key is looked up, and leaves the agent untouched', async () => {
+    const agent = await agentWithKey();
+    const checked = { count: 0 };
+    const limited = await serverWith(
+      { rateLimitPerMinute: 5, rateLimitPerAgentPerMinute: 1000, rateLimitPerOrganisationPerMinute: 100_000 },
+      checked,
+    );
+    try {
+      const statuses = [];
+      for (let request = 0; request < 8; request += 1) {
+        statuses.push((await sent(limited, agentKeyText(ids.next(), wrongSecret), OUTSIDER)).status);
+      }
+      expect(statuses).toEqual([401, 401, 401, 401, 401, 429, 429, 429]);
+      // Past its address's limit, no key is looked up: the directory isn't read for the flood.
+      expect(checked.count).toBe(5);
+      expect((await sent(limited, agent.text)).status).toBe(200);
+    } finally {
+      await limited.close();
+    }
   });
 });

@@ -117,7 +117,7 @@ async function copied(...events: IdpEvent[]): Promise<void> {
     ids,
     clock,
     issuer: ISSUER,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: logger(),
   });
   await copier.run();

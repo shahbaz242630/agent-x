@@ -95,7 +95,7 @@ const handoffOf = (w: World) =>
   createHandoff({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail: w.rail,
     keys,
     ids,
@@ -110,7 +110,7 @@ const checksOf = (w: World, rail: FakeRail = w.rail) =>
   createPaymentChecks({
     list: () => Promise.resolve([w.org]),
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     rail,
     keys,
     ids,
@@ -236,7 +236,7 @@ function startClock(at: Date): void {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -466,7 +466,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
     await createPaymentChecks({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,
@@ -526,7 +526,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
     await createPaymentChecks({
       list: () => Promise.resolve([hung.w.org, fine.w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -582,7 +582,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
     createPaymentChecks({
       list: () => Promise.resolve([]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail,
       keys,
       ids,
@@ -741,7 +741,7 @@ describe('a message the check can’t take yet waits for the next run', () => {
     await createPaymentChecks({
       list: () => Promise.resolve([w.org]),
       database: app,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       rail: w.rail,
       keys,
       ids,

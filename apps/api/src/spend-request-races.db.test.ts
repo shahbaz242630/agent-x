@@ -205,7 +205,7 @@ beforeEach(() => {
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     keys,
     ids,
     clock,
@@ -382,7 +382,7 @@ describe('the deadlock suite: a freeze racing each change and the agent’s requ
     ids,
     clock,
     challenges: createStepUpChallenges({ ids, clock, keys, logger: testLogger() }),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger: testLogger(capture),
   });
   const freeze = (w: World, choice: 'pause' | 'cancel' = 'pause') =>
@@ -582,7 +582,7 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
         capture = new LogCapture();
         decisions = createSpendRequestDecisions({
           database: app,
-          outbox: createOutbox({ ids, clock }),
+          outbox: createOutbox({ ids, clock, keys }),
           keys,
           ids,
           clock,
