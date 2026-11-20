@@ -23,6 +23,7 @@ import {
 } from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
+import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, ChainBroken, createAuditTrail } from '../../audit/index.ts';
@@ -272,7 +273,8 @@ describe(`SEC-DB-14 R-15 the owner can't put back a session that was ended (S207
   /** A sign-out as the app makes one (sign-in-flow.ts): the session deleted and its end signed, in one transaction. */
   const signOut = (cookie: string) =>
     app.transaction().execute(async (tx) => {
-      const ended = await sessions().end(tx, cookie);
+      // As the sign-in flow holds it: a transaction on the identity tables alone.
+      const ended = await sessions().end(tx as unknown as Kysely<IdentityTables>, cookie);
       if (ended !== undefined) {
         await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, clock.now()));
       }
