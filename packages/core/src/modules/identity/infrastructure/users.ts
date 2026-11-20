@@ -8,7 +8,10 @@
 // own login account's subject and then sign in, through the login service
 // itself, as that admin. A row whose MAC doesn't hold is no person: a sign-in
 // or step-up with it is refused, nothing new is made, and the integrity alarm
-// is raised.
+// is raised. A row with no MAC is never believed either, and nothing ever
+// gives it one: S205's start-up backfill for the people made before 0100 was
+// deleted (S207, R-15) once staging's ran, since an owner who nulled an admin's
+// MAC and moved their subject could have had it sealed at the next start.
 import type { Kysely, Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
@@ -116,57 +119,4 @@ export async function subjectOfUser(db: Handle, userId: string, macs: RowMacs): 
 export async function isUser(db: Handle, userId: string): Promise<boolean> {
   const found = await db.selectFrom('identity.users').select('id').where('id', '=', userId).executeTakeFirst();
   return found !== undefined;
-}
-
-/**
- * Until when the API gives a MAC to each person made before 0100, at its
- * start. Production starts empty; staging's people are the only ones without
- * one, and after this no row without a MAC is ever believed.
- * TODO(S205): delete backfillUserMacs, its call in the API's boot and this once it has passed.
- */
-export const USER_MAC_BACKFILL_UNTIL = new Date('2026-11-25T00:00:00Z');
-
-/** How many people a backfill reads at a time. */
-const BACKFILL_BATCH = 500;
-
-/**
- * Gives each person made before 0100 (no MAC) their MAC, until
- * USER_MAC_BACKFILL_UNTIL; after it, nothing. Never touches a row with a MAC,
- * whether it holds or not, so a row the owner edited is never made genuine.
- * Says how many it gave one.
- */
-export async function backfillUserMacs(
-  db: Kysely<IdentityTables>,
-  { keys, clock }: { readonly keys: RowMacs['keys']; readonly clock: Clock },
-): Promise<number> {
-  if (clock.now().getTime() >= USER_MAC_BACKFILL_UNTIL.getTime()) return 0;
-  let given = 0;
-  // The nil UUID: before every ID.
-  let after = '00000000-0000-0000-0000-000000000000';
-  for (;;) {
-    const rows = await db
-      .selectFrom('identity.users')
-      .select(['id', 'issuer', 'subject', 'created_at'])
-      .where('mac', 'is', null)
-      .where('id', '>', after)
-      .orderBy('id')
-      .limit(BACKFILL_BATCH)
-      .execute();
-    const last = rows.at(-1);
-    if (last === undefined) return given;
-    for (const row of rows) {
-      const updated = await db
-        .updateTable('identity.users')
-        .set(macOf(keys, messageOf(row)))
-        .where('id', '=', row.id)
-        // Only the row as it was read, still without a MAC.
-        .where('mac', 'is', null)
-        .where('issuer', '=', row.issuer)
-        .where('subject', '=', row.subject)
-        .where('created_at', '=', row.created_at)
-        .executeTakeFirst();
-      given += Number(updated.numUpdatedRows);
-    }
-    after = last.id;
-  }
 }

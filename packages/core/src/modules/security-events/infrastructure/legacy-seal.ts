@@ -1,5 +1,5 @@
 // The security rows from before 0105 given their MACs, once (S206 V6), as
-// 0100's people were (S205 backfillUserMacs). From then on a row with no MAC
+// 0100's people were (S205's backfill, deleted S207). From then on a row with no MAC
 // is never believed, whatever its ID or dates: not shown, not counted, and
 // alarmed when met.
 //
@@ -35,7 +35,7 @@
 //
 // TODO(S206 AT10-style): delete this, and its call at start, once the release
 // that brings 0105 has started everywhere and every environment holds
-// `all_sealed`, as 0100's people backfill goes.
+// `all_sealed`, as 0100's people backfill went (S207).
 import { createHash, type Hash } from 'node:crypto';
 
 import { limitedTransaction, withTenant } from '@agentx/platform/db';
@@ -58,7 +58,7 @@ export const SEALING_STARTED = 'security_events.sealing_started';
 export const ALL_SEALED = 'security_events.all_sealed';
 
 /**
- * After this, no sealing runs at all (as 0100's people backfill had USER_MAC_BACKFILL_UNTIL): the release has started
+ * After this, no sealing runs at all (as 0100's people backfill had its cutoff): the release has started
  * everywhere well before, so a sealing record missing by then was deleted. A later commit removes the sealing, tracked
  * with AT10.
  */

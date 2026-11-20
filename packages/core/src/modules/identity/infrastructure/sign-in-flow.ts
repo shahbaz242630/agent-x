@@ -40,6 +40,11 @@
 // (login-flows.ts): every network's together, and the network it comes from.
 // Past either it is SignInBusy, and no flow is kept.
 //
+// S207 (R-15): a flow's return path is kept unsealed, so `complete` checks it
+// again as it takes the flow. Only the app writes one, and only a path of our
+// own, so one that isn't (an address on another site, `//evil.example`) was
+// written past the app: the integrity alarm, and the browser goes home.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -188,6 +193,13 @@ export function createSignIn({
       return work(tx);
     });
 
+  /** The flow as taken, its return path checked again (S207): one that isn't ours raises the alarm and is home instead. */
+  function ownReturn<T extends { readonly returnTo: string }>(taken: T | undefined): T | undefined {
+    if (taken === undefined || isReturnPath(taken.returnTo)) return taken;
+    logger.error('audit.integrity_failed', { check: 'login_flow', reason: 'return_to' });
+    return { ...taken, returnTo: HOME_PATH };
+  }
+
   /** A step-up's way back: the session, the challenge, the ID token, the checks; then the evidence and a new cookie ID. */
   async function completeStepUp(
     challengeId: string,
@@ -263,7 +275,7 @@ export function createSignIn({
     async complete(input) {
       const { flowId, previousCookie } = input;
       // Taken, and committed, before the login service is called: used once, whatever follows.
-      const taken = flowId === undefined ? undefined : await limited((tx) => flows.take(tx, flowId));
+      const taken = flowId === undefined ? undefined : ownReturn(await limited((tx) => flows.take(tx, flowId)));
       if ('refused' in input) {
         const detail = 'the login service sent the browser back without a sign-in';
         // A step-up's: back to the change's page to say so (CO2); a sign-in's, refused as it always was.
