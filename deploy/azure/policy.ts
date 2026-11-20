@@ -3443,7 +3443,7 @@ const arrivalMinutes = (query: unknown): number | undefined => {
  * Rule alert-arrival (S206): an alert counting the apps' log lines over a window no longer than its interval judges each
  * line by when it arrived, not its own time. The container tables arrive 4-9 minutes late (S33), and later behind the
  * daily cap: judged by its own time, a line landing after its window was read is never seen. So each such query keeps
- * the lines that arrived within at least its interval (`where ingestion_time() > ago(...)`), reading the two days
+ * the lines that arrived within longer than its interval (`where ingestion_time() > ago(...)`), reading the two days
  * before its run (overrideQueryTimeRange) for them.
  */
 const judgesOnArrival = (alert: PredictedResource, add: (problem: Problem) => void): void => {
@@ -3451,13 +3451,14 @@ const judgesOnArrival = (alert: PredictedResource, add: (problem: Problem) => vo
   const every = minutesOf(at(alert.properties, 'evaluationFrequency'));
   const reads = criteria.some((criterion) => String(at(criterion, 'query')).includes('ContainerAppConsoleLogs'));
   if (!reads || minutesOf(at(alert.properties, 'windowSize')) > every) return;
-  const banded = criteria.every((criterion) => (arrivalMinutes(at(criterion, 'query')) ?? 0) >= every);
+  // Longer than the interval, never just as long: a run starting late would otherwise leave a gap (MO2).
+  const banded = criteria.every((criterion) => (arrivalMinutes(at(criterion, 'query')) ?? 0) > every);
   if (!banded || at(alert.properties, 'overrideQueryTimeRange') !== 'P2D') {
     add({
       rule: 'alert-arrival',
       resource: alert.name,
       message:
-        "counts the apps' log lines over a window no longer than its interval, so it must keep the lines that arrived within at least that interval (where ingestion_time() > ago(...)) and read two days back for them (overrideQueryTimeRange P2D): lines arrive 4-9 minutes late, and one judged by its own time after its window was read is never seen",
+        "counts the apps' log lines over a window no longer than its interval, so it must keep the lines that arrived within longer than that interval (where ingestion_time() > ago(...)) and read two days back for them (overrideQueryTimeRange P2D): lines arrive 4-9 minutes late, and one judged by its own time after its window was read is never seen",
     });
   }
 };

@@ -150,8 +150,9 @@ resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
 // as nothing here.
 // What each line-counting alert on the apps' logs reads before its run: Azure's most, two days, so a line that reaches
 // the workspace late (4-9 minutes, or hours behind a cap) is still in view when it arrives. Each counts the lines that
-// arrived over twice its interval (`where ingestion_time() > ago(...)`): a run starting late leaves no gap, and a line
-// may notify twice, never not at all (MO2, the login alerts' rule; S206). Reading costs nothing more; a rule's price
+// arrived over twice its interval (`where ingestion_time() > ago(...)`), the daily summary over 25 hours: a run
+// starting late leaves no gap, and a line may notify twice (counted in two summaries), never not at all (MO2, the
+// login alerts' rule; S206). Reading costs nothing more; a rule's price
 // follows how often it runs.
 var consoleLinesRead = 'P2D'
 
@@ -275,7 +276,7 @@ resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(1d) | where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic") | ${saysStages} | summarize Times = count() by Says'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(25h) | where tostring(parse_json(Log).level) in~ ("warn", "warning", "error", "fatal", "panic") | ${saysStages} | summarize Times = count() by Says'
           dimensions: [
             {
               name: 'Says'

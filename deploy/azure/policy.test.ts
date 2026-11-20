@@ -4203,6 +4203,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       // No band, a band shorter than its interval, or no two days read back for late lines.
       banded('where ingestion_time() > ago(10m) | ', ''),
       banded('ingestion_time() > ago(10m)', 'ingestion_time() > ago(4m)'),
+      // Just as long as its interval: a run starting late leaves a gap.
+      banded('ingestion_time() > ago(10m)', 'ingestion_time() > ago(5m)'),
       banded('ingestion_time() > ago(10m)', 'TimeGenerated > ago(10m)'),
       (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
       (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT1H'),
@@ -4212,6 +4214,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
         String(staging.predictedResources.find(INTEGRITY_ALERT)?.name),
       ]);
     }
+    // The daily summary over 25 hours by arrival; over exactly a day, a run starting late would leave a gap.
+    const DAILY = named(/-daily-words$/);
+    expect(String(at(staging.predictedResources.find(DAILY)?.properties, 'criteria', 'allOf', '0', 'query'))).toContain(
+      '| where ingestion_time() > ago(25h) |',
+    );
+    expect(arrivalRules(changed(DAILY, banded('ago(25h)', 'ago(1d)')))).toEqual([
+      String(staging.predictedResources.find(DAILY)?.name),
+    ]);
     // A window longer than its interval is the dead-man alerts' shape, judged by its own rule.
     expect(arrivalRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).windowSize = 'PT15M')))).toEqual([]);
   });
