@@ -120,7 +120,7 @@ import {
   CHAIN_RECOVERY_USAGE,
   COUNTING_CONTACTS,
   COUNTING_CONTACTS_USAGE,
-  DISCARD_FORK,
+  chainFlags,
   FACTOR_RESET_NOTICE,
   FACTOR_RESET_NOTICE_USAGE,
   factorResetNoticeOf,
@@ -272,6 +272,8 @@ type Request =
       readonly id: string;
       /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
       readonly discardFork: boolean;
+      /** The named flag (AT9): the plan ending at the copy's head before the anchor rather than refused. */
+      readonly shortOfAnchor: boolean;
     }
   | {
       readonly command: typeof CHAIN_REBASE;
@@ -422,17 +424,11 @@ function restoreCheckAsked(words: readonly string[], fromFile: boolean): Request
     : problem(`${RESTORE_CHECK} runs only from a request file, as the one word in its list`);
 }
 
-/** Whether what follows a request's own words is nothing, or the named flag alone (E10's --discard-fork). */
-export const flagAlone = (more: readonly string[]): { readonly discardFork: boolean } | undefined => {
-  if (more.length === 0) return { discardFork: false };
-  return more.length === 1 && more[0] === DISCARD_FORK ? { discardFork: true } : undefined;
-};
-
-/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named, the fork flag maybe. */
+/** A chain recovery plan (4D2e E9): only from a file, the organisation and the plan's ID named, the named flags maybe. */
 function chainRecoveryAsked(words: readonly string[], fromFile: boolean): Request | Problems {
   const [, orgFlag, orgId, idFlag, id, ...more] = words;
   if (!fromFile) return problem(`${CHAIN_RECOVERY} runs only from a request file: ${CHAIN_RECOVERY_USAGE}`);
-  const flag = flagAlone(more);
+  const flag = chainFlags(more);
   if (!(orgFlag === '--org' && idFlag === '--id' && id !== undefined && flag !== undefined)) {
     return problem(`the request file holds ${CHAIN_RECOVERY_USAGE} as a JSON list, and nothing else`);
   }
@@ -980,7 +976,7 @@ async function chainRecovery(
   request: Extract<Request, { command: typeof CHAIN_RECOVERY }>,
   logger: Logger,
 ): Promise<number> {
-  const { orgId, id: planId, discardFork } = request;
+  const { orgId, id: planId, discardFork, shortOfAnchor } = request;
   const log = logger.child({ orgId });
   const store = evidenceStoreOf(config);
   // The config has checked each public key's form, so the checker takes them as they are.
@@ -1002,7 +998,7 @@ async function chainRecovery(
       return 1;
     }
     const anchor = anchors.latest({ kind: 'organisation', orgId });
-    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor, discardFork });
+    const plan = await planChainRecovery({ copy, live, keys, orgId, anchor, discardFork, shortOfAnchor });
     const file = planFile(plan, { planId, orgId, release: config.release, run: config.run, anchor });
     // What a repair is asked with (chain-restore): the plan as read, by its digest alone.
     const digest = planDigest(plan, orgId, anchor);
@@ -1017,6 +1013,7 @@ async function chainRecovery(
       log.error('operator.chain_recovery_refused', {
         planId,
         discardFork,
+        shortOfAnchor,
         reason: plan.reason,
         seq: plan.seq,
         problem: plan.problem ?? null,
@@ -1029,6 +1026,7 @@ async function chainRecovery(
       planId,
       digest,
       discardFork,
+      shortOfAnchor,
       forkDiscarded: plan.forkDiscarded,
       putBack: count('put_back'),
       replaced: count('replace'),
@@ -1038,6 +1036,8 @@ async function chainRecovery(
       endsAt: plan.endsAt.seq,
       keptPastCopy: plan.keptPastCopy,
       anchorSeq: anchor?.seq ?? null,
+      // AT9: the anchor the plan ends before, its events past endsAt given up by the rebase that follows the repair.
+      endsShortOf: plan.endsShortOf,
     });
     return 0;
   });

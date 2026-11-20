@@ -8,10 +8,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { createAuditTrail } from '@agentx/core/modules/audit';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { type Output } from '@agentx/platform/observability';
+import { folderWriteOnceStore } from '@agentx/platform/storage';
 import {
   createTestDatabase,
   LogCapture,
@@ -107,10 +110,8 @@ const folder = mkdtempSync(path.join(tmpdir(), 'agentx-chain-restore-'));
 const evidence = path.join(folder, 'evidence');
 const anchorsFolder = path.join(folder, 'anchors');
 const anchorKeyFiles = writeTestKeys(['audit-anchor']);
-const anchorHalf = String(
-  loadKeys({ directory: anchorKeyFiles.directory, current: {} }, ['audit-anchor']).describe()[0]?.versions[0]
-    ?.publicKey,
-);
+const anchorKeys = loadKeys({ directory: anchorKeyFiles.directory, current: {} }, ['audit-anchor']);
+const anchorHalf = String(anchorKeys.describe()[0]?.versions[0]?.publicKey);
 
 let database: TestDatabase;
 let operator: Database<OperatorTables>;
@@ -245,7 +246,16 @@ describe('SEC-DB-12 4D2e E10 the chain repair, run as its job runs it', () => {
       removed: 0,
       holdKept: true,
     });
-    const facts = { restoreId, planId, orgId, digest, discardFork: false, release: 'r-restore', run: null };
+    const facts = {
+      restoreId,
+      planId,
+      orgId,
+      digest,
+      discardFork: false,
+      shortOfAnchor: false,
+      release: 'r-restore',
+      run: null,
+    };
     expect(records(restoreId, 'start')).toEqual({ k: 'restore_start', ...facts });
     expect(records(restoreId, 'outcome')).toMatchObject({ k: 'restore', ...facts, ok: true });
 
@@ -258,7 +268,10 @@ describe('SEC-DB-12 4D2e E10 the chain repair, run as its job runs it', () => {
   it('refuses a stale digest, and keeps that as its outcome', async () => {
     const restoreId = uuidV7Ids.next();
     const asked = requested(
-      chainRestoreRequest({ orgId, planId: stored('a'.repeat(64)), digest: 'a'.repeat(64), id: restoreId }, true),
+      chainRestoreRequest(
+        { orgId, planId: stored('a'.repeat(64)), digest: 'a'.repeat(64), id: restoreId },
+        { discardFork: true },
+      ),
     );
     const { code, line } = await run(['--request', asked]);
     expect(code).toBe(1);
@@ -394,6 +407,72 @@ describe('SEC-DB-12 4D2e E10 the chain repair, run as its job runs it', () => {
         events: ['operator.starting', 'operator.chain_restore_owner_login', 'operator.refused'],
       });
       expect(line('operator.refused')).toMatchObject({ restoreId, problems: [expect.stringMatching(problem)] });
+    }
+  });
+});
+
+describe('SEC-DB-12 AT9 a repair short of its anchor, run as its job runs it', () => {
+  it('repairs with the named flag and warns that the chain ends before its anchor, naming the head a rebase takes', async () => {
+    // An organisation of its own, so its anchor ahead of its head leaves the other tests' chain alone.
+    const other = uuidV7Ids.next();
+    await createOrganizationAsOperator(
+      operator,
+      { keys: operatorKeys, ids: uuidV7Ids, logger: testLogger() },
+      { orgId: other, name: `Chain Restore Short ${other.slice(-6)}`, release: 'r-1', run: null },
+    );
+    const reader = createDatabase<OperatorTables>(
+      { ...database.connection('operator'), maxConnections: 1, readOnly: true },
+      testLogger(),
+    );
+    try {
+      const head = await createAuditTrail({ keys: operatorKeys, ids: uuidV7Ids }).verifyAlone(reader, other, undefined);
+      if (!head.ok) throw new Error('A new chain should check out');
+      const anchor = { seq: head.seq + 2n, hash: head.hash, macKeyVersion: head.macKeyVersion };
+      const log = createAnchorLog({
+        store: folderWriteOnceStore(anchorsFolder),
+        keys: anchorKeys,
+        logger: testLogger(),
+        now: () => new Date(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+      });
+      await log.read();
+      log.keep(signAnchor(anchorKeys, { kind: 'organisation', orgId: other }, anchor, new Date(), 1));
+      await log.flush();
+      const plan = await planChainRecovery({
+        copy: reader,
+        live: reader,
+        keys: operatorKeys,
+        orgId: other,
+        anchor,
+        shortOfAnchor: true,
+      });
+      const planId = uuidV7Ids.next();
+      mkdirSync(path.join(evidence, other), { recursive: true });
+      writeFileSync(
+        path.join(evidence, other, `chain-recovery-${planId}.ndjson`),
+        planFile(plan, { planId, orgId: other, release: 'r-1', run: null, anchor }),
+      );
+      const digest = planDigest(plan, other, anchor);
+      const restoreId = uuidV7Ids.next();
+      const asked = requested(
+        chainRestoreRequest({ orgId: other, planId, digest, id: restoreId }, { shortOfAnchor: true }),
+      );
+
+      const { code, events, line } = await run(['--request', asked]);
+
+      expect(code).toBe(0);
+      expect(events.slice(-2)).toEqual(['operator.chain_restored', 'operator.chain_restored_short_of_anchor']);
+      expect(line('operator.chain_restored')).toMatchObject({ endsShortOf: String(anchor.seq) });
+      expect(line('operator.chain_restored_short_of_anchor')).toMatchObject({
+        orgId: other,
+        restoreId,
+        endsAt: String(head.seq),
+        endsAtHash: head.hash.toString('hex'),
+        anchorSeq: String(anchor.seq),
+      });
+    } finally {
+      await reader.destroy();
     }
   });
 });

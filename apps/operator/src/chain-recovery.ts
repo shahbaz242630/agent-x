@@ -24,7 +24,14 @@
 //   an event past the copy's head missing or damaged, a sealed live head past
 //   where the plan could end, or no head row for the plan's end
 // - `behind_anchor`, `anchor`: the result wouldn't hold the store's anchor: it
-//   would end before it, or hold another event where it was anchored
+//   would end before it, or hold another event where it was anchored. Where no
+//   copy reaches the anchor, the named flag `--short-of-anchor` (AT9,
+//   `shortOfAnchor`) lets a plan end at the copy's head before it: the copy's
+//   events put back, each proven ours by its MAC (and operator's signature) and
+//   linked by the copy's own whole check to the live events the plan keeps;
+//   every live row past the copy's head is lost for good (the live head's
+//   among them, a junk row removed), and the rebase that follows (E11) gives up
+//   only the events past the copy's head, not the ones it put back
 // - `moved`: a head changed while the chains were read; run it again
 // - `too_large`: more rows than one plan writes
 //
@@ -104,6 +111,11 @@ export type RecoveryPlan =
       readonly forkDiscarded: boolean;
       /** The live chain as the plan read it, every row and the head (fingerprintOf): a repair writes only onto this. */
       readonly liveFingerprint: string;
+      /**
+       * The anchor's number the plan ends before, under `shortOfAnchor` alone (AT9): the rebase then gives up the events
+       * past `endsAt`. Null where the plan holds its anchor.
+       */
+      readonly endsShortOf: bigint | null;
     }
   | {
       readonly ok: false;
@@ -177,6 +189,8 @@ export interface RecoverySides {
   readonly mostRows?: number;
   /** The named flag (E10): a fork's live branch planned away rather than the plan refused. */
   readonly discardFork?: boolean;
+  /** The named flag (AT9): a plan ending at the copy's head before the anchor, rather than refused `behind_anchor`. */
+  readonly shortOfAnchor?: boolean;
   /** How a page is read, and its size: the module's own read, but for a test that moves a chain between pages. */
   readonly readPage?: typeof chainRowsAlone;
   readonly pageSize?: number;
@@ -270,7 +284,7 @@ const COPY_UNSIGNED =
 
 /** The plan's row by row judgement, then its end. */
 function createPlanner(
-  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS, discardFork = false }: RecoverySides,
+  { keys, orgId, anchor, mostRows = MOST_PLANNED_ROWS, discardFork = false, shortOfAnchor = false }: RecoverySides,
   copied: CheckedPoint,
   liveHeads: { first?: ChainHead | string },
 ) {
@@ -301,6 +315,13 @@ function createPlanner(
   // A fork's live branch, found and planned away under discardFork alone.
   let forked = false;
   let atAnchor: CheckedPoint | undefined;
+
+  /**
+   * The anchor's number where the plan ends short of it, as asked (AT9): at the copy's head, the anchor past it; null
+   * otherwise. Every live row past that head then goes: the lost events' rows were deleted, any other is no original.
+   */
+  const shortOf = (): bigint | null =>
+    shortOfAnchor && anchor !== undefined && anchor.seq > end.seq && end.seq === copied.seq ? anchor.seq : null;
 
   const plan = (row: PlannedRow): Refused | undefined => {
     rows.push(row);
@@ -341,8 +362,8 @@ function createPlanner(
     if (forked) return plan({ action: 'remove', seq, stored: live.stored });
     const head = liveHead();
     // Never the app's: not sealed by us, and past a sealed head that stands exactly where the plan ends (every row
-    // here is past that end).
-    if (!sealedHere(live) && head?.seq === end.seq) {
+    // here is past that end), or past the copy's head where the plan ends short of its anchor (AT9).
+    if (!sealedHere(live) && (head?.seq === end.seq || shortOf() !== null)) {
       return plan({ action: 'remove', seq, stored: live.stored });
     }
     return refused('new_seal', end.seq + 1n);
@@ -359,9 +380,12 @@ function createPlanner(
 
     finish(copyHead: ChainHead, liveFingerprint: string): RecoveryPlan {
       const head = liveHead();
+      const endsShortOf = shortOf();
+      const short = endsShortOf !== null;
       // The live head is sealed past where the plan can end: events the copy doesn't hold are lost. A fork's
-      // branch is discarded whole, the plan ending at the copy's head.
-      if (head !== undefined && head.seq > end.seq && !forked) return refused('new_seal', end.seq + 1n);
+      // branch is discarded whole, the plan ending at the copy's head; so is the lost tail of a plan short of its
+      // anchor (AT9), the rebase giving it up.
+      if (head !== undefined && head.seq > end.seq && !forked && !short) return refused('new_seal', end.seq + 1n);
       let replaceHead: ChainHead | undefined;
       if (end.seq === copied.seq) {
         const live = liveHeads.first;
@@ -370,8 +394,9 @@ function createPlanner(
         // Grown on past the copy, but no original head row stands at its end (a hash names its event's number too).
         return refused('new_seal', end.seq);
       }
-      if (anchor !== undefined && anchor.seq > end.seq) return refused('behind_anchor', anchor.seq);
+      if (anchor !== undefined && anchor.seq > end.seq && !short) return refused('behind_anchor', anchor.seq);
       if (
+        !short &&
         anchor !== undefined &&
         anchor.seq > 0n &&
         (atAnchor === undefined ||
@@ -389,6 +414,7 @@ function createPlanner(
         keptPastCopy: end.seq - copied.seq,
         forkDiscarded: forked,
         liveFingerprint,
+        endsShortOf,
       };
     },
   };
@@ -430,6 +456,8 @@ function planLines(plan: RecoveryPlan, orgId: string, anchor: CheckedPoint | und
       keptPastCopy: plan.keptPastCopy.toString(),
       forkDiscarded: plan.forkDiscarded,
       liveFingerprint: plan.liveFingerprint,
+      // Only where it ends short (AT9), so a plan that holds its anchor reads, and digests, as before.
+      ...(plan.endsShortOf === null ? {} : { endsShortOf: plan.endsShortOf.toString() }),
     },
     ...plan.rows.map((row) => {
       const at = { k: 'row', action: row.action, seq: row.seq.toString() };

@@ -5,10 +5,16 @@
 // only the copy's original rows, in one transaction, onto the live chain as
 // the plan read it, and checks the whole chain before it commits. Every race
 // here is lined up with a held lock (waitUntilQueued), never left to chance.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { type AuditEvent, chainRowsAlone, createAuditTrail } from '@agentx/core/modules/audit';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
-import { loadKeys } from '@agentx/platform/keys';
+import { type CheckedPoint, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
+import { createDatabase, type Database, databaseNow, withTenant } from '@agentx/platform/db';
+import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
+import { folderWriteOnceStore } from '@agentx/platform/storage';
 import {
   createTestDatabase,
   type TestClient,
@@ -17,18 +23,20 @@ import {
   waitUntilQueued,
   writeTestKeys,
 } from '@agentx/testing';
-import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
+import { rebaseChain } from './chain-rebase.ts';
 import { fingerprintOf, planChainRecovery, planDigest, type RecoveryPlan } from './chain-recovery.ts';
 import { outcomeLine, restoreChain, type RestoreOutcome, restoreFile, type RestoreSides } from './chain-restore.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 
 const server = inject('postgres');
-const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing']);
+const keyFiles = writeTestKeys(['audit-mac', 'field-encryption', 'operator-signing', 'audit-rebase']);
 const keys = loadKeys({ directory: keyFiles.directory, current: {} }, [
   'audit-mac',
   'field-encryption',
   'operator-signing',
+  'audit-rebase',
 ]);
 const trail = createAuditTrail({ keys, ids: uuidV7Ids });
 
@@ -154,6 +162,7 @@ function restore(digest: string, more: Partial<RestoreSides> = {}): Promise<Rest
     anchor: undefined,
     digest,
     discardFork: false,
+    shortOfAnchor: false,
     ...more,
   });
 }
@@ -570,6 +579,146 @@ describe('a fork, with the named flag', () => {
   });
 });
 
+describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then the rebase for the rest', () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-short-of-anchor-'));
+  const anchorKeyFiles = writeTestKeys(['audit-anchor']);
+  const apiAnchorKey = loadKeys({ directory: anchorKeyFiles.directory, current: {} }, ['audit-anchor']);
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+    anchorKeyFiles.remove();
+  });
+
+  /** The chains' anchors as the API holds them, in a store of their own: its anchor key, the rebase key's public half. */
+  const anchorKeys: KeyProvider = {
+    ...apiAnchorKey,
+    verifySignature: (purpose, version, message, signature) =>
+      (purpose === 'audit-rebase' ? keys : apiAnchorKey).verifySignature(purpose, version, message, signature),
+  };
+  const anchorLog = (store: string) =>
+    createAnchorLog({
+      store: folderWriteOnceStore(store),
+      keys: anchorKeys,
+      logger: testLogger(),
+      now: () => new Date(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+    });
+
+  /** Keeps the anchor as the API does; then waits until the database's clock, which dates a rebase, has passed it. */
+  async function anchored(store: string, point: CheckedPoint): Promise<void> {
+    const log = anchorLog(store);
+    await log.read();
+    const at = new Date();
+    log.keep(signAnchor(apiAnchorKey, { kind: 'organisation', orgId }, point, at, 1));
+    await log.flush();
+    const clock = on(live, 'operator', true);
+    await vi.waitUntil(async () => (await databaseNow(clock)).getTime() > at.getTime(), {
+      timeout: 5000,
+      interval: 20,
+    });
+  }
+
+  /** The plan as the operator reads it, against the anchor, with the named flag. */
+  const plannedShort = (anchor: CheckedPoint) =>
+    planChainRecovery({
+      copy: on(theCopy(), 'operator', true),
+      live: on(live, 'operator', true),
+      keys,
+      orgId,
+      anchor,
+      shortOfAnchor: true,
+    });
+
+  it('puts back what the copy holds, checks the chain whole to its head, then the rebase gives up only the rest', async () => {
+    await record(live, 2);
+    const earlier = await headOf(live);
+    const head = await copied(3);
+    await record(live, 2);
+    const anchor = await verifiedLive();
+    if (!anchor.ok) throw new Error('The grown chain should check out');
+    await windBack(earlier);
+
+    const plan = await plannedShort(anchor);
+    if (!plan.ok) throw new Error(`refused: ${plan.reason}`);
+    const digest = planDigest(plan, orgId, anchor);
+    const before = await snapshot(live);
+    // The repair takes the flag too: without it the plan made now is refused, and nothing is written.
+    expect(await restore(digest, { anchor })).toMatchObject({
+      ok: false,
+      reason: 'plan',
+      plan: { reason: 'behind_anchor', seq: anchor.seq },
+    });
+    expect(await snapshot(live)).toBe(before);
+
+    const outcome = await restore(digest, { anchor, shortOfAnchor: true });
+    if (!outcome.ok) throw new Error(`not repaired: ${outcome.reason}`);
+    expect(outcomeLine(outcome)).toMatchObject({
+      putBack: 3,
+      replaced: 0,
+      removed: 0,
+      headReplaced: true,
+      endsAt: String(head),
+      endsShortOf: String(anchor.seq),
+    });
+    // Whole to the copy's head, its rows exactly the copy's; against the anchor it reads wound back: a rebase's case.
+    expect(await verifiedLive()).toMatchObject({ ok: true, seq: head });
+    expect(await snapshot(live)).toBe(await snapshot(theCopy()));
+    expect(await trail.verifyAlone(on(live, 'operator', true), orgId, anchor)).toMatchObject({
+      ok: false,
+      problem: { reason: 'anchor' },
+    });
+
+    const store = path.join(folder, orgId);
+    await anchored(store, anchor);
+    const rebased = await rebaseChain({
+      live: on(live, 'operator', true),
+      writer: on(live, 'operator'),
+      services: { keys, ids: uuidV7Ids, logger: testLogger() },
+      store: folderWriteOnceStore(store),
+      anchors: anchorLog(store),
+      chain: { kind: 'organisation', orgId },
+      asked: {
+        id: uuidV7Ids.next(),
+        seq: head,
+        hash: outcome.plan.endsAt.hash,
+        reason: 'repaired',
+        evidence: ['INC', 'AT9'].join('-'),
+        release: 'r-1',
+        run: null,
+      },
+    });
+    // Only the two events no copy held are given up: the three the copy held are back.
+    expect(rebased).toMatchObject({ ok: true, shorterBy: 2n, recorded: 'recorded' });
+    const api = anchorLog(store);
+    await api.read();
+    const point = api.latest({ kind: 'organisation', orgId });
+    expect(point).toMatchObject({ seq: head, hash: outcome.plan.endsAt.hash });
+    // The chain checks whole against the rebase's point, with the operator's signed record of it just past.
+    expect(await trail.verifyAlone(on(live, 'operator', true), orgId, point)).toMatchObject({
+      ok: true,
+      seq: head + 1n,
+    });
+  });
+
+  it("refuses a copy whose events don't link to the live chain's, and writes nothing", async () => {
+    await record(live, 1);
+    const earlier = await headOf(live);
+    const head = await copied(3);
+    await windBack(earlier);
+    await record(live, 2);
+    const anchor: CheckedPoint = { seq: head + 5n, hash: Buffer.alloc(32, 9), macKeyVersion: 1 };
+    const refusedPlan = await plannedShort(anchor);
+    expect(refusedPlan).toMatchObject({ ok: false, reason: 'fork' });
+    const before = await snapshot(live);
+    expect(await restore(planDigest(refusedPlan, orgId, anchor), { anchor, shortOfAnchor: true })).toMatchObject({
+      ok: false,
+      reason: 'plan',
+      plan: { reason: 'fork' },
+    });
+    expect(await snapshot(live)).toBe(before);
+  });
+});
+
 describe("the repair's record", () => {
   it('names the run, the plan and the outcome, and no row', () => {
     const facts = {
@@ -578,6 +727,7 @@ describe("the repair's record", () => {
       orgId: uuidV7Ids.next(),
       digest: 'ab'.repeat(32),
       discardFork: false,
+      shortOfAnchor: false,
       release: 'r-1',
       run: null,
     };

@@ -1168,6 +1168,13 @@ export const PLAIN_WORDS = {
     broke: 'Nothing was changed, and the organisation stays on hold.',
     next: 'Read the reason in the line. If the plan changed, make a new one, then follow playbook H.',
   },
+  'operator.chain_restored_short_of_anchor': {
+    happened:
+      "An organisation's audit chain was repaired from a copy that holds only some of its lost events: it now ends before the point it was last trusted at.",
+    broke:
+      'The events past the new end are still missing, so the anchor check keeps alarming for this chain and the organisation stays on hold.',
+    next: "Once the investigation accepts the rest as lost for good, run the chain's rebase with the head in the line (playbook H).",
+  },
   'operator.state_recovery_refused': {
     happened: "A recovery plan for an organisation's tampered records was refused.",
     broke:
