@@ -64,6 +64,18 @@ export const HOLDINGS_CHECK_EVERY_MS = 15 * 60_000;
  */
 export const CUTOVER_HOLD_OFF_MS = 30_000;
 
+/** Waits `ms`, or less once `signal` is aborted: a stopping process never waits out the hold-off. */
+export const waitUnlessStopped = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+  });
+
 /** How many pages one run checks an organisation: about 10,000 requests a run. */
 const PAGES_A_RUN = 50;
 
@@ -83,13 +95,13 @@ export function createHoldingsCheck({
   pagesARun = PAGES_A_RUN,
   clock = systemClock,
   cutoverHoldOffMs = CUTOVER_HOLD_OFF_MS,
-  wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  wait = waitUnlessStopped,
 }: {
   /** The time a cutover opens its totals at (GM-1a), and the hold-off it is measured by. */
   readonly clock?: Clock;
-  /** CUTOVER_HOLD_OFF_MS and a timer's wait, but for the tests. */
+  /** CUTOVER_HOLD_OFF_MS and a timer's wait (waitUnlessStopped), but for the tests. */
   readonly cutoverHoldOffMs?: number;
-  readonly wait?: (ms: number) => Promise<void>;
+  readonly wait?: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
   /** The organisations to look in this run: job-list.ts's, from the marks and the directory. */
   readonly list: () => Promise<readonly string[]>;
   /** One whose pass ended this run, its requests all checked: owed no visit until listed again. */
@@ -107,10 +119,10 @@ export function createHoldingsCheck({
   /** When this process's first run started, which it does once it holds the jobs' lease (job-list.ts). */
   let firstRunAt: number | undefined;
   /** Waits until CUTOVER_HOLD_OFF_MS has passed since the first run started: at once after that. */
-  const cutoverHeldOff = async (): Promise<void> => {
+  const cutoverHeldOff = async (signal: AbortSignal | undefined): Promise<void> => {
     firstRunAt ??= clock.now().getTime();
     const left = firstRunAt + cutoverHoldOffMs - clock.now().getTime();
-    if (left > 0) await wait(left);
+    if (left > 0) await wait(left, signal);
   };
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
@@ -119,7 +131,7 @@ export function createHoldingsCheck({
    * so every organisation is at a process's first run. A failure is logged and left for the next run, its decisions
    * refused busy meanwhile.
    */
-  const cutOverIn = async (orgId: string, log: Logger): Promise<void> => {
+  const cutOverIn = async (orgId: string, log: Logger, signal: AbortSignal | undefined): Promise<void> => {
     // Not before the process before this one can have stopped (rollout, GM-1a review): it may still commit a decision
     // or an ending made by the code before GM-1a, which keeps no total, for up to its stop deadline after the lease
     // passed here.
@@ -129,7 +141,9 @@ export function createHoldingsCheck({
         monthTotalsCutOver(tx, states, orgId),
       );
       if (now === 'cut_over') return;
-      await cutoverHeldOff();
+      await cutoverHeldOff(signal);
+      // Stopped while it waited (the process is going): left for the next run, which tries again.
+      if (signal?.aborted === true) return;
       const trail = createAuditTrail({ keys, ids });
       const done = await withSignedStates(database, orgId, services(log), (tx, states) =>
         cutOverMonthTotals(tx, states, orgId, {
@@ -174,7 +188,7 @@ export function createHoldingsCheck({
   /** Checks the organisation's next pages, up to its share; false if the signal stopped it. */
   const checkIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
-    if (progress.get(orgId) === undefined) await cutOverIn(orgId, log);
+    if (progress.get(orgId) === undefined) await cutOverIn(orgId, log, signal);
     let requests = 0;
     let mismatched = 0;
     let tampered = 0;

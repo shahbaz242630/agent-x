@@ -897,6 +897,30 @@ describe('an organisation made before GM-1a, until its cutover', () => {
     expect(lines('month_totals.cutover_failed')).toHaveLength(1);
   });
 
+  it('cuts nothing over when stopped during the hold-off: the next run does', async () => {
+    const old = await ready({ madeBeforeMonthTotals: true });
+    const stop = new AbortController();
+    const check = createHoldingsCheck({
+      list: () => Promise.resolve([old.w.org]),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+      clock,
+      // The process told to stop while it waits.
+      wait: () => {
+        stop.abort();
+        return Promise.resolve();
+      },
+    });
+    await check.run(stop.signal);
+    expect(lines('month_totals.cut_over')).toEqual([]);
+    expect(await ask(old.acting, old.w, 1n)).toEqual(refused(503, 'ORGANISATION_BUSY'));
+
+    await check.run();
+    expect(lines('month_totals.cut_over')).toHaveLength(1);
+  });
+
   it('waits out the hold-off once, at its first run, before cutting any organisation over; none for one cut over', async () => {
     const waits: number[] = [];
     const check = (w: World) =>
