@@ -52,7 +52,7 @@ interface ReservationsTable {
   settled_at: Date | null;
 }
 
-/** An agent's month's total in one currency, signed (0109, GM-1a): what its reservations hold, kept as they change. */
+/** An agent's month's total in one currency, signed (0110, GM-1a): what its reservations hold, kept as they change. */
 interface MonthTotalsTable {
   org_id: string;
   /** Named by its organisation, agent, month and currency (namedId), so a deleted one reads as deleted. */

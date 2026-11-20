@@ -86,7 +86,7 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * 0054), then its spend requests (8, Phase 2 D1), then a handed-off one's
  * instruction and transaction (10, Phase 4 B3), then an admin's proposal to
  * mark the transaction failed (10, after it: 0066, gate H10), then its agents'
- * month totals (11a, after the reservations and before the audit head: 0109,
+ * month totals (11a, after the reservations and before the audit head: 0110,
  * GM-1a). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
  * table with `liveStatuses`, its live and newest rows), so a new table goes in at its
