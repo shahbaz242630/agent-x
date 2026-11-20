@@ -645,7 +645,8 @@ export function createHandoff({
   ): Promise<'recorded' | 'late'> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       const key = { orgId, id: transactionId };
-      const locked = await lockPayment(tx, states, key, requestId);
+      // No answer only ever marks it UNKNOWN, which gives no capacity back: its month total left unlocked (GM-1a).
+      const locked = await lockPayment(tx, states, key, requestId, answer.kind !== 'unknown');
       const from = locked.transaction.status;
       /** The status it moved to, or null where its machine refused the move. */
       const move = async (
@@ -719,13 +720,13 @@ export function createHandoff({
       return recorded;
     });
 
-  /** The transaction and its holdings locked (`lockPayment`), its status as read. */
+  /** The transaction and its holdings locked (`lockPayment`), its status as read: the sweep's, which only marks one UNKNOWN, so no month total is locked. */
   const lockedHoldings = async (
     tx: HandoffTx,
     states: SignedStates,
     key: { readonly orgId: string; readonly id: string },
     requestId: string,
-  ): Promise<TransactionStatus> => (await lockPayment(tx, states, key, requestId)).transaction.status;
+  ): Promise<TransactionStatus> => (await lockPayment(tx, states, key, requestId, false)).transaction.status;
 
   /** The partner's answer to the intent, within its time; any it can't give is `unknown` (never resent). */
   const answerOf = async (intent: ApprovedPaymentIntent, id: string, log: Logger): Promise<Answer> => {

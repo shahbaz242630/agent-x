@@ -108,6 +108,8 @@ export async function lockPayment(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
   requestId?: string,
+  /** False where the move to come can only keep capacity held (to UNKNOWN): its month total not locked (GM-1a). */
+  givesBack = true,
 ): Promise<LockedPayment> {
   const read = await transactionOf(tx, states, key, 'change');
   if (read.outcome !== 'found') throw new Error(`A handed-off transaction can't be believed: ${key.id}`);
@@ -122,7 +124,11 @@ export async function lockPayment(
   const proposal = await openProposalOf(tx, states, { orgId: key.orgId, transactionId: read.transaction.id }, 'change');
   if (proposal.outcome === 'tampered')
     throw new Error(`A handed-off transaction's proposal can't be believed: ${key.id}`);
-  await lockHoldingsOf(tx, requestId ?? instruction.instruction.spendRequestId);
+  await lockHoldingsOf(tx, states, {
+    orgId: key.orgId,
+    requestId: requestId ?? instruction.instruction.spendRequestId,
+    givesBack,
+  });
   return {
     transaction: read.transaction,
     instruction: instruction.instruction,
@@ -165,7 +171,7 @@ export async function settlePayment(
   outbox: Outbox,
   { orgId, requestId, transactionId, status, at, openProposal }: PaymentMoved,
 ): Promise<void> {
-  await settleHoldings(tx, { requestId, status, at });
+  await settleHoldings(tx, states, { orgId, requestId, status, at });
   // The bank's answer came first (partner S145): an admin's proposal to mark it failed ends with the move, all told.
   const ended = openProposal !== null && status !== 'UNKNOWN';
   if (ended) {

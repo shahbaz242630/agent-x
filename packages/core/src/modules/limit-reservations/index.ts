@@ -12,7 +12,30 @@ export {
   type ZoneCheck,
   zoneInForce,
 } from './infrastructure/agent-zones.ts';
-export { MONTH_TOTALS } from './infrastructure/month-totals.ts';
+export {
+  checkMonthTotals,
+  CUTOVER_ACTION,
+  CUTOVER_SUBJECT,
+  type CutOver,
+  givenBack,
+  MONTH_TOTALS,
+  type MonthTotalCheck,
+  monthTotalFrom,
+  monthTotalGathered,
+  monthTotalId,
+  monthTotalKeyFrom,
+  monthTotalKeyText,
+  type MonthTotalKey,
+  monthTotalOf,
+  monthTotalOrder,
+  monthTotalsCutOver,
+  monthTotalToSend,
+  MOST_TOTALS_CHECKED_A_PAGE,
+  recordMonthTotal,
+  reservationsHeldIn,
+  type TotalsChecked,
+  totalsMissing,
+} from './infrastructure/month-totals.ts';
 export {
   agentMonth,
   agentMonthLocking,
