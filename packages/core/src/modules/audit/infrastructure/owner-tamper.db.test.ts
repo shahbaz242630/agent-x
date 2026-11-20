@@ -377,6 +377,8 @@ describe('FX-TAMPER as the owner: what gets past the row check alone, and what c
  * The signed states' digest (AT13) as the anchor check keeps it, and signed states whose reads are held to it, as
  * withSignedStates builds them where a process keeps one. Their alarms hand on to `found`, as the others' do.
  */
+/** When the digest's walks are dated: the anchor check's clock, held still. */
+const AT13_AT = new Date('2026-11-20T09:00:00.000Z');
 let digest: DigestLog;
 let held: SignedStates;
 
@@ -387,7 +389,7 @@ async function newDigest(store?: WriteOnceStore, anchors?: DigestAnchors): Promi
     anchors,
     keys,
     logger: testLogger(capture),
-    now: () => new Date(),
+    now: () => AT13_AT,
     epoch: 1,
     alertAfterMs: 60_000,
     mostBytes: 64 * 1024 * 1024,
@@ -411,7 +413,7 @@ function heldTo(kept: DigestLog): SignedStates {
 async function walked(from: CheckedPoint = CHAIN_START, into: DigestLog = digest): Promise<CheckedPoint> {
   const step = await trail.checkFromAnchor(app, org, from);
   if (!step.ok) throw new Error('The chain should have checked out before the tampering');
-  if (step.signed !== undefined) into.record({ kind: 'organisation', orgId: org }, step.signed, new Date());
+  if (step.signed !== undefined) into.record({ kind: 'organisation', orgId: org }, step.signed, AT13_AT);
   return { seq: step.seq, hash: step.hash, macKeyVersion: step.macKeyVersion };
 }
 
@@ -422,7 +424,7 @@ const heldCheck = (id: string, lock: 'share' | 'change' = 'share', states = held
 async function caughtAtDecision(id: string, seq: bigint, states = held): Promise<void> {
   expect(await heldCheck(id, 'share', states)).toEqual({ outcome: 'tampered', sign: 'log' });
   expect(await heldCheck(id, 'change', states)).toEqual({ outcome: 'tampered', sign: 'log' });
-  const named = expect.objectContaining({
+  const named: unknown = expect.objectContaining({
     event: 'audit.integrity_failed',
     check: 'state',
     reason: 'log',
@@ -659,7 +661,7 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
     ]);
     await owner.withoutStatusGuard(() => owner.restoreRow(savedRow));
     // The operator rebases the chain where it now stands (E11): what the digest knew of it before no longer holds.
-    rebased.set(org, new Date(Date.now() + 1000));
+    rebased.set(org, new Date(AT13_AT.getTime() + 1000));
     expect(await heldCheck(id, 'share', heldTo(kept))).toMatchObject({ outcome: 'verified', version: 1 });
   });
 
@@ -681,7 +683,7 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
       store: createFakeWriteOnceStore().store,
       keys,
       logger: testLogger(capture),
-      now: () => new Date(),
+      now: () => AT13_AT,
       epoch: 1,
       alertAfterMs: 60_000,
       mostBytes: 1024 * 1024,
@@ -701,7 +703,13 @@ describe('AT13: the digest’s edges, as the owner tampers', () => {
       began = resolve;
     });
     const done = withTenant(app, org, (tx) => work(tx, began, gate));
-    return { begun, release: () => release(), done };
+    return {
+      begun,
+      release: () => {
+        release();
+      },
+      done,
+    };
   }
 
   it('forced order: a decision whose transaction began before a change, read after the walk kept it, reads the change', async () => {

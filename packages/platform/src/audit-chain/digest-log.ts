@@ -419,7 +419,9 @@ export function createDigestLog({
   /** A read or write that failed: a warning, and past `alertAfterMs` of failing, the alert. */
   const failed = (what: 'read' | 'write', error: unknown): void => {
     const at = now().getTime();
-    const since = what === 'read' ? (readFailingSince ??= at) : (writeFailingSince ??= at);
+    if (what === 'read') readFailingSince ??= at;
+    else writeFailingSince ??= at;
+    const since = (what === 'read' ? readFailingSince : writeFailingSince) ?? at;
     if (at - since >= alertAfterMs) logger.error('audit.state_digest_store_failing', { what, err: error });
     else logger.warn('audit.state_digest_store_failed', { what, err: error });
   };

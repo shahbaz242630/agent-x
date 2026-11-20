@@ -47,7 +47,8 @@ export function anchorsKeptOf(
     return undefined;
   }
   const now = (): Date => clock.now();
-  let digest: DigestLog | undefined;
+  // Made after the log, which counts it: asked only once both are made.
+  const kept: { digest?: DigestLog } = {};
   // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it. They
   // let shards go past what they can hold (PR3), asking for one's anchors only with it pinned or held.
   const log = createAnchorLog({
@@ -57,9 +58,9 @@ export function anchorsKeptOf(
     now,
     cutOver: true,
     evicts: true,
-    alsoHeld: () => digest?.memoryHeld().bytes ?? 0,
+    alsoHeld: () => kept.digest?.memoryHeld().bytes ?? 0,
   });
-  digest = createDigestLog({
+  const digest = createDigestLog({
     ...services,
     store,
     epoch,
@@ -67,5 +68,6 @@ export function anchorsKeptOf(
     anchors: log,
     mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
   });
+  kept.digest = digest;
   return { log, digest };
 }

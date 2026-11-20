@@ -23,13 +23,19 @@ export const ENTRY_BYTES = 16;
 /** The smallest table a chain gets, in slots: a power of two. */
 const FIRST_SLOTS = 8;
 
-/** The fingerprint of an object's key: two 32-bit halves, never both 0 (an empty slot). */
-export function fingerprintOf(key: string): readonly [number, number] {
-  const digest = createHash('sha256').update(key, 'utf8').digest();
-  const high = digest.readUInt32BE(0);
-  const low = digest.readUInt32BE(4);
+/** A slot's value; one past the table, which no slot is, as empty. */
+export const valueAt = (array: Float64Array | Uint32Array, index: number): number => array[index] ?? 0;
+
+/** A hash's first 8 bytes as two 32-bit halves, never both 0 (an empty slot). */
+export function halvesOf(hash: Buffer): readonly [number, number] {
+  const high = hash.readUInt32BE(0);
+  const low = hash.readUInt32BE(4);
   return high === 0 && low === 0 ? [0, 1] : [high, low];
 }
+
+/** The fingerprint of an object's key. */
+export const fingerprintOf = (key: string): readonly [number, number] =>
+  halvesOf(createHash('sha256').update(key, 'utf8').digest());
 
 /** A place as a slot holds it: every place a chain can reach is a safe integer. */
 export function placeOf(seq: bigint): number {
@@ -70,7 +76,7 @@ export class ChainDigest {
     let slot = low & mask;
     for (;;) {
       const at = slot * 2;
-      const [h, l] = [this.#halves[at], this.#halves[at + 1]];
+      const [h, l] = [valueAt(this.#halves, at), valueAt(this.#halves, at + 1)];
       if ((h === 0 && l === 0) || (h === high && l === low)) return slot;
       slot = (slot + 1) & mask;
     }
@@ -79,7 +85,7 @@ export class ChainDigest {
   /** The object's newest signed place, if this table knows it. */
   get(high: number, low: number): number | undefined {
     const slot = this.#slotOf(high, low);
-    const place = this.#places[slot] ?? 0;
+    const place = valueAt(this.#places, slot);
     return place === 0 ? undefined : place;
   }
 
@@ -87,7 +93,7 @@ export class ChainDigest {
   put(high: number, low: number, place: number): boolean {
     if ((this.#size + 1) * 4 > this.#places.length * 3) this.#grow();
     const slot = this.#slotOf(high, low);
-    const known = this.#places[slot] ?? 0;
+    const known = valueAt(this.#places, slot);
     if (known >= place) return false;
     if (known === 0) {
       this.#size += 1;
@@ -101,8 +107,8 @@ export class ChainDigest {
   /** Every object held: its halves and place. */
   *entries(): Generator<readonly [number, number, number]> {
     for (let slot = 0; slot < this.#places.length; slot += 1) {
-      const place = this.#places[slot] ?? 0;
-      if (place !== 0) yield [this.#halves[slot * 2] ?? 0, this.#halves[slot * 2 + 1] ?? 0, place];
+      const place = valueAt(this.#places, slot);
+      if (place !== 0) yield [valueAt(this.#halves, slot * 2), valueAt(this.#halves, slot * 2 + 1), place];
     }
   }
 

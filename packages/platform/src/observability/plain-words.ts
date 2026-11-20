@@ -295,13 +295,11 @@ export const PLAIN_WORDS = {
   },
   'audit.state_digest_beyond_memory': {
     happened: 'The record of each signed record’s latest version, kept with the audit anchors, outgrew its memory.',
-    broke:
-      'Payments wait for every organisation until a restart with more memory. Other decisions go on checked as before.',
+    broke: 'Payments wait for every organisation until a restart with more memory. Other decisions go on as before.',
     next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
   'audit.state_digest_store_failed': {
-    happened:
-      'The record of each signed record’s latest version could not be read from or written to the anchor store.',
+    happened: 'The record of each signed record’s latest version could not be read from or written to the store.',
     broke: 'Nothing yet: it is tried again each run. After a start, payments wait until it has been read once.',
     next: 'Nothing if it passes. If it repeats, check the anchor store as for the anchors: playbook section H.',
   },

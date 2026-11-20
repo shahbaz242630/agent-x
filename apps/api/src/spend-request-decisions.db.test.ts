@@ -20,7 +20,7 @@
 // rules, and nothing written anywhere (SEC-AG-09); and no request ever left
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
-import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { checkStatesWith, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import {
   addZone,
   AGENT_ZONES,
@@ -48,6 +48,7 @@ import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
+import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import {
   createDatabase,
   type Database,
@@ -996,6 +997,40 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect(line?.trips).toBe(17);
     // From the supplier's lock to the commit, both counted: 16 with the lock in the gather, 13 after C6.
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
+  });
+
+  it('SEC-DB-17 (AT13) counts the same trips with every read held to the signed states’ digest: it is memory, no trip', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w)));
+    // The anchor check's walk of the whole chain, kept as job-list.ts keeps it, every signed object in it.
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    const step = await createAuditTrail({ keys, ids: new SequentialIds(0x1317) }).checkFromAnchor(
+      app,
+      w.org,
+      CHAIN_START,
+    );
+    if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+    digest.record({ kind: 'organisation', orgId: w.org }, step.signed, clock.now());
+    checkStatesWith(digest);
+    try {
+      decidedOf(await ask(acting, asking(w, { orderReference: 'INV-DIGEST-ONE-TRIP' })));
+    } finally {
+      checkStatesWith(undefined);
+    }
+    const line = capture
+      .lines()
+      .filter(({ event }) => event === 'spend_request.decided')
+      .at(-1);
+    expect(line?.trips).toBe(17);
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
+    expect(capture.lines().filter(({ event }) => event === 'audit.integrity_failed')).toEqual([]);
   });
 
   it('SEC-DB-17 counts a decision sent for approval, its notice told, as the allowed one and its notice alone (S206 V4)', async () => {
