@@ -5,6 +5,7 @@ export interface LimitReservationsTables {
   'limit_reservations.agent_zones': AgentZonesTable;
   'limit_reservations.agent_periods': AgentPeriodsTable;
   'limit_reservations.reservations': ReservationsTable;
+  'limit_reservations.month_totals': MonthTotalsTable;
 }
 
 /** The time zone an agent's months are named in: its first reservation's mandate's, kept for good. */
@@ -49,4 +50,20 @@ interface ReservationsTable {
   reserved_at: Date;
   /** When it reached FINALISED or RELEASED; none before. */
   settled_at: Date | null;
+}
+
+/** An agent's month's total in one currency, signed (0109, GM-1a): what its reservations hold, kept as they change. */
+interface MonthTotalsTable {
+  org_id: string;
+  /** Named by its organisation, agent, month and currency (namedId), so a deleted one reads as deleted. */
+  id: string;
+  agent_id: string;
+  /** `YYYY-MM`, as `periodOf` names it in the agent's zone. */
+  month: string;
+  currency: string;
+  /** Minor units held: read back as text or a bigint, never a float. */
+  held_minor: string | bigint;
+  created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: string | null;
 }

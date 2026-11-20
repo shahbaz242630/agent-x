@@ -505,6 +505,72 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
 const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT, currency = 'AED') =>
   inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since, currency }));
 
+describe("an agent's month total (0109, GM-1a)", () => {
+  /** A total row for the agent's month, as the audit module's record adds one before sealing it. */
+  const totalRow = (org: Org, overrides: Record<string, unknown> = {}) => ({
+    org_id: org.id,
+    id: randomUUID(),
+    agent_id: org.agent,
+    month: MONTH,
+    currency: 'AED',
+    held_minor: 25_000n,
+    created_at: AT,
+    ...overrides,
+  });
+  const addTotal = (org: Org, overrides: Record<string, unknown> = {}) =>
+    inOrg(org, (tx) => tx.insertInto('limit_reservations.month_totals').values(totalRow(org, overrides)).execute());
+  const changeTotal = (org: Org, values: Record<string, unknown>) =>
+    inOrg(org, (tx) => tx.updateTable('limit_reservations.month_totals').set(values).execute());
+
+  it("is one an agent, month and currency, in a period of the agent's", async () => {
+    const org = await organisation();
+    await expect(addTotal(org)).rejects.toEqual(refusedBy('in_its_agents_period'));
+    await period(org);
+    await addTotal(org);
+    await expect(addTotal(org)).rejects.toEqual(refusedBy('one_total_a_month'));
+    // Another currency's minor units are a total of their own (G4).
+    await addTotal(org, { currency: 'USD' });
+  });
+
+  it('never holds less than nothing, nor a month or currency that is not one', async () => {
+    const org = await organisation();
+    await period(org);
+    await expect(addTotal(org, { held_minor: -1n })).rejects.toEqual(refusedBy('month_totals_held_minor_check'));
+    await expect(addTotal(org, { currency: 'aed' })).rejects.toEqual(refusedBy('month_totals_currency_check'));
+    await expect(addTotal(org, { month: '2026-13' })).rejects.toEqual(refusedBy('month_totals_month_check'));
+  });
+
+  it('changes only in what it holds and its signed state: its agent, month, currency and making fixed, never deleted', async () => {
+    const org = await organisation();
+    await period(org);
+    await period(org, '2026-11');
+    await addTotal(org);
+    await changeTotal(org, { held_minor: 50_000n, state_version: 2, state_event_id: randomUUID() });
+    // The audit module's record writes them again with the same values as it seals a new total: no change.
+    await changeTotal(org, { agent_id: org.agent, month: MONTH, currency: 'AED', created_at: AT });
+    await expect(changeTotal(org, { month: '2026-11' })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeTotal(org, { currency: 'USD' })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeTotal(org, { created_at: LATER })).rejects.toEqual(refusedBy('fixed_at_creation'));
+    await expect(changeTotal(org, { org_id: randomUUID() })).rejects.toEqual(DENIED);
+    await expect(changeTotal(org, { id: randomUUID() })).rejects.toEqual(DENIED);
+    await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.month_totals').execute())).rejects.toEqual(
+      DENIED,
+    );
+  });
+
+  it("is its organisation's alone", async () => {
+    const org = await organisation();
+    const other = await organisation();
+    await period(org);
+    await addTotal(org);
+    const seen = await inOrg(other, (tx) => tx.selectFrom('limit_reservations.month_totals').select('id').execute());
+    expect(seen).toEqual([]);
+    await expect(
+      inOrg(other, (tx) => tx.insertInto('limit_reservations.month_totals').values(totalRow(org)).execute()),
+    ).rejects.toThrow(/row-level security/);
+  });
+});
+
 describe('the totals in one currency (G4)', () => {
   it('count only the currency weighed: another’s minor units are never counted as its own', async () => {
     const org = await organisation();

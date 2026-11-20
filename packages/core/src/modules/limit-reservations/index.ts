@@ -12,6 +12,7 @@ export {
   type ZoneCheck,
   zoneInForce,
 } from './infrastructure/agent-zones.ts';
+export { MONTH_TOTALS } from './infrastructure/month-totals.ts';
 export {
   agentMonth,
   agentMonthLocking,

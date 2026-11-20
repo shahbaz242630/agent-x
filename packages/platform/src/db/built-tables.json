@@ -39,6 +39,7 @@
   "instructions.instructions",
   "limit_reservations.agent_periods",
   "limit_reservations.agent_zones",
+  "limit_reservations.month_totals",
   "limit_reservations.reservations",
   "mandates.allowed_currencies",
   "mandates.mandates",
