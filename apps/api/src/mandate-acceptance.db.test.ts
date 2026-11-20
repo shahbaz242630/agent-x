@@ -138,7 +138,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    outbox: createOutbox({ ids, clock }),
+    outbox: createOutbox({ ids, clock, keys }),
     logger,
   });
 });

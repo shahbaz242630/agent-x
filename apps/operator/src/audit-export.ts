@@ -95,7 +95,7 @@ function record(
   const { orgId, exportId, from, to, caseRef, release, run } = request;
   const trail = createAuditTrail({ keys: services.keys, ids: theExportId(exportId) });
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
-  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
+  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock, keys: services.keys });
   return withSignedStates(database, orgId, services, async (tx, states) => {
     const before = await earlierRecord(tx, states, request, AUDIT_LOG_EXPORTED);
     if (before !== undefined) {

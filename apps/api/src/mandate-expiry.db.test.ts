@@ -91,7 +91,7 @@ beforeEach(() => {
       keys,
       ids,
       clock,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger,
       ...(most !== undefined && { most }),
     });
@@ -273,7 +273,7 @@ describe('mandates ended by the clock (B4)', () => {
       keys,
       ids,
       clock,
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(capture),
     });
 

@@ -329,7 +329,7 @@ beforeEach(() => {
   const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry(services);
   payees = createSupplierPayees({ ...services, rail, partner: 'fake' });
-  const outbox = createOutbox({ ids, clock });
+  const outbox = createOutbox({ ids, clock, keys });
   payeeChanges = createSupplierPayeeChanges({ ...services, challenges: challenges(), outbox });
   verifications = createSupplierVerifications({ ...services, challenges: challenges(), outbox });
 });
@@ -584,7 +584,7 @@ describe(`a member's removal ends the payee registrations they left open (AG7, 6
       ids,
       clock,
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
       logger: testLogger(),
       leaving: registrationsOfLeaving,
     });
@@ -765,7 +765,7 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
       clock,
       logger: testLogger(logs),
       challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
+      outbox: createOutbox({ ids, clock, keys }),
     });
 
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));

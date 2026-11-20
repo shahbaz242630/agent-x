@@ -713,12 +713,12 @@ export function createSpendRequestDecisions({
         actor: { type: 'agent', id: agent.id },
       });
     }
+    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.
-    // Told before it is signed, so the chain head, whose lock comes last, is held one statement less (4D2d P8).
+    // Told after it is signed: the notice's record takes the chain head's lock too, which comes last (S206 V4, ADR-006 §6).
     if (made.decision === 'REQUIRE_APPROVAL') {
       await outbox.add(tx, toldAdminsAndApprovers(orgId, 'spend_request_waiting', requestId));
     }
-    const answer = await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     return { id: requestId, answer, decision: made.decision, reasons: made.reasons };
   }
 
