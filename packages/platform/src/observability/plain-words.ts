@@ -558,11 +558,9 @@ export const PLAIN_WORDS = {
     next: 'The reason says why: if the site stays down or refuses for days, tell the app maker.',
   },
   'oauth.client_unsealed': {
-    happened:
-      "An MCP app's kept record had no seal, or one made with a key version no longer held, so it was not used.",
-    broke:
-      'An app named by its document is fetched again from its own site, so nothing breaks; an app that registered itself is refused until it registers again.',
-    next: 'Records kept from before the client seals were added, or a key rotation, explain it. Otherwise someone took a seal out: treat it as tampering.',
+    happened: "An MCP app's kept record had no seal, so it was not used.",
+    broke: 'An app with its own document is fetched again; an app that registered itself must register again.',
+    next: 'Old records or a key change explain it. Otherwise treat it as tampering.',
   },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
