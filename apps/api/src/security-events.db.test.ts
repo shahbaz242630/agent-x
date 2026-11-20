@@ -3,7 +3,9 @@
 // events alone (never another's, never those tied to no one), newest first,
 // each person and agent named; and an agent that can't be believed refusing
 // the page, the organisation held, as on the logs.
+import { v7Floor } from '@agentx/core/modules/activity';
 import { withSignedStates } from '@agentx/core/modules/audit';
+import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -21,11 +23,19 @@ import { createSecurityEventPages, type SecurityEventPages } from './security-ev
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<MandateWorldTables & SecurityEventsTables>;
+let app: Database<MandateWorldTables & SecurityEventsTables & PlatformControlsTables>;
 
 const ids = new SequentialIds(0x5ec7_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000a15b0';
 const NOW = new Date('2026-10-19T09:00:30Z');
+let made = 0;
+/** UUIDv7s made at NOW, as the API makes a row's as it writes it: the page holds each row's ID to its time (S206 V6). */
+const idsNow = {
+  next: () => {
+    made += 1;
+    return `${v7Floor(NOW.getTime()).slice(0, 14)}7000-8000-${made.toString(16).padStart(12, '0')}`;
+  },
+};
 const EVER = { from: new Date('2000-01-01T00:00:00Z'), to: new Date('2100-01-01T00:00:00Z'), limit: 100 };
 
 let clock: FixedClock;
@@ -36,7 +46,7 @@ const { world, quiet } = shared;
 
 /** One count of a refusal, tied to the organisation as the API ties it. */
 const noted = (w: World, about: { userId?: string; agentId?: string }, reason: string) =>
-  createSecurityEvents({ ids, clock: new FixedClock(NOW), retentionDays: 30 }).record(app, [
+  createSecurityEvents({ ids: idsNow, clock: new FixedClock(NOW), keys, retentionDays: 30 }).record(app, [
     {
       kind: 'rate_limited',
       reason,
@@ -51,7 +61,7 @@ const noted = (w: World, about: { userId?: string; agentId?: string }, reason: s
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<MandateWorldTables & SecurityEventsTables>(
+  app = createDatabase<MandateWorldTables & SecurityEventsTables & PlatformControlsTables>(
     { ...database.connection('app'), maxConnections: 4 },
     testLogger(),
   );

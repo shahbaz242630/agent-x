@@ -19,14 +19,27 @@
 //   flood is counted in `security.events`, never stored.
 // - `sweep`: both tables past the security events' retention.
 //
+// S206 V6 (R-15): each refused message kept carries a MAC (the security
+// rows' key, its own label) over every column but its body, which the AEAD
+// already binds to its ID; the caps count only rows whose MAC holds and that
+// are dated no later than now: rows the database's owner planted (dated
+// ahead, or with no MAC, whatever their ID) can neither stop evidence being
+// kept nor quiet the `first` alert. Those that fail raise the alarm, once a
+// message. A flood stays cheap: each process stops its own past the caps in
+// memory (gate H4), and the store first counts the hour's rows in one
+// statement; only when that count could be the planted rows' doing are the
+// rows read and their MACs checked, at most READ_AT_MOST of them.
+//
 // Each runs in a transaction of its own whose statements give up after 10
 // seconds, a wait for a lock included.
 import type { KeyProvider } from '@agentx/platform/keys';
 import { limitStatements } from '@agentx/platform/db';
+import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type SqlBool } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator, isIpAddress } from '../../../shared-kernel/index.ts';
 import type { EventReference, EventRefusal, PartnerEvent } from '../../providers/index.ts';
+import { evidenceMessage, rowMac, rowMacHolds } from '../../security-events/index.ts';
 import type { ProviderEventsTables } from './tables.ts';
 
 /** How many refused messages from one network are kept an hour; the rest are only counted. */
@@ -89,15 +102,21 @@ export interface ProviderEvents {
 const inboxData = (id: string) => ['provider_events.inbox', id.toLowerCase()] as const;
 const evidenceData = (id: string) => ['security.partner_event_evidence', id.toLowerCase()] as const;
 
+/** The most of the hour's kept rows the caps read: the honest ones are at most MOST_KEPT_AN_HOUR_IN_ALL. */
+const READ_AT_MOST = 4 * MOST_KEPT_AN_HOUR_IN_ALL;
+
 export function createProviderEvents({
   keys,
   ids,
   clock,
+  logger,
   retentionDays,
 }: {
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  /** Where a kept row whose MAC doesn't hold raises the alarm. */
+  readonly logger: Logger;
   /** How long a message is kept: the security events' retention (AGENTX_SECURITY_EVENT_RETENTION_DAYS). */
   readonly retentionDays: number;
 }): ProviderEvents {
@@ -196,33 +215,60 @@ export function createProviderEvents({
           address === null
             ? null
             : sql<string>`pg_catalog.network(pg_catalog.set_masklen(${address}::inet, case when pg_catalog.family(${address}::inet) = 6 then 64 else 32 end))`;
-        const counts = await tx
+        const inNetwork = network === null ? sql<SqlBool>`ip is null` : sql<SqlBool>`ip <<= ${network}`;
+        // The hour's rows, none dated past now (S206 V6: one the owner dated ahead would cap every hour to come).
+        const hour = tx
           .selectFrom('security.partner_event_evidence')
+          .where('received_at', '>', hourAgo)
+          .where('received_at', '<=', now);
+        // Counted first, in one statement: rows the owner planted only add to it, so a count under both caps with none
+        // from the network is the truth, and no row is read.
+        const counted = await hour
           .select((select) => [
             select.fn.countAll<string>().as('all'),
-            select.fn
-              .count<string>('id')
-              .filterWhere(network === null ? sql<SqlBool>`ip is null` : sql<SqlBool>`ip <<= ${network}`)
-              .as('from_network'),
+            select.fn.count<string>('id').filterWhere(inNetwork).as('from_network'),
           ])
-          .where('received_at', '>', hourAgo)
           .executeTakeFirstOrThrow();
-        const fromNetwork = Number(counts.from_network);
-        if (fromNetwork >= MOST_KEPT_AN_HOUR || Number(counts.all) >= MOST_KEPT_AN_HOUR_IN_ALL) return 'capped';
+        let fromNetwork = Number(counted.from_network);
+        let all = Number(counted.all);
+        if (fromNetwork > 0 || all >= MOST_KEPT_AN_HOUR_IN_ALL) {
+          // The count may be the owner's doing: each row believed only if its MAC holds. At most the hour's caps of
+          // rows are honest, so a read past READ_AT_MOST is the owner's flood: the rest are not read.
+          const recent = await hour
+            .select(['id', 'reason', 'ip', 'body_key_version', 'body_bytes', 'received_at', 'mac', 'mac_key_version'])
+            .select(inNetwork.as('in_network'))
+            .orderBy('received_at', 'desc')
+            .limit(READ_AT_MOST)
+            .execute();
+          const believed = recent.filter((row) => rowMacHolds(keys, evidenceMessage(row), row));
+          // One line a message, naming the first such row and how many: a planted flood is one alarm, not hundreds.
+          const forged = recent.filter((row) => !believed.includes(row));
+          if (forged[0] !== undefined) {
+            logger.error('audit.integrity_failed', {
+              check: 'partner_event_evidence',
+              reason: 'mac',
+              rowId: forged[0].id,
+              rows: forged.length,
+            });
+          }
+          fromNetwork = believed.filter((row) => row.in_network).length;
+          all = believed.length;
+        }
+        if (fromNetwork >= MOST_KEPT_AN_HOUR || all >= MOST_KEPT_AN_HOUR_IN_ALL) return 'capped';
         const id = ids.next();
         const kept = body.subarray(0, MOST_KEPT_BYTES);
         const sealed = keys.encrypt('field-encryption', kept, evidenceData(id));
+        const row = {
+          id,
+          reason,
+          ip: address,
+          body_key_version: sealed.keyVersion,
+          body_bytes: kept.length,
+          received_at: now,
+        };
         await tx
           .insertInto('security.partner_event_evidence')
-          .values({
-            id,
-            reason,
-            ip: address,
-            body_ciphertext: sealed.ciphertext,
-            body_key_version: sealed.keyVersion,
-            body_bytes: kept.length,
-            received_at: now,
-          })
+          .values({ ...row, body_ciphertext: sealed.ciphertext, ...rowMac(keys, evidenceMessage(row)) })
           .execute();
         return fromNetwork === 0 ? 'first' : 'kept';
       }),

@@ -2,7 +2,7 @@
 // schema: a retention below the least, or not a whole number of days, is refused
 // before anything is built, so no sweep can delete a fresh partner message.
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { FixedClock, SequentialIds } from '@agentx/testing';
+import { FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
 import { createProviderEvents, LEAST_RETENTION_DAYS } from './provider-events.ts';
@@ -13,7 +13,13 @@ const keys = createKeyProvider(
   ),
 );
 const build = (retentionDays: number) =>
-  createProviderEvents({ keys, ids: new SequentialIds(1), clock: new FixedClock(new Date(0)), retentionDays });
+  createProviderEvents({
+    keys,
+    ids: new SequentialIds(1),
+    clock: new FixedClock(new Date(0)),
+    logger: testLogger(),
+    retentionDays,
+  });
 
 describe('provider events retention', () => {
   it(`keeps messages at least ${String(LEAST_RETENTION_DAYS)} whole days`, () => {

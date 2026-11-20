@@ -42,6 +42,7 @@ import { API_PURPOSES, type KeyProvider, loadKeys, OPERATOR_ONLY } from '../../p
 import { FixedClock, testLogger } from '../../packages/testing/src/index.ts';
 
 import { createHandoff, handoffDatabaseGate } from '../../apps/api/src/handoff.ts';
+import { createSecuritySeal, type SecuritySealTables } from '../../apps/api/src/security-seal.ts';
 import { createRailHealth } from '../../apps/api/src/rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables } from '../../apps/api/src/handoff-world.helper.test.ts';
 import { createMandateRegistry } from '../../apps/api/src/mandate-registry.ts';
@@ -110,7 +111,9 @@ const cookieHeader = (cookie: string) => ({ cookie: `__Host-agentx-session=${coo
 const { password, users } = inject('e2e');
 // Reuse the driver's code history when recovery signs the same person in again.
 const personLogin = loginDriver({ password, callback: /^http:\/\/localhost:8080\/tamper-signed-in$/ });
-const database = createDatabase<HandoffWorldTables & ActivityExportTables & ActivityTables & InstructionsTables>(
+const database = createDatabase<
+  HandoffWorldTables & ActivityExportTables & ActivityTables & InstructionsTables & SecuritySealTables
+>(
   {
     host: '127.0.0.1',
     port: 56541,
@@ -1300,6 +1303,18 @@ beforeAll(async () => {
     ids: uuidV7Ids,
     clock,
     logger: testLogger(),
+  }).run();
+  // The API's security seal (S206 V6) seals each closed UTC day of an organisation's own security events on its chain,
+  // at the organisation's slot: run here first for the foreign organisation, as the job would, so the snapshot holds
+  // any seal due. With no new rows of its own, a later visit writes nothing, so a change after is still a request's.
+  await createSecuritySeal({
+    list: () => Promise.resolve([foreign.world.org]),
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock,
+    logger: testLogger(),
+    retentionDays: 90,
   }).run();
   foreignBefore = await foreignChain();
   expect(foreignBefore.events).toBeGreaterThan(0);

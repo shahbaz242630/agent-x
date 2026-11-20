@@ -1326,6 +1326,32 @@ export const PLAIN_WORDS = {
     broke: 'They are not in the security records yet; they were kept in memory.',
     next: 'They are tried again a minute later. If it keeps failing, check the database.',
   },
+  'security.legacy_seal_failed': {
+    happened: 'The API could not seal the security records from before this release.',
+    broke: 'Those older records are not shown or counted until sealed; the API and new records are unaffected.',
+    next: 'The next start takes the sealing up again. If it keeps failing, check the database and the platform audit chain.',
+  },
+  'security.legacy_seal_unanchored': {
+    happened: 'A record of the older security records’ sealing could not be anchored at once.',
+    broke: 'Until the next anchor check anchors it, that record could be removed without the next sealing noticing.',
+    next: 'Nothing to do if the next anchor check succeeds. If anchoring keeps failing, check the anchor store.',
+  },
+  'security_event_seal.failed': {
+    happened: 'The daily seal of the security records could not be made or checked this run.',
+    broke: 'A change to them is not caught until the next run, 30 minutes later.',
+    next: 'Nothing to do if it is rare. If it repeats, check the database and the audit chains.',
+  },
+  'security_event_seal.moved': {
+    happened: 'A day of the security records changed while it was being sealed.',
+    broke:
+      'That day and every later one stay unsealed. A closed day never changes: a server clock is far off, or this is tampering.',
+    next: "Check the servers' clocks and the database for changes made outside the app.",
+  },
+  'security_event_seal.run_failed': {
+    happened: 'A run of the security records seal stopped early on an error.',
+    broke: "Organisations' security records are not sealed or checked until the next run, 30 minutes later.",
+    next: 'Nothing to do if it is rare. If it repeats, a developer should find the cause in the log.',
+  },
   'spend_request.organisation_busy': {
     happened: "An organisation's agents had as many payment requests running as they may, and one waited too long.",
     broke: 'That one was turned away as busy and nothing was saved. Other organisations carried on.',
