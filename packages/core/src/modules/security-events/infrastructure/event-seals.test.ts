@@ -45,7 +45,7 @@ const facts = (change: Partial<EventFacts> = {}): EventFacts => ({
 
 const holds = (made: EventFacts, read: EventFacts, by = keys) => eventMacHolds(by, read, eventMac(keys, made));
 
-describe('a security event’s MAC (S206 V6)', () => {
+describe('SEC-DB-18 a security event’s MAC (S206 V6)', () => {
   it('holds over the row as written, and as Postgres gives it back', () => {
     expect(holds(facts(), facts())).toBe(true);
     // An IPv6 address the API had in capitals and in full reads back compressed, in lower case.
@@ -92,7 +92,7 @@ describe('a security event’s MAC (S206 V6)', () => {
   });
 });
 
-describe('the seal check’s rules (S206 V6)', () => {
+describe('SEC-DB-18 the seal check’s rules (S206 V6)', () => {
   const sealOf = (day: string, digest = `digest-${day}`) => ({
     day,
     requests: 1,

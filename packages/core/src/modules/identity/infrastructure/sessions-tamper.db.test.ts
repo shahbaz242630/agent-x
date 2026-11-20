@@ -373,7 +373,7 @@ describe(`the owner can't verify a person's step-up (Postgres ${server.version})
   });
 });
 
-describe(`the owner can't use a step-up twice by putting its challenge back (R-15, S206; Postgres ${server.version})`, () => {
+describe(`SEC-DB-15 the owner can't use a step-up twice by putting its challenge back (R-15, S206; Postgres ${server.version})`, () => {
   const trail = createAuditTrail({ keys, ids });
   const ORG = '0199a0f0-0000-7000-8000-000000005206';
 
