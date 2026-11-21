@@ -57,6 +57,7 @@ export {
   sameFrom,
   splitHeldIn,
   splitHeldLess,
+  heldWindowsGivenBack,
   windowsGivenBack,
   type WindowsChecked,
   type WindowsHeld,

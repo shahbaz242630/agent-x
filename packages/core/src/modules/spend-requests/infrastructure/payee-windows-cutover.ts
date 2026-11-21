@@ -63,6 +63,10 @@ export type WindowsCutoverDone =
 const ALREADY = Object.freeze({ outcome: 'already' as const });
 const NOT_YET = Object.freeze({ outcome: 'not_yet' as const });
 const TAMPERED = Object.freeze({ outcome: 'tampered' as const });
+/** The windows already counted, or their log not believed: nothing to cut over. */
+const STOPPED_BY = { cut_over: ALREADY, tampered: TAMPERED } as const;
+/** The month totals not cut over yet, or their log not believed: the windows wait for them. */
+const WAITING_ON = { not_yet: NOT_YET, tampered: TAMPERED } as const;
 
 /**
  * The organisation cut over to signed payee windows, in the caller's transaction (withSignedStates' for it), at `at`;
@@ -79,9 +83,9 @@ export async function cutOverPayeeWindows<Tx extends CutoverTransaction>(
   }: { readonly payments: PaymentsOf<Tx>; readonly record: (event: AuditEvent) => Promise<unknown>; readonly at: Date },
 ): Promise<WindowsCutoverDone> {
   const now = await payeeWindowsCutOver(tx, states, orgId);
-  if (now !== 'not_yet') return now === 'cut_over' ? ALREADY : TAMPERED;
+  if (now !== 'not_yet') return STOPPED_BY[now];
   const months = await monthTotalsCutOver(tx, states, orgId);
-  if (months !== 'cut_over') return months === 'tampered' ? TAMPERED : NOT_YET;
+  if (months !== 'cut_over') return WAITING_ON[months];
   const keptFrom = keptFromHour(at);
   const signed: WindowsHeld = new Map();
   const sealedAhead: string[] = [];

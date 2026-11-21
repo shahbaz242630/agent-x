@@ -26,6 +26,7 @@ import {
   monthSpentRead,
   type MonthToSum,
   type Payee,
+  type PayeeWindowCheck,
   payeeWindowGathered,
   payeeWindowId,
   type PayeeWindowKey,
@@ -127,8 +128,10 @@ export async function monthLockedAndTotalsWeighed(
 ): Promise<TotalsWeighed & { readonly monthTotal: DecisionMonthTotal; readonly windows: DecisionWindows }> {
   const { agentId, month, currency } = toWeigh.month;
   const key = { agentId, month, currency };
-  const windowKeys = payee === null ? [] : payeeWindowKeys(payee);
-  const ids = windowKeys.map((windowKey) => payeeWindowId(orgId, windowKey));
+  const windows = (payee === null ? [] : payeeWindowKeys(payee)).map((windowKey) => ({
+    key: windowKey,
+    id: payeeWindowId(orgId, windowKey),
+  }));
   const others = totalsRead(tx, { ...toWeigh, month: null });
   const {
     ahead: [, locked, found],
@@ -139,23 +142,29 @@ export async function monthLockedAndTotalsWeighed(
     [
       monthTotalGathered(orgId, key, 'change'),
       // In the lock order: each window after the total, in order of ID.
-      ...windowKeys
-        .map((windowKey, index) => ({ windowKey, id: ids[index] ?? '' }))
+      ...windows
         .toSorted((a, b) => payeeWindowOrder(a.id, b.id))
-        .map(({ windowKey }) => payeeWindowGathered(orgId, windowKey, 'change')),
+        .map((window) => payeeWindowGathered(orgId, window.key, 'change')),
     ],
   );
   if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
   const weighed = totalsOf(found.rows[0] as Parameters<typeof totalsOf>[0]);
   // Answered from the gather: no trip.
   const total = await monthTotalOf(tx, states, orgId, key, 'change');
-  const windowReads = [];
-  for (const id of ids) windowReads.push(await payeeWindowOf(tx, states, orgId, id, 'change'));
-  const counted = await countedAsRead(tx, states, orgId, total, windowReads);
+  const reads = [];
+  for (const window of windows)
+    reads.push({ key: window.key, read: await payeeWindowOf(tx, states, orgId, window.id, 'change') });
+  const counted = await countedAsRead(
+    tx,
+    states,
+    orgId,
+    total,
+    reads.map(({ read }) => read),
+  );
   return {
     ...weighed,
     monthTotal: decisionTotal(key, total, counted.monthTotals),
-    windows: decisionWindows(windowKeys, windowReads, counted.payeeWindows),
+    windows: decisionWindows(reads, counted.payeeWindows),
   };
 }
 
@@ -187,26 +196,27 @@ function decisionTotal(key: MonthTotalKey, total: MonthTotalCheck, counted: Coun
   if (total.outcome === 'tampered') return TAMPERED;
   if (total.outcome === 'held') return { outcome: 'held', key, total, spent: total.held };
   if (counted === 'cut_over') return { outcome: 'none', key, total, spent: 0n };
-  return counted === 'tampered' ? TAMPERED : BUSY;
+  return NOT_COUNTED[counted];
 }
+
+/** What a read missing answers before the organisation is counted: busy, or its log can't be believed. */
+const NOT_COUNTED = {
+  not_yet: Object.freeze({ outcome: 'busy' as const }),
+  tampered: Object.freeze({ outcome: 'tampered' as const }),
+} as const;
 
 /** A decision's windows as read: any tampered with refuses them all; one missing holds nothing once cut over, else busy. */
 function decisionWindows(
-  keys: readonly PayeeWindowKey[],
-  reads: readonly Awaited<ReturnType<typeof payeeWindowOf>>[],
+  reads: readonly { readonly key: PayeeWindowKey; readonly read: PayeeWindowCheck }[],
   counted: Counted,
 ): DecisionWindows {
   const rows: { readonly key: PayeeWindowKey; readonly read: WindowToWrite }[] = [];
-  for (const [index, read] of reads.entries()) {
-    const key = keys[index];
-    if (read.outcome === 'tampered' || key === undefined) return TAMPERED;
+  for (const { key, read } of reads) {
+    if (read.outcome === 'tampered') return TAMPERED;
     rows.push({ key, read });
   }
-  if (rows.some(({ read }) => read.outcome === 'none') && counted !== 'cut_over') {
-    return counted === 'tampered' ? TAMPERED : BUSY;
-  }
+  if (counted !== 'cut_over' && rows.some(({ read }) => read.outcome === 'none')) return NOT_COUNTED[counted];
   return { outcome: 'read', rows };
 }
 
-const TAMPERED = Object.freeze({ outcome: 'tampered' as const });
-const BUSY = Object.freeze({ outcome: 'busy' as const });
+const TAMPERED = NOT_COUNTED.tampered;

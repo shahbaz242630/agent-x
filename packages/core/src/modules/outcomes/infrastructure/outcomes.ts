@@ -14,7 +14,7 @@ import {
   type LimitReservationsTables,
   lockReservationsOf,
   settleReservationsOf,
-  windowsGivenBack,
+  heldWindowsGivenBack,
 } from '../../limit-reservations/index.ts';
 import {
   lockClaimsOf,
@@ -97,13 +97,10 @@ export async function settleHoldings(
     });
     // Its payee windows likewise (GM-1b), read for change with the total: none read, nothing given back, which the
     // holdings check then finds as a window holding more than its reservations, never less.
-    const held = totalsLocked.get(tx)?.get(requestId.toLowerCase());
-    if (held !== undefined && held !== null) {
-      await windowsGivenBack(tx, states, orgId, held.windowsRead, held.windows, {
-        at,
-        change: { actor: { type: 'system', id: 'api' }, action: 'payee_window.released', details: {} },
-      });
-    }
+    await heldWindowsGivenBack(tx, states, orgId, totalsLocked.get(tx)?.get(requestId.toLowerCase()), {
+      at,
+      change: { actor: { type: 'system', id: 'api' }, action: 'payee_window.released', details: {} },
+    });
   }
   if (reservation !== null) await settleReservationsOf(tx, { requestId, to: reservation, at });
   if (releasesClaim) await releaseClaim(tx, { requestId, releasedAt: at });

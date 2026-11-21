@@ -38,7 +38,7 @@ export function heldByHourFrom(text: string): HeldByHour | undefined {
     const hour = Number(found[1]);
     if (hour <= last) return undefined;
     last = hour;
-    held.set(hour, BigInt(found[2] ?? ''));
+    held.set(hour, BigInt(String(found[2])));
   }
   return held;
 }

@@ -25,8 +25,10 @@ import {
   windowsGivenBack,
 } from '@agentx/core/modules/limit-reservations';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { paymentHoldsOf } from '@agentx/core/modules/outcomes';
 import {
   cancelRequest,
+  cutOverPayeeWindows,
   expireRequest,
   rejectRequest,
   requestOf,
@@ -866,6 +868,47 @@ describe('an organisation made before GM-1b, until its cutover', () => {
     expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 1, mismatched: 1 })]);
     expect(await heldIn(w, supplierKey(supplierOf_(w)))).toBe(ORDER);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('alarms a payee the reservations hold capacity with that no signed request does, and opens nothing for it', async () => {
+    const { w, acting } = await ready({ madeBeforePayeeWindows: true });
+    await cutOverByHand(w);
+    const ended = await decided(acting, w, ORDER, supplierOf_(w, 1));
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: ended.id },
+        { kind: 'user', userId: '0199a0f0-0000-7000-8000-0000000000aa' },
+        clock.now(),
+      ),
+    );
+    await asBeforeGm1b(w, [ended.id]);
+    // Its reservation held again past the app.
+    await asOwner(w, (owner) =>
+      owner.query(
+        "update limit_reservations.reservations set state = 'HELD', settled_at = null where request_id = $1",
+        [ended.id],
+      ),
+    );
+
+    await visit(w);
+    expect(lines('payee_windows.cut_over')).toEqual([expect.objectContaining({ opened: 0, mismatched: 1 })]);
+    expect(await heldIn(w, supplierKey(supplierOf_(w, 1)))).toBe('none');
+  });
+
+  it('answers a cutover asked directly: already for one born counted, waiting for its month totals before them', async () => {
+    const cut = (w: World) =>
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        cutOverPayeeWindows(tx, states, w.org, {
+          payments: paymentHoldsOf,
+          record: (event) => createAuditTrail({ keys, ids }).record(tx, w.org, event),
+          at: clock.now(),
+        }),
+      );
+    expect(await cut((await ready()).w)).toEqual({ outcome: 'already' });
+    expect(await cut((await ready({ madeBeforeMonthTotals: true })).w)).toEqual({ outcome: 'not_yet' });
   });
 
   it('opens nothing for an hour no window counts any more, nor for a request ended before it', async () => {

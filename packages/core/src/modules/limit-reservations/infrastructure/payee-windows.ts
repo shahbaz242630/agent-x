@@ -135,15 +135,13 @@ const NONE = Object.freeze({ outcome: 'none' as const });
 export function payeeWindowFrom(check: StateCheck): PayeeWindowCheck {
   if (check.outcome === 'tampered') return check;
   if (check.outcome === 'missing') return NONE;
-  const text = check.fields.get('held_by_hour');
-  const currency = check.fields.get('currency');
-  // The seal holds them to what the app wrote, which is always in this form.
-  const held = typeof text === 'string' ? heldByHourFrom(text) : undefined;
-  if (held === undefined || typeof currency !== 'string') throw new Error('A verified payee window holds no hours');
+  // The seal holds them to what the app wrote, which is always in this form (0112's checks: none of them null).
+  const held = heldByHourFrom(String(check.fields.get('held_by_hour')));
+  if (held === undefined) throw new Error('A verified payee window holds no hours');
   const key = {
     supplierId: check.fields.get('supplier_id') ?? null,
     payeeKey: check.fields.get('payee_key') ?? null,
-    currency,
+    currency: String(check.fields.get('currency')),
   };
   return Object.freeze({ outcome: 'held', held, key, state: check });
 }
@@ -330,8 +328,7 @@ export async function windowsGivenBack(
     const id = take.id.toLowerCase();
     byWindow.set(id, [...(byWindow.get(id) ?? []), take]);
   }
-  for (const id of [...byWindow.keys()].toSorted(payeeWindowOrder)) {
-    const taken = byWindow.get(id) ?? [];
+  for (const [id, taken] of [...byWindow].toSorted(([a], [b]) => payeeWindowOrder(a, b))) {
     const window = read.get(id);
     if (window === undefined) throw new Error(`A payee window given back to was not read for change: ${id}`);
     if (window.outcome === 'tampered') continue;
@@ -355,6 +352,24 @@ export async function windowsGivenBack(
       },
     });
   }
+}
+
+/**
+ * windowsGivenBack for one request's capacity as its caller locked it (a payment's verified failure): none, for a
+ * request that can't be believed or whose decision sealed no month (decided before E1), gives nothing back.
+ */
+export async function heldWindowsGivenBack(
+  tx: WindowsTransaction,
+  states: SignedStates,
+  orgId: string,
+  held:
+    | { readonly windowsRead: ReadonlyMap<string, PayeeWindowCheck>; readonly windows: readonly WindowTake[] }
+    | null
+    | undefined,
+  recorded: { readonly at: Date; readonly change: SignedChange },
+): Promise<void> {
+  if (held === null || held === undefined) return;
+  await windowsGivenBack(tx, states, orgId, held.windowsRead, held.windows, recorded);
 }
 
 /** What the reservations hold in one hour, for one supplier, key and currency, and whether their decisions sealed windows. */
