@@ -189,7 +189,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     // Long enough for a job to have begun, were there one: each starts at once.
     await new Promise((resolve) => setTimeout(resolve, 500));
     const seen = run.capture.lines().map((line) => String(line.event));
-    expect(seen.filter((event) => /^audit\.|_sweep_done$|^idempotency\./.test(event))).toEqual([]);
+    // No store is named here, so the web copy says once that it decides without the digest (AT13b), and nothing else.
+    expect(seen.filter((event) => /^audit\.|_sweep_done$|^idempotency\./.test(event))).toEqual([
+      'audit.web_anchors_off',
+    ]);
     await stop(run);
     await expectNoApiConnections();
   });
