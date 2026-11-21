@@ -2173,8 +2173,28 @@ describe('what a handed-off request holds follows its payment (C3; ADR-006 ยง10โ
 
     expect(await holdingsOf(w, paid.id)).toEqual(HOLDS_AFTER.SUCCEEDED);
     expect(await holdingsOf(w, failed.id)).toEqual(HOLDS_AFTER.FAILED);
+    // Its order let go of in its slots once the failure is proven (TR-2); the paid one's held for good.
+    const slotsLetGo = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('details')
+        .where('subject_type', '=', 'order_slot')
+        .where('action', '=', 'order_slot.released')
+        .execute(),
+    );
+    expect(slotsLetGo.length).toBeGreaterThan(0);
+    for (const { details } of slotsLetGo) {
+      expect(JSON.parse(details)).toMatchObject({ requestIds: failed.id.toLowerCase() });
+    }
     expect(await holdingsChecked(w)).toEqual([
-      expect.objectContaining({ mismatched: 0, tampered: 0, totals: 1, totalsMismatched: 0 }),
+      expect.objectContaining({
+        mismatched: 0,
+        tampered: 0,
+        totals: 1,
+        totalsMismatched: 0,
+        slotsMismatched: 0,
+        slotsMissing: 0,
+      }),
     ]);
   });
 
