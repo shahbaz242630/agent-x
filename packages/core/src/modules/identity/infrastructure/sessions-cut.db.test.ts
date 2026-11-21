@@ -305,14 +305,12 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
     expect(answers()).toHaveLength(1);
   });
 
-  it('a copy finding the cut after another answered: held to the same head it takes that answer; to another, it answers again', async () => {
-    const [behind, one, two] = [await newDigest(), await newDigest(), await newDigest()];
+  it('a copy finding the cut after another copy recorded an answer records its own: an older record never answers a cut', async () => {
+    const [one, two] = [await newDigest(), await newDigest()];
     const first = await signedIn();
     const before = await headRow();
     await signOut((await signedIn()).cookie);
-    // One copy saw the chain after the first sign-out only, the other two after a second.
-    expect(await copy(behind, false).use(app, first.cookie)).toBeDefined();
-    await signOut((await signedIn()).cookie);
+    // Both copies held to the same head, past the sign-out.
     expect(await copy(one, false).use(app, first.cookie)).toBeDefined();
     expect(await copy(two, false).use(app, first.cookie)).toBeDefined();
     await cutBackTo(before);
@@ -320,18 +318,19 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
 
     expect(await copy(one).use(app, first.cookie)).toBeUndefined();
     expect(await allEndedRecords()).toBe(records + 1);
-    // Someone signs in again; the other copies find the cut as they read that session.
+    // Someone signs in again; the other copy finds the cut as it reads that session.
     clock.advanceBy(1000);
     const again = await signedIn();
-    // Found after that committed, at or above it, held to the same head: the record names it, so it is taken.
+    // The record was there before it went to answer: it can't be shown to come after every event the copy held (the
+    // owner could have put it back from an earlier cut), so it answers again, once.
     expect(await copy(two).holder(app, again.cookie)).toBeUndefined();
-    expect(await allEndedRecords()).toBe(records + 1);
-    expect(lines('identity.sessions_all_ended_found')).toHaveLength(1);
-    expect(await copy(two).holder(app, again.cookie)).toBe(again.userId);
-    // Held to another head: the record can't be shown to come after the cut it found, so it answers again.
-    expect(await copy(behind).holder(app, again.cookie)).toBeUndefined();
     expect(await allEndedRecords()).toBe(records + 2);
     expect(answers()).toHaveLength(2);
+    expect(lines('identity.sessions_all_ended_found')).toEqual([]);
+    clock.advanceBy(1000);
+    const later = await signedIn();
+    expect(await copy(two).holder(app, later.cookie)).toBe(later.userId);
+    expect(await copy(one).holder(app, later.cookie)).toBe(later.userId);
   });
 
   it('the answer cut off too: found again and answered again, but once a copy a minute at most, refusing meanwhile', async () => {
@@ -471,6 +470,37 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
         [JSON.stringify(record?.kept)],
       );
       await asOwner('delete from identity.sessions where id = $1', [old.sessionId]);
+    }
+  });
+
+  it('a sign-in whose check finds an event edited (not the chain wound back) stays refused, whatever answer came after', async () => {
+    const ends = { logger: testLogger(capture), signedEnds: createSignedEnds(keys) };
+    const endsAt = (userId: string) =>
+      app
+        .transaction()
+        .execute((tx) => sessionsEndedAt(tx as unknown as Kysely<IdentityTables>, userId, ends, clock.now()));
+    const person = await signedIn();
+    expect(await endsAt(person.userId)).toMatchObject({ kind: 'read' });
+    await signOut((await signedIn()).cookie);
+    const edited = (await headRow()).seq;
+    await platform.recordAlone(
+      app,
+      sessionsAllEndedEvent({ held: { seq: 1n, hash: Buffer.alloc(32) }, found: 1n }, clock.now()),
+    );
+    const [kept] = await asOwner('select e.details from platform_controls.audit_events e where e.seq = $1::bigint', [
+      edited.toString(),
+    ]);
+    await asOwner("update platform_controls.audit_events set details = '{}' where seq = $1::bigint", [
+      edited.toString(),
+    ]);
+    try {
+      expect(await endsAt(person.userId)).toEqual({ kind: 'tampered' });
+      expect(alarms()).toEqual([expect.objectContaining({ check: 'platform_chain' })]);
+    } finally {
+      await asOwner('update platform_controls.audit_events set details = $2 where seq = $1::bigint', [
+        edited.toString(),
+        kept?.details,
+      ]);
     }
   });
 

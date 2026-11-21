@@ -24,7 +24,10 @@
 // cut back (sessions-all-ended.ts), every person's sessions ended at its `at`. Kept as everyone's end here. A head
 // wound back behind where this process got to breaks the check, as before, unless such an end was recorded after the
 // event it got to (the database's clock, under the head's lock, for both): then the chain was cut back before it, the
-// end answers it, and the check goes on afresh from the sign-in's moment, the ends kept carried over.
+// end answers it, and the check goes on afresh from the sign-in's moment, the ends kept carried over. An end this
+// process never checked, cut off by a later cut, is no better known afresh than by a process just started (its bound);
+// the session such a sign-in opens is still held by the sessions' reads (sessions.ts). Only a wound-back chain is
+// answered so: an event edited or missing breaks the check, and raises the alarm, as before.
 import type { KeyProvider } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 
@@ -230,6 +233,9 @@ async function allEndedAfter(tx: PlatformTransaction, keys: KeyProvider, point: 
   return row !== undefined && platformEventSealed(keys, row);
 }
 
+/** The problems a stretch's check gives for a chain wound back behind a place checked before (checkPlatformStretch). */
+const WOUND_BACK: ReadonlySet<string> = new Set(['head', 'anchor']);
+
 export function createSignedEnds(keys: KeyProvider): SignedEnds {
   let reached: Reached | undefined;
   let running: Promise<EndsChecked> | undefined;
@@ -265,8 +271,10 @@ export function createSignedEnds(keys: KeyProvider): SignedEnds {
   const checkFrom = async (tx: PlatformTransaction, since: Date): Promise<EndsChecked> => {
     const was = reached;
     const found = await walkFrom(tx, since, was);
-    if (found.kind === 'checked' || was?.point === undefined || !(await allEndedAfter(tx, keys, was.point)))
-      return found;
+    // Only the chain wound back behind where it got to (a head below it, or another event there) is answered so: an event
+    // edited or missing breaks the check as before.
+    if (found.kind === 'checked' || was?.point === undefined || !WOUND_BACK.has(found.problem.reason)) return found;
+    if (!(await allEndedAfter(tx, keys, was.point))) return found;
     // AT13h, the header: the chain cut back behind where it got to, answered by every session's end: afresh from `since`.
     return walkFrom(tx, since, { point: undefined, from: since, ends: was.ends });
   };

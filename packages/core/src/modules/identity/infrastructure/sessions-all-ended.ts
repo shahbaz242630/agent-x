@@ -9,11 +9,15 @@
 // restarted or not, as each read finds the record by its index; any signed in after it can't be one a deleted end named.
 //
 // In one transaction of its own, each statement limited:
-// - a lock only this takes (a transaction advisory lock), so copies answering the same cut at once go one at a time;
-// - the newest such record read: one sealed, at or below the head, and recorded after the read that found the cut (above
-//   the head it found) or for the same head held to (its `seen`), answers the cut already, and nothing is recorded;
+// - the database's clock read, then a lock only this takes (a transaction advisory lock), so copies answering the same
+//   cut at once go one at a time;
+// - a record sealed, at or below the head, and recorded after that moment (the database's clock under the head's lock)
+//   was recorded on the chain as this copy found it, after every event it held: it answers the cut, and nothing more
+//   is recorded. Any older one, or one the owner put back, answers nothing: a copy that finds the cut once another's
+//   record has committed records its own (no clock-free proof that one came after its cut), once a minute at most;
 // - else every session's row deleted, but those another transaction holds now (a request reading its own session):
-//   the record ends them all the same, quietly, and the hourly sweep takes them; then the record, the head's lock last;
+//   the record ends them all the same, quietly, and the hourly sweep takes them; then the head's lock (the last lock),
+//   and the record, its time taken holding it;
 // - the head locked and read, sealed, at or above the record: where the chain is taken from once the transaction
 //   commits (afterCommit), so nothing this copy records meanwhile is missed. A head below it is taken from nowhere.
 // A failure is logged and nothing is taken: the reads go on refusing, as before.
@@ -60,20 +64,19 @@ export interface AllSessionsEnding {
 const ONE_AT_A_TIME = sql<string>`pg_catalog.hashtextextended(${SESSIONS_ALL_ENDED}, 0)`;
 
 /**
- * The place of the newest record of every session's end, where it answers the cut already: sealed, at or below the
- * head, and recorded after the head the read found, or for the same head held to. One statement.
+ * The place of a record of every session's end that answers the cut already: sealed, at or below the head, and
+ * recorded (the database's clock, under the head's lock) after `asked`, a moment after the read that found the cut, so
+ * on the chain as it found it. An older one, or one put back by the owner, answers nothing. One statement.
  */
-async function answeredAt(tx: PlatformTransaction, keys: KeyProvider, cut: CutAnswered): Promise<bigint | undefined> {
+async function answeredSince(tx: PlatformTransaction, keys: KeyProvider, asked: Date): Promise<bigint | undefined> {
   const row = await platformEventsSigned(tx)
     .where('e.action', '=', SESSIONS_ALL_ENDED)
+    .where('e.recorded_at', '>', asked)
     .where('e.seq', '<=', sql<bigint>`(select h.seq from platform_controls.audit_head h limit 1)`)
     .orderBy('e.seq', 'desc')
     .limit(1)
     .executeTakeFirst();
-  if (row === undefined || !platformEventSealed(keys, row)) return undefined;
-  if (cut.found !== null && row.seq > cut.found) return row.seq;
-  const { seen, seenHash } = JSON.parse(row.details) as { seen?: unknown; seenHash?: unknown };
-  return seen === cut.held.seq.toString() && seenHash === cut.held.hash.toString('hex') ? row.seq : undefined;
+  return row !== undefined && platformEventSealed(keys, row) ? row.seq : undefined;
 }
 
 export function createAllSessionsEnding({
@@ -93,12 +96,14 @@ export function createAllSessionsEnding({
   let startedAt: number | undefined;
 
   const end = async (cut: PlatformCut): Promise<void> => {
-    const endedAt = clock.now();
     const done = await db.transaction().execute(async (tx) => {
       await limitStatements(tx);
       const chain = tx as unknown as PlatformTransaction;
+      // The database's clock before waiting for the lock: after the read that found the cut.
+      const { rows } = await sql<{ now: Date }>`select pg_catalog.clock_timestamp() as now`.execute(tx);
+      const [{ now: asked }] = rows as [{ readonly now: Date }];
       await sql`select pg_catalog.pg_advisory_xact_lock(${ONE_AT_A_TIME})`.execute(tx);
-      let seq = await answeredAt(chain, keys, cut);
+      let seq = await answeredSince(chain, keys, asked);
       let ended: number | undefined;
       if (seq === undefined) {
         const rows = await tx
@@ -107,7 +112,10 @@ export function createAllSessionsEnding({
           .returning('id')
           .execute();
         ended = rows.length;
-        seq = (await platform.record(chain, sessionsAllEndedEvent(cut, endedAt))).seq;
+        // Its time taken holding the head's lock (the last lock): every event before it on the chain was recorded before
+        // that time, so every session one names signed in before it. A sign-in as the rows went only signs in again.
+        await lockedPlatformHead(chain, keys);
+        seq = (await platform.record(chain, sessionsAllEndedEvent(cut, clock.now()))).seq;
       }
       const head = await lockedPlatformHead(chain, keys);
       if (head !== undefined && head.seq >= seq) {
