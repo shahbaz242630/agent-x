@@ -273,7 +273,8 @@ async function send(
     headers: {
       origin: API_ORIGIN,
       'idempotency-key': randomUUID(),
-      'agentx-organization': own.world.org,
+      // A caller's own header never reads `own`: the foreign request is asked before own is seeded (E2E-1).
+      'agentx-organization': headers['agentx-organization'] ?? own.world.org,
       ...headers,
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
@@ -606,12 +607,13 @@ async function seedRequest(tenant: Tenant, purpose: string): Promise<void> {
   const op = operation('POST', '/v1/spend-requests');
   const answer = await controlSend(
     op,
-    { authorization: `Bearer ${tenant.key.text}` },
+    { authorization: `Bearer ${tenant.key.text}`, 'agentx-organization': tenant.world.org },
     {
       ...(sample(op.schema ?? {}, tenant) as Record<string, unknown>),
       purpose,
       orderReference: randomUUID(),
     },
+    routeOf(op, tenant),
   );
   expect(answer.status).toBe(201);
   const request = JSON.parse(answer.text) as { id: string; status: string };
