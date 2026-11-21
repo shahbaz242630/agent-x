@@ -25,7 +25,7 @@
 // after a proven failure), refused past the app (0060) and alarmed by the
 // holdings check where it gets past.
 import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
-import { createAuditTrail, holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
+import { checkStatesWith, createAuditTrail, holdOrganisation, withSignedStates } from '@agentx/core/modules/audit';
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { MANDATE_VERSIONS } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -54,7 +54,10 @@ import {
   type AnchorLog,
   type AnchorStore,
   type Chain,
+  CHAIN_START,
   createAnchorLog,
+  createDigestLog,
+  type DigestLog,
   createMemoryAnchorStore,
   signAnchor,
 } from '@agentx/platform/audit-chain';
@@ -63,6 +66,7 @@ import {
   createTestDatabase,
   FixedClock,
   LogCapture,
+  type SavedRow,
   SequentialIds,
   tamperAsOwner,
   type TestClient,
@@ -2402,6 +2406,155 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
     anchors.keep(signAnchor(keys, chain, { seq: BigInt(head.seq), hash: head.hash, macKeyVersion: 1 }, clock.now()));
     return anchors;
   }
+
+  /**
+   * The anchor check's walk of the whole chain, kept in a digest (AT13) as job-list.ts keeps one, and the chain anchored
+   * where it stands: what a process holding the digest gives Tx A. Every signed state read here is held to it until
+   * `checkStatesWith(undefined)`.
+   */
+  async function digestedNow(w: World): Promise<{ anchors: AnchorStore; digest: DigestLog }> {
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    const chain = { kind: 'organisation', orgId: w.org } as const;
+    const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
+    if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+    digest.record(chain, step.signed, clock.now(), { from: 0n, to: step });
+    const anchors = createMemoryAnchorStore();
+    anchors.keep(signAnchor(keys, chain, step, clock.now()));
+    return { anchors, digest };
+  }
+
+  describe('AT13: an authority row’s newest signed events deleted below the anchor, its row rolled back', () => {
+    interface Stop {
+      readonly table: typeof AGENT_KEYS | typeof AGENTS;
+      readonly action: string;
+      readonly id: (acting: { readonly keyId: string }, w: World) => string;
+      readonly change: (w: World, id: string) => Promise<unknown>;
+    }
+    const by = (action: string) => ({ actor: OPERATOR, action, details: { reason: 'test' } });
+    const KEY_REVOKED: Stop = {
+      table: AGENT_KEYS,
+      action: 'agent_key.revoked',
+      id: (acting) => acting.keyId,
+      change: (w, id) =>
+        signed(w, (tx, states) =>
+          states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id }, 'revoke', by('agent_key.revoked')),
+        ),
+    };
+    const AGENT_SUSPENDED: Stop = {
+      table: AGENTS,
+      action: 'agent.suspended',
+      id: (_acting, w) => w.agent,
+      change: (w, id) =>
+        signed(w, (tx, states) =>
+          states.changeStatus(tx, AGENTS, { orgId: w.org, id }, 'suspend', by('agent.suspended')),
+        ),
+    };
+
+    /** An approved request, then the row changed (a stop) and the change taken back by the owner below the anchor. */
+    async function rolledBack(stop: Stop) {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      const id = stop.id(acting, w);
+      let saved: SavedRow | undefined;
+      await asOwner(w, stop.table, async (owner) => {
+        saved = await owner.saveRow(id);
+      });
+      await stop.change(w, id);
+      // Events after it, so the change lies below the anchor and is not the anchored event itself.
+      await withTenant(app, w.org, async (tx) => {
+        for (const step of [1, 2]) {
+          await createAuditTrail({ keys, ids }).record(tx, w.org, {
+            actor: OPERATOR,
+            action: 'probe.stepped',
+            subject: { type: 'probe', id: w.agent, version: step },
+            details: { step },
+          });
+        }
+      });
+      const kept = await digestedNow(w);
+      const row = saved;
+      if (row === undefined) throw new Error('nothing saved');
+      await asOwner(w, stop.table, async (owner) => {
+        await owner.query('delete from audit.events where org_id = $1 and subject_id = $2 and action = $3', [
+          w.org,
+          id,
+          stop.action,
+        ]);
+        await owner.withoutStatusGuard(() => owner.restoreRow(row));
+      });
+      return { w, request, ...kept };
+    }
+
+    it.each([
+      ['an agent key’s revocation', KEY_REVOKED],
+      ['an agent’s suspension', AGENT_SUSPENDED],
+    ] as const)('%s: Tx A refuses at decision time, the hold, no call', async (_what, stop) => {
+      const { w, request, anchors, digest } = await rolledBack(stop);
+      checkStatesWith(digest);
+      try {
+        refusedWithTheHold(await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest }));
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(lines('audit.integrity_failed')).toContainEqual(
+        expect.objectContaining({ check: 'state', reason: 'log', subjectType: stop.table.subject }),
+      );
+    });
+
+    it('the positive control: with no digest the anchor alone lets the payment go, the limit AT13 closes', async () => {
+      const { w, request, anchors } = await rolledBack(KEY_REVOKED);
+      const made = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade });
+      expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+    });
+
+    it('a digest not yet read since the start: the payment waits, digest_pending, no call, no hold', async () => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      const anchors = await anchoredNow(w);
+      const unread = createDigestLog({
+        store: createFakeWriteOnceStore().store,
+        keys,
+        logger: testLogger(capture),
+        now: () => clock.now(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        mostBytes: 1024 * 1024,
+      });
+      checkStatesWith(unread);
+      try {
+        const made = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest: unread });
+        expect(made).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(lines('handoff.waiting')).toEqual([
+        expect.objectContaining({ requestId: request.id, why: 'digest_pending' }),
+      ]);
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
+
+    it('a chain grown honestly since the digest’s walk hands off as ever: no false alarm', async () => {
+      const { w, acting } = await ready();
+      await ask(acting, w, { amount: ALLOWED() });
+      const { anchors, digest } = await digestedNow(w);
+      const later = await ask(acting, w, { amount: ALLOWED() });
+      checkStatesWith(digest);
+      try {
+        const made = await handedOnce(w, later.id, { anchors, anchorFirst: noAnchorMade, digest });
+        expect(made).toMatchObject({ submitted: 2, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
+  });
 
   /** Events of the organisation's own, sealed by the app's keys and naming no state: the chain grows, nothing else. */
   const grown = (w: World, times: number) =>

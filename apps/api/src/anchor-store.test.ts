@@ -2,13 +2,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { signAnchor } from '@agentx/platform/audit-chain';
+import { signAnchor, subjectKey } from '@agentx/platform/audit-chain';
 import type { Config } from '@agentx/platform/config';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { anchorLogOf } from './anchor-store.ts';
+import { anchorLogOf, anchorsKeptOf } from './anchor-store.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -72,5 +72,28 @@ describe("where the chains' anchors are kept (PL-58)", () => {
     await newEpoch?.read();
     expect(newEpoch?.state()).toBe('read');
     expect(newEpoch?.latest({ kind: 'platform' })).toBeUndefined();
+  });
+
+  it('the signed states’ digest in the same folder, half the anchors’ budget, counted in theirs (AT13)', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'anchors-'));
+    folders.push(directory);
+    const config = configWith({ directory, container: null }, 2);
+    const kept = anchorsKeptOf(config, services);
+    if (kept === undefined) throw new Error('A folder is named');
+    const { log, digest } = kept;
+    expect(digest.memoryHeld().mostBytes).toBe(Math.floor(log.memoryHeld().mostBytes / 2));
+    const before = log.memoryHeld().bytes;
+    await log.read();
+    await digest.read();
+    const chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000001' } as const;
+    digest.record(chain, new Map([[subjectKey('agent', '0199a0f0-0000-7000-8000-0000000000a1'), 3n]]), AT);
+    expect(log.memoryHeld().bytes).toBe(before + digest.memoryHeld().bytes);
+    await digest.flush();
+
+    const after = anchorsKeptOf(config, services);
+    await after?.log.read();
+    await after?.digest.read();
+    expect(after?.digest.latest(chain, 'agent', '0199a0f0-0000-7000-8000-0000000000a1')).toBe(3n);
+    expect(anchorsKeptOf(configWith({ directory: null, container: null }), services)).toBeUndefined();
   });
 });

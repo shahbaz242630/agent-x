@@ -37,6 +37,15 @@
 // off that package; platform-controls, which keeps its own chain, and the apps,
 // which are no modules, are not held by it.
 //
+// The object's newest signed events deleted or moved below the anchor, older
+// than the last 1,000 of the chain, with its row rolled back to an older
+// genuine version, leave every seal true (decisions 1 and 2b): the anchor
+// check's walk keeps where each object's newest signed event was (the signed
+// states' digest, AT13; @agentx/platform/audit-chain's digest-log.ts), and a
+// trail given it reads an object whose newest signed event here is older than
+// that, or none, as broken at that place. In memory: no trip. An object signed
+// past the anchor isn't in it yet; the next check of the chain sees to that.
+//
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
 // an event sealed with a key the app still holds, though rotated out, which
@@ -79,9 +88,12 @@ import {
   passStep,
   probeEdges,
   sealedSigned,
+  type SignedSeen,
+  type StateDigest,
   type StateSeal,
   stateSealIn,
   type StoredEntry,
+  subjectKey,
   verifyChain,
   verifyFromAnchor,
   walkLast,
@@ -254,6 +266,37 @@ function walkedOf(entry: StoredEntry | undefined, actions: readonly string[]): W
   return { seq: entry.seq, recordedAt: entry.recordedAt, subjectId, details };
 }
 
+/**
+ * A walk's step (checkFromAnchor, passStep) and, for one that holds, each signed object its events named, with the
+ * newest signed place it read (AT13): what the anchor check keeps in the signed states' digest.
+ */
+export type WalkedStep = ChainStep & { readonly signed?: SignedSeen };
+
+/**
+ * The walk's own reads, each event looked at as it goes for a signed state, by the rule the decisions' read finds the
+ * newest by (latestWith: the seal's key in the details' text): no read of their own.
+ */
+function seeingSigned<Reader extends Pick<ChainReader, 'events'>>(reader: Reader, seen: Map<string, bigint>): Reader {
+  return {
+    ...reader,
+    async events(after, upTo, limit) {
+      const batch = await reader.events(after, upTo, limit);
+      for (const entry of batch) {
+        const [, , , , , , type, id, , , details] = entry?.content ?? [];
+        if (entry === undefined || typeof type !== 'string' || typeof id !== 'string') continue;
+        if (typeof details !== 'string' || !details.includes(HAS_STATE_SEAL)) continue;
+        const key = subjectKey(type, id);
+        if ((seen.get(key) ?? 0n) < entry.seq) seen.set(key, entry.seq);
+      }
+      return batch;
+    },
+  };
+}
+
+/** A step and what it saw, kept only for one that holds: a step that fails read no chain to believe. */
+const walked = (step: ChainStep, seen: ReadonlyMap<string, bigint>): WalkedStep =>
+  step.ok && seen.size > 0 ? { ...step, signed: seen } : step;
+
 /** An event of the log as its page shows it: whole, with the hashes that link it into the chain, as hex. */
 export interface LogEvent extends ReadEvent {
   readonly hash: string;
@@ -345,8 +388,9 @@ export interface AuditTrail {
    * `most` events past it, in withTenant's transaction for the organisation,
    * limited as verifyAlone's. For a chain that moved; it reads the wall's own
    * organisation alone, so a chain it can't see reads as empty, never another's.
+   * A step that holds says which signed objects it read (WalkedStep, AT13).
    */
-  checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<ChainStep>;
+  checkFromAnchor(db: Kysely<AuditTables>, orgId: string, from: CheckedPoint, most?: number): Promise<WalkedStep>;
   /**
    * checkFromAnchor from a place a check of the organisation's own reached (S206 V4: the notice check's), keeping the
    * events of `actions` its walk read. They are given only for a step that holds, each then in its place in one
@@ -361,7 +405,8 @@ export interface AuditTrail {
   ): Promise<{ readonly step: ChainStep; readonly kept: readonly WalkedEvent[] }>;
   /**
    * One step of a full pass over the chain's old events (passStep, 4D2e E), in a transaction as checkFromAnchor's,
-   * each trip's answer limited as verifyAlone's: the anchor check runs it (E7).
+   * each trip's answer limited as verifyAlone's: the anchor check runs it (E7). A step that holds says which signed
+   * objects it read (WalkedStep, AT13), so a pass brings a chain anchored before the digest into it.
    */
   passStep(
     db: Kysely<AuditTables>,
@@ -369,7 +414,7 @@ export interface AuditTrail {
     cursor: CheckedPoint,
     target: CheckedPoint,
     most: number,
-  ): Promise<ChainStep>;
+  ): Promise<WalkedStep>;
   /** Whether every event of a stretch of the chain is stored (countStep, 4D2e E), in a transaction as passStep's. */
   countStep(db: Kysely<AuditTables>, orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
   /** The chain's last `most` events up to `target` walked (walkLast, 4D2e E7), in a transaction as passStep's. */
@@ -1333,11 +1378,17 @@ export function createAuditTrail({
   keys,
   ids,
   correlationId,
+  digest,
 }: {
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   /** The request's or job's correlation ID (a UUID), sealed into each event's details; none when left out. */
   readonly correlationId?: string | undefined;
+  /**
+   * The signed states' digest (AT13), where this process keeps one (withSignedStates): every read of a latest signed
+   * state is held to it. None for a read that judges a copy, not the live log (a recovery plan's).
+   */
+  readonly digest?: Pick<StateDigest, 'latest'> | undefined;
 }): AuditTrail {
   if (correlationId !== undefined && !UUID.test(correlationId)) {
     throw new TypeError('A correlation ID sealed into the audit log must be a UUID');
@@ -1427,6 +1478,32 @@ export function createAuditTrail({
     chain: Chain & { readonly kind: 'organisation' },
     rows: readonly Readonly<Record<string, unknown>>[],
     first: Readonly<Record<string, unknown>> | undefined,
+    known: bigint | undefined,
+  ): LatestSignedState => heldToDigest(latestOfRows(chain, rows, first), known);
+
+  /**
+   * Where the digest (AT13) says the object's newest signed event is, if it says. Asked before the statement that reads
+   * the log is sent: whatever the walk read was committed by then, so the statement's snapshot, taken after, holds it,
+   * and a write landing meanwhile can never read as rolled back.
+   */
+  const knownOf = (chain: Chain & { readonly kind: 'organisation' }, type: string, id: string): bigint | undefined =>
+    digest?.latest(chain, type, id);
+
+  /**
+   * The latest signed state held to the digest: the newest signed event the anchor check's walk read for the object is
+   * at `known`, so one older here, or none, is broken there: deleted, moved or rolled back past the app. One already
+   * broken stays as it is; one at or past `known` is the log's to judge, as ever.
+   */
+  const heldToDigest = (latest: LatestSignedState, known: bigint | undefined): LatestSignedState => {
+    if (known === undefined || latest.kind === 'broken') return latest;
+    return latest.kind === 'none' || latest.seq < known ? brokenAt(known) : latest;
+  };
+
+  /** latestIn's judgement of the rows alone, as before the digest. */
+  const latestOfRows = (
+    chain: Chain & { readonly kind: 'organisation' },
+    rows: readonly Readonly<Record<string, unknown>>[],
+    first: Readonly<Record<string, unknown>> | undefined,
   ): LatestSignedState => {
     if (first === undefined) return { kind: 'none' };
     // The first event of the chain past its head (or of a chain with no head), if there is one: such a chain
@@ -1486,13 +1563,17 @@ export function createAuditTrail({
     for (const row of rows as readonly Readonly<Record<string, unknown>>[]) {
       if (typeof row.item === 'number') byItem[row.item]?.push(row);
     }
-    return byItem.map((own) => {
+    return byItem.map((own, item) => {
       const [first] = own;
       const asked = first?.asked_id;
+      const type = reads[item]?.subject;
+      // The object the row's read named, if it named one, found in the statement itself: so the digest is asked after
+      // it. That can only leave a row unbelieved, read again on its own (signed-states.ts), never an alarm.
+      const known = typeof asked === 'string' && type !== undefined ? knownOf(chain, type, asked) : undefined;
       // A backlog, past the head or not, is left to the row's own read, which judges it as it always has.
       return {
         id: typeof asked === 'string' ? asked : null,
-        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first),
+        latest: own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first, known),
         rows: rowsAlong(first),
       };
     });
@@ -1510,6 +1591,7 @@ export function createAuditTrail({
     await assertTenant(tx, orgId);
     const chain = chainOf(orgId);
     const id = subject.id.toLowerCase();
+    const known = knownOf(chain, subject.type, id);
     // The object's newest signed event and every one after it.
     const events = await eventsWithHead(
       tx,
@@ -1524,7 +1606,7 @@ export function createAuditTrail({
       rowRead === undefined ? {} : { alongside: rowRead },
     );
     const rows = rowRead === undefined ? undefined : rowsAlong(events[0]);
-    return { latest: latestIn(chain, events, events[0]), rows };
+    return { latest: latestIn(chain, events, events[0], known), rows };
   };
 
   /**
@@ -1598,14 +1680,16 @@ export function createAuditTrail({
       orgId: string,
       from: CheckedPoint,
       most?: number,
-    ): Promise<ChainStep> {
+    ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
-      return withTenant(
+      const seen = new Map<string, bigint>();
+      const step = await withTenant(
         db,
         chain.orgId,
-        (tx) => verifyFromAnchor(keys, chain, readerFor(tx, chain.orgId, keys), from, most),
+        (tx) => verifyFromAnchor(keys, chain, seeingSigned(readerFor(tx, chain.orgId, keys), seen), from, most),
         JOB_LIMITS,
       );
+      return walked(step, seen);
     },
 
     async walkFrom(
@@ -1647,14 +1731,16 @@ export function createAuditTrail({
       cursor: CheckedPoint,
       target: CheckedPoint,
       most: number,
-    ): Promise<ChainStep> {
+    ): Promise<WalkedStep> {
       const chain = chainOf(orgId);
-      return withTenant(
+      const seen = new Map<string, bigint>();
+      const step = await withTenant(
         db,
         chain.orgId,
-        (tx) => passStep(keys, chain, readerFor(tx, chain.orgId, keys), cursor, target, most),
+        (tx) => passStep(keys, chain, seeingSigned(readerFor(tx, chain.orgId, keys), seen), cursor, target, most),
         JOB_LIMITS,
       );
+      return walked(step, seen);
     },
 
     async countStep(
@@ -1793,6 +1879,8 @@ export function createAuditTrail({
       if (asked.length === 0) return new Map();
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
+      // Before the statement, as latestWith asks it.
+      const known = new Map(asked.map((id) => [id, knownOf(chain, type, id)]));
       // Each object's newest signed event and every one after it, as latestSignedState reads one object's, each
       // object's at most LATER_EVENTS_READ + 1 of its own: past that, its judgement below says so.
       const rows = await eventsWithHead(
@@ -1815,7 +1903,10 @@ export function createAuditTrail({
       return new Map(
         asked.map((id) => {
           const own = byObject.get(id) ?? [];
-          return [id, !pastHead && own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first)];
+          return [
+            id,
+            !pastHead && own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first, known.get(id)),
+          ];
         }),
       );
     },
