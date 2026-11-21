@@ -36,6 +36,7 @@ export {
   type TotalsChecked,
   totalsMissing,
 } from './infrastructure/month-totals.ts';
+export { PAYEE_WINDOWS } from './infrastructure/payee-windows.ts';
 export {
   agentMonth,
   agentMonthLocking,

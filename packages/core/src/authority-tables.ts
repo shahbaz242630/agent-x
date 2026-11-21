@@ -23,7 +23,7 @@ import {
   REGISTERED_CONTACTS,
 } from './modules/identity/index.ts';
 import { INSTRUCTIONS } from './modules/instructions/index.ts';
-import { AGENT_ZONES, MONTH_TOTALS } from './modules/limit-reservations/index.ts';
+import { AGENT_ZONES, MONTH_TOTALS, PAYEE_WINDOWS } from './modules/limit-reservations/index.ts';
 import { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './modules/mandates/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 import { SPEND_REQUESTS } from './modules/spend-requests/index.ts';
@@ -87,7 +87,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * instruction and transaction (10, Phase 4 B3), then an admin's proposal to
  * mark the transaction failed (10, after it: 0066, gate H10), then its agents'
  * month totals (11a, after the reservations and before the audit head: 0110,
- * GM-1a). Clearing the
+ * GM-1a), then its payees' split windows (11b, after the month totals and
+ * before the audit head: 0112, GM-1b). Clearing the
  * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
  * table with `liveStatuses`, its live and newest rows), so a new table goes in at its
  * level.
@@ -118,4 +119,5 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   TRANSACTIONS,
   FAILURE_PROPOSALS,
   MONTH_TOTALS,
+  PAYEE_WINDOWS,
 ];

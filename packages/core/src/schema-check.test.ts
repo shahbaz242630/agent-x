@@ -130,6 +130,8 @@ describe('at start-up', () => {
         'transactions.failure_proposals': ['transaction_id', 'evidence_ref', 'proposed_by', 'created_at'],
         // GM-1a (0110): a month total's agent, month, currency and when it was made.
         'limit_reservations.month_totals': ['agent_id', 'month', 'currency', 'created_at'],
+        // GM-1b (0112): a payee window's supplier, payee key, currency and when it was made.
+        'limit_reservations.payee_windows': ['supplier_id', 'payee_key', 'currency', 'created_at'],
       },
     });
   });

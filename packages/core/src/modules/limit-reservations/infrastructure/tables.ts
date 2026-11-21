@@ -6,6 +6,7 @@ export interface LimitReservationsTables {
   'limit_reservations.agent_periods': AgentPeriodsTable;
   'limit_reservations.reservations': ReservationsTable;
   'limit_reservations.month_totals': MonthTotalsTable;
+  'limit_reservations.payee_windows': PayeeWindowsTable;
 }
 
 /** The time zone an agent's months are named in: its first reservation's mandate's, kept for good. */
@@ -63,6 +64,23 @@ interface MonthTotalsTable {
   currency: string;
   /** Minor units held: read back as text or a bigint, never a float. */
   held_minor: string | bigint;
+  created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: string | null;
+}
+
+/** A payee's split window in one currency, signed (0112, GM-1b): what its reservations hold, hour by hour. */
+interface PayeeWindowsTable {
+  org_id: string;
+  /** Named by its organisation, supplier, payee key and currency (namedId), so a deleted one reads as deleted. */
+  id: string;
+  /** Its supplier's reservations, under any key; null for a key's own row. */
+  supplier_id: string | null;
+  /** Its payee key's reservations, under any supplier; null for a supplier's own row. */
+  payee_key: string | null;
+  currency: string;
+  /** `hour:amount`, comma between, in order: each hour since 1970 holding anything, in minor units. */
+  held_by_hour: string;
   created_at: Date;
   state_version: Generated<number>;
   state_event_id: string | null;
