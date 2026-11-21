@@ -92,6 +92,7 @@ export { createLoginSessions, type LoginSessions, LoginSessionsUnavailable } fro
 export { LoginTokenRefused } from './infrastructure/zitadel-call.ts';
 export {
   createSessions,
+  LONGEST_ABSOLUTE_SECONDS,
   LONGEST_IDLE_SECONDS,
   type LiveSession,
   type OpenedSession,

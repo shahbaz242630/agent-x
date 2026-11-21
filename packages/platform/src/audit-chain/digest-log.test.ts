@@ -60,6 +60,7 @@ function digestOn(
     mostFileBytes = undefined as number | undefined,
     signing = keys,
     forget = undefined as number | undefined,
+    forgetSessions = undefined as number | undefined,
   } = {},
 ) {
   const log = createDigestLog({
@@ -73,6 +74,7 @@ function digestOn(
     mostBytes,
     ...(mostFileBytes === undefined ? {} : { mostFileBytes }),
     forgetRequestsAfterMs: forget,
+    forgetSessionEndsAfterMs: forgetSessions,
   });
   return { log, fake, time, capture };
 }
@@ -1426,5 +1428,233 @@ describe('the highest head each chain was read at (AT13f)', () => {
     expect(log.heads(THIRD)?.seen).toEqual(headAt(4n));
     expect(log.bytesHeld()).toBe(400);
     expect(log.memoryHeld().bytes).toBe(400);
+  });
+});
+
+/** A delta's name for `at`, as the digest names its files. */
+const deltaNamed = (at: Date) =>
+  `e1/digests/deltas/${String(9_999_999_999_999 - at.getTime()).padStart(13, '0')}-0199a0f0-0000-7000-8000-000000000001`;
+
+/** One entry, packed as a line carries it. */
+const oneEntry = (place: bigint): string => {
+  const entry = Buffer.alloc(16);
+  entry.writeUInt32BE(1, 0);
+  entry.writeUInt32BE(2, 4);
+  entry.writeBigUInt64BE(place, 8);
+  return entry.toString('base64');
+};
+
+describe('the platform chain’s session ends forgotten past the longest session (AT13g)', () => {
+  const DAY = 24 * HOUR;
+  /** The longest absolute timeout there can be, as the API passes it (LONGEST_ABSOLUTE_SECONDS). */
+  const LONGEST = DAY;
+  /** When a fact known by START may go: the longest session and the day's margin past it. */
+  const GOES = START.getTime() + LONGEST + DAY;
+  const PERSON = '0199a0f0-0000-7000-8000-00000000aa01';
+  const RECORD = '0199a0f0-0000-7000-8000-00000000bb01';
+  const ENDED = `${PERSON}:${RECORD}`;
+  const ROTATED = `${PERSON}:${RECORD}:${'ab'.repeat(32)}`;
+  const REQUEST = '0199a0f0-0000-7000-8000-0000000000c1';
+
+  /** A sign-out, a rotation, a person's sessions all ended and the hand-off pause, the platform chain read whole to 9. */
+  const recordEach = (log: ReturnType<typeof digestOn>['log']) => {
+    log.record(
+      PLATFORM,
+      seen(
+        ['platform.handoff_pause', 'pause', 2n],
+        ['identity.session_ended', ENDED, 4n],
+        ['identity.session_rotated', ROTATED, 5n],
+        ['identity.sessions_ended', PERSON, 6n],
+      ),
+      START,
+      stretch(0n, 9n),
+    );
+  };
+
+  /** The places it holds for each object recordEach recorded, in its order. */
+  const held = (log: ReturnType<typeof digestOn>['log']) => [
+    log.latest(PLATFORM, 'platform.handoff_pause', 'pause'),
+    log.latest(PLATFORM, 'identity.session_ended', ENDED),
+    log.latest(PLATFORM, 'identity.session_rotated', ROTATED),
+    log.latest(PLATFORM, 'identity.sessions_ended', PERSON),
+  ];
+
+  it('lets them go a day past the longest session: the pause kept, coverage untouched, memory given back, said', async () => {
+    const capture = new LogCapture();
+    const { log, time } = digestOn(undefined, { forgetSessions: LONGEST, capture });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 1n]), START);
+    log.record(PLATFORM, seen(['platform.handoff_pause', 'pause', 1n]), START);
+    const authority = log.memoryHeld().bytes;
+    recordEach(log);
+    expect(held(log)).toEqual([2n, 4n, 5n, 6n]);
+    expect(log.memoryHeld().bytes).toBeGreaterThan(authority);
+
+    // A minute short of the longest session and its margin: kept.
+    time.held.at = GOES - MINUTE;
+    log.record(CHAIN, seen(['agent', AGENT, 2n]), time.now());
+    expect(held(log)).toEqual([2n, 4n, 5n, 6n]);
+
+    time.held.at = GOES + HOUR;
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), time.now());
+    expect(held(log)).toEqual([2n, undefined, undefined, undefined]);
+    expect(log.covers(PLATFORM, 9n)).toBe(true);
+    expect(log.coverage(PLATFORM)).toEqual(point(9n));
+    expect(log.memoryHeld()).toMatchObject({ objects: 2, chains: 2, bytes: authority });
+    expect(log.bytesHeld()).toBe(log.memoryHeld().bytes);
+    expect(said(capture, 'audit.state_digest_session_ends_forgotten')).toEqual([
+      expect.objectContaining({ level: 'info', objects: 3 }),
+    ]);
+    expect(said(capture, 'audit.state_digest_requests_forgotten')).toEqual([]);
+    expect(said(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('each chain by its own horizon: an organisation’s requests by the approval’s, the platform’s ends by the session’s', async () => {
+    const { log, time } = digestOn(undefined, { forget: 7 * DAY, forgetSessions: LONGEST });
+    await log.read();
+    recordEach(log);
+    log.record(CHAIN, seen(['spend_request', REQUEST, 3n], ['identity.session_ended', ENDED, 4n]), START);
+    time.held.at = GOES + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(PLATFORM, 'identity.session_ended', ENDED)).toBeUndefined();
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(3n);
+    // A session end's type on an organisation's chain is no session end: kept, as any other fact there.
+    expect(log.latest(CHAIN, 'identity.session_ended', ENDED)).toBe(4n);
+    time.held.at = START.getTime() + 8 * DAY + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBeUndefined();
+    expect(log.latest(CHAIN, 'identity.session_ended', ENDED)).toBe(4n);
+  });
+
+  it('with only the requests’ horizon given, the platform’s ends are kept for good; with only the session’s, requests are', async () => {
+    const requestsOnly = digestOn(undefined, { forget: 7 * DAY });
+    await requestsOnly.log.read();
+    recordEach(requestsOnly.log);
+    requestsOnly.time.held.at = START.getTime() + 30 * DAY;
+    requestsOnly.log.record(OTHER, new Map(), requestsOnly.time.now());
+    expect(held(requestsOnly.log)).toEqual([2n, 4n, 5n, 6n]);
+
+    const sessionsOnly = digestOn(undefined, { forgetSessions: LONGEST });
+    await sessionsOnly.log.read();
+    sessionsOnly.log.record(CHAIN, seen(['spend_request', REQUEST, 3n]), START);
+    sessionsOnly.time.held.at = START.getTime() + 30 * DAY;
+    sessionsOnly.log.record(OTHER, new Map(), sessionsOnly.time.now());
+    expect(sessionsOnly.log.latest(CHAIN, 'spend_request', REQUEST)).toBe(3n);
+  });
+
+  it('a newer end of a person’s, in a newer day, stands until that goes too', async () => {
+    const { log, time } = digestOn(undefined, { forgetSessions: LONGEST });
+    await log.read();
+    log.record(PLATFORM, seen(['identity.sessions_ended', PERSON, 3n]), START);
+    time.held.at = START.getTime() + DAY + HOUR;
+    log.record(PLATFORM, seen(['identity.sessions_ended', PERSON, 8n]), time.now());
+    expect(log.latest(PLATFORM, 'identity.sessions_ended', PERSON)).toBe(8n);
+    time.held.at = GOES + HOUR;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.latest(PLATFORM, 'identity.sessions_ended', PERSON)).toBe(8n);
+    time.held.at = GOES + DAY + 2 * HOUR;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.latest(PLATFORM, 'identity.sessions_ended', PERSON)).toBeUndefined();
+  });
+
+  it('writes them with `s` on the platform’s lines, `y` on an organisation’s; a restart agrees, before and after the horizon', async () => {
+    const { log, fake, time } = digestOn(undefined, { forget: 7 * DAY, forgetSessions: LONGEST });
+    await log.read();
+    recordEach(log);
+    log.record(CHAIN, seen(['spend_request', REQUEST, 3n]), START, stretch(0n, 3n));
+    await log.flush();
+    const [delta] = namesUnder(fake.files, 'deltas');
+    const written = linesOf(fake.files.get(delta ?? '') ?? Buffer.alloc(0)).map(
+      (line) => JSON.parse(line) as Record<string, unknown>,
+    );
+    expect(written).toContainEqual(expect.objectContaining({ c: 'platform', p: 1, s: START.toISOString() }));
+    expect(written).toContainEqual(expect.objectContaining({ c: `organisation:${ORG}`, p: 1, y: START.toISOString() }));
+    expect(written.filter((line) => line.c === 'platform' && 'y' in line)).toEqual([]);
+    expect(written.filter((line) => line.c !== 'platform' && 's' in line)).toEqual([]);
+
+    // Before the horizon, a restart from the deltas holds them as memory does.
+    time.held.at = START.getTime() + HOUR;
+    const early = digestOn(fake, { time, forget: 7 * DAY, forgetSessions: LONGEST });
+    await early.log.read();
+    expect(held(early.log)).toEqual([2n, 4n, 5n, 6n]);
+
+    // Past it: a snapshot written then holds none of them, and a start from it or from the deltas agrees with memory.
+    time.held.at = GOES + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(held(log)).toEqual([2n, undefined, undefined, undefined]);
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots').length).toBeGreaterThan(0);
+    const late = digestOn(fake, { time, forget: 7 * DAY, forgetSessions: LONGEST });
+    await late.log.read();
+    expect(held(late.log)).toEqual(held(log));
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
+    const fromDeltas = digestOn(fake, { time, forget: 7 * DAY, forgetSessions: LONGEST });
+    await fromDeltas.log.read();
+    expect(held(fromDeltas.log)).toEqual(held(log));
+    expect(fromDeltas.log.latest(CHAIN, 'spend_request', REQUEST)).toBe(3n);
+  });
+
+  it('an image that doesn’t forget them reads `s` lines as payments’ facts, kept; lines from before stay kept for good', async () => {
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = digestOn(fake, { time, forgetSessions: LONGEST });
+    await log.read();
+    recordEach(log);
+    await log.flush();
+    time.held.at = GOES + DAY;
+    const keeping = digestOn(fake, { time });
+    await keeping.log.read();
+    keeping.log.record(OTHER, new Map(), time.now());
+    expect(held(keeping.log)).toEqual([2n, 4n, 5n, 6n]);
+
+    // A payments' line of the platform's with no `s`, as written before AT13g: kept by one that forgets, for good.
+    const before = createFakeWriteOnceStore();
+    const name = deltaNamed(START);
+    const line = { c: 'platform', t: START.toISOString(), e: oneEntry(4n), p: 1 };
+    before.files.set(name, closedFile(name, [JSON.stringify(line)]));
+    const restarted = digestOn(before, { time, forgetSessions: LONGEST });
+    await restarted.log.read();
+    restarted.log.record(OTHER, new Map(), time.now());
+    expect(restarted.log.memoryHeld()).toMatchObject({ objects: 1 });
+  });
+
+  it.each([
+    ['`s` on an organisation’s line', { c: `organisation:${ORG}`, p: 1, s: START.toISOString() }],
+    ['`y` on the platform’s', { c: 'platform', p: 1, y: START.toISOString() }],
+    ['`s` that isn’t one of our times', { c: 'platform', p: 1, s: 'yesterday' }],
+    ['`s` on a line that isn’t a payments’ one', { c: 'platform', s: START.toISOString() }],
+  ])('%s: the file is unsound, nothing in it taken', async (_what, fields) => {
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const capture = new LogCapture();
+    const name = deltaNamed(START);
+    fake.files.set(name, closedFile(name, [JSON.stringify({ t: START.toISOString(), e: oneEntry(4n), ...fields })]));
+    time.held.at += 6 * MINUTE;
+    const restarted = digestOn(fake, { time, capture, forget: 7 * DAY, forgetSessions: LONGEST });
+    await restarted.log.read();
+    expect(said(capture, 'audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'file' })]);
+    expect(restarted.log.memoryHeld().objects).toBe(0);
+  });
+
+  it('the platform chain’s session ends’ days give way with its growing objects, and none are kept after', async () => {
+    const capture = new LogCapture();
+    const { log } = digestOn(undefined, { forgetSessions: LONGEST, mostBytes: 12_000, capture });
+    await log.read();
+    log.record(PLATFORM, seen(['platform.handoff_pause', 'pause', 2n]), START, stretch(0n, 4n));
+    const ends = new Map(
+      Array.from({ length: 400 }, (_, at) => [
+        subjectKey('identity.session_ended', `${PERSON}:${String(at)}`),
+        BigInt(at + 5),
+      ]),
+    );
+    log.record(PLATFORM, ends, START, stretch(4n, 500n));
+    expect(log.latest(PLATFORM, 'identity.session_ended', `${PERSON}:0`)).toBeUndefined();
+    expect(log.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(2n);
+    expect(said(capture, 'audit.state_digest_chain_gave_way')).toEqual([
+      expect.objectContaining({ what: 'session_ends' }),
+    ]);
+    log.record(PLATFORM, seen(['identity.session_ended', ENDED, 600n]), START);
+    expect(log.latest(PLATFORM, 'identity.session_ended', ENDED)).toBeUndefined();
+    expect(log.bytesHeld()).toBe(log.memoryHeld().bytes);
   });
 });

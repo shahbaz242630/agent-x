@@ -2,7 +2,7 @@ import { createKeyProvider } from '@agentx/platform/keys';
 import { FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createSessions } from './sessions.ts';
+import { createSessions, LONGEST_ABSOLUTE_SECONDS } from './sessions.ts';
 
 const keys = createKeyProvider({ 'session-mac': { current: 1, versions: new Map([[1, Buffer.alloc(32, 1)]]) } }, [
   'session-mac',
@@ -36,5 +36,12 @@ describe("the sessions' timeouts", () => {
 
   it('are refused with an idle timeout longer than the absolute one', () => {
     expect(make(3601, 3600)).toThrow('the idle timeout must not be longer than the absolute one');
+  });
+
+  it('take an absolute timeout up to the longest there can be, which the digest forgets session ends past (AT13g)', () => {
+    expect(make(1800, LONGEST_ABSOLUTE_SECONDS)).not.toThrow();
+    expect(make(1800, LONGEST_ABSOLUTE_SECONDS + 1)).toThrow(
+      `the absolute timeout must not be longer than ${LONGEST_ABSOLUTE_SECONDS} seconds, which the digest relies on`,
+    );
   });
 });

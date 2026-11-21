@@ -23,6 +23,7 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
+import { createDigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Kysely } from 'kysely';
@@ -37,6 +38,7 @@ import {
 import {
   createSessions,
   endSessionsOf,
+  LONGEST_ABSOLUTE_SECONDS,
   lockSessionsOf,
   sessionEndedEvent,
   sessionRotatedEvent,
@@ -1317,5 +1319,73 @@ describe(`AT13c R-15 a signed end deleted below the platform chain's anchor, its
 
     expect(await heldTo(digest).holder(ordered, cookie)).toBeUndefined();
     expect(alarms()).toEqual([]);
+  });
+
+  it('AT13g: a sign-out the digest forgot past the longest session, deleted with its row put back: past its absolute end, no one', async () => {
+    // The longest session there can be, so its absolute end is the latest any setting gives.
+    const own = new FixedClock(clock.now());
+    const longest = { idleSeconds: 1800, absoluteSeconds: LONGEST_ABSOLUTE_SECONDS };
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => own.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+      forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
+    });
+    const at = (on: FixedClock) =>
+      createSessions({ ids, clock: on, timeouts: longest, keys, logger: testLogger(capture), digest: () => digest });
+    const userId = await person();
+    const { sessionId, cookie } = await at(own).open(app, userId, {
+      idpSessionId: 'V1_1',
+      authTime: own.now(),
+      amr: PASSKEY,
+    });
+    const kept = await keep(sessionId);
+    await app.transaction().execute(async (tx) => {
+      const ended = await at(own).end(tx as unknown as Kysely<IdentityTables>, cookie);
+      if (ended === undefined) throw new Error('the session did not end');
+      await platform.record(tx as unknown as PlatformTransaction, sessionEndedEvent(ended, own.now()));
+    });
+    // The anchor check's walk, recorded as it keeps one: the digest knows the sign-out from now.
+    const report = await walking.verifyAlone(app as unknown as Kysely<PlatformControlsTables>, undefined);
+    if (!report.ok) throw new Error('The platform chain should have checked out');
+    digest.record({ kind: 'platform' }, report.signed ?? new Map<string, bigint>(), own.now());
+    const endKey = signedEndKey.ended(userId, sessionId);
+    expect(digest.latest({ kind: 'platform' }, SESSION_ENDED, endKey)).toBeDefined();
+
+    const restore = await deletedEnd(SESSION_ENDED, 'record', sessionId);
+    try {
+      await putBack(sessionId, kept);
+      // Within its absolute end the digest is what refuses it (AT13c), with the alarm.
+      expect(await at(own).use(app, cookie)).toBeUndefined();
+      expect(alarms()).toEqual([expect.objectContaining({ check: 'session', reason: 'ended', rowId: sessionId })]);
+
+      // Past the longest session and the digest's day of margin: the sign-out's fact is let go.
+      own.advanceBy(LONGEST_ABSOLUTE_SECONDS * 1000 + 24 * 3_600_000 + 60_000);
+      digest.record({ kind: 'platform' }, new Map(), own.now());
+      expect(digest.latest({ kind: 'platform' }, SESSION_ENDED, endKey)).toBeUndefined();
+      expect(capture.lines().filter((line) => line.event === 'audit.state_digest_session_ends_forgotten')).toEqual([
+        // Every end the walk read, this file's other sessions' too, all known by the same moment.
+        expect.objectContaining({
+          level: 'info',
+          objects: [...(report.signed ?? new Map<string, bigint>()).keys()].filter((key) => key.startsWith('identity.'))
+            .length,
+        }),
+      ]);
+      // The row put back is past its absolute end, held by its MAC: no read finds it, and no alarm is needed.
+      expect(await at(own).use(app, cookie)).toBeUndefined();
+      expect(await at(own).holder(app, cookie)).toBeUndefined();
+      expect(await at(own).rotate(app, sessionId)).toBeUndefined();
+      expect(alarms()).toHaveLength(1);
+
+      // The positive control: the same row is a session of the app's to a clock still within its end, so its end is
+      // all that stops it once the digest has forgotten (the reason the horizon is the longest session there can be).
+      const within = new FixedClock(new Date(clock.now().getTime() + 60_000));
+      expect(await at(within).holder(app, cookie)).toBe(userId);
+    } finally {
+      await restore();
+    }
   });
 });

@@ -1,11 +1,15 @@
 // The `jobs` side's list as a config makes it (4D2e D): the jobs a config can leave off (the factor removals, the
 // background downloads, a durable anchor log) made on where it names them, and listed either way. Made only: nothing
 // starts, so no database is reached.
+import { checkStatesWith, statesDigest } from '@agentx/core/modules/audit';
+import { LONGEST_ABSOLUTE_SECONDS } from '@agentx/core/modules/identity';
+import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
+import { type DigestLog, subjectKey } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { loadConfig } from '@agentx/platform/config';
 import { createLogger } from '@agentx/platform/observability';
 import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { Leadership } from './background.ts';
 import { type Booted, sharedParts } from './boot.ts';
@@ -158,5 +162,34 @@ describe('the integrity passes as the jobs side wires them, each bound (4D2e D11
     const { passes } = passesAt('2026-11-04T10:00:00.000Z');
     expect(await listedOnce(passes.sweep)).toEqual(ALL);
     expect(await passes.securitySweep.list()).toEqual(ALL);
+  });
+});
+
+describe('the digest a jobs copy keeps in memory alone, with no store named (AT13d/g)', () => {
+  it('forgets session ends past the longest session and requests past the approval horizon, as the kept one does', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const at = new Date('2026-11-21T09:00:00.000Z').getTime();
+      vi.setSystemTime(at);
+      namesWith(BASE);
+      const digest = statesDigest() as DigestLog;
+      const chain = { kind: 'organisation', orgId: '0199a0f0-0000-7000-8000-000000000001' } as const;
+      const platform = { kind: 'platform' } as const;
+      const REQUEST = '0199a0f0-0000-7000-8000-0000000000c1';
+      const ENDED = '0199a0f0-0000-7000-8000-0000000000aa:0199a0f0-0000-7000-8000-0000000000bb';
+      digest.record(chain, new Map([[subjectKey('spend_request', REQUEST), 3n]]), new Date(at));
+      digest.record(platform, new Map([[subjectKey('identity.session_ended', ENDED), 4n]]), new Date(at));
+      const DAY = 86_400_000;
+      vi.setSystemTime(at + LONGEST_ABSOLUTE_SECONDS * 1000 + DAY + 60_000);
+      digest.record(chain, new Map(), new Date());
+      expect(digest.latest(platform, 'identity.session_ended', ENDED)).toBeUndefined();
+      expect(digest.latest(chain, 'spend_request', REQUEST)).toBe(3n);
+      vi.setSystemTime(at + APPROVAL_HORIZON_MS + DAY + 3_600_000);
+      digest.record(chain, new Map(), new Date());
+      expect(digest.latest(chain, 'spend_request', REQUEST)).toBeUndefined();
+    } finally {
+      checkStatesWith(undefined);
+      vi.useRealTimers();
+    }
   });
 });
