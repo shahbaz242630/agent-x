@@ -4,7 +4,7 @@
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -1214,6 +1214,74 @@ describe("4D2e E11 a chain's rebase, run as the job runs it", () => {
       );
     return rows[0];
   }
+
+  it("AT13f after a repair that kept its anchor: only with the repair's own record, at its head, recorded on the chain", async () => {
+    const orgId = await madeOrganisation();
+    // A store of its own, so no other case here reads this rebase; the chain whole, as a repair that holds its anchor
+    // leaves it (with no anchor at all here, which a rebase after a repair takes alike).
+    const store = path.join(folder, `anchors-${orgId}`);
+    const head = await headOf({ kind: 'organisation', orgId });
+    const evidence = path.join(folder, `evidence-${orgId}`);
+    const repair = uuidV7Ids.next();
+    const after = (id = uuidV7Ids.next()) => {
+      const asked = path.join(folder, `rebase-after-${id}`);
+      const words = JSON.parse(
+        chainRebaseRequest({
+          chain: orgId,
+          seq: head.seq.toString(),
+          hash: head.hash.toString('hex'),
+          reason: 'repaired',
+          evidence: EVIDENCE,
+          id,
+        }),
+      ) as string[];
+      writeFileSync(asked, JSON.stringify([...words, '--after-restore', repair]));
+      return { id, running: run(['--request', asked], { ...env(store), AGENTX_EVIDENCE_DIR: evidence }) };
+    };
+
+    // Without the repair's record: refused before anything is read, nothing written.
+    const unrecorded = await after().running;
+    expect(unrecorded.code).toBe(1);
+    expect(unrecorded.line('operator.refused')).toMatchObject({
+      problems: [`the repair ${repair} has no readable outcome in the evidence store`],
+    });
+    // Without the flag, the chain holding its anchor needs none.
+    const plain = await rebase(orgId, head, { store }).running;
+    expect(plain.line('operator.chain_rebase_refused')).toMatchObject({ reason: 'not_needed' });
+
+    mkdirSync(path.join(evidence, orgId), { recursive: true });
+    const record = {
+      k: 'restore',
+      restoreId: repair,
+      orgId,
+      ok: true,
+      endsAt: head.seq.toString(),
+      endsAtHash: head.hash.toString('hex'),
+      endsShortOf: null,
+      rebaseNeeded: true,
+    };
+    writeFileSync(path.join(evidence, orgId, `chain-restore-${repair}-outcome.ndjson`), `${JSON.stringify(record)}\n`);
+    const { id, running } = after();
+    const { code, line } = await running;
+    expect(code).toBe(0);
+    expect(line('operator.chain_rebased')).toMatchObject({
+      seq: String(head.seq),
+      shorterBy: '0',
+      recorded: 'recorded',
+    });
+    expect(JSON.parse(String((await newestEvent(orgId))?.details))).toMatchObject({
+      rebaseId: id,
+      afterRestore: repair,
+    });
+    const read = await readRebaseFile(auditKeys, {
+      bytes: readFileSync(path.join(store, 'e1', 'rebases', id)),
+      name: `e1/rebases/${id}`,
+      epoch: 1,
+    });
+    expect(read).toMatchObject({
+      rebase: { chain: `organisation:${orgId}`, seq: head.seq, hash: head.hash, from: null },
+    });
+  });
 
   it("SEC-DB-11 moves an organisation's chain on to the head named, says it is shorter, records it on the chain, and the API takes it in", async () => {
     const orgId = await madeOrganisation();

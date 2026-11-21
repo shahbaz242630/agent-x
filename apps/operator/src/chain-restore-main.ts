@@ -39,7 +39,7 @@ import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/pl
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { createLogger, createStartupLogger, guardOutputs, type Logger } from '@agentx/platform/observability';
 
-import { outcomeLine, type RestoreFacts, restoreChain, restoreFile } from './chain-restore.ts';
+import { outcomeLine, rebaseAfterLine, type RestoreFacts, restoreChain, restoreFile } from './chain-restore.ts';
 import type { EvidenceStore } from './evidence-store.ts';
 import {
   type OperatorOptions,
@@ -192,6 +192,9 @@ async function repaired(
       anchorSeq: outcome.plan.endsShortOf,
     });
   }
+  // AT13f: rows taken away or replaced, the anchor held: the API's copies alarm on the heads they saw until a rebase.
+  const rebaseAfter = rebaseAfterLine(outcome, facts);
+  if (rebaseAfter !== undefined) log.warn('operator.chain_restored_rebase_needed', rebaseAfter);
   if ((await store.put(`${name}-outcome.ndjson`, restoreFile(outcome, facts))) === 'there_already') {
     log.error('operator.done_before', { command: CHAIN_RESTORE, restoreId: facts.restoreId });
     return 1;

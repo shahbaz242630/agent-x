@@ -13,7 +13,7 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { HELD_KEYS, type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { HELD_KEYS, type OperatorProcess, restoreRecordProblems, runOperator, USAGE } from './main.ts';
 import {
   ACTIVITY_EXPORT_USAGE,
   activityExportRequest,
@@ -33,6 +33,7 @@ import {
   handoffRequest,
   handoffUsage,
   NO_ANCHORS_PROBLEM,
+  NO_STORE_PROBLEM,
   PERSON_ACTIVITY_EXPORT,
   PERSON_ACTIVITY_EXPORT_USAGE,
   personActivityExportRequest,
@@ -1111,5 +1112,103 @@ describe("4D2e E11 a chain's rebase, only ever from a file", () => {
       const { line } = await run(['--request', requestFile(asked(change))], WITH_ANCHORS);
       expect(line('operator.refused')?.problems).toEqual([said]);
     }
+  });
+
+  describe('AT13f after a repair that kept its anchor (--after-restore)', () => {
+    const REPAIR = '0199a0f0-0000-7000-8000-0000000000f1';
+    const withRepair = (more: Partial<ChainRebaseWords> = {}, repair = REPAIR) =>
+      JSON.stringify([...(JSON.parse(asked(more)) as string[]), '--after-restore', repair]);
+
+    it('reads it last, then connects', async () => {
+      const { events } = await run(['--request', requestFile(withRepair())], WITH_ANCHORS);
+      expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    });
+
+    it.each([
+      ['a repair ID not a UUIDv7', {}, REPAIR.toUpperCase(), ["the repair's ID must be a UUIDv7, in lower case"]],
+      ['the platform chain', { chain: 'platform' }, REPAIR, ["a rebase after a repair is of an organisation's chain"]],
+      ['another reason', { reason: 'recovered' }, REPAIR, ['a rebase after a repair has the reason repaired']],
+    ])('refuses %s, before it connects', async (_what, more, repair, problems) => {
+      const { events, line } = await run(['--request', requestFile(withRepair(more, repair))], WITH_ANCHORS);
+      expect(events).toEqual(['operator.refused']);
+      expect(line('operator.refused')?.problems).toEqual(problems);
+    });
+
+    it('refuses the flag anywhere but last, or misnamed', async () => {
+      const all = JSON.parse(withRepair()) as string[];
+      for (const changed of [
+        [...all.slice(0, 1), '--after-restore', REPAIR, ...all.slice(1, -2)],
+        all.map((word) => (word === '--after-restore' ? '--after' : word)),
+      ]) {
+        const { line } = await run(['--request', requestFile(JSON.stringify(changed))], WITH_ANCHORS);
+        expect(line('operator.refused')?.problems).toEqual([
+          `the request file holds ${CHAIN_REBASE_USAGE} as a JSON list, and nothing else`,
+        ]);
+      }
+    });
+  });
+});
+
+describe("AT13f a rebase after a repair, held to the repair's own record", () => {
+  const ORG = '0199a0f0-0000-7000-8000-000000000001';
+  const REPAIR = '0199a0f0-0000-7000-8000-0000000000f1';
+  const HASH = Buffer.alloc(32, 0xab);
+  const asked = { orgId: ORG, restoreId: REPAIR, seq: 12n, hash: HASH };
+  const record = {
+    k: 'restore',
+    restoreId: REPAIR,
+    orgId: ORG,
+    ok: true,
+    endsAt: '12',
+    endsAtHash: HASH.toString('hex'),
+    endsShortOf: null,
+    rebaseNeeded: true,
+  };
+
+  it('takes a repair of this organisation that took rows away or replaced them, ending at the head named', () => {
+    expect(restoreRecordProblems(record, asked)).toEqual([]);
+  });
+
+  it.each<[string, Parameters<typeof restoreRecordProblems>[0], string]>([
+    ['no store named', 'unset', NO_STORE_PROBLEM],
+    ['no record', 'missing', `the repair ${REPAIR} has no readable outcome in the evidence store`],
+    ['another kind of line', { ...record, k: 'plan' }, `the outcome read is not this organisation's repair ${REPAIR}`],
+    [
+      'another repair',
+      { ...record, restoreId: NEW_ID },
+      `the outcome read is not this organisation's repair ${REPAIR}`,
+    ],
+    [
+      'another organisation',
+      { ...record, orgId: NEW_ID },
+      `the outcome read is not this organisation's repair ${REPAIR}`,
+    ],
+    [
+      'a refused repair',
+      { ...record, ok: false },
+      `the repair ${REPAIR} did not repair the chain: there is nothing to rebase`,
+    ],
+    [
+      'another head',
+      { ...record, endsAt: '13' },
+      `the repair ${REPAIR} ended at another head than the one named: copy it from its line`,
+    ],
+    [
+      'another hash',
+      { ...record, endsAtHash: 'cd'.repeat(32) },
+      `the repair ${REPAIR} ended at another head than the one named: copy it from its line`,
+    ],
+    [
+      'short of its anchor',
+      { ...record, endsShortOf: '20' },
+      `the repair ${REPAIR} ended short of its anchor: rebase it without --after-restore`,
+    ],
+    [
+      'rows put back alone',
+      { ...record, rebaseNeeded: false },
+      `the repair ${REPAIR} only put rows back: the chain is the app's own, and needs no rebase`,
+    ],
+  ])('refuses %s', (_what, read, said) => {
+    expect(restoreRecordProblems(read, asked)).toEqual([said]);
   });
 });

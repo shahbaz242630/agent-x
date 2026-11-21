@@ -15,7 +15,12 @@
 // - `store`: the anchors' store couldn't be read whole, so there is nothing to
 //   judge the chain against
 // - `not_needed`: the chain still holds its anchor (or has none): the API's
-//   check finds nothing wrong, and a rebase would only set its point aside
+//   check finds nothing wrong, and a rebase would only set its point aside.
+//   But after a repair that took rows away or replaced them (AT13f, its ID named
+//   by `--after-restore`, its outcome read back from the evidence store and
+//   checked first, main.ts), it is rebased at the head the repair ended at: the
+//   API's copies hold every read to the heads they saw, and to the digest's
+//   coverage, which can be past the anchor, and only a rebase sets those aside
 // - `broken`: the chain fails its own whole check (a seal, a link, a MAC, an
 //   operator's signature): a rebase moves an anchor, it never blesses a chain
 //   the app didn't write. Only `anchor` (wound back, or another event where it
@@ -97,6 +102,11 @@ export interface RebaseAsked {
   /** The release and the job's run, recorded with the event, as every operator act is. */
   readonly release: string;
   readonly run: string | null;
+  /**
+   * The repair this rebase follows though the chain holds its anchor (AT13f): a repair that took rows away or replaced
+   * them, its outcome's record checked by the caller (main.ts). Without it such a chain is `not_needed`.
+   */
+  readonly afterRestore?: string | undefined;
 }
 
 /** The tables a rebase reads, and the one event it records: either chain's. */
@@ -193,7 +203,7 @@ async function recordRebase(
   services: SignedStatesServices,
   chain: Chain,
   rebase: Rebase,
-  { release, run }: Pick<RebaseAsked, 'release' | 'run'>,
+  { release, run, afterRestore }: Pick<RebaseAsked, 'release' | 'run' | 'afterRestore'>,
 ): Promise<'recorded' | 'already'> {
   const details = {
     rebaseId: rebase.id,
@@ -204,6 +214,7 @@ async function recordRebase(
     evidence: rebase.evidence,
     release,
     run,
+    ...(afterRestore === undefined ? {} : { afterRestore }),
   };
   if (chain.kind === 'platform') {
     try {
@@ -302,6 +313,13 @@ export async function rebaseChain({
 
   const anchor = anchors.latest(chain);
   const held = await checkWhole(live, keys, chain, anchor);
+  // A chain holding its anchor needs none, but after a repair that took rows away or replaced them (AT13f): the API's
+  // copies hold every read to the heads they saw, which only a rebase sets aside. At the head the repair ended at.
+  if (held.ok && asked.afterRestore !== undefined) {
+    if (held.seq !== asked.seq || !held.hash.equals(asked.hash))
+      return { ok: false, reason: 'head_differs', seq: held.seq };
+    return signed(held, anchor, 0n);
+  }
   if (held.ok) return { ok: false, reason: 'not_needed', ...(anchor === undefined ? {} : { seq: anchor.seq }) };
   // Only a chain failing against its anchor is what a rebase is for: with no anchor, a failure is the chain's own.
   if (held.problem.reason !== 'anchor' || anchor === undefined) {
@@ -322,24 +340,33 @@ export async function rebaseChain({
       shorterBy,
     });
   }
-  const rebase = signRebase(keys, anchors.epoch, {
-    id: asked.id,
-    chain: nameOf(chain),
-    seq: whole.seq,
-    hash: whole.hash,
-    macKeyVersion: whole.macKeyVersion,
-    // The database's clock, not this job's: one clock on Azure's side, which the API's is held near (anchor-log.ts allows
-    // a rebase 20 s ahead of it at most).
-    at: await databaseNow(live),
-    reason: asked.reason,
-    evidence: asked.evidence,
-    from: anchor.seq,
-  });
-  try {
-    await store.put(rebaseFileName(anchors.epoch, asked.id), rebaseFile(rebase));
-  } catch (error) {
-    if (error instanceof OverwriteRefused) return { ok: false, reason: 'done_before' };
-    throw error;
+  return signed(whole, anchor, shorterBy);
+
+  /** The rebase to `head`, signed, written to the store once, and recorded on its chain. */
+  async function signed(
+    head: AnchorPoint & { readonly macKeyVersion: number },
+    from: AnchorPoint | undefined,
+    by: bigint,
+  ): Promise<RebaseOutcome> {
+    const rebase = signRebase(keys, anchors.epoch, {
+      id: asked.id,
+      chain: nameOf(chain),
+      seq: head.seq,
+      hash: head.hash,
+      macKeyVersion: head.macKeyVersion,
+      // The database's clock, not this job's: one clock on Azure's side, which the API's is held near (anchor-log.ts
+      // allows a rebase 20 s ahead of it at most).
+      at: await databaseNow(live),
+      reason: asked.reason,
+      evidence: asked.evidence,
+      from: from?.seq ?? null,
+    });
+    try {
+      await store.put(rebaseFileName(anchors.epoch, asked.id), rebaseFile(rebase));
+    } catch (error) {
+      if (error instanceof OverwriteRefused) return { ok: false, reason: 'done_before' };
+      throw error;
+    }
+    return { ok: true, rebase, shorterBy: by, recorded: await record(rebase) };
   }
-  return { ok: true, rebase, shorterBy, recorded: await record(rebase) };
 }

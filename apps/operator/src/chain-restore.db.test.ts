@@ -11,7 +11,13 @@ import path from 'node:path';
 
 import { type AuditEvent, chainRowsAlone, createAuditTrail } from '@agentx/core/modules/audit';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { type CheckedPoint, createAnchorLog, signAnchor } from '@agentx/platform/audit-chain';
+import {
+  type CheckedPoint,
+  createAnchorLog,
+  createDigestLog,
+  type DigestLog,
+  signAnchor,
+} from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, databaseNow, withTenant } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import { folderWriteOnceStore } from '@agentx/platform/storage';
@@ -27,7 +33,14 @@ import { afterAll, afterEach, beforeEach, describe, expect, inject, it, vi } fro
 
 import { rebaseChain } from './chain-rebase.ts';
 import { fingerprintOf, planChainRecovery, planDigest, type RecoveryPlan } from './chain-recovery.ts';
-import { outcomeLine, restoreChain, type RestoreOutcome, restoreFile, type RestoreSides } from './chain-restore.ts';
+import {
+  outcomeLine,
+  rebaseAfterLine,
+  restoreChain,
+  type RestoreOutcome,
+  restoreFile,
+  type RestoreSides,
+} from './chain-restore.ts';
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
 
 const server = inject('postgres');
@@ -205,10 +218,13 @@ describe('SEC-DB-12 PL-29 a chain repaired from its plan, original rows alone', 
       putBack: 1,
       replaced: 0,
       removed: 0,
+      // Rows put back alone: the chain is the app's own again, and needs no rebase (AT13f), nor says one.
+      rebaseNeeded: false,
       endsAt: outcome.ok ? outcome.plan.endsAt.seq.toString() : '',
       endsAtHash: outcome.ok ? outcome.plan.endsAt.hash.toString('hex') : '',
     });
     expect(outcome.ok && outcome.plan.endsAt.hash.toString('hex')).toMatch(/^[0-9a-f]{64}$/);
+    expect(rebaseAfterLine(outcome, { orgId, restoreId: uuidV7Ids.next() })).toBeUndefined();
     expect(await verifiedLive()).toMatchObject({ ok: true });
     expect(await snapshot(live)).toBe(await snapshot(theCopy()));
   });
@@ -220,7 +236,13 @@ describe('SEC-DB-12 PL-29 a chain repaired from its plan, original rows alone', 
     await editEvent(live, 1n);
     await windBack(earlier);
     const outcome = await restore(await digestNow());
-    expect(outcome.ok && outcomeLine(outcome)).toMatchObject({ putBack: 3, replaced: 1, headReplaced: true });
+    // A row replaced: the copies' heads set aside by the rebase that follows (AT13f).
+    expect(outcome.ok && outcomeLine(outcome)).toMatchObject({
+      putBack: 3,
+      replaced: 1,
+      headReplaced: true,
+      rebaseNeeded: true,
+    });
     expect(await verifiedLive()).toMatchObject({ ok: true });
     expect(await snapshot(live)).toBe(await snapshot(theCopy()));
   });
@@ -659,6 +681,8 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
       headReplaced: true,
       endsAt: String(head),
       endsShortOf: String(anchor.seq),
+      // Its own rebase gives up the rest: not the one after a repair that kept its anchor.
+      rebaseNeeded: false,
       liveHeadReplaced: { k: 'liveHead', seq: earlier.seq, hash: earlier.hash.toString('hex'), sealed: true },
     });
     // Whole to the copy's head, its rows exactly the copy's; against the anchor it reads wound back: a rebase's case.
@@ -699,6 +723,133 @@ describe('SEC-DB-12 PL-29 AT9 a copy holding some lost events: put back, then th
       ok: true,
       seq: head + 1n,
     });
+  });
+
+  /** The chain's events read by a trail held to `digest`, as a decision's read is: its outcome's kind. */
+  const readHeldTo = (digest: DigestLog) =>
+    withTenant(on(live, 'app'), orgId, async (tx) =>
+      createAuditTrail({ keys, ids: uuidV7Ids, digest }).recordedEvents(tx, orgId, {
+        subjectTypes: ['probe'],
+        limit: 100,
+      }),
+    );
+
+  it('AT13f a fork discarded, the anchor held, coverage and a head seen past it: the rebase after the repair clears every copy', async () => {
+    await record(live, 1);
+    const anchor = await verifiedLive();
+    if (!anchor.ok) throw new Error('The chain should check out');
+    const earlier = await headOf(live);
+    // The copy is taken, then the chain grows on: the API reads a head the copy never held.
+    const copyHead = await copied(2);
+    await record(live, 2);
+    const seen = copyHead + 2n;
+    const store = path.join(folder, `${orgId}-at13f`);
+    await anchored(store, anchor);
+    const chain = { kind: 'organisation', orgId } as const;
+    // A copy of the API: the anchors and the digest from the same store, a walk's coverage and a head read past the anchor.
+    const digestOf = async () => {
+      const anchors = anchorLog(store);
+      const digest = createDigestLog({
+        store: folderWriteOnceStore(store),
+        keys: anchorKeys,
+        logger: testLogger(),
+        now: () => new Date(),
+        epoch: 1,
+        anchors,
+        alertAfterMs: 60_000,
+        mostBytes: 64 * 1024 * 1024,
+      });
+      await anchors.read();
+      await digest.read();
+      return { anchors, digest };
+    };
+    const api = await digestOf();
+    const whole = await verifiedLive();
+    if (!whole.ok) throw new Error('The chain should check out');
+    api.digest.record(chain, new Map(), new Date(), { from: 0n, to: whole });
+    await api.digest.flush();
+    expect(await readHeldTo(api.digest)).toMatchObject({ kind: 'recorded' });
+    expect(api.digest.heads(chain)?.seen?.seq).toBe(seen);
+
+    // Cut back past the anchor's place, then written on: a fork the repair discards from a copy that holds its end.
+    await windBack(earlier);
+    await record(live, 3);
+    expect(await readHeldTo(api.digest)).toMatchObject({ kind: 'broken', seq: seen });
+    const plan = await planChainRecovery({
+      copy: on(theCopy(), 'operator', true),
+      live: on(live, 'operator', true),
+      keys,
+      orgId,
+      anchor,
+      discardFork: true,
+    });
+    if (!plan.ok) throw new Error(`refused: ${plan.reason}`);
+    const outcome = await restore(planDigest(plan, orgId, anchor), { anchor, discardFork: true });
+    if (!outcome.ok) throw new Error(`not repaired: ${outcome.reason}`);
+    expect(outcomeLine(outcome)).toMatchObject({ forkDiscarded: true, rebaseNeeded: true, endsShortOf: null });
+    const restoreId = uuidV7Ids.next();
+    const fromHere = outcome.plan.endsAt.hash.toString('hex');
+    expect(rebaseAfterLine(outcome, { orgId, restoreId })).toEqual({
+      restoreId,
+      endsAt: copyHead,
+      endsAtHash: fromHere,
+      request: `chain-rebase --chain ${orgId} --seq ${String(copyHead)} --hash ${fromHere} --reason repaired --evidence <incident reference> --id <new rebase ID> --after-restore ${restoreId}`,
+    });
+
+    // The positive control: the repaired chain holds its anchor and is whole, yet every copy that read the fork's
+    // place still refuses it, and so does one started since, from the coverage in the store.
+    const fork = outcome.plan.endsAt;
+    expect(fork.seq).toBe(copyHead);
+    expect(await readHeldTo(api.digest)).toMatchObject({ kind: 'broken' });
+    const restarted = await digestOf();
+    expect(await readHeldTo(restarted.digest)).toMatchObject({ kind: 'broken' });
+
+    const rebaseOf = (afterRestore?: string, hash = fork.hash) =>
+      rebaseChain({
+        live: on(live, 'operator', true),
+        writer: on(live, 'operator'),
+        services: { keys, ids: uuidV7Ids, logger: testLogger() },
+        store: folderWriteOnceStore(store),
+        anchors: anchorLog(store),
+        chain,
+        asked: {
+          id: uuidV7Ids.next(),
+          seq: fork.seq,
+          hash,
+          reason: 'repaired',
+          evidence: ['INC', 'AT13f'].join('-'),
+          release: 'r-1',
+          run: null,
+          ...(afterRestore === undefined ? {} : { afterRestore }),
+        },
+      });
+    // A rebase is dated by the database's clock, which this test's server keeps a little behind the app's: wait until
+    // it has passed what the copy read, as an incident's rebase always has.
+    const readBy = Date.now();
+    const clock = on(live, 'operator', true);
+    await vi.waitUntil(async () => (await databaseNow(clock)).getTime() > readBy, { timeout: 5000, interval: 20 });
+    // Its place named with another hash: not the head the repair ended at, refused.
+    expect(await rebaseOf(uuidV7Ids.next(), Buffer.alloc(32, 7))).toMatchObject({
+      ok: false,
+      reason: 'head_differs',
+      seq: fork.seq,
+    });
+    // Without the repair named, the rebase is not needed: the chain holds its anchor.
+    expect(await rebaseOf()).toMatchObject({ ok: false, reason: 'not_needed' });
+    const rebased = await rebaseOf(uuidV7Ids.next());
+    expect(rebased).toMatchObject({ ok: true, shorterBy: 0n, recorded: 'recorded' });
+
+    // Within one read of the anchors, the copy sets its heads and coverage aside: verified, no restart. Tx A waits for
+    // the catch-up walk (`digest_pending`), owed from the chain's first event.
+    await api.anchors.read();
+    expect(await readHeldTo(api.digest)).toMatchObject({ kind: 'recorded' });
+    expect(api.digest.covers(chain, fork.seq)).toBe(false);
+    expect(api.digest.owed(chain, fork.seq)).toBe(true);
+    await restarted.anchors.read();
+    expect(await readHeldTo(restarted.digest)).toMatchObject({ kind: 'recorded' });
+    // And one started after the rebase reads the store's old coverage as passed over.
+    const after = await digestOf();
+    expect(await readHeldTo(after.digest)).toMatchObject({ kind: 'recorded' });
   });
 
   it("refuses a copy whose events don't link to the live chain's, and writes nothing", async () => {

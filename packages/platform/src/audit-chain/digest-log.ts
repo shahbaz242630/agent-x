@@ -16,7 +16,9 @@
 // the chain's first event (`covered`). Tx A asks `covers` of the anchor it compares with: a stretch lost (a crash between
 // the anchor's write and the digest's, a spoiled delta) or a rebase leaves the chain uncovered, so its hand-offs wait
 // (`digest_pending`, that organisation alone) until the anchor check's catch-up walk reads on from where it is covered
-// (anchor-check.ts). Every other read goes on with the facts held, which are true either way.
+// (anchor-check.ts). Every other read goes on with the facts held, which are true either way. Coverage can sit past
+// the chain's last anchor: the catch-up walk records it to the head it read, writing no anchor, and an anchor whose
+// write failed beside a digest delta that was written leaves it so. Each is a place the app's chain truly reached.
 //
 // A start reads the newest sound snapshot, then every delta named since it, less five minutes for the clocks. A file
 // whose closing line fails is spoiled: the alarm, and nothing in it counts. A snapshot spoiled is passed over for the one
@@ -81,8 +83,11 @@
 // a head below it, or another event at its place, is the chain cut back past the app, tampering for every object it
 // holds, never an object missing. Raised by the reads themselves, from what is committed, asked before the statement as
 // `latest` is; in memory, with no trip and no file. A rebase after the read that saw it sets it aside, as it does the
-// facts. Where the digest covers the chain (a walk's head under an anchor, from the store), that is held to as well, so a
-// restart keeps the chain held as far as its last anchor; what this process saw above it is forgotten with the process.
+// facts. Where the digest covers the chain (a head a walk read, from the store: about its last anchor, or past it), that
+// is held to as well, so a restart keeps the chain held that far; what this process saw above it goes with the process.
+// So a sanctioned repair that leaves the chain below, or other than, a head a copy saw or a walk covered (rows taken
+// away or replaced, though the anchor holds) is followed by a rebase (the operator's `chain-rebase --after-restore`),
+// which sets every copy's heads and coverage aside within one read of the anchors.
 // Another copy sees only what it read itself. Held at most a tenth of what may be held, the one raised longest ago going
 // first: only weaker, never a stop.
 import { randomUUID } from 'node:crypto';
@@ -1304,7 +1309,7 @@ export function createDigestLog({
     }
   };
 
-  /** Where the digest covers the chain to, from its first event: a walk's head under an anchor, read back at a start. */
+  /** Where the digest covers the chain to, from its first event: a head a walk read (an anchor's, or past it), read back at a start. */
   const coveredHead = (name: string): HeadSeen | undefined => {
     const held = chainOf(name);
     // Given way whole, or coming back: it reads as before the digest until its walk is back (`covers`).
