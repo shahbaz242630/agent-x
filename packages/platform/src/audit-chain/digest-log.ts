@@ -100,18 +100,12 @@
 // chain may be taken as it stands for those reads alone (`accept`): a head kept beside the one seen, which `accepted`
 // gives while the head seen is still the one it was taken over, raised as that is, and set aside by a rebase. Never
 // lowers what the other reads hold to: the hand-off pause's reads stay held to the head seen.
-import { randomUUID } from 'node:crypto';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createGunzip, createGzip } from 'node:zlib';
-
-import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
-import type { Message } from '../keys/message.ts';
+import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
 import { type Chain, chainName, type CheckedPoint } from './chain.ts';
 import { isCount, timeIn } from './rebase.ts';
-import { bodyHash } from './shards.ts';
+import { bodyLines, fileName, type FileKind, isSoundFile, namesIn, signedFile, timeOfName } from './signed-files.ts';
 import {
   ChainDigest,
   fingerprintOf,
@@ -298,17 +292,8 @@ const FORGET_EVERY_MS = 60 * 60_000;
 /** The most objects on one line: 32 KB of entries, 44 KB of base64. */
 const MOST_ENTRIES_A_LINE = 2048;
 
-/** A line past this is no line of ours. */
-const MOST_LINE_BYTES = 64 * 1024;
-
 /** How often the whole is written, where something moved. */
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
-
-/** What a file's name counts down from, so the newest lists first, as the anchors' files. */
-const LAST_MS = 9_999_999_999_999;
-
-/** A file's name after its folder. */
-const FILE = /^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** How far past this process's clock a name may be dated, as the anchors' log allows. */
 const MOST_AHEAD_MS = 5 * 60_000;
@@ -318,9 +303,6 @@ const LAG_MS = MOST_AHEAD_MS;
 
 /** How many spoiled snapshots a start goes back past: a day's at one an hour. */
 const MOST_SPOILED_SNAPSHOTS = 24;
-
-/** How many names a list asks. */
-const NAMES_A_PAGE = 100;
 
 /** How near what is held may come to what it may before that is said. */
 const NEAR_MEMORY = 0.5;
@@ -353,52 +335,8 @@ const HASH = /^[0-9a-f]{64}$/;
 type Kind = 'deltas' | 'snapshots';
 type Entries = readonly (readonly [number, number, number])[];
 
-/** What a file's closing line signs: its own label, so an anchor file's closing line can't close one of these. */
-const closingMessage = (name: string, epoch: number, lines: number, body: string): Message => [
-  'audit-digest-file',
-  name,
-  String(epoch),
-  String(lines),
-  body,
-];
-
-const countedDown = (ms: number): string => String(LAST_MS - ms).padStart(13, '0');
-const timeOfName = (countdown: string): number => LAST_MS - Number(countdown);
-
-/** A file's lines, as gunzip gives them, never the whole as one string. */
-async function* linesIn(bytes: Buffer): AsyncGenerator<string> {
-  const opening = createGunzip();
-  opening.end(bytes);
-  let rest: Buffer = Buffer.alloc(0);
-  for await (const chunk of opening as AsyncIterable<Buffer>) {
-    const joined = rest.length > 0 ? Buffer.concat([rest, chunk]) : chunk;
-    let from = 0;
-    for (let end = joined.indexOf(10, from); end >= 0; end = joined.indexOf(10, from)) {
-      yield joined.toString('utf8', from, end);
-      from = end + 1;
-    }
-    rest = joined.subarray(from);
-    if (rest.length > MOST_LINE_BYTES) throw new RangeError('a line longer than any of ours');
-  }
-  if (rest.length > 0) yield rest.toString('utf8');
-}
-
-/** Text gzipped as it is made: a snapshot is never one string. */
-async function gzipped(text: Iterable<string>): Promise<Buffer> {
-  const made: Buffer[] = [];
-  await pipeline(Readable.from(text), createGzip(), async (chunks: AsyncIterable<Buffer>) => {
-    for await (const chunk of chunks) made.push(chunk);
-  });
-  return Buffer.concat(made);
-}
-
-function parsed(line: string): unknown {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return undefined;
-  }
-}
+/** What a digest file's closing line signs under: its own label, so an anchor file's closing line can't close one. */
+const DIGEST_FILE: FileKind = { label: 'audit-digest-file', purpose: 'audit-anchor' };
 
 /** How much of a chain gave way for memory, in which generation, and what it let go (AT13e): a mark line's. */
 interface Mark {
@@ -1041,82 +979,33 @@ export function createDigestLog({
     }
   };
 
-  /** Whether the signature closes the file for its name, epoch, lines and body. A version not held is simply wrong. */
-  const closes = (fields: unknown, name: string, lines: number, body: string): boolean => {
-    if (typeof fields !== 'object' || fields === null) return false;
-    const { k, kv, sig } = fields as Record<string, unknown>;
-    if (k !== 'z' || !isCount(kv) || typeof sig !== 'string') return false;
-    try {
-      return keys.verifySignature(
-        'audit-anchor',
-        kv,
-        closingMessage(name, epoch, lines, body),
-        Buffer.from(sig, 'base64'),
-      );
-    } catch (error) {
-      if (error instanceof KeyError) return false;
-      throw error;
-    }
-  };
-
-  /**
-   * Whether a file is sound: closed for its own name, and every line before it one of ours. A pass of its own, holding a
-   * line at a time, so nothing of a file is taken before that is known, and a large one is never held parsed whole.
-   */
-  const isSound = async (bytes: Buffer, name: string): Promise<boolean> => {
-    const body = bodyHash();
-    let last: string | undefined;
-    try {
-      for await (const text of linesIn(bytes)) {
-        if (last !== undefined) {
-          if (lineFrom(parsed(last)) === undefined) return false;
-          body.add(last);
-        }
-        last = text;
-      }
-    } catch {
-      // Not gzip, or a line longer than any of ours.
-      return false;
-    }
-    return last !== undefined && closes(parsed(last), name, body.lines, body.digest());
-  };
+  /** Whether a file is sound: closed for its own name, and every line before it one of ours (signed-files.ts). */
+  const isSound = (bytes: Buffer, name: string): Promise<boolean> =>
+    isSoundFile(keys, DIGEST_FILE, bytes, name, epoch, (fields) => lineFrom(fields) !== undefined);
 
   /** A file taken in if it is sound: whether it was. One listed and then gone is a failure of the store's. */
   const takeFile = async (from: WriteOnceStore, name: string): Promise<boolean> => {
     const got = await from.getAtMost(name, mostFileBytes);
     if (got === 'missing') throw new Error('a digest file listed and then not there');
     if (typeof got === 'string' || !(await isSound(got, name))) return false;
-    let last: DigestLine | undefined;
-    for await (const text of linesIn(got)) {
-      // Every line but the closing one, each known to read by the pass above.
-      if (last !== undefined) take(last);
-      last = lineFrom(parsed(text));
+    // Every line but the closing one, each known to read by the pass above.
+    for await (const fields of bodyLines(got)) {
+      const line = lineFrom(fields);
+      if (line !== undefined) take(line);
     }
     return true;
   };
 
   /** Every well-named file of a kind, newest first. A name dated past the clock is the alarm, and passed over. */
-  async function* namesOf(
-    from: WriteOnceStore,
-    kind: Kind,
-  ): AsyncGenerator<{ readonly name: string; readonly at: number }> {
-    const start = folder(kind);
-    let after: string | undefined;
-    do {
-      const page = await from.list(start, NAMES_A_PAGE, after);
-      for (const name of page.names) {
-        const rest = name.slice(start.length);
-        if (!FILE.test(rest)) continue;
-        const at = timeOfName(rest.slice(0, 13));
-        if (at > now().getTime() + MOST_AHEAD_MS) {
-          alarm('future', { kind, fileAt: new Date(at).toISOString() });
-          continue;
-        }
-        yield { name, at };
-      }
-      after = page.next;
-    } while (after !== undefined);
-  }
+  const namesOf = (from: WriteOnceStore, kind: Kind) =>
+    namesIn(
+      from,
+      folder(kind),
+      () => now().getTime() + MOST_AHEAD_MS,
+      (at) => {
+        alarm('future', { kind, fileAt: new Date(at).toISOString() });
+      },
+    );
 
   /**
    * The newest sound snapshot taken in, and its time: none for a store with none, or with only spoiled ones as far back
@@ -1184,18 +1073,8 @@ export function createDigestLog({
 
   /** A file of the lines, closed and signed, named for `at`: made a line at a time, its closing line last. */
   const fileOf = async (kind: Kind, lines: Iterable<string>, at: number): Promise<{ name: string; bytes: Buffer }> => {
-    const name = `${folder(kind)}${countedDown(at)}-${randomUUID()}`;
-    function* closed(): Generator<string> {
-      const body = bodyHash();
-      for (const line of lines) {
-        body.add(line);
-        yield `${line}\n`;
-      }
-      const message = closingMessage(name, epoch, body.lines, body.digest());
-      const { signature, keyVersion } = keys.sign('audit-anchor', message);
-      yield JSON.stringify({ k: 'z', lines: body.lines, kv: keyVersion, sig: signature.toString('base64') });
-    }
-    return { name, bytes: await gzipped(closed()) };
+    const name = fileName(folder(kind), at);
+    return { name, bytes: await signedFile(keys, DIGEST_FILE, name, epoch, lines) };
   };
 
   /** What moved, as a delta's lines: each chain's facts, then the stretches its walks read. */
