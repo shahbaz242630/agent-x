@@ -1485,6 +1485,22 @@ describe('a chain taken as it stands after a signed answer to its cut (AT13h, S2
     expect(log.heads(CHAIN)?.accepted).toBeUndefined();
   });
 
+  it('never taken over a head seen that has moved on, though the head seen falls back to it after (a head let go)', async () => {
+    // A tenth of 4,000 bytes: two heads of 200.
+    const { log } = digestOn(undefined, { mostBytes: 4000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 6n));
+    const asked = log.heads(CHAIN);
+    expect(asked?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    log.heads(CHAIN)?.saw(headAt(10n));
+    asked?.accept(headAt(3n));
+    // The head seen here let go for others: held to where the walks cover it again, the head the watch gave.
+    log.heads(OTHER)?.saw(headAt(2n));
+    log.heads(THIRD)?.saw(headAt(4n));
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+  });
+
   it('set aside once the head seen moves past the head it was taken over, its memory given back', async () => {
     const { log } = digestOn();
     await log.read();
