@@ -1159,8 +1159,11 @@ describe('SEC-DB-16 R-15 a stretch of the chain checked in place, from a moment 
     await four();
     const asApp = await database.connect('app');
     try {
-      // Four events are too few for the planner to prefer an index: as it would for a chain of any size.
+      // Four events are too few for the planner to prefer an index: as it would for a chain of any size. With sorts off
+      // too, the one ordered path is 0103's index; the primary key plus a sort cost the same at four rows, and pg18
+      // sometimes chose it (S208, a flaky run on #757).
       await asApp.query('set enable_seqscan = off');
+      await asApp.query('set enable_sort = off');
       const plan = await asApp.query<{ 'QUERY PLAN': string }>(
         `explain select seq from platform_controls.audit_events
          where recorded_at < $1 and seq <= 4 order by recorded_at desc, seq desc limit 1`,
