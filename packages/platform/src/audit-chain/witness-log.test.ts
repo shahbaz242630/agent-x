@@ -80,7 +80,7 @@ function witnessOn(
     leads = false,
     mostBytes = 1024 * 1024,
     waitMs = 200,
-    dropsAtAnchor = false,
+    dropsAtAnchor,
   }: WitnessOptions = {},
 ) {
   const log = createWitnessLog({
@@ -95,7 +95,8 @@ function witnessOn(
     alertAfterMs: 15 * MINUTE,
     mostBytes,
     waitMs,
-    dropsAtAnchor,
+    // Left out unless a test says: the default is the copy that anchors.
+    ...(dropsAtAnchor === undefined ? {} : { dropsAtAnchor }),
   });
   return { log, heads, snapshots, time, capture };
 }
