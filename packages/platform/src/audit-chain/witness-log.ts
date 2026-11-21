@@ -53,8 +53,6 @@ export interface WitnessedHead {
   readonly seq: bigint;
   readonly hash: Buffer;
   readonly at: number;
-  /** When its heads file was written (its name's time), where it was read from one: long after `at`, it landed late. */
-  readonly landedAt?: number;
 }
 
 /** How soon a head goes out: before anyone is told the write succeeded, or with the next flush. */
@@ -512,16 +510,12 @@ export function createWitnessLog({
 
   // ---- reading ----
 
-  /**
-   * A heads file or snapshot taken in if it is sound under its kind's key: the chains it gave a new head, or false. A
-   * heads file's heads carry when it was written (`landedAt`, its name's time).
-   */
+  /** A heads file or snapshot taken in if it is sound under its kind's key: the chains it gave a new head, or false. */
   const takeFile = async (
     from: WriteOnceStore,
     name: string,
     kind: FileKind,
     gained: Set<string>,
-    landedAt?: number,
   ): Promise<boolean> => {
     const got = await from.getAtMost(name, MOST_FILE_BYTES);
     if (got === 'missing') throw new Error('a witness file listed and then not there');
@@ -537,7 +531,7 @@ export function createWitnessLog({
       // A heads file says only what was written: a mark of heads let go comes from a snapshot alone.
       if ('lost' in line) {
         if (kind === SNAPSHOT_FILE) lostRead(line.chain, line.lost);
-      } else if (keep(line.chain, landedAt === undefined ? line.head : { ...line.head, landedAt })) {
+      } else if (keep(line.chain, line.head)) {
         gained.add(line.chain);
       }
     }
@@ -586,7 +580,7 @@ export function createWitnessLog({
       for await (const file of namesOf(store, at)) {
         if (file.at < since) break;
         if (namesRead.has(file.name)) continue;
-        if (!(await takeFile(store, file.name, kind, gained, file.at))) {
+        if (!(await takeFile(store, file.name, kind, gained))) {
           alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
         }
         namesRead.add(file.name);

@@ -1588,7 +1588,7 @@ export function createAuditTrail({
     if (last !== undefined) {
       moved.head = { seq: last.seq, hash: last.hash };
       wroteTo(tx, chain, last.seq);
-      // Kept with an idempotent write's answer (TR-1, migration 0114): a replay holds the chain to it.
+      // Kept with an idempotent write's answer (TR-1, migration 0115): a replay holds the chain to it.
       chainHeadWritten(tx, chain.orgId, moved.head);
     }
     return sealed.map(({ id, seq, recordedAt }) => Object.freeze({ id, seq, recordedAt }));

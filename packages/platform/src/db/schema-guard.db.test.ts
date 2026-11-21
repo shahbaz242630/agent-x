@@ -1264,7 +1264,7 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   });
 
   /**
-   * Puts back the rights 0006, 0009 and 0114 (the write's head, TR-1) give the app, whatever a case changed,
+   * Puts back the rights 0006, 0009 and 0115 (the write's head, TR-1) give the app, whatever a case changed,
    * and proves they are exactly theirs: both checkers only allow-list, so a
    * restore that gave back less would pass unseen.
    */

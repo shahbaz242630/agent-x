@@ -85,11 +85,14 @@ export const nowChainsOf = (tx: object): readonly Chain[] =>
  */
 export class WriteCutBack extends Error {
   readonly seq: bigint | undefined;
+  /** Where the row's record of the head failed rather than the chain: rewritten (`forged`) or taken away (`missing`). */
+  readonly record: 'forged' | 'missing' | undefined;
 
-  constructor(seq: bigint | undefined) {
+  constructor(seq: bigint | undefined, record?: 'forged' | 'missing') {
     super("The write this request repeats is no longer on the organisation's audit chain");
     this.name = 'WriteCutBack';
     this.seq = seq;
+    this.record = record;
   }
 }
 
@@ -108,7 +111,7 @@ export async function witnessReplayedWrite(
   keys: KeyProvider,
   kept: HeadKept,
 ): Promise<void> {
-  if (kept.kind === 'forged') throw new WriteCutBack(undefined);
+  if (kept.kind === 'forged') throw new WriteCutBack(undefined, kept.missing === true ? 'missing' : 'forged');
   const chain: Chain = { kind: 'organisation', orgId: orgId.toLowerCase() };
   const keptAt = kept.kind === 'head' ? kept.seq : null;
   const { rows } = await sql<Record<string, unknown>>`

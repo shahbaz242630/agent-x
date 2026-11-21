@@ -4,6 +4,7 @@
 import {
   type Chain,
   type ChainReport,
+  type ChainStep,
   type CheckedPoint,
   createMemoryAnchorStore,
   signAnchor,
@@ -25,12 +26,7 @@ const AT = new Date('2026-11-04T09:00:00.000Z');
 
 const point = (seq: bigint): CheckedPoint => ({ seq, hash: Buffer.alloc(32, Number(seq)), macKeyVersion: 1 });
 const ok = (seq: bigint): ChainReport => ({ ok: true, ...point(seq) });
-const witnessed = (seq: bigint, fill = Number(seq), landedAfterMs = 1_000) => ({
-  seq,
-  hash: Buffer.alloc(32, fill),
-  at: AT.getTime(),
-  landedAt: AT.getTime() + landedAfterMs,
-});
+const witnessed = (seq: bigint, fill = Number(seq)) => ({ seq, hash: Buffer.alloc(32, fill), at: AT.getTime() });
 
 interface Asked {
   readonly orgId: string;
@@ -41,11 +37,13 @@ interface Asked {
 /** How a test's check answers. */
 interface Answering {
   readonly verified?: (orgId: string, recent?: RecentPlaces) => ChainReport;
+  /** One step of a walk from a head towards the anchor (the trail's passStep); none, the chains have no `confirm`. */
+  readonly stepped?: (cursor: CheckedPoint, target: CheckedPoint) => ChainStep;
   readonly answers?: Readonly<Record<string, ProbeAnswer>>;
   readonly probeFails?: boolean;
 }
 
-function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false }: Answering = {}) {
+function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false, stepped }: Answering = {}) {
   const steps: string[] = [];
   const asked: { orgId: string; from: bigint; heldTo: bigint[] }[] = [];
   const pending = new Map<string, ReturnType<typeof witnessed>[]>();
@@ -67,6 +65,14 @@ function withWitness({ verified = () => ok(1n), answers = {}, probeFails = false
       if (failure !== undefined) steps.push(`hold ${orgId} ${failure}`);
       return Promise.resolve();
     },
+    ...(stepped === undefined
+      ? {}
+      : {
+          confirm: (orgId: string, cursor: CheckedPoint, target: CheckedPoint) => {
+            steps.push(`confirm ${orgId} ${cursor.seq.toString()}`);
+            return Promise.resolve(stepped(cursor, target));
+          },
+        }),
     probe: (chains: readonly Asked[]) => {
       for (const { orgId, from, heldTo = [] } of chains) {
         asked.push({ orgId, from: from.seq, heldTo: heldTo.map(({ seq }) => seq) });
@@ -254,27 +260,76 @@ describe('TR-1 the anchor check held to the witness log', () => {
     expect(run.pruned).not.toContainEqual([ORG, [4n]]);
   });
 
-  it('older than the walk kept: the alarm, unless it landed long after it was noted (its copy failing to write: said, let go)', async () => {
-    const run = await anchoredAtFive();
-    run.pending.set(ORG, [witnessed(2n, 2, 120_000)]);
-    await run.check.run();
-    expect(run.alarms()).toEqual([]);
-    expect(run.capture.lines()).toContainEqual(
-      expect.objectContaining({ level: 'warn', event: 'audit.witness_late', seq: '2', orgId: ORG }),
-    );
-    expect(run.pruned).toContainEqual([ORG, [2n]]);
-    run.pending.set(ORG, [witnessed(3n)]);
-    await run.check.run();
-    expect(run.alarms()).toEqual([{ what: 'witness', reason: 'cut_back', seq: '3' }]);
-  });
+  /** A walk from a head to the anchor at 5: reaches it where `onChain`, else breaks at the head's next place. */
+  const walkingTo =
+    (onChain: (cursor: CheckedPoint) => boolean) =>
+    (cursor: CheckedPoint, target: CheckedPoint): ChainStep =>
+      onChain(cursor)
+        ? { ok: true, seq: target.seq, hash: target.hash, macKeyVersion: target.macKeyVersion, to: target.seq }
+        : { ok: false, problem: { reason: 'link', seq: cursor.seq + 1n } };
 
-  it('a head at or below an anchor this process didn’t make (a restart, another copy’s) is let go: that copy confirmed it first; the probe’s one read never does', async () => {
-    const run = withWitness({ answers: { [ORG]: { kind: 'same' }, [OTHER_ORG]: { kind: 'same' } } });
+  /** ORG anchored at 5 by another copy (or before a restart): this process kept no hashes of its walk. */
+  const anchoredElsewhere = (stepped?: Answering['stepped']) => {
+    const run = withWitness({
+      answers: { [ORG]: { kind: 'same' }, [OTHER_ORG]: { kind: 'same' } },
+      ...(stepped === undefined ? {} : { stepped }),
+    });
     run.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(5n), AT));
-    run.pending.set(ORG, [witnessed(4n, 44)]);
+    return run;
+  };
+
+  it('a head below an anchor this process didn’t make (a restart, another copy’s) is walked from to the anchor: on the chain, let go', async () => {
+    const run = anchoredElsewhere(walkingTo(() => true));
+    run.pending.set(ORG, [witnessed(4n)]);
     await run.check.run();
+    expect(run.steps).toContain(`confirm ${ORG} 4`);
     expect(run.pruned).toContainEqual([ORG, [4n]]);
     expect(run.alarms()).toEqual([]);
+  });
+
+  it('a head older than the walk kept, or below another copy’s anchor, that doesn’t run to the anchor: the alarm and the hold', async () => {
+    const run = anchoredElsewhere(walkingTo(() => false));
+    run.pending.set(ORG, [witnessed(4n, 44)]);
+    await run.check.run();
+    expect(run.alarms()).toEqual([{ what: 'witness', reason: 'cut_back', seq: '4' }]);
+    expect(run.steps).toContain(`hold ${ORG} cut_back`);
+    // Anchored here, its hash older than the walk kept: walked too, never let go as late.
+    const here = await anchoredAtFive();
+    here.pending.set(ORG, [witnessed(2n)]);
+    await here.check.run();
+    expect(here.alarms()).toEqual([]);
+    expect(here.pruned).not.toContainEqual([ORG, [2n]]);
+    expect(here.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'error', event: 'audit.witness_head_unconfirmed', orgId: ORG }),
+    );
+  });
+
+  it('one that can’t be walked (no way to, or the walk failing) is kept, said, and the chain anchored no more until it is', async () => {
+    const run = anchoredElsewhere();
+    run.pending.set(ORG, [witnessed(4n)]);
+    // A walk to anchor it anew at 9 would otherwise go through.
+    const moved = withWitness({ verified: (orgId) => ok(orgId === ORG ? 9n : 1n) });
+    moved.anchors.keep(signAnchor(keys, { kind: 'organisation', orgId: ORG }, point(5n), AT));
+    moved.pending.set(ORG, [witnessed(4n)]);
+    await moved.check.run();
+    expect(moved.anchors.latest({ kind: 'organisation', orgId: ORG })?.seq).toBe(5n);
+    expect(moved.pruned).not.toContainEqual([ORG, [4n]]);
+    expect(moved.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'error', event: 'audit.witness_head_unconfirmed', orgId: ORG, heads: 1 }),
+    );
+    await run.check.run();
+    expect(run.pruned).not.toContainEqual([ORG, [4n]]);
+    expect(run.alarms()).toEqual([]);
+    // A walk that throws: a warning, kept as well.
+    const failing = anchoredElsewhere(() => {
+      throw new Error('database away');
+    });
+    failing.pending.set(ORG, [witnessed(4n)]);
+    await failing.check.run();
+    expect(failing.capture.lines()).toContainEqual(
+      expect.objectContaining({ level: 'warn', event: 'audit.anchor_check_failed', check: 'witness' }),
+    );
+    expect(failing.pruned).not.toContainEqual([ORG, [4n]]);
   });
 
   it('a quick probe that fails is a warning: the run asks the same of every chain', async () => {

@@ -27,7 +27,7 @@ import {
   type WitnessLog,
   WitnessUnconfirmed,
 } from '@agentx/platform/audit-chain';
-import { createDatabase, createIdempotentWrites, type Database } from '@agentx/platform/db';
+import { createDatabase, createIdempotentWrites, type Database, HEAD_SEALS_REQUIRED_FROM } from '@agentx/platform/db';
 import {
   createFakeWriteOnceStore,
   createTestDatabase,
@@ -493,6 +493,158 @@ describe('TR-1 review finding 2: a retry answered from the stored result', () =>
     await suspend();
     witnessWith(undefined);
     expect(up.files.size).toBe(0);
+  });
+});
+
+describe('TR-1 review 3: a head below an anchor this process didn’t make (a restart, another copy’s)', () => {
+  /** The agent suspended, then suspended again: two events, the first's head witnessed where `witnessed` is given. */
+  const suspendOn = (w: World, reason: string) =>
+    signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: { reason },
+      }),
+    );
+
+  /** J's anchor check over the real trail, a head below its anchor confirmed by walking from it (passStep). */
+  const checkOnJ = (w: World, j: { anchors: AnchorStore }, witness: WitnessLog) => {
+    const trail = createAuditTrail({ keys, ids });
+    return createAnchorCheck({
+      chains: [],
+      organizations: {
+        list: () => Promise.resolve([w.org]),
+        recorded: () => Promise.resolve([w.org]),
+        probe: (chains, signal, pages) => trail.probeHeads(app, chains, signal, pages),
+        verify: (orgId, anchor, heldTo, recent) =>
+          trail.checkFromAnchor(app, orgId, anchor ?? CHAIN_START, undefined, heldTo, recent),
+        confirm: (orgId, cursor, target) => trail.passStep(app, orgId, cursor, target, 2_000),
+        hold: (orgId, failure) => holdOrganisation(app, orgId, { keys, ids, logger: testLogger(capture) }, failure),
+      },
+      keys,
+      clock,
+      logger: testLogger(capture),
+      staleAfterMs: 900_000,
+      deadlineMs: 120_000,
+      anchors: j.anchors,
+      witness,
+    });
+  };
+
+  it('is walked from to the anchor: an honest one on the chain is let go, no alarm', async () => {
+    const { w } = await ready();
+    const store = createFakeWriteOnceStore();
+    witnessWith(witnessOver(store));
+    await suspendOn(w, 'witnessed');
+    witnessWith(undefined);
+    // Another event after it, unwitnessed: the anchor J holds (made elsewhere) stands above the head.
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'reactivate', {
+        actor: OPERATOR,
+        action: 'agent.reactivated',
+        details: {},
+      }),
+    );
+    const jWitness = witnessOver(store);
+    const j = await jobsCopy(w, jWitness);
+    await jWitness.refresh();
+    expect(jWitness.pending({ kind: 'organisation', orgId: w.org })).toHaveLength(1);
+    await checkOnJ(w, j, jWitness).run();
+    expect(jWitness.pending({ kind: 'organisation', orgId: w.org })).toEqual([]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('one the chain was cut back below and grown again past (anchored there elsewhere): the walk breaks, the alarm and the hold', async () => {
+    const { w } = await ready();
+    let head: SavedHead | undefined;
+    let row: SavedRow | undefined;
+    await asOwner(w, async (owner) => {
+      head = await owner.saveHead();
+      row = await owner.saveRow(w.agent);
+    });
+    const store = createFakeWriteOnceStore();
+    witnessWith(witnessOver(store));
+    await suspendOn(w, 'witnessed');
+    witnessWith(undefined);
+    await asOwner(w, async (owner) => {
+      if (head === undefined || row === undefined) throw new Error('nothing saved');
+      const [back, saved] = [head, row];
+      await owner.windBack(back);
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+    });
+    // A copy that never saw the stop grows the cut chain past its place; another copy anchors it there.
+    await suspendOn(w, 'a stale copy');
+    await signed(w, (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'reactivate', {
+        actor: OPERATOR,
+        action: 'agent.reactivated',
+        details: {},
+      }),
+    );
+    const jWitness = witnessOver(store);
+    const j = await jobsCopy(w, jWitness);
+    await jWitness.refresh();
+    await checkOnJ(w, j, jWitness).run();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back' }),
+    );
+    expect(jWitness.pending({ kind: 'organisation', orgId: w.org })).toHaveLength(1);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
+  });
+});
+
+describe('TR-1 review 3: a replayed row with no head seal, either side of the date every row must carry one', () => {
+  const replayAt = async (at: Date) => {
+    const { w } = await ready();
+    const witness = witnessOver(createFakeWriteOnceStore());
+    const idempotency = createIdempotentWrites({ keys, logger: testLogger(capture), now: () => at });
+    const request = {
+      orgId: w.org,
+      client: { kind: 'agent' as const, id: w.agent },
+      operation: 'agents.suspend',
+      key: `tr1-legacy-${String(at.getTime())}`,
+      payload: '{}',
+    };
+    const suspend = () =>
+      withSignedStates(app, w.org, { keys, ids, logger: testLogger(capture) }, (tx, states) =>
+        idempotency.run(tx, request, async () => {
+          await states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+            actor: OPERATOR,
+            action: 'agent.suspended',
+            details: { reason: 'test' },
+          });
+          return { status: 200, resourceId: w.agent };
+        }),
+      );
+    await suspend();
+    // As a row from before 0115 reads, or one whose seal the owner took away.
+    await asOwner(w, async (owner) => {
+      await owner.query(
+        'update idempotency.keys set head_seq = null, head_hash = null, head_mac = null, head_mac_key_version = null where org_id = $1',
+        [w.org],
+      );
+    });
+    witnessWith(witness);
+    try {
+      return { w, answer: await suspend().catch((error: unknown) => error) };
+    } finally {
+      witnessWith(undefined);
+    }
+  };
+
+  it('the day before: answered as before', async () => {
+    const { answer } = await replayAt(new Date(HEAD_SEALS_REQUIRED_FROM.getTime() - 86_400_000));
+    expect(answer).toMatchObject({ outcome: 'replayed' });
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('from the date on: a seal taken away, the alarm (`record: missing`) and the hold, never the stored answer', async () => {
+    const { w, answer } = await replayAt(HEAD_SEALS_REQUIRED_FROM);
+    expect(answer).toBeInstanceOf(WriteCutBack);
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'witness', reason: 'cut_back', record: 'missing' }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
   });
 });
 

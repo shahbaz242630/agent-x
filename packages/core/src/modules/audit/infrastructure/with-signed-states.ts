@@ -107,7 +107,7 @@
 // later request here for the organisation waits for it too. The holds it found are still set first. Sent again under
 // its key, on any copy or after a restart, the answer from the stored result witnesses the chain's head as it stands
 // first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database; and
-// holds the chain to the head that write left (kept with its answer, migration 0114): one gone from the chain is the write cut
+// holds the chain to the head that write left (kept with its answer, migration 0115): one gone from the chain is the write cut
 // out, the alarm and the hold, and the request's answer 503 (WriteCutBack), never the stored one.
 import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
 import { answeredFromEarlier, inBoundedSavepoint, withTenant } from '@agentx/platform/db';
@@ -685,7 +685,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
         chain: 'organisation',
         check: 'witness',
         reason: 'cut_back',
-        ...(error.seq === undefined ? { record: 'forged' } : { seq: error.seq.toString() }),
+        ...(error.seq === undefined ? { record: error.record ?? 'forged' } : { seq: error.seq.toString() }),
       });
       found.push({ orgId: own, subjectType: CHAIN_SUBJECT, objectId: own, sign: 'chain', chainFailure: 'cut_back' });
     } else if (error instanceof ChainBroken && error.chain.kind === 'platform') {
