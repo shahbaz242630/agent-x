@@ -44,3 +44,97 @@ describe("a decision's windows as the holdings check reads them", () => {
     expect(read.get(BARE)?.held).toBeNull();
   });
 });
+
+describe('when a request was approved, as its decision is read (AT13d)', () => {
+  const at = (hours: number) => new Date(AT.getTime() + hours * 3_600_000);
+  const timed = (seq: number, hours: number, id: string, action: string, subjectType = 'spend_request') => ({
+    ...event(seq, subjectType, id, action, HELD),
+    recordedAt: at(hours),
+  });
+
+  it('is its decision’s time, or a person’s approval after it; nothing else signed since (a carry) moves it', async () => {
+    const asked: { actions?: readonly string[]; limit?: number }[] = [];
+    const events = [
+      timed(1, 0, OLD, 'spend_request.decided'),
+      timed(2, 0, NEW, 'spend_request.decided'),
+      timed(3, 5, NEW, 'spend_request.approved'),
+      timed(4, 9, NEW, 'spend_request.carried'),
+      // An approval of another object's, and one of a request with no decision read: neither dates anything.
+      timed(5, 20, OLD, 'spend_request.approved', 'spend_request_windows'),
+      timed(6, 30, NONE, 'spend_request.approved'),
+    ];
+    const states = {
+      historyOf: (_tx: unknown, _org: string, find: { actions: readonly string[]; limit: number }) => {
+        asked.push(find);
+        return Promise.resolve({ outcome: 'read', events });
+      },
+    } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD, NEW, NONE]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect(read.get(OLD)?.approvedAt).toEqual(at(0));
+    expect(read.get(NEW)).toMatchObject({ decidedAt: at(0), approvedAt: at(5) });
+    expect(read.has(NONE)).toBe(false);
+    // Read on the decision's own trip: its approvals asked with it, room for one each.
+    expect(asked).toEqual([
+      expect.objectContaining({
+        actions: [
+          'spend_request.decided',
+          'spend_request.approved',
+          'spend_request.voided',
+          'spend_request.expired',
+          'spend_request.cancelled',
+          'spend_request.rejected',
+          'spend_request.windows_named',
+        ],
+        limit: 7 * 3,
+      }),
+    ]);
+  });
+
+  it('reads a signed ending that kept its capacity, and only that: from the request’s own ending events', async () => {
+    const ending = (
+      seq: number,
+      id: string,
+      action: string,
+      details: Record<string, unknown>,
+      type = 'spend_request',
+    ) => event(seq, type, id, action, details);
+    const events = [
+      ...[OLD, NEW, NONE, BARE].map((id, at) => timed(at + 1, 0, id, 'spend_request.decided')),
+      ending(5, OLD, 'spend_request.voided', { causes: 'APPROVAL_LAPSED', capacityKept: true, keptAmountMinor: '1' }),
+      ending(6, NEW, 'spend_request.expired', { capacityKept: 'true' }),
+      ending(7, NONE, 'spend_request.carried', { capacityKept: true }),
+      ending(8, BARE, 'spend_request.cancelled', { capacityKept: true }, 'spend_request_windows'),
+    ];
+    const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD, NEW, NONE, BARE]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect([OLD, NEW, NONE, BARE].map((id) => read.get(id)?.capacityKept)).toEqual([true, false, false, false]);
+  });
+
+  it.each(['spend_request.expired', 'spend_request.cancelled', 'spend_request.rejected'])(
+    'reads it on %s too',
+    async (action) => {
+      const events = [
+        timed(1, 0, OLD, 'spend_request.decided'),
+        event(2, 'spend_request', OLD, action, { capacityKept: true }),
+      ];
+      const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+      const read = await decisionsRead(null as never, states, ORG, [OLD]);
+      if (read === 'tampered') throw new Error('read whole');
+      expect(read.get(OLD)?.capacityKept).toBe(true);
+    },
+  );
+
+  it('never moves back for an approval read before a later one', async () => {
+    const events = [
+      timed(1, 0, OLD, 'spend_request.decided'),
+      timed(2, 8, OLD, 'spend_request.approved'),
+      timed(3, 4, OLD, 'spend_request.approved'),
+    ];
+    const states = { historyOf: () => Promise.resolve({ outcome: 'read', events }) } as unknown as SignedStates;
+    const read = await decisionsRead(null as never, states, ORG, [OLD]);
+    if (read === 'tampered') throw new Error('read whole');
+    expect(read.get(OLD)?.approvedAt).toEqual(at(8));
+  });
+});

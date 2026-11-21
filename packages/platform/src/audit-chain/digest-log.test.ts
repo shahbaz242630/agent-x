@@ -59,6 +59,7 @@ function digestOn(
     mostBytes = 64 * 1024 * 1024,
     mostFileBytes = undefined as number | undefined,
     signing = keys,
+    forget = undefined as number | undefined,
   } = {},
 ) {
   const log = createDigestLog({
@@ -71,6 +72,7 @@ function digestOn(
     alertAfterMs: 15 * MINUTE,
     mostBytes,
     ...(mostFileBytes === undefined ? {} : { mostFileBytes }),
+    forgetRequestsAfterMs: forget,
   });
   return { log, fake, time, capture };
 }
@@ -974,5 +976,278 @@ describe('the digest’s mark lines, read (AT13e)', () => {
     await restarted.log.read();
     expect(restarted.log.coverage(CHAIN)).toBeUndefined();
     expect(restarted.log.owed(CHAIN, 600n)).toBe(true);
+  });
+});
+
+describe('a request’s facts forgotten past the approval horizon (AT13d)', () => {
+  const DAY = 24 * HOUR;
+  /** The approval horizon, as the API passes it (APPROVAL_HORIZON_MS). */
+  const HORIZON = 7 * DAY;
+  /** When a fact known by START may go: the horizon and the day's margin past it. */
+  const GOES = START.getTime() + HORIZON + DAY;
+  const REQUEST = '0199a0f0-0000-7000-8000-0000000000c1';
+  const NEWER = '0199a0f0-0000-7000-8000-0000000000c2';
+  const INSTRUCTION = '0199a0f0-0000-7000-8000-0000000000d1';
+  const TRANSACTION = '0199a0f0-0000-7000-8000-0000000000e1';
+  const PROPOSAL = '0199a0f0-0000-7000-8000-0000000000f1';
+  const REMITTANCE = '0199a0f0-0000-7000-8000-0000000000f2';
+
+  /** One of each of a payment's objects, an agent, and the chain read whole to 9. */
+  const recordEach = (log: ReturnType<typeof digestOn>['log']) => {
+    log.record(
+      CHAIN,
+      seen(
+        ['agent', AGENT, 2n],
+        ['spend_request', REQUEST, 4n],
+        ['instruction', INSTRUCTION, 5n],
+        ['transaction', TRANSACTION, 6n],
+        ['failure_proposal', PROPOSAL, 7n],
+        ['supplier_remittance', REMITTANCE, 8n],
+      ),
+      START,
+      stretch(0n, 9n),
+    );
+  };
+
+  /** The places it holds for each object recordEach recorded, in its order. */
+  const held = (log: ReturnType<typeof digestOn>['log']) => [
+    log.latest(CHAIN, 'agent', AGENT),
+    log.latest(CHAIN, 'spend_request', REQUEST),
+    log.latest(CHAIN, 'instruction', INSTRUCTION),
+    log.latest(CHAIN, 'transaction', TRANSACTION),
+    log.latest(CHAIN, 'failure_proposal', PROPOSAL),
+    log.latest(CHAIN, 'supplier_remittance', REMITTANCE),
+  ];
+
+  it('lets a request’s go once its day is a day past the horizon: every other object kept, coverage untouched', async () => {
+    const capture = new LogCapture();
+    const { log, time } = digestOn(undefined, { forget: HORIZON, capture });
+    await log.read();
+    recordEach(log);
+    const before = log.memoryHeld();
+    expect(held(log)).toEqual([2n, 4n, 5n, 6n, 7n, 8n]);
+
+    // A minute short of the horizon and its margin: kept.
+    time.held.at = GOES - MINUTE;
+    log.record(OTHER, seen(['agent', AGENT, 1n]), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(4n);
+
+    time.held.at = GOES + HOUR;
+    log.record(OTHER, seen(['agent', AGENT, 2n]), time.now());
+    expect(held(log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
+    expect(log.covers(CHAIN, 9n)).toBe(true);
+    expect(log.coverage(CHAIN)).toEqual(point(9n));
+    // One object gone from this chain, one agent come in the other's.
+    const after = log.memoryHeld();
+    expect(after).toMatchObject({ objects: before.objects, chains: 2 });
+    expect(log.bytesHeld()).toBe(after.bytes);
+    expect(said(capture, 'audit.state_digest_requests_forgotten')).toEqual([expect.objectContaining({ objects: 1 })]);
+    expect(said(capture, 'audit.integrity_failed')).toEqual([]);
+  });
+
+  it('holds what it may less once they go: the memory a day’s table took is given back', async () => {
+    const { log, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 1n]), START);
+    const authority = log.memoryHeld().bytes;
+    log.record(CHAIN, requests(500), START);
+    expect(log.memoryHeld()).toMatchObject({ objects: 501 });
+    expect(log.memoryHeld().bytes).toBeGreaterThan(authority + 500 * 16);
+    time.held.at = GOES + HOUR;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.memoryHeld()).toMatchObject({ objects: 1, bytes: authority });
+  });
+
+  it('a request with a newer fact keeps it in its newer day’s table, the highest place standing until that goes too', async () => {
+    const { log, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    log.record(CHAIN, seen(['spend_request', REQUEST, 3n], ['spend_request', NEWER, 4n]), START);
+    time.held.at = START.getTime() + 5 * DAY;
+    log.record(CHAIN, seen(['spend_request', REQUEST, 9n]), time.now());
+    // The older day's lower place doesn't hide the newer one.
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(9n);
+
+    time.held.at = GOES + HOUR;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(9n);
+    expect(log.latest(CHAIN, 'spend_request', NEWER)).toBeUndefined();
+
+    time.held.at = GOES + 5 * DAY + HOUR;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBeUndefined();
+  });
+
+  it('looks them over at most hourly between reads: few loops over the chains', async () => {
+    const { log, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    time.held.at = GOES - 10 * MINUTE;
+    log.record(CHAIN, seen(['agent', AGENT, 1n]), time.now());
+    // Recorded under the clock: known by now, its own day's table.
+    log.record(CHAIN, new Map([[subjectKey('spend_request', REQUEST), 3n]]), START);
+    time.held.at = GOES - 5 * MINUTE;
+    log.record(CHAIN, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(3n);
+  });
+
+  it('keeps a day’s table until its latest fact is past the horizon, not its first', async () => {
+    const { log, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    log.record(CHAIN, seen(['spend_request', REQUEST, 4n]), START);
+    // Later the same day: the same day's table, known by later.
+    time.held.at = START.getTime() + 14 * HOUR;
+    log.record(CHAIN, seen(['spend_request', NEWER, 5n]), time.now());
+    time.held.at = GOES + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(4n);
+    expect(log.latest(CHAIN, 'spend_request', NEWER)).toBe(5n);
+    time.held.at = GOES + 15 * HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', NEWER)).toBeUndefined();
+  });
+
+  it('dates a request’s facts by when the walk recorded them, never by when it began: a long walk errs on keeping', async () => {
+    const { log, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    time.held.at = START.getTime() + 3 * DAY;
+    // A walk begun three days before it recorded what it read.
+    log.record(CHAIN, seen(['spend_request', REQUEST, 4n]), START);
+    time.held.at = GOES + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBe(4n);
+    time.held.at = GOES + 3 * DAY + HOUR;
+    log.record(OTHER, new Map(), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBeUndefined();
+  });
+
+  it('lets go at once what a read took in past the horizon, though it looked them over within the hour', async () => {
+    const fake = createFakeWriteOnceStore();
+    const writer = digestOn(fake, { forget: HORIZON });
+    await writer.log.read();
+    recordEach(writer.log);
+    await writer.log.flush();
+    const time = clock(GOES + HOUR);
+    const reader = digestOn(fake, { time, forget: HORIZON });
+    reader.log.record(OTHER, seen(['agent', AGENT, 1n]), time.now());
+    time.held.at += 10 * MINUTE;
+    await reader.log.read();
+    expect(held(reader.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
+  });
+
+  it('a restart agrees with memory: dated as written, never by the start; a snapshot holds only what memory does', async () => {
+    const { log, fake, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    recordEach(log);
+    await log.flush();
+    const early = namesUnder(fake.files, 'snapshots');
+    expect(early).toHaveLength(1);
+
+    // A start an hour on reads it back, dated by when it was known, not by the start.
+    time.held.at = START.getTime() + HOUR;
+    const soon = digestOn(fake, { time, forget: HORIZON });
+    await soon.log.read();
+    expect(held(soon.log)).toEqual([2n, 4n, 5n, 6n, 7n, 8n]);
+    time.held.at = GOES + HOUR;
+    soon.log.record(CHAIN, new Map(), time.now());
+    expect(held(soon.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
+
+    // The first process past the horizon too, its next snapshot without the request.
+    log.record(OTHER, seen(['agent', AGENT, 1n]), time.now());
+    expect(log.latest(CHAIN, 'spend_request', REQUEST)).toBeUndefined();
+    await log.flush();
+    const late = namesUnder(fake.files, 'snapshots').filter((name) => !early.includes(name));
+    expect(late).toHaveLength(1);
+    const lateLines = linesOf(fake.files.get(late[0] ?? '') ?? Buffer.alloc(0));
+    expect(lateLines.some((line) => line.includes('"y"'))).toBe(false);
+
+    // A start from the late snapshot, and one from the early snapshot alone, read the same.
+    const fromLate = digestOn(fake, { time, forget: HORIZON });
+    await fromLate.log.read();
+    expect(held(fromLate.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
+    expect(fromLate.log.covers(CHAIN, 9n)).toBe(true);
+    for (const name of late) fake.files.delete(name);
+    const fromEarly = digestOn(fake, { time, forget: HORIZON });
+    await fromEarly.log.read();
+    expect(held(fromEarly.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
+    expect(fromEarly.log.covers(CHAIN, 9n)).toBe(true);
+    expect(fromEarly.log.memoryHeld()).toMatchObject({ objects: 6 });
+  });
+
+  it('writes a request’s facts as payments’ lines with when they were known by: an image before reads them as kept', async () => {
+    const { log, fake, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    recordEach(log);
+    await log.flush();
+    const [delta] = namesUnder(fake.files, 'deltas');
+    const written = linesOf(fake.files.get(delta ?? '') ?? Buffer.alloc(0)).map((line) => JSON.parse(line) as object);
+    expect(written).toContainEqual(expect.objectContaining({ p: 1, y: START.toISOString() }));
+
+    // One that forgets nothing (as before AT13d) holds them as payments' facts, for good.
+    time.held.at = GOES + DAY;
+    const before = digestOn(fake, { time });
+    await before.log.read();
+    expect(held(before.log)).toEqual([2n, 4n, 5n, 6n, 7n, 8n]);
+  });
+
+  it('a payments’ line written before AT13d (no `y`) stays a payment’s fact for good', async () => {
+    const { log, fake, time } = digestOn();
+    await log.read();
+    recordEach(log);
+    await log.flush();
+    time.held.at = GOES + DAY;
+    const restarted = digestOn(fake, { time, forget: HORIZON });
+    await restarted.log.read();
+    expect(held(restarted.log)).toEqual([2n, 4n, 5n, 6n, 7n, 8n]);
+  });
+
+  it.each([
+    ['on an authority line', { p: undefined, y: START.toISOString() }],
+    ['not a time', { p: 1, y: 'yesterday' }],
+    ['a time not written as ours', { p: 1, y: '2026-11-20T09:00:00Z' }],
+  ])('a `y` %s is no line of ours: the file is the alarm', async (_what, fields) => {
+    const { fake, time, capture } = digestOn();
+    const at = String(9_999_999_999_999 - (START.getTime() + MINUTE)).padStart(13, '0');
+    const name = `e1/digests/deltas/${at}-0199a0f0-0000-7000-8000-00000000f003`;
+    const entry = Buffer.alloc(16);
+    entry.writeUInt32BE(1, 0);
+    entry.writeUInt32BE(2, 4);
+    entry.writeBigUInt64BE(3n, 8);
+    const line = { c: `organisation:${ORG}`, t: START.toISOString(), e: entry.toString('base64'), ...fields };
+    fake.files.set(name, closedFile(name, [JSON.stringify(line)]));
+    time.held.at += 6 * MINUTE;
+    const restarted = digestOn(fake, { time, capture, forget: HORIZON });
+    await restarted.log.read();
+    expect(said(capture, 'audit.integrity_failed')).toEqual([expect.objectContaining({ reason: 'file' })]);
+  });
+
+  it('a chain whose payments give way lets its requests’ days go with them, and keeps none after', async () => {
+    const { log } = digestOn(undefined, { forget: HORIZON, mostBytes: 12_000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 4n));
+    log.record(CHAIN, requests(400), START, stretch(4n, 500n));
+    expect(log.latest(CHAIN, 'spend_request', FIRST_REQUEST)).toBeUndefined();
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(3n);
+    expect(log.memoryHeld().bytes).toBeLessThanOrEqual(12_000);
+    expect(log.bytesHeld()).toBe(log.memoryHeld().bytes);
+    log.record(CHAIN, requests(1, 2000), START);
+    expect(log.latest(CHAIN, 'spend_request', '0199a0f0-0000-7000-8000-0000000007d0')).toBeUndefined();
+  });
+
+  it('a write that fails keeps a request’s facts for the next with when they were known by', async () => {
+    const { log, fake, time } = digestOn(undefined, { forget: HORIZON });
+    await log.read();
+    fake.instead.put = () => Promise.reject(new Error('store away'));
+    recordEach(log);
+    await log.flush();
+    delete fake.instead.put;
+    time.held.at = START.getTime() + 2 * DAY;
+    await log.flush();
+    const [delta] = namesUnder(fake.files, 'deltas');
+    const written = linesOf(fake.files.get(delta ?? '') ?? Buffer.alloc(0)).map((line) => JSON.parse(line) as object);
+    expect(written).toContainEqual(expect.objectContaining({ p: 1, y: START.toISOString() }));
+    for (const name of namesUnder(fake.files, 'snapshots')) fake.files.delete(name);
+    time.held.at = GOES + HOUR;
+    const restarted = digestOn(fake, { time, forget: HORIZON });
+    await restarted.log.read();
+    expect(held(restarted.log)).toEqual([2n, undefined, 5n, 6n, 7n, 8n]);
   });
 });

@@ -780,7 +780,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
     const events = await shared.eventsAbout(w.org, supplierOfWorld(w), 'supplier');
     expect(events.find(({ action }) => action === 'supplier.unverify')).toMatchObject({
-      details: { pendingRequests: 'cancel', pendingStatementVersion: 3 },
+      details: { pendingRequests: 'cancel', pendingStatementVersion: 4 },
     });
   });
 
@@ -805,7 +805,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     const recorded = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
     await voidedBefore(w, [approved, waiting], 'SUPPLIER_NOT_VERIFIED', recorded);
     expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
-    expect(await chosen(w)).toMatchObject([{ details: { pendingRequests: 'cancel', pendingStatementVersion: 3 } }]);
+    expect(await chosen(w)).toMatchObject([{ details: { pendingRequests: 'cancel', pendingStatementVersion: 4 } }]);
     // The cancel is the stop in force: the job takes any past the batch, and a pause can't undo it.
     expect(await stillPaused(w, 'SUSPENDED')).toBe(false);
     expect(await supplierSuspended(w, 'pause')).toMatchObject({
@@ -1124,10 +1124,10 @@ describe('a supplier’s details changed: the admin chooses cancel or pause (dec
 
     const events = await supplierEvents(w);
     expect(events.findLast(({ action }) => action === 'supplier.unverify')).toMatchObject({
-      details: { pendingRequests: 'pause', pendingStatementVersion: 2 },
+      details: { pendingRequests: 'pause', pendingStatementVersion: 3 },
     });
     expect(events.findLast(({ action }) => action === 'supplier.details_changed')).toMatchObject({
-      details: { pendingRequests: 'pause', pendingStatementVersion: 2, followsVersionId: before.currentVersionId },
+      details: { pendingRequests: 'pause', pendingStatementVersion: 3, followsVersionId: before.currentVersionId },
     });
 
     await shared.verified(w, supplierOfWorld(w));
@@ -1436,7 +1436,7 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
     expect(await reactivation(w)).toMatchObject({
       action: 'supplier.reactivate_verified',
-      details: { pendingRequests: 'cancel', pendingStatementVersion: 3 },
+      details: { pendingRequests: 'cancel', pendingStatementVersion: 4 },
     });
   });
 
@@ -1608,7 +1608,7 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     expect(await frozen(w, 'pause')).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
     await job(w).run();
     for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
-    expect(await freezes(w)).toMatchObject([{ details: { pendingRequests: 'pause', pendingStatementVersion: 3 } }]);
+    expect(await freezes(w)).toMatchObject([{ details: { pendingRequests: 'pause', pendingStatementVersion: 4 } }]);
 
     expect(await unfrozen(w, 'All clear', 'pause')).toMatchObject({ organization: { status: 'ACTIVE' } });
     await job(w).run();
@@ -1616,7 +1616,7 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     const unfreeze = await unfreezeEvent(w);
     expect(unfreeze).toMatchObject({
       action: 'organization.unfreeze',
-      details: { reason: 'All clear', pendingRequests: 'pause', pendingStatementVersion: 2 },
+      details: { reason: 'All clear', pendingRequests: 'pause', pendingStatementVersion: 3 },
     });
     expect(unfreeze?.details).toHaveProperty('stepUpChallengeId');
     expect(await told(w)).toEqual([{ kind: 'organization_frozen' }, { kind: 'organization_unfrozen' }]);
@@ -1685,7 +1685,7 @@ describe('freezing the organisation: an admin or approver chooses cancel or paus
     );
     expect(await unfreezeEvent(w)).toMatchObject({
       action: 'organization.unfreeze',
-      details: { reason: 'All clear', pendingRequests: 'cancel', pendingStatementVersion: 2 },
+      details: { reason: 'All clear', pendingRequests: 'cancel', pendingStatementVersion: 3 },
     });
   });
 
@@ -2172,11 +2172,11 @@ describe('a consent run out: cancel, or hold until renewed, as the admin chose (
       ({ action }) => action === 'funding_source.consent_expiry_chosen',
     );
     expect(chosen.map(({ details }) => details)).toEqual([
-      expect.objectContaining({ pendingRequests: 'pause', pendingStatementVersion: 1 }),
+      expect.objectContaining({ pendingRequests: 'pause', pendingStatementVersion: 2 }),
       // Past the end it names the consent that ran out, so it cancels for good (F1 G1).
       expect.objectContaining({
         pendingRequests: 'cancel',
-        pendingStatementVersion: 1,
+        pendingStatementVersion: 2,
         lapsedConsentId: w.state.accountConsentId,
       }),
     ]);

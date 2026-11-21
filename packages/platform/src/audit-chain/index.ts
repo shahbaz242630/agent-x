@@ -11,7 +11,13 @@ export {
   signProgress,
 } from './anchor.ts';
 export { type AnchorLog, createAnchorLog, type LastKnown } from './anchor-log.ts';
-export { createDigestLog, type DigestAnchors, type DigestLog, type StateDigest } from './digest-log.ts';
+export {
+  createDigestLog,
+  type DigestAnchors,
+  type DigestLog,
+  FORGET_MARGIN_MS,
+  type StateDigest,
+} from './digest-log.ts';
 export { type SignedSeen, subjectKey } from './state-digest.ts';
 export { shardOf } from './shards.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';

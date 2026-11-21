@@ -754,13 +754,18 @@ describe('refused, changing nothing', () => {
   });
 
   it('SEC-DP-11 a step-up asked for another payment or another reference: STEP_UP_FAILED', async () => {
-    const { w, acting, transaction, first } = await markable();
+    const { w, acting, transaction } = await handedOff(REJECTED_UNPROVEN);
+    // The other payment handed off beside it, before the members' fortnight: asked once the clock had moved on two
+    // weeks, its approval (sealed by the database's clock) would read past the 7-day horizon, never handed off (AT13d).
     // Small: two of ALLOWED to one supplier would together need an approval (the split check).
     const other = await ask(acting, w, { amount: SMALL(REJECTED_UNPROVEN) });
     await handoffOf(w).run();
     clock.advanceBy(2 * STEP);
     await checksOf(w).run();
     const otherPayment = await transactionOf(w, other.id);
+    const first = await adminOf(w);
+    // Members long enough to be each other's second person, and both payments past their day.
+    clock.advanceBy(ESTABLISHED_MS);
     clock.advanceBy(MARK_FAILED_AFTER_MS);
     const admin = await signedInAgain(first);
     const challengeId = askedFor(await proposing(admin, transaction.id));

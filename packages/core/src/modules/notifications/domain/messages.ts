@@ -407,7 +407,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   spend_request_stopped: {
     subject: () => 'Agent X: an approved payment was stopped before it reached the bank',
     firstLine: () =>
-      "An approved spend request in one of your Agent X organisations was stopped by Agent X's last check before it was handed to the bank, because something it was approved under had changed: for example its agent's key was ended, its supplier's payee changed, or its mandate was replaced or stopped. Nothing was paid, and the money held for it was freed.",
+      "An approved spend request in one of your Agent X organisations was stopped by Agent X's last check before it was handed to the bank, because something it was approved under had changed, or its approval ran out: for example its agent's key was ended, its supplier's payee changed, its mandate was replaced or stopped, or it was approved more than 7 days ago (time it was paused counts) and not yet paid. Nothing was paid, and the money held for it was freed.",
     check:
       "Sign in to Agent X to see the request and why it was stopped. Once whatever stopped it is put right, the agent can ask again if the payment is still needed. If you didn't expect this, tell the organisation's other admins.",
   },

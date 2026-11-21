@@ -5,6 +5,7 @@
 // store's alert. Production never gets here, its config refuses to start
 // (config.ts); staging runs on, as code can reach it before its `apps` hand deploy
 // sets the store, and a refusal would take it down until then.
+import { APPROVAL_HORIZON_MS } from '@agentx/core/modules/spend-requests';
 import type { Clock } from '@agentx/core/shared-kernel';
 import { type AnchorLog, createAnchorLog, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { type Config, LOCAL_ONLY } from '@agentx/platform/config';
@@ -70,6 +71,8 @@ export function anchorsKeptOf(
     anchors: log,
     leading,
     mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
+    // An approval older than this is never handed off (AT13d): so a request's facts needn't be kept past it.
+    forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
   });
   kept.digest = digest;
   return { log, digest };

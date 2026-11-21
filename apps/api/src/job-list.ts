@@ -20,7 +20,7 @@ import {
 import { listedByShard, listedOrganizations, organisationsWithMarks } from '@agentx/core/modules/directory';
 import { mandateExpiryDue } from '@agentx/core/modules/mandates';
 import { createNoticeCheck } from '@agentx/core/modules/notifications';
-import { requestExpiryDue } from '@agentx/core/modules/spend-requests';
+import { APPROVAL_HORIZON_MS, requestExpiryDue } from '@agentx/core/modules/spend-requests';
 import {
   activeContactsFor,
   contactAddressFor,
@@ -281,6 +281,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       alertAfterMs: staleAfterMs,
       mostBytes: MEMORY_DIGEST_BYTES,
       leading,
+      forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
     });
   checkStatesWith(digest);
   // The platform chain's walks keep its signed states in the digest too (AT13c): the pause, the sessions' signed ends.

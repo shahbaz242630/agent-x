@@ -486,7 +486,7 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     expect(events[1]).toMatchObject({ actor_type: 'user' });
     expect(JSON.parse(String(events[1]?.details))).toMatchObject({
       pendingRequests: 'pause',
-      pendingStatementVersion: 1,
+      pendingStatementVersion: 2,
     });
   });
 

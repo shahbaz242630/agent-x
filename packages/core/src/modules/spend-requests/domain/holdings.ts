@@ -21,7 +21,10 @@
 //   a payment that can't be read (its instruction or transaction tampered
 //   with, or gone) never matches;
 // - ended (denied, expired, cancelled): nothing held: no reservation or a
-//   RELEASED one, no claim or a released one;
+//   RELEASED one, no claim or a released one; but where its signed ending
+//   kept its capacity (AT13d: ended past what the digest remembers), its one
+//   reservation stays HELD as decided, as its month total and windows kept the
+//   amount, and its claim released;
 // - VALIDATING: never seen once committed (a request leaves it in the
 //   transaction that made it), so it never matches.
 import type { Money } from '../../../shared-kernel/index.ts';
@@ -76,6 +79,8 @@ export interface RequestHolding {
   readonly held: HeldSealed | null;
   /** A handed-off request's payment; one handed off without it never matches. */
   readonly payment?: PaymentHolds | undefined;
+  /** Ended, whether its signed ending kept its capacity (AT13d): its reservation then stays HELD, as decided. */
+  readonly capacityKept?: boolean | undefined;
 }
 
 /** A reservation of the request, as its table holds it. */
@@ -185,15 +190,26 @@ export function holdingsMatch(
   // A handed-off request holds as its payment says (C3), never given back before a verified failure.
   const holds = byStatus === 'handed_off' ? (request.payment ?? 'unreadable') : byStatus;
   if (holds === 'never' || holds === 'unreadable' || reservations.length > 1 || claims.length > 1) return false;
-  if (holds === 'ended') {
-    return reservations.every(({ state }) => state === 'RELEASED') && claims.every(({ released }) => released);
-  }
   const [reservation] = reservations;
+  if (holds === 'ended') {
+    const claimsReleased = claims.every(({ released }) => released);
+    // Its signed ending kept its capacity (AT13d): its one reservation stays HELD, as decided; otherwise none holds.
+    if (request.capacityKept === true) {
+      return claimsReleased && reservation !== undefined && reservationAsDecided(request, reservation, 'HELD');
+    }
+    return reservations.every(({ state }) => state === 'RELEASED') && claimsReleased;
+  }
   const [claim] = claims;
   if (reservation === undefined || claim === undefined || claim.released || !claim.itsOwn) return false;
-  if (!claim.payeeAsSealed || !reservation.payeeAsSealed) return false;
+  if (!claim.payeeAsSealed) return false;
+  return reservationAsDecided(request, reservation, RESERVATION_STATE[holds]);
+}
+
+/** Whether the reservation is in `state`, on its payee as sealed, holding exactly what the request was decided to. */
+function reservationAsDecided(request: RequestHolding, reservation: ReservationHolding, state: string): boolean {
   return (
-    reservation.state === RESERVATION_STATE[holds] &&
+    reservation.payeeAsSealed &&
+    reservation.state === state &&
     reservation.agentId === request.agentId &&
     reservation.mandateId === request.mandateId &&
     reservation.supplierId === request.supplierId &&

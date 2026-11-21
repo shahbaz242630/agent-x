@@ -44,6 +44,47 @@ const reservation = (overrides: Partial<ReservationHolding> = {}): ReservationHo
 const OPEN: ClaimHolding = { released: false, itsOwn: true, payeeAsSealed: true };
 const RELEASED: ClaimHolding = { released: true, itsOwn: true, payeeAsSealed: true };
 
+describe('an ended request whose signed ending kept its capacity (AT13d)', () => {
+  const kept = (status: SpendRequestStatus) => ({ ...request(status), capacityKept: true });
+
+  it.each(['DENIED', 'EXPIRED', 'CANCELLED'] as const)(
+    '%s: its one reservation HELD as decided, its claim released',
+    (status) => {
+      expect(holdingsMatch(kept(status), [reservation()], [RELEASED])).toBe(true);
+      expect(holdingsMatch(kept(status), [reservation()], [])).toBe(true);
+    },
+  );
+
+  it('anything else is a mismatch: none held, released, or not as decided; its claim open', () => {
+    const ended = kept('DENIED');
+    expect(holdingsMatch(ended, [], [RELEASED])).toBe(false);
+    for (const state of ['RELEASED', 'FINALISED', 'BLOCKED_UNKNOWN']) {
+      expect(holdingsMatch(ended, [reservation({ state })], [RELEASED])).toBe(false);
+    }
+    for (const changed of [
+      { amountMinor: 99_999n },
+      { month: '2026-09' },
+      { agentId: 'another' },
+      { payeeAsSealed: false },
+      { reservedAt: new Date(AT.getTime() - 1) },
+    ]) {
+      expect(holdingsMatch(ended, [reservation(changed)], [RELEASED])).toBe(false);
+    }
+    expect(holdingsMatch(ended, [reservation()], [OPEN])).toBe(false);
+    expect(holdingsMatch(ended, [reservation(), reservation()], [RELEASED])).toBe(false);
+  });
+
+  it('a HELD reservation of an ended request whose ending kept nothing is the mismatch it always was', () => {
+    expect(holdingsMatch(request('DENIED'), [reservation()], [RELEASED])).toBe(false);
+    expect(holdingsMatch({ ...request('DENIED'), capacityKept: false }, [reservation()], [RELEASED])).toBe(false);
+    expect(
+      holdingsMatch({ ...request('DENIED'), capacityKept: false }, [reservation({ state: 'RELEASED' })], [RELEASED]),
+    ).toBe(true);
+    // Kept or not, a request still holding is judged as ever.
+    expect(holdingsMatch({ ...request('APPROVED'), capacityKept: true }, [reservation()], [OPEN])).toBe(true);
+  });
+});
+
 describe('what a request holds (E1)', () => {
   it.each(['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'] as const)(
     '%s: exactly one HELD reservation of its own and one open claim of its own',
