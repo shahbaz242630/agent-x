@@ -3,8 +3,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { SignedStates, StateCheck } from '../../audit/index.ts';
+import { MOST_BANK_ENTRIES } from '../domain/order-slots.ts';
 import {
   checkOrderSlots,
+  heldSlotsLetGo,
   keyHashOf,
   MOST_SLOTS_CHECKED_A_PAGE,
   orderHashOf,
@@ -12,6 +14,7 @@ import {
   orderSlotId,
   type OrderSlotKey,
   orderSlotKeys,
+  slotAsClaimed,
   slotTakesOf,
 } from './order-slots.ts';
 
@@ -104,6 +107,53 @@ describe("an order's slots", () => {
       { id: orderSlotId(ORG, KEY), requestId: REQUEST },
     ]);
     expect(slotTakesOf(REQUEST, null)).toEqual([]);
+  });
+});
+
+describe("a slot's ID", () => {
+  it('is named the same for a slot naming neither supplier nor key (never sealed so: 0114 refuses it)', () => {
+    const neither = { kind: 'payee_order', supplierId: null, payeeKey: null, keyHash: keyHashOf('inv-7') } as const;
+    expect(orderSlotId(ORG, neither)).toBe(orderSlotId(ORG, neither));
+    expect(orderSlotId(ORG, neither)).not.toBe(orderSlotId(ORG, { ...neither, payeeKey: 'payee-1' }));
+  });
+});
+
+describe('a slot held to its open claims', () => {
+  const entry = (n: number) => `${ORDER}:0199a0f0-0000-7000-8000-${n.toString(16).padStart(12, '0')}`;
+  const ORDER = '1111111111111111';
+  const bankOf = (entries: readonly string[]) => ({
+    kind: 'bank' as const,
+    entries: entries.map((text) => {
+      const [orderHash = '', requestId = ''] = text.split(':');
+      return { orderHash, requestId };
+    }),
+  });
+
+  it('holds as claimed with the same holders, never one more or one less', () => {
+    expect(slotAsClaimed({ kind: 'order', holder: REQUEST }, new Set([REQUEST]))).toBe(true);
+    expect(slotAsClaimed({ kind: 'order', holder: null }, new Set())).toBe(true);
+    expect(slotAsClaimed({ kind: 'order', holder: null }, new Set([REQUEST]))).toBe(false);
+    expect(slotAsClaimed({ kind: 'order', holder: REQUEST }, new Set())).toBe(false);
+    expect(slotAsClaimed(bankOf([entry(1)]), new Set([entry(1), entry(2)]))).toBe(false);
+  });
+
+  it('holds a full bank slot as claimed where every one listed is claimed, more claimed past its list', () => {
+    const listed = Array.from({ length: MOST_BANK_ENTRIES }, (_, n) => entry(n));
+    expect(slotAsClaimed(bankOf(listed), new Set([...listed, entry(MOST_BANK_ENTRIES)]))).toBe(true);
+    expect(slotAsClaimed(bankOf(listed), new Set(listed.slice(1)))).toBe(false);
+  });
+});
+
+describe("a payment's failure letting go of its slots", () => {
+  it('lets go of nothing where its caller locked none', async () => {
+    const { states, mismatch } = statesWatching();
+    await expect(
+      heldSlotsLetGo(null as never, states, ORG, undefined, {
+        at: new Date(),
+        change: { actor: { type: 'system', id: 'api' }, action: 'order_slot.released', details: {} },
+      }),
+    ).resolves.toBeUndefined();
+    expect(mismatch).not.toHaveBeenCalled();
   });
 });
 

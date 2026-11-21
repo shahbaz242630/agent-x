@@ -141,6 +141,7 @@ export {
   SLOTS_NAMED_ACTION,
   SLOTS_NAMED_SUBJECT,
   type SlotsChecked,
+  heldSlotsLetGo,
   slotsLetGo,
   slotsMissing,
   type SlotTake,

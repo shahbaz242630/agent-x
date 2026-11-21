@@ -547,6 +547,20 @@ describe("the slot's own rules", () => {
       });
     });
 
+  it('lets a slot tampered with be at an ending: the request still ends, as a brake must, the alarm raised by its read', async () => {
+    const { w, acting } = await ready();
+    const held = await decided(acting, w, 'INV-7');
+    const key = await orderSlot(w, 'INV-7');
+    await slotTamper(w, (owner) => owner.setColumn(orderSlotId(w.org, key), 'holders', ''));
+    const ended = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(tx, states, keys, { orgId: w.org, id: held.id }, { kind: 'user', userId: PERSON }, clock.now()),
+    );
+    expect(ended).toMatchObject({ outcome: 'ended' });
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held', foundOn: ORDER_SLOTS.subject });
+    const events = await eventsAbout(w.org, orderSlotId(w.org, key), ORDER_SLOTS.subject);
+    expect(events.map(({ action }) => action)).toEqual(['order_slot.held']);
+  });
+
   it('lets go of nothing a request does not hold: the mismatch alarmed, the slot as it was', async () => {
     const { w, acting } = await ready();
     const held = await decided(acting, w, 'INV-7');
@@ -1060,6 +1074,49 @@ describe('an organisation made before TR-2, until its cutover', () => {
     expect(await holdersIn(w, await bankSlot(w, 'INV-7'))).toBe('none');
     expect(await eventsAbout(w.org, held.id, SLOTS_NAMED_SUBJECT)).toEqual([]);
     expect(await ask(acting, w, 'INV-8')).toEqual(refused(503, 'ORGANISATION_BUSY'));
+  });
+
+  it('is not cut over over two signed requests holding one order (made past the claims): nothing opened, alarmed', async () => {
+    const { w, acting } = await ready({ madeBeforeOrderSlots: true });
+    await cutOverByHand(w);
+    const first = await decided(acting, w, 'INV-7');
+    // The slots gone and the first's claim released past the app: the same order decided again, both still holding.
+    await asBeforeTr2(w, [first.id]);
+    await cutOverByHand(w);
+    await claimReleased(w, first.id);
+    const second = await decided(acting, w, 'INV-7');
+    expect(second.decision).toBe('ALLOW');
+    await asBeforeTr2(w, [second.id]);
+
+    await visit(w);
+    expect(lines('order_slots.cutover_held')).toHaveLength(1);
+    expect(lines('order_slots.cut_over')).toEqual([]);
+    alarmedOn('holding');
+    expect(await holdersIn(w, await orderSlot(w, 'INV-7'))).toBe('none');
+  });
+
+  it("counts a request on its supplier alone where its claim's payee key doesn't hold to its seal, alarmed", async () => {
+    const { w, acting } = await ready({ madeBeforeOrderSlots: true });
+    const supplierId = supplierOf_(w);
+    await payeeKeyOf(w, supplierId, 'payee-1');
+    await cutOverByHand(w);
+    const held = await decided(acting, w, 'INV-7', supplierId);
+    await asBeforeTr2(w, [held.id]);
+    await asOwner(w, (owner) =>
+      owner.query("update spend_requests.order_claims set payee_key = 'planted-payee' where request_id = $1", [
+        held.id,
+      ]),
+    );
+
+    await visit(w);
+    // Its supplier's order and bank slots alone: no signed fact names its key.
+    expect(lines('order_slots.cut_over')).toEqual([expect.objectContaining({ opened: 2 })]);
+    const [supplierOrder, payeeOrder] = await slotKeys(w, 'INV-7', supplierId, 'payee-1');
+    expect(await holdersIn(w, supplierOrder ?? ({} as OrderSlotKey))).toBe(held.id);
+    expect(await holdersIn(w, payeeOrder ?? ({} as OrderSlotKey))).toBe('none');
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ subjectType: SPEND_REQUESTS.subject, objectId: held.id, reason: 'holding' }),
+    );
   });
 
   it('is not cut over over a decision that already names its slots (made past the app): alarmed', async () => {

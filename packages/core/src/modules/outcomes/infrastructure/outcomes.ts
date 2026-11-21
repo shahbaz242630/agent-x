@@ -18,10 +18,10 @@ import {
 } from '../../limit-reservations/index.ts';
 import {
   lockClaimsOf,
+  heldSlotsLetGo,
   lockedHoldingsOf,
   type PaymentHolds,
   releaseClaim,
-  slotsLetGo,
   type SpendRequestsTables,
 } from '../../spend-requests/index.ts';
 import { paymentsOfRequests, type PaymentsTables, type TransactionStatus } from '../../transactions/index.ts';
@@ -113,12 +113,10 @@ export async function settleHoldings(
   if (releasesClaim) {
     // Its order let go of in its slots (TR-2), read for change with its total: none read, nothing let go, which the
     // holdings check then finds as a slot held with its claim released (fail safe: the order stays refused).
-    if (locked !== undefined) {
-      await slotsLetGo(tx, states, orgId, locked.slotsRead, locked.slots, {
-        at,
-        change: { actor: { type: 'system', id: 'api' }, action: 'order_slot.released', details: {} },
-      });
-    }
+    await heldSlotsLetGo(tx, states, orgId, locked, {
+      at,
+      change: { actor: { type: 'system', id: 'api' }, action: 'order_slot.released', details: {} },
+    });
     await releaseClaim(tx, { requestId, releasedAt: at });
   }
 }

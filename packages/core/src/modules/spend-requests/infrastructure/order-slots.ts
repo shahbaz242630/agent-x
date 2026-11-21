@@ -345,6 +345,22 @@ export async function slotsLetGo(
   }
 }
 
+/**
+ * slotsLetGo for one request's slots as its caller locked them (a payment's verified failure): none read (its caller
+ * never locked them) lets go of nothing, which the holdings check then finds as a slot held with its claim released:
+ * the order stays refused, never paid twice.
+ */
+export async function heldSlotsLetGo(
+  tx: SlotsTransaction,
+  states: SignedStates,
+  orgId: string,
+  held: { readonly slotsRead: ReadonlyMap<string, OrderSlotCheck>; readonly slots: readonly SlotTake[] } | undefined,
+  recorded: { readonly at: Date; readonly change: SignedChange },
+): Promise<void> {
+  if (held === undefined) return;
+  await slotsLetGo(tx, states, orgId, held.slotsRead, held.slots, recorded);
+}
+
 /** An open claim, as its table holds it: its request, supplier, payee key, canonical form and bank key. */
 interface OpenClaim extends OrderToSlot {
   readonly requestId: string;
@@ -413,7 +429,7 @@ export async function slotsHeldByClaims(
 }
 
 /** Whether a slot's holders are those the claims say: the same, or, for a bank slot full, all listed among them. */
-function asClaimed(holders: Holders, claimed: ReadonlySet<string>): boolean {
+export function slotAsClaimed(holders: Holders, claimed: ReadonlySet<string>): boolean {
   const listed =
     holders.kind === 'order'
       ? holderIds(holders)
@@ -476,7 +492,7 @@ export async function checkOrderSlots(
         );
   let mismatched = 0;
   for (const { id, holders } of verified) {
-    if (!asClaimed(holders, claimed.get(id) ?? new Set())) {
+    if (!slotAsClaimed(holders, claimed.get(id) ?? new Set())) {
       states.mismatch(ORDER_SLOTS.subject, { orgId, id });
       mismatched += 1;
     }
