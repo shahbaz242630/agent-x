@@ -6,33 +6,71 @@
 // (config.ts); staging runs on, as code can reach it before its `apps` hand deploy
 // sets the store, and a refusal would take it down until then.
 import type { Clock } from '@agentx/core/shared-kernel';
-import { type AnchorLog, createAnchorLog } from '@agentx/platform/audit-chain';
+import { type AnchorLog, createAnchorLog, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { type Config, LOCAL_ONLY } from '@agentx/platform/config';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
-import { azureBlobOrigins, azureWriteOnceStore, folderWriteOnceStore } from '@agentx/platform/storage';
+import {
+  azureBlobOrigins,
+  azureWriteOnceStore,
+  folderWriteOnceStore,
+  type WriteOnceStore,
+} from '@agentx/platform/storage';
 
-export function anchorLogOf(
+interface StoreServices {
+  readonly keys: KeyProvider;
+  readonly logger: Logger;
+  readonly clock: Clock;
+  readonly alertAfterMs: number;
+}
+
+export function anchorLogOf(config: Config, services: StoreServices): AnchorLog | undefined {
+  return anchorsKeptOf(config, services)?.log;
+}
+
+/**
+ * The anchors' log and, in the same store, the signed states' digest (AT13, digest-log.ts): the digest after the log,
+ * whose rebases and shards it goes by, and counted in the log's budget, keeping itself to half of it.
+ */
+export function anchorsKeptOf(
   { environment, anchorStore: { directory, container }, audit: { anchorEpoch: epoch } }: Config,
-  {
-    clock,
-    ...services
-  }: {
-    readonly keys: KeyProvider;
-    readonly logger: Logger;
-    readonly clock: Clock;
-    readonly alertAfterMs: number;
-  },
-): AnchorLog | undefined {
+  { clock, ...services }: StoreServices,
+  /** Whether this process leads the jobs: one that doesn't says nothing from its digest (digest-log.ts). */
+  leading?: () => boolean,
+): { readonly log: AnchorLog; readonly digest: DigestLog } | undefined {
+  let store: WriteOnceStore;
+  if (container !== null) {
+    store = azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
+  } else if (directory !== null) {
+    store = folderWriteOnceStore(directory);
+  } else {
+    if (!LOCAL_ONLY.includes(environment)) services.logger.error('audit.anchor_store_not_set', { environment });
+    return undefined;
+  }
+  const now = (): Date => clock.now();
+  // Made after the log, which counts it: asked only once both are made.
+  const kept: { digest?: DigestLog } = {};
   // The API's jobs anchor, so they move the store on to the shards (PL-65 PR2); the operator's job only reads it. They
   // let shards go past what they can hold (PR3), asking for one's anchors only with it pinned or held.
-  const shared = { ...services, epoch, now: () => clock.now(), cutOver: true, evicts: true };
-  if (container !== null) {
-    const fetch = createOutboundFetch(azureBlobOrigins(container));
-    return createAnchorLog({ ...shared, store: azureWriteOnceStore({ settings: container, fetch }) });
-  }
-  if (directory !== null) return createAnchorLog({ ...shared, store: folderWriteOnceStore(directory) });
-  if (!LOCAL_ONLY.includes(environment)) services.logger.error('audit.anchor_store_not_set', { environment });
-  return undefined;
+  const log = createAnchorLog({
+    ...services,
+    store,
+    epoch,
+    now,
+    cutOver: true,
+    evicts: true,
+    alsoHeld: () => kept.digest?.bytesHeld() ?? 0,
+  });
+  const digest = createDigestLog({
+    ...services,
+    store,
+    epoch,
+    now,
+    anchors: log,
+    leading,
+    mostBytes: Math.floor(log.memoryHeld().mostBytes / 2),
+  });
+  kept.digest = digest;
+  return { log, digest };
 }

@@ -80,6 +80,11 @@
 // A hold's transaction is bounded by the head's lock (5 s) and each statement's
 // time (10 s).
 //
+// Every read of a latest signed state here is held to the signed states'
+// digest where the process keeps one (AT13, `checkStatesWith`, at boot): an
+// object whose newest signed event in the database is older than the anchor
+// check last read, or gone, is tampering, at decision time.
+//
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
 // back.
@@ -93,7 +98,7 @@
 // its waits bounded (HOLD_MARK_LIMITS): one that fails or waits too long is
 // rolled back alone, said (`org_work.hold_mark_skipped`), and the hold commits;
 // the hourly look marks it.
-import { ChainBroken } from '@agentx/platform/audit-chain';
+import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
 import { inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -173,6 +178,17 @@ const unrecorded = new Map<string, Map<string, Found>>();
  * one is tried only while none is, so by one request at a time.
  */
 const recording = new Map<string, number>();
+/**
+ * The signed states' digest every read here is held to (AT13, audit-trail.ts): the one the process that keeps the anchors
+ * keeps, given at boot (`checkStatesWith`); none in a process that keeps none, whose reads are as before it.
+ */
+let stateDigest: Pick<StateDigest, 'latest'> | undefined;
+
+/** The digest this process's signed states are held to from now on, or (undefined) none: once, at boot. */
+export function checkStatesWith(digest: Pick<StateDigest, 'latest'> | undefined): void {
+  stateDigest = digest;
+}
+
 /** How a hold set marks the hold history's work, in the hold's transaction (the header): none until a process gives it. */
 let markHold: ((tx: Transaction<AuditTables>, orgId: string) => Promise<void>) | undefined;
 
@@ -609,7 +625,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   work: (tx: Transaction<Tables>, states: SignedStates) => Promise<Result>,
 ): Promise<Result> {
   const { keys, ids, logger, correlationId } = services;
-  const trail = createAuditTrail({ keys, ids, correlationId });
+  const trail = createAuditTrail({ keys, ids, correlationId, digest: stateDigest });
   const found: TamperFinding[] = [];
   const states = createSignedStates({
     keys,

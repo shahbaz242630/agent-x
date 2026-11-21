@@ -287,6 +287,36 @@ export const PLAIN_WORDS = {
     broke: 'After a start, payments wait for every organisation. Nobody is held.',
     next: 'Give the process a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
+  'audit.state_digest_near_memory': {
+    happened: 'The record of signed records’ latest versions has passed half its memory.',
+    broke: 'Nothing yet. If it fills, the largest organisation stops being held to it, its records checked as before.',
+    next: 'Plan more memory for the process in good time: the line says how much is held.',
+  },
+  'audit.state_digest_chain_gave_way': {
+    happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
+    broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
+    next: 'Nothing waits: its payments go on, checked as before. Give the process more memory in good time.',
+  },
+  'audit.state_digest_snapshot_too_large': {
+    happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',
+    broke: 'Nothing: it was not written, and a start reads the smaller files instead, more slowly.',
+    next: 'Give the process more memory, so the copy fits again.',
+  },
+  'audit.state_digest_catch_up_failed': {
+    happened: 'A walk to bring one organisation’s record of signed records’ latest versions up to date failed.',
+    broke: 'That organisation’s payments wait until it is up to date. Others go on.',
+    next: 'Nothing: it is tried again at its next turn. If it repeats, read the reason on the line.',
+  },
+  'audit.state_digest_store_failed': {
+    happened: 'The record of each signed record’s latest version could not be read from or written to the store.',
+    broke: 'Nothing yet: it is tried again each run. After a start, payments wait until it has been read once.',
+    next: 'Nothing if it passes. If it repeats, check the anchor store as for the anchors: playbook section H.',
+  },
+  'audit.state_digest_store_failing': {
+    happened: 'The record of each signed record’s latest version has failed to reach the anchor store for some time.',
+    broke: 'After a start, payments wait for every organisation. Unwritten parts are kept in memory meanwhile.',
+    next: 'Check the anchor store and the API’s access to it, as for the anchors: playbook section H.',
+  },
   'audit.anchor_store_foreign': {
     happened: 'The store that keeps the audit anchors holds files the app would never have named.',
     broke: 'Nothing: those files were left unread and the check went on without them.',
@@ -556,6 +586,11 @@ export const PLAIN_WORDS = {
     happened: "An MCP app's metadata document couldn't be fetched again, so the copy kept from before was used.",
     broke: 'Nothing yet: the app still connects. Past 7 days without a fresh copy, it would be refused.',
     next: 'The reason says why: if the site stays down or refuses for days, tell the app maker.',
+  },
+  'oauth.client_unsealed': {
+    happened: "An MCP app's kept record had no seal, so it was not used.",
+    broke: 'An app with its own document is fetched again; an app that registered itself must register again.',
+    next: 'Old records or a key change explain it. Otherwise treat it as tampering.',
   },
   'oauth.client_metadata_sweep_failed': {
     happened: 'The clean-up of MCP apps’ metadata documents past their day failed.',
@@ -930,6 +965,16 @@ export const PLAIN_WORDS = {
     broke: "No organisation's spend requests were checked this run.",
     next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database.',
   },
+  'month_totals.cutover_failed': {
+    happened: "Moving an organisation's monthly spending limits onto signed running totals failed.",
+    broke: "That organisation's agents can't spend under a mandate yet: their requests are answered busy.",
+    next: 'It is tried again at the next run, about 15 minutes later. If it keeps failing, check the database and the error.',
+  },
+  'month_totals.cutover_held': {
+    happened: "An organisation's monthly limits were not moved onto signed totals: a record can't be trusted.",
+    broke: 'The organisation is on hold and its agents are answered busy.',
+    next: 'Follow the integrity alarm raised with it. Once the hold is cleared the move is tried again.',
+  },
   'http.framework_log': {
     happened: 'The web server reported a problem of its own while handling a request.',
     broke: 'That request may not have been answered properly.',
@@ -1011,6 +1056,16 @@ export const PLAIN_WORDS = {
       "An organisation's contacts or sign-in resets passed half of what a list reads, or a hold clearing found over eight thousand of one kind of record.",
     broke: 'Nothing yet. A list past its limit stops working; a hold clearing only gets slower.',
     next: 'Find out why the organisation has so many, and tell the developer.',
+  },
+  'identity.session_last_use_unsealed': {
+    happened: 'A console sign-in from before the last-use seal came back, so it was ended.',
+    broke: 'That person is signed out and signs in again once; nothing else is affected.',
+    next: 'Expected for a while after the release that added the seal. Long after it, treat it as tampering.',
+  },
+  'identity.session_last_use_mismatch': {
+    happened: "A console sign-in's last-use seal did not match, so it was ended.",
+    broke: 'That person signs in again; nothing else is affected.',
+    next: 'Expected during a release or after a rollback (then clear the seals per the incident playbook before rolling forward). Otherwise treat it as tampering.',
   },
   'identity.session_sweep_failed': {
     happened: 'The hourly clean-up of ended sign-in sessions failed.',

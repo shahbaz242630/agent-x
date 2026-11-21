@@ -36,6 +36,7 @@ export {
   latestPlatformTimeOf,
   latestPlatformTimeOfRead,
   platformEventWith,
+  platformEventWithRead,
   type PlatformEventsMatching,
 } from './infrastructure/platform-events.ts';
 export type { PlatformControlsTables } from './infrastructure/tables.ts';

@@ -20,7 +20,7 @@
 // rules, and nothing written anywhere (SEC-AG-09); and no request ever left
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
-import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { checkStatesWith, createAuditTrail, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import {
   addZone,
   AGENT_ZONES,
@@ -40,14 +40,17 @@ import {
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
   releaseClaim,
+  requestOf,
   SPEND_REQUESTS,
   type SpendRequestsTables,
   totalsWeighed,
+  voidedWith,
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
+import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
 import {
   createDatabase,
   type Database,
@@ -741,21 +744,11 @@ describe('deciding a spend request and reserving it (D4)', () => {
   it('frees a released reservation’s capacity, and never counts another agent’s', async () => {
     const { w, acting } = await ready();
     const first = decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n) })));
-    // Ended and given back past the use cases (cancel and expiry come with D7 and D8).
-    await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: first.id }, 'deny', {
-        actor: OPERATOR,
-        action: 'spend_request.denied',
-        details: {},
-      }),
-    );
-    await withTenant(app, w.org, async (tx) => {
-      await tx
-        .updateTable('limit_reservations.reservations')
-        .set({ state: 'RELEASED', settled_at: clock.now() })
-        .where('request_id', '=', first.id)
-        .execute();
-      await releaseClaim(tx, { requestId: first.id, releasedAt: clock.now() });
+    // Ended as a void ends it: its reservation and claim released and its amount given back to the month's total.
+    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      // Read for change first, as every void's caller reads it.
+      await requestOf(tx, states, { orgId: w.org, id: first.id }, 'change');
+      await voidedWith(tx, states, keys, { orgId: w.org, id: first.id }, ['AGENT_SUSPENDED'], clock.now());
     });
     expect(decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-2' }))).decision).toBe(
       'ALLOW',
@@ -998,6 +991,40 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
     expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
   });
 
+  it('SEC-DB-17 (AT13) counts the same trips with every read held to the signed states’ digest: it is memory, no trip', async () => {
+    const { w, acting } = await ready();
+    decidedOf(await ask(acting, asking(w)));
+    // The anchor check's walk of the whole chain, kept as job-list.ts keeps it, every signed object in it.
+    const digest = createDigestLog({
+      keys,
+      logger: testLogger(capture),
+      now: () => clock.now(),
+      epoch: 1,
+      alertAfterMs: 60_000,
+      mostBytes: 64 * 1024 * 1024,
+    });
+    const step = await createAuditTrail({ keys, ids: new SequentialIds(0x1317) }).checkFromAnchor(
+      app,
+      w.org,
+      CHAIN_START,
+    );
+    if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+    digest.record({ kind: 'organisation', orgId: w.org }, step.signed, clock.now());
+    checkStatesWith(digest);
+    try {
+      decidedOf(await ask(acting, asking(w, { orderReference: 'INV-DIGEST-ONE-TRIP' })));
+    } finally {
+      checkStatesWith(undefined);
+    }
+    const line = capture
+      .lines()
+      .filter(({ event }) => event === 'spend_request.decided')
+      .at(-1);
+    expect(line?.trips).toBe(17);
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(12);
+    expect(capture.lines().filter(({ event }) => event === 'audit.integrity_failed')).toEqual([]);
+  });
+
   it('SEC-DB-17 counts a decision sent for approval, its notice told, as the allowed one and its notice alone (S206 V4)', async () => {
     const { w, acting } = await ready({ terms: { approvalThreshold: AED(500_000n) } });
     decidedOf(await ask(acting, asking(w)));
@@ -1021,8 +1048,9 @@ describe('its writes on one trip, one forced to fail (4D2d P16)', () => {
       .at(-1);
     // Its gather reads the zone as not there, the insert comes after the supplier's lock, and the zone's seal adds trips.
     expect(line?.supplierLockTrip).toBe(6);
-    expect(line?.trips).toBe(23);
-    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(18);
+    // Its month has no signed total yet, so one more read of the organisation's log says it holds nothing (GM-1a).
+    expect(line?.trips).toBe(24);
+    expect((line?.trips as number) - (line?.supplierLockTrip as number) + 1).toBe(19);
     // The month it added, dated the instant it was asked.
     const periods = await withTenant(app, w.org, (tx) =>
       tx.selectFrom('limit_reservations.agent_periods').select(['month', 'created_at']).execute(),

@@ -179,6 +179,20 @@ export async function decisionsOf(
   orgId: string,
   ids: readonly string[],
 ): Promise<Map<string, Decided>> {
+  const read = await decisionsRead(tx, states, orgId, ids);
+  return read === 'tampered' ? new Map() : read;
+}
+
+/**
+ * decisionsOf, saying `tampered` for a history that can't be believed (its alarm raised) rather than answering none:
+ * for a reader that must not take "no decision read" for "no decision" (GM-1a's cutover, which would open nothing).
+ */
+export async function decisionsRead(
+  tx: Transaction<AuditTables>,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<Map<string, Decided> | 'tampered'> {
   if (ids.length === 0) return new Map();
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject],
@@ -186,7 +200,7 @@ export async function decisionsOf(
     actions: ['spend_request.decided'],
     limit: MOST_DECIDED_EVENTS * ids.length,
   });
-  if (history.outcome !== 'read') return new Map();
+  if (history.outcome !== 'read') return 'tampered';
   const decided = history.events.map(
     ({ event, recordedAt, seq }) =>
       [
@@ -318,6 +332,9 @@ async function judged<Tx extends HoldingsTransaction>(
     // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
     // where its decision wrote one (G5), with its bank key (0043): one changed past the app could hide a
     // possible duplicate. A claim made before G5 has none to compare, as E1b's payee seal.
+    // Which keys are compared rests on the decided event alone (R-15, S207 GM-3): the payee seal's fields, and G5's
+    // `possibleDuplicate`, which every decision since writes. The owner can't write or edit that event (the chain's
+    // MAC), and no column, its times least of all, is read here, so backdating a new request skips neither.
     const bankKeyAsMade = (bankKey: string | null) =>
       held?.bankKeyed !== true || bankKey === bankKeyOf(request.orderReference);
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({

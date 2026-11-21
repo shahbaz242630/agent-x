@@ -99,6 +99,7 @@ export {
   signedRowReadSeen,
   signedRowSeen,
   signedRowUnlocked,
+  signedRowWriting,
   MOST_SIGNED_ROWS_READ,
   type WrittenRow,
   writeSignedRow,

@@ -1,19 +1,26 @@
 // What a decision weighs from the tables once its locks are held, in one
-// statement (4D2d P12): the agent's month's total, the payee's split total and
-// the claims on the order. A statement's snapshot is taken as it starts, so it
+// statement (4D2d P12): the payee's split total and the claims on the order;
+// and, beside them on the same trip, the agent's month's signed total (GM-1a,
+// month-totals.ts). The reservations' own month sum (`month` here) is no
+// longer weighed by any decision: it is what the holdings check holds the
+// signed total to, and the tests' view of what is reserved. A statement's snapshot is taken as it starts, so it
 // goes in a statement of its own, after the supplier's and the month's locks:
 // never in the statement that takes either, whose snapshot would miss what the
 // lock's holder committed during the wait (the S157 trap). It may share a trip
 // with the month's lock (4D2e C7): the server starts it, and takes its snapshot,
 // only once the lock ahead of it is answered, so one trip saves the round trip
 // and loses nothing it would have seen.
-import { sendTogether } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
-import type { AuditTables } from '../../audit/index.ts';
+import type { AuditTables, SignedStates } from '../../audit/index.ts';
 import {
   agentMonthLocking,
   type LimitReservationsTables,
+  type MonthTotalCheck,
+  monthTotalGathered,
+  type MonthTotalKey,
+  monthTotalOf,
+  monthTotalsCutOver,
   monthSpentRead,
   type MonthToSum,
   splitHeldRead,
@@ -73,18 +80,66 @@ export async function totalsWeighed(tx: TotalsTransaction, toWeigh: TotalsToWeig
 }
 
 /**
- * The agent's month locked (agentMonthLocking), then the totals and claims asked read in a statement of their own, on
- * one trip (4D2e C7), a decision's: its supplier's lock is alone before it. A wait run out or a deadlock on the lock
- * comes back as itself: the statement behind it fails only after it, unseen.
+ * A decision's month's total, read for change with its month's lock (GM-1a): what it holds, with what it is to be
+ * written from (`held`, or `none`: a month nothing is held in yet); `busy` for an organisation not yet counted in
+ * signed totals (its cutover to come); or `tampered`, the alarm raised.
+ */
+export type DecisionMonthTotal =
+  | {
+      readonly outcome: 'held' | 'none';
+      readonly key: MonthTotalKey;
+      readonly total: Exclude<MonthTotalCheck, { readonly outcome: 'tampered' }>;
+      readonly spent: bigint;
+    }
+  | { readonly outcome: 'busy' }
+  | { readonly outcome: 'tampered' };
+
+/**
+ * The agent's month locked (agentMonthLocking), then the split total and claims asked read in a statement of their
+ * own, then the month's signed total gathered for change (GM-1a), all on one trip (4D2e C7), a decision's: its
+ * supplier's lock is alone before it. Each read in a statement after the lock, so each sees what the lock's holder
+ * committed. The month's total is the signed one, never the reservations' sum, which the database's owner could cut
+ * (R-15). A wait run out or a deadlock on the lock comes back as itself: the statements behind it fail only after it,
+ * unseen. A month with no total makes one more trip, to the organisation's log: nothing held after its cutover.
  */
 export async function monthLockedAndTotalsWeighed(
   tx: TotalsTransaction,
+  states: SignedStates,
   { orgId, at }: { readonly orgId: string; readonly at: Date },
   toWeigh: TotalsToWeigh & { readonly month: MonthToSum },
-): Promise<TotalsWeighed> {
-  const { agentId, month } = toWeigh.month;
-  const totals = totalsRead(tx, toWeigh);
-  const [, locked, found] = await sendTogether(tx, [...agentMonthLocking(tx, { orgId, agentId, month, at }), totals]);
+): Promise<TotalsWeighed & { readonly monthTotal: DecisionMonthTotal }> {
+  const { agentId, month, currency } = toWeigh.month;
+  const key = { agentId, month, currency };
+  const others = totalsRead(tx, { ...toWeigh, month: null });
+  const {
+    ahead: [, locked, found],
+  } = await states.gatherBehind(
+    tx,
+    orgId,
+    [...agentMonthLocking(tx, { orgId, agentId, month, at }), others],
+    [monthTotalGathered(orgId, key, 'change')],
+  );
   if (locked.rows.length !== 1) throw new Error(`the agent's period was not there to lock: ${month}`);
-  return totalsOf(found.rows[0] as Parameters<typeof totalsOf>[0]);
+  const weighed = totalsOf(found.rows[0] as Parameters<typeof totalsOf>[0]);
+  // Answered from the gather: no trip.
+  const total = await monthTotalOf(tx, states, orgId, key, 'change');
+  return { ...weighed, monthTotal: await decisionTotal(tx, states, orgId, key, total) };
 }
+
+/** A decision's month total as read: a month with none holds nothing once the organisation is cut over, else busy. */
+async function decisionTotal(
+  tx: TotalsTransaction,
+  states: SignedStates,
+  orgId: string,
+  key: MonthTotalKey,
+  total: MonthTotalCheck,
+): Promise<DecisionMonthTotal> {
+  if (total.outcome === 'tampered') return TAMPERED;
+  if (total.outcome === 'held') return { outcome: 'held', key, total, spent: total.held };
+  const cutOver = await monthTotalsCutOver(tx, states, orgId);
+  if (cutOver === 'cut_over') return { outcome: 'none', key, total, spent: 0n };
+  return cutOver === 'tampered' ? TAMPERED : BUSY;
+}
+
+const TAMPERED = Object.freeze({ outcome: 'tampered' as const });
+const BUSY = Object.freeze({ outcome: 'busy' as const });
