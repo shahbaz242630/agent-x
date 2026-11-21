@@ -218,7 +218,6 @@ describe('TR-1 F.1 the walk within a transaction and the path frontier', () => {
       seq: 6n,
     });
     // A stretch of exactly what it keeps (6 events, 3 to 9) is kept whole below a later anchor.
-    if (second === undefined) throw new Error('raised');
     const exact = createChainFrontier({
       anchors: { latest: () => latest.anchor, rebasedAfter: () => false },
       now: () => AT,
