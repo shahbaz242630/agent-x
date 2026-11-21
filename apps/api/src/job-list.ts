@@ -345,9 +345,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         // From its anchor, and whole once a day (4D2e E8), or when the digest owes it a walk (AT13c).
         verify: platformChainCheck({
           // Held to the heads copies witnessed (TR-1), asked before the walk.
-          fromAnchor: (from) =>
-            platform.checkFromAnchor(database, from, undefined, witness?.pending({ kind: 'platform' })),
-          whole: (anchor) => platform.verifyAlone(database, anchor),
+          fromAnchor: (from, heldTo) => platform.checkFromAnchor(database, from, undefined, heldTo),
+          whole: (anchor, heldTo) => platform.verifyAlone(database, anchor, heldTo),
           clock: systemClock,
           owed: (anchor) => digest.owed({ kind: 'platform' }, anchor.seq),
         }),
@@ -363,14 +362,9 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       }),
       // No organisation's chain read whole (4D2e E8): every head probed each run, those moved read from their anchors.
       probe: (chains, signal, pagesAtOnce) => trail.probeHeads(database, chains, signal, pagesAtOnce),
-      verify: (orgId, anchor) =>
-        trail.checkFromAnchor(
-          database,
-          orgId,
-          anchor ?? CHAIN_START,
-          undefined,
-          witness?.pending({ kind: 'organisation', orgId }),
-        ),
+      // Held to the heads the anchor check asked of the witness log before the walk (TR-1).
+      verify: (orgId, anchor, heldTo) =>
+        trail.checkFromAnchor(database, orgId, anchor ?? CHAIN_START, undefined, heldTo),
       // The run's own logger: the hold's lines name the organisation themselves.
       hold: (orgId, failure) =>
         holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure, JOB_ANSWER_WITHIN_MS),

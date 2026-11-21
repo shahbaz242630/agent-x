@@ -104,16 +104,18 @@
 // nothing a stop or an approval wrote is told it succeeded before its head is outside the database. With none waiting
 // (an agent's decision: `soon`, and nothing unconfirmed) it answers at once, no trip. Past the witness log's wait it
 // throws WitnessUnconfirmed (503: saved, not yet confirmed, retry): the change stands, the head stays queued, and every
-// later request here for the organisation waits for it too. The holds it found are still set first.
+// later request here for the organisation waits for it too. The holds it found are still set first. Sent again under
+// its key, on any copy or after a restart, the answer from the stored result witnesses the chain's head as it stands
+// first (`answeredFromEarlier`), so no retry is told the change succeeded with no head of it outside the database.
 import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
-import { inBoundedSavepoint, withTenant } from '@agentx/platform/db';
+import { answeredFromEarlier, inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
-import { nowChainsOf, waitWitnessed } from './witnessing.ts';
+import { nowChainsOf, waitWitnessed, witnessHeadAsItStands } from './witnessing.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
@@ -668,10 +670,14 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     result = await withTenant(
       db,
       orgId,
-      (tx) => {
+      async (tx) => {
         opened.began = true;
         opened.tx = tx;
-        return work(tx, states);
+        const done = await work(tx, states);
+        // An answer from an earlier write's stored result (TR-1): that write's head may never have gone out (its answer
+        // was the 503 for that), so the chain's head as it stands goes out before this answer does.
+        if (answeredFromEarlier(tx)) await witnessHeadAsItStands(tx, orgId);
+        return done;
       },
       { limited: true },
     );

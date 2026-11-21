@@ -135,7 +135,12 @@ export interface PlatformChain {
    * database can get round this one. One that holds says which signed objects
    * it read, given `subjectOf` (AT13c).
    */
-  verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<WalkedReport>;
+  verifyAlone(
+    db: Kysely<PlatformControlsTables>,
+    anchor: AnchorPoint | undefined,
+    /** The heads copies witnessed (TR-1), asked before the walk: one it doesn't pass through is `cut_back`. */
+    heldTo?: readonly HeadSeen[],
+  ): Promise<WalkedReport>;
   /**
    * Every organisation the chain records as created (`organization.created`'s
    * `orgId`, B1c-2b), in the order recorded, in a transaction of its own, 10
@@ -818,11 +823,21 @@ export function createPlatformChain({
       return verifyChain(keys, CHAIN, readerFor(tx, keys), anchor);
     },
 
-    verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<WalkedReport> {
+    async verifyAlone(
+      db: Kysely<PlatformControlsTables>,
+      anchor: AnchorPoint | undefined,
+      heldTo: readonly HeadSeen[] = [],
+    ): Promise<WalkedReport> {
+      const found = new Map<bigint, Buffer>();
       // Each statement limited, waits for locks included, so the pool can be closed soon after a stop.
-      return limitedTransaction(db, (tx) => walking((reader) => verifyChain(keys, CHAIN, reader, anchor), tx), {
-        answeredWithinMs: JOB_ANSWER_WITHIN_MS,
-      });
+      const report = await limitedTransaction(
+        db,
+        (tx) => walking((reader) => verifyChain(keys, CHAIN, watchingPlaces(reader, heldTo, found), anchor), tx),
+        { answeredWithinMs: JOB_ANSWER_WITHIN_MS },
+      );
+      // Read whole from its first event: every witnessed head is this walk's to judge (TR-1).
+      const held = heldToWitnessed(report, heldTo, found, 0n);
+      return held === report ? report : held;
     },
 
     async createdOrganizations(

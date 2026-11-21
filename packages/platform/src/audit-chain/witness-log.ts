@@ -31,11 +31,16 @@
 // snapshot, a day of heads files back (a head older than that above its chain's anchor means the anchor check has been
 // stalled a day, its own alarm).
 //
-// Held: every head read or noted above its chain's latest anchor (`pending`, a list per chain, never only the highest: a
-// stale copy's head on a cut branch must not bury the honest one below it), set aside by a rebase dated after it, and
-// let go at or below the chain's anchor (the anchor check refuses to anchor through a head missing on its walk, and
-// prunes once it has). Bounded: past what may be held, a chain's lowest heads go first, loudly, and that chain reads as
-// `beyondMemory` until anchored past them (its hand-offs wait).
+// Held: every head read or noted (`pending`, a list per chain, never only the highest: a stale copy's head on a cut
+// branch must not bury the honest one below it), set aside by a rebase dated after it. Let go only once confirmed on the
+// chain (`prune`): the anchor check's walk passed through it (never one it wasn't asked, nor one at or below where it
+// began), or its probe read the same event at its place. A copy that never checks a chain (a web copy, `dropsAtAnchor`)
+// lets go those at or below the chain's anchor instead, which the jobs copy made only after confirming every head it
+// had read. So a head landing late at or below an anchor stays held on the jobs copy until its probe judges it: never
+// dropped unseen, and a fork there is the alarm. Two heads at one place with different hashes prove a fork without a
+// read: the alarm at once. Bounded: past what may be held, a chain's lowest heads go first, loudly, and that chain reads
+// as `beyondMemory` (its hand-offs wait, the anchor check anchors it no more) until a rebase: kept in the snapshot, so a
+// restart holds it too.
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
@@ -104,9 +109,9 @@ export interface WitnessLog extends ChainWitness {
   refreshWhole(): Promise<boolean>;
   /** When the last refresh that ended whole began: none before one has. */
   freshAt(): Date | undefined;
-  /** The chain's heads at or below `upToSeq` let go: the anchor check found each on its walk and anchored past them. */
-  prune(chain: Chain, upToSeq: bigint): void;
-  /** Whether a head of the chain above its anchor was let go for memory: its hand-offs wait until anchored past it. */
+  /** Those heads let go: each confirmed on the chain (the anchor check's walk passed through it, or its probe read it). */
+  prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void;
+  /** Whether a head of the chain was let go for memory: its hand-offs wait, and it is anchored no more, until a rebase. */
   beyondMemory(chain: Chain): boolean;
   /** The anchors' log this one goes by, once it is made: none until then, and no head is set aside or let go by it. */
   useAnchors(anchors: WitnessAnchors): void;
@@ -158,20 +163,28 @@ const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SEQ = /^[1-9]\d{0,18}$/;
 const HASH = /^[0-9a-f]{64}$/;
 
-/** A line of a heads file or snapshot: one chain's head. */
-interface HeadLine {
-  readonly chain: string;
-  readonly head: WitnessedHead;
-}
+/** A line of a heads file or snapshot: one chain's head, or (a snapshot's) the highest head it let go for memory. */
+type HeadLine =
+  | { readonly chain: string; readonly head: WitnessedHead }
+  | { readonly chain: string; readonly lost: { readonly seq: bigint; readonly at: number } };
 
 function lineFrom(fields: unknown): HeadLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
-  const { c, s, h, t, ...rest } = fields as Record<string, unknown>;
+  const { c, s, h, t, l, ...rest } = fields as Record<string, unknown>;
   const at = timeIn(t);
   if (Object.keys(rest).length > 0 || typeof c !== 'string' || !CHAIN.test(c) || at === undefined) return undefined;
-  if (typeof s !== 'string' || !SEQ.test(s) || typeof h !== 'string' || !HASH.test(h)) return undefined;
+  if (s === undefined && h === undefined && typeof l === 'string' && SEQ.test(l)) {
+    return { chain: c, lost: { seq: BigInt(l), at: at.getTime() } };
+  }
+  if (l !== undefined || typeof s !== 'string' || !SEQ.test(s) || typeof h !== 'string' || !HASH.test(h)) {
+    return undefined;
+  }
   return { chain: c, head: { seq: BigInt(s), hash: Buffer.from(h, 'hex'), at: at.getTime() } };
 }
+
+/** A snapshot's line for a chain's heads let go for memory. */
+const lostText = (chain: string, { seq, at }: { readonly seq: bigint; readonly at: number }): string =>
+  JSON.stringify({ c: chain, l: seq.toString(), t: new Date(at).toISOString() });
 
 const lineText = (chain: string, { seq, hash, at }: WitnessedHead): string =>
   JSON.stringify({ c: chain, s: seq.toString(), h: hash.toString('hex'), t: new Date(at).toISOString() });
@@ -211,6 +224,7 @@ export function createWitnessLog({
   alertAfterMs,
   mostBytes,
   waitMs = WAIT_MS,
+  dropsAtAnchor = false,
 }: {
   /** Where every copy adds its heads and reads the others'. */
   readonly store: WriteOnceStore;
@@ -230,6 +244,11 @@ export function createWitnessLog({
   readonly mostBytes: number;
   /** How long a `now` waiter waits for its Put. */
   readonly waitMs?: number;
+  /**
+   * Whether heads at or below the chain's anchor are let go as such: a copy that never checks a chain (a web copy). The
+   * copy that anchors (jobs) lets a head go only once it confirmed it (`prune`), as an anchor of its own is no proof.
+   */
+  readonly dropsAtAnchor?: boolean;
 }): WitnessLog {
   const folder = (kind: 'heads' | 'operator' | 'snapshots'): string => `e${String(epoch)}/${kind}/`;
   const ownFolder = signer === 'operator' ? folder('operator') : folder('heads');
@@ -240,8 +259,8 @@ export function createWitnessLog({
   // Every head held, by chain, and how many in all.
   const held = new Map<string, WitnessedHead[]>();
   let heldCount = 0;
-  // A chain's highest head let go for memory, and when that was last said.
-  const lost = new Map<string, bigint>();
+  // A chain's highest head let go for memory, with when (a rebase after sets it aside), and when that was last said.
+  const lost = new Map<string, { seq: bigint; at: number }>();
   let lostSaidAt: number | undefined;
 
   // Heads waiting for their Put, and each chain's `now` heads not yet written.
@@ -258,8 +277,11 @@ export function createWitnessLog({
   let refreshing: Promise<Refreshed> | undefined;
   let refreshNext: Promise<Refreshed> | undefined;
   let readFailingSince: number | undefined;
-  // The newest heads file read or written, by its name's time, and the names read since a look back past it.
+  // The newest heads file a whole pass read, by its name's time, when the last whole pass began, and the names read
+  // since a look back past them. Moved on only by a pass that ended whole, never by this copy's own writes: a pass cut
+  // short newest-first would otherwise pass over the older files it never reached.
   let headsFrom: number | undefined;
+  let wholeFrom: number | undefined;
   const namesRead = new Set<string>();
   let lastSnapshotAt: number | undefined;
   let changedSinceSnapshot = false;
@@ -285,11 +307,23 @@ export function createWitnessLog({
   /** The chain's latest anchor's place, as the anchors' log says it: none, nothing is let go by it. */
   const anchoredAt = (name: string): bigint | undefined => anchors?.latest(chainOfName(name))?.seq;
 
-  /** Whether a head is still held: above the chain's anchor, and not dated before a rebase of the chain. */
+  /** Whether a head is still held: not dated before a rebase of the chain; where `dropsAtAnchor`, above its anchor. */
   const stands = (name: string, head: WitnessedHead): boolean => {
-    const anchored = anchoredAt(name);
+    const anchored = dropsAtAnchor ? anchoredAt(name) : undefined;
     if (anchored !== undefined && head.seq <= anchored) return false;
     return anchors?.rebasedAfter(chainOfName(name), new Date(head.at)) !== true;
+  };
+
+  /** The fork alarm: two heads witnessed at one place with different hashes, no read needed. */
+  const forked = (name: string, seq: bigint): void => {
+    const platform = name === 'platform';
+    const log = platform ? logger : logger.child({ orgId: name.slice('organisation:'.length) });
+    log.error('audit.integrity_failed', {
+      chain: platform ? 'platform' : 'organisation',
+      check: 'witness',
+      reason: 'fork',
+      seq: seq.toString(),
+    });
   };
 
   /** Past what may be held, the chain holding most lets its lowest head go: said, and the chain marked. */
@@ -302,8 +336,8 @@ export function createWitnessLog({
       const lowest = list.pop();
       heldCount -= 1;
       if (list.length === 0) held.delete(name);
-      const before = lost.get(name) ?? 0n;
-      if (lowest !== undefined && lowest.seq > before) lost.set(name, lowest.seq);
+      const before = lost.get(name)?.seq ?? 0n;
+      if (lowest !== undefined && lowest.seq > before) lost.set(name, { seq: lowest.seq, at: now().getTime() });
       const at = now().getTime();
       if (lostSaidAt === undefined || at - lostSaidAt >= SAY_EVERY_MS) {
         lostSaidAt = at;
@@ -317,6 +351,7 @@ export function createWitnessLog({
     if (!stands(name, head)) return false;
     const list = held.get(name) ?? [];
     if (list.some(({ seq, hash }) => seq === head.seq && hash.equals(head.hash))) return false;
+    if (list.some((one) => one.seq === head.seq && stands(name, one))) forked(name, head.seq);
     const place = list.findIndex(({ seq }) => seq < head.seq);
     list.splice(place < 0 ? list.length : place, 0, head);
     held.set(name, list);
@@ -330,8 +365,8 @@ export function createWitnessLog({
   const standing = (name: string, most = Number.POSITIVE_INFINITY): readonly WitnessedHead[] => {
     const list = held.get(name);
     if (list === undefined) return [];
-    // Highest first: those at or below the anchor are the list's tail, let go from its end.
-    const anchored = anchoredAt(name);
+    // Highest first: those at or below the anchor are the list's tail, let go from its end (a web copy's alone).
+    const anchored = dropsAtAnchor ? anchoredAt(name) : undefined;
     let end = list.length;
     while (anchored !== undefined && end > 0 && (list[end - 1]?.seq ?? 0n) <= anchored) end -= 1;
     if (end < list.length) setList(name, list.slice(0, end));
@@ -342,6 +377,15 @@ export function createWitnessLog({
       kept.push(head);
     }
     return kept;
+  };
+
+  /** Whether the chain let a head go for memory since its last rebase: set aside only by a rebase after it. */
+  const beyond = (name: string): boolean => {
+    const mark = lost.get(name);
+    if (mark === undefined) return false;
+    if (anchors?.rebasedAfter(chainOfName(name), new Date(mark.at)) !== true) return true;
+    lost.delete(name);
+    return false;
   };
 
   /** The chain's list as given, counted. */
@@ -376,7 +420,6 @@ export function createWitnessLog({
       );
       await store.put(name, bytes);
       namesRead.add(name);
-      headsFrom = Math.max(headsFrom ?? at, at);
       for (const queued of taking) {
         unconfirmed.get(queued.chain)?.delete(queued);
         if (unconfirmed.get(queued.chain)?.size === 0) unconfirmed.delete(queued.chain);
@@ -495,7 +538,13 @@ export function createWitnessLog({
     }
     for await (const fields of bodyLines(got)) {
       const line = lineFrom(fields);
-      if (line !== undefined && keep(line.chain, line.head)) gained.add(line.chain);
+      if (line === undefined) continue;
+      // A heads file says only what was written: a mark of heads let go comes from a snapshot alone.
+      if ('lost' in line) {
+        if (kind === SNAPSHOT_FILE) lostRead(line.chain, line.lost);
+      } else if (keep(line.chain, line.head)) {
+        gained.add(line.chain);
+      }
     }
     return true;
   };
@@ -524,8 +573,17 @@ export function createWitnessLog({
     return undefined;
   };
 
-  /** Every heads file of both folders named at or after `since`, not read yet, each under its own folder's key. */
-  const readHeads = async (since: number, gained: Set<string>): Promise<void> => {
+  /** A snapshot's mark of heads let go for memory, kept as the higher of what is held and what it says. */
+  const lostRead = (name: string, mark: { readonly seq: bigint; readonly at: number }): void => {
+    if ((lost.get(name)?.seq ?? 0n) < mark.seq) lost.set(name, mark);
+  };
+
+  /**
+   * Every heads file of both folders named at or after `since`, not read yet, each under its own folder's key: the
+   * newest name read, for the next pass to look back from once this one has ended whole.
+   */
+  const readHeads = async (since: number, gained: Set<string>): Promise<number | undefined> => {
+    let newest: number | undefined;
     for (const [at, kind] of [
       [folder('heads'), HEADS_FILE],
       [folder('operator'), OPERATOR_FILE],
@@ -537,28 +595,36 @@ export function createWitnessLog({
           alarm('spoiled', { folder: at, fileAt: new Date(file.at).toISOString() });
         }
         namesRead.add(file.name);
-        headsFrom = Math.max(headsFrom ?? file.at, file.at);
+        newest = Math.max(newest ?? file.at, file.at);
       }
     }
+    return newest;
   };
 
   const refreshOnce = async (): Promise<Refreshed> => {
     const began = now();
     const gained = new Set<string>();
     try {
+      let newest: number | undefined;
       if (state === 'read') {
-        await readHeads((headsFrom ?? began.getTime()) - LAG_MS, gained);
+        // From the older of the newest file the last whole pass read and when it began, so nothing it didn't reach is
+        // passed over, less the lag for a file named earlier that landed later.
+        const from = Math.min(headsFrom ?? began.getTime(), wholeFrom ?? began.getTime());
+        newest = await readHeads(from - LAG_MS, gained);
       } else {
         const snapshot = await readSnapshot(gained);
         if (snapshot !== undefined) lastSnapshotAt = snapshot;
-        await readHeads(
+        newest = await readHeads(
           snapshot === undefined ? began.getTime() - NO_SNAPSHOT_READ_BACK_MS : snapshot - LAG_MS,
           gained,
         );
         state = 'read';
       }
+      // Ended whole: only now does the next pass look back from here.
+      if (newest !== undefined) headsFrom = Math.max(headsFrom ?? newest, newest);
+      wholeFrom = began.getTime();
       // Names older than any later look back reaches need no remembering.
-      const keepFrom = (headsFrom ?? 0) - 2 * LAG_MS;
+      const keepFrom = Math.min(headsFrom ?? 0, wholeFrom) - 2 * LAG_MS;
       for (const name of namesRead) {
         const countdown = name.slice(name.lastIndexOf('/') + 1, name.lastIndexOf('/') + 14);
         if (timeOfName(countdown) < keepFrom) namesRead.delete(name);
@@ -604,6 +670,8 @@ export function createWitnessLog({
       const name = fileName(folder('snapshots'), at);
       const lines: string[] = [];
       for (const name of held.keys()) for (const head of standing(name)) lines.push(lineText(name, head));
+      // What was let go for memory, so a start from it still holds those chains as missing heads (never quietly).
+      for (const [name, mark] of lost) if (beyond(name)) lines.push(lostText(name, mark));
       await snapshots.put(name, await signedFile(keys, SNAPSHOT_FILE, name, epoch, lines));
       lastSnapshotAt = at;
       changedSinceSnapshot = false;
@@ -646,28 +714,16 @@ export function createWitnessLog({
       return (await nextRefresh()).whole;
     },
     freshAt: () => freshAt,
-    prune(chain: Chain, upToSeq: bigint): void {
+    prune(chain: Chain, heads: readonly { readonly seq: bigint; readonly hash: Buffer }[]): void {
       const name = nameOf(chain);
       const list = held.get(name);
-      if (list !== undefined) {
-        const kept = list.filter(({ seq }) => seq > upToSeq);
-        heldCount -= list.length - kept.length;
-        if (kept.length === 0) held.delete(name);
-        else held.set(name, kept);
-      }
-      if ((lost.get(name) ?? 0n) <= upToSeq) lost.delete(name);
+      if (list === undefined || heads.length === 0) return;
+      setList(
+        name,
+        list.filter((one) => !heads.some(({ seq, hash }) => seq === one.seq && hash.equals(one.hash))),
+      );
     },
-    beyondMemory(chain: Chain): boolean {
-      const name = nameOf(chain);
-      const seq = lost.get(name);
-      if (seq === undefined) return false;
-      const anchored = anchoredAt(name);
-      if (anchored !== undefined && seq <= anchored) {
-        lost.delete(name);
-        return false;
-      }
-      return true;
-    },
+    beyondMemory: (chain: Chain): boolean => beyond(nameOf(chain)),
     useAnchors(given: WitnessAnchors): void {
       anchors = given;
     },

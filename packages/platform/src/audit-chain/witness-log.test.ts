@@ -65,6 +65,8 @@ interface WitnessOptions {
   readonly leads?: boolean;
   readonly mostBytes?: number;
   readonly waitMs?: number;
+  /** A web copy's: heads at or below the anchor let go as such. */
+  readonly dropsAtAnchor?: boolean;
 }
 
 function witnessOn(
@@ -78,6 +80,7 @@ function witnessOn(
     leads = false,
     mostBytes = 1024 * 1024,
     waitMs = 200,
+    dropsAtAnchor,
   }: WitnessOptions = {},
 ) {
   const log = createWitnessLog({
@@ -92,6 +95,8 @@ function witnessOn(
     alertAfterMs: 15 * MINUTE,
     mostBytes,
     waitMs,
+    // Left out unless a test says: the default is the copy that anchors.
+    ...(dropsAtAnchor === undefined ? {} : { dropsAtAnchor }),
   });
   return { log, heads, snapshots, time, capture };
 }
@@ -356,15 +361,78 @@ describe('the witness log: reading', () => {
     expect(seqs(log.pending(CHAIN))).toEqual([5n, 4n]);
   });
 
-  it('holds only heads above the chain’s anchor; prune lets go those at or below a place', () => {
-    const { log } = witnessOn();
-    for (const seq of [3n, 5n, 8n]) log.soon(CHAIN, head(seq, 1));
-    log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 5n]])));
-    expect(seqs(log.pending(CHAIN))).toEqual([8n]);
-    log.soon(OTHER, head(2n, 1));
-    log.soon(OTHER, head(4n, 1));
-    log.prune(OTHER, 2n);
-    expect(seqs(log.pending(OTHER))).toEqual([4n]);
+  it('the copy that anchors keeps a head at or below an anchor until it confirmed it (prune, those heads alone); a web copy lets it go', () => {
+    const jobs = witnessOn();
+    const web = witnessOn(undefined, { dropsAtAnchor: true });
+    for (const { log } of [jobs, web]) {
+      for (const seq of [3n, 5n, 8n]) log.soon(CHAIN, head(seq, 1));
+      log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 5n]])));
+    }
+    // An anchor of its own is no proof of a head read in late: held, for the probe to judge.
+    expect(seqs(jobs.log.pending(CHAIN))).toEqual([8n, 5n, 3n]);
+    expect(seqs(web.log.pending(CHAIN))).toEqual([8n]);
+    // Let go only the very heads confirmed: one at the same place with another hash stays.
+    jobs.log.prune(CHAIN, [head(5n, 1), head(3n, 9)]);
+    expect(seqs(jobs.log.pending(CHAIN))).toEqual([8n, 3n]);
+    jobs.log.prune(OTHER, [head(3n, 1)]);
+    jobs.log.prune(CHAIN, []);
+    expect(seqs(jobs.log.pending(CHAIN))).toEqual([8n, 3n]);
+  });
+
+  it('two heads witnessed at one place with different hashes prove a fork: the alarm at once, no read; the same head twice, none', async () => {
+    const store = createFakeWriteOnceStore();
+    await planted(store.files, 'heads', HEADS, [
+      line(`organisation:${ORG}`, 7n, 1),
+      line(`organisation:${ORG}`, 7n, 1),
+    ]);
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 7n, 2)], { at: START.getTime() - 1000 });
+    const { log, capture } = witnessOn(store);
+    await log.refresh();
+    expect(capture.lines().filter((one) => one.event === 'audit.integrity_failed' && one.check === 'witness')).toEqual([
+      expect.objectContaining({ reason: 'fork', seq: '7', orgId: ORG, chain: 'organisation' }),
+    ]);
+    // Both kept: the probe finds which the chain holds.
+    expect(log.pending(CHAIN).map(({ hash }) => hash[0])).toEqual([1, 2]);
+  });
+
+  it('a pass cut short never moves the next one past the older files it didn’t reach, nor does this copy’s own write', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    const at = START.getTime();
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 1n, 1)], { at: at + MINUTE });
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 2n, 1)], { at: at + 10 * MINUTE });
+    time.held.at = at + 11 * MINUTE;
+    // The newest read, the older one fails: the pass ends cut short.
+    store.instead.getAtMost = (name, most) =>
+      name.includes(String(9_999_999_999_999 - (at + MINUTE)))
+        ? Promise.reject(new Error('blip'))
+        : store.real.getAtMost(name, most);
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([2n]);
+    delete store.instead.getAtMost;
+    // This copy's own write, newer than both, moves nothing either.
+    log.soon(OTHER, head(1n, 1));
+    await log.flush();
+    time.held.at = at + 20 * MINUTE;
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([2n, 1n]);
+  });
+
+  it('a head another copy named early that lands after this copy’s own later write is still read', async () => {
+    const store = createFakeWriteOnceStore();
+    const time = clock();
+    const { log } = witnessOn(store, { time });
+    await log.refresh();
+    const at = START.getTime();
+    time.held.at = at + 10 * MINUTE;
+    log.soon(OTHER, head(1n, 1));
+    await log.flush();
+    await planted(store.files, 'heads', HEADS, [line(`organisation:${ORG}`, 4n, 1)], { at: at + MINUTE });
+    time.held.at = at + 11 * MINUTE;
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([4n]);
   });
 
   it('a read failing is a warning, and past alertAfterMs of failing the alert; freshAt moves only on a whole read', async () => {
@@ -410,10 +478,12 @@ describe('the witness log: reading', () => {
 });
 
 describe('the witness log: memory and snapshots', () => {
-  it('past what it may hold, the chain holding most lets its lowest head go, loudly, and reads beyondMemory until anchored past it', () => {
-    const { log, capture } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES });
-    const anchored = new Map<string, bigint>();
-    log.useAnchors(anchorsWith(new Map(), anchored));
+  it('past what it may hold, the chain holding most lets its lowest head go, loudly, and reads beyondMemory until a rebase: anchors and prunes clear nothing, a snapshot keeps it', async () => {
+    const snapshots = createFakeWriteOnceStore();
+    const time = clock();
+    const { log, capture } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES, snapshots, leads: true, time });
+    const rebases = new Map<string, Date>();
+    log.useAnchors(anchorsWith(rebases, new Map([[ORG, 9n]])));
     for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, 1));
     expect(log.beyondMemory(CHAIN)).toBe(false);
     log.soon(OTHER, head(1n, 1));
@@ -421,7 +491,18 @@ describe('the witness log: memory and snapshots', () => {
     expect(log.beyondMemory(CHAIN)).toBe(true);
     expect(log.beyondMemory(OTHER)).toBe(false);
     expect(capture.lines().map(({ event }) => event)).toContain('audit.witness_beyond_memory');
-    anchored.set(ORG, 1n);
+    // Anchored past it, or every head held confirmed: still missing heads it can't check.
+    log.prune(CHAIN, [head(3n, 1), head(2n, 1)]);
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+    // The leader's snapshot carries it: a start from it holds the chain as missing heads at once.
+    await log.refresh();
+    await log.flush();
+    const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
+    await restarted.log.refresh();
+    expect(restarted.log.beyondMemory(CHAIN)).toBe(true);
+    expect(restarted.log.beyondMemory(OTHER)).toBe(false);
+    // A rebase after it (the sanctioned way back) sets it aside.
+    rebases.set(ORG, new Date(time.held.at + 1));
     expect(log.beyondMemory(CHAIN)).toBe(false);
   });
 
