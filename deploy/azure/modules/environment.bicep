@@ -308,7 +308,11 @@ resource dailyWords 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // intervals, or the check itself broke (`audit.integrity_failed`,
 // `audit.anchor_check_crashed`). A start refused on a broken platform chain
 // logs the first too, and so does the operator's command wherever the API
-// would (B1c): its job logs to the same table. Only the count leaves the
+// would (B1c): its job logs to the same table. And two signs of the owner's
+// hand on the jobs (TR-1): the jobs' lease taken while its own term still ran
+// (`jobs.lease_taken_early`), and a hand-off held back before the partner was
+// called because a chain or the platform pause didn't match a witnessed head
+// (`handoff.held_before_sending`). Only the count leaves the
 // workspace; the lines say which chain and why. Every 5 minutes, each line
 // judged as it arrives (the last 10 minutes' arrivals, S206 faster detection):
 // with the checks finding a change within about 5 minutes and lines 4-10
@@ -320,7 +324,7 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Audit: a chain failed its integrity check'
-    description: 'SEV-1. The API or the operator\'s command found an audit chain changed, removed or wound back, could not check it for three intervals, or its check broke (audit.integrity_failed, audit.anchor_check_crashed). Runbook: Incident-Response-Playbook.md section H.'
+    description: 'SEV-1. The API or the operator\'s command found an audit chain changed, removed or wound back, could not check it for three intervals, or its check broke (audit.integrity_failed, audit.anchor_check_crashed); or the jobs\' lease was taken while their own term still ran (jobs.lease_taken_early); or a hand-off was held back before the partner was called, a chain not matching a witnessed head (handoff.held_before_sending). Runbook: Incident-Response-Playbook.md section H.'
     severity: 1
     enabled: true
     scopes: [workspaceId]
@@ -333,7 +337,7 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(10m) | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(10m) | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed", "jobs.lease_taken_early", "handoff.held_before_sending") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
@@ -660,16 +664,18 @@ resource platformFullAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 // anchors are in memory alone; or a production web copy can't read the anchors
 // past the alert limit, or can't hold them (AT13b): its decisions go on without
 // the digest. Staging's one API (AGENTX_ROLE all) and Stage G's web copies (no
-// store, an info line alone) never say those two. Any one line tells someone;
-// none is a hold. Stateful, as above.
+// store, an info line alone) never say those two. And the witness log (TR-1):
+// writes or reads failing past the alert limit, no store named, or more heads
+// waiting than memory holds; until it is back, stops answer to be retried and
+// payments wait. Any one line tells someone; none is a hold. Stateful, as above.
 resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: anchorStoreAlertName
   location: location
   tags: tags
   kind: 'LogAlert'
   properties: {
-    displayName: 'Anchor store: payments waiting, anchors not kept, or web copies without the digest'
-    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone; or a web copy can\'t read the anchors, or hold them: its decisions go on without the digest, so check the API identity\'s audit-anchors-reader role, that foundation has run, and its heap. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
+    displayName: 'Anchor store: payments waiting, anchors or witnessed heads not kept, or web copies without the digest'
+    description: 'SEV-2. The API could not read the store that keeps the audit anchors after a start, so payments wait for every organisation; or could not write to it for three check intervals, so a restart would forget them; or could not read it for three, so a restart would make payments wait; or started with no store named, so anchors are in memory alone; or a web copy can\'t read the anchors, or hold them: its decisions go on without the digest, so check the API identity\'s audit-anchors-reader role, that foundation has run, and its heap; or the witness log can\'t be written or read, was never named, or holds more heads than memory: stops answer to be retried and payments wait until it is back, so check the witness role on audit-witness and that foundation has run. Nobody is held. Runbook: Incident-Response-Playbook.md section H.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -682,7 +688,7 @@ resource anchorStoreAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory", "audit.witness_write_failing", "audit.witness_read_failing", "audit.witness_store_not_set", "audit.witness_beyond_memory") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

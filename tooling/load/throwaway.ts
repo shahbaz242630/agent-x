@@ -57,8 +57,14 @@ export function throwawayServerOfHost(host: string): string | undefined {
  */
 export const throwawayAnchorsContainer = (id: string): string => `audit-anchors-g-${id}`;
 
-/** A copy's anchors container by name, and nothing else: never staging's own `audit-anchors`. */
-export const THROWAWAY_ANCHORS_CONTAINER = /^audit-anchors-g-[a-z0-9]{8}$/;
+/** The copy's witness log (apps.bicep, TR-1): its own too, for the same reason, never staging's `audit-witness`. */
+export const throwawayWitnessContainer = (id: string): string => `audit-witness-g-${id}`;
+
+/**
+ * A copy's anchors or witness container by name, and nothing else: never staging's own `audit-anchors` or
+ * `audit-witness`, the only containers a Stage G removal may name.
+ */
+export const THROWAWAY_ANCHORS_CONTAINER = /^audit-(?:anchors|witness)-g-[a-z0-9]{8}$/;
 
 /** The database comment that marks a copy: it names the server, so a copy can't vouch for another. */
 export const sentinelOf = (server: string): string => `agentx-stage-g-throwaway ${server}`;

@@ -397,7 +397,7 @@ export function realStageGAzure(steps: JobSteps): StageGAzure {
       return (Array.isArray(listed) ? listed : []).map((each) => text(record(each).name));
     },
     deleteContainer: (account, container) => {
-      // Its own guard, not only the caller's (S185): staging's `audit-anchors` is never a name it will send.
+      // Its own guard, not only the caller's (S185): staging's `audit-anchors` and `audit-witness` are never names it will send.
       if (!THROWAWAY_ANCHORS_CONTAINER.test(container)) {
         throw new Error(`${container} isn't a throwaway copy's anchors container: nothing was removed.`);
       }
