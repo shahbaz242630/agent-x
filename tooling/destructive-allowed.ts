@@ -322,6 +322,17 @@ export const ALLOWED: readonly Allowed[] = [
     why: "the one session whose last use the app didn't write (GM-4): ended before the use just written makes it whole",
   },
   {
+    file: 'packages/core/src/modules/identity/infrastructure/sessions-all-ended.ts',
+    match: ".deleteFrom('identity.sessions')",
+    guard: 'answeredSince',
+    proof: {
+      file: 'packages/core/src/modules/identity/infrastructure/sessions-cut.db.test.ts',
+      title:
+        'found: the alarm, every session ended with one signed record, the read refused; then a new sign-in works on the same copy',
+    },
+    why: 'every session ended once when the platform chain is found cut (AT13h, partner S208): the signed record ends them, the rows go as tidy-up; once a copy a minute, never where an answer since the cut already did',
+  },
+  {
     file: 'packages/core/src/modules/identity/infrastructure/step-up-challenges.ts',
     match: ".deleteFrom('identity.step_up_challenges')",
     guard: ".where('ends_at', '<=', now)",
