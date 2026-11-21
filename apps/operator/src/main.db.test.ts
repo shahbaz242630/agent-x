@@ -519,6 +519,11 @@ describe(`TR-1 the operator's chain writes witnessed (Postgres ${server.version}
     // Control: its sealed head noted, the platform's too.
     await noteHeadsAsTheyStand(config, auditKeys, quiet(), request, witness);
     expect(noted).toEqual(['platform', 'organisation']);
+    // A chain with no events yet (an export of a new organisation's): no head to witness, and done.
+    const empty = { ...request, orgId: uuidV7Ids.next() };
+    await noteHeadsAsTheyStand(config, auditKeys, quiet(), empty, witness);
+    expect(noted).toEqual(['platform', 'organisation', 'platform']);
+    noted.length = 2;
     const owner = await tamperAsOwner(database, ORGANIZATIONS, orgId);
     try {
       const [kept] = await owner.query<{ head: unknown }>(
