@@ -59,8 +59,8 @@ const leadership: Leadership = {
   stop: () => Promise.resolve(),
 };
 
-/** The `jobs` side's names, as the config given makes them. */
-function namesWith(env: Record<string, string>) {
+/** The `jobs` side's jobs, as the config given makes them, under the leadership given. */
+function jobsWith(env: Record<string, string>, under: Leadership) {
   const config = loadConfig(env);
   const logger = createLogger({ service: 'api', config, destination: new LogCapture() });
   const booted: Booted = {
@@ -71,7 +71,35 @@ function namesWith(env: Record<string, string>) {
     database: untouched as Booted['database'],
     atCrash: () => undefined,
   };
-  return oneCopyJobs(booted, sharedParts(booted, leadership), leadership).jobs.map(({ name }) => name);
+  return oneCopyJobs(booted, sharedParts(booted, under), under).jobs;
+}
+
+describe('a jobs copy that follows still reads the store (TR-1 A)', () => {
+  it.each([
+    ['a store named: its read, gated to run only while this copy doesn’t lead', EVERYTHING_ON, ['anchors_follow']],
+    ['none: listed, with nothing to run', BASE, []],
+  ])('%s', async (_what, env, gatedToFollow) => {
+    const gated: string[] = [];
+    const idle = (work: { readonly name: string }) => ({ name: work.name, run: () => Promise.resolve() });
+    const recording: Leadership = {
+      ...leadership,
+      onlyWhileLeading: idle,
+      onlyWhileNotLeading: (work) => {
+        gated.push(work.name);
+        return idle(work);
+      },
+    };
+    const follow = jobsWith(env, recording).find(({ name }) => name === 'anchors_follow');
+    if (follow === undefined) throw new Error('anchors_follow should be listed');
+    // Started, as start-jobs.ts starts it: the gate is put round its work then.
+    await follow.start().stop();
+    expect(gated).toEqual(gatedToFollow);
+  });
+});
+
+/** The `jobs` side's names, as the config given makes them. */
+function namesWith(env: Record<string, string>) {
+  return jobsWith(env, leadership).map(({ name }) => name);
 }
 
 describe('the jobs side as a config makes it (4D2e D10)', () => {

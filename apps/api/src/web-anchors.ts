@@ -38,10 +38,13 @@ export function createWebAnchorRead({
   log,
   digest,
   logger,
+  copy = 'web',
 }: {
   readonly log: Pick<AnchorLog, 'read' | 'readFailed'>;
   readonly digest: Pick<DigestLog, 'read'>;
   readonly logger: Logger;
+  /** Which copy reads: a web copy, or a jobs copy that follows (TR-1 A), named on its line. */
+  readonly copy?: 'web' | 'jobs';
 }): { run(signal?: AbortSignal): Promise<void> } {
   return {
     async run(signal?: AbortSignal): Promise<void> {
@@ -57,7 +60,7 @@ export function createWebAnchorRead({
       } catch (error) {
         if (!(error instanceof Stopped)) {
           logger.warn('audit.web_anchors_read_failed', {
-            copy: 'web',
+            copy,
             what: 'read',
             was: 'audit.state_digest_store_failed',
             err: error,

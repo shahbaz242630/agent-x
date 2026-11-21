@@ -483,7 +483,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     // sets this copy's facts and heads aside (AT13b), and the leader's walks reach it. None where they're in memory alone.
     followerJob(
       'anchors_follow',
-      kept && createWebAnchorRead({ log: kept.log, digest: kept.digest, logger }),
+      kept && createWebAnchorRead({ log: kept.log, digest: kept.digest, logger, copy: 'jobs' }),
       WEB_ANCHORS_EVERY_MS,
       QUICK_MS,
     ),

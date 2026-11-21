@@ -689,7 +689,13 @@ export function createDigestLog({
   let nearSaid = false;
   let changedSinceSnapshot = false;
   let lastSnapshotAt: number | undefined;
-  // The newest delta read or written, by its name's time, and the names read since a look back past it.
+  // Whether the last read ended whole, begun and ended while this process wrote (TR-1 A): only then may a snapshot stand
+  // for the store. A copy that followed may have missed the leader's deltas; until a read while it leads takes them in,
+  // a snapshot of its memory would hide them from every later start. Deltas go on either way.
+  let readWhileWriting = false;
+  // The newest delta a read that ended whole listed, by its name's time, and the names read since a look back past it.
+  // Never moved by this process's own writes, nor by a read that failed part way (TR-1 A): either would let the next
+  // read look back too little, past deltas another copy wrote meanwhile, which it would then never take in.
   let deltasFrom: number | undefined;
   const namesRead = new Set<string>();
   let reading: Promise<void> | undefined;
@@ -1133,20 +1139,28 @@ export function createDigestLog({
     return undefined;
   };
 
-  /** Every delta named at or after `since` (all of them, with none), not read yet, taken in. */
+  /**
+   * Every delta named at or after `since` (all of them, with none), not read yet, taken in. The look back moves on to
+   * the newest name listed, its own included, only once the list has been read whole.
+   */
   const readDeltas = async (from: WriteOnceStore, since: number | undefined): Promise<void> => {
+    let newest: number | undefined;
     for await (const { name, at } of namesOf(from, 'deltas')) {
       if (since !== undefined && at < since) break;
+      newest = Math.max(newest ?? at, at);
       if (namesRead.has(name)) continue;
       if (!(await takeFile(from, name))) alarm('file', { kind: 'deltas', fileAt: new Date(at).toISOString() });
       namesRead.add(name);
-      deltasFrom = Math.max(deltasFrom ?? at, at);
     }
+    if (newest !== undefined) deltasFrom = Math.max(deltasFrom ?? newest, newest);
   };
 
   // Read whether or not this process leads: a copy following reads what the leader writes, as a web copy does (TR-1 A).
   const readOnce = async (): Promise<void> => {
     if (store === undefined) return;
+    // Cleared while a read is under way, or after one failed: no snapshot until a read ends whole.
+    readWhileWriting = false;
+    const writingAtStart = writing();
     try {
       if (state === 'read') {
         await readDeltas(store, deltasFrom === undefined ? undefined : deltasFrom - LAG_MS);
@@ -1164,6 +1178,7 @@ export function createDigestLog({
         }
       }
       readFailingSince = undefined;
+      readWhileWriting = writingAtStart && writing();
       // What it took in may be past the horizon already: let go before memory is judged, so nothing gives way for it.
       forgetPast(true);
       judgeMemory();
@@ -1238,9 +1253,10 @@ export function createDigestLog({
     if (store === undefined || !writing()) return;
     const at = now().getTime();
     if ((pending.size > 0 || pendingStretches.size > 0) && !(await deltaWritten(store, at))) return;
-    // A snapshot only after a whole read: one made from less would stand for the whole at the next start.
+    // A snapshot only after a whole read, made while this process writes (`readWhileWriting`): one made from less
+    // would stand for the whole at the next start.
     const due = lastSnapshotAt === undefined || at - lastSnapshotAt >= SNAPSHOT_EVERY_MS;
-    if (state === 'read' && changedSinceSnapshot && due) await snapshotWritten(store, at);
+    if (state === 'read' && readWhileWriting && changedSinceSnapshot && due) await snapshotWritten(store, at);
   };
 
   /** A chain's facts and mark from a delta not written, back into what waits: the higher mark of the two, as a read takes it. */
@@ -1268,8 +1284,8 @@ export function createDigestLog({
     try {
       const file = await fileOf('deltas', deltaLines(facts, stretches), at);
       await into.put(file.name, file.bytes);
+      // Known, so not read back; the look back moves on only by a read that lists it (`readDeltas`).
       namesRead.add(file.name);
-      deltasFrom = Math.max(deltasFrom ?? at, at);
       writeFailingSince = undefined;
       return true;
     } catch (error) {

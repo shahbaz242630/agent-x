@@ -755,6 +755,98 @@ describe('the digest in a process that loses the lease (AT13, TR-1 A)', () => {
     await restarted.read();
     expect(restarted.latest(OTHER, 'agent', AGENT)).toBe(4n);
   });
+
+  it('leading again, writes no snapshot until a read while it leads has ended whole: the leader’s deltas never hidden', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+
+    // It follows; the copy leading writes a delta this one never reads, its reads failing.
+    leads.now = false;
+    time.held.at += MINUTE;
+    const { log: leader } = digestOn(fake, { time });
+    await leader.read();
+    leader.record(OTHER, seen(['agent_key', KEY, 5n]), time.now());
+    await leader.flush();
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    await log.read();
+
+    // It leads again an hour on, a snapshot due, its reads still failing: deltas go, no snapshot.
+    time.held.at += HOUR;
+    leads.now = true;
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+    delete fake.instead.list;
+    const { log: restarted } = digestOn(fake, { time });
+    await restarted.read();
+    expect(restarted.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+    expect(restarted.latest(CHAIN, 'agent', AGENT)).toBe(12n);
+
+    // The positive control: a read while it leads ends whole, and the snapshot is written, holding the leader's fact.
+    await log.read();
+    log.record(CHAIN, seen(['agent_key', KEY, 11n]), time.now(), stretch(12n, 13n));
+    time.held.at += MINUTE;
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
+    const { log: fromSnapshot } = digestOn(fake, { time });
+    await fromSnapshot.read();
+    expect(fromSnapshot.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+  });
+
+  it('a read begun while it followed and ended once it leads stands for no snapshot; the next one does', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    leads.now = false;
+    // A follower's read whose list answers only after it has come to lead.
+    const { promise: listed, resolve: answer } = Promise.withResolvers<undefined>();
+    fake.instead.list = async (...args) => {
+      await listed;
+      return fake.real.list(...args);
+    };
+    const reading = log.read();
+    leads.now = true;
+    answer(undefined);
+    await reading;
+    delete fake.instead.list;
+    time.held.at += HOUR;
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+
+    await log.read();
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
+  });
 });
 
 const THIRD_ORG = '0199a0f0-0000-7000-8000-000000000003';
