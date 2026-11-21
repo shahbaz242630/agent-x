@@ -573,7 +573,8 @@ export function createDigestLog({
     held.saidAt = at;
     held.saidWhat = held.gaveWay === 2 ? 2 : 1;
     logFor(name).error('audit.state_digest_chain_gave_way', {
-      what: held.gaveWay === 1 ? 'payments' : 'chain',
+      // The platform chain's growing objects are its session ends, never payments.
+      what: held.gaveWay === 2 ? 'chain' : name === 'platform' ? 'session_ends' : 'payments',
       bytes: heldBytes,
       mostBytes,
     });
@@ -675,7 +676,7 @@ export function createDigestLog({
     changedSinceSnapshot = true;
     markPending(name, held);
     logFor(name).info('audit.state_digest_chain_coming_back', {
-      was: was === 1 ? 'payments' : 'chain',
+      was: was === 2 ? 'chain' : name === 'platform' ? 'session_ends' : 'payments',
       bytes: heldBytes,
       mostBytes,
     });

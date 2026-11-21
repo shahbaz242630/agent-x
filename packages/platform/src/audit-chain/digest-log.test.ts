@@ -787,7 +787,7 @@ describe('the digest’s fair share: many small organisations never push out a l
     log.record(PLATFORM, ends, START);
     const [line, ...others] = said(capture, 'audit.state_digest_chain_gave_way');
     expect(others).toEqual([]);
-    expect(line).toMatchObject({ what: 'payments' });
+    expect(line).toMatchObject({ what: 'session_ends' });
     expect(line?.orgId).toBeUndefined();
     expect(log.latest(PLATFORM, 'platform.handoff_pause', 'pause')).toBe(3n);
     expect(log.latest(PLATFORM, 'identity.session_ended', 'p/0')).toBeUndefined();

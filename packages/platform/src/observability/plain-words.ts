@@ -293,9 +293,9 @@ export const PLAIN_WORDS = {
     next: 'Plan more memory for the process in good time: the line says how much is held.',
   },
   'audit.state_digest_chain_gave_way': {
-    happened: 'The record of one organisation’s signed records’ latest versions outgrew its share of memory.',
-    broke: 'Its payments, or all its records, are checked as before: tampering there is found later. Others go on.',
-    next: 'Nothing waits. It comes back by itself when memory has room again, an hour on at the soonest.',
+    happened: 'The record of signed records’ latest versions, for one organisation or the platform, outgrew its share.',
+    broke: 'Its payments or session ends, or all of it, are checked as before: tampering is found later.',
+    next: 'Nothing waits. Give the process more memory in good time; it may come back once there is room.',
   },
   'audit.state_digest_snapshot_too_large': {
     happened: 'The hourly copy of the record of signed records’ latest versions was larger than a start may read.',
