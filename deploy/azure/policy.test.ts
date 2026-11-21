@@ -4758,10 +4758,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_write_failed" | summarize Events = count()',
       ),
       query(
-        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()',
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory") | summarize Events = count()',
       ),
       query(
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable") | summarize Events = count()',
+      ),
+      // Without a production web copy's lasting failures (AT13b): its decisions would go on without the digest unseen.
+      query(
+        'ContainerAppConsoleLogs | where ingestion_time() > ago(30m) | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on") | summarize Events = count()',
       ),
       query(
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing") | summarize Events = count()',

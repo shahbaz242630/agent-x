@@ -72,14 +72,17 @@ function storeOf(
 /**
  * What a store's failures are called on a web copy (AT13b): the jobs copy's lines say payments wait, which is never so
  * on a web copy (Tx A runs in the jobs copy), so each is said under a web copy's own name and words, as a warning: its
- * decisions go on with today's checks. The daily email of warnings carries a lasting one; none pages.
+ * decisions go on with today's checks. Only the lasting ones page (the anchor store's alert, environment.bicep): a
+ * read failing past `alertAfterMs`, anchors' or digest's, or a heap too small for the store. A first read that fails is
+ * a blip until then: the digest's own count runs from its first failure, the start's included, so access that never
+ * works still pages once the digest's has lasted; a store whose files alone are wrong pages through the jobs copy.
  */
 export const WEB_COPY_NAMES = {
   'audit.anchor_store_read_failed': 'audit.web_anchors_read_failed',
   'audit.anchor_shard_unreadable': 'audit.web_anchors_read_failed',
   'audit.state_digest_store_failed': 'audit.web_anchors_read_failed',
+  'audit.anchor_store_unreadable': 'audit.web_anchors_read_failed',
   'audit.anchor_store_read_failing': 'audit.web_anchors_read_failing',
-  'audit.anchor_store_unreadable': 'audit.web_anchors_read_failing',
   'audit.state_digest_store_failing': 'audit.web_anchors_read_failing',
   'audit.anchor_store_beyond_memory': 'audit.web_anchors_beyond_memory',
 } as const satisfies Partial<Record<ProblemEvent, ProblemEvent>>;

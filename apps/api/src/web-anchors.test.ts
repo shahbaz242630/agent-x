@@ -254,14 +254,38 @@ describe('a web copy’s logger (AT13b)', () => {
         expect.objectContaining({ level: 'warn', event: web, was: event, n: 2 }),
       ]);
     }
-    expect(Object.values(WEB_COPY_NAMES).toSorted()).toEqual([
-      'audit.web_anchors_beyond_memory',
-      'audit.web_anchors_read_failed',
-      'audit.web_anchors_read_failed',
-      'audit.web_anchors_read_failed',
-      'audit.web_anchors_read_failing',
-      'audit.web_anchors_read_failing',
-      'audit.web_anchors_read_failing',
+    // What pages (the anchor store's alert) is what lasts: a first read that fails is a blip, said as one.
+    expect(WEB_COPY_NAMES).toEqual({
+      'audit.anchor_store_read_failed': 'audit.web_anchors_read_failed',
+      'audit.anchor_shard_unreadable': 'audit.web_anchors_read_failed',
+      'audit.state_digest_store_failed': 'audit.web_anchors_read_failed',
+      'audit.anchor_store_unreadable': 'audit.web_anchors_read_failed',
+      'audit.anchor_store_read_failing': 'audit.web_anchors_read_failing',
+      'audit.state_digest_store_failing': 'audit.web_anchors_read_failing',
+      'audit.anchor_store_beyond_memory': 'audit.web_anchors_beyond_memory',
+    });
+  });
+
+  it('a store it never reads from the start pages once the alert limit has passed, and not before', async () => {
+    const directory = folder();
+    await folderWriteOnceStore(directory).put('a-file', Buffer.from('x'));
+    const capture = new LogCapture();
+    let at = AT.getTime();
+    const services = { ...servicesWith(capture), clock: { now: () => new Date(at) } };
+    const kept = anchorsReadOf(configWith(join(directory, 'a-file')), services);
+    if (kept === undefined) throw new Error('a folder is named');
+    const read = createWebAnchorRead({ ...kept, logger: services.logger });
+    const paging = () => capture.lines().filter(({ event }) => event === 'audit.web_anchors_read_failing');
+    await read.run();
+    at += services.alertAfterMs - 1;
+    await read.run();
+    // A start that failed is a blip until the limit: nothing in the alert's query yet.
+    expect(paging()).toEqual([]);
+    expect(capture.lines().map(({ event }) => event)).toContain('audit.web_anchors_read_failed');
+    at += 1;
+    await read.run();
+    expect(paging()).toEqual([
+      expect.objectContaining({ level: 'warn', copy: 'web', was: 'audit.state_digest_store_failing' }),
     ]);
   });
 
@@ -271,7 +295,7 @@ describe('a web copy’s logger (AT13b)', () => {
     logger.error('audit.integrity_failed', { chain: 'store' });
     logger.warn('audit.anchor_store_foreign', { files: 1 });
     logger.info('audit.anchors_read', { chains: 1 });
-    logger.child({ orgId: ORG }).error('audit.anchor_store_unreadable');
+    logger.child({ orgId: ORG }).error('audit.anchor_store_read_failing');
     expect(capture.lines().map(({ level, event, orgId }) => [level, event, orgId])).toEqual([
       ['error', 'audit.integrity_failed', undefined],
       ['warn', 'audit.anchor_store_foreign', undefined],

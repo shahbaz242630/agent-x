@@ -405,9 +405,11 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 /**
  * The anchors' store can't be read after a start, has gone long unread or unwritten, or was never named (4D2e E, PL-58);
  * a file too large for this process, the check behind on its turns, or past the organisations it notes (E6): capacity, never tamper.
+ * And a production web copy that can't read the anchors past the alert limit, or hold them (AT13b): its decisions go on
+ * without the digest.
  */
 const ANCHOR_STORE_LINES =
-  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on")';
+  'where tostring(parse_json(Log).event) in ("audit.anchor_store_unreadable", "audit.anchor_store_unwritable", "audit.anchor_store_read_failing", "audit.anchor_store_not_set", "audit.anchor_store_beyond_memory", "audit.anchor_store_near_memory", "audit.anchor_check_behind", "audit.anchor_check_over_size", "audit.anchor_store_moved_on", "audit.web_anchors_read_failing", "audit.web_anchors_beyond_memory")';
 
 /**
  * The fewest days of point-in-time restore a deployment keeps (ADR-002). In production, also twice the days the full pass

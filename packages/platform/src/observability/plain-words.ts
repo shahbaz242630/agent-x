@@ -333,7 +333,7 @@ export const PLAIN_WORDS = {
     next: 'Nothing if it passes: it tries again each minute. If it keeps failing, a lasting warning follows.',
   },
   'audit.web_anchors_read_failing': {
-    happened: 'A web copy of the API has not been able to read the audit anchors for some time.',
+    happened: 'A web copy of the API has kept failing to read the audit anchors or their digest.',
     broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
     next: 'Check the API identity’s anchors reader role on the anchors container, and that the foundation deploy has run.',
   },
