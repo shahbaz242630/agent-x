@@ -42,6 +42,20 @@ describe('TR-1 a walk held to the witnessed heads', () => {
     expect(heldToWitnessed(walk, [head(6n, 6)], found, 2n)).toMatchObject({ ok: false });
   });
 
+  it('TR-3: a fingerprint (a place and its hash’s first 8 bytes) is held to by those bytes, at a place read and at the head', () => {
+    const found = new Map([[5n, Buffer.concat([Buffer.alloc(8, 5), Buffer.alloc(24, 7)])]]);
+    const walk = reached(8n, 8);
+    const print = (seq: bigint, fill: number) => ({ seq, hash: Buffer.alloc(8, fill) });
+    expect(heldToWitnessed(walk, [print(5n, 5), print(8n, 8)], found, 2n)).toBe(walk);
+    expect(heldToWitnessed(walk, [print(5n, 6)], found, 2n)).toEqual({
+      ok: false,
+      problem: { reason: 'cut_back', seq: 5n },
+    });
+    expect(heldToWitnessed(walk, [print(8n, 9)], found, 2n)).toMatchObject({ ok: false });
+    // A full head is still held to all 32 bytes.
+    expect(heldToWitnessed(walk, [{ seq: 5n, hash: Buffer.alloc(32, 5) }], found, 2n)).toMatchObject({ ok: false });
+  });
+
   it('leaves to the next walk a head at or below where it began, or past where a capped step stopped short of its goal', () => {
     const found = new Map<bigint, Buffer>();
     const capped = reached(8n, 8, 20n);

@@ -31,6 +31,9 @@ const START = new Date('2026-11-20T09:00:00.000Z');
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
+/** What a log may hold to keep `heads` heads: theirs, and the fingerprints' tenth on top (TR-3). */
+const forHeads = (heads: number): number => Math.ceil((heads * WITNESS_HEAD_BYTES * 11) / 10);
+
 const hash = (fill: number): Buffer => Buffer.alloc(32, fill);
 const head = (seq: bigint, fill: number) => ({ seq, hash: hash(fill) });
 
@@ -571,7 +574,7 @@ describe('the witness log: memory and snapshots', () => {
   it('past what it may hold, the chain holding most lets its lowest head go, loudly, and reads beyondMemory until a rebase: anchors and prunes clear nothing, a snapshot keeps it', async () => {
     const snapshots = createFakeWriteOnceStore();
     const time = clock();
-    const { log, capture } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES, snapshots, leads: true, time });
+    const { log, capture } = witnessOn(undefined, { mostBytes: forHeads(3), snapshots, leads: true, time });
     const rebases = new Map<string, Date>();
     log.useAnchors(anchorsWith(rebases, new Map([[ORG, 9n]])));
     for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, 1));
@@ -645,7 +648,7 @@ describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
   });
 
   it('gives way from the organisation chain holding most, never the platform’s while one is held, its lowest above the anchor first', () => {
-    const { log } = witnessOn(undefined, { mostBytes: 4 * WITNESS_HEAD_BYTES });
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(4) });
     log.useAnchors(anchorsWith(new Map(), new Map([[ORG, 2n]])));
     for (const seq of [1n, 2n, 3n]) log.soon(PLATFORM, head(seq, 1));
     log.soon(CHAIN, head(1n, 1));
@@ -655,28 +658,100 @@ describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
     expect(log.beyondMemory(CHAIN)).toBe(true);
     expect(log.beyondMemory(PLATFORM)).toBe(false);
     // Only the platform's held: it gives way then.
-    const alone = witnessOn(undefined, { mostBytes: 2 * WITNESS_HEAD_BYTES });
+    const alone = witnessOn(undefined, { mostBytes: forHeads(2) });
     for (const seq of [1n, 2n, 3n]) alone.log.soon(PLATFORM, head(seq, 1));
     expect(alone.log.beyondMemory(PLATFORM)).toBe(true);
   });
 
-  it('a walk from below the lowest head let go to at or past the highest sets the mark aside; one short of either leaves it', async () => {
+  it('each head let go leaves a fingerprint; a walk held to them all, from below the lowest to past the highest, sets the mark aside; one short of either, or not held to one, leaves it', async () => {
     const snapshots = createFakeWriteOnceStore();
     const time = clock();
-    const { log } = witnessOn(undefined, { mostBytes: 3 * WITNESS_HEAD_BYTES, snapshots, leads: true, time });
-    for (const seq of [5n, 6n, 7n, 8n, 9n]) log.soon(CHAIN, head(seq, 1));
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(3), snapshots, leads: true, time });
+    for (const seq of [5n, 6n, 7n, 8n, 9n]) log.soon(CHAIN, head(seq, Number(seq)));
     expect(seqs(log.pending(CHAIN))).toEqual([9n, 8n, 7n]);
-    expect(log.walkedPast(CHAIN, 5n, 9n)).toBe(true);
-    expect(log.walkedPast(CHAIN, 4n, 5n)).toBe(true);
-    // The leader's snapshot keeps the lowest too: a start from it is set aside the same way.
+    const prints = log.fingerprints(CHAIN);
+    expect(prints.map(({ seq, hash: prefix }) => [seq, prefix.toString('hex')])).toEqual([
+      [5n, hash(5).subarray(0, 8).toString('hex')],
+      [6n, hash(6).subarray(0, 8).toString('hex')],
+    ]);
+    expect(log.fingerprints(OTHER)).toEqual([]);
+    expect(log.walkedPast(CHAIN, 5n, 9n, prints)).toBe(true);
+    expect(log.walkedPast(CHAIN, 4n, 5n, prints)).toBe(true);
+    expect(log.walkedPast(CHAIN, 4n, 9n, prints.slice(1))).toBe(true);
+    // The leader's snapshot keeps the lowest and the fingerprints too: a start from it is set aside the same way.
     await log.refresh();
     await log.flush();
     const restarted = witnessOn(createFakeWriteOnceStore(), { snapshots, time });
     await restarted.log.refresh();
     expect(restarted.log.beyondMemory(CHAIN)).toBe(true);
-    expect(restarted.log.walkedPast(CHAIN, 4n, 6n)).toBe(false);
-    expect(log.walkedPast(CHAIN, 4n, 6n)).toBe(false);
+    expect(restarted.log.fingerprints(CHAIN)).toEqual(prints);
+    expect(restarted.log.walkedPast(CHAIN, 4n, 6n, prints)).toBe(false);
+    expect(log.walkedPast(CHAIN, 4n, 6n, prints)).toBe(false);
     expect(log.beyondMemory(CHAIN)).toBe(false);
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+  });
+
+  it('fingerprints past their share let the chain holding most go, an organisation’s before the platform’s: said, and a rebase alone sets it aside', () => {
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    // Room for 2 heads, and one fingerprint: forHeads(2) / 11 bytes, of 32 each.
+    const { log, capture } = witnessOn(undefined, { mostBytes: forHeads(2), time });
+    log.useAnchors(anchorsWith(rebases));
+    log.soon(PLATFORM, head(1n, 1));
+    log.soon(PLATFORM, head(2n, 2));
+    log.soon(PLATFORM, head(3n, 3));
+    expect(log.fingerprints(PLATFORM).map(({ seq }) => seq)).toEqual([1n]);
+    log.soon(CHAIN, head(1n, 1));
+    log.soon(CHAIN, head(2n, 2));
+    // CHAIN's head went, and its fingerprint was one too many: its fingerprints let go, the platform's kept.
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+    expect(log.fingerprints(PLATFORM).map(({ seq }) => seq)).toEqual([1n]);
+    expect(log.walkedPast(CHAIN, 0n, 100n, [])).toBe(true);
+    // Said once: a head it let go after (its 2) leaves no fingerprint to overflow again.
+    expect(capture.lines().filter(({ fingerprints }) => fingerprints === false)).toEqual([
+      expect.objectContaining({ event: 'audit.witness_beyond_memory', chain: `organisation:${ORG}` }),
+    ]);
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+  });
+
+  it('a rebase after the heads let go sets their fingerprints aside too, asked first', () => {
+    const time = clock();
+    const rebases = new Map<string, Date>();
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(2), time });
+    log.useAnchors(anchorsWith(rebases));
+    for (const seq of [1n, 2n, 3n]) log.soon(CHAIN, head(seq, 1));
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([1n]);
+    rebases.set(ORG, new Date(time.held.at + 1));
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+  });
+
+  it('holds what its share says, past ten heads too: the fingerprints’ tenth taken from it', () => {
+    const { log } = witnessOn(undefined, { mostBytes: forHeads(20) });
+    for (let seq = 1n; seq <= 20n; seq += 1n) log.soon(CHAIN, head(seq, 1));
+    expect(log.beyondMemory(CHAIN)).toBe(false);
+    log.soon(CHAIN, head(21n, 1));
+    expect(log.beyondMemory(CHAIN)).toBe(true);
+  });
+
+  it('a heads file can’t carry a fingerprint: only a snapshot does', async () => {
+    const store = createFakeWriteOnceStore();
+    const at = START.getTime() - MINUTE;
+    const print = JSON.stringify({
+      c: `organisation:${ORG}`,
+      s: '4',
+      x: '0'.repeat(16),
+      t: new Date(at).toISOString(),
+    });
+    await planted(store.files, 'heads', HEADS, [print, line(`organisation:${ORG}`, 5n, 1, new Date(at))], { at });
+    const { log } = witnessOn(store, { mostBytes: forHeads(2) });
+    await log.refresh();
+    expect(seqs(log.pending(CHAIN))).toEqual([5n]);
+    expect(log.fingerprints(CHAIN)).toEqual([]);
+    // Its own head let go: its fingerprint alone, none from the file.
+    log.soon(CHAIN, head(6n, 6));
+    log.soon(CHAIN, head(7n, 7));
+    expect(log.fingerprints(CHAIN).map(({ seq }) => seq)).toEqual([5n]);
   });
 
   it('a snapshot’s mark with no lowest is set aside by a rebase alone; one whose lowest is past its highest spoils it', async () => {
@@ -687,7 +762,7 @@ describe('TR-3 the witness log: dates, memory, Puts and replays', () => {
     await planted(snapshots.files, 'snapshots', SNAPSHOT, [lost({})], { at });
     const { log } = witnessOn(createFakeWriteOnceStore(), { snapshots });
     await log.refresh();
-    expect(log.walkedPast(CHAIN, 0n, 100n)).toBe(true);
+    expect(log.walkedPast(CHAIN, 0n, 100n, [])).toBe(true);
     const bad = createFakeWriteOnceStore();
     await planted(bad.files, 'snapshots', SNAPSHOT, [lost({ f: '10' })], { at });
     const spoiled = witnessOn(createFakeWriteOnceStore(), { snapshots: bad });

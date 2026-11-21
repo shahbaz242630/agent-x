@@ -61,7 +61,8 @@ const CROWDED_PROBED = 50;
  * heap share where that is more; never past MOST_HEAP_SHARE.
  */
 export function witnessMostBytes(anchorSeconds: number, heapLimit: number): number {
-  const forTheRate = anchorSeconds * TARGET_WRITES_A_SECOND * HEADROOM * WITNESS_HEAD_BYTES;
+  // With the fingerprints' tenth on top (witness-log.ts).
+  const forTheRate = (anchorSeconds * TARGET_WRITES_A_SECOND * HEADROOM * WITNESS_HEAD_BYTES * 11) / 10;
   return Math.floor(Math.min(heapLimit * MOST_HEAP_SHARE, Math.max(heapLimit * HEAP_SHARE, forTheRate)));
 }
 
