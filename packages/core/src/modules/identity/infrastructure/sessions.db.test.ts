@@ -7,6 +7,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type SignInEvidence, SignInRefused } from '../domain/sign-in.ts';
+import { lastUseMessage, macOf } from './row-macs.ts';
 import { createSessions, LONGEST_IDLE_SECONDS, type Sessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
@@ -59,6 +60,18 @@ async function setUp(): Promise<{ userId: string; clock: FixedClock; sessions: S
 const rowOf = (sessionId: string) =>
   app.selectFrom('identity.sessions').selectAll().where('id', '=', sessionId).executeTakeFirst();
 
+/** Sets a session's last use, with its MAC, as a use at that moment would have (0111). */
+async function lastUsedAt(sessionId: string, when: number): Promise<void> {
+  const row = await rowOf(sessionId);
+  if (row === undefined) throw new Error('no such session');
+  const { mac, mac_key_version: version } = macOf(keys, lastUseMessage(row.cookie_hash, new Date(when)));
+  await app
+    .updateTable('identity.sessions')
+    .set({ last_seen_at: new Date(when), last_use_mac: mac, last_use_mac_key_version: version })
+    .where('id', '=', sessionId)
+    .execute();
+}
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
@@ -96,11 +109,7 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       idleEndsAt: new Date(clock.now().getTime() + IDLE * SECOND),
     });
     // In use until moments before its absolute end: its idle end would come later, so it is the absolute end.
-    await app
-      .updateTable('identity.sessions')
-      .set({ last_seen_at: new Date(end - 10 * SECOND) })
-      .where('id', '=', sessionId)
-      .execute();
+    await lastUsedAt(sessionId, end - 10 * SECOND);
     const late = createSessions({
       ids,
       clock: new FixedClock(new Date(end - SECOND)),
@@ -246,13 +255,17 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       const { userId, clock, sessions } = await setUp();
       const { sessionId, cookie } = await sessions.open(app, userId, evidence);
       clock.advanceBy(60 * SECOND);
+      const before = await rowOf(sessionId);
 
       const rotated = await sessions.rotate(app, sessionId);
 
-      expect(rotated).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      expect(rotated).not.toBe(cookie);
+      expect(rotated?.cookie).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(rotated?.cookie).not.toBe(cookie);
+      // The row as it was, for its signed rotation: its person, record and the MAC it had.
+      expect(rotated?.retired).toEqual({ userId, sessionId, mac: before?.mac });
+      expect((await rowOf(sessionId))?.mac).not.toEqual(before?.mac);
       expect(await sessions.use(app, cookie)).toBeUndefined();
-      expect(await sessions.use(app, rotated ?? '')).toMatchObject({
+      expect(await sessions.use(app, rotated?.cookie ?? '')).toMatchObject({
         sessionId,
         userId,
         ...evidence,
@@ -337,6 +350,8 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       ends_at: new Date(START.getTime() + SECOND),
       mac: Buffer.alloc(32, 1),
       mac_key_version: 1,
+      last_use_mac: null as Buffer | null,
+      last_use_mac_key_version: null as number | null,
     };
     const insert = (change: Partial<typeof row>) =>
       app
@@ -357,6 +372,11 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       { idp_session_id: '' },
       { mac: Buffer.alloc(31, 9) },
       { mac_key_version: 0 },
+      { last_use_mac: Buffer.alloc(31, 9), last_use_mac_key_version: 1 },
+      { last_use_mac: Buffer.alloc(32, 9), last_use_mac_key_version: 0 },
+      // A last use's MAC goes with its version, neither without the other (0111).
+      { last_use_mac: Buffer.alloc(32, 9) },
+      { last_use_mac_key_version: 1 },
     ]) {
       await expect(insert({ cookie_hash: Buffer.alloc(32, 10), ...change })).rejects.toMatchObject({ code: '23514' });
     }
@@ -404,13 +424,6 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
       keys,
       logger: testLogger(),
     });
-  /** Sets a session's last use, as a use at that moment would have. */
-  const lastUsed = (sessionId: string, when: number) =>
-    app
-      .updateTable('identity.sessions')
-      .set({ last_seen_at: new Date(when) })
-      .where('id', '=', sessionId)
-      .execute();
 
   it('deletes only sessions no setting could make live again: past their end, or unused past the longest idle timeout', async () => {
     const { userId } = await setUp();
@@ -420,7 +433,7 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
       at(openedAt)
         .open(app, userId, evidence)
         .then(async (opened) => {
-          await lastUsed(opened.sessionId, usedAt);
+          await lastUsedAt(opened.sessionId, usedAt);
           return opened;
         });
     const LONGEST = LONGEST_IDLE_SECONDS * SECOND;

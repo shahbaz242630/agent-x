@@ -21,7 +21,7 @@ const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
   ['person', sql<string | null>`(details::jsonb ->> 'person')`],
   ['subject', sql<string | null>`(details::jsonb ->> 'subject')`],
   ['at', sql<string | null>`(details::jsonb ->> 'at')`],
-  // 0110's: a session's signed sign-out, by its record ID (sessions.ts).
+  // 0109's: a session's signed sign-out or rotation, by its record ID (sessions.ts).
   ['record', sql<string | null>`(details::jsonb ->> 'record')`],
 ]);
 

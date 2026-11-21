@@ -308,8 +308,18 @@ export const ALLOWED: readonly Allowed[] = [
       file: 'packages/core/src/modules/identity/infrastructure/sessions.db.test.ts',
       title: 'deletes only sessions no setting could make live again: past their end, or unused past the longest idle',
     },
-    why: 'sign-out by cookie hash, the sweep of sessions no setting could make live again, and the line above',
-    lines: 3,
+    why: 'sign-out by cookie hash, the sweep of sessions no setting could make live again, and the two lines named on their own',
+    lines: 4,
+  },
+  {
+    file: 'packages/core/src/modules/identity/infrastructure/sessions.ts',
+    match: "deleteFrom('identity.sessions').where('id', '=', row.id)",
+    guard: 'lastUseHolds',
+    proof: {
+      file: 'packages/core/src/modules/identity/infrastructure/sessions-tamper.db.test.ts',
+      title: 'an idle session whose last use the owner moves on is ended, not found, and raises the alarm',
+    },
+    why: "the one session whose last use the app didn't write (GM-4): ended before the use just written makes it whole",
   },
   {
     file: 'packages/core/src/modules/identity/infrastructure/step-up-challenges.ts',
