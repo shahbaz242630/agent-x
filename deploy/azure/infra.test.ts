@@ -1168,8 +1168,12 @@ describe('the deployers (deployers/deployers.bicep)', () => {
       'staging-whatif',
     ]);
     // AZ5e: the access alarm, in this group (out of the infra identity's reach), on the main workspace.
-    const [alarm, ...moreAlarms] = of('Microsoft.Insights/scheduledQueryRules');
-    expect(moreAlarms).toEqual([]);
+    // AL1: and the alert-rules alarm, with it (the test below).
+    expect(of('Microsoft.Insights/scheduledQueryRules').map((rule) => rule.name)).toEqual([
+      'alert-agentx-stg-access-changed',
+      'alert-agentx-stg-alert-rules-rewritten',
+    ]);
+    const [alarm] = of('Microsoft.Insights/scheduledQueryRules');
     expect(alarm?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
     const properties = alarm?.properties as {
       enabled?: boolean;
@@ -1251,5 +1255,79 @@ describe('the deployers (deployers/deployers.bicep)', () => {
     const [group] = of('Microsoft.Insights/actionGroups');
     expect(group?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
     expect(properties.actions?.actionGroups).toEqual([group?.id]);
+  });
+
+  it("counts staging's alert-rule writes once a window, here out of a deploy's reach (AL1), and pushes to the Azure app too (AL2)", () => {
+    const snapshot = inCopy((dir) =>
+      deploymentSnapshot(dir, 'deployers/staging.bicepparam', undefined, {}, SUBSCRIPTION),
+    );
+    const of = (type: string) => snapshot.predictedResources.filter((resource) => resource.type === type);
+    const rule = of('Microsoft.Insights/scheduledQueryRules').find(
+      (each) => each.name === 'alert-agentx-stg-alert-rules-rewritten',
+    );
+    expect(rule?.id).toContain('/resourceGroups/rg-agentx-staging-deployers/');
+    const properties = rule?.properties as {
+      description?: string;
+      severity?: number;
+      enabled?: boolean;
+      autoMitigate?: boolean;
+      scopes?: string[];
+      evaluationFrequency?: string;
+      windowSize?: string;
+      overrideQueryTimeRange?: string;
+      skipQueryValidation?: unknown;
+      criteria?: {
+        allOf?: {
+          query?: string;
+          operator?: string;
+          threshold?: number;
+          timeAggregation?: string;
+          metricMeasureColumn?: string;
+        }[];
+      };
+      actions?: { actionGroups?: string[] };
+    };
+    // A stateless SEV-1 on the main workspace, which holds the subscription's activity log, with its runbook.
+    expect(properties).toMatchObject({ severity: 1, enabled: true, autoMitigate: false });
+    expect(properties.description).toMatch(/^SEV-1\. .+ Runbook: Incident-Response-Playbook\.md section I\.$/);
+    expect(properties.scopes).toEqual([
+      `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces/log-agentx-stg`,
+    ]);
+    expect(properties.skipQueryValidation).toBeUndefined();
+    // Every 15 minutes (Microsoft reports health only that often, and the health alarm watches it), counting lines
+    // by when they arrived over 30 minutes, as the login alerts' band: a run late by up to 15 leaves no gap.
+    expect(properties.evaluationFrequency).toBe('PT15M');
+    expect(properties.windowSize).toBe('PT15M');
+    expect(properties.overrideQueryTimeRange).toBe('P1D');
+    const [criterion, ...more] = properties.criteria?.allOf ?? [];
+    expect(more).toEqual([]);
+    expect(criterion).toMatchObject({ operator: 'GreaterThan', threshold: 0 });
+    const query = String(criterion?.query);
+    expect(query).toMatch(/^AzureActivity \| where ingestion_time\(\) > ago\(30m\) \| /);
+    // The one number the query returns, totalled: a Count would count rows and fire on every run.
+    expect(criterion).toMatchObject({ timeAggregation: 'Total', metricMeasureColumn: 'Rules' });
+    expect(query).toContain('| where CategoryValue == "Administrative" |');
+    expect(query).toContain('| where ResourceGroup =~ "rg-agentx-staging" |');
+    // Every writer and every outcome: refused attempts count too, and no caller is left out.
+    expect(query).not.toMatch(/ActivityStatus|Caller/);
+    // The writes alone (the deletes are monitoring.bicep's per-event alarm's), each kind of rule and the action group.
+    const writes = /OperationNameValue in~ \(([^)]*)\)/.exec(query)?.[1];
+    expect(writes?.split(', ')).toEqual([
+      '"Microsoft.Insights/scheduledQueryRules/write"',
+      '"Microsoft.Insights/metricAlerts/write"',
+      '"Microsoft.Insights/activityLogAlerts/write"',
+      '"Microsoft.Insights/actionGroups/write"',
+    ]);
+    expect(query).toMatch(/ \| summarize Rules = dcount\(_ResourceId\)$/);
+    const [group, ...moreGroups] = of('Microsoft.Insights/actionGroups');
+    expect(moreGroups).toEqual([]);
+    expect(properties.actions?.actionGroups).toEqual([group?.id]);
+    // AL2: the email and a push to the Azure app, both to the address the partner's terminal gives (never the repo's).
+    expect((group?.properties as { emailReceivers?: unknown }).emailReceivers).toEqual([
+      { name: 'partner-email', emailAddress: 'alerts@example.invalid', useCommonAlertSchema: true },
+    ]);
+    expect((group?.properties as { azureAppPushReceivers?: unknown }).azureAppPushReceivers).toEqual([
+      { name: 'partner-app', emailAddress: 'alerts@example.invalid' },
+    ]);
   });
 });

@@ -1675,7 +1675,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       const operations = anyOf(
         structuredClone(staging.predictedResources.find(RULES_CHANGED)) as unknown as Mutable,
       ).map((one) => one.equals);
-      expect(operations).toHaveLength(11);
+      expect(operations).toHaveLength(7);
       expect(operations).toEqual(
         expect.arrayContaining([
           'Microsoft.AlertsManagement/actionRules/write',
@@ -1683,6 +1683,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
           'Microsoft.Insights/diagnosticSettings/delete',
         ]),
       );
+      // AL1: the writes every foundation deploy makes to every rule and the action group, one email each, are the
+      // deployers' alert-rules alarm's to count (infra.test.ts), never this per-event one's.
+      for (const type of ['scheduledQueryRules', 'metricAlerts', 'activityLogAlerts', 'actionGroups']) {
+        expect(operations).toContain(`Microsoft.Insights/${type}/delete`);
+        expect(operations).not.toContain(`Microsoft.Insights/${type}/write`);
+      }
       expect(operations).not.toContain('Microsoft.Insights/diagnosticSettings/write');
       expect(operations).not.toContain('Microsoft.DBforPostgreSQL/flexibleServers/configurations/write');
       expect(brokenRules(without(ACTIVITY_ALERTS))).toEqual(['alert-rules-watch']);
@@ -1745,12 +1751,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
               }),
           ] as const,
         ]),
-        // A kind of change left unwatched: each of the eleven, written or deleted (alert processing rules among them),
+        // A kind of change left unwatched: each of the seven, the deletes, an alert processing rule written,
         // or a diagnostic setting deleted.
         ...Array.from(
-          { length: 11 },
+          { length: 7 },
           (_unused, index) => [RULES_CHANGED, (alert: Mutable) => anyOf(alert).splice(index, 1)] as const,
         ),
+        // AL1: a deploy's writes back on the per-event alarm, one email a rule again.
+        [
+          RULES_CHANGED,
+          (alert: Mutable) =>
+            anyOf(alert).push({ field: 'operationName', equals: 'Microsoft.Insights/scheduledQueryRules/write' }),
+        ],
         [
           RULES_CHANGED,
           (alert: Mutable) =>

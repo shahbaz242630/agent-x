@@ -20,7 +20,8 @@
 //   no reviewer), the plan the partner reads before approving. It reads staging's
 //   group and asks Azure's what-if; it changes nothing
 // - the alarm on an app changing role grants, trusts, policy rules or locks
-//   across the subscription (watch.bicep, AZ5e), where the infra identity can't reach it
+//   across the subscription (watch.bicep, AZ5e), where the infra identity can't reach it; and the one on
+//   staging's alert rules being rewritten, about two emails a deploy (AL1)
 //
 // The subjects are the immutable form names.bicep's githubRepository() writes;
 // infra.test.ts holds the two equal. The tags come from tags.bicep, not
@@ -74,6 +75,7 @@ module watch 'watch.bicep' = {
     location: location
     // The foundation's workspace, by name (names.bicep's): it exists before this runs.
     workspaceId: resourceId(subscription().subscriptionId, stagingGroupName, 'Microsoft.OperationalInsights/workspaces', 'log-agentx-${short}')
+    stagingGroupName: stagingGroupName
     alertEmail: alertEmail
     infraPrincipalId: identities.outputs.infraPrincipalId
   }
