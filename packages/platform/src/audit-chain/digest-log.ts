@@ -32,13 +32,25 @@
 // and only while this process leads (`leading`): one that has lost the lease reads the store no more, so it forgets all
 // it holds and reads it again whole when it leads again.
 //
-// What it holds is bounded (`mostBytes`), and one organisation's growth never stops another's. Past it, the largest chain
-// gives way first: its payments' objects (`PAYMENT_SUBJECTS`: requests, instructions, transactions, which grow with use),
-// then the whole chain, each with that organisation's alarm. A chain given way reads as before the digest, Tx A
+// What it holds is bounded (`mostBytes`), and one organisation's growth never stops another's. Past it, a chain gives
+// way: the objects that grow with use first (`GROWING_SUBJECTS`: a payment's requests, instructions, transactions; the
+// platform chain's session ends), then the whole chain, each with that organisation's alarm. Only a chain holding more
+// than its fair share (what may be held over the chains held) is chosen while one does, those with growing objects
+// first, then the largest: so many small organisations never push out a large one within its share, and as the whole is
+// over what may be held, the largest chain is always past its share. A chain given way reads as before the digest, Tx A
 // included (today's checks), never as a stop. How far it gave way is written with what moved and in every snapshot
-// (`g`), so a restart holds it so at once, never as a chain to wait for: given way whole, it reads as before the digest;
-// its payments alone, it stays covered, as a fact missing only loses protection, never raises the alarm. The anchors'
-// log counts what is held here against its own budget too (`alsoHeld`), and lets its shards go to make room.
+// (`g`, with what it let go, `b`), so a restart holds it so at once, never as a chain to wait for: given way whole, it
+// reads as before the digest; its growing objects alone, it stays covered, as a fact missing only loses protection,
+// never raises the alarm. The anchors' log counts what is held here against its own budget too (`alsoHeld`), and lets
+// its shards go to make room.
+//
+// A chain given way comes back (AT13e) once what is held is under half of what may be, with room for what it let go,
+// and an hour after it gave way: so it never flaps. Its coverage starts again from nothing, and the anchor check's
+// catch-up walk reads it from its first event (`owed`), facts kept as it goes; until that walk reaches the anchor, it
+// reads as given way (today's checks: no wait, and no alarm from facts it doesn't hold yet). Each chain's give-way state
+// has a generation (`n`), odd while it comes back: written on every mark line and stretch, read as the highest
+// generation, then the highest give-way within it, so files read in any order agree and a restart holds it as it was. A
+// stretch counts only from the generation its chain last began coming back in, so none from before stands for it.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -84,6 +96,11 @@ export interface DigestLog extends StateDigest {
   record(chain: Chain, seen: SignedSeen, began: Date, stretch?: Stretch): void;
   /** Where the chain is covered to, for a catch-up walk to go on from: none, from its first event. */
   coverage(chain: Chain): CheckedPoint | undefined;
+  /**
+   * Whether the chain, anchored at `seq`, owes a catch-up walk: read, not wholly given way, and not covered to there
+   * (one coming back included, AT13e). A chain coming back whose walk has reached `seq` is back, from here.
+   */
+  owed(chain: Chain, seq: bigint): boolean;
   /** Reads what the store holds that this process has not. Never throws; one at a time, a second call joins the first. */
   read(): Promise<void>;
   /** Writes what moved, and hourly the whole. Never throws; one at a time, a second call joins the first. */
@@ -107,15 +124,20 @@ export interface DigestAnchors {
 }
 
 /**
- * The subject types that grow with use, one or more a payment: given way first under memory, as the authority a payment
- * rests on (agents, keys, mandates, members, policies, suppliers, sources, the hold) is what an attacker rolls back first.
+ * The subject types that grow with use: one or more a payment, and on the platform chain one a sign-out or step-up
+ * (AT13c: the session ends' facts, identity's signed-ends.ts names them). Given way first under memory, as the authority
+ * a payment rests on (agents, keys, mandates, members, policies, suppliers, sources, the hold, the hand-off pause) is
+ * what an attacker rolls back first.
  */
-const PAYMENT_SUBJECTS: ReadonlySet<string> = new Set([
+const GROWING_SUBJECTS: ReadonlySet<string> = new Set([
   'spend_request',
   'instruction',
   'transaction',
   'failure_proposal',
   'supplier_remittance',
+  'identity.session_ended',
+  'identity.session_rotated',
+  'identity.sessions_ended',
 ]);
 
 /** The most objects on one line: 32 KB of entries, 44 KB of base64. */
@@ -159,6 +181,9 @@ const MOST_STRETCHES = 16;
 
 /** How often a chain given way says so again. */
 const SAY_EVERY_MS = 60 * 60_000;
+
+/** How long after it gave way a chain may come back: at most once an hour, so it never flaps (AT13e). */
+const BACK_AFTER_MS = 60 * 60_000;
 
 const CHAIN = /^(?:platform|organisation:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SEQ = /^(?:0|[1-9]\d{0,18})$/;
@@ -214,6 +239,16 @@ function parsed(line: string): unknown {
   }
 }
 
+/** How much of a chain gave way for memory, in which generation, and what it let go (AT13e): a mark line's. */
+interface Mark {
+  /** 0 none, 1 its growing objects, 2 all of it. */
+  readonly gaveWay: 0 | 1 | 2;
+  /** Odd while the chain comes back; raised each time it begins to, and once more when it is back. */
+  readonly gen: number;
+  /** About how many bytes its tables held when it gave way: what coming back would take. */
+  readonly letGo: number;
+}
+
 /** A line of a file, read: its chain, when its walk began, its entries and their class, and the stretch read. */
 interface DigestLine {
   readonly chain: string;
@@ -223,6 +258,10 @@ interface DigestLine {
   readonly stretch?: Stretch | undefined;
   /** How much of the chain had given way for memory where the line was written (`g`): kept so across a restart. */
   readonly gaveWay?: 1 | 2 | undefined;
+  /** The chain's give-way generation (`n`), on a mark line or a stretch; none, 0. */
+  readonly gen?: number | undefined;
+  /** What the chain let go (`b`), on a mark line. */
+  readonly letGo?: number | undefined;
 }
 
 /** A line's stretch, none where it names none, or `undefined` read as a line not ours where one is half there. */
@@ -233,39 +272,58 @@ function stretchFrom({ f, u, h, k }: Record<string, unknown>): Stretch | 'none' 
   return { from: BigInt(f), to: { seq: BigInt(u), hash: Buffer.from(h, 'hex'), macKeyVersion: k } };
 }
 
+/** A line's mark fields as they may be: a generation any line may carry, what was let go only with how far. */
+const markFieldsHold = ({ g, n, b }: Record<string, unknown>): boolean =>
+  (g === undefined || g === 1 || g === 2) &&
+  (n === undefined || isCount(n)) &&
+  (b === undefined || (isCount(b) && g !== undefined));
+
 function lineFrom(fields: unknown): DigestLine | undefined {
   if (typeof fields !== 'object' || fields === null) return undefined;
   const said = fields as Record<string, unknown>;
-  const { c, t, e, p, g } = said;
+  const { c, t, e, p, g, n, b } = said;
   const at = timeIn(t);
   const stretch = stretchFrom(said);
   if (typeof c !== 'string' || !CHAIN.test(c) || at === undefined || stretch === undefined) return undefined;
-  if ((p !== undefined && p !== 1) || (g !== undefined && g !== 1 && g !== 2)) return undefined;
+  if ((p !== undefined && p !== 1) || !markFieldsHold(said)) return undefined;
   const entries = e === undefined ? [] : typeof e === 'string' ? unpackEntries(Buffer.from(e, 'base64')) : undefined;
-  if (entries === undefined || (entries.length === 0 && stretch === 'none' && g === undefined)) return undefined;
+  if (entries === undefined || (entries.length === 0 && stretch === 'none' && g === undefined && n === undefined)) {
+    return undefined;
+  }
   return {
     chain: c,
     at,
     payments: p === 1,
     entries,
     ...(stretch === 'none' ? {} : { stretch }),
-    ...(g === undefined ? {} : { gaveWay: g }),
+    ...(g === undefined ? {} : { gaveWay: g as 1 | 2 }),
+    ...(n === undefined ? {} : { gen: n as number }),
+    ...(b === undefined ? {} : { letGo: b as number }),
   };
+}
+
+/** What a line holds beside its chain and time. */
+interface LineParts {
+  readonly payments?: boolean;
+  readonly entries?: Entries;
+  readonly stretch?: Stretch | undefined;
+  readonly mark?: Mark;
+  /** A stretch's generation, where it has no mark. */
+  readonly gen?: number;
 }
 
 /** A line's text. */
 function lineText(
   chain: string,
   at: number,
-  payments: boolean,
-  entries: Entries,
-  stretch?: Stretch,
-  gaveWay?: 1 | 2,
+  { payments = false, entries = [], stretch, mark, gen }: LineParts,
 ): string {
+  const generation = mark?.gen ?? gen ?? 0;
   return JSON.stringify({
     c: chain,
     t: new Date(at).toISOString(),
-    ...(gaveWay === undefined ? {} : { g: gaveWay }),
+    ...(mark === undefined || mark.gaveWay === 0 ? {} : { g: mark.gaveWay, b: mark.letGo }),
+    ...(generation === 0 ? {} : { n: generation }),
     ...(entries.length === 0 ? {} : { e: packEntries(entries, entries.length).toString('base64') }),
     ...(payments ? { p: 1 } : {}),
     ...(stretch === undefined
@@ -279,35 +337,44 @@ function lineText(
   });
 }
 
+/** A stretch as written: with the generation of its chain when its walk was recorded. */
+interface Walked {
+  readonly stretch: Stretch;
+  readonly gen: number;
+}
+
 /**
- * A chain's lines: how much of it gave way for memory, if any, first; each class's entries, at most MOST_ENTRIES_A_LINE a
- * line; the stretches on lines of their own.
+ * A chain's lines: how much of it gave way for memory and its generation, if either, first; each class's entries, at
+ * most MOST_ENTRIES_A_LINE a line; the stretches on lines of their own.
  */
 function* linesOf(
   chain: string,
   at: number,
   [kept, spent]: readonly [Entries, Entries],
-  stretches: readonly Stretch[],
-  gaveWay: 0 | 1 | 2 = 0,
+  stretches: readonly Walked[],
+  mark: Mark | undefined,
 ): Generator<string> {
-  if (gaveWay !== 0) yield lineText(chain, at, false, [], undefined, gaveWay);
+  if (mark !== undefined && (mark.gaveWay !== 0 || mark.gen !== 0)) yield lineText(chain, at, { mark });
   for (const [payments, entries] of [
     [false, kept],
     [true, spent],
   ] as const) {
     for (let from = 0; from < entries.length; from += MOST_ENTRIES_A_LINE) {
-      yield lineText(chain, at, payments, entries.slice(from, from + MOST_ENTRIES_A_LINE));
+      yield lineText(chain, at, { payments, entries: entries.slice(from, from + MOST_ENTRIES_A_LINE) });
     }
   }
-  for (const stretch of stretches) yield lineText(chain, at, false, [], stretch);
+  for (const { stretch, gen } of stretches) yield lineText(chain, at, { stretch, gen });
 }
 
 /** The chain's object, from its name in a line. */
 const chainOfName = (name: string): Chain =>
   name === 'platform' ? { kind: 'platform' } : { kind: 'organisation', orgId: name.slice('organisation:'.length) };
 
-/** Whether a subject key is a payment's. */
-const isPayment = (key: string): boolean => PAYMENT_SUBJECTS.has(key.slice(0, key.indexOf('\n')));
+/** Whether a subject key is of a type that grows with use. */
+const grows = (key: string): boolean => GROWING_SUBJECTS.has(key.slice(0, key.indexOf('\n')));
+
+/** The generation from which a chain's stretches count: the one it last began coming back in (odd), else all. */
+const baseOf = (gen: number): number => (gen % 2 === 1 ? gen : Math.max(gen - 1, 0));
 
 /**
  * One chain as held: its authority's and its payments' tables, when its oldest fact's walk began, where it is covered to
@@ -319,6 +386,14 @@ interface ChainState {
   covered: CheckedPoint | undefined;
   readonly stretches: Map<bigint, CheckedPoint>;
   gaveWay: 0 | 1 | 2;
+  /** Its give-way generation (AT13e, the header): odd while it comes back. */
+  gen: number;
+  /** About what its tables held when it gave way, for coming back to fit. */
+  letGo: number;
+  /** When it gave way, here or as read: it comes back no sooner than BACK_AFTER_MS after. */
+  gaveWayAt?: number;
+  /** In what waits to be written: its mark moved, so a mark line goes with it. */
+  marked?: boolean;
   saidAt?: number;
   saidWhat?: 1 | 2;
 }
@@ -392,8 +467,8 @@ export function createDigestLog({
   const chains = new Map<string, ChainState>();
   // What moved since the last write, by chain, in the same shape: given way to nothing, written then dropped.
   let pending = new Map<string, ChainState>();
-  // Each chain's stretches since the last write, in order.
-  let pendingStretches = new Map<string, Stretch[]>();
+  // Each chain's stretches since the last write, in order, each with its chain's generation then.
+  let pendingStretches = new Map<string, Walked[]>();
   let state: 'unread' | 'read' = store === undefined ? 'read' : 'unread';
   // What the chains' tables take, kept as they change (the anchors' log asks it at every line it stages).
   let heldBytes = 0;
@@ -423,6 +498,8 @@ export function createDigestLog({
       covered: undefined,
       stretches: new Map(),
       gaveWay: 0,
+      gen: 0,
+      letGo: 0,
     };
     if (counted) heldBytes += tablesBytes(made) + CHAIN_BYTES;
     return made;
@@ -485,23 +562,27 @@ export function createDigestLog({
     return moved;
   };
 
+  /** The chain's own logger: an organisation's names it. */
+  const logFor = (name: string): Logger =>
+    name.startsWith('organisation:') ? logger.child({ orgId: name.slice('organisation:'.length) }) : logger;
+
   /** The organisation's line, for a chain that gave way. */
   const sayGaveWay = (name: string, held: ChainState): void => {
     const at = now().getTime();
     if (held.saidWhat === held.gaveWay && held.saidAt !== undefined && at - held.saidAt < SAY_EVERY_MS) return;
     held.saidAt = at;
     held.saidWhat = held.gaveWay === 2 ? 2 : 1;
-    const log = name.startsWith('organisation:') ? logger.child({ orgId: name.slice('organisation:'.length) }) : logger;
-    log.error('audit.state_digest_chain_gave_way', {
-      what: held.gaveWay === 1 ? 'payments' : 'chain',
+    logFor(name).error('audit.state_digest_chain_gave_way', {
+      // The platform chain's growing objects are its session ends, never payments.
+      what: held.gaveWay === 2 ? 'chain' : name === 'platform' ? 'session_ends' : 'payments',
       bytes: heldBytes,
       mostBytes,
     });
   };
 
   /**
-   * Past what may be held, the largest chain gives way, its payments first, then all of it, until under GIVE_WAY_TO of
-   * it: so one organisation's growth costs it alone. Said at half, once.
+   * Past what may be held, chains give way (`toGiveWay`) until under GIVE_WAY_TO of it: so one organisation's growth
+   * costs it alone. Said at half, once. Under half, chains given way come back as they fit (`comeBack`).
    */
   const judgeMemory = (): void => {
     if (heldBytes > mostBytes * NEAR_MEMORY && !nearSaid) {
@@ -509,33 +590,47 @@ export function createDigestLog({
       logger.warn('audit.state_digest_near_memory', { bytes: heldBytes, mostBytes });
     }
     while (heldBytes > mostBytes) {
-      const largest = largestStanding();
-      if (largest === undefined) return;
-      giveWay(...largest);
+      const chosen = toGiveWay();
+      if (chosen === undefined) return;
+      giveWay(...chosen);
       if (heldBytes <= mostBytes * GIVE_WAY_TO) return;
     }
+    comeBack();
   };
 
-  /** The largest chain not wholly given way yet. */
-  const largestStanding = (): [string, ChainState] | undefined => {
-    let largest: [string, ChainState] | undefined;
+  /**
+   * The chain to give way next, of those not wholly given way: one past its fair share first, one with growing objects
+   * still held before one without, the largest of those; only with none past its share, the largest.
+   */
+  const toGiveWay = (): [string, ChainState] | undefined => {
+    const share = (mostBytes - chains.size * CHAIN_BYTES) / Math.max(chains.size, 1);
+    let chosen: [string, ChainState] | undefined;
+    let chosenRank = -1;
     for (const entry of chains) {
-      if (entry[1].gaveWay < 2 && (largest === undefined || tablesBytes(entry[1]) > tablesBytes(largest[1]))) {
-        largest = entry;
+      const held = entry[1];
+      if (held.gaveWay === 2) continue;
+      const bytes = tablesBytes(held);
+      const rank = bytes <= share ? 0 : held.gaveWay === 0 && held.tables[1].size > 0 ? 2 : 1;
+      if (rank > chosenRank || (rank === chosenRank && chosen !== undefined && bytes > tablesBytes(chosen[1]))) {
+        chosen = entry;
+        chosenRank = rank;
       }
     }
-    return largest;
+    return chosen;
   };
 
-  /** The chain gives way: its payments' table, or with none or those gone already, all of it. Said. */
+  /** The chain gives way: its growing objects' table, or with none or those gone already, all of it. Said. */
   const giveWay = (name: string, held: ChainState): void => {
+    const before = tablesBytes(held);
     dropTo(held, held.gaveWay === 0 && held.tables[1].size > 0 ? 1 : 2);
+    held.letGo += before - tablesBytes(held);
+    held.gaveWayAt = now().getTime();
     // Written with what moved, so a restart holds the chain as given way at once, never as a chain to walk again.
-    if (store !== undefined) pendingChain(name, now().getTime()).gaveWay = held.gaveWay;
+    markPending(name, held);
     sayGaveWay(name, held);
   };
 
-  /** The chain held as given way this far: its payments' table let go, or both. */
+  /** The chain held as given way this far: its growing objects' table let go, or both. */
   const dropTo = (held: ChainState, level: 1 | 2): void => {
     for (const index of level === 1 ? ([1] as const) : ([0, 1] as const)) {
       heldBytes -= held.tables[index].bytes;
@@ -545,20 +640,106 @@ export function createDigestLog({
     held.gaveWay = level;
   };
 
+  /**
+   * Under half of what may be held, each chain given way an hour or more ago comes back where what it let go fits in
+   * the room left under half, the smallest first (AT13e): the hysteresis between giving way past the whole and coming
+   * back under half, with what it let go counted, so a chain comes back only where it would fit again.
+   */
+  const comeBack = (): void => {
+    let room = mostBytes * NEAR_MEMORY - heldBytes;
+    if (room <= 0) return;
+    const at = now().getTime();
+    const ready = [...chains].filter(
+      ([, held]) => held.gaveWay !== 0 && held.gaveWayAt !== undefined && at - held.gaveWayAt >= BACK_AFTER_MS,
+    );
+    for (const [name, held] of ready.toSorted(([, one], [, other]) => one.letGo - other.letGo)) {
+      if (held.letGo > room) return;
+      room -= held.letGo;
+      beginComingBack(name, held);
+    }
+  };
+
+  /**
+   * The chain begins to come back: a new odd generation, so no stretch from before stands for it; its coverage from
+   * nothing, for the catch-up walk to read it from its first event; facts kept from here. It reads as given way until
+   * that walk reaches the anchor (`covers`). Written, so a restart agrees.
+   */
+  const beginComingBack = (name: string, held: ChainState): void => {
+    const was = held.gaveWay;
+    held.gen += held.gen % 2 === 1 ? 2 : 1;
+    held.gaveWay = 0;
+    held.letGo = 0;
+    held.covered = undefined;
+    held.stretches.clear();
+    delete held.gaveWayAt;
+    delete held.saidWhat;
+    changedSinceSnapshot = true;
+    markPending(name, held);
+    logFor(name).info('audit.state_digest_chain_coming_back', {
+      was: was === 2 ? 'chain' : name === 'platform' ? 'session_ends' : 'payments',
+      bytes: heldBytes,
+      mostBytes,
+    });
+  };
+
+  /** A chain coming back whose walk has reached `seq`, back: its generation even again, written. Facts all held. */
+  const settle = (name: string, held: ChainState, seq: bigint): void => {
+    if (held.gen % 2 === 0 || held.gaveWay !== 0 || held.covered === undefined || held.covered.seq < seq) return;
+    held.gen += 1;
+    changedSinceSnapshot = true;
+    markPending(name, held);
+    logFor(name).info('audit.state_digest_chain_back', { seq });
+  };
+
+  /** The chain's mark into what waits to be written: the newest is the highest, so it stands. */
+  const markPending = (name: string, held: ChainState): void => {
+    if (store === undefined) return;
+    const waiting = pendingChain(name, now().getTime());
+    waiting.gen = held.gen;
+    waiting.gaveWay = held.gaveWay;
+    waiting.letGo = held.letGo;
+    waiting.marked = true;
+  };
+
+  /**
+   * A mark read (AT13e): a higher generation, or a further give-way within the same, stands; anything lower is passed
+   * over, as files are read in any order. A generation that begins a chain's coming back anew sets its coverage aside,
+   * since no stretch from before it stands for the chain. Given way where it was written: so here at once, said again.
+   */
+  const raise = (name: string, held: ChainState, gen: number, level: 0 | 1 | 2, letGo: number): void => {
+    if (gen < held.gen || (gen === held.gen && level <= held.gaveWay)) return;
+    if (baseOf(gen) > baseOf(held.gen)) {
+      held.covered = undefined;
+      held.stretches.clear();
+    }
+    if (gen > held.gen) {
+      held.gen = gen;
+      held.gaveWay = 0;
+      held.letGo = 0;
+      delete held.gaveWayAt;
+    }
+    changedSinceSnapshot = true;
+    if (level === 0) return;
+    dropTo(held, level);
+    held.letGo = letGo;
+    held.gaveWayAt = now().getTime();
+    sayGaveWay(name, held);
+  };
+
   /** A line read: passed over if dated before its chain's rebase, else merged. */
   const take = (line: DigestLine): void => {
     if (anchors?.rebasedAfter(chainOfName(line.chain), line.at) === true) return;
     const at = line.at.getTime();
     const held = heldChain(line.chain, at);
-    // Given way where it was written: so here at once, its alarm said again.
-    if (line.gaveWay !== undefined && line.gaveWay > held.gaveWay) {
-      dropTo(held, line.gaveWay);
-      sayGaveWay(line.chain, held);
-    }
+    const gen = line.gen ?? 0;
+    raise(line.chain, held, gen, line.gaveWay ?? 0, line.letGo ?? 0);
     for (const [high, low, place] of line.entries) {
       if (putInto(held, line.payments, high, low, place)) changedSinceSnapshot = true;
     }
-    if (line.stretch !== undefined && extend(held, line.stretch)) changedSinceSnapshot = true;
+    // A stretch from before the chain last began coming back stands for nothing.
+    if (line.stretch !== undefined && gen >= baseOf(held.gen) && extend(held, line.stretch)) {
+      changedSinceSnapshot = true;
+    }
   };
 
   /** Whether the signature closes the file for its name, epoch, lines and body. A version not held is simply wrong. */
@@ -718,7 +899,7 @@ export function createDigestLog({
   /** What moved, as a delta's lines: each chain's facts, then the stretches its walks read. */
   function* deltaLines(
     facts: ReadonlyMap<string, ChainState>,
-    stretches: ReadonlyMap<string, readonly Stretch[]>,
+    stretches: ReadonlyMap<string, readonly Walked[]>,
   ): Generator<string> {
     for (const name of new Set([...facts.keys(), ...stretches.keys()])) {
       const held = facts.get(name);
@@ -727,22 +908,24 @@ export function createDigestLog({
         held === undefined ? [] : [...held.tables[1].entries()],
       ] as const;
       // Every chain with a stretch has its pending entry too (record makes one), dated by its walk.
-      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? [], held?.gaveWay);
+      const mark = held?.marked === true ? held : undefined;
+      yield* linesOf(name, held?.bornAt ?? now().getTime(), entries, stretches.get(name) ?? [], mark);
     }
   }
 
   /**
-   * The whole, as a snapshot's lines: a chain that gave way any part of itself is written with no coverage, so the next
-   * start reads it again from its first event; one wholly given way, not at all.
+   * The whole, as a snapshot's lines, each chain with its mark: its growing objects given way keep their coverage (a
+   * fact missing only loses protection, never raises the alarm); one given way whole needs none, as it reads as before
+   * the digest. A coverage is written in the chain's generation, as it stands for the chain in it.
    */
   function* snapshotLines(): Generator<string> {
     for (const [name, held] of chains) {
-      // A chain given way is written as such: its payments given way keep their coverage (a fact missing only loses
-      // protection, never raises the alarm); one given way whole needs none, as it reads as before the digest.
       const coverage =
-        held.gaveWay < 2 && held.covered !== undefined ? [{ from: 0n, to: held.covered }] : ([] as Stretch[]);
+        held.gaveWay < 2 && held.covered !== undefined
+          ? [{ stretch: { from: 0n, to: held.covered }, gen: held.gen }]
+          : ([] as Walked[]);
       const tables = [[...held.tables[0].entries()], [...held.tables[1].entries()]] as const;
-      yield* linesOf(name, held.bornAt, tables, coverage, held.gaveWay);
+      yield* linesOf(name, held.bornAt, tables, coverage, held);
     }
   }
 
@@ -753,6 +936,19 @@ export function createDigestLog({
     // A snapshot only after a whole read: one made from less would stand for the whole at the next start.
     const due = lastSnapshotAt === undefined || at - lastSnapshotAt >= SNAPSHOT_EVERY_MS;
     if (state === 'read' && changedSinceSnapshot && due) await snapshotWritten(store, at);
+  };
+
+  /** A chain's facts and mark from a delta not written, back into what waits: the higher mark of the two, as a read takes it. */
+  const keptAgain = (kept: ChainState, held: ChainState): void => {
+    if (held.marked === true && (held.gen > kept.gen || (held.gen === kept.gen && held.gaveWay > kept.gaveWay))) {
+      kept.gen = held.gen;
+      kept.gaveWay = held.gaveWay;
+      kept.letGo = held.letGo;
+      kept.marked = true;
+    }
+    for (const index of [0, 1] as const) {
+      for (const [high, low, place] of held.tables[index].entries()) kept.tables[index].put(high, low, place);
+    }
   };
 
   /** What moved, written as a delta: whether it was. One that failed is kept for the next, its facts as true then. */
@@ -768,13 +964,7 @@ export function createDigestLog({
       writeFailingSince = undefined;
       return true;
     } catch (error) {
-      for (const [name, held] of facts) {
-        const kept = pendingChain(name, held.bornAt);
-        if (held.gaveWay > kept.gaveWay) kept.gaveWay = held.gaveWay;
-        for (const index of [0, 1] as const) {
-          for (const [high, low, place] of held.tables[index].entries()) kept.tables[index].put(high, low, place);
-        }
-      }
+      for (const [name, held] of facts) keptAgain(pendingChain(name, held.bornAt), held);
       for (const [name, walked] of stretches) {
         pendingStretches.set(name, [...walked, ...(pendingStretches.get(name) ?? [])]);
       }
@@ -805,22 +995,22 @@ export function createDigestLog({
     for (const [key, seq] of seen) {
       const [high, low] = fingerprintOf(key);
       const place = placeOf(seq);
-      const payment = isPayment(key);
-      if (!putInto(held, payment, high, low, place)) continue;
+      const growing = grows(key);
+      if (!putInto(held, growing, high, low, place)) continue;
       changedSinceSnapshot = true;
-      if (store !== undefined) pendingChain(name, at).tables[payment ? 1 : 0].put(high, low, place);
+      if (store !== undefined) pendingChain(name, at).tables[growing ? 1 : 0].put(high, low, place);
     }
   };
 
   /**
-   * A walk's stretch into the chain's coverage, and into what waits to be written: never for a chain given way any part
-   * of itself, which holds less than the stretch would claim.
+   * A walk's stretch into the chain's coverage, and into what waits to be written, in the chain's generation: never for
+   * a chain given way whole, which holds less than the stretch would claim.
    */
   const recordStretch = (name: string, held: ChainState, stretch: Stretch, at: number): void => {
     if (extend(held, stretch)) changedSinceSnapshot = true;
     if (store === undefined || held.gaveWay === 2) return;
     pendingChain(name, at);
-    pendingStretches.set(name, [...(pendingStretches.get(name) ?? []), stretch]);
+    pendingStretches.set(name, [...(pendingStretches.get(name) ?? []), { stretch, gen: held.gen }]);
   };
 
   /** The chain's facts waiting to be written, made where there are none. */
@@ -840,19 +1030,31 @@ export function createDigestLog({
       const held = chainOf(chainName(chain));
       if (held === undefined) return undefined;
       const [high, low] = fingerprintOf(subjectKey(type, id));
-      const place = held.tables[PAYMENT_SUBJECTS.has(type) ? 1 : 0].get(high, low);
+      const place = held.tables[GROWING_SUBJECTS.has(type) ? 1 : 0].get(high, low);
       return place === undefined ? undefined : BigInt(place);
     },
     covers(chain: Chain, seq: bigint): boolean {
       if (!speaks() || state !== 'read' || anchors?.holds(chain) === false) return false;
       if (seq === 0n) return true;
-      const held = chainOf(chainName(chain));
-      if (held?.gaveWay === 2) return true;
-      return held?.covered !== undefined && held.covered.seq >= seq;
+      const name = chainName(chain);
+      const held = chainOf(name);
+      if (held === undefined) return false;
+      settle(name, held, seq);
+      // Given way whole, or coming back until its walk reaches the anchor: today's checks, never a wait (AT13e).
+      if (held.gaveWay === 2 || held.gen % 2 === 1) return true;
+      return held.covered !== undefined && held.covered.seq >= seq;
     },
     coverage(chain: Chain): CheckedPoint | undefined {
       if (!speaks()) return undefined;
       return chainOf(chainName(chain))?.covered;
+    },
+    owed(chain: Chain, seq: bigint): boolean {
+      if (!speaks() || state !== 'read' || seq === 0n) return false;
+      const name = chainName(chain);
+      const held = chainOf(name);
+      if (held === undefined) return true;
+      settle(name, held, seq);
+      return held.gaveWay !== 2 && (held.covered === undefined || held.covered.seq < seq);
     },
     record(chain: Chain, seen: SignedSeen, began: Date, stretch?: Stretch): void {
       if (!speaks()) return;

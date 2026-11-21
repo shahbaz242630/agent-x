@@ -14,7 +14,7 @@
 // first, so none are lost.
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { OauthTables } from '@agentx/core/modules/oauth';
-import { type AuditTables, markHoldsWith } from '@agentx/core/modules/audit';
+import { type AuditTables, markHoldsWith, statesDigest } from '@agentx/core/modules/audit';
 import { type DirectoryTables, markOrgWorkNow } from '@agentx/core/modules/directory';
 import {
   createLoginFlows,
@@ -365,7 +365,15 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
   });
   return {
     flows: createLoginFlows({ clock: systemClock }),
-    sessions: createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions, keys, logger }),
+    // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end.
+    sessions: createSessions({
+      ids: uuidV7Ids,
+      clock: systemClock,
+      timeouts: config.sessions,
+      keys,
+      logger,
+      digest: statesDigest,
+    }),
     challenges: createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock, keys, logger }),
     // Where role grants write their notices (B5-1b), and the notices' sweep reads.
     outbox,

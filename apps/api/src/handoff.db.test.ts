@@ -2554,6 +2554,30 @@ describe('a row changed past the app before the hand-off (FX-TAMPER; gate H7)', 
       }
       expect(lines('audit.integrity_failed')).toEqual([]);
     });
+
+    it('AT13c: the platform chain anchored past what the digest covers: the payment waits, digest_pending; covered, it goes', async () => {
+      const { w, acting } = await ready();
+      const request = await ask(acting, w, { amount: ALLOWED() });
+      const { anchors, digest } = await digestedNow(w);
+      const platform = { kind: 'platform' } as const;
+      const head = { seq: 7n, hash: Buffer.alloc(32, 7), macKeyVersion: 1 };
+      anchors.keep(signAnchor(keys, platform, head, clock.now()));
+      checkStatesWith(digest);
+      try {
+        const waited = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest });
+        expect(waited).toMatchObject({ submitted: 0, status: 'APPROVED', hold: { outcome: 'clear' } });
+        expect(lines('handoff.waiting')).toEqual([
+          expect.objectContaining({ requestId: request.id, why: 'digest_pending' }),
+        ]);
+        // The whole walk of the platform chain recorded, as the anchor check's first run after a start does.
+        digest.record(platform, new Map(), clock.now(), { from: 0n, to: head });
+        const made = await handedOnce(w, request.id, { anchors, anchorFirst: noAnchorMade, digest });
+        expect(made).toMatchObject({ submitted: 1, status: 'HANDED_OFF', hold: { outcome: 'clear' } });
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(lines('audit.integrity_failed')).toEqual([]);
+    });
   });
 
   /** Events of the organisation's own, sealed by the app's keys and naming no state: the chain grows, nothing else. */
