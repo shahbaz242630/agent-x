@@ -698,7 +698,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(fresh).toMatchObject({ decision: 'ALLOW', status: 'APPROVED' });
   });
 
-  it('refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {
+  it('SEC-AV-08 refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {
     const { w, acting } = await ready();
     expect(await ask(acting, asking(w, { amount: money(1_000_000n, 'USD') }))).toEqual(
       refused(422, 'CURRENCY_NOT_ALLOWED'),

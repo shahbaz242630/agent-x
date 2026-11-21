@@ -117,14 +117,15 @@ export const flowSourceOf = (ip: string | undefined): FlowSource => ({
 const CAP_WARNING_EVERY_MS = 60_000;
 
 /**
- * A cap's warning, said at most once a minute with how many were refused since it was last said (`refused`): an
- * attack's flood is a line a minute, never one a request. Each call counts one refusal.
+ * A cap's warning, said at most once a minute with how many were refused since it was last said (`refused`, or the
+ * field `counted` names): an attack's flood is a line a minute, never one a request. Each call counts one.
  */
 export function capWarning(
   logger: Logger,
   clock: Clock,
   event: ProblemEvent,
   fields: Readonly<Record<string, unknown>> = {},
+  counted = 'refused',
 ): () => void {
   let warnedAt = Number.NEGATIVE_INFINITY;
   let refusedSince = 0;
@@ -132,7 +133,7 @@ export function capWarning(
     refusedSince += 1;
     const now = clock.now().getTime();
     if (now - warnedAt < CAP_WARNING_EVERY_MS) return;
-    logger.warn(event, { ...fields, refused: refusedSince });
+    logger.warn(event, { ...fields, [counted]: refusedSince });
     warnedAt = now;
     refusedSince = 0;
   };

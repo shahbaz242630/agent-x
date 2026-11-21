@@ -5,14 +5,20 @@
 // times are the Clock's (ADR-006 §3).
 //
 // S206 V8 (0106): anyone can start a sign-in with an anonymous GET, so a
-// sign-in's flow is started only while its network holds fewer than
-// MOST_OPEN_SIGN_INS_A_NETWORK under way. Every network's together are held
-// too, but never as a lockout (the review of S206 V8): once MOST_OPEN_SIGN_INS
+// network holds at most MOST_OPEN_SIGN_INS_A_NETWORK under way. S208: a
+// network at its share is never refused a fresh sign-in, as one caller filling
+// it would lock everyone else behind the same address (an office, a carrier's
+// NAT) out for ten minutes; instead the network's oldest unfinished sign-ins
+// give way to the new one, so a flood must go on without pause to push others
+// out, which the per-address rate limit slows (per /64 for IPv6, while the
+// share counts a /48). A flow that gave way is gone:
+// its callback finds no flow, a plain refusal to start again. Every network's
+// together are held too, but never as a lockout (the review of S206 V8): once MOST_OPEN_SIGN_INS
 // are under way, a network holding fewer than QUIET_NETWORK_SIGN_INS is still
 // let in, and only the busy ones are refused, so a crowd of networks filling
 // the table can't stop everyone else signing in, admins included; the table
 // then grows only with each new network's few. A step-up's flow is never
-// counted.
+// counted, and never gives way.
 import { createHash, randomBytes } from 'node:crypto';
 
 import { limitStatements } from '@agentx/platform/db';
@@ -38,12 +44,16 @@ export const QUIET_NETWORK_SIGN_INS = 3;
 /**
  * The most sign-ins under way at once from one network (S206 V8): an IPv4 address alone, or an IPv6 /48, as the OAuth
  * flows count theirs (AG8), so a few networks can't fill MOST_OPEN_SIGN_INS for everyone. An office signs in a few.
+ * Past it the network's oldest give way (S208), never the new one.
  */
 export const MOST_OPEN_SIGN_INS_A_NETWORK = 100;
 
-/** A sign-in's flow kept, with the ID for its cookie; or not: every network's at their cap and this one not quiet, or this one's at its own. */
+/**
+ * A sign-in's flow kept, with the ID for its cookie, and whether its network's oldest gave way to it (S208); or not:
+ * every network's at their cap and this one not quiet.
+ */
 type SignInFlowStarted =
-  { readonly outcome: 'started'; readonly flowId: string } | { readonly outcome: 'full' | 'network_full' };
+  { readonly outcome: 'started'; readonly flowId: string; readonly gaveWay: boolean } | { readonly outcome: 'full' };
 
 /** A flow as the callback takes it back. */
 interface TakenFlow {
@@ -62,10 +72,11 @@ export interface LoginFlows {
    */
   save(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, stepUpChallengeId?: string): Promise<string>;
   /**
-   * Keeps a sign-in's flow started from `network` (S206 V8), unless this network holds MOST_OPEN_SIGN_INS_A_NETWORK
-   * under way, or MOST_OPEN_SIGN_INS are and this network holds QUIET_NETWORK_SIGN_INS or more; each count stopping at
-   * its cap (0106's indexes). Best effort, with no lock, as the OAuth flows' caps: sign-ins started at once may pass a
-   * cap by a few rows. In the caller's transaction.
+   * Keeps a sign-in's flow started from `network` (S206 V8), unless MOST_OPEN_SIGN_INS are under way and this network
+   * holds QUIET_NETWORK_SIGN_INS or more; each count stopping at its cap (0106's indexes). A network holding
+   * MOST_OPEN_SIGN_INS_A_NETWORK has its oldest sign-ins under way deleted first, all but its newest one fewer than
+   * that, in one statement (S208). Best effort, with no lock, as the OAuth flows' caps: sign-ins started at once may
+   * pass a cap by a few rows, which the network's next start trims back. In the caller's transaction.
    */
   start(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, network: string): Promise<SignInFlowStarted>;
   /** Takes the flow this ID names, once and within its ten minutes; undefined for any other. */
@@ -104,6 +115,27 @@ export const signInsUnderWay = (db: Kysely<IdentityTables>, most: number, now: D
 async function signInsAt(db: Kysely<IdentityTables>, most: number, now: Date, network?: string): Promise<boolean> {
   const { flows } = await signInsUnderWay(db, most, now, network).executeTakeFirstOrThrow();
   return flows >= most;
+}
+
+/**
+ * Deletes the network's sign-ins not ended at `now` but its newest MOST_OPEN_SIGN_INS_A_NETWORK - 1, in one statement
+ * (S208): the oldest give way to the one about to start. A step-up's flow is never one of them.
+ */
+async function oldestGiveWay(db: Kysely<IdentityTables>, network: string, now: Date): Promise<void> {
+  await db
+    .deleteFrom('identity.login_flows')
+    .where('step_up_challenge_id', 'is', null)
+    .where('cookie_hash', 'in', (inner) =>
+      inner
+        .selectFrom('identity.login_flows')
+        .select('cookie_hash')
+        .where('network_key', '=', network)
+        .where('step_up_challenge_id', 'is', null)
+        .where('ends_at', '>', now)
+        .orderBy('ends_at', 'desc')
+        .offset(MOST_OPEN_SIGN_INS_A_NETWORK - 1),
+    )
+    .execute();
 }
 
 export function createLoginFlows({
@@ -153,11 +185,14 @@ export function createLoginFlows({
       const now = clock.now();
       // A quiet network gets in on its own count of a few: a flood across many networks never makes each start count
       // every network's. Only a busy one is counted further, against its own cap and then the backstop.
+      let gaveWay = false;
       if (await signInsAt(db, QUIET_NETWORK_SIGN_INS, now, network)) {
-        if (await signInsAt(db, MOST_OPEN_SIGN_INS_A_NETWORK, now, network)) return { outcome: 'network_full' };
-        if (await signInsAt(db, mostOpen, now)) return { outcome: 'full' };
+        gaveWay = await signInsAt(db, MOST_OPEN_SIGN_INS_A_NETWORK, now, network);
+        // At its share, the network's oldest give way: its count is no higher after, so the backstop needs no count.
+        if (gaveWay) await oldestGiveWay(db, network, now);
+        else if (await signInsAt(db, mostOpen, now)) return { outcome: 'full' };
       }
-      return { outcome: 'started', flowId: await kept(db, flow, returnTo, now, { network }) };
+      return { outcome: 'started', flowId: await kept(db, flow, returnTo, now, { network }), gaveWay };
     },
 
     async take(db, flowId) {
