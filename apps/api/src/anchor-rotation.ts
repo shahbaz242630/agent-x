@@ -60,9 +60,11 @@ import {
   type ChainReport,
   type ChainStep,
   type CheckedPoint,
+  type DigestLog,
   OLD_EDIT_DAYS,
   type PassRecord,
   type Progress,
+  type SignedSeen,
   signPass,
   signProgress,
 } from '@agentx/platform/audit-chain';
@@ -78,8 +80,13 @@ export interface RotatedChecks {
   count(orgId: string, after: bigint, upTo: bigint): Promise<ChainProblem | undefined>;
   /** The last `most` events up to `target` walked (walkLast). */
   walkLast(orgId: string, target: CheckedPoint, most: number): Promise<ChainStep>;
-  /** One step of a full pass (passStep). */
-  passStep(orgId: string, cursor: CheckedPoint, target: CheckedPoint, most: number): Promise<ChainStep>;
+  /** One step of a full pass (passStep): one that holds says which signed objects it read (AT13). */
+  passStep(
+    orgId: string,
+    cursor: CheckedPoint,
+    target: CheckedPoint,
+    most: number,
+  ): Promise<ChainStep & { readonly signed?: SignedSeen }>;
 }
 
 /** The rotation's reads from the audit trail's own, each in its own transaction under the organisation's wall. */
@@ -230,6 +237,11 @@ export interface RotationOptions {
   readonly bounded: <T>(work: () => Promise<T>, signal: AbortSignal) => Promise<T>;
   /** A chain found failing: the alarm and its hold. */
   readonly failed: (orgId: string, check: RotationCheck, problem: ChainProblem) => Promise<void>;
+  /**
+   * The signed states' digest (AT13): each pass step that holds records the signed objects it read, so a chain anchored
+   * before the digest, or rebased since, comes into it whole within a round. None, and nothing is recorded.
+   */
+  readonly digest?: Pick<DigestLog, 'record'> | undefined;
   /** A read that didn't come back, the run not stopped: the alarm where the database refused it, a warning otherwise. */
   readonly missed: (orgId: string, check: RotationCheck, error: unknown) => Promise<void>;
   /**
@@ -306,6 +318,7 @@ export function createRotation({
   failed,
   missed,
   shards,
+  digest,
 }: RotationOptions): Rotation {
   const started = clock.now().getTime();
   const slots = new Map<string, number>();
@@ -561,6 +574,7 @@ export function createRotation({
     const { cursor, target } = passing;
     if (cursor.seq < target.seq) {
       const most = smallest(PASS_STEP, budget, target.seq - cursor.seq);
+      const stepBegan = clock.now();
       const step = await read(orgId, 'pass', () => checks.passStep(orgId, cursor, target, Number(most)), signal);
       if (step === MISSED) return MISSED;
       retryFirst.delete(orgId);
@@ -572,6 +586,12 @@ export function createRotation({
         return FAILED;
       }
       const { seq, hash, macKeyVersion } = step;
+      // Every event the step read is sealed and in its place below the anchor: as true a fact as the walk's, and the
+      // stretch it read, dated when it began (AT13).
+      digest?.record(chainOf(orgId), step.signed ?? new Map(), stepBegan, {
+        from: cursor.seq,
+        to: { seq, hash, macKeyVersion },
+      });
       underWay.set(orgId, { ...passing, cursor: { seq, hash, macKeyVersion } });
       passed += seq - cursor.seq;
       if (seq < target.seq) return seq - cursor.seq;

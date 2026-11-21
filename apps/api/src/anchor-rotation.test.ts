@@ -5,6 +5,7 @@ import {
   type ChainProblem,
   type ChainStep,
   type CheckedPoint,
+  type DigestLog,
   createMemoryAnchorStore,
   type AnchorLog,
   type AnchorStore,
@@ -119,6 +120,8 @@ interface Rotating {
   readonly shards?: ReturnType<typeof lettingGo>;
   /** A real anchors' log, its anchors, passes and shards all, at this clock. */
   readonly over?: { readonly log: AnchorLog; readonly clock: FixedClock };
+  /** The signed states' digest the pass steps record into (AT13). */
+  readonly digest?: Pick<DigestLog, 'record'>;
 }
 
 /**
@@ -236,6 +239,7 @@ function rotating(more: Rotating = {}) {
       return Promise.resolve();
     },
     ...(shards === undefined ? {} : { shards }),
+    digest: more.digest,
   });
   const anchor = (orgId: string, seq: bigint, at = clock.now()): Anchor => {
     const signed = signAnchor(keys, chainOf(orgId), point(seq), at);
@@ -966,6 +970,30 @@ describe('a run of the rotation', () => {
     stopped.answer.count = () => Promise.reject(new Stopped('the check was stopped'));
     await stopped.run([orgId]);
     expect(stopped.missed).toEqual([]);
+  });
+});
+
+describe('the full pass and the signed states’ digest (AT13)', () => {
+  it('records what each step that holds read, and its stretch, dated when it began; nothing from one that fails', async () => {
+    const recorded: unknown[][] = [];
+    const made = rotating({ digest: { record: (...args) => recorded.push(args) } });
+    const orgId = orgInSlot(5);
+    made.anchor(orgId, 1728n);
+    const seen = new Map([['agent\n0199a0f0-0000-7000-8000-0000000000a1', 2n]]);
+    made.answer.pass = (_orgId, cursor, to) => {
+      // The step takes a while: its facts are dated when it began.
+      made.clock.advanceBy(5000);
+      return Promise.resolve({ ...stepTo(cursor.seq + 2n, to.seq), signed: seen });
+    };
+    await made.run([orgId]);
+    made.answer.pass = (_orgId, cursor, to) => Promise.resolve(stepTo(cursor.seq + 2n, to.seq));
+    await made.run([orgId]);
+    made.answer.pass = () => Promise.resolve({ ok: false, problem: { reason: 'mac', seq: 5n } });
+    await made.run([orgId]);
+    expect(recorded).toEqual([
+      [chainOf(orgId), seen, AT, { from: 0n, to: point(2n) }],
+      [chainOf(orgId), new Map(), new Date(AT.getTime() + 5000), { from: 2n, to: point(4n) }],
+    ]);
   });
 });
 

@@ -5,9 +5,12 @@
 // The `jobs` side's run only while this process holds the lease (background.ts).
 // Nothing here starts until start-jobs.ts starts it: the anchor check's order
 // (it must start before the hand-off's first run) is this list's.
+import { getHeapStatistics } from 'node:v8';
+
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { backgroundDownloadsDue, SEAL_GRACE_MS } from '@agentx/core/modules/activity';
 import {
+  checkStatesWith,
   createAuditTrail,
   holdHistoryDue,
   holdOrganisation,
@@ -32,7 +35,7 @@ import { checkSchemaOnSchedule, createFullServerWatch, createReleaseDriftWatch }
 import { sweepConnectionTokens } from '@agentx/core/modules/agents';
 import { sweepClientMetadata, sweepClientNetworks, sweepClients, sweepFlows } from '@agentx/core/modules/oauth';
 import { type Clock, HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
-import { CHAIN_START, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createDigestLog, createMemoryAnchorStore } from '@agentx/platform/audit-chain';
 import { JOB_ANSWER_WITHIN_MS, sweepExpiredKeys, timedRoundTrips } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 import { createOutboundFetch } from '@agentx/platform/outbound';
@@ -42,7 +45,7 @@ import { ACTIVITY_SEAL_CHECK_EVERY_MS, createActivitySealCheck } from './activit
 import { ACTIVITY_SEAL_EVERY_MS, createActivitySeal } from './activity-seal.ts';
 import { createAnchorCheck, reachWithin, scheduleAnchorCheck } from './anchor-check.ts';
 import { platformChainCheck, recordedSince, rotatedChecksOf } from './anchor-rotation.ts';
-import { anchorLogOf } from './anchor-store.ts';
+import { anchorsKeptOf } from './anchor-store.ts';
 import { lanesWithin } from './anchor-turns.ts';
 import { type Leadership, scheduleRuns } from './background.ts';
 import type { Booted, SharedParts } from './boot.ts';
@@ -101,6 +104,9 @@ import { createWaitingRejections, WAITING_REJECTIONS_EVERY_MS, waitingRejections
  * has 10 seconds at most, and it may go on past this, its result still compared.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
+
+/** What the signed states' digest may hold where no store keeps the anchors: a tenth of the heap, as with a store. */
+const MEMORY_DIGEST_BYTES = Math.floor(getHeapStatistics().heap_size_limit / 10);
 
 /**
  * The idempotency keys' retention sweep (B1e-3): at each start, then an hour
@@ -258,8 +264,25 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
   // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
   // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
-  const anchorLog = anchorLogOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs });
+  // A copy that loses the lease says nothing from its digest, and reads it again whole when it leads (AT13).
+  const leading = (): boolean => leadership.leading();
+  const kept = anchorsKeptOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs }, leading);
+  const anchorLog = kept?.log;
   const anchorStore = anchorLog ?? createMemoryAnchorStore();
+  // The signed states' digest (AT13): kept beside the anchors, in memory alone where they are. Every signed state this
+  // process reads is held to it from here (withSignedStates), Tx A's among them.
+  const digest =
+    kept?.digest ??
+    createDigestLog({
+      keys,
+      logger,
+      now: () => systemClock.now(),
+      epoch: config.audit.anchorEpoch,
+      alertAfterMs: staleAfterMs,
+      mostBytes: MEMORY_DIGEST_BYTES,
+      leading,
+    });
+  checkStatesWith(digest);
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
@@ -299,6 +322,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     mostOrganisations: config.audit.mostOrganisations,
     anchors: anchorStore,
     ...(anchorLog === undefined ? {} : { durable: anchorLog }),
+    digest,
     // Old events' counts, walks and full pass (4D2e E7): what finds an old event deleted or edited.
     rotation: rotatedChecksOf(trail, database),
     // Staging sleeps when unused: a woken process says nothing of a pass late for the time it slept.
@@ -336,6 +360,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
           anchorFirst: (orgId, signal) => anchors.anchorOrganisation(orgId, signal),
           // Tx A's shard held from the lane's first anchor through Tx A, where the log lets shards go (PL-65 PR3).
           ...(anchorLog === undefined ? {} : { pin: anchorLog.pin.bind(anchorLog) }),
+          digest,
         },
       }),
     );
