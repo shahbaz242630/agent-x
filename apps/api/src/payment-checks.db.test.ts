@@ -468,7 +468,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
         const key = { orgId: w.org, id: (await transactionOf(w, request.id)).id };
         await withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, async (tx, states) => {
           await lockedTransaction(tx, states, key, 'change');
-          await lockHoldingsOf(tx, request.id);
+          await lockHoldingsOf(tx, states, { orgId: w.org, requestId: request.id });
           const moved = await moveTransaction(
             tx,
             states,
@@ -478,7 +478,7 @@ describe('what the bank’s word can’t prove (ADR-007 §11; SEC-PTR-09)', () =
             { actor: { type: 'system', id: 'test' }, details: {} },
           );
           if (moved.outcome !== 'moved') throw new Error(`not moved: ${moved.outcome}`);
-          await settleHoldings(tx, { requestId: request.id, status: moved.to, at: clock.now() });
+          await settleHoldings(tx, states, { orgId: w.org, requestId: request.id, status: moved.to, at: clock.now() });
         });
         return w.rail.submitApprovedIntent(intent);
       },

@@ -40,7 +40,7 @@ import {
 import { INSTRUCTIONS } from '@agentx/core/modules/instructions';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import { MARK_FAILED_AFTER_MS, markFailed } from '@agentx/core/modules/outcomes';
+import { lockPayment, MARK_FAILED_AFTER_MS, markFailed } from '@agentx/core/modules/outcomes';
 import { changeHandoffPause, createPlatformChain } from '@agentx/core/modules/platform-controls';
 import type { FakeRail } from '@agentx/core/modules/providers';
 import { FAILURE_PROPOSALS, noteTransactionFacts, TRANSACTIONS } from '@agentx/core/modules/transactions';
@@ -894,6 +894,23 @@ describe('records that can’t be believed (their alarm raised): refused, nothin
       expect(await holdsOf(w)).toHaveLength(1);
     },
   );
+
+  it("refuses to lock a payment whose open proposal can't be believed, for any move of it (the bank check's, Tx B's)", async () => {
+    const { w, transaction, first } = await markable();
+    const proposal = proposalIdOf(await proposed(first, transaction.id));
+    const owner = await tamperAsOwner(database, FAILURE_PROPOSALS, w.org);
+    try {
+      await owner.stripSeals(proposal);
+    } finally {
+      await owner.end();
+    }
+
+    await expect(
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        lockPayment(tx, states, { orgId: w.org, id: transaction.id }),
+      ),
+    ).rejects.toThrow("proposal can't be believed");
+  });
 
   it.each([
     ['its proposal, signed', true],

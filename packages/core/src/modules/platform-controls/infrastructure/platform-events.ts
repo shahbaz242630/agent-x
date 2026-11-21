@@ -21,6 +21,8 @@ const INDEXED_FACTS: ReadonlyMap<string, RawBuilder<string | null>> = new Map([
   ['person', sql<string | null>`(details::jsonb ->> 'person')`],
   ['subject', sql<string | null>`(details::jsonb ->> 'subject')`],
   ['at', sql<string | null>`(details::jsonb ->> 'at')`],
+  // 0109's: a session's signed sign-out or rotation, by its record ID (sessions.ts).
+  ['record', sql<string | null>`(details::jsonb ->> 'record')`],
 ]);
 
 /** A fact of the details: one 0084 indexes as its index keys it, any other by a bound name. */
@@ -120,11 +122,16 @@ export async function latestPlatformTimeOf(
 }
 
 /** The read platformEventWith runs. */
-export const platformEventWithRead = (db: Reader, action: string, facts: Readonly<Record<string, string>>) =>
+export const platformEventWithRead = (
+  db: Reader,
+  action: string,
+  facts: Readonly<Record<string, string>>,
+  factsFrom?: PlatformEventsMatching['factsFrom'],
+) =>
   db
     .selectFrom('platform_controls.audit_events')
     .select('seq')
-    .where(sql<boolean>`${matches({ action, facts })}`)
+    .where(sql<boolean>`${matches({ action, facts, ...(factsFrom === undefined ? {} : { factsFrom }) })}`)
     .limit(1);
 
 /** Whether the chain holds an event of `action` whose details hold every one of `facts`, read outside a transaction or in one. */

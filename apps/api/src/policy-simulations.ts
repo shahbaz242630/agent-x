@@ -38,6 +38,7 @@ import {
   type MandateWeighed,
   type PoliciesWeighed,
   type SpendWeighed,
+  monthSpentWeighed,
   weigh,
 } from './spend-request-decisions.ts';
 import { createUseCaseWork } from './use-case-work.ts';
@@ -127,7 +128,7 @@ export function createPolicySimulations({
         const agentId = await agentOfMandate(tx, orgId, mandateId);
         if (agentId === undefined) throw new MandateRefused(404, 'NOT_FOUND');
         const agent = await agentIn(tx, states, { orgId, agentId });
-        const { input, mandate, month } = await weigh(tx, states, orgId, agent, asked, {
+        const { inputWith, totalOf, mandate, month } = await weigh(tx, states, orgId, agent, asked, {
           now,
           decides: false,
           monthOf: async (zoneIfNew) => {
@@ -137,6 +138,8 @@ export function createPolicySimulations({
           },
           rules: policiesFor(mandateId, whatIf),
         });
+        // The month's signed total, as a decision weighs it (GM-1a), read and changing nothing.
+        const input = inputWith(totalOf === null ? 0n : await monthSpentWeighed(tx, states, orgId, totalOf, 'share'));
         return {
           outcome: 'simulated' as const,
           made: decide(input),

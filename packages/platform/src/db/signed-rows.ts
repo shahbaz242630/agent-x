@@ -606,6 +606,25 @@ export async function writeSignedRow<Schema>(
   from: 'new' | { readonly version: number; readonly eventId: string | null },
   set: SignedFieldValues,
 ): Promise<WrittenRow> {
+  const writing = signedRowWriting(table, key, from, set);
+  const { rows } = await writing.statement.execute(tx);
+  return writing.written(rows);
+}
+
+/**
+ * writeSignedRow's update, not run, for a trip that carries other statements
+ * (GM-1a: a month's total written on its decision's own trip); `written`
+ * reads its rows as writeSignedRow gives them back.
+ */
+export function signedRowWriting(
+  table: SignedStateTable,
+  key: SignedRowKey,
+  from: 'new' | { readonly version: number; readonly eventId: string | null },
+  set: SignedFieldValues,
+): {
+  readonly statement: RawBuilder<Record<string, unknown>>;
+  readonly written: (rows: readonly Record<string, unknown>[]) => WrittenRow;
+} {
   checkTable(table);
   checkKey(key);
   const values = valuesToWrite(table, set, from === 'new');
@@ -621,20 +640,23 @@ export async function writeSignedRow<Schema>(
   );
   // The alias keeps the text after the table name from starting with SET,
   // which the lint rule against session-wide settings would take for one.
-  const { rows } = await sql<Record<string, unknown>>`
+  const statement = sql<Record<string, unknown>>`
     update ${sql.table(table.table)} as target set ${sql.join(assignments)}
     where target.org_id = ${key.orgId} and target.id = ${key.id} and ${state}
     returning ${sql.join([columnsOf(table), ...echoes])}
-  `.execute(tx);
-  const row = rowOf(table, rows);
-  const written = values.map(([{ column }], index): readonly [string, unknown] => [
-    column,
-    rows[0]?.[`w${index.toString()}`],
-  ]);
-  if (row.outcome === 'found' && !written.every(([, value]) => isText(value))) {
-    return { row: { outcome: 'unreadable' }, written: [] };
-  }
-  return Object.freeze({ row, written: Object.freeze(written as FieldText[]) });
+  `;
+  const written = (rows: readonly Record<string, unknown>[]): WrittenRow => {
+    const row = rowOf(table, rows);
+    const echoed = values.map(([{ column }], index): readonly [string, unknown] => [
+      column,
+      rows[0]?.[`w${index.toString()}`],
+    ]);
+    if (row.outcome === 'found' && !echoed.every(([, value]) => isText(value))) {
+      return { row: { outcome: 'unreadable' }, written: [] };
+    }
+    return Object.freeze({ row, written: Object.freeze(echoed as FieldText[]) });
+  };
+  return Object.freeze({ statement, written });
 }
 
 /**

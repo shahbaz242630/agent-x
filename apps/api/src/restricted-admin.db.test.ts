@@ -288,7 +288,7 @@ beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, logger);
   const services = { database: app, keys, ids, clock, logger };
-  const clients = createOauthClients({ database: app, clock, logger, metadata: undefined });
+  const clients = createOauthClients({ database: app, keys, clock, logger, metadata: undefined });
   authorizing = createOauthAuthorizing({ database: app, keys, clock, ids, logger, capabilities, clients });
   const registered = await authorizing.register(
     { redirect_uris: [REDIRECT], client_name: 'ChatGPT' },

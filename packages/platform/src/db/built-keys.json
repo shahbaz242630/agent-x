@@ -51,6 +51,8 @@
   {"table":"limit_reservations.agent_periods","name":"agent_periods_pkey","definition":"PRIMARY KEY (org_id, agent_id, month)"},
   {"table":"limit_reservations.agent_zones","name":"agent_zones_pkey","definition":"PRIMARY KEY (org_id, agent_id)"},
   {"table":"limit_reservations.agent_zones","name":"one_zone_by_id","definition":"UNIQUE (org_id, id)"},
+  {"table":"limit_reservations.month_totals","name":"month_totals_pkey","definition":"PRIMARY KEY (org_id, id)"},
+  {"table":"limit_reservations.month_totals","name":"one_total_a_month","definition":"UNIQUE (org_id, agent_id, month, currency)"},
   {"table":"limit_reservations.reservations","name":"one_reservation_a_request","definition":"UNIQUE (org_id, request_id)"},
   {"table":"limit_reservations.reservations","name":"reservations_pkey","definition":"PRIMARY KEY (org_id, id)"},
   {"table":"mandates.allowed_currencies","name":"allowed_currencies_pkey","definition":"PRIMARY KEY (code)"},
