@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createKeyProvider, type KeyMaterial } from '../keys/key-provider.ts';
 import { byPurpose, PURPOSES } from '../keys/purposes.ts';
 import type { Chain } from './chain.ts';
-import { createDigestLog, type DigestAnchors, headHeldTo } from './digest-log.ts';
+import { createDigestLog, type DigestAnchors, headHeldTo, heldThrough, raiseWritten } from './digest-log.ts';
 import { bodyHash } from './shards.ts';
 import { subjectKey } from './state-digest.ts';
 
@@ -1428,6 +1428,177 @@ describe('the highest head each chain was read at (AT13f)', () => {
     expect(log.heads(THIRD)?.seen).toEqual(headAt(4n));
     expect(log.bytesHeld()).toBe(400);
     expect(log.memoryHeld().bytes).toBe(400);
+  });
+});
+
+describe('a chain taken as it stands after a signed answer to its cut (AT13h, S208: accept)', () => {
+  it('nothing taken at first; once taken, held to where it was taken, the head seen never lowered', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    const before = log.bytesHeld();
+    log.heads(CHAIN)?.accept(headAt(6n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(6n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    expect(log.bytesHeld()).toBe(before + 200);
+    // Taken again (the answer cut off and answered again): lower still, counted once.
+    log.heads(CHAIN)?.accept(headAt(5n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(5n));
+    expect(log.bytesHeld()).toBe(before + 200);
+    // Each chain its own.
+    expect(log.heads(OTHER)?.accepted).toBeUndefined();
+  });
+
+  it('its own reads raise it alone; a write or a read held to the head seen raises both', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    log.heads(CHAIN)?.accept(headAt(6n));
+    // A write this copy committed (or a read held to the head seen), below the head seen: raises where it was taken.
+    log.heads(CHAIN)?.saw(headAt(7n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(8n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(7n, 77));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(8n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(12n));
+    // Past the head seen, its own reads still leave that alone: the other reads stay held where they were.
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(12n));
+  });
+
+  it('only over the head seen when the watch was asked, while it still is; none where the watch gave none', async () => {
+    const { log } = digestOn();
+    await log.read();
+    // A watch that gave no head seen takes nothing.
+    log.heads(CHAIN)?.accept(headAt(3n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const asked = log.heads(CHAIN);
+    log.heads(CHAIN)?.saw(headAt(10n));
+    // The head seen moved on since the watch was asked: it is not the head the answer was to.
+    asked?.accept(headAt(6n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    // A place before the first is no head.
+    log.heads(CHAIN)?.accept(headAt(0n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+  });
+
+  it('never taken over a head seen that has moved on, though the head seen falls back to it after (a head let go)', async () => {
+    // A tenth of 4,000 bytes: two heads of 200.
+    const { log } = digestOn(undefined, { mostBytes: 4000 });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 3n]), START, stretch(0n, 6n));
+    const asked = log.heads(CHAIN);
+    expect(asked?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    log.heads(CHAIN)?.saw(headAt(10n));
+    asked?.accept(headAt(3n));
+    // The head seen here let go for others: held to where the walks cover it again, the head the watch gave.
+    log.heads(OTHER)?.saw(headAt(2n));
+    log.heads(THIRD)?.saw(headAt(4n));
+    expect(log.heads(CHAIN)?.seen).toEqual({ seq: 6n, hash: point(6n).hash });
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+  });
+
+  it('never raised by a watch asked before the read that found the cut: it may have read the chain before the cut', async () => {
+    const time = clock();
+    const { log } = digestOn(undefined, { time });
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const stale = log.heads(CHAIN);
+    time.held.at += MINUTE;
+    log.heads(CHAIN)?.accept(headAt(6n));
+    stale?.saw(headAt(9n, 3));
+    stale?.accepted?.saw(headAt(9n, 3));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(6n));
+    log.heads(CHAIN)?.saw(headAt(7n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+  });
+
+  it('a write raises only the heads its chain ran through as it wrote (heldThrough, raiseWritten)', async () => {
+    expect(heldThrough(undefined, null)).toBe(true);
+    expect(heldThrough(headAt(4n), Buffer.from(headAt(4n).hash))).toBe(true);
+    expect(heldThrough(headAt(4n), headAt(4n, 9).hash)).toBe(false);
+    expect(heldThrough(headAt(4n), null)).toBe(false);
+    const { log } = digestOn();
+    await log.read();
+    const watch = () => {
+      const asked = log.heads(CHAIN);
+      if (asked === undefined) throw new Error('no watch');
+      return asked;
+    };
+    log.heads(CHAIN)?.saw(headAt(9n));
+    // Ran through neither, or only the head seen with a head taken it didn't run through: nothing.
+    raiseWritten(watch(), headAt(12n), { seen: false, accepted: true });
+    raiseWritten(watch(), headAt(12n), { seen: true, accepted: false });
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    log.heads(CHAIN)?.accept(headAt(6n));
+    // Through the head taken alone (a write after the answer, on the chain as cut): that alone.
+    raiseWritten(watch(), headAt(7n), { seen: false, accepted: true });
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    raiseWritten(watch(), headAt(8n), { seen: false, accepted: false });
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+    // Through both: both.
+    raiseWritten(watch(), headAt(12n), { seen: true, accepted: true });
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(12n));
+  });
+
+  it('set aside once the head seen moves past the head it was taken over, its memory given back', async () => {
+    const { log } = digestOn();
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const before = log.bytesHeld();
+    log.heads(CHAIN)?.accept(headAt(6n));
+    log.heads(CHAIN)?.saw(headAt(11n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(11n));
+    expect(log.bytesHeld()).toBe(before);
+  });
+
+  it('a rebase after it was taken sets it aside; one asked before a rebase takes nothing and raises nothing', async () => {
+    const rebases = new Map<string, Date>();
+    const time = clock();
+    const { log } = digestOn(undefined, { time, anchors: anchorsWith(rebases) });
+    await log.read();
+    log.heads(CHAIN)?.saw(headAt(9n));
+    log.heads(CHAIN)?.accept(headAt(6n));
+    const askedBefore = log.heads(CHAIN);
+    time.held.at += MINUTE;
+    rebases.set(ORG, new Date(START.getTime() + 30_000));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.bytesHeld()).toBe(0);
+    askedBefore?.accept(headAt(5n));
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    // Raised by a read asked before the rebase: not kept, though taken again after it.
+    log.heads(CHAIN)?.saw(headAt(4n));
+    log.heads(CHAIN)?.accept(headAt(3n));
+    askedBefore?.saw(headAt(8n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(3n));
+  });
+
+  it('forgotten with the heads by a copy that stops leading, and taken nowhere while it doesn’t', () => {
+    const leads = { now: true };
+    const log = createDigestLog({
+      keys,
+      logger: testLogger(),
+      now: () => START,
+      epoch: 1,
+      leading: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    log.heads(CHAIN)?.saw(headAt(9n));
+    const asked = log.heads(CHAIN);
+    asked?.accept(headAt(6n));
+    expect(log.bytesHeld()).toBe(400);
+    leads.now = false;
+    expect(log.heads(CHAIN)).toBeUndefined();
+    asked?.accept(headAt(5n));
+    leads.now = true;
+    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
+    expect(log.bytesHeld()).toBe(0);
   });
 });
 

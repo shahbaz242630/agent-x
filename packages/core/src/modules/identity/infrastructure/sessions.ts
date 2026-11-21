@@ -46,6 +46,16 @@
 // the reads that let a session in (`use`, `holder`, `rotate`): a sign-out still
 // ends one, and a sign-in is held by its own check of the chain (signed-ends.ts).
 //
+// A cut found is answered, not left standing (AT13h, S208's partner decision): given
+// the `database`, the read that finds it ends every session there is, once, signed
+// (sessions-all-ended.ts), and the chain is taken as it then stands for these reads
+// (the digest's `accepted`, held to and raised as the head seen is), so people sign
+// in again and carry on with no operator and no restart. The read itself is refused,
+// as is every read inside the minute after an answer. Each read finds that record by
+// its index too, as a person's all ended: a session signed in before it is no session,
+// refused quietly (a request reading its own row as the rows went keeps it, and a
+// sign-in under way as they went opens one: neither is tampering).
+//
 // Its last use is the owner's to move too, and moved on, an idle session lived
 // again for a cookie stolen while it was live. So the last use has a MAC of
 // its own, with the cookie's hash (0111): `use` writes it with the new last use,
@@ -87,10 +97,13 @@ import {
 } from '../../platform-controls/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import { lastUseMessage, macHolds, macOf, type RowMacs, rowForged, sessionMessage } from './row-macs.ts';
+import { createAllSessionsEnding } from './sessions-all-ended.ts';
 import {
+  EVERYONE,
   type RetiredSession,
   SESSION_ENDED,
   SESSION_ROTATED,
+  SESSIONS_ALL_ENDED,
   SESSIONS_ENDED,
   signedEndKey,
   type SignedEnds,
@@ -252,6 +265,14 @@ export {
 /** How far before a sign-in the platform chain is checked for ends: the app's clock and the database's may differ. */
 const CLOCKS_DIFFER_MS = 2 * 60 * 1000;
 
+/**
+ * How a person's or everyone's signed end read by its index decides (AT13h, S208): only at or below the platform
+ * chain's head, and only with a time no later than the database's now and those two minutes. A row the owner planted
+ * past the head (in no walk, no stretch's check) or with a time to come would otherwise refuse every sign-in and
+ * session for good with no alarm; one planted inside the chain breaks the chain's check, which raises it.
+ */
+const SIGNED_END = { belowHead: true, notAhead: 'at' } as const;
+
 /** What a sign-in finds of the person's ends (sessionsEndedAt). */
 export type SessionsEnded =
   /** The latest end believed, or null for none. */
@@ -280,7 +301,8 @@ const later = (one: Date | null, other: Date | null): Date | null =>
  *   and put back, is seen. It counts too where the index missed it: the index is read on the first statement's
  *   snapshot, before any wait for the row's lock, and a record put back while the sign-in waited is missing there.
  * The column behind either signed end raises the alarm (check `user`), and the signed end is believed; a chain that
- * doesn't hold raises it too (check `platform_chain`), and nothing is believed.
+ * doesn't hold raises it too (check `platform_chain`), and nothing is believed. Every session's end at once (AT13h,
+ * sessions-all-ended.ts) is everyone's end too, read the same two ways, and no column is held to it.
  */
 export async function sessionsEndedAt(
   tx: Kysely<IdentityTables>,
@@ -291,10 +313,18 @@ export async function sessionsEndedAt(
   const person = userId.toLowerCase();
   // The platform chain's tables are reached in the same transaction: they belong to no organisation.
   const platform = tx as unknown as PlatformTransaction;
-  const signed = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: { person } }]);
+  const signed = latestPlatformTimeOfRead(platform, 'at', [
+    { action: SESSIONS_ENDED, facts: { person }, ...SIGNED_END },
+  ]);
+  // Every session's end at once (AT13h): everyone's, never the column's to agree with.
+  const everyone = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END }]);
   const row = await tx
     .selectFrom('identity.users')
-    .select(['sessions_ended_at', sql<Date | null>`(${signed})`.as('signed_end')])
+    .select([
+      'sessions_ended_at',
+      sql<Date | null>`(${signed})`.as('signed_end'),
+      sql<Date | null>`(${everyone})`.as('everyone_end'),
+    ])
     .where('id', '=', userId)
     .forShare()
     .executeTakeFirstOrThrow();
@@ -315,7 +345,8 @@ export async function sessionsEndedAt(
       userId,
     });
   }
-  return { kind: 'read', endedAt: later(column, signedEnd) };
+  const everyoneEnd = later(row.everyone_end, checked.ends.get(EVERYONE)?.at ?? null);
+  return { kind: 'read', endedAt: later(later(column, signedEnd), everyoneEnd) };
 }
 
 /** The columns a session's MAC is made from, with the MAC itself. */
@@ -372,14 +403,23 @@ const signedEndsOfRow = (db: Kysely<IdentityTables>, seenAt: bigint | undefined)
     sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ROTATED, {}, { record, person, retired })})`.as(
       'rotated_away',
     ),
-    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person } }])})`.as(
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person }, ...SIGNED_END }])})`.as(
       'all_ended_at',
     ),
     // Its place too, for the digest (AT13c), which keeps places: by the same index, the person's few such ends.
     sql<
       bigint | null
-    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person } })})`.as(
+    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person }, ...SIGNED_END })})`.as(
       'all_ended_seq',
+    ),
+    // Every session's end at once (AT13h), its time and place: by 0057's by-action index, a few such ends ever.
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END }])})`.as(
+      'everyone_ended_at',
+    ),
+    sql<
+      bigint | null
+    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END })})`.as(
+      'everyone_ended_seq',
     ),
     // The platform chain's head, held to the highest seen (AT13h, the header).
     ...platformHeadRead(seenAt),
@@ -392,10 +432,12 @@ interface SignedEndsOfRow {
   readonly rotated_away: boolean;
   readonly all_ended_at: Date | null;
   readonly all_ended_seq: bigint | null;
+  readonly everyone_ended_at: Date | null;
+  readonly everyone_ended_seq: bigint | null;
 }
 
 /** The ends the read is held to the digest by: its person, record and MAC, and what it found of each. */
-type EndsRead = Pick<SignedEndsOfRow, 'signed_out' | 'rotated_away' | 'all_ended_seq'> & {
+type EndsRead = Pick<SignedEndsOfRow, 'signed_out' | 'rotated_away' | 'all_ended_seq' | 'everyone_ended_seq'> & {
   readonly id: string;
   readonly user_id: string;
   readonly mac: Buffer;
@@ -416,7 +458,11 @@ function endUnseen(digest: Pick<StateDigest, 'latest'> | undefined, row: EndsRea
   const retired = signedEndKey.rotated(person, record, row.mac.toString('hex'));
   if (!row.rotated_away && digest.latest(PLATFORM, SESSION_ROTATED, retired) !== undefined) return 'rotated';
   const allEnded = digest.latest(PLATFORM, SESSIONS_ENDED, person.toLowerCase());
-  return allEnded !== undefined && (row.all_ended_seq === null || row.all_ended_seq < allEnded) ? 'ended' : undefined;
+  if (allEnded !== undefined && (row.all_ended_seq === null || row.all_ended_seq < allEnded)) return 'ended';
+  const everyone = digest.latest(PLATFORM, SESSIONS_ALL_ENDED, EVERYONE);
+  return everyone !== undefined && (row.everyone_ended_seq === null || row.everyone_ended_seq < everyone)
+    ? 'ended'
+    : undefined;
 }
 
 /** The row's signed ends read again on their own, from the facts the row named: one statement. */
@@ -430,8 +476,15 @@ async function endsNow(db: Kysely<IdentityTables>, row: EndsRead): Promise<EndsR
       sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ROTATED, { record, person, retired })})`.as(
         'rotated_away',
       ),
-      sql<bigint | null>`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: { person } })})`.as(
+      sql<
+        bigint | null
+      >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: { person }, ...SIGNED_END })})`.as(
         'all_ended_seq',
+      ),
+      sql<
+        bigint | null
+      >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END })})`.as(
+        'everyone_ended_seq',
       ),
     ])
     .executeTakeFirstOrThrow();
@@ -463,6 +516,13 @@ const SESSION_READ = [...SESSION_SEALED, 'last_seen_at', 'last_use_mac', 'last_u
 const endedBySignature = (row: SignedEndsOfRow & { readonly auth_time: Date }): boolean =>
   row.signed_out || (row.all_ended_at !== null && row.auth_time < row.all_ended_at);
 
+/**
+ * Whether every session's end at once (AT13h) names the session: its sign-in before it, or at the same moment (a sign-in
+ * as the rows went may be one of them: only signed in again, never let through).
+ */
+const endedForEveryone = (row: SignedEndsOfRow & { readonly auth_time: Date }): boolean =>
+  row.everyone_ended_at !== null && row.auth_time <= row.everyone_ended_at;
+
 export function createSessions({
   ids,
   clock,
@@ -470,10 +530,16 @@ export function createSessions({
   keys,
   logger,
   digest,
+  database,
 }: RowMacs & {
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly timeouts: SessionTimeouts;
+  /**
+   * Where a cut platform chain is answered, in a transaction of its own (AT13h, the header: every session ended,
+   * signed): none, and a cut chain refuses every session read as before.
+   */
+  readonly database?: Kysely<IdentityTables>;
   /**
    * The signed states' digest this process keeps, asked at each read (AT13c, the header): given at boot, kept by the
    * jobs once they lead; none, or none yet, and the reads are as before it.
@@ -515,6 +581,8 @@ export function createSessions({
       rowForged(logger, 'session', row, 'ended');
       return false;
     }
+    // Quietly: a row a request held as every session ended, or one a sign-in under way then opened, is no tampering.
+    if (endedForEveryone(row)) return false;
     if (!row.rotated_away) return true;
     rowForged(logger, 'session', row, 'rotated');
     return false;
@@ -523,21 +591,32 @@ export function createSessions({
   /** What a read holds the platform chain's head to (AT13h), asked before its statement: none without a digest. */
   const platformWatch = () => digest?.()?.heads?.(PLATFORM);
 
-  /** Whether the platform chain was cut back below the head the read was held to (AT13h): the alarm, and no session. */
-  const platformCut = (
+  /** The head a read is held to: where a cut answered took the chain as it stands, else the head seen (the header). */
+  const heldTo = (watch: ReturnType<typeof platformWatch>) => watch?.accepted ?? watch;
+
+  const ending =
+    database === undefined ? undefined : createAllSessionsEnding({ db: database, keys, ids, clock, logger });
+
+  /**
+   * Whether the platform chain was cut back below the head the read was held to (AT13h): the alarm, the cut answered
+   * (every session ended, signed, at most once a minute), and no session.
+   */
+  const platformCut = async (
     db: Kysely<IdentityTables>,
     watch: ReturnType<typeof platformWatch>,
     row: PlatformHeadOfRow & { readonly id: string; readonly user_id: string },
-  ): boolean => {
-    const cut = platformCutBack(keys, db, watch, row);
-    if (cut === undefined) return false;
+  ): Promise<boolean> => {
+    if (watch === undefined) return false;
+    const held = platformCutBack(keys, db, heldTo(watch), row);
+    if (held === undefined) return false;
     logger.error('audit.integrity_failed', {
       check: 'platform_chain',
       reason: 'cut_back',
-      seq: cut.toString(),
+      seq: held.seq.toString(),
       rowId: row.id,
       userId: row.user_id,
     });
+    await ending?.answer({ watch, held, found: row.platform_head_seq });
     return true;
   };
 
@@ -633,10 +712,15 @@ export function createSessions({
           'was.last_seen_at as was_seen_at',
           'was.last_use_mac as was_mac',
           'was.last_use_mac_key_version as was_mac_key_version',
-          ...signedEndsOfRow(db, watch?.seen?.seq),
+          ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq),
         ])
         .executeTakeFirst();
-      if (row === undefined || platformCut(db, watch, row) || !standing(row) || !(await heldToDigest(db, row))) {
+      if (
+        row === undefined ||
+        (await platformCut(db, watch, row)) ||
+        !standing(row) ||
+        !(await heldToDigest(db, row))
+      ) {
         return undefined;
       }
       if (!lastUseHolds(row, { at: row.was_seen_at, mac: row.was_mac, version: row.was_mac_key_version })) {
@@ -665,12 +749,12 @@ export function createSessions({
       const watch = platformWatch();
       const row = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db, watch?.seen?.seq)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq)])
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
-      if (row === undefined || platformCut(db, watch, row)) return undefined;
+      if (row === undefined || (await platformCut(db, watch, row))) return undefined;
       return (await believed(db, row, lastUseOf(row))) ? row.user_id : undefined;
     },
 
@@ -680,13 +764,13 @@ export function createSessions({
       const watch = platformWatch();
       const live = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db, watch?.seen?.seq)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq)])
         .where('id', '=', sessionId)
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
         .executeTakeFirst();
       // Only a row whose MACs held, and never ended, gets new ones: rotating a forged or put-back row would make it genuine.
-      if (live === undefined || platformCut(db, watch, live) || !(await believed(db, live, lastUseOf(live)))) {
+      if (live === undefined || (await platformCut(db, watch, live)) || !(await believed(db, live, lastUseOf(live)))) {
         return undefined;
       }
       const cookie = newCookie();

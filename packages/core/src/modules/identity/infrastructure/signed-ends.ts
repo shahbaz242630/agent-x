@@ -19,12 +19,24 @@
 // a chain that doesn't hold does. Sign-ins arriving while a check runs share the
 // next one, which starts once it ends (so after each of them read the person's
 // row), from the earliest moment any of them asked for.
+//
+// Every session's end at once (`identity.sessions_all_ended`, AT13h, S208): the console's answer to a platform chain
+// cut back (sessions-all-ended.ts), every person's sessions ended at its `at`. Kept as everyone's end here. A head
+// wound back behind where this process got to breaks the check, as before, unless such an end was recorded after the
+// event it got to (the database's clock, under the head's lock, for both): then the chain was cut back before it, the
+// end answers it, and the check goes on afresh from the sign-in's moment, the ends kept carried over. An end this
+// process never checked, cut off by a later cut, is no better known afresh than by a process just started (its bound);
+// the session such a sign-in opens is still held by the sessions' reads (sessions.ts). Only a wound-back chain is
+// answered so: an event edited or missing breaks the check, and raises the alarm, as before.
 import type { KeyProvider } from '@agentx/platform/keys';
+import { sql } from 'kysely';
 
 import {
   checkPlatformStretch,
   type CheckedPlatformEvent,
   type PlatformEvent,
+  platformEventSealed,
+  platformEventsSigned,
   type PlatformPoint,
   type PlatformTransaction,
   type StretchCheck,
@@ -92,6 +104,36 @@ export const sessionRotatedEvent = (retired: RetiredSession, rotatedAt: Date) =>
   }) satisfies PlatformEvent;
 
 /**
+ * The platform chain's signed record of every session ended at once (AT13h, S208's partner decision): a process found
+ * the chain cut back below the head it held the console's sessions to, so any of them could be one whose signed end the
+ * cut took. Every session whose sign-in was before its `at` is no session, and everyone signs in again.
+ */
+export const SESSIONS_ALL_ENDED = 'identity.sessions_all_ended';
+
+/** Where the end of everyone's sessions is kept beside each person's: no person's ID is this. */
+export const EVERYONE = 'everyone';
+
+/** A cut the end answers: the head the reads were held to, and the place of the head found below or beside it. */
+export interface CutAnswered {
+  readonly held: { readonly seq: bigint; readonly hash: Buffer };
+  readonly found: bigint | null;
+}
+
+/** The record of every session's end, for the transaction that deletes them, last of its locks. */
+export const sessionsAllEndedEvent = ({ held, found }: CutAnswered, endedAt: Date) =>
+  ({
+    actor: { type: 'system', id: 'api' },
+    action: SESSIONS_ALL_ENDED,
+    details: {
+      reason: 'platform_chain_cut',
+      at: endedAt.toISOString(),
+      seen: held.seq.toString(),
+      seenHash: held.hash.toString('hex'),
+      found: found === null ? 'none' : found.toString(),
+    },
+  }) satisfies PlatformEvent;
+
+/**
  * Each signed end's object in the signed states' digest (AT13c, digest-log.ts): the facts a session's read matches it
  * by, as its ID. A sign-out by its person and record; a rotation by those and the MAC it retired; a person's sessions
  * all ended by the person, its newest place the newest such end.
@@ -114,6 +156,7 @@ const textIn = (details: Readonly<Record<string, unknown>>, name: string): strin
  * Details that can't be read give none: the chain's own check is what judges the event.
  */
 export function signedEndSubjectOf(action: string, detailsJson: string): readonly [string, string] | undefined {
+  if (action === SESSIONS_ALL_ENDED) return [action, EVERYONE];
   if (action !== SESSION_ENDED && action !== SESSION_ROTATED && action !== SESSIONS_ENDED) return undefined;
   let details: unknown;
   try {
@@ -161,17 +204,37 @@ interface Reached {
   readonly ends: Map<string, KeptEnd>;
 }
 
-/** Each event's end, kept as the person's latest. */
+/** Each event's end, kept as the person's latest; every session's end at once, as everyone's (EVERYONE). */
 function keep(ends: Map<string, KeptEnd>, events: readonly CheckedPlatformEvent[]): void {
   for (const { action, details, recordedAt } of events) {
-    if (action !== SESSIONS_ENDED) continue;
-    const { person, at } = JSON.parse(details) as { person?: unknown; at?: unknown };
-    const when = typeof at === 'string' ? new Date(at) : undefined;
+    if (action !== SESSIONS_ENDED && action !== SESSIONS_ALL_ENDED) continue;
+    const facts = JSON.parse(details) as { person?: unknown; at?: unknown };
+    const person = action === SESSIONS_ALL_ENDED ? EVERYONE : facts.person;
+    const when = typeof facts.at === 'string' ? new Date(facts.at) : undefined;
     if (typeof person !== 'string' || when === undefined || Number.isNaN(when.getTime())) continue;
     const kept = ends.get(person);
     if (kept === undefined || kept.at < when) ends.set(person, { at: when, recordedAt });
   }
 }
+
+/**
+ * Whether every session was ended at once (AT13h) after the event at `point` was recorded, sealed and at or below the
+ * head: the database's clock for both, taken under the head's lock, so such an end found with `point` gone from the
+ * chain was recorded on the chain as cut. One statement.
+ */
+async function allEndedAfter(tx: PlatformTransaction, keys: KeyProvider, point: PlatformPoint): Promise<boolean> {
+  const row = await platformEventsSigned(tx)
+    .where('e.action', '=', SESSIONS_ALL_ENDED)
+    .where('e.recorded_at', '>', point.recordedAt)
+    .where('e.seq', '<=', sql<bigint>`(select h.seq from platform_controls.audit_head h limit 1)`)
+    .orderBy('e.seq', 'desc')
+    .limit(1)
+    .executeTakeFirst();
+  return row !== undefined && platformEventSealed(keys, row);
+}
+
+/** The problems a stretch's check gives for a chain wound back behind a place checked before (checkPlatformStretch). */
+const WOUND_BACK: ReadonlySet<string> = new Set(['head', 'anchor']);
 
 export function createSignedEnds(keys: KeyProvider): SignedEnds {
   let reached: Reached | undefined;
@@ -180,12 +243,12 @@ export function createSignedEnds(keys: KeyProvider): SignedEnds {
   let waiting: Promise<EndsChecked> | undefined;
   let waitingSince = new Date(0);
 
-  const checkFrom = async (tx: PlatformTransaction, since: Date): Promise<EndsChecked> => {
-    const was = reached;
+  const walkFrom = async (tx: PlatformTransaction, since: Date, was: Reached | undefined): Promise<EndsChecked> => {
     // From where it got to, if that covers `since` and is no older than it; otherwise afresh from `since`.
     const on = was?.point !== undefined && was.from <= since && was.point.recordedAt >= since ? was : undefined;
     // Afresh, nothing kept is needed: the walk reads every end since `since`, and must run through where it got to.
-    const ends = on?.ends ?? new Map<string, KeptEnd>();
+    // Past a cut answered (AT13h, the header), the ends kept are carried over: `was` with no place.
+    const ends = on?.ends ?? new Map<string, KeptEnd>(was?.point === undefined ? was?.ends : undefined);
     let start: StretchStart = { since };
     if (on?.point !== undefined) start = { after: on.point };
     else if (was?.point !== undefined) start = { since, through: was.point };
@@ -203,6 +266,17 @@ export function createSignedEnds(keys: KeyProvider): SignedEnds {
     for (const [person, end] of ends) if (end.recordedAt < keptFrom) ends.delete(person);
     reached = { point, from: keptFrom, ends };
     return { kind: 'checked', ends, read };
+  };
+
+  const checkFrom = async (tx: PlatformTransaction, since: Date): Promise<EndsChecked> => {
+    const was = reached;
+    const found = await walkFrom(tx, since, was);
+    // Only the chain wound back behind where it got to (a head below it, or another event there) is answered so: an event
+    // edited or missing breaks the check as before.
+    if (found.kind === 'checked' || was?.point === undefined || !WOUND_BACK.has(found.problem.reason)) return found;
+    if (!(await allEndedAfter(tx, keys, was.point))) return found;
+    // AT13h, the header: the chain cut back behind where it got to, answered by every session's end: afresh from `since`.
+    return walkFrom(tx, since, { point: undefined, from: since, ends: was.ends });
   };
 
   const begin = (tx: PlatformTransaction, since: Date): Promise<EndsChecked> => {

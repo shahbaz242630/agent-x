@@ -171,7 +171,7 @@ async function readPause(
     row: read,
     known,
     // With no pause or resume ever, nothing was there to cut off but the row as born, which is paused.
-    cut: newest === undefined ? undefined : platformCutBack(keys, tx, watch, newest),
+    cut: newest === undefined ? undefined : platformCutBack(keys, tx, watch, newest)?.seq,
     newest:
       newest === undefined
         ? undefined

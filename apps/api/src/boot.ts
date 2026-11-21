@@ -365,7 +365,8 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
   });
   return {
     flows: createLoginFlows({ clock: systemClock }),
-    // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end.
+    // Held to the signed states' digest once the jobs keep it (AT13c): a session put back after its signed end. A cut
+    // platform chain answered in the database by every session ended, signed (AT13h).
     sessions: createSessions({
       ids: uuidV7Ids,
       clock: systemClock,
@@ -373,6 +374,7 @@ export function sharedParts({ config, keys, logger, database }: Booted, leadersh
       keys,
       logger,
       digest: statesDigest,
+      database,
     }),
     challenges: createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock, keys, logger }),
     // Where role grants write their notices (B5-1b), and the notices' sweep reads.

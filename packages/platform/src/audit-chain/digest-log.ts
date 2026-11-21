@@ -90,6 +90,12 @@
 // which sets every copy's heads and coverage aside within one read of the anchors.
 // Another copy sees only what it read itself. Held at most a tenth of what may be held, the one raised longest ago going
 // first: only weaker, never a stop.
+//
+// A cut answered (AT13h, S208's partner decision): the console's sessions answer a cut platform chain by a signed end of
+// every session, recorded on the chain as it now stands (identity's sessions-all-ended.ts). Once that commits, the
+// chain may be taken as it stands for those reads alone (`accept`): a head kept beside the one seen, which `accepted`
+// gives while the head seen is still the one it was taken over, raised as that is, and set aside by a rebase. Never
+// lowers what the other reads hold to: the hand-off pause's reads stay held to the head seen.
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -130,7 +136,43 @@ export interface HeadWatch {
   readonly seen: HeadSeen | undefined;
   /** The head the read found, sealed and not cut back: kept as seen where higher, dated when this watch was asked. */
   saw(head: HeadSeen): void;
+  /**
+   * Where the chain was taken as it stands after a signed answer to its cut (AT13h, the header), raised since: while
+   * `seen` is still the head it was taken over. Its `saw` raises it alone. None else.
+   */
+  readonly accepted: Pick<HeadWatch, 'seen' | 'saw'> | undefined;
+  /**
+   * Takes the chain as it stands at `to`, a sealed head at or above a signed answer to the cut of the head this watch
+   * gave as `seen`, for the reads that answer allows: only while that is still the head seen, and never from a watch
+   * asked before a rebase. Nothing where this watch gave none.
+   */
+  accept(to: HeadSeen): void;
 }
+
+/**
+ * Whether the chain, as a write found it under its head's lock, still runs through `at` (AT13h): no head to hold to, or
+ * the event at its place (read at or below the head locked) with its hash. A write on a chain cut back below a head
+ * this process holds raises nothing from it: the write goes on from the cut, and raising it would hide the cut.
+ */
+export const heldThrough = (at: HeadSeen | undefined, hashThere: unknown): boolean =>
+  at === undefined || (hashThere instanceof Buffer && hashThere.equals(at.hash));
+
+/**
+ * What a write committed raises (AT13h): the head seen, and the head taken with it, where the chain ran through both;
+ * only the head taken, where it ran through that alone (a cut answered); nothing where it ran through neither.
+ */
+export function raiseWritten(
+  watch: HeadWatch,
+  head: HeadSeen,
+  held: { readonly seen: boolean; readonly accepted: boolean },
+): void {
+  if (!held.accepted) return;
+  if (held.seen) watch.saw(head);
+  else watch.accepted?.saw(head);
+}
+
+/** Whether two heads are the same: the same place, with the same hash. */
+const sameHead = (one: HeadSeen, other: HeadSeen): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
 /**
  * Whether a chain's head, read in one statement with the hash of the event at the seen place (`seenHash`), holds to the
@@ -150,6 +192,9 @@ export function headHeldTo(seen: HeadSeen | undefined, head: HeadSeen | undefine
 
 /** A head seen, with when the read that saw it was asked: a rebase after that sets it aside. */
 type HeadKept = HeadSeen & { readonly at: number };
+
+/** A chain taken as it stands (AT13h, `accept`): the head seen it was taken over, and the head held to since. */
+type HeadAccepted = HeadKept & { readonly over: HeadSeen };
 
 /** What a decision reads of the digest. */
 export interface StateDigest {
@@ -221,11 +266,15 @@ const GROWING_SUBJECTS: ReadonlySet<string> = new Set([
 /** A spend request's subject type: its facts forgotten past the approval horizon (AT13d). */
 const REQUEST_SUBJECT = 'spend_request';
 
-/** The platform chain's session ends' subject types: their facts forgotten past the longest session (AT13g). */
+/**
+ * The platform chain's session ends' subject types: their facts forgotten past the longest session (AT13g). Every
+ * session's end at once (AT13h, a cut chain answered) too: it ends only sessions signed in before it.
+ */
 const SESSION_ENDS: ReadonlySet<string> = new Set([
   'identity.session_ended',
   'identity.session_rotated',
   'identity.sessions_ended',
+  'identity.sessions_all_ended',
 ]);
 
 /** A day: a request's or session end's facts are kept in one table a day they were known by. */
@@ -620,6 +669,8 @@ export function createDigestLog({
   const chains = new Map<string, ChainState>();
   // The highest head each chain was read at here (AT13f), with when that read was asked, the one raised longest ago first.
   const heads = new Map<string, HeadKept>();
+  // Each chain taken as it stands after a signed answer to its cut (AT13h): a few at most, one a chain cut.
+  const accepted = new Map<string, HeadAccepted>();
   const mostHeads = Math.max(1, Math.floor((mostBytes * HEADS_SHARE) / HEAD_BYTES));
   // What moved since the last write, by chain, in the same shape: given way to nothing, written then dropped.
   let pending = new Map<string, ChainState>();
@@ -699,6 +750,7 @@ export function createDigestLog({
   const forget = (): void => {
     chains.clear();
     heads.clear();
+    accepted.clear();
     heldBytes = 0;
     namesRead.clear();
     deltasFrom = undefined;
@@ -1334,18 +1386,73 @@ export function createDigestLog({
     return covered === undefined || covered.seq < 1n ? undefined : { seq: covered.seq, hash: covered.hash };
   };
 
+  /** The head a read of the chain is held to: the higher of its own seen here and where the digest covers it. */
+  const seenOf = (name: string, chain: Chain): HeadSeen | undefined => {
+    const own = headOf(name, chain);
+    const covered = coveredHead(name);
+    return own === undefined || (covered !== undefined && covered.seq > own.seq) ? covered : own;
+  };
+
+  /** The chain taken as it stands (AT13h), while `seen` is still the head it was taken over and no rebase came after. */
+  const acceptedOf = (name: string, chain: Chain, seen: HeadSeen | undefined): HeadSeen | undefined => {
+    const held = accepted.get(name);
+    if (held === undefined) return undefined;
+    if (seen !== undefined && sameHead(held.over, seen) && anchors?.rebasedAfter(chain, new Date(held.at)) !== true) {
+      return held;
+    }
+    accepted.delete(name);
+    heldBytes -= HEAD_BYTES;
+    return undefined;
+  };
+
+  /** A head a read found, or a write moved to, raising where the chain was taken as it stands, as raiseHead does the seen. */
+  const raiseAccepted = (name: string, chain: Chain, { seq, hash }: HeadSeen, asked: number): void => {
+    const held = accepted.get(name);
+    // Never from a watch asked before the read that found the cut: it may have read the chain before the cut.
+    if (held === undefined || held.seq >= seq || asked < held.at) return;
+    if (anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
+    accepted.set(name, { ...held, seq, hash: Buffer.from(hash) });
+  };
+
+  /** The chain taken as it stands at `to` over the head seen `over` (AT13h): only while that is still the head seen. */
+  const acceptAt = (name: string, chain: Chain, over: HeadSeen | undefined, to: HeadSeen, asked: number): void => {
+    if (over === undefined || to.seq < 1n || !speaks() || anchors?.rebasedAfter(chain, new Date(asked)) === true)
+      return;
+    const seen = seenOf(name, chain);
+    if (seen === undefined || !sameHead(seen, over)) return;
+    if (!accepted.has(name)) heldBytes += HEAD_BYTES;
+    accepted.set(name, {
+      over: { seq: over.seq, hash: Buffer.from(over.hash) },
+      seq: to.seq,
+      hash: Buffer.from(to.hash),
+      at: asked,
+    });
+  };
+
   return Object.freeze({
     heads(chain: Chain): HeadWatch | undefined {
       if (!speaks() || anchors?.holds(chain) === false) return undefined;
       const name = chainName(chain);
       const asked = now().getTime();
-      const own = headOf(name, chain);
-      const covered = coveredHead(name);
-      const seen = own === undefined || (covered !== undefined && covered.seq > own.seq) ? covered : own;
+      const seen = seenOf(name, chain);
+      const taken = acceptedOf(name, chain, seen);
       return Object.freeze({
         seen: seen === undefined ? undefined : Object.freeze({ seq: seen.seq, hash: seen.hash }),
         saw: (head: HeadSeen) => {
           raiseHead(name, chain, head, asked);
+          raiseAccepted(name, chain, head, asked);
+        },
+        accepted:
+          taken === undefined
+            ? undefined
+            : Object.freeze({
+                seen: Object.freeze({ seq: taken.seq, hash: taken.hash }),
+                saw: (head: HeadSeen) => {
+                  raiseAccepted(name, chain, head, asked);
+                },
+              }),
+        accept: (to: HeadSeen) => {
+          acceptAt(name, chain, seen, to, asked);
         },
       });
     },

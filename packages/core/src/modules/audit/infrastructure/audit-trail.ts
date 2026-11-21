@@ -64,7 +64,10 @@
 // rollback, the idempotency claim's among them) was sent after the write was
 // begun: so the newest events this process wrote are held from their commit,
 // not from its next read. Asked before the head is locked, so a rebase after it
-// sets the head aside, as a read's.
+// sets the head aside, as a read's. And only where the head's lock showed the
+// chain still ran through the head held to (heldThrough, the hash there read in
+// the lock's own statement, S208): a write on a chain cut back goes on from the
+// cut, and raising it would hide the cut from every read after.
 //
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
@@ -96,6 +99,8 @@ import {
   type ChainStep,
   type CheckedPoint,
   type HeadWatch,
+  heldThrough,
+  raiseWritten,
   clockOf,
   countIn,
   countStep,
@@ -1027,10 +1032,21 @@ interface EventToWrite {
   readonly details: string;
 }
 
-/** A head this transaction moved, and the time read when its lock was taken. */
+/** A head this transaction moved, the time read when its lock was taken, and what that lock found held (AT13h). */
 interface HeadMoved {
   readonly head: ChainHead;
   readonly now: Date;
+  readonly held: boolean;
+}
+
+/**
+ * What a write was held to (AT13h): the head its watch gave, and once the head is locked, whether the chain still ran
+ * through it (heldThrough), without which its commit raises nothing (raiseWritten): a write on a chain cut back below
+ * the head held to goes on from the cut, and raising it would hide the cut.
+ */
+interface WriteHold {
+  readonly seen: NonNullable<HeadWatch['seen']> | undefined;
+  held: boolean;
 }
 
 /**
@@ -1053,15 +1069,16 @@ function writerFor(
   keys: KeyProvider,
   orgId: string,
   toWrite: readonly EventToWrite[],
-  along?: Along,
-  headHeld = false,
+  along: Along | undefined,
+  headHeld: boolean,
+  hold: WriteHold,
 ): ChainBatchWriter {
   let lockedAt: Date | undefined;
   /** Whether the move took; one that did is the head this transaction goes on from. */
   const moved = (took: boolean, head: ChainHead): boolean => {
     if (took && lockedAt !== undefined) {
       const byOrg = headsMoved.get(tx) ?? new Map<string, HeadMoved>();
-      byOrg.set(orgId, { head, now: lockedAt });
+      byOrg.set(orgId, { head, now: lockedAt, held: hold.held });
       headsMoved.set(tx, byOrg);
     }
     return took;
@@ -1071,10 +1088,13 @@ function writerFor(
       headsTaken.set(tx, (headsTaken.get(tx) ?? new Set<string>()).add(orgId));
       const held = headHeld ? headsMoved.get(tx)?.get(orgId) : undefined;
       if (held !== undefined) {
+        // Going on from its own move: the chain runs through what it held to as the first lock found.
         lockedAt = held.now;
+        hold.held = held.held;
         return held;
       }
-      // The clock in the outer select, which reads a row only once the inner one has locked it.
+      // The clock in the outer select, which reads a row only once the inner one has locked it; with it, the hash at
+      // the head held to (AT13h), at or below the head locked, by the events' key: no trip of its own.
       const { rows } = await timedLock('headLockMs', () =>
         sql<Record<string, unknown>>`
         with locked as materialized (
@@ -1082,11 +1102,15 @@ function writerFor(
           where h.org_id = ${orgId}
           for no key update
         )
-        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now from locked l
+        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now,
+               (select e.hash from audit.events e
+                where e.org_id = ${orgId} and e.seq = ${hold.seen?.seq ?? null}::bigint and e.seq <= l.seq) as seen_hash
+        from locked l
       `.execute(tx),
       );
       const row = rows[0];
       if (row === undefined) return undefined;
+      hold.held = heldThrough(hold.seen, row.seen_hash);
       lockedAt = clockOf(row);
       return { head: headFields(row), now: lockedAt };
     },
@@ -1486,16 +1510,17 @@ export function createAuditTrail({
     // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
     const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
     const watch = watchOf(chain);
+    const held: WriteHold = { seen: watch?.seen, held: false };
     if (watch !== undefined) {
       await afterCommit(tx, () => {
-        if (moved.head !== undefined) watch.saw(moved.head);
+        if (moved.head !== undefined) raiseWritten(watch, moved.head, { seen: held.held, accepted: true });
       });
     }
     const append = (reuse: boolean) =>
       appendEvents(
         keys,
         chain,
-        writerFor(tx, keys, chain.orgId, events, along, reuse),
+        writerFor(tx, keys, chain.orgId, events, along, reuse, held),
         events.map(({ event, details }) => ({ nextId: () => ids.next(), content: eventContent(event, details) })),
       );
     let sealed: Awaited<ReturnType<typeof append>>;

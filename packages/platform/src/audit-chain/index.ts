@@ -17,7 +17,9 @@ export {
   type DigestLog,
   FORGET_MARGIN_MS,
   headHeldTo,
+  heldThrough,
   type HeadWatch,
+  raiseWritten,
   type StateDigest,
 } from './digest-log.ts';
 export { type SignedSeen, subjectKey } from './state-digest.ts';
