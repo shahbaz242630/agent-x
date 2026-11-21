@@ -57,12 +57,14 @@ class StandIn implements SignIn {
 
   /** The network each sign-in was begun from (S206 V8). */
   networks: string[] = [];
+  /** Whether each sign-in begun had its network's oldest give way to it (S208). */
+  gaveWay = false;
 
   begin(returnTo: string | undefined, network: string) {
     this.begun.push(returnTo);
     this.networks.push(network);
     if (this.beginFailsWith !== undefined) return Promise.reject(this.beginFailsWith);
-    return Promise.resolve({ url: LOGIN_URL, flowId: FLOW_ID });
+    return Promise.resolve({ url: LOGIN_URL, flowId: FLOW_ID, gaveWay: this.gaveWay });
   }
 
   /** Each step-up begun: the session, the challenge and the return path. */
@@ -390,10 +392,7 @@ describe('S47 a login service that cannot be reached, such as one still waking f
     },
   );
 
-  it.each([
-    ['every network’s', 'full', 'auth.sign_ins_capped', MOST_OPEN_SIGN_INS],
-    ['its network’s', 'network_full', 'auth.sign_ins_network_capped', MOST_OPEN_SIGN_INS_A_NETWORK],
-  ] as const)(
+  it.each([['every network’s', 'full', 'auth.sign_ins_capped', MOST_OPEN_SIGN_INS]] as const)(
     'SEC-HA-14 S206 V8 answers a sign-in past %s cap SIGN_IN_UNAVAILABLE, 503 and Retry-After, its warning once a minute',
     async (_what, cap, event, most) => {
       const standIn = new StandIn();
@@ -417,6 +416,35 @@ describe('S47 a login service that cannot be reached, such as one still waking f
       expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_in_unavailable');
     },
   );
+
+  it('SEC-HA-14 S208 starts a sign-in past its network’s share as any other, its oldest giving way, warned once a minute', async () => {
+    const standIn = new StandIn();
+    standIn.gaveWay = true;
+    const { app, capture, noted } = await server(standIn);
+
+    for (let sent = 0; sent < 3; sent += 1) {
+      const response = await app.inject({ url: '/v1/auth/sign-in', remoteAddress: '203.0.113.7' });
+      expect(response.statusCode).toBe(302);
+      expect(response.headers.location).toBe(LOGIN_URL);
+      expect(setCookies(response.headers['set-cookie'])).toEqual([
+        `${FLOW_COOKIE}=${FLOW_ID}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`,
+      ]);
+    }
+    expect(noted).toEqual([]);
+    // One caller filling its network's share never refuses the next: a line a minute says the oldest gave way.
+    expect(capture.lines().filter((line) => line.event === 'auth.sign_ins_gave_way')).toEqual([
+      expect.objectContaining({ level: 'warn', most: MOST_OPEN_SIGN_INS_A_NETWORK, started: 1 }),
+    ]);
+    expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_ins_capped');
+  });
+
+  it('warns of no network giving way when none did', async () => {
+    const standIn = new StandIn();
+    const { app, capture } = await server(standIn);
+
+    expect((await app.inject('/v1/auth/sign-in')).statusCode).toBe(302);
+    expect(capture.lines().map((line) => line.event)).not.toContain('auth.sign_ins_gave_way');
+  });
 
   it('still fails on our side, not as unavailable, for any other failure at the start', async () => {
     const standIn = new StandIn();

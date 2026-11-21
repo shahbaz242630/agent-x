@@ -49,7 +49,7 @@ import {
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import type { PaymentsTables } from '@agentx/core/modules/transactions';
-import { CHAIN_START, createDigestLog } from '@agentx/platform/audit-chain';
+import { CHAIN_START, createDigestLog, type DigestLog } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, type DatabaseTransaction } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -64,6 +64,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { cutChainEndBack, savedHeadOf, withDigest } from './chain-cut.helper.test.ts';
 import { createHoldingsCheck } from './holdings-check.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { weighedAgain } from './spend-request-approvals.ts';
@@ -245,7 +246,7 @@ beforeEach(() => {
   });
 });
 
-describe("a payee's split window, signed (GM-1b)", () => {
+describe("SEC-LIM-04, SEC-DB-10 a payee's split window, signed (GM-1b)", () => {
   it("is made by the payee's first decision and added to at each one's hour, sealed, its ID in the decision", async () => {
     const { w, acting } = await ready();
     const supplier = supplierKey(supplierOf_(w));
@@ -392,7 +393,7 @@ describe("a payee's split window, signed (GM-1b)", () => {
     alarmedOn('pointer');
   });
 
-  it('AT13: is caught at decision time rolled back with its newest event deleted below the anchor; the anchor alone lets it pass', async () => {
+  it('SEC-DB-11 AT13: is caught at decision time rolled back with its newest event deleted below the anchor; the anchor alone lets it pass', async () => {
     const { w, acting } = await ready();
     const theirs = await shared.secondAgent(registry, w, TERMS);
     await decided(acting, w, 100_000n);
@@ -456,6 +457,64 @@ describe("a payee's split window, signed (GM-1b)", () => {
 
     expect(await ask(acting, w, ORDER)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     alarmedOn('pointer');
+  });
+});
+
+describe('SEC-DB-11 AT13f: a payee’s window made above the last anchor, cut off with the chain’s end (GM-1b)', () => {
+  const window = (w: World) => supplierKey(supplierOf_(w));
+  /** A digest as the process that keeps the anchors keeps one, every signed state read here held to it in `work`. */
+  const heldToADigest = <T>(work: (digest: DigestLog) => Promise<T>) =>
+    withDigest({ keys, logger: testLogger(capture), now: () => clock.now() }, work);
+
+  it('the positive control: read without the heads seen, the window reads as nothing held and the split passes again', async () => {
+    const { w, acting } = await ready();
+    const saved = await savedHeadOf(database, w.org);
+    const first = await decided(acting, w);
+    expect(first.decision).toBe('ALLOW');
+    expect(await decided(acting, w)).toMatchObject(SPLIT);
+    expect(await heldIn(w, window(w))).toBe(2n * ORDER);
+    await cutChainEndBack(database, w.org, saved);
+
+    // The window gone with its events: none, read as nothing held, so the same order to the payee is allowed again.
+    expect(await heldIn(w, window(w))).toBe('none');
+    expect((await decided(acting, w)).decision).toBe('ALLOW');
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('R-15: with the head seen, the window cut off reads as tampered and a decision on the payee is refused, alarmed, held', async () => {
+    const { w, seenAt } = await heldToADigest(async (digest) => {
+      const { w, acting } = await ready();
+      const saved = await savedHeadOf(database, w.org);
+      await decided(acting, w);
+      expect(await decided(acting, w)).toMatchObject(SPLIT);
+      // Any read of the chain since (the hand-off's, a list's, the next decision's): the head it read is seen here.
+      expect(await heldIn(w, window(w))).toBe(2n * ORDER);
+      const seen = digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq;
+      await cutChainEndBack(database, w.org, saved);
+
+      // The window itself, read on its own, is caught: it never reads as a payee with nothing held.
+      expect(await heldIn(w, window(w))).toBe('tampered');
+      expect(await ask(acting, w, ORDER)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+      return { w, seenAt: seen };
+    });
+    expect(seenAt).toBeDefined();
+    expect(lines('audit.integrity_failed')).toContainEqual(
+      expect.objectContaining({ check: 'state', reason: 'log', seq: String(seenAt) }),
+    );
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('a window grown honestly under the heads seen decides as ever: the split asks approval, no alarm', async () => {
+    await heldToADigest(async (digest) => {
+      const { w, acting } = await ready();
+      await decided(acting, w);
+      expect(await heldIn(w, window(w))).toBe(ORDER);
+      const seen = digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq ?? 0n;
+      expect(await decided(acting, w)).toMatchObject(SPLIT);
+      expect(await heldIn(w, window(w))).toBe(2n * ORDER);
+      expect(digest.heads({ kind: 'organisation', orgId: w.org })?.seen?.seq).toBeGreaterThan(seen);
+    });
+    expect(lines('audit.integrity_failed')).toEqual([]);
   });
 });
 
@@ -654,7 +713,7 @@ describe('every ending gives its amount back to the windows its decision sealed,
   });
 });
 
-describe('in the lock order (11b: after the month totals, in order of ID), forced', () => {
+describe('SEC-LIM-01 in the lock order (11b: after the month totals, in order of ID), forced', () => {
   /** A void of `requestId` in a transaction of its own, held open at `gate` once it has given its capacity back. */
   const voidHeldOpen = (w: World, requestId: string, gate: Promise<unknown>, given: () => void) =>
     withSignedStates(app, w.org, quiet(), async (tx, states) => {

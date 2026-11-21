@@ -369,20 +369,18 @@ resource witnessRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existi
   name: guid(resourceGroup().id, 'audit-witness')
 }
 
-resource witnessWriter 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
-  for each in witnessWriters: {
-    name: each.identity
-  }
-]
+// Each writer's identity by its ID, not a second `existing` declaration: the API's and the jobs app's are already
+// declared as the anchors' keepers or readers, and Azure refuses a template that declares one resource twice.
+func identityOf(name string) string => resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', name)
 
 // Every copy of the API, `web` copies too, and the jobs app put the heads they wrote and read the others'.
 resource writesWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for (each, index) in witnessWriters: {
+  for each in witnessWriters: {
     scope: witnessContainer
-    name: guid(witnessContainer.id, witnessWriter[index].id, witnessRole.id)
+    name: guid(witnessContainer.id, identityOf(each.identity), witnessRole.id)
     properties: {
       roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', witnessRole.name)
-      principalId: witnessWriter[index].properties.principalId
+      principalId: reference(identityOf(each.identity), '2024-11-30').principalId
       principalType: 'ServicePrincipal'
       description: '${each.workload} writes and reads audit witness heads (deploy/azure/modules/evidence.bicep)'
     }

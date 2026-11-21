@@ -337,14 +337,14 @@ describe('ADR-003 and ADR-013: the login service as Azure runs it', () => {
     expect(creates).toEqual([]);
   });
 
-  it("switches off Zitadel's daily report to zitadel.com and its metrics endpoint (nothing leaves the UAE)", () => {
+  it("SEC-DATA-08 switches off Zitadel's daily report to zitadel.com and its metrics endpoint (nothing leaves the UAE)", () => {
     expect(file.services.zitadel?.environment).toMatchObject({
       ZITADEL_SERVICEPING_ENABLED: 'false',
       ZITADEL_METRICS_TYPE: 'none',
     });
   });
 
-  it("switches off the login pages' OpenTelemetry SDK, which starts by default", () => {
+  it("SEC-DATA-08 switches off the login pages' OpenTelemetry SDK, which starts by default", () => {
     expect(file.services.login?.environment?.OTEL_SDK_DISABLED).toBe('true');
   });
 });

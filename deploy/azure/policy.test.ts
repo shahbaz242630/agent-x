@@ -8287,7 +8287,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
-  it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
+  it('SEC-DATA-08 container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
     for (const setting of [
       { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'https://collector.example.invalid' },
       { name: 'OTEL_SDK_DISABLED', value: 'false' },

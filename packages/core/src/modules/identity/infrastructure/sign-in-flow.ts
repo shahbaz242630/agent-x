@@ -36,9 +36,10 @@
 // service gave them, are kept for the person too, in the same transaction
 // (user-contacts.ts), for the audit log to say who did what.
 //
-// S206 V8: a sign-in starts only while its flows are under their caps
-// (login-flows.ts): every network's together, and the network it comes from.
-// Past either it is SignInBusy, and no flow is kept.
+// S206 V8: a sign-in starts only while its flows are under every network's
+// cap (login-flows.ts); past it, for a busy network, it is SignInBusy, and no
+// flow is kept. S208: past its own network's share it still starts, that
+// network's oldest giving way (`gaveWay`, for the API's warning).
 //
 // S207 (R-15): a flow's return path is kept unsealed, so `complete` checks it
 // again as it takes the flow. Only the app writes one, and only a path of our
@@ -55,6 +56,10 @@
 // A step-up's new cookie ID is signed the same way (`identity.session_rotated`,
 // S207 GM-4), in its own transaction: the row as it was, put back, is no
 // session. If that can't be signed, the step-up fails and nothing changes.
+//
+// A step-up flow's challenge is kept unsealed too, so `complete` refuses one whose nonce isn't the sealed challenge's
+// own: the owner pointing a flow at another pending challenge of the session raises the integrity alarm, and the
+// fresh sign-in verifies nothing.
 //
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
@@ -83,6 +88,8 @@ export interface SignInBegun {
   readonly url: string;
   /** For the flow cookie; never kept. */
   readonly flowId: string;
+  /** True when its network was at its share, and its oldest sign-ins under way gave way to it (S208). */
+  readonly gaveWay?: boolean;
 }
 
 export interface SignInCompleted {
@@ -140,11 +147,11 @@ export class StepUpFailed extends Error {
   }
 }
 
-/** A sign-in not started: too many are under way, every network's together (`full`) or this network's (S206 V8). */
+/** A sign-in not started: too many are under way, every network's together, and its network not quiet (S206 V8). */
 export class SignInBusy extends Error {
   override readonly name = 'SignInBusy';
-  readonly cap: 'full' | 'network_full';
-  constructor(cap: 'full' | 'network_full') {
+  readonly cap: 'full';
+  constructor(cap: 'full') {
     super(`sign-in not started: too many under way (${cap})`);
     this.cap = cap;
   }
@@ -153,7 +160,8 @@ export class SignInBusy extends Error {
 export interface SignIn {
   /**
    * Starts a sign-in from `network` (its client's, as login-flows.ts counts it) that sends the browser back to
-   * `returnTo` (our home page if none). Throws RangeError for a path that isn't ours, SignInBusy past a cap.
+   * `returnTo` (our home page if none). Throws RangeError for a path that isn't ours, SignInBusy past every network's
+   * cap (S206 V8); past its own network's share, its oldest give way instead (S208).
    */
   begin(returnTo: string | undefined, network: string): Promise<SignInBegun>;
   /**
@@ -278,6 +286,17 @@ export function createSignIn({
     if (pending === undefined) {
       throw failed('challenge_missing', 'the challenge is not pending for this session', userId);
     }
+    // The flow's row has no MAC (0011, 0014); the challenge's nonce is sealed. A flow started for this challenge
+    // carries its nonce (`beginStepUp`), so one that doesn't was retargeted past the app: the alarm, and refused.
+    if (taken.flow.nonce !== pending.nonce) {
+      logger.error('audit.integrity_failed', {
+        check: 'login_flow',
+        reason: 'step_up_nonce',
+        rowId: challengeId,
+        userId,
+      });
+      throw failed('challenge_missing', 'the flow was not started for this challenge', userId);
+    }
     let signedIn;
     try {
       signedIn = await oidc.finish(taken.flow, returned);
@@ -320,7 +339,7 @@ export function createSignIn({
       const { url, flow } = await oidc.start({ prompt: 'login' });
       const started = await limited((tx) => flows.start(tx, flow, returnTo, network));
       if (started.outcome !== 'started') throw new SignInBusy(started.outcome);
-      return { url, flowId: started.flowId };
+      return { url, flowId: started.flowId, gaveWay: started.gaveWay };
     },
 
     async beginStepUp(sessionId, challengeId, returnTo = HOME_PATH) {

@@ -8,6 +8,7 @@ import {
   FixedClock,
   LogCapture,
   SequentialIds,
+  tamperAsOwner,
   type TestClient,
   type TestDatabase,
   testLogger,
@@ -395,22 +396,56 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(client.started).toBe(0);
   });
 
-  it('SEC-HA-14 S206 V8 refuses to begin one while its network holds its share, as SignInBusy, keeping no flow', async () => {
-    // A network of its own, so the file's other sign-ins (NETWORK's) are never held by it.
+  it('SEC-HA-14 S208 begins one while its network holds its share, its oldest giving way: that one refused at its callback', async () => {
+    // A network of its own, so the file's other sign-ins (NETWORK's) are never pushed out by it.
     const network = '198.51.100.9';
     const kept = () =>
       app.selectFrom('identity.login_flows').select('cookie_hash').where('network_key', '=', network).execute();
-    for (let open = 0; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) await signIn.begin(undefined, network);
+    const begun = [];
+    for (let open = 0; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
+      clock.advanceBy(1000);
+      begun.push(await signIn.begin(undefined, network));
+    }
+    expect(begun.every((one) => one.gaveWay === false)).toBe(true);
 
-    await expect(signIn.begin('/agents', network)).rejects.toThrow(SignInBusy);
-    await expect(signIn.begin('/agents', network)).rejects.toMatchObject({ cap: 'network_full' });
+    clock.advanceBy(1000);
+    const fresh = await signIn.begin('/agents', network);
+    expect(fresh.gaveWay).toBe(true);
     expect(await kept()).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
-    // Another network still begins, and comes back signed in.
-    const { url, flowId } = await signIn.begin('/agents', '198.51.100.10');
-    const state = new URL(url).searchParams.get('state') ?? '';
-    expect(await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined })).toMatchObject({
-      returnTo: '/agents',
+    // The new one comes back signed in; the oldest's browser finds no flow, refused plainly, to start again.
+    client.proves = { ...evidence, authTime: clock.now() };
+    const back = ({ url, flowId }: { url: string; flowId: string }) => ({
+      flowId,
+      code: 'a-code',
+      state: new URL(url).searchParams.get('state') ?? '',
+      previousCookie: undefined,
     });
+    expect(await signIn.complete(back(fresh))).toMatchObject({ returnTo: '/agents' });
+    const [oldest] = begun;
+    if (oldest === undefined) throw new Error('none begun');
+    await expect(signIn.complete(back(oldest))).rejects.toMatchObject({
+      name: 'SignInFailed',
+      failure: 'flow_missing',
+    });
+    expect(client.finished).toHaveLength(1);
+  });
+
+  it('SEC-HA-14 S206 V8 refuses to begin one past every network’s cap, as SignInBusy', async () => {
+    // Every network's cap is a million (login-flows.db.test.ts fills a smaller one): here the flows say it is reached.
+    const full = createSignIn({
+      db: app,
+      oidc: client,
+      flows: { ...createLoginFlows({ clock }), start: () => Promise.resolve({ outcome: 'full' as const }) },
+      sessions,
+      challenges,
+      ids: new SequentialIds(0x9f00),
+      clock,
+      keys,
+      logger: testLogger(),
+    });
+
+    await expect(full.begin('/agents', NETWORK)).rejects.toThrow(SignInBusy);
+    await expect(full.begin('/agents', NETWORK)).rejects.toMatchObject({ cap: 'full' });
   });
 
   it('opens a new session each time, for the same person, and ends the one the browser brought', async () => {
@@ -1649,5 +1684,89 @@ describe(`SEC-DB-10 R-15 the owner can't send a sign-in's browser to another sit
       back: { returnTo: '/', challengeId: challenge.challengeId },
     });
     expect(alarms()).toEqual([expect.objectContaining({ check: 'login_flow', reason: 'return_to' })]);
+  });
+});
+
+describe(`S208 the owner can't point a step-up's flow at another challenge of the session (Postgres ${server.version})`, () => {
+  // A step-up flow's challenge is kept unsealed (0014). The owner, holding none of the app's keys, can point it at
+  // another pending challenge of the same session; the fresh sign-in's nonce is the first challenge's, which the
+  // callback checks against the sealed challenge's own, so the other is never verified, and the alarm is raised.
+  const LOGIN_FLOWS = { table: 'identity.login_flows', subject: 'login_flow' };
+  /** Any organisation: the flows belong to none, so the owner's organisation setting is never read. */
+  const ANY_ORG = '0199a0f0-0000-7000-8000-000000000b34';
+  const FRESH: SignInEvidence = {
+    idpSessionId: 'V1_fresh',
+    authTime: new Date(START.getTime() + 10_000),
+    amr: ['pwd', 'user', 'mfa'],
+  };
+  const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+
+  /** A signed-in person with two pending challenges of the one session, and a step-up begun for the first. */
+  async function twoChallenges() {
+    const done = await roundTrip();
+    const open = (action: string, fill: number) =>
+      challenges.open(app, { sessionId: done.sessionId, action, changeHash: Buffer.alloc(32, fill) });
+    const first = await open('members.invite', 9);
+    const second = await open('members.remove', 10);
+    if (first === undefined || second === undefined) throw new Error('no challenge');
+    client.proves = FRESH;
+    const { url, flowId } = await signIn.beginStepUp(done.sessionId, first.challengeId, '/members/confirm');
+    const state = new URL(url).searchParams.get('state') ?? '';
+    return { done, first, second, back: { flowId, code: 'a-code', state, previousCookie: done.cookie } };
+  }
+  /** The challenge consumed, as a change's confirmation does: its evidence if it was verified, undefined if not. */
+  const verified = (sessionId: string, challengeId: string, action: string, fill: number) =>
+    used(
+      challenges,
+      app,
+      challengeId,
+      { sessionId, action, changeHash: Buffer.alloc(32, fill) },
+      { passkeyRequired: false },
+    );
+
+  it('control: a step-up untouched verifies its own challenge, with no alarm', async () => {
+    const { done, first, second, back } = await twoChallenges();
+
+    expect(await signIn.complete(back)).toMatchObject({ stepUpChallengeId: first.challengeId });
+    expect(alarms()).toEqual([]);
+    expect(await verified(done.sessionId, first.challengeId, 'members.invite', 9)).toBeDefined();
+    expect(await verified(done.sessionId, second.challengeId, 'members.remove', 10)).toBeUndefined();
+  });
+
+  it('a flow the owner points at another pending challenge is refused, with the alarm, verifying neither', async () => {
+    const { done, first, second, back } = await twoChallenges();
+    const traded = client.finished.length;
+    const owner = await tamperAsOwner(database, LOGIN_FLOWS, ANY_ORG);
+    try {
+      await owner.query('update identity.login_flows set step_up_challenge_id = $2 where cookie_hash = $1', [
+        createHash('sha256').update(back.flowId, 'ascii').digest(),
+        second.challengeId,
+      ]);
+    } finally {
+      await owner.end();
+    }
+
+    await expect(signIn.complete(back)).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      failure: 'challenge_missing',
+      userId: done.userId,
+    });
+    expect(alarms()).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        check: 'login_flow',
+        reason: 'step_up_nonce',
+        rowId: second.challengeId,
+        userId: done.userId,
+      }),
+    ]);
+    // Refused before the login service's answer was traded: nothing recorded, the session's cookie kept.
+    expect(client.finished).toHaveLength(traded);
+    expect(await sessions.use(app, done.cookie)).toBeDefined();
+    expect(await verified(done.sessionId, second.challengeId, 'members.remove', 10)).toBeUndefined();
+    expect(await verified(done.sessionId, first.challengeId, 'members.invite', 9)).toBeUndefined();
+    expect(await challenges.pending(app, second.challengeId, done.sessionId)).toMatchObject({
+      challengeId: second.challengeId,
+    });
   });
 });
