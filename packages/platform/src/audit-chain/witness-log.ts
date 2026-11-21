@@ -139,10 +139,16 @@ const MOST_SPOILED_SNAPSHOTS = 24;
 const SNAPSHOT_EVERY_MS = 60 * 60_000;
 
 /**
- * How many heads let go since the last snapshot write the next at once, the hour or not: a restart starts from the
- * snapshot, and every head confirmed and let go since would come back to be confirmed again.
+ * How many heads let go since the last snapshot write the next before the hour (after SNAPSHOT_AT_MOST_MS): a restart
+ * starts from the snapshot, and every head confirmed and let go since would come back to be confirmed again.
  */
 const PRUNED_FOR_A_SNAPSHOT = 1_000;
+
+/**
+ * The least time between snapshots written early for heads let go: busy chains let a thousand go a minute, and every
+ * snapshot is kept for years in the write-once store.
+ */
+const SNAPSHOT_AT_MOST_MS = 15 * 60_000;
 
 /** The most lines one heads file carries: more wait for the next Put. */
 const MOST_LINES_A_FILE = 10_000;
@@ -647,8 +653,9 @@ export function createWitnessLog({
   const snapshotOnce = async (): Promise<void> => {
     if (snapshots === undefined || writes?.() !== true || state !== 'read' || !changedSinceSnapshot) return;
     const at = now().getTime();
-    const hourly = lastSnapshotAt === undefined || at - lastSnapshotAt >= SNAPSHOT_EVERY_MS;
-    if (!hourly && prunedSinceSnapshot < PRUNED_FOR_A_SNAPSHOT) return;
+    const since = lastSnapshotAt === undefined ? Infinity : at - lastSnapshotAt;
+    const early = prunedSinceSnapshot >= PRUNED_FOR_A_SNAPSHOT && since >= SNAPSHOT_AT_MOST_MS;
+    if (since < SNAPSHOT_EVERY_MS && !early) return;
     try {
       const name = fileName(folder('snapshots'), at);
       const lines: string[] = [];
