@@ -18,7 +18,10 @@ import {
   DEACTIVATE_CONFIRM_OPERATION,
   DEACTIVATE_OPERATION,
   type IdentityTables,
+  type MembershipChange,
   type Role,
+  ROLE_CONFIRM_OPERATION,
+  ROLE_OPERATION,
   userForSubject,
 } from '@agentx/core/modules/identity';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
@@ -276,6 +279,40 @@ async function verified(
   );
 }
 
+/**
+ * `admin` changes `whom`'s membership (a new role, or removal) through the
+ * real use case, with step-up, so the signed role change and who granted it
+ * are recorded exactly as the console's would be.
+ */
+async function membershipChanged(adminPerson: Person, whom: Person, change: MembershipChange) {
+  const admin = await signedIn(adminPerson);
+  const memberships = createMembershipChanges({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: challenges(),
+    outbox: createOutbox({ ids, clock, keys }),
+    logger: testLogger(),
+    leaving: registrationsOfLeaving,
+  });
+  const [askAs, confirmAs] =
+    change.kind === 'deactivate'
+      ? [DEACTIVATE_OPERATION, DEACTIVATE_CONFIRM_OPERATION]
+      : [ROLE_OPERATION, ROLE_CONFIRM_OPERATION];
+  const asked = await memberships.ask(admin, keyed(admin, askAs), whom.membershipId, change, CORRELATION);
+  if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
+  await stepUp(admin, asked.stepUpChallengeId);
+  return memberships.confirm(
+    admin,
+    keyed(admin, confirmAs),
+    whom.membershipId,
+    change,
+    asked.stepUpChallengeId,
+    CORRELATION,
+  );
+}
+
 /** The supplier as its signed state says. */
 const supplierNow = (org: string, id: string) =>
   withSignedStates(app, org, quiet(), async (tx, states) => {
@@ -468,6 +505,60 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(theirs.form?.url).not.toBe(hers.form?.url);
   });
 
+  it('SEC-PAY-04 shuts the single-user path for 14 days when the enterer demotes the only other verifier, then verifies alone', async () => {
+    const { org, alice, bob, supplierId } = await established();
+
+    // Alice entered the payee; Bob, the one person who could check her, is demoted by her through the console.
+    expect(await membershipChanged(alice, bob, { kind: 'role', role: 'viewer' })).toMatchObject({
+      outcome: 'written',
+    });
+
+    // No one is left to check Alice, but the lock-out after a verifier's change keeps her from verifying alone.
+    expect(await ask(await signedIn(alice), supplierId)).toEqual(refusedWith('SOLO_PATH_LOCKED', 403));
+    expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('FORBIDDEN', 403));
+    expect(await supplierNow(org, supplierId)).toMatchObject({ status: 'UNVERIFIED', verifiedBy: null });
+
+    // The control: the lock-out alone was the reason; once it has passed, the single-user path opens as designed.
+    // It runs from the role change's signed time, which is Postgres's clock, not the test's.
+    const demoted = await withTenant(app, org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select('recorded_at')
+        .where('subject_type', '=', 'membership')
+        .where('subject_id', '=', bob.membershipId)
+        .where('action', '=', 'membership.role_changed')
+        .executeTakeFirstOrThrow(),
+    );
+    const reopens = new Date(demoted.recorded_at).getTime() + 14 * DAY_MS;
+    clock.advanceBy(Math.max(0, reopens - clock.now().getTime() - 1));
+    expect(await ask(await signedIn(alice), supplierId)).toEqual(refusedWith('SOLO_PATH_LOCKED', 403));
+    clock.advanceBy(1);
+    expect(await verified(alice, supplierId)).toMatchObject({ outcome: 'changed', supplier: { status: 'VERIFIED' } });
+    expect((await recordedOf(org, supplierId)).details).toMatchObject({ path: 'single_user' });
+  });
+
+  it('SEC-PAY-04 refuses a verifier whose role the person who entered the payee granted, while an independent one may', async () => {
+    const org = await organization();
+    const alice = await member(org, 'admin');
+    const bob = await member(org, 'approver');
+    const dan = await member(org, 'viewer');
+    clock.advanceBy(15 * DAY_MS);
+    // Alice makes Dan an approver through the console, then enters the payee herself.
+    expect(await membershipChanged(alice, dan, { kind: 'role', role: 'approver' })).toMatchObject({
+      outcome: 'written',
+    });
+    const supplierId = await payable(alice);
+    clock.advanceBy(PAYEE_COOLING_OFF_MS);
+
+    expect(await ask(await signedIn(dan), supplierId)).toEqual(refusedWith('VERIFIER_GRANTED_BY_ENTERER', 403));
+    expect(await supplierNow(org, supplierId)).toMatchObject({ status: 'UNVERIFIED', verifiedBy: null });
+    // The control: Bob, whose role Alice never touched, is a true second person.
+    expect(await verified(bob, supplierId)).toMatchObject({
+      outcome: 'changed',
+      supplier: { status: 'VERIFIED', verifiedBy: bob.membershipId },
+    });
+  });
+
   it('takes the single-user path in an organisation of one: its own admin, once cooled off', async () => {
     const org = await organization();
     const alice = await member(org, 'admin');
@@ -576,37 +667,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
 
 describe(`a member's removal ends the payee registrations they left open (AG7, 6F1; Postgres ${server.version})`, () => {
   /** `admin` removes `gone` from the organisation, with step-up, ending what the payee registrations' leaving names. */
-  async function removed(adminPerson: Person, gone: Person) {
-    const admin = await signedIn(adminPerson);
-    const memberships = createMembershipChanges({
-      database: app,
-      keys,
-      ids,
-      clock,
-      challenges: challenges(),
-      outbox: createOutbox({ ids, clock, keys }),
-      logger: testLogger(),
-      leaving: registrationsOfLeaving,
-    });
-    const change = { kind: 'deactivate' } as const;
-    const asked = await memberships.ask(
-      admin,
-      keyed(admin, DEACTIVATE_OPERATION),
-      gone.membershipId,
-      change,
-      CORRELATION,
-    );
-    if (asked.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(asked)}`);
-    await stepUp(admin, asked.stepUpChallengeId);
-    return memberships.confirm(
-      admin,
-      keyed(admin, DEACTIVATE_CONFIRM_OPERATION),
-      gone.membershipId,
-      change,
-      asked.stepUpChallengeId,
-      CORRELATION,
-    );
-  }
+  const removed = (adminPerson: Person, gone: Person) => membershipChanged(adminPerson, gone, { kind: 'deactivate' });
 
   /** The registration as its signed state stands. */
   const registrationNow = (org: string, supplierId: string, id: string) =>
