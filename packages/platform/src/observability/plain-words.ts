@@ -347,6 +347,47 @@ export const PLAIN_WORDS = {
     broke: 'Its decisions go on with today’s checks, without the digest. Payments are not affected.',
     next: 'Give the API a larger heap, as the line counts, then restart it. Nothing was tampered with.',
   },
+  'audit.witness_write_failed': {
+    happened: 'This copy could not write the latest audit chain heads to the witness store just now.',
+    broke: 'Nothing yet: they are kept and tried again in moments. A stop waiting on them may answer "retry".',
+    next: 'Nothing if it passes. If it keeps failing, a lasting error follows: check the witness store on Azure.',
+  },
+  'audit.witness_write_failing': {
+    happened: 'This copy has kept failing to write audit chain heads to the witness store.',
+    broke:
+      'Stops, approvals and other changes on this copy answer "saved but not yet confirmed; retry" until it works.',
+    next: 'Check the witness store and this copy’s audit-witness role on it: playbook section H.',
+  },
+  'audit.witness_read_failed': {
+    happened: 'This copy could not read the other copies’ audit chain heads from the witness store just now.',
+    broke: 'Nothing yet: it holds what it read before and tries again soon.',
+    next: 'Nothing if it passes. If it keeps failing, a lasting error follows.',
+  },
+  'audit.witness_read_failing': {
+    happened: 'This copy has kept failing to read the other copies’ audit chain heads from the witness store.',
+    broke: 'A chain cut back below a head another copy wrote may go unseen here. Payments wait for a fresh read.',
+    next: 'Check the witness store and this copy’s audit-witness role on it: playbook section H.',
+  },
+  'audit.web_witness_read_failed': {
+    happened: 'A web copy of the API could not read the other copies’ audit chain heads just now.',
+    broke: 'Its decisions go on with the heads it read before. Payments are checked again at the hand-off.',
+    next: 'Nothing if it passes: it tries again each minute. If it keeps failing, a lasting error follows.',
+  },
+  'audit.witness_unconfirmed': {
+    happened: 'A change was saved, but its audit chain head did not reach the witness store in time.',
+    broke: 'The person or agent was told to retry. The head is still queued and goes out as soon as the store answers.',
+    next: 'Nothing if it is rare. If it repeats, check the witness store: a write failure line will say more.',
+  },
+  'audit.witness_store_not_set': {
+    happened: 'This API was started with no witness store named for the audit chain heads.',
+    broke: 'Copies cannot see each other’s chain heads, so a chain cut back below another copy’s write is missed.',
+    next: 'Run the apps hand deploy, which sets AGENTX_AUDIT_WITNESS_URL: playbook section H.',
+  },
+  'audit.witness_beyond_memory': {
+    happened: 'This copy holds more witnessed audit chain heads than its memory allows, and let the oldest go.',
+    broke: 'Payments of the organisation named wait until its chain is anchored past them. Others go on.',
+    next: 'Check the anchor check is keeping up (its own lines say); give the API more memory if it is.',
+  },
   'audit.anchor_store_write_refused': {
     happened: 'An API copy that only reads the audit anchors tried to write a file to their store.',
     broke: 'Nothing: the write was refused before it left the process, and the store is unchanged.',

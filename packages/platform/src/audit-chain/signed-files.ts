@@ -163,7 +163,7 @@ export async function isSoundFile(
 }
 
 /** Every line of a sound file but its closing one, parsed. */
-export async function* bodyLines(bytes: Buffer): AsyncGenerator<unknown> {
+export async function* bodyLines(bytes: Buffer): AsyncGenerator {
   let last: string | undefined;
   for await (const text of linesIn(bytes)) {
     if (last !== undefined) yield parsed(last);

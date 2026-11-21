@@ -23,6 +23,16 @@ export {
   type StateDigest,
 } from './digest-log.ts';
 export { type SignedSeen, subjectKey } from './state-digest.ts';
+export {
+  type ChainWitness,
+  createWitnessLog,
+  type WitnessAnchors,
+  type WitnessClass,
+  type WitnessedHead,
+  type WitnessLog,
+  type WitnessSigner,
+  WitnessUnconfirmed,
+} from './witness-log.ts';
 export { shardOf } from './shards.ts';
 export { OLD_EDIT_DAYS } from './limits.ts';
 export { OPERATOR_ID, operatorSignature, sealedSigned } from './operator-signature.ts';
