@@ -27,8 +27,14 @@
 // finds it changed (revoke-during-approval).
 import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
-import type { SignedStates } from '@agentx/core/modules/audit';
-import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import {
+  CHAIN_START,
+  checkStatesWith,
+  createAuditTrail,
+  createDigestLog,
+  type SignedStates,
+} from '@agentx/core/modules/audit';
+import { createStepUpChallenges, MEMBERSHIPS } from '@agentx/core/modules/identity';
 import {
   acceptDraft,
   MANDATES,
@@ -40,6 +46,7 @@ import {
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import {
+  APPROVAL_HORIZON_MS,
   cancelRequest,
   checkHoldings,
   expireRequest,
@@ -92,6 +99,8 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
 let clock: FixedClock;
+/** The use cases' log lines, where the integrity alarm (`audit.integrity_failed`, SEV-1) shows. */
+let capture: LogCapture;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let approvals: SpendRequestApprovals;
@@ -212,7 +221,8 @@ afterAll(async () => {
 /** The use cases on a clock started at `start`. */
 function startedAt(start: Date) {
   clock = new FixedClock(start);
-  const logger = testLogger(new LogCapture());
+  capture = new LogCapture();
+  const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({
     database: app,
@@ -462,6 +472,65 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await holdingsOf(w, asked.id)).toEqual({ reservation: 'RELEASED', released: true });
   });
 
+  it('AT13d: an approval rolled back by the owner once the digest forgot the request is refused REQUEST_EXPIRED, never approved again', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      const saved = await owner.saveRow(waiting.id);
+      expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+      // Events after it, so the approval lies inside the walk, not at its end.
+      await withTenant(app, w.org, (tx) =>
+        createAuditTrail({ keys, ids }).record(tx, w.org, {
+          actor: OPERATOR,
+          action: 'probe.stepped',
+          subject: { type: 'probe', id: w.agent, version: 1 },
+          details: {},
+        }),
+      );
+      // The anchor check's walk kept in a digest that forgets a request's facts past the horizon, as job-list.ts keeps it.
+      const digest = createDigestLog({
+        keys,
+        logger: testLogger(),
+        now: () => clock.now(),
+        epoch: 1,
+        alertAfterMs: 60_000,
+        mostBytes: 64 * 1024 * 1024,
+        forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
+      });
+      const chain = { kind: 'organisation', orgId: w.org } as const;
+      const step = await createAuditTrail({ keys, ids }).checkFromAnchor(app, w.org, CHAIN_START);
+      if (!step.ok || step.signed === undefined) throw new Error('The chain should have checked out');
+      digest.record(chain, step.signed, clock.now(), { from: 0n, to: step });
+      expect(digest.latest(chain, SPEND_REQUESTS.subject, waiting.id)).toBeDefined();
+      // Its decision sealed now by the database's clock, so only the app's clock can age it: the horizon, the digest's
+      // day of margin and a few minutes on, the digest's next record forgets the request.
+      clock.advanceBy(APPROVAL_HORIZON_MS + 24 * HOUR_MS + 5 * 60_000);
+      digest.record(chain, new Map(), clock.now());
+      expect(digest.latest(chain, SPEND_REQUESTS.subject, waiting.id)).toBeUndefined();
+      // The approval's event deleted and the row put back as it was waiting: nothing the digest still holds says otherwise.
+      await owner.query('delete from audit.events where org_id = $1 and subject_id = $2 and action = $3', [
+        w.org,
+        waiting.id,
+        'spend_request.approved',
+      ]);
+      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+      expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+      // Signed in now: the admin's session has long been idle.
+      const approver = await member(w.org, 'approver');
+
+      checkStatesWith(digest);
+      try {
+        expect(await asking(approver, waiting.id)).toEqual(refused(409, 'REQUEST_EXPIRED'));
+      } finally {
+        checkStatesWith(undefined);
+      }
+      expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+    } finally {
+      await owner.end();
+    }
+  });
+
   it('refuses one past the 24 hours its organisation chose when it was asked, one asked before keeping 72 (E6)', async () => {
     const { w, acting } = await ready();
     const before = await ask(acting, w);
@@ -545,18 +614,28 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
-  it('refuses a role raised to approver past the app as INTEGRITY_FAILED (SEC-DB-06)', async () => {
+  it('SEC-DB-06 refuses a role raised to approver past the app by the owner: INTEGRITY_FAILED, the alarm, the hold', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
     const viewer = await member(w.org, 'viewer');
-    await database
-      .as('admin')
-      .query(`update identity.memberships set role = 'approver' where org_id = $1 and id = $2`, [
-        w.org,
-        viewer.membershipId,
-      ]);
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).not.toMatchObject({ outcome: 'held' });
+    // The database's owner raises the role, with no signed role-grant event behind it.
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, w.org);
+    try {
+      await owner.setColumn(viewer.membershipId, 'role', 'approver');
+    } finally {
+      await owner.end();
+    }
 
     expect(await asking(viewer, waiting.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'audit.integrity_failed',
+        subjectType: MEMBERSHIPS.subject,
+        objectId: viewer.membershipId.toLowerCase(),
+      }),
+    );
+    expect(await signed(w, (tx, states) => states.holdRecord(tx, w.org))).toMatchObject({ outcome: 'held' });
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 

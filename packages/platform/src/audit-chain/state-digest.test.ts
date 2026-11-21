@@ -12,7 +12,7 @@ import {
   valueAt,
 } from './state-digest.ts';
 
-describe('the digest’s table of one chain (AT13)', () => {
+describe('SEC-DB-10, SEC-DB-11 the digest’s table of one chain (AT13)', () => {
   it('keeps each object’s highest place, says whether it moved, and grows past three slots in four', () => {
     const table = new ChainDigest(1000, 4);
     expect(table.put(1, 2, 5)).toBe(true);

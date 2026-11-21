@@ -228,9 +228,11 @@ describe('POST /v1/spend-requests/{id}/approve and …/confirm: an admin or appr
     const { app, asked } = await withApprovals();
     const headers = { authorization: `Bearer ${KEY}`, 'idempotency-key': 'x' };
 
-    expect([401, 403]).toContain((await app.inject({ ...ask(), headers })).statusCode);
+    // The stand-in accepts the key, so a 401 would mean it never got that far: the refusal must be the 403 of a
+    // known agent on a person's route.
+    expect((await app.inject({ ...ask(), headers })).statusCode).toBe(403);
     const confirming = await app.inject({ ...confirm({ stepUpChallengeId: CHALLENGE_ID }), headers });
-    expect([401, 403]).toContain(confirming.statusCode);
+    expect(confirming.statusCode).toBe(403);
     expect(asked).toEqual([]);
   });
 

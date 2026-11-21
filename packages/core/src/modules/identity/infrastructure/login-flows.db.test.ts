@@ -1,5 +1,5 @@
 // B2-3a-1: the sign-in flows under way (0011), on the real migrated schema, as the app role.
-import { createTestDatabase, FixedClock, type TestDatabase, testLogger } from '@agentx/testing';
+import { createTestDatabase, FixedClock, type TestDatabase, testLogger, waitUntilQueued } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -228,31 +228,166 @@ describe(`SEC-HA-14 the sign-ins under way, held to their caps (S206 V8, Postgre
       .where('network_key', '=', network)
       .execute();
 
-  it(`holds one network to ${String(MOST_OPEN_SIGN_INS_A_NETWORK)} sign-ins under way, keeping none past it`, async () => {
+  it(`holds one network to ${String(MOST_OPEN_SIGN_INS_A_NETWORK)} sign-ins under way, its oldest giving way to a new one (S208)`, async () => {
     const clock = new FixedClock(new Date('2027-01-01T09:00:00Z'));
     const store = createLoginFlows({ clock });
     const network = '198.51.100.7';
-    for (let open = 1; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
-      expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    // A step-up's flow is never counted, and never gives way, though it is older than every sign-in here.
+    const stepUp = await store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c2');
+    const started: string[] = [];
+    for (let open = 0; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
+      clock.advanceBy(1000);
+      const begun = await store.start(app, newFlow(), '/', network);
+      if (begun.outcome !== 'started') throw new Error(`not started: ${begun.outcome}`);
+      expect(begun.gaveWay).toBe(false);
+      started.push(begun.flowId);
     }
-    // A step-up's flow is never counted: it needs a live session, and a flood of sign-ins must never stop it.
-    await store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c2');
-    const last = await store.start(app, newFlow(), '/agents', network);
-    if (last.outcome !== 'started') throw new Error(`not started: ${last.outcome}`);
-    expect(await store.take(app, last.flowId)).toMatchObject({ returnTo: '/agents' });
-    // Taken at its callback, its place is free again.
-    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    // Taken at its callback, a flow's place is free again: the next start pushes none out.
+    expect(await store.take(app, started.pop() ?? '')).toMatchObject({ returnTo: '/' });
+    clock.advanceBy(1000);
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started', gaveWay: false });
 
-    expect(await store.start(app, newFlow(), '/', network)).toEqual({ outcome: 'network_full' });
+    // At its share, a new sign-in is never refused: the oldest gives way, the network's count no higher.
+    clock.advanceBy(1000);
+    const fresh = await store.start(app, newFlow(), '/agents', network);
+    if (fresh.outcome !== 'started') throw new Error(`not started: ${fresh.outcome}`);
+    expect(fresh.gaveWay).toBe(true);
     expect(await openFrom(network)).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
     expect((await openFrom(network)).every((row) => row.step_up_challenge_id === null)).toBe(true);
-    // Another network is not held by it; a step-up still starts; once its flows end, this one isn't held either.
-    expect(await store.start(app, newFlow(), '/', '198.51.100.8')).toMatchObject({ outcome: 'started' });
-    await expect(
-      store.save(app, newFlow(), '/members/confirm', '0199a0f0-0000-7000-8000-0000000000c3'),
-    ).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
-    clock.advanceBy(LOGIN_FLOW_SECONDS * 1000);
-    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started' });
+    // The oldest's callback finds no flow, a plain refusal; the next oldest is still there, as is the new one.
+    const [oldest, nextOldest] = started;
+    expect(await store.take(app, oldest ?? '')).toBeUndefined();
+    expect(await store.take(app, nextOldest ?? '')).toMatchObject({ returnTo: '/' });
+    expect(await store.take(app, fresh.flowId)).toMatchObject({ returnTo: '/agents' });
+    expect(await store.take(app, stepUp)).toMatchObject({ stepUpChallengeId: '0199a0f0-0000-7000-8000-0000000000c2' });
+    // Another network is not touched by it.
+    expect(await store.start(app, newFlow(), '/', '198.51.100.8')).toMatchObject({
+      outcome: 'started',
+      gaveWay: false,
+    });
+  });
+
+  it('trims a network past its share back to it at its next start, its oldest giving way, its step-ups and ended flows left', async () => {
+    const at = new Date('2027-01-15T09:00:00Z');
+    const store = createLoginFlows({ clock: new FixedClock(at) });
+    const network = '198.51.100.12';
+    const admin = database.as('admin');
+    // Three past its share, as starts at once may leave it (no lock): each ending a second after the one before.
+    // Beside them a step-up's flow of the same network, older than all (n = 0), and an ended sign-in of its, neither
+    // counted.
+    await admin.query(
+      `insert into identity.login_flows
+         (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at, network_key, step_up_challenge_id)
+       select pg_catalog.sha256(('s208-trim-' || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/t' || n,
+         $1::timestamptz - pg_catalog.make_interval(secs => 700), $1::timestamptz + pg_catalog.make_interval(secs => n),
+         $2, case when n = 0 then '0199a0f0-0000-7000-8000-0000000000c4'::uuid end
+       from pg_catalog.generate_series(0, $3::int) as n
+       union all
+       select pg_catalog.sha256('s208-trim-ended'::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/ended',
+         $1::timestamptz - pg_catalog.make_interval(secs => 700), $1, $2, null`,
+      [at, network, MOST_OPEN_SIGN_INS_A_NETWORK + 3],
+    );
+    try {
+      expect(await store.start(app, newFlow(), '/new', network)).toMatchObject({ outcome: 'started', gaveWay: true });
+      const left = (
+        await admin.query<{ return_to: string }>(
+          'select return_to from identity.login_flows where network_key = $1 order by ends_at, return_to',
+          [network],
+        )
+      ).map((row) => row.return_to);
+      // The four oldest sign-ins gave way (/t1 to /t4): its newest 99 and the new one are left, with the step-up and
+      // the ended flow.
+      expect(left).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK + 2);
+      expect(left.slice(0, 3)).toEqual(['/ended', '/t0', '/t5']);
+      expect(left.at(-1)).toBe('/new');
+    } finally {
+      await admin.query('delete from identity.login_flows where network_key = $1', [network]);
+    }
+  });
+
+  it('at its share, only its own oldest sign-in gives way: never a newer step-up, never an older network’s, and never refused by the backstop', async () => {
+    const at = new Date('2027-01-17T09:00:00Z');
+    // A backstop already passed (the network alone holds 100): giving way keeps the count, so it is never asked.
+    const store = createLoginFlows({ clock: new FixedClock(at), mostOpen: 50 });
+    const network = '198.51.100.14';
+    const neighbour = '198.51.100.15';
+    const admin = database.as('admin');
+    // The network at its share (/s1 oldest to /s100), a step-up of its own NEWER than all of them, and a neighbour's
+    // sign-ins older than every one of the network's: a delete counting the step-up among the newest, or reaching past
+    // the network, would take the wrong rows.
+    await admin.query(
+      `insert into identity.login_flows
+         (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at, network_key, step_up_challenge_id)
+       select pg_catalog.sha256(('s209-share-' || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/s' || n,
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => 10 + n),
+         $2, null
+       from pg_catalog.generate_series(1, $4::int) as n
+       union all
+       select pg_catalog.sha256('s209-share-step-up'::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/step-up',
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => 500),
+         $2, '0199a0f0-0000-7000-8000-0000000000c5'::uuid
+       union all
+       select pg_catalog.sha256(('s209-neighbour-' || n)::bytea), 'S', 'N', pg_catalog.repeat('V', 43), '/n' || n,
+         $1::timestamptz - pg_catalog.make_interval(secs => 60), $1::timestamptz + pg_catalog.make_interval(secs => n),
+         $3, null
+       from pg_catalog.generate_series(1, 5) as n`,
+      [at, network, neighbour, MOST_OPEN_SIGN_INS_A_NETWORK],
+    );
+    try {
+      expect(await store.start(app, newFlow(), '/new', network)).toMatchObject({ outcome: 'started', gaveWay: true });
+      const left = (
+        await admin.query<{ return_to: string }>(
+          'select return_to from identity.login_flows where network_key = $1 order by ends_at, return_to',
+          [network],
+        )
+      ).map((row) => row.return_to);
+      // Only /s1 gave way: its other 99, the new one and its step-up are left.
+      expect(left).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK + 1);
+      expect(left.slice(0, 2)).toEqual(['/s2', '/s3']);
+      expect(left).toContain('/step-up');
+      expect(left).toContain('/new');
+      // The neighbour's five, older than all of them, are untouched.
+      expect(await openFrom(neighbour)).toHaveLength(5);
+    } finally {
+      await admin.query('delete from identity.login_flows where network_key = any($1)', [[network, neighbour]]);
+    }
+  });
+
+  it('two starts past a network’s share at once both start: the second waits on the oldest the first deletes', async () => {
+    const clock = new FixedClock(new Date('2027-01-20T09:00:00Z'));
+    const store = createLoginFlows({ clock });
+    const network = '198.51.100.13';
+    for (let open = 0; open < MOST_OPEN_SIGN_INS_A_NETWORK; open += 1) {
+      clock.advanceBy(1000);
+      await store.start(app, newFlow(), '/', network);
+    }
+    // The first start's transaction held open after its delete and insert, so the second meets its lock.
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached = (): void => undefined;
+    const firstIn = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const first = app.transaction().execute(async (tx) => {
+      const begun = await store.start(tx, newFlow(), '/first', network);
+      reached();
+      await held;
+      return begun;
+    });
+    await firstIn;
+    const second = store.start(app, newFlow(), '/second', network);
+    await waitUntilQueued(database.as('admin'), 1);
+    release();
+
+    expect(await first).toMatchObject({ outcome: 'started', gaveWay: true });
+    expect(await second).toMatchObject({ outcome: 'started', gaveWay: true });
+    // Both chose the same oldest; the second deleted none once it was gone, so the network is one over its share,
+    expect(await openFrom(network)).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK + 1);
+    // and its next start trims it back.
+    expect(await store.start(app, newFlow(), '/', network)).toMatchObject({ outcome: 'started', gaveWay: true });
+    expect(await openFrom(network)).toHaveLength(MOST_OPEN_SIGN_INS_A_NETWORK);
   });
 
   it(`past every network's backstop, still lets a quiet network in and refuses only a busy one: no lockout`, async () => {
@@ -324,7 +459,9 @@ describe(`SEC-HA-14 the sign-ins under way, held to their caps (S206 V8, Postgre
 
   it('counts the sign-ins under way from the partial indexes alone, never reading the rows', async () => {
     // The very statements the caps run, planned as the app role on one connection, so its settings hold for both:
-    // no scan of the table, nor a bitmap over it, to fall back on.
+    // no scan of the table, nor a bitmap over it, to fall back on. Vacuumed and analysed first, as autovacuum keeps the
+    // live table: the flows given way above leave dead rows and stale counts the planner would otherwise read.
+    await database.as('admin').query('vacuum analyze identity.login_flows');
     await app.connection().execute(async (db) => {
       await sql`set enable_seqscan = off`.execute(db);
       await sql`set enable_bitmapscan = off`.execute(db);
