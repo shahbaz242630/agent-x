@@ -240,9 +240,26 @@ function splitTheApi(from: Snapshot): Snapshot {
   ) as Mutable;
   apiReads.id = `${String(apiReads.id)}-api`;
   apiReads.name = `${String(apiReads.name)}-api`;
-  const kept = [...resources, jobs, apiReads].filter(
+  // And the witness log's snapshots (TR-1): the API reads them with the same read-only role, the jobs app alone adds one.
+  const restorerReadsSnapshots = resources.find(
     (resource) =>
-      at(resource, 'properties', 'description') !== 'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
+      at(resource, 'properties', 'description') ===
+      'chain-restore reads audit witness snapshots (deploy/azure/modules/evidence.bicep)',
+  );
+  if (restorerReadsSnapshots === undefined) throw new Error("no chain repair's read of the witness snapshots");
+  const apiReadsSnapshots = JSON.parse(
+    JSON.stringify(restorerReadsSnapshots)
+      .replaceAll('id-agentx-stg-chain-restore', 'id-agentx-stg-api')
+      .replace('chain-restore reads audit witness snapshots', 'api reads audit witness snapshots'),
+  ) as Mutable;
+  apiReadsSnapshots.id = `${String(apiReadsSnapshots.id)}-api`;
+  apiReadsSnapshots.name = `${String(apiReadsSnapshots.name)}-api`;
+  const dropped = new Set([
+    'api keeps audit anchors (deploy/azure/modules/evidence.bicep)',
+    'api writes and reads audit witness snapshots (deploy/azure/modules/evidence.bicep)',
+  ]);
+  const kept = [...resources, jobs, apiReads, apiReadsSnapshots].filter(
+    (resource) => !dropped.has(String(at(resource, 'properties', 'description'))),
   );
   return { ...from, predictedResources: kept as unknown as PredictedResource[] };
 }
@@ -790,6 +807,12 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-anchors$/,
       ),
       expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-witness$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Storage\/storageAccounts\/blobServices\/containers stagentxstg[a-z0-9]{6}\/default\/audit-witness-snapshots$/,
+      ),
+      expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
       // The anchors' role to the API's and the jobs' identities on staging (4D2e D13).
@@ -804,6 +827,29 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       // 4D2e E10: the chain repair's identity adds its records and reads the anchors, with the same two roles,
       // and reads the plans with a role of its own.
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      // TR-1: the witness log's role to the API's, the jobs' and the operator's identities, its read to the chain repair's;
+      // on its snapshots, the role to the API's and the jobs' (staging's anchors' keepers), the read to the chain repair's.
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
       expect.stringMatching(
         /^Microsoft\.Authorization\/roleAssignments [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
       ),
@@ -870,8 +916,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ).toEqual([
       'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
       'Microsoft.Consumption/budgets budget-agentx-staging',
-      // The evidence store's four, the activity downloads', CI's and the job watch's.
-      ...Array.from({ length: 7 }, (): unknown => role),
+      // The evidence store's five (the witness log's since TR-1), the activity downloads', CI's and the job watch's.
+      ...Array.from({ length: 8 }, (): unknown => role),
       // The live server's delete lock (S185), which CI may neither write nor lift.
       'Microsoft.Authorization/locks keep-live-database',
       // The main workspace's (AZ5e): the access alarm reads it, so CI may not delete it.
@@ -2625,7 +2671,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
         },
         split,
       );
-      expect(anchorRules(untold)).toEqual(['evidence-store ca-agentx-stg-api']);
+      // Its epoch went with them, yet it still writes the witness log (TR-1), named under the epoch: refused too.
+      expect(anchorRules(untold)).toEqual(['evidence-store ca-agentx-stg-api', 'anchor-epoch the deployment']);
       // Told the jobs app's identity, which may write; or another container; or another epoch than the jobs'.
       const told = (change: (entry: Mutable) => void, name: string): Snapshot =>
         changed(
@@ -2778,8 +2825,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
             name: 'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
             value: `[reference('${identityId('chain-restore')}', '2024-11-30').clientId]`,
           },
+          // The witness log's read (TR-1).
+          {
+            name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+            value: `[reference('${identityId('chain-restore')}', '2024-11-30').clientId]`,
+          },
         ]);
-        for (const setting of ['AGENTX_EVIDENCE_CLIENT_ID', 'AGENTX_AUDIT_ANCHORS_CLIENT_ID']) {
+        for (const setting of [
+          'AGENTX_EVIDENCE_CLIENT_ID',
+          'AGENTX_AUDIT_ANCHORS_CLIENT_ID',
+          'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+        ]) {
           const asOperator = changed(JOB('chain-restore'), (job) => {
             const clientId = settingsOf(job).find((entry) => entry.name === setting) ?? {};
             clientId.value = `[reference('${identityId('operator')}', '2024-11-30').clientId]`;
@@ -2862,6 +2918,354 @@ describe('SEC-OPS-09 each rule can fail', () => {
     });
   });
 
+  describe('evidence-store: the witness log (TR-1)', () => {
+    const ACTIONS_OF = 'Microsoft.Storage/storageAccounts/blobServices/containers/blobs';
+    const WITNESS = (resource: PredictedResource) =>
+      IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices/containers')(resource) &&
+      resource.id.endsWith('/audit-witness');
+    const groupId = (): string =>
+      String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
+    const ROLE = (resource: PredictedResource) =>
+      ROLE_DEFINITIONS(resource) && resource.name === bicepGuid(groupId(), 'audit-witness');
+    const GRANT = (description: string) => (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) &&
+      at(resource.properties, 'description') === `${description} (deploy/azure/modules/evidence.bicep)`;
+    const API_WRITES = GRANT('api writes and reads audit witness heads');
+    const JOBS_WRITE = GRANT('jobs writes and reads audit witness heads');
+    const OPERATOR_WRITES = GRANT('operator writes and reads audit witness heads');
+    const RESTORER_READS = GRANT('chain-restore reads audit witness heads');
+    const permissionsOf = (role: Mutable): Mutable => first(at(role, 'properties', 'permissions'));
+    const witnessSettings = (workload: Mutable): Mutable[] =>
+      settingsOf(workload).filter((entry) => String(entry.name).startsWith('AGENTX_AUDIT_WITNESS_'));
+    const identityId = (workload: string, from: Snapshot = staging): string =>
+      String(
+        from.predictedResources.find(
+          (resource) =>
+            resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities' &&
+            resource.name.endsWith(`-${workload}`),
+        )?.id,
+      );
+    /** The store's problems in production, rule and resource: the epoch's part is the anchors' tests'. */
+    const productionStoreRules = (snapshotted: Snapshot) =>
+      policyProblems(snapshotted, { region: 'uaenorth', environment: 'production' })
+        .filter(({ rule }) => rule === 'evidence-store')
+        .map(({ rule, resource }) => `${rule} ${resource}`);
+    const toWorkload = (from: string, to: string) => (grant: Mutable) => {
+      inside(grant, 'properties').principalId = String(at(grant, 'properties', 'principalId')).replace(
+        `id-agentx-stg-${from}`,
+        `id-agentx-stg-${to}`,
+      );
+    };
+
+    it("a third container in the write-once account, private, kept by the account's own policy", () => {
+      expect(staging.predictedResources.filter(WITNESS)).toHaveLength(1);
+      expect(brokenRules(changed(WITNESS, (found) => (inside(found, 'properties').publicAccess = 'Blob')))).toEqual([
+        'evidence-store',
+      ]);
+      expect(brokenRules(without(WITNESS))).toEqual(['required', 'evidence-store']);
+      expect(
+        brokenRules(changed(WITNESS, (found) => (found.id = String(found.id).replace(/audit-witness$/, 'other')))),
+      ).toEqual(['evidence-store']);
+    });
+
+    it('its role adds a new file and reads, and can never overwrite or delete', () => {
+      expect(at(staging.predictedResources.find(ROLE)?.properties, 'permissions')).toEqual([
+        {
+          actions: [],
+          notActions: [],
+          dataActions: [`${ACTIONS_OF}/add/action`, `${ACTIONS_OF}/read`],
+          notDataActions: [],
+        },
+      ]);
+      for (const change of [
+        (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/write`),
+        (role: Mutable) => (at(permissionsOf(role), 'dataActions') as string[]).push(`${ACTIONS_OF}/delete`),
+        (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/read`]),
+        (role: Mutable) => (permissionsOf(role).dataActions = [`${ACTIONS_OF}/add/action`]),
+        (role: Mutable) => (permissionsOf(role).actions = ['Microsoft.Storage/storageAccounts/read']),
+        (role: Mutable) =>
+          (inside(role, 'properties').assignableScopes = ['/subscriptions/00000000-0000-0000-0000-000000000001']),
+      ]) {
+        expect(brokenRules(changed(ROLE, change))).toEqual(['evidence-store']);
+      }
+      expect(brokenRules(changed(ROLE, (role) => (permissionsOf(role).dataActions = ['*'])))).toEqual([
+        'evidence-store',
+        'role-actions',
+      ]);
+      expect(brokenRules(without(ROLE))).toEqual(['evidence-store']);
+    });
+
+    it('given once on its own container to every app that runs the API and the operator (WITNESS_WRITERS), to no one else', () => {
+      for (const grant of [API_WRITES, JOBS_WRITE, OPERATOR_WRITES]) {
+        expect(staging.predictedResources.filter(grant)).toHaveLength(1);
+        // Gone: that copy's stops would answer to be retried, its heads never seen by the others.
+        expect(brokenRules(without(grant))).toEqual(['evidence-store']);
+        for (const change of [
+          (each: Mutable) =>
+            (each.id = String(each.id).replace('/containers/audit-witness', '/containers/audit-anchors')),
+          (each: Mutable) =>
+            (each.id = String(each.id).replace('/containers/audit-witness', '/containers/audit-exports')),
+          (each: Mutable) => (inside(each, 'properties').principalType = 'User'),
+        ]) {
+          expect(brokenRules(changed(grant, change))).toEqual(['evidence-store']);
+        }
+        const twice = structuredClone(staging.predictedResources.find(grant)) as unknown as Mutable;
+        twice.id = `${String(twice.id)}-second`;
+        expect(brokenRules(withExtra(twice))).toEqual(['evidence-store']);
+      }
+      // Given to a job that writes no chain instead, or to the chain repair, which only reads.
+      expect(brokenRules(changed(API_WRITES, toWorkload('api', 'migrate')))).toEqual(['evidence-store']);
+      const restorerWrites = structuredClone(staging.predictedResources.find(API_WRITES)) as unknown as Mutable;
+      restorerWrites.id = `${String(restorerWrites.id)}-restorer`;
+      toWorkload('api', 'chain-restore')(restorerWrites);
+      expect(brokenRules(withExtra(restorerWrites))).toEqual(['evidence-store']);
+    });
+
+    it("the chain repair reads it with the anchors' read-only role, and nothing more", () => {
+      const roleIdOf = (find: (resource: PredictedResource) => boolean): string =>
+        String(at(staging.predictedResources.find(find)?.properties, 'roleDefinitionId'));
+      expect(roleIdOf(RESTORER_READS)).toContain(bicepGuid(groupId(), 'audit-anchors-reader'));
+      expect(brokenRules(without(RESTORER_READS))).toEqual(['evidence-store']);
+      // The writers' role in its place: it could add a head the others believe.
+      const asWriter = changed(RESTORER_READS, (grant: Mutable) => {
+        inside(grant, 'properties').roleDefinitionId = roleIdOf(API_WRITES);
+      });
+      expect(brokenRules(asWriter)).toEqual(['evidence-store']);
+      expect(brokenRules(changed(RESTORER_READS, toWorkload('chain-restore', 'operator')))).toEqual(['evidence-store']);
+      // The read-only role given to the API on the witness log too, beside its writing.
+      const apiReads = structuredClone(staging.predictedResources.find(RESTORER_READS)) as unknown as Mutable;
+      apiReads.id = `${String(apiReads.id)}-api`;
+      toWorkload('chain-restore', 'api')(apiReads);
+      expect(brokenRules(withExtra(apiReads))).toEqual(['evidence-store']);
+    });
+
+    it('every app that runs the API, the operator and the chain repair alone are told of it, each as its own identity', () => {
+      const STORE_NAME = String(staging.predictedResources.find(EVIDENCE_STORE)?.name);
+      const url = `[format('https://{0}.blob.{1}/{2}', '${STORE_NAME}', environment().suffixes.storage, 'audit-witness')]`;
+      for (const [pick, workload] of [
+        [APP('api'), 'api'],
+        [JOB('operator'), 'operator'],
+        [JOB('chain-restore'), 'chain-restore'],
+      ] as const) {
+        expect(witnessSettings(staging.predictedResources.find(pick) as unknown as Mutable)).toEqual([
+          { name: 'AGENTX_AUDIT_WITNESS_URL', value: url },
+          {
+            name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+            value: `[reference('${identityId(workload)}', '2024-11-30').clientId]`,
+          },
+          // The snapshots for the API and the chain repair (TR-1); never the operator.
+          ...(workload === 'operator'
+            ? []
+            : [
+                {
+                  name: 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL',
+                  value: url.replace("'audit-witness'", "'audit-witness-snapshots'"),
+                },
+              ]),
+        ]);
+      }
+      const entry = (app: Mutable, name: string): Mutable =>
+        witnessSettings(app).find((each) => each.name === name) ?? {};
+      for (const change of [
+        (app: Mutable) => {
+          const told = entry(app, 'AGENTX_AUDIT_WITNESS_URL');
+          told.value = String(told.value).replace("'audit-witness'", "'audit-anchors'");
+        },
+        (app: Mutable) => {
+          const told = entry(app, 'AGENTX_AUDIT_WITNESS_URL');
+          told.value = String(told.value).replace(`'${STORE_NAME}'`, "'stagentxother'");
+        },
+        (app: Mutable) => settingsOf(app).push({ name: 'AGENTX_AUDIT_WITNESS_DIR', value: '/mnt/witness' }),
+        (app: Mutable) => {
+          containerOf(app).env = settingsOf(app).filter((each) => each.name !== 'AGENTX_AUDIT_WITNESS_CLIENT_ID');
+        },
+        // Untold altogether: its stops would never be witnessed.
+        (app: Mutable) => {
+          containerOf(app).env = settingsOf(app).filter(
+            (each) => !String(each.name).startsWith('AGENTX_AUDIT_WITNESS_'),
+          );
+        },
+        // Told the operator's identity, which holds the same role: still refused.
+        (app: Mutable) => {
+          const told = entry(app, 'AGENTX_AUDIT_WITNESS_CLIENT_ID');
+          told.value = String(told.value).replace(identityId('api'), identityId('operator'));
+        },
+      ]) {
+        expect(brokenRules(changed(APP('api'), change))).toEqual(['evidence-store']);
+      }
+      // The chain repair told an identity that may write.
+      expect(
+        brokenRules(
+          changed(JOB('chain-restore'), (job) => {
+            const told = entry(job, 'AGENTX_AUDIT_WITNESS_CLIENT_ID');
+            told.value = String(told.value).replace(identityId('chain-restore'), identityId('operator'));
+          }),
+        ),
+      ).toEqual(['evidence-store']);
+      const told = changed(JOB('migrate'), (job) =>
+        settingsOf(job).push({ name: 'AGENTX_AUDIT_WITNESS_URL', value: 'x' }),
+      );
+      expect(policyProblems(told, STAGING)).toEqual([
+        {
+          rule: 'evidence-store',
+          resource: 'job-agentx-stg-migrate',
+          message:
+            "sets AGENTX_AUDIT_WITNESS_URL: only every app that runs the API and the operator's job write the witness log, and the chain repair's job reads it",
+        },
+      ]);
+    });
+
+    describe('its snapshots, apart from the heads', () => {
+      const SNAPSHOTS = (resource: PredictedResource) =>
+        IN_EVIDENCE_STORE('Microsoft.Storage/storageAccounts/blobServices/containers')(resource) &&
+        resource.id.endsWith('/audit-witness-snapshots');
+      const API_KEEPS = GRANT('api writes and reads audit witness snapshots');
+      const JOBS_KEEP = GRANT('jobs writes and reads audit witness snapshots');
+      const RESTORER_READS_SNAPSHOTS = GRANT('chain-restore reads audit witness snapshots');
+      const API_READS_SNAPSHOTS = GRANT('api reads audit witness snapshots');
+      const roleOf = (grant: Mutable): string => String(at(grant, 'properties', 'roleDefinitionId'));
+      const readOnlyRole = (): string => bicepGuid(groupId(), 'audit-anchors-reader');
+      const writeRole = (): string => bicepGuid(groupId(), 'audit-witness');
+
+      it('a fourth container, distinct from the heads, private', () => {
+        expect(staging.predictedResources.filter(SNAPSHOTS)).toHaveLength(1);
+        expect(brokenRules(without(SNAPSHOTS))).toEqual(['required', 'evidence-store']);
+        expect(brokenRules(changed(SNAPSHOTS, (found) => (inside(found, 'properties').publicAccess = 'Blob')))).toEqual(
+          ['evidence-store'],
+        );
+        // Heads and snapshots in one container: the snapshots' grants then land on the heads, and are refused.
+        const one = changed(
+          (resource) =>
+            SNAPSHOTS(resource) || (ASSIGNMENTS(resource) && resource.id.includes('/audit-witness-snapshots/')),
+          (found) => (found.id = String(found.id).replace('/audit-witness-snapshots', '/audit-witness')),
+        );
+        expect(brokenRules(one)).toContain('evidence-store');
+        // A workload told the heads' container for its snapshots, or the snapshots' for its heads.
+        for (const [setting, from, to] of [
+          ['AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL', "'audit-witness-snapshots'", "'audit-witness'"],
+          ['AGENTX_AUDIT_WITNESS_URL', "'audit-witness'", "'audit-witness-snapshots'"],
+        ] as const) {
+          const swapped = changed(APP('api'), (app) => {
+            const told = settingsOf(app).find((each) => each.name === setting) ?? {};
+            told.value = String(told.value).replace(from, to);
+          });
+          expect({ setting, rules: brokenRules(swapped) }).toEqual({ setting, rules: ['evidence-store'] });
+        }
+      });
+
+      it("only the app holding the jobs adds one (staging's API too); the operator has nothing there", () => {
+        expect(roleOf(staging.predictedResources.find(JOBS_KEEP) as unknown as Mutable)).toContain(writeRole());
+        expect(roleOf(staging.predictedResources.find(API_KEEPS) as unknown as Mutable)).toContain(writeRole());
+        expect(roleOf(staging.predictedResources.find(RESTORER_READS_SNAPSHOTS) as unknown as Mutable)).toContain(
+          readOnlyRole(),
+        );
+        for (const grant of [API_KEEPS, JOBS_KEEP, RESTORER_READS_SNAPSHOTS]) {
+          expect(brokenRules(without(grant))).toEqual(['evidence-store']);
+        }
+        // The operator given the snapshots' writing: it could add a snapshot leaving a head out.
+        expect(brokenRules(changed(JOBS_KEEP, toWorkload('jobs', 'operator')))).toEqual(['evidence-store']);
+        const operatorKeeps = structuredClone(staging.predictedResources.find(JOBS_KEEP)) as unknown as Mutable;
+        operatorKeeps.id = `${String(operatorKeeps.id)}-operator`;
+        toWorkload('jobs', 'operator')(operatorKeeps);
+        expect(brokenRules(withExtra(operatorKeeps))).toEqual(['evidence-store']);
+        // The chain repair given the writing role there.
+        expect(
+          brokenRules(
+            changed(RESTORER_READS_SNAPSHOTS, (grant) => {
+              inside(grant, 'properties').roleDefinitionId = roleOf(grant).replace(readOnlyRole(), writeRole());
+            }),
+          ),
+        ).toEqual(['evidence-store']);
+        // The operator told where they are.
+        const told = changed(JOB('operator'), (job) =>
+          settingsOf(job).push({ name: 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL', value: 'x' }),
+        );
+        expect(policyProblems(told, STAGING)).toEqual([
+          {
+            rule: 'evidence-store',
+            resource: 'job-agentx-stg-operator',
+            message:
+              "sets AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: only every app that runs the API and the chain repair's job read the witness snapshots",
+          },
+        ]);
+      });
+
+      it('in production the API reads them alone: given the writing role there, it is refused', () => {
+        const split = productionLike({ subject: true });
+        const rules = productionStoreRules;
+        expect(rules(split)).toEqual([]);
+        expect(split.predictedResources.filter(API_KEEPS)).toEqual([]);
+        const apiGrant = split.predictedResources.find(API_READS_SNAPSHOTS) as unknown as Mutable;
+        expect(roleOf(apiGrant)).toContain(readOnlyRole());
+        expect(roleOf(apiGrant)).not.toContain(writeRole());
+        // Its read made the writing role: a compromised web copy could add a snapshot leaving a real head out.
+        const writes = changed(
+          API_READS_SNAPSHOTS,
+          (grant) => {
+            inside(grant, 'properties').roleDefinitionId = roleOf(grant).replace(readOnlyRole(), writeRole());
+          },
+          split,
+        );
+        expect(rules(writes)).toContain('evidence-store the deployment');
+        // Or the writing role given beside its read, as staging's API holds it.
+        const beside = structuredClone(split.predictedResources.find(JOBS_KEEP)) as unknown as Mutable;
+        beside.id = `${String(beside.id)}-api`;
+        toWorkload('jobs', 'api')(beside);
+        expect(
+          rules({
+            ...split,
+            predictedResources: [...split.predictedResources, beside as unknown as PredictedResource],
+          }),
+        ).not.toEqual([]);
+        // Its read taken away: its web copies told a store they can't read.
+        expect(
+          rules({
+            ...split,
+            predictedResources: split.predictedResources.filter((each) => !API_READS_SNAPSHOTS(each)),
+          }),
+        ).toEqual(expect.arrayContaining(['evidence-store the deployment', 'evidence-store ca-agentx-stg-api']));
+      });
+    });
+
+    it("in production the API's web copies write it as the API's identity, beside the jobs app (WITNESS_WRITERS)", () => {
+      const split = productionLike({ subject: true });
+      const witnessRules = productionStoreRules;
+      expect(witnessRules(split)).toEqual([]);
+      for (const workload of ['api', 'jobs']) {
+        expect(witnessSettings(split.predictedResources.find(APP(workload)) as unknown as Mutable)).toEqual([
+          { name: 'AGENTX_AUDIT_WITNESS_URL', value: expect.stringContaining("'audit-witness')]") as unknown },
+          {
+            name: 'AGENTX_AUDIT_WITNESS_CLIENT_ID',
+            value: `[reference('${identityId(workload, split)}', '2024-11-30').clientId]`,
+          },
+          {
+            name: 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL',
+            value: expect.stringContaining("'audit-witness-snapshots')]") as unknown,
+          },
+        ]);
+      }
+      // The web copies' writing taken away, as their anchors are read-only: every stop they answer would wait.
+      const apiCannot = {
+        ...split,
+        predictedResources: split.predictedResources.filter((resource) => !API_WRITES(resource)),
+      };
+      expect(witnessRules(apiCannot)).toEqual(
+        expect.arrayContaining(['evidence-store the deployment', 'evidence-store ca-agentx-stg-api']),
+      );
+      // The jobs app told the API's identity.
+      const asApi = changed(
+        APP('jobs'),
+        (app) => {
+          const told = witnessSettings(app).find((each) => each.name === 'AGENTX_AUDIT_WITNESS_CLIENT_ID') ?? {};
+          told.value = String(told.value).replace('id-agentx-stg-jobs', 'id-agentx-stg-api');
+        },
+        split,
+      );
+      // Refused for the heads, and for the snapshots, which production's API identity may only read.
+      expect(witnessRules(asApi)).toEqual(['evidence-store ca-agentx-stg-jobs', 'evidence-store ca-agentx-stg-jobs']);
+    });
+  });
+
   it("anchor-epoch: the operator told another epoch than the API's, or none, or another workload told one (4D2e E9)", () => {
     const epochOf = (workload: Mutable): unknown[] =>
       settingsOf(workload)
@@ -2888,7 +3292,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         rule: 'anchor-epoch',
         resource: 'job-agentx-stg-migrate',
         message:
-          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors, the operator's job and the chain repair's",
+          "sets AGENTX_ANCHOR_EPOCH: only the app that holds the jobs, the web copies that read its anchors or write the witness log, the operator's job and the chain repair's",
       },
     ]);
   });
@@ -4345,6 +4749,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
     const counted = (filter: string) => query(`ContainerAppConsoleLogs | ${filter} | summarize Events = count()`);
     expect(brokenRules(without(INTEGRITY_ALERT))).toEqual(['audit-integrity-alert']);
+    // TR-1: the jobs' lease taken early and a hand-off held before sending are the SEV-1 too; either left out is refused.
+    const deployed = String(criterion(staging.predictedResources.find(INTEGRITY_ALERT) as unknown as Mutable).query);
+    for (const event of ['jobs.lease_taken_early', 'handoff.held_before_sending']) {
+      expect(deployed).toContain(`, "${event}"`);
+      const leftOut = query(deployed.replace(`, "${event}"`, ''));
+      expect({ event, rules: brokenRules(changed(INTEGRITY_ALERT, leftOut)) }).toEqual({
+        event,
+        rules: ['audit-integrity-alert'],
+      });
+    }
     for (const change of [
       // A check that broke is the alarm too, not just a chain that failed.
       counted('where tostring(parse_json(Log).event) == "audit.integrity_failed"'),
@@ -4790,6 +5204,21 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
     expect(brokenRules(without(ANCHOR_STORE_ALERT))).toEqual(['anchor-store-alert']);
+    // TR-1: the witness log's lasting errors ride on the same alert; any one left out is refused.
+    const deployed = String(criterion(staging.predictedResources.find(ANCHOR_STORE_ALERT) as unknown as Mutable).query);
+    for (const event of [
+      'audit.witness_write_failing',
+      'audit.witness_read_failing',
+      'audit.witness_store_not_set',
+      'audit.witness_beyond_memory',
+    ]) {
+      expect(deployed).toContain(`, "${event}"`);
+      const leftOut = query(deployed.replace(`, "${event}"`, ''));
+      expect({ event, rules: brokenRules(changed(ANCHOR_STORE_ALERT, leftOut)) }).toEqual({
+        event,
+        rules: ['anchor-store-alert'],
+      });
+    }
     for (const change of [
       query(
         'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "audit.anchor_store_write_failed" | summarize Events = count()',
@@ -6890,10 +7319,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
     });
     // Stage G's copy's anchors role (4D2e) reads it only on the copy's run, a load run, so always split.
     expect(at(template, 'resources', 'throwawayAnchorsKept', 'condition')).toBe("[variables('throwaway')]");
+    // And its witness log's role for the jobs app (TR-1), on the same run alone.
+    expect(at(template, 'resources', 'throwawayWitnessJobs', 'condition')).toBe("[variables('throwaway')]");
+    expect(at(template, 'resources', 'throwawaySnapshotsJobs', 'condition')).toBe("[variables('throwaway')]");
     expect(at(template, 'variables', 'throwaway')).toMatch(/^\[and\(parameters\('loadRun'\), /);
     expect(at(template, 'variables', 'split')).toMatch(/^\[or\(parameters\('loadRun'\), /);
     // Every other read of it sits in the branch for the jobs app alone, which ARM's if() evaluates only when taken.
-    const { throwawayAnchorsKept: _onTheCopy, ...others } = at(template, 'resources') as Record<string, unknown>;
+    const {
+      throwawayAnchorsKept: _onTheCopy,
+      throwawayWitnessJobs: _witnessOnTheCopy,
+      throwawaySnapshotsJobs: _snapshotsOnTheCopy,
+      ...others
+    } = at(template, 'resources') as Record<string, unknown>;
     const compiled = JSON.stringify({ ...(template as Record<string, unknown>), resources: others });
     const reads = [...compiled.matchAll(/reference\('jobsIdentity'\)/g)].map((match) => match.index);
     expect(reads.length).toBeGreaterThan(0);
@@ -8916,6 +9353,8 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     expect(policyProblems(plainLoad.together, STAGING)).toEqual([]);
     expect(JSON.stringify(plainLoad.together)).not.toContain('stageg-job');
     expect(JSON.stringify(plainLoad.together)).not.toContain('audit-anchors-g-');
+    expect(JSON.stringify(plainLoad.together)).not.toContain('audit-witness-g-');
+    expect(JSON.stringify(plainLoad.together)).not.toContain('audit-witness-snapshots-g-');
   });
 
   it('load-database: the API, its jobs or a load job somewhere else, or another job on the copy', () => {
@@ -9025,6 +9464,162 @@ describe("Stage G's run on its throwaway copy (4D2e)", () => {
     ]);
     // Out of the copy's run, a copy's container is no one's.
     const stray = found(copy.together, ANCHORS_ON_COPY);
+    expect(
+      brokenRules({
+        predictedResources: [...staging.predictedResources, stray as unknown as PredictedResource],
+        diagnostics: [],
+      }),
+    ).toEqual(['load-database']);
+  });
+
+  it("load-database and evidence-store: the copy's witness log (TR-1) in staging's container, another copy's, or written by another", () => {
+    const WITNESS = 'audit-witness-g-a1b2c3d4';
+    const WITNESS_ON_COPY = (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Storage/storageAccounts/blobServices/containers' &&
+      resource.id.endsWith(`/${WITNESS}`);
+    const WITNESS_ROLE = (workload: string) => (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Authorization/roleAssignments' &&
+      resource.id.includes(`/containers/${WITNESS}/`) &&
+      String(at(resource.properties, 'principalId')).includes(`id-agentx-stg-${workload}`);
+    // Both apps that run the API on the copy write its chains: each told the copy's own witness log, the API with the
+    // epoch its files are named under, as it keeps no anchors there.
+    for (const app of ['api', 'jobs']) {
+      expect(value(found(copy.together, APP(app)), 'AGENTX_AUDIT_WITNESS_URL')).toMatch(
+        new RegExp(`'${WITNESS}'\\)\\]$`),
+      );
+      expect(found(copy.together, WITNESS_ROLE(app))).toBeDefined();
+    }
+    expect(value(found(copy.together, APP('api')), 'AGENTX_ANCHOR_EPOCH')).toBe('1');
+    expect(found(copy.together, WITNESS_ON_COPY)).toBeDefined();
+    // The operator and the chain repair stay on staging's own witness log.
+    for (const job of ['operator', 'chain-restore']) {
+      expect(value(found(copy.together, JOB(job)), 'AGENTX_AUDIT_WITNESS_URL')).toMatch(/'audit-witness'\)\]$/);
+    }
+    // The API told staging's container: the copy's heads would read to staging as chains cut.
+    const stagingWitness = onCopy(APP('api'), (app) => {
+      for (const entry of settingsOf(app).filter(({ name }) => name === 'AGENTX_AUDIT_WITNESS_URL')) {
+        entry.value = String(entry.value).replace(WITNESS, 'audit-witness');
+      }
+    });
+    expect(said(stagingWitness)).toEqual([
+      `evidence-store ca-agentx-stg-api: must set AGENTX_AUDIT_WITNESS_URL to this deployment's store's ${WITNESS} container, and AGENTX_AUDIT_WITNESS_CLIENT_ID to the client ID of the identity its role is given to, each once as a value, and no other AGENTX_AUDIT_WITNESS_ setting`,
+    ]);
+    // The API's web copies told no epoch, or another than the jobs': they would write another epoch's heads.
+    expect(brokenRules(onCopy(APP('api'), setTo('AGENTX_ANCHOR_EPOCH', '7')))).toEqual(['anchor-epoch']);
+    expect(
+      brokenRules(
+        onCopy(APP('api'), (app) => {
+          containerOf(app).env = settingsOf(app).filter(({ name }) => name !== 'AGENTX_ANCHOR_EPOCH');
+        }),
+      ),
+    ).toEqual(['anchor-epoch']);
+    const without = (pick: (resource: PredictedResource) => boolean): Snapshot => ({
+      predictedResources: copy.together.predictedResources.filter((resource) => !pick(resource)),
+      diagnostics: [],
+    });
+    for (const app of ['api', 'jobs']) {
+      expect(said(without(WITNESS_ROLE(app)))).toEqual([
+        `load-database the deployment: must give the witness log's role on ${WITNESS} once to the API and once to the jobs app; it gives 1`,
+      ]);
+    }
+    expect(
+      said(
+        without(
+          (resource) => WITNESS_ON_COPY(resource) || WITNESS_ROLE('api')(resource) || WITNESS_ROLE('jobs')(resource),
+        ),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        `load-database the deployment: needs Stage G's copy's own witness container, ${WITNESS}: never staging's audit-witness`,
+      ]),
+    );
+    const another = onCopy(
+      (resource) => WITNESS_ON_COPY(resource) || WITNESS_ROLE('api')(resource) || WITNESS_ROLE('jobs')(resource),
+      (resource) => {
+        resource.id = String(resource.id).replace(WITNESS, 'audit-witness-g-zzzzzzzz');
+        resource.name = String(resource.name).replace(WITNESS, 'audit-witness-g-zzzzzzzz');
+      },
+    );
+    expect(brokenRules(another)).toContain('load-database');
+    // The role given to the operator in the API's place, or the anchors' role in the witness log's.
+    const toOperator = onCopy(WITNESS_ROLE('api'), (role) => {
+      inside(role, 'properties').principalId = String(at(role, 'properties', 'principalId')).replace(
+        'id-agentx-stg-api',
+        'id-agentx-stg-operator',
+      );
+    });
+    expect(said(toOperator)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^load-database [0-9a-f-]+: must give the witness log's role on the copy's witness container to the API's and the jobs app's identities alone$/,
+        ),
+      ]),
+    );
+    const anchorsRole = onCopy(WITNESS_ROLE('jobs'), (role) => {
+      inside(role, 'properties').roleDefinitionId = String(at(role, 'properties', 'roleDefinitionId')).replace(
+        bicepGuid(String(found(copy.together, type('Microsoft.Resources/resourceGroups')).id), 'audit-witness'),
+        bicepGuid(String(found(copy.together, type('Microsoft.Resources/resourceGroups')).id), 'audit-anchors'),
+      );
+    });
+    expect(brokenRules(anchorsRole)).toContain('load-database');
+    // Out of the copy's run, a copy's witness container is no one's.
+    const stray = found(copy.together, WITNESS_ON_COPY);
+    expect(
+      brokenRules({
+        predictedResources: [...staging.predictedResources, stray as unknown as PredictedResource],
+        diagnostics: [],
+      }),
+    ).toEqual(['load-database']);
+  });
+
+  it("load-database: the copy's witness snapshots (TR-1) added by the jobs app alone, read by the API", () => {
+    const SNAPSHOTS = 'audit-witness-snapshots-g-a1b2c3d4';
+    const ON_COPY = (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Storage/storageAccounts/blobServices/containers' &&
+      resource.id.endsWith(`/${SNAPSHOTS}`);
+    const GIVEN = (workload: string) => (resource: PredictedResource) =>
+      resource.type === 'Microsoft.Authorization/roleAssignments' &&
+      resource.id.includes(`/containers/${SNAPSHOTS}/`) &&
+      String(at(resource.properties, 'principalId')).includes(`id-agentx-stg-${workload}`);
+    const group = String(found(copy.together, type('Microsoft.Resources/resourceGroups')).id);
+    expect(found(copy.together, ON_COPY)).toBeDefined();
+    expect(String(at(found(copy.together, GIVEN('jobs')), 'properties', 'roleDefinitionId'))).toContain(
+      bicepGuid(group, 'audit-witness'),
+    );
+    expect(String(at(found(copy.together, GIVEN('api')), 'properties', 'roleDefinitionId'))).toContain(
+      bicepGuid(group, 'audit-anchors-reader'),
+    );
+    for (const app of ['api', 'jobs']) {
+      expect(value(found(copy.together, APP(app)), 'AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL')).toMatch(
+        new RegExp(`'${SNAPSHOTS}'\\)\\]$`),
+      );
+    }
+    const without = (pick: (resource: PredictedResource) => boolean): Snapshot => ({
+      predictedResources: copy.together.predictedResources.filter((resource) => !pick(resource)),
+      diagnostics: [],
+    });
+    expect(said(without(GIVEN('jobs')))).toEqual(
+      expect.arrayContaining([
+        `load-database the deployment: must give on ${SNAPSHOTS} the witness log's role once to the jobs app and the read-only role once to the API; it gives 1`,
+      ]),
+    );
+    // The API's web copies given the writing role there, in place of reading.
+    const apiWrites = onCopy(GIVEN('api'), (grant) => {
+      inside(grant, 'properties').roleDefinitionId = String(at(grant, 'properties', 'roleDefinitionId')).replace(
+        bicepGuid(group, 'audit-anchors-reader'),
+        bicepGuid(group, 'audit-witness'),
+      );
+    });
+    expect(brokenRules(apiWrites)).toEqual(['load-database']);
+    expect(said(without((resource) => ON_COPY(resource) || GIVEN('api')(resource) || GIVEN('jobs')(resource)))).toEqual(
+      expect.arrayContaining([
+        `load-database the deployment: needs Stage G's copy's own snapshots container, ${SNAPSHOTS}: never staging's audit-witness-snapshots`,
+      ]),
+    );
+    // The API told staging's snapshots on the copy: it would start from staging's heads.
+    const stagingSnapshots = onCopy(APP('api'), setTo('AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL', 'x'));
+    expect(brokenRules(stagingSnapshots)).toEqual(['evidence-store']);
+    const stray = found(copy.together, ON_COPY);
     expect(
       brokenRules({
         predictedResources: [...staging.predictedResources, stray as unknown as PredictedResource],

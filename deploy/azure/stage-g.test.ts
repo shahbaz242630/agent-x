@@ -892,13 +892,14 @@ describe('delete', () => {
     expect(done.azure.deleted).toEqual([COPY]);
     const state = readStateFile();
     expect(state.copy).toBeUndefined();
-    expect(state.anchors).toEqual([
-      {
-        container: `audit-anchors-g-${ID}`,
+    // Its witness log (TR-1) kept beside its anchors, for the same days.
+    expect(state.anchors).toEqual(
+      [`audit-anchors-g-${ID}`, `audit-witness-g-${ID}`, `audit-witness-snapshots-g-${ID}`].map((container) => ({
+        container,
         server: COPY,
         lockedUntil: expect.stringMatching(/^2026-11-09T11:/) as unknown,
-      },
-    ]);
+      })),
+    );
     expect(done.text).toContain('node deploy/azure/deploy.ts apps\n');
     expect(done.text).toContain('node deploy/azure/operator.ts handoff-resume --reason <case reference>');
     expect(done.text).toContain('delete --anchors');

@@ -25,7 +25,7 @@ var accessAdministrator = 'f58310d9-a9f6-439a-9e8d-f62e7b41a168'
 var vaultReaderRole = '4633458b-17de-408a-b874-0445c86b69e6'
 
 // The custom roles our Bicep gives, by the word each is named from (guid(resourceGroup().id, word)): CI's and the
-// job watch's (names.bicep), the evidence store's four and the activity downloads' (their modules).
+// job watch's (names.bicep), the evidence store's five and the activity downloads' (their modules).
 // infra.test.ts holds this list equal to every role the deployments give.
 var customRoleWords = [
   'release'
@@ -33,6 +33,7 @@ var customRoleWords = [
   'evidence-writer'
   'audit-anchors'
   'audit-anchors-reader'
+  'audit-witness'
   'evidence-plan-reader'
   'activity-downloads'
 ]

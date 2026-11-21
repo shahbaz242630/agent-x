@@ -1,7 +1,12 @@
-// The write-once store, with two containers: our team's exports of an
+// The write-once store, with four containers: our team's exports of an
 // organisation's audit log (`audit-exports`; ADR-005 §6, Phase 3 E10c; decision
-// 27), and the audit chains' anchors (`audit-anchors`; 4D2e E, PL-58), kept apart
-// from the database so a chain wound back shows, across restarts too. The
+// 27), the audit chains' anchors (`audit-anchors`; 4D2e E, PL-58), kept apart
+// from the database so a chain wound back shows, across restarts too, and the
+// witness log (`audit-witness`; TR-1), where every copy of the API, and the
+// operator, puts each chain head it wrote before saying it was done, so a chain
+// cut below a head any copy saw shows to every other copy, and that log's hourly
+// snapshots (`audit-witness-snapshots`), apart from the heads so that a copy
+// that may add a head can't add a snapshot leaving one out. The
 // operator's `audit-export` job writes each export once, as its own identity
 // (apps/operator/src/azure-blob-store.ts); the API writes each anchor file once,
 // as its own (packages/platform/src/storage/write-once.ts). Nothing, us included,
@@ -9,7 +14,7 @@
 //
 // - version-level immutability, set when the account is created (Microsoft:
 //   it can't be added later), and every container takes the account's policy,
-//   so the two keep a file alike: staging a few days, Unlocked;
+//   so the four keep a file alike: staging a few days, Unlocked;
 //   production five years, Locked. A policy can't be created Locked, so
 //   production's first foundation runs twice, Unlocked then Locked, and a
 //   Locked account can't be deleted until its last file's time is up
@@ -35,7 +40,17 @@
 //   overwrite or delete. The chain repair's (4D2e E10) may read and list
 //   `audit-anchors` alone: it adds nothing there. So may production's API
 //   (`anchorReaders`, AT13b), whose `web` copies read the anchors and the
-//   signed states' digest beside them and never write. No one else is given anything
+//   signed states' digest beside them and never write. The identities of the
+//   apps that run the API (`witnessWriters`: the API, every copy of it, and the
+//   jobs app) and the operator's may add a new file to `audit-witness` and read
+//   and list what is there: every copy that writes a chain puts its head there,
+//   and reads the others'. The chain repair's may read and list it alone. Only
+//   the app that holds the jobs (`anchorKeepers`, as for the anchors) may add a
+//   snapshot to `audit-witness-snapshots` and read them; production's API
+//   (`anchorReaders`) and the chain repair's may read and list them alone, and
+//   the operator's nothing there: a snapshot is what a restarting copy starts
+//   from, so whoever may add one could make every copy forget a witnessed head.
+//   None can overwrite or delete. No one else is given anything
 // - every read, write and delete is logged to the workspace (StorageBlobLogs)
 
 @export()
@@ -49,6 +64,14 @@ func evidenceContainerName() string => 'audit-exports'
 @export()
 @description('The container the audit chains\' anchors are kept in.')
 func anchorContainerName() string => 'audit-anchors'
+
+@export()
+@description('The container the witness log is kept in (TR-1): the chain heads each copy wrote.')
+func witnessContainerName() string => 'audit-witness'
+
+@export()
+@description('The container the witness log\'s hourly snapshots are kept in (TR-1), apart from the heads: only the app that holds the jobs adds one.')
+func witnessSnapshotsContainerName() string => 'audit-witness-snapshots'
 
 param location string
 param name string
@@ -64,6 +87,9 @@ param anchorKeepers array
 
 @description('Who reads the anchors and keeps none, each `{ workload, identity }` (AT13b): production\'s API, whose `web` copies hold its decisions to the signed states\' digest kept beside them. Created by the foundation under that name.')
 param anchorReaders array
+
+@description('Who writes the witness log, each `{ workload, identity }` (TR-1): the identities of the apps that run the API, the API (every copy of it, `web` copies too) and the jobs app, in both environments, as every copy writes the chains. Created by the foundation under that name.')
+param witnessWriters array
 
 @description('The chain repair\'s identity (4D2e E10): it adds its records as the writer does and reads the anchors as the operator does. Created by the foundation under this name.')
 param restorerIdentityName string
@@ -205,6 +231,22 @@ resource anchorContainer 'Microsoft.Storage/storageAccounts/blobServices/contain
   }
 }
 
+resource witnessContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
+  parent: blobs
+  name: witnessContainerName()
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource witnessSnapshotsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
+  parent: blobs
+  name: witnessSnapshotsContainerName()
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 // Created by the foundation (environment.bicep) under this name.
 resource writer 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
   name: writerIdentityName
@@ -318,6 +360,96 @@ resource restorerReadsAnchors 'Microsoft.Authorization/roleAssignments@2022-04-0
     principalId: restorer.properties.principalId
     principalType: 'ServicePrincipal'
     description: 'chain-restore reads audit anchors (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The witness log (TR-1). Defined in the partner's `access` deployment (modules/roles.bicep, AZ5), never by CI:
+// given here by name. Add a new file, read and list; never overwrite or delete.
+resource witnessRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  name: guid(resourceGroup().id, 'audit-witness')
+}
+
+resource witnessWriter 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
+  for each in witnessWriters: {
+    name: each.identity
+  }
+]
+
+// Every copy of the API, `web` copies too, and the jobs app put the heads they wrote and read the others'.
+resource writesWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (each, index) in witnessWriters: {
+    scope: witnessContainer
+    name: guid(witnessContainer.id, witnessWriter[index].id, witnessRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', witnessRole.name)
+      principalId: witnessWriter[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${each.workload} writes and reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
+
+// The operator's commands that write a chain (the hand-off pause above all) put their heads there too.
+resource operatorWritesWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: witnessContainer
+  name: guid(witnessContainer.id, writer.id, witnessRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', witnessRole.name)
+    principalId: writer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'operator writes and reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The chain repair reads the witnessed heads a repair is checked against, and adds none: the read-only role.
+resource restorerReadsWitness 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: witnessContainer
+  name: guid(witnessContainer.id, restorer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads audit witness heads (deploy/azure/modules/evidence.bicep)'
+  }
+}
+
+// The witness log's snapshots (TR-1): the app that holds the jobs alone adds one (the anchors' keepers: production's
+// jobs app; staging's API too, which holds the jobs out of a load run), with the witness role; never the operator.
+resource keepsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (keeper, index) in anchorKeepers: {
+    scope: witnessSnapshotsContainer
+    name: guid(witnessSnapshotsContainer.id, anchorKeeper[index].id, witnessRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', witnessRole.name)
+      principalId: anchorKeeper[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${keeper.workload} writes and reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
+
+// Production's `web` copies start from a snapshot and add none: the read-only role, as the chain repair's.
+resource readsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (reader, index) in anchorReaders: {
+    scope: witnessSnapshotsContainer
+    name: guid(witnessSnapshotsContainer.id, anchorReader[index].id, anchorReaderRole.id)
+    properties: {
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+      principalId: anchorReader[index].properties.principalId
+      principalType: 'ServicePrincipal'
+      description: '${reader.workload} reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
+    }
+  }
+]
+
+resource restorerReadsWitnessSnapshots 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: witnessSnapshotsContainer
+  name: guid(witnessSnapshotsContainer.id, restorer.id, anchorReaderRole.id)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', anchorReaderRole.name)
+    principalId: restorer.properties.principalId
+    principalType: 'ServicePrincipal'
+    description: 'chain-restore reads audit witness snapshots (deploy/azure/modules/evidence.bicep)'
   }
 }
 
