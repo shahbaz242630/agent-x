@@ -4,6 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import { WitnessUnconfirmed } from '@agentx/platform/audit-chain';
 import { isLockWaitRunOut, isRetryable, isStatementLimit, OrganisationBusy, PoolWaitRanOut } from '@agentx/platform/db';
 import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
@@ -179,10 +180,13 @@ export function troubleOf(error: unknown, operation: string | undefined): 'stop'
  * INTEGRITY_FAILED. Its organisation past its share of the connections, or a
  * lock's wait run out (held by its organisation's own work): 503 busy, never a
  * 500 (partner, S161). Its transaction made nothing; one before it may have, so
- * the same request again, under its key, answers as that one did.
+ * the same request again, under its key, answers as that one did. A change saved
+ * whose chain head isn't yet outside the database (TR-1, WitnessUnconfirmed) is
+ * 503 busy too: sent again under its key, it answers once the head is out.
  */
 export function responseFor(error: unknown, operation?: string): ErrorResponse {
   if (error instanceof IntegrityFailure) return { status: 503, code: 'INTEGRITY_FAILED' };
+  if (error instanceof WitnessUnconfirmed) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (troubleOf(error, operation) !== undefined) return { status: 503, code: 'ORGANISATION_BUSY' };
   if (error instanceof OrganisationBusy || isLockWaitRunOut(error)) return { status: 503, code: 'ORGANISATION_BUSY' };
   // Every connection in use, past the pool's own wait: the platform's, for whichever organisation or job was next.

@@ -98,6 +98,13 @@
 // its waits bounded (HOLD_MARK_LIMITS): one that fails or waits too long is
 // rolled back alone, said (`org_work.hold_mark_skipped`), and the hold commits;
 // the hourly look marks it.
+//
+// Its answer waits for the witness log (TR-1, witnessing.ts): once its transaction has committed, for every `now` head
+// it wrote (the organisation's chain, the platform's) and any this process holds unconfirmed for the organisation, so
+// nothing a stop or an approval wrote is told it succeeded before its head is outside the database. With none waiting
+// (an agent's decision: `soon`, and nothing unconfirmed) it answers at once, no trip. Past the witness log's wait it
+// throws WitnessUnconfirmed (503: saved, not yet confirmed, retry): the change stands, the head stays queued, and every
+// later request here for the organisation waits for it too. The holds it found are still set first.
 import { ChainBroken, type StateDigest } from '@agentx/platform/audit-chain';
 import { inBoundedSavepoint, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -106,6 +113,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
+import { nowChainsOf, waitWitnessed } from './witnessing.ts';
 import {
   holdNoLongerWaiting,
   holdStillWaiting,
@@ -645,13 +653,15 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     unrecorded: (id) => waitingOnAClearHold(id.toLowerCase()),
   });
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
-  const opened = { began: false };
+  const opened: { began: boolean; tx?: object } = { began: false };
+  let result: Result;
   try {
-    return await withTenant(
+    result = await withTenant(
       db,
       orgId,
       (tx) => {
         opened.began = true;
+        opened.tx = tx;
         return work(tx, states);
       },
       { limited: true },
@@ -674,4 +684,9 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
     for (const [held, one] of due) await setHold(db, held, one, services);
   }
+  // Committed: its `now` heads, and any held unconfirmed here for the organisation, outside the database first (TR-1).
+  const written = opened.tx === undefined ? [] : nowChainsOf(opened.tx);
+  const platform = written.filter(({ kind }) => kind === 'platform');
+  await waitWitnessed([{ kind: 'organisation', orgId: orgId.toLowerCase() }, ...platform]);
+  return result;
 }

@@ -85,6 +85,11 @@ export interface WitnessLog extends ChainWitness {
   /** Writes every head waiting, and hourly the snapshot where this copy leads. Never throws. */
   flush(): Promise<void>;
   /**
+   * Every head noted here written, `soon` ones too: for a process about to end (the operator's command), which reports
+   * success only once they are outside the database. WitnessUnconfirmed past the wait, the heads still queued.
+   */
+  drained(): Promise<void>;
+  /**
    * Reads what the store holds that this process has not: the next refresh that starts after this call. The chains
    * that gained a head from another copy, none where the read failed. Never throws.
    */
@@ -358,6 +363,15 @@ export function createWitnessLog({
 
   const nowWaiting = (): boolean => queue.some(({ klass }) => klass === 'now');
 
+  /** A `soon` head waited for as a `now` one: counted among its chain's unconfirmed. */
+  const promoted = (queued: Queued): Queued => {
+    const now: Queued = { ...queued, klass: 'now' };
+    const waiting = unconfirmed.get(queued.chain) ?? new Set<Queued>();
+    waiting.add(now);
+    unconfirmed.set(queued.chain, waiting);
+    return now;
+  };
+
   /**
    * Writes what waits, one Put at a time, each taking all it can: `all`, every head; else only while a `now` head
    * waits. A Put that fails is tried again after a wait that doubles, while a `now` head waits.
@@ -567,6 +581,12 @@ export function createWitnessLog({
     async flush(): Promise<void> {
       await write(true);
       await snapshotOnce();
+    },
+    async drained(): Promise<void> {
+      // Every head waiting made a `now` one, so a failed Put is tried again, backing off, within the wait.
+      queue = queue.map((queued) => (queued.klass === 'now' ? queued : promoted(queued)));
+      await write(true);
+      await settled([...unconfirmed.keys()].map(chainOfName));
     },
     refresh(): Promise<readonly Chain[]> {
       if (refreshing === undefined) return startRefresh();

@@ -141,6 +141,13 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       mostOrganisations: config.audit.mostOrganisations,
     },
     anchorStore: { directory: config.anchorStore.directory, container: place(config.anchorStore.container) },
+    witnessStore: {
+      heads: { directory: config.witnessStore.heads.directory, container: place(config.witnessStore.heads.container) },
+      snapshots: {
+        directory: config.witnessStore.snapshots.directory,
+        container: place(config.witnessStore.snapshots.container),
+      },
+    },
     activityDownloads: {
       directory: config.activityDownloads.directory,
       container: place(config.activityDownloads.container),

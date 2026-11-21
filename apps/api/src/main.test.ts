@@ -964,6 +964,13 @@ describe('SEC-OPS-07 a live start: production, the gate reference on the platfor
     AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
     AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
     AGENTX_OUTBOUND_ALLOWED_ORIGINS: LIVE_ORIGIN,
+    // Every copy witnesses its chain heads in production (TR-1): the witness log's stores, on Azure's identity. These
+    // tests end before any job runs, so nothing reaches them.
+    AGENTX_AUDIT_WITNESS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness',
+    AGENTX_AUDIT_WITNESS_CLIENT_ID: '1f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
+    AGENTX_AUDIT_WITNESS_SNAPSHOTS_URL: 'https://stagentxevprd01.blob.core.windows.net/audit-witness-snapshots',
+    IDENTITY_ENDPOINT: 'http://localhost:42356/msi/token',
+    IDENTITY_HEADER: 'identity header for these tests',
   };
 
   /** Production names its port; `boot` never listens on it, so any number does (only the web side serves). */

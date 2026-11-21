@@ -128,6 +128,16 @@ export {
 } from './infrastructure/newest-detail.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
 export { type PageAsked, type PageShown, type VerifiedPage, verifiedPage } from './infrastructure/verified-page.ts';
+export { WITNESSED_SOON, witnessClassOf } from './infrastructure/witness-class.ts';
+export {
+  chainWitness,
+  noteCommitted,
+  nowChainsOf,
+  waitWitnessed,
+  witnessedWrite,
+  witnessWith,
+  wroteTo,
+} from './infrastructure/witnessing.ts';
 export {
   checkStatesWith,
   holdOrganisation,

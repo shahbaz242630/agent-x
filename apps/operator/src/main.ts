@@ -60,7 +60,7 @@
 //    catch: the failure names the organisation's ID, to look for first)
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
-import { markHoldsWith } from '@agentx/core/modules/audit';
+import { markHoldsWith, witnessWith } from '@agentx/core/modules/audit';
 import { markOrgWorkNow } from '@agentx/core/modules/directory';
 import { MOST_EXPORT_DAYS } from '@agentx/core/modules/evidence';
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
@@ -70,6 +70,7 @@ import {
   type AnchorLog,
   type Chain,
   createAnchorLog,
+  createWitnessLog,
   EVIDENCE_REFERENCE,
   REBASE_REASONS,
   type RebaseReason,
@@ -699,7 +700,24 @@ async function connect(
   return database;
 }
 
-/** Does what was asked once the settings are read: the exit code. */
+/**
+ * The commands that write a chain (TR-1): each head they leave goes to the witness log, under the operator's own key,
+ * and the command reports success only once every head is outside the database. In production one refuses to start
+ * without the witness store, as a write no copy can see is one the owner could cut back unseen.
+ */
+const CHAIN_WRITERS: ReadonlySet<string> = new Set([
+  'create-organization',
+  'invite-first-admin',
+  'handoff-pause',
+  'handoff-resume',
+  FACTOR_RESET_NOTICE,
+  CHAIN_REBASE,
+]);
+
+const NO_WITNESS_PROBLEM =
+  "AGENTX_AUDIT_WITNESS_URL is not set: in production every chain write is witnessed outside the database, so this command, which writes one, doesn't run without it";
+
+/** Does what was asked once the settings are read, its chain writes witnessed (CHAIN_WRITERS): the exit code. */
 async function run(
   config: OperatorConfig,
   keys: KeyProvider,
@@ -711,6 +729,47 @@ async function run(
     logger.error('operator.refused', { problems: request.problems });
     return 1;
   }
+  const store = witnessStoreOf(config);
+  const writesChains = CHAIN_WRITERS.has(request.command);
+  if (store === undefined && writesChains && config.environment === 'production') {
+    logger.error('operator.refused', { problems: [NO_WITNESS_PROBLEM] });
+    return 1;
+  }
+  const witness =
+    store &&
+    createWitnessLog({
+      store,
+      keys,
+      logger,
+      now: () => systemClock.now(),
+      epoch: config.anchors.epoch,
+      signer: 'operator',
+      alertAfterMs: 0,
+      mostBytes: OPERATOR_WITNESS_BYTES,
+    });
+  witnessWith(witness);
+  const code = await runRequest(config, keys, request, logger);
+  if (witness === undefined) return code;
+  try {
+    await witness.drained();
+    return code;
+  } catch (error) {
+    // Done in the database, its heads not yet outside it: never reported as done. Run the same request again.
+    logger.error('operator.failed', { command: request.command, step: 'witness', err: error });
+    return 1;
+  }
+}
+
+/** What the operator's witness log may hold: a command's few heads, many times over. */
+const OPERATOR_WITNESS_BYTES = 1024 * 1024;
+
+/** Does what was asked: the exit code. */
+async function runRequest(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Request,
+  logger: Logger,
+): Promise<number> {
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
   if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
@@ -992,13 +1051,19 @@ function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger)
   });
 }
 
-/** The anchors' store, or nothing where none is set. */
-function anchorStoreOf({ anchors: { directory, container } }: OperatorConfig): WriteOnceStore | undefined {
+/** A write-once store as the config places it: the container, or the folder in development and test, or nothing. */
+function writeOnceStoreAt({ directory, container }: OperatorConfig['witness']): WriteOnceStore | undefined {
   if (container !== null) {
     return azureWriteOnceStore({ settings: container, fetch: createOutboundFetch(azureBlobOrigins(container)) });
   }
   return directory === null ? undefined : folderWriteOnceStore(directory);
 }
+
+/** The witness log's heads' store (TR-1), where the operator adds its own, or nothing where none is set. */
+const witnessStoreOf = (config: OperatorConfig): WriteOnceStore | undefined => writeOnceStoreAt(config.witness);
+
+/** The anchors' store, or nothing where none is set. */
+const anchorStoreOf = (config: OperatorConfig): WriteOnceStore | undefined => writeOnceStoreAt(config.anchors);
 
 /**
  * The chains' anchors as the API keeps them, read with their public keys alone

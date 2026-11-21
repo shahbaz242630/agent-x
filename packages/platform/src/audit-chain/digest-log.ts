@@ -100,6 +100,12 @@
 // chain may be taken as it stands for those reads alone (`accept`): a head kept beside the one seen, which `accepted`
 // gives while the head seen is still the one it was taken over, raised as that is, and set aside by a rebase. Never
 // lowers what the other reads hold to: the hand-off pause's reads stay held to the head seen.
+//
+// Held to every copy's heads too (TR-1, witness-log.ts): another copy's stop was never seen here, so each read is also
+// held to the highest heads any copy witnessed above the chain's anchor (`witnessed`, at most MOST_WITNESSED), each at
+// its place with its hash, in the read's own statement (`heldTo`): a list, never only the highest, as a stale copy's
+// head on a cut branch must not bury the honest one. The chain taken as it stands (AT13h) holds its reads to the heads
+// witnessed after it alone: one the cut took away, witnessed before, would lock the console again (S208's decision).
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Logger } from '../observability/index.ts';
 import type { WriteOnceStore } from '../storage/write-once.ts';
@@ -123,7 +129,7 @@ interface Stretch {
 }
 
 /** A chain's head as a read found it, sealed (AT13f): its place, and the hash of its event there. */
-interface HeadSeen {
+export interface HeadSeen {
   readonly seq: bigint;
   readonly hash: Buffer;
 }
@@ -132,13 +138,21 @@ interface HeadSeen {
 export interface HeadWatch {
   /** The highest head this process has seen the chain at, or the digest covers it to; none, nothing to hold to. */
   readonly seen: HeadSeen | undefined;
+  /**
+   * Every head the read is held to (TR-1): the head this process saw, where the digest covers the chain to, and the
+   * highest heads any copy witnessed above the chain's anchor (witness-log.ts), at most MOST_WITNESSED: each at its place
+   * with its hash, the chain's head no lower than the highest. Kept apart, never only the highest: a stale copy's head
+   * on a cut branch must not bury the honest one below it. Empty, nothing to hold to.
+   */
+  readonly heldTo: readonly HeadSeen[];
   /** The head the read found, sealed and not cut back: kept as seen where higher, dated when this watch was asked. */
   saw(head: HeadSeen): void;
   /**
    * Where the chain was taken as it stands after a signed answer to its cut (AT13h, the header), raised since: while
-   * `seen` is still the head it was taken over. Its `saw` raises it alone. None else.
+   * `seen` is still the head it was taken over. Its `saw` raises it alone; its `heldTo` adds only heads witnessed after
+   * it was taken (TR-1: a head the cut took away, witnessed before, must not lock the console again). None else.
    */
-  readonly accepted: Pick<HeadWatch, 'seen' | 'saw'> | undefined;
+  readonly accepted: Pick<HeadWatch, 'seen' | 'saw' | 'heldTo'> | undefined;
   /**
    * Takes the chain as it stands at `to`, a sealed head at or above a signed answer to the cut of the head this watch
    * gave as `seen`, for the reads that answer allows: only while that is still the head seen, and never from a watch
@@ -147,13 +161,26 @@ export interface HeadWatch {
   accept(to: HeadSeen): void;
 }
 
+/** The places a read asks the hashes of, in its own statement, in the order `heldTo` gives them (TR-1). */
+export const placesOf = (heads: readonly HeadSeen[]): readonly string[] => heads.map(({ seq }) => seq.toString());
+
+/** The first head without its hash at its place, `hashes` read in the order given (placesOf). */
+const hashMissing = (heads: readonly HeadSeen[], hashes: unknown): HeadSeen | undefined => {
+  const read: readonly unknown[] = Array.isArray(hashes) ? hashes : [];
+  return heads.find(({ hash }, at) => {
+    const there = read[at];
+    return !(there instanceof Buffer) || !there.equals(hash);
+  });
+};
+
 /**
- * Whether the chain, as a write found it under its head's lock, still runs through `at` (AT13h): no head to hold to, or
- * the event at its place (read at or below the head locked) with its hash. A write on a chain cut back below a head
- * this process holds raises nothing from it: the write goes on from the cut, and raising it would hide the cut.
+ * Whether the chain, as a write found it under its head's lock, still runs through every head in `at` (AT13h, TR-1):
+ * none to hold to, or the event at each place (read at or below the head locked, in the lock's statement) with its
+ * hash. A write on a chain cut back below a head this process holds raises nothing from it: the write goes on from the
+ * cut, and raising it would hide the cut.
  */
-export const heldThrough = (at: HeadSeen | undefined, hashThere: unknown): boolean =>
-  at === undefined || (hashThere instanceof Buffer && hashThere.equals(at.hash));
+export const heldThrough = (at: readonly HeadSeen[], hashesThere: unknown): boolean =>
+  hashMissing(at, hashesThere) === undefined;
 
 /**
  * What a write committed raises (AT13h): the head seen, and the head taken with it, where the chain ran through both;
@@ -173,26 +200,48 @@ export function raiseWritten(
 const sameHead = (one: HeadSeen, other: HeadSeen): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
 /**
- * Whether a chain's head, read in one statement with the hash of the event at the seen place (`seenHash`), holds to the
- * head the read was held to (AT13f): sealed (`head`, none where it isn't), no lower, the same event at the seen place,
- * and at that place only with its hash. Nothing seen, nothing to hold to. Else the chain was cut back past the app.
+ * Where a chain's head, read in one statement with the hashes of the events at the places held to (`seenHashes`, in
+ * `heldTo`'s order), fails the heads the read was held to (AT13f, TR-1): none where it is sealed (`head`, none where it
+ * isn't), no lower than the highest, with the same event at each place, and at its own place only with its hash.
+ * Nothing held to, nothing to hold to. Else the chain was cut back past the app, at the head named.
  */
-export function headHeldTo(seen: HeadSeen | undefined, head: HeadSeen | undefined, seenHash: unknown): boolean {
-  if (seen === undefined) return true;
-  return (
-    head !== undefined &&
-    head.seq >= seen.seq &&
-    seenHash instanceof Buffer &&
-    seenHash.equals(seen.hash) &&
-    (head.seq !== seen.seq || head.hash.equals(seen.hash))
-  );
+export function headCutBelow(
+  heldTo: readonly HeadSeen[],
+  head: HeadSeen | undefined,
+  seenHashes: unknown,
+): HeadSeen | undefined {
+  const [first] = heldTo;
+  if (first === undefined) return undefined;
+  const highest = heldTo.reduce((one, other) => (other.seq > one.seq ? other : one), first);
+  if (head === undefined || head.seq < highest.seq) return highest;
+  return hashMissing(heldTo, seenHashes) ?? heldTo.find(({ seq, hash }) => seq === head.seq && !head.hash.equals(hash));
 }
+
+/** Whether the chain's head, read as headCutBelow reads it, holds to every head held to. */
+export const headHeldTo = (heldTo: readonly HeadSeen[], head: HeadSeen | undefined, seenHashes: unknown): boolean =>
+  headCutBelow(heldTo, head, seenHashes) === undefined;
 
 /** A head seen, with when the read that saw it was asked: a rebase after that sets it aside. */
 type HeadKept = HeadSeen & { readonly at: number };
 
-/** A chain taken as it stands (AT13h, `accept`): the head seen it was taken over, and the head held to since. */
-type HeadAccepted = HeadKept & { readonly over: HeadSeen };
+/**
+ * A chain taken as it stands (AT13h, `accept`): the head seen it was taken over (none where this process held it to
+ * witnessed heads alone, TR-1), and the head held to since.
+ */
+type HeadAccepted = HeadKept & { readonly over: HeadSeen | undefined };
+
+/** The most witnessed heads a read is held to: the highest, as each is one more place read in the read's statement. */
+export const MOST_WITNESSED = 8;
+
+/**
+ * How long after a chain was taken as it stands a witnessed head must have been noted to hold the reads it allows: the
+ * writers' clocks may run ahead of this one, and a head the cut took away, noted just before, must not count.
+ */
+const ACCEPT_MARGIN_MS = 60_000;
+
+/** The same head twice, or none of either. */
+const sameOrNone = (one: HeadSeen | undefined, other: HeadSeen | undefined): boolean =>
+  one === undefined || other === undefined ? one === other : sameHead(one, other);
 
 /** What a decision reads of the digest. */
 export interface StateDigest {
@@ -575,6 +624,7 @@ export function createDigestLog({
   mostFileBytes = mostBytes,
   forgetRequestsAfterMs,
   forgetSessionEndsAfterMs,
+  witnessed,
 }: {
   /** Where it is kept; none in development and test with no store, where it lives in memory alone and reads as read. */
   readonly store?: WriteOnceStore | undefined;
@@ -610,6 +660,11 @@ export function createDigestLog({
    * None: kept for good.
    */
   readonly forgetSessionEndsAfterMs?: number | undefined;
+  /**
+   * Every head any copy witnessed above the chain's anchor, the highest first (TR-1, witness-log.ts's `pending`): each
+   * read is held to the highest of them too. None, only to the heads this process saw and its walks covered.
+   */
+  readonly witnessed?: ((chain: Chain) => readonly (HeadSeen & { readonly at: number })[]) | undefined;
 }): DigestLog {
   const chains = new Map<string, ChainState>();
   // The highest head each chain was read at here (AT13f), with when that read was asked, the one raised longest ago first.
@@ -1265,12 +1320,10 @@ export function createDigestLog({
   };
 
   /** The chain taken as it stands (AT13h), while `seen` is still the head it was taken over and no rebase came after. */
-  const acceptedOf = (name: string, chain: Chain, seen: HeadSeen | undefined): HeadSeen | undefined => {
+  const acceptedOf = (name: string, chain: Chain, seen: HeadSeen | undefined): HeadKept | undefined => {
     const held = accepted.get(name);
     if (held === undefined) return undefined;
-    if (seen !== undefined && sameHead(held.over, seen) && anchors?.rebasedAfter(chain, new Date(held.at)) !== true) {
-      return held;
-    }
+    if (sameOrNone(held.over, seen) && anchors?.rebasedAfter(chain, new Date(held.at)) !== true) return held;
     accepted.delete(name);
     heldBytes -= HEAD_BYTES;
     return undefined;
@@ -1285,18 +1338,47 @@ export function createDigestLog({
     accepted.set(name, { ...held, seq, hash: Buffer.from(hash) });
   };
 
-  /** The chain taken as it stands at `to` over the head seen `over` (AT13h): only while that is still the head seen. */
-  const acceptAt = (name: string, chain: Chain, over: HeadSeen | undefined, to: HeadSeen, asked: number): void => {
-    if (over === undefined || to.seq < 1n || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
-    const seen = seenOf(name, chain);
-    if (seen === undefined || !sameHead(seen, over)) return;
+  /**
+   * The chain taken as it stands at `to` over the head seen `over` (AT13h): only while that is still the head seen, and
+   * only where the watch held the chain to something (a head seen, or witnessed heads alone: TR-1).
+   */
+  const acceptAt = (
+    name: string,
+    chain: Chain,
+    { over, heldTo }: { readonly over: HeadSeen | undefined; readonly heldTo: readonly HeadSeen[] },
+    to: HeadSeen,
+    asked: number,
+  ): void => {
+    if (heldTo.length === 0 || to.seq < 1n || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
+    if (!sameOrNone(seenOf(name, chain), over)) return;
     if (!accepted.has(name)) heldBytes += HEAD_BYTES;
     accepted.set(name, {
-      over: { seq: over.seq, hash: Buffer.from(over.hash) },
+      over: over === undefined ? undefined : { seq: over.seq, hash: Buffer.from(over.hash) },
       seq: to.seq,
       hash: Buffer.from(to.hash),
       at: asked,
     });
+  };
+
+  /** The chain's witnessed heads, the highest first, at most MOST_WITNESSED: only those noted after `after` where given. */
+  const witnessedOf = (chain: Chain, after?: number): HeadSeen[] => {
+    const found: HeadSeen[] = [];
+    for (const { seq, hash, at } of witnessed?.(chain) ?? []) {
+      if (found.length >= MOST_WITNESSED) break;
+      if (after === undefined || at > after) found.push({ seq, hash });
+    }
+    return found;
+  };
+
+  /** The heads a read is held to, each once, in the order given. */
+  const distinct = (heads: readonly (HeadSeen | undefined)[]): readonly HeadSeen[] => {
+    const kept: HeadSeen[] = [];
+    for (const head of heads) {
+      if (head !== undefined && !kept.some((one) => sameHead(one, head))) {
+        kept.push(Object.freeze({ seq: head.seq, hash: head.hash }));
+      }
+    }
+    return Object.freeze(kept);
   };
 
   return Object.freeze({
@@ -1306,8 +1388,10 @@ export function createDigestLog({
       const asked = now().getTime();
       const seen = seenOf(name, chain);
       const taken = acceptedOf(name, chain, seen);
+      const heldTo = distinct([headOf(name, chain), coveredHead(name), ...witnessedOf(chain)]);
       return Object.freeze({
         seen: seen === undefined ? undefined : Object.freeze({ seq: seen.seq, hash: seen.hash }),
+        heldTo,
         saw: (head: HeadSeen) => {
           raiseHead(name, chain, head, asked);
           raiseAccepted(name, chain, head, asked);
@@ -1317,12 +1401,13 @@ export function createDigestLog({
             ? undefined
             : Object.freeze({
                 seen: Object.freeze({ seq: taken.seq, hash: taken.hash }),
+                heldTo: distinct([taken, ...witnessedOf(chain, taken.at + ACCEPT_MARGIN_MS)]),
                 saw: (head: HeadSeen) => {
                   raiseAccepted(name, chain, head, asked);
                 },
               }),
         accept: (to: HeadSeen) => {
-          acceptAt(name, chain, seen, to, asked);
+          acceptAt(name, chain, { over: seen, heldTo }, to, asked);
         },
       });
     },

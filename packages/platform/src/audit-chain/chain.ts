@@ -196,7 +196,8 @@ export function sealNext(
  * - `anchor`: the chain no longer holds what was last anchored: the head is behind the anchor, or the
  *   anchored event isn't the one anchored (a chain wound back, or grown again on a wound-back head)
  */
-export type ChainProblemReason = 'gap' | 'link' | 'hash' | 'mac' | 'unreadable' | 'head' | 'anchor';
+/** `cut_back`: the chain no longer runs through a head a copy of the app witnessed (TR-1, witness-path.ts). */
+export type ChainProblemReason = 'gap' | 'link' | 'hash' | 'mac' | 'unreadable' | 'head' | 'anchor' | 'cut_back';
 
 /** A place in a chain the app has seen and signed (ADR-012 §2): the chain must still hold it. */
 export interface AnchorPoint {

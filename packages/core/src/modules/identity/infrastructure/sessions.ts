@@ -393,7 +393,7 @@ export const sessionRowMessage = (row: SessionRow) =>
  * session's few rotations, by the same index), and its person's latest all ended (0084's by-person index). Each a
  * subquery of the statement, on the row's own columns.
  */
-const signedEndsOfRow = (db: Kysely<IdentityTables>, seenAt: bigint | undefined) => {
+const signedEndsOfRow = (db: Kysely<IdentityTables>, heldTo: Parameters<typeof platformHeadRead>[0]) => {
   const platform = db as unknown as Kysely<PlatformControlsTables>;
   const person = sql<string>`identity.sessions.user_id::text`;
   const record = sql<string>`identity.sessions.id::text`;
@@ -422,7 +422,7 @@ const signedEndsOfRow = (db: Kysely<IdentityTables>, seenAt: bigint | undefined)
       'everyone_ended_seq',
     ),
     // The platform chain's head, held to the highest seen (AT13h, the header).
-    ...platformHeadRead(seenAt),
+    ...platformHeadRead(heldTo),
   ] as const;
 };
 
@@ -712,7 +712,7 @@ export function createSessions({
           'was.last_seen_at as was_seen_at',
           'was.last_use_mac as was_mac',
           'was.last_use_mac_key_version as was_mac_key_version',
-          ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq),
+          ...signedEndsOfRow(db, heldTo(watch)?.heldTo ?? []),
         ])
         .executeTakeFirst();
       if (
@@ -749,7 +749,7 @@ export function createSessions({
       const watch = platformWatch();
       const row = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.heldTo ?? [])])
         .where('cookie_hash', '=', hashOf(cookie))
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)
@@ -764,7 +764,7 @@ export function createSessions({
       const watch = platformWatch();
       const live = await db
         .selectFrom('identity.sessions')
-        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.seen?.seq)])
+        .select([...SESSION_READ, ...signedEndsOfRow(db, heldTo(watch)?.heldTo ?? [])])
         .where('id', '=', sessionId)
         .where('last_seen_at', '>', idleSince(now))
         .where('ends_at', '>', now)

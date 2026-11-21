@@ -16,13 +16,17 @@ export {
   type DigestAnchors,
   type DigestLog,
   FORGET_MARGIN_MS,
+  headCutBelow,
   headHeldTo,
+  type HeadSeen,
   heldThrough,
   type HeadWatch,
+  placesOf,
   raiseWritten,
   type StateDigest,
 } from './digest-log.ts';
 export { type SignedSeen, subjectKey } from './state-digest.ts';
+export { heldToWitnessed, watchingPlaces } from './witness-path.ts';
 export {
   type ChainWitness,
   createWitnessLog,
