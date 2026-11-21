@@ -225,6 +225,81 @@ describe('a lost lease aborts runs', () => {
   });
 });
 
+describe('the lease taken while this process’s own term still runs (TR-1 A)', () => {
+  it('is the error at once: no copy could have taken it by expiry yet, so the row was changed past the app', async () => {
+    const { row, storeFor } = rowAt(now);
+    const { one, begun } = leadershipOf(storeFor('a'));
+    await begun;
+    expect(said('jobs.lease_taken_early')).toEqual([]);
+
+    // The owner's UPDATE: another holder, with the term this process renewed still running.
+    row.holder = 'b';
+    row.until = Date.now() + LEASE_TERM_MS;
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS);
+    expect(one.leading()).toBe(false);
+    expect(said('jobs.lease_taken_early')).toEqual([
+      expect.objectContaining({ level: 'error', termLeftMs: LEASE_TERM_MS - LEASE_RENEW_EVERY_MS }),
+    ]);
+    // Once, at the refusal that ended the lead: the refusals after it are a follower's.
+    await vi.advanceTimersByTimeAsync(3 * LEASE_RENEW_EVERY_MS);
+    expect(said('jobs.lease_taken_early')).toHaveLength(1);
+  });
+
+  it.each([
+    ['inside its last try’s deadline, for the two clocks', LEASE_TERM_MS - LEASE_RETRY_AFTER_MS],
+    ['after its term ran out', LEASE_TERM_MS + 2 * LEASE_RETRY_AFTER_MS],
+  ])('the positive control: refused %s, only the hand-over, as information', async (_when, refusedFrom) => {
+    const startedAt = Date.now();
+    let taken = false;
+    const { one, begun } = leadershipOf({
+      take: () => {
+        if (!taken) {
+          taken = true;
+          return Promise.resolve(true);
+        }
+        // Unanswered until then, so no renewal moves the term on; then refused.
+        return Date.now() - startedAt < refusedFrom
+          ? Promise.reject(new Error('connection lost'))
+          : Promise.resolve(false);
+      },
+      release: () => Promise.resolve(),
+    });
+    await begun;
+    await vi.advanceTimersByTimeAsync(refusedFrom + LEASE_RETRY_AFTER_MS);
+    expect(one.leading()).toBe(false);
+    expect(said('jobs.lease_taken_early')).toEqual([]);
+    expect(said('jobs.lease_held_elsewhere')).toEqual([expect.objectContaining({ level: 'info' })]);
+  });
+});
+
+describe('a follower’s own read of the store (TR-1 A)', () => {
+  it('runs only while this process doesn’t lead, with the run’s own signal, keeping the job’s name', async () => {
+    const { row, storeFor } = rowAt(now);
+    const { one, begun } = leadershipOf(storeFor('a'));
+    await begun;
+    const runs: (AbortSignal | undefined)[] = [];
+    const following = one.onlyWhileNotLeading({
+      name: 'anchors_follow',
+      run: (signal) => {
+        runs.push(signal);
+        return Promise.resolve();
+      },
+    });
+    expect(following.name).toBe('anchors_follow');
+    // Leading: the anchor check reads the store in its place.
+    await following.run(new AbortController().signal);
+    expect(runs).toEqual([]);
+
+    row.holder = 'b';
+    row.until = Date.now() + LEASE_TERM_MS;
+    await vi.advanceTimersByTimeAsync(LEASE_RENEW_EVERY_MS);
+    expect(one.leading()).toBe(false);
+    const stopping = new AbortController();
+    await following.run(stopping.signal);
+    expect(runs).toEqual([stopping.signal]);
+  });
+});
+
 describe('a follower waits, and expiry hands over', () => {
   it('holds its runs back, without counting as running them, until the lease ends, then runs them at once', async () => {
     const { storeFor } = rowAt(now);

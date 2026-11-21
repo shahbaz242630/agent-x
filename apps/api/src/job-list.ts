@@ -274,6 +274,8 @@ export function webCopyJobs({ config, keys, logger }: Booted, { watch }: SharedP
 export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: SharedParts, leadership: Leadership) {
   const { flows, sessions, challenges, securityEvents, outbox, downloads, rail, providerEvents, watch } = parts;
   const job = jobsWatchedBy(watch, leadership.onlyWhileLeading.bind(leadership));
+  // The one job a follower runs, passed over while this process leads (TR-1 A).
+  const followerJob = jobsWatchedBy(watch, leadership.onlyWhileNotLeading.bind(leadership));
   const list = () => listedOrganizations(database);
   const organisationJob = { list, database, keys, ids: uuidV7Ids, logger };
   const clocked = { ...organisationJob, clock: systemClock };
@@ -282,7 +284,8 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
   // The audit chains' last anchors (ADR-012 §2): the anchor check keeps them, Tx A reads them from memory. Durable where
   // the config names a store (PL-58). The check's first run reads it, and where a lease decides who runs the jobs, that
   // run waits for the lease: a copy that doesn't lead reads nothing, and one that comes to lead reads it then.
-  // A copy that loses the lease says nothing from its digest, and reads it again whole when it leads (AT13).
+  // A copy that loses the lease forgets nothing its digest holds and goes on answering from it; it only writes nothing
+  // until it leads again, and meanwhile reads the store as a web copy does (TR-1 A, `anchors_follow` below).
   const leading = (): boolean => leadership.leading();
   const kept = anchorsKeptOf(config, { keys, logger, clock: systemClock, alertAfterMs: staleAfterMs }, leading);
   const anchorLog = kept?.log;
@@ -298,7 +301,7 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
       epoch: config.audit.anchorEpoch,
       alertAfterMs: staleAfterMs,
       mostBytes: MEMORY_DIGEST_BYTES,
-      leading,
+      writes: leading,
       forgetRequestsAfterMs: APPROVAL_HORIZON_MS,
       forgetSessionEndsAfterMs: LONGEST_ABSOLUTE_SECONDS * 1000,
     });
@@ -475,6 +478,14 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
     ),
     job('anchor_check', anchors, config.audit.anchorSeconds * 1000, HOUR_MS, undefined, (work, everyMs) =>
       scheduleAnchorCheck(work, everyMs, () => anchors.finish()),
+    ),
+    // While another copy leads, the anchors and the digest read as a web copy reads them (TR-1 A): so a rebase still
+    // sets this copy's facts and heads aside (AT13b), and the leader's walks reach it. None where they're in memory alone.
+    followerJob(
+      'anchors_follow',
+      kept && createWebAnchorRead({ log: kept.log, digest: kept.digest, logger, copy: 'jobs' }),
+      WEB_ANCHORS_EVERY_MS,
+      QUICK_MS,
     ),
     // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
     // check. The two share the pool, and both start at once: each statement is

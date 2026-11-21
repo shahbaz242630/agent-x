@@ -687,8 +687,8 @@ describe('the digest within its memory: one organisation’s growth never stops 
   });
 });
 
-describe('the digest in a process that loses the lease (AT13)', () => {
-  it('says nothing and forgets all it holds while it doesn’t lead, and reads the store again whole when it does', async () => {
+describe('the digest in a process that loses the lease (AT13, TR-1 A)', () => {
+  it('keeps its heads and facts when the lease goes, reads the store as a web copy does, writes nothing until it leads', async () => {
     const leads = { now: true };
     const rebases = new Map<string, Date>();
     const fake = createFakeWriteOnceStore();
@@ -700,7 +700,195 @@ describe('the digest in a process that loses the lease (AT13)', () => {
       now: time.now,
       epoch: 1,
       anchors: anchorsWith(rebases),
-      leading: () => leads.now,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    log.heads(CHAIN)?.saw(headAt(12n));
+    // Recorded while it led, not yet written as the lease goes.
+    log.record(OTHER, seen(['agent', AGENT, 4n]), START);
+    const written = fake.files.size;
+
+    leads.now = false;
+    // Every answer as while it led: the facts, the coverage and the head seen above it, none forgotten.
+    expect(log.state()).toBe('read');
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(9n);
+    expect(log.covers(CHAIN, 10n)).toBe(true);
+    expect(log.coverage(CHAIN)?.seq).toBe(10n);
+    expect(log.owed(CHAIN, 10n)).toBe(false);
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(12n));
+    // A head a read finds while it follows is held to as well.
+    log.heads(CHAIN)?.saw(headAt(14n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(14n));
+    // It writes nothing: a walk isn't recorded, and what waits isn't written.
+    log.record(CHAIN, seen(['agent_key', KEY, 3n]), START, stretch(10n, 13n));
+    expect(log.latest(CHAIN, 'agent_key', KEY)).toBeUndefined();
+    time.held.at += MINUTE;
+    await log.flush();
+    expect(fake.files.size).toBe(written);
+
+    // The copy leading walks and writes; this one reads it, as a web copy does.
+    const { log: leader } = digestOn(fake, { time });
+    await leader.read();
+    leader.record(CHAIN, seen(['agent_key', KEY, 11n]), time.now(), stretch(10n, 13n));
+    await leader.flush();
+    await log.read();
+    expect(log.latest(CHAIN, 'agent_key', KEY)).toBe(11n);
+    expect(log.coverage(CHAIN)?.seq).toBe(13n);
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(14n));
+
+    // A rebase its anchors' log reads while it follows sets the chain aside, heads and facts, as at a leader.
+    rebases.set(ORG, new Date(time.held.at));
+    expect(log.heads(CHAIN)?.seen).toBeUndefined();
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
+
+    // Leading again, it writes what it held back: a start reads it.
+    leads.now = true;
+    const before = fake.files.size;
+    time.held.at += MINUTE;
+    await log.flush();
+    expect(fake.files.size).toBe(before + 1);
+    const { log: restarted } = digestOn(fake, { time });
+    await restarted.read();
+    expect(restarted.latest(OTHER, 'agent', AGENT)).toBe(4n);
+  });
+
+  it('leading again, writes no snapshot until a read while it leads has ended whole: the leader’s deltas never hidden', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+
+    // It follows; the copy leading writes a delta this one never reads, its reads failing.
+    leads.now = false;
+    time.held.at += MINUTE;
+    const { log: leader } = digestOn(fake, { time });
+    await leader.read();
+    leader.record(OTHER, seen(['agent_key', KEY, 5n]), time.now());
+    await leader.flush();
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    await log.read();
+
+    // It leads again an hour on, a snapshot due, its reads still failing: deltas go, no snapshot.
+    time.held.at += HOUR;
+    leads.now = true;
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+    delete fake.instead.list;
+    const { log: restarted } = digestOn(fake, { time });
+    await restarted.read();
+    expect(restarted.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+    expect(restarted.latest(CHAIN, 'agent', AGENT)).toBe(12n);
+
+    // The positive control: a read while it leads ends whole, and the snapshot is written, holding the leader's fact.
+    await log.read();
+    log.record(CHAIN, seen(['agent_key', KEY, 11n]), time.now(), stretch(12n, 13n));
+    time.held.at += MINUTE;
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
+    const { log: fromSnapshot } = digestOn(fake, { time });
+    await fromSnapshot.read();
+    expect(fromSnapshot.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+  });
+
+  it('its own deltas never move its look back: leading again past the lag, a read still takes in what another wrote', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
+      alertAfterMs: MINUTE,
+      mostBytes: 1024 * 1024,
+    });
+    await log.read();
+    log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await log.flush();
+    await log.read();
+
+    // It follows; another copy writes a delta, this one's reads failing.
+    leads.now = false;
+    time.held.at += MINUTE;
+    const { log: leader } = digestOn(fake, { time });
+    await leader.read();
+    leader.record(OTHER, seen(['agent_key', KEY, 5n]), time.now());
+    await leader.flush();
+    fake.instead.list = () => Promise.reject(new Error('the store is away'));
+    await log.read();
+    delete fake.instead.list;
+
+    // Leading again ten minutes on, past the lag: its own delta first, then a read.
+    time.held.at += 10 * MINUTE;
+    leads.now = true;
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    await log.read();
+    expect(log.latest(OTHER, 'agent_key', KEY)).toBe(5n);
+  });
+
+  it('a start that finds no delta after its snapshot looks back from the snapshot, never the whole epoch again', async () => {
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const { log: before } = digestOn(fake, { time });
+    await before.read();
+    before.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
+    await before.flush();
+    const old = namesUnder(fake.files, 'deltas');
+    time.held.at += 2 * HOUR;
+    before.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await before.flush();
+    // The delta beside the newer snapshot gone from the listing: quiet hours, nothing written since the snapshot.
+    for (const name of namesUnder(fake.files, 'deltas')) if (!old.includes(name)) fake.files.delete(name);
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
+
+    const fetched: string[] = [];
+    fake.instead.getAtMost = (name, most) => {
+      fetched.push(name);
+      return fake.real.getAtMost(name, most);
+    };
+    time.held.at += MINUTE;
+    const { log } = digestOn(fake, { time });
+    await log.read();
+    expect(log.latest(CHAIN, 'agent', AGENT)).toBe(12n);
+    log.record(OTHER, seen(['agent', AGENT, 4n]), time.now());
+    await log.flush();
+    await log.read();
+    expect(fetched.filter((name) => old.includes(name))).toEqual([]);
+  });
+
+  it('a read begun while it followed and ended once it leads stands for no snapshot; the next one does', async () => {
+    const leads = { now: true };
+    const fake = createFakeWriteOnceStore();
+    const time = clock();
+    const log = createDigestLog({
+      store: fake.store,
+      keys,
+      logger: testLogger(),
+      now: time.now,
+      epoch: 1,
+      writes: () => leads.now,
       alertAfterMs: MINUTE,
       mostBytes: 1024 * 1024,
     });
@@ -708,23 +896,25 @@ describe('the digest in a process that loses the lease (AT13)', () => {
     log.record(CHAIN, seen(['agent', AGENT, 9n]), START, stretch(0n, 10n));
     await log.flush();
     leads.now = false;
-    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
-    expect(log.covers(CHAIN, 10n)).toBe(false);
-    expect(log.coverage(CHAIN)).toBeUndefined();
-    expect(log.state()).toBe('unread');
-    // A walk while it doesn't lead records nothing, and it doesn't read the store.
-    log.record(CHAIN, seen(['agent', KEY, 3n]), START, stretch(0n, 3n));
-    await log.read();
-    expect(log.memoryHeld().chains).toBe(0);
-    // Meanwhile another copy leads, and the chain is rebased: nothing of the old facts comes back here.
-    time.held.at += 2 * MINUTE;
-    rebases.set(ORG, new Date(START.getTime() + MINUTE));
+    // A follower's read whose list answers only after it has come to lead.
+    const { promise: listed, resolve: answer } = Promise.withResolvers<undefined>();
+    fake.instead.list = async (...args) => {
+      await listed;
+      return fake.real.list(...args);
+    };
+    const reading = log.read();
     leads.now = true;
-    expect(log.covers(CHAIN, 10n)).toBe(false);
+    answer(undefined);
+    await reading;
+    delete fake.instead.list;
+    time.held.at += HOUR;
+    log.record(CHAIN, seen(['agent', AGENT, 12n]), time.now(), stretch(10n, 12n));
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(1);
+
     await log.read();
-    expect(log.state()).toBe('read');
-    expect(log.latest(CHAIN, 'agent', AGENT)).toBeUndefined();
-    expect(log.covers(CHAIN, 10n)).toBe(false);
+    await log.flush();
+    expect(namesUnder(fake.files, 'snapshots')).toHaveLength(2);
   });
 });
 
@@ -1322,7 +1512,7 @@ describe('the highest head each chain was read at (AT13f)', () => {
     expect(log.heads(OTHER)?.seen).toEqual(headAt(6n));
   });
 
-  it('says nothing for a chain whose shard is let go, nor in a copy that doesn’t lead, which forgets the heads too', () => {
+  it('says nothing for a chain whose shard is let go; a copy that doesn’t lead keeps the heads and raises them (TR-1 A)', () => {
     const letGo = new Set<string>([OTHER_ORG]);
     const leads = { now: true };
     const log = createDigestLog({
@@ -1331,7 +1521,7 @@ describe('the highest head each chain was read at (AT13f)', () => {
       now: () => START,
       epoch: 1,
       anchors: anchorsWith(new Map(), letGo),
-      leading: () => leads.now,
+      writes: () => leads.now,
       alertAfterMs: MINUTE,
       mostBytes: 1024 * 1024,
     });
@@ -1340,12 +1530,15 @@ describe('the highest head each chain was read at (AT13f)', () => {
     asked?.saw(headAt(5n));
     expect(log.bytesHeld()).toBe(200);
     leads.now = false;
-    expect(log.heads(CHAIN)).toBeUndefined();
-    // A read asked while it led and answered after: nothing kept by a copy that doesn't.
+    // The lease gone, even for a moment: the head seen is still held to, so a cut back below it is still the alarm.
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(5n));
+    // A read asked while it led and answered after raises it all the same.
     asked?.saw(headAt(6n));
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(6n));
+    expect(log.heads(OTHER)).toBeUndefined();
     leads.now = true;
-    expect(log.heads(CHAIN)?.seen).toBeUndefined();
-    expect(log.bytesHeld()).toBe(0);
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(6n));
+    expect(log.bytesHeld()).toBe(200);
   });
 
   it('holds to where the digest covers the chain too, a walk’s head under an anchor: the higher of the two', async () => {
@@ -1578,14 +1771,14 @@ describe('a chain taken as it stands after a signed answer to its cut (AT13h, S2
     expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(3n));
   });
 
-  it('forgotten with the heads by a copy that stops leading, and taken nowhere while it doesn’t', () => {
+  it('kept with the heads by a copy that stops leading, and raised while it doesn’t (TR-1 A)', () => {
     const leads = { now: true };
     const log = createDigestLog({
       keys,
       logger: testLogger(),
       now: () => START,
       epoch: 1,
-      leading: () => leads.now,
+      writes: () => leads.now,
       alertAfterMs: MINUTE,
       mostBytes: 1024 * 1024,
     });
@@ -1594,11 +1787,13 @@ describe('a chain taken as it stands after a signed answer to its cut (AT13h, S2
     asked?.accept(headAt(6n));
     expect(log.bytesHeld()).toBe(400);
     leads.now = false;
-    expect(log.heads(CHAIN)).toBeUndefined();
-    asked?.accept(headAt(5n));
+    // The head seen stays held to by every other read; the chain taken as it stands stays so for the sessions' reads.
+    expect(log.heads(CHAIN)?.seen).toEqual(headAt(9n));
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(6n));
+    log.heads(CHAIN)?.accepted?.saw(headAt(7n));
     leads.now = true;
-    expect(log.heads(CHAIN)?.accepted).toBeUndefined();
-    expect(log.bytesHeld()).toBe(0);
+    expect(log.heads(CHAIN)?.accepted?.seen).toEqual(headAt(7n));
+    expect(log.bytesHeld()).toBe(400);
   });
 });
 
