@@ -592,6 +592,41 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
     });
   });
 
+/**
+ * Any input, but with every yes-or-no gate open (the agent and mandate active
+ * and matching, the supplier verified and on every list, the source allowed,
+ * the cap chosen, no duplicate, the limits and caps out of the way): so the
+ * amounts alone decide, and an allowed order is common rather than one in a
+ * thousand, which the split property needs to be tested at all.
+ */
+const amountsDecide: fc.Arbitrary<DecisionInput> = anyInput.map((given) => {
+  if (given.mandate === null) throw new Error('anyInput always has a mandate');
+  const open = (policy: PolicyRules | null): PolicyRules | null =>
+    policy === null ? null : { ...policy, perOrderCap: null, monthlyCap: null, supplierIds: null };
+  return {
+    ...given,
+    request: { ...given.request, fundingSourceId: SOURCE },
+    agent: { id: AGENT, status: 'ACTIVE' },
+    mandate: {
+      ...given.mandate,
+      status: 'ACTIVE',
+      agentId: AGENT,
+      endsAt: null,
+      supplierIds: [SUPPLIER, OTHER_SUPPLIER],
+      perOrderLimit: money(100_000_000n, 'AED'),
+      monthlyLimit: money(100_000_000n, 'AED'),
+    },
+    supplierStatus: 'VERIFIED',
+    sourceMayFund: true,
+    organizationPolicy: open(given.organizationPolicy),
+    organizationCapChosen: true,
+    mandatePolicy: open(given.mandatePolicy),
+    monthSpent: money(0n, 'AED'),
+    duplicateOrder: false,
+    possibleDuplicate: false,
+  };
+});
+
 const rank = (decision: Decision): number => DECISIONS.indexOf(decision);
 
 describe('reasonsShownToAgent (decision 11c)', () => {
@@ -660,6 +695,46 @@ describe('decide: properties', () => {
         if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);
         // A possible duplicate is never allowed without a person (decision 11a).
         if (decision === 'ALLOW') expect(given.possibleDuplicate).toBe(false);
+      }),
+    );
+  });
+
+  it('SEC-LIM-05 never lets an order reference already claimed through: one claim an order', () => {
+    fc.assert(
+      fc.property(anyInput, (given) => {
+        const made = decide({ ...given, duplicateOrder: true });
+        // Denied outright, whatever else is weighed: never allowed, never sent to a person to approve.
+        expect(made.decision).toBe('DENY');
+        expect(made.reasons).toContain('DUPLICATE_ORDER_REFERENCE');
+      }),
+    );
+  });
+
+  it('SEC-LIM-05 never allows an order that, with the supplier’s open ones, passes the lowest threshold (no split)', () => {
+    const lowestOf = ({ mandate, organizationPolicy, mandatePolicy }: DecisionInput): bigint => {
+      if (mandate === null) throw new Error('anyInput always has a mandate');
+      // The lowest of the mandate's threshold and each policy's, worked out here, not by the code under test.
+      return [organizationPolicy?.approvalThreshold, mandatePolicy?.approvalThreshold]
+        .flatMap((threshold) => (threshold === null || threshold === undefined ? [] : [threshold.minor]))
+        .reduce((a, b) => (b < a ? b : a), mandate.approvalThreshold.minor);
+    };
+    fc.assert(
+      fc.property(fc.boolean(), anyInput, amountsDecide, (gatesOpen, any, cleared) => {
+        const given = gatesOpen ? cleared : any;
+        const { decision, reasons } = decide(given);
+        const { request, splitOpen } = given;
+        const splitCheck = given.mandate?.splitCheck === true;
+        const lowest = lowestOf(given);
+        const together = splitOpen.minor + request.amount.minor;
+        if (splitCheck && together > lowest) expect(decision).not.toBe('ALLOW');
+        // A split under the threshold is named as one, so a person sees why (ADR-014 §5).
+        const split = splitCheck && request.amount.minor <= lowest && together > lowest;
+        if (split && rank(decision) >= rank('REQUIRE_APPROVAL')) expect(reasons).toContain('AGGREGATE_THRESHOLD');
+        // With the check off, the open orders never weigh.
+        if (!splitCheck) expect(reasons).not.toContain('AGGREGATE_THRESHOLD');
+        // With every other gate open the amounts alone decide: allowed exactly when within the lowest threshold,
+        // counting the supplier's open orders when the check is on.
+        if (gatesOpen) expect(decision === 'ALLOW').toBe((splitCheck ? together : request.amount.minor) <= lowest);
       }),
     );
   });
