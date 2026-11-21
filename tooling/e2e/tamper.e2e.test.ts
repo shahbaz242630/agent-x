@@ -478,7 +478,9 @@ const foreignChain = () =>
     const bytes = JSON.stringify({ events, head }, (_key, value: unknown) =>
       typeof value === 'bigint' ? String(value) : value,
     );
-    return { events: events.length, digest: createHash('sha256').update(bytes).digest('hex') };
+    // Each event by its place, action and actor, so a change names what was written (S207: a finding that named nothing).
+    const kinds = events.map((event) => `${String(event.seq)} ${event.action} by ${event.actor_type}`);
+    return { events: events.length, kinds, digest: createHash('sha256').update(bytes).digest('hex') };
   });
 
 /**
@@ -1332,9 +1334,17 @@ afterEach(async () => {
     if (foreignBefore !== undefined) {
       const current = await foreignChain();
       if (current.digest !== foreignBefore.digest) {
+        const was = new Set(foreignBefore.kinds);
+        const added = current.kinds.filter((kind) => !was.has(kind));
         foreignBefore = current;
-        if (lastAnswer === undefined) throw new Error('foreign audit changed without an HTTP request');
-        finding(lastAnswer.op, lastAnswer.headers, 'foreign audit chain changed', lastAnswer.answer);
+        if (lastAnswer === undefined)
+          throw new Error(`foreign audit changed without an HTTP request: ${added.join('; ')}`);
+        finding(
+          lastAnswer.op,
+          lastAnswer.headers,
+          `foreign audit chain changed (${added.join('; ') || 'no event added'})`,
+          lastAnswer.answer,
+        );
       }
     }
   } finally {
