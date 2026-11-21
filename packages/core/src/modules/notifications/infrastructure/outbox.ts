@@ -45,7 +45,7 @@
 // Each but `add` runs in a transaction of its own whose statements give up
 // after 10 seconds, a wait for a lock included: `fanOut` and `passOn` under
 // the organisation's wall, as their records need. The times are the Clock's.
-import { limitStatements, readEachTenant, withTenant } from '@agentx/platform/db';
+import { limitStatements, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
@@ -255,84 +255,6 @@ const QUEUED_COLUMNS = [
 
 /** Thrown inside a transaction to roll it back: the notice it read is not one the app queued there. */
 class NotQueuedHere extends Error {}
-
-/**
- * Seals, over what each says now, every notice still to be sent that has no seal and no `notice.queued` record, in
- * the caller's transaction, which must record that it was done, once ever (apps/api/src/notice-legacy.ts). A notice
- * with a record was queued sealed: one with no seal now had it taken out, and stays unsealed, to be refused. Its
- * organisations' records are read under each one's wall (readEachTenant, on `db`), one with a read that failed
- * counted as recorded, and the pass then not `complete`: its caller leaves it to be done again. Says how many it
- * sealed.
- *
- * TODO(S206 V4): delete this with sealLegacyNotices once a release has run it (Outstanding-Work AT10).
- */
-export async function sealNoticesFromBefore(
-  tx: Transaction<NotificationsTables>,
-  db: Kysely<OutboxTables>,
-  keys: KeyProvider,
-): Promise<{ readonly sealed: number; readonly complete: boolean }> {
-  const unsealed = await tx
-    .selectFrom('notifications.outbox')
-    .select(QUEUED_COLUMNS)
-    .where('mac', 'is', null)
-    .where('before_seals', '=', true)
-    .where('sent_at', 'is', null)
-    .where('given_up_at', 'is', null)
-    .forUpdate()
-    .execute();
-  const { recorded, complete } = await recordedNotices(db, unsealed);
-  const open = unsealed.filter((row) => !recorded.has(row.id.toLowerCase()));
-  if (open.length === 0) return { sealed: 0, complete };
-  const values = open.map((row) => {
-    const { mac, keyVersion } = queuedSeal(keys, row);
-    return sql`(${row.id}::uuid, ${mac}::bytea, ${keyVersion}::integer)`;
-  });
-  await sql`
-    update notifications.outbox o set mac = v.mac, mac_key_version = v.version
-    from (values ${sql.join(values)}) as v (id, mac, version)
-    where o.id = v.id and o.mac is null
-  `.execute(tx);
-  return { sealed: open.length, complete };
-}
-
-/**
- * Whether this transaction took the pass over the notices from before seals for itself (a transaction's advisory
- * lock, only tried): a replica that didn't leaves it to the one that did. TODO(S206 V4): delete with the pass (AT10).
- */
-export async function tookLegacySealPass(tx: Transaction<NotificationsTables>): Promise<boolean> {
-  const { rows } = await sql<{ got: boolean }>`select pg_catalog.pg_try_advisory_xact_lock(
-      pg_catalog.hashtextextended('notifications.legacy_seal', 0)) as got`.execute(tx);
-  return rows[0]?.got === true;
-}
-
-/** Which of these notices their organisations' chains record as queued: one statement an organisation, one trip. */
-async function recordedNotices(
-  db: Kysely<OutboxTables>,
-  rows: readonly { readonly id: string; readonly org_id: string }[],
-): Promise<{ readonly recorded: ReadonlySet<string>; readonly complete: boolean }> {
-  const byOrg = new Map<string, string[]>();
-  for (const row of rows) byOrg.set(row.org_id.toLowerCase(), [...(byOrg.get(row.org_id.toLowerCase()) ?? []), row.id]);
-  const reads = await readEachTenant(
-    db,
-    [...byOrg].map(([orgId, ids]) => ({ orgId, ids })),
-    ({ orgId, ids }) =>
-      db
-        .selectFrom('audit.events')
-        .select('subject_id')
-        .where('org_id', '=', orgId)
-        .where('subject_type', '=', NOTICE_SUBJECT)
-        .where('subject_id', 'in', ids),
-  );
-  const recorded = new Set<string>();
-  let complete = true;
-  for (const { item, read } of reads) {
-    // A read that failed can't say a notice has no record: none of its organisation's is sealed, this time.
-    if (!('rows' in read)) complete = false;
-    const found = 'rows' in read ? read.rows.map(({ subject_id: id }) => id) : item.ids;
-    for (const id of found) recorded.add(id.toLowerCase());
-  }
-  return { recorded, complete };
-}
 
 export function createOutbox({
   ids,

@@ -41,8 +41,10 @@
 // again for a cookie stolen while it was live. So the last use has a MAC of
 // its own, with the cookie's hash (0111): `use` writes it with the new last use,
 // in its one statement, and checks the one it replaced, read in the same
-// statement from the row as it was; one the app didn't write ends the session,
-// with the alarm. `holder` and `rotate` check it as they read the row.
+// statement from the row as it was; one the app didn't write, or none, ends the
+// session, with the alarm (S208: the rollout's grace, which only warned, deleted
+// early; a release from before 0111 rolled back to would page for each session
+// it touched). `holder` and `rotate` check it as they read the row.
 //
 // A session lives while both its timeouts hold: the idle one, from its last
 // use, and the absolute one, from when it opened. `use` finds a live session
@@ -155,15 +157,6 @@ export interface Sessions {
    */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
-
-/**
- * From when a last use whose MAC doesn't hold raises the integrity alarm (0111, S207 GM-4). Before it, the release
- * before this one may still be serving, or be rolled back to: its `use` moves the last use without its MAC, and its
- * `rotate` changes the cookie's hash without one, so an honest session's MAC wouldn't hold. Such a session is ended all
- * the same, with a warning, so an attack still fails, but no one is paged for a rollout (decision 49).
- * TODO(S207 GM-4): delete this grace path, and its warning, after the date.
- */
-export const LAST_USE_ALARM_FROM = new Date('2026-12-05T00:00:00Z');
 
 /** The cookie ID's size: 256 bits. */
 const COOKIE_BYTES = 32;
@@ -500,23 +493,15 @@ export function createSessions({
     return false;
   };
 
-  /** Whether the session's last use is the app's: one moved raises the alarm, one from before 0111 is warned of. */
+  /** Whether the session's last use is the app's: one moved, or with no MAC, raises the alarm. */
   const lastUseHolds = (
     row: { readonly id: string; readonly user_id: string; readonly cookie_hash: Buffer },
     lastUse: LastUse,
   ): boolean => {
-    if (lastUse.mac === null) {
-      logger.warn('identity.session_last_use_unsealed', { rowId: row.id, userId: row.user_id });
-      return false;
-    }
+    // macHolds believes no null MAC.
     const sealed = { mac: lastUse.mac, mac_key_version: lastUse.version };
     if (macHolds(keys, lastUseMessage(row.cookie_hash, lastUse.at), sealed)) return true;
-    // Ended either way; only what is said differs while the release before can still write the row (decision 49).
-    if (clock.now() < LAST_USE_ALARM_FROM) {
-      logger.warn('identity.session_last_use_mismatch', { rowId: row.id, userId: row.user_id });
-    } else {
-      rowForged(logger, 'session', row, 'last_use');
-    }
+    rowForged(logger, 'session', row, 'last_use');
     return false;
   };
 

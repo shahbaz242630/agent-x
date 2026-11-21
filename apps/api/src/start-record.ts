@@ -4,10 +4,15 @@
 // every start in order, sealed, where a change is found. A start that can't be
 // written doesn't go on: the caller refuses to start.
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { ROW_MACS_FROM } from '@agentx/core/modules/security-events';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
+
+/**
+ * The detail naming the start's own time, by its clock (S206 V6). It bounded the security rows from before 0105 and told
+ * a database born sealed from one from before (both passes deleted S208); kept as the start's signed time.
+ */
+const ROW_MACS_FROM = 'rowMacsFrom';
 
 export interface StartFacts {
   /** The config fingerprint's hash (`sha256:` and 64 hex digits). */
@@ -15,10 +20,7 @@ export interface StartFacts {
   readonly release: string;
   /** ADR-014 §4: a live start's live-money gate reference, recorded beside the config's hash; none otherwise. */
   readonly gateRef: string | undefined;
-  /**
-   * When it started, by its clock: recorded as ROW_MACS_FROM (S206 V6), the time no security row from before 0105 is
-   * newer than (core's legacy-seal.ts). Boot always gives it; a test that records a start of its own may not.
-   */
+  /** When it started, by its clock: recorded as ROW_MACS_FROM. Boot always gives it; a test's own start may not. */
   readonly at?: Date | undefined;
 }
 

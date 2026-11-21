@@ -190,13 +190,10 @@ describe(`the API process (Postgres ${server.version})`, () => {
       for (const line of chunk.split('\n')) if (line.startsWith('{')) said.push(JSON.parse(line) as Line);
     });
     try {
-      // The anchor check's first anchor, and the legacy sealing's (S206 V6) done: it anchors the platform chain at its
-      // start and its end, each a write of its own, racing the check's. Waited for, so the writes are all made.
+      // The anchor check's first anchor, waited for, so its write is made.
       await vi.waitFor(
         () => {
-          expect(said.map((line) => line.event)).toEqual(
-            expect.arrayContaining(['audit.anchors_written', 'security.legacy_seal_done']),
-          );
+          expect(said.map((line) => line.event)).toContain('audit.anchors_written');
         },
         { timeout: 30_000, interval: 100 },
       );
@@ -204,7 +201,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
       // PR2's sharded store: the platform chain's snapshot in its shard's folder, a signed list of it under `changes/`.
       const shard = shardHex(shardOf('platform'));
       expect(readdirSync(path.join(folder, 'e1', 'shards')).toSorted()).toEqual(['changes', shard].toSorted());
-      // A signed list for each write the store said it made, however the check's and the sealing's fell.
+      // A signed list for each write the store said it made.
       const writes = () => said.filter((line) => line.event === 'audit.anchors_written').length;
       await vi.waitFor(() => {
         expect(readdirSync(path.join(folder, 'e1', 'shards', 'changes'))).toHaveLength(writes());

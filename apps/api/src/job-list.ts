@@ -80,7 +80,6 @@ import {
 import { eachDay, owedPasses, rotation } from './org-passes.ts';
 import { createPersonSealCheck, PERSON_SEAL_CHECK_EVERY_MS } from './person-seal-check.ts';
 import { createPersonSeal, PERSON_SEAL_EVERY_MS } from './person-seal.ts';
-import { createLegacySealJob, LEGACY_SEAL_EVERY_MS } from './legacy-seal-job.ts';
 import { createSecuritySeal, SECURITY_SEAL_EVERY_MS } from './security-seal.ts';
 import { createSecurityTally, SECURITY_TALLY_EVERY_MS } from './security-tally.ts';
 import { createPaymentChecks, PAYMENT_CHECKS_EVERY_MS, paymentCheckDue } from './payment-checks.ts';
@@ -696,17 +695,6 @@ export function oneCopyJobs({ config, keys, logger, database }: Booted, parts: S
         retentionDays: config.securityEvents.retentionDays,
       }),
       SECURITY_TALLY_EVERY_MS,
-      LONG_MS,
-    ),
-    // The security rows from before 0105 given their MACs, once, where the anchor store is (S206 V6).
-    job(
-      'security_legacy_seal',
-      createLegacySealJob({
-        ...clocked,
-        anchors: anchorLog,
-        retentionDays: config.securityEvents.retentionDays,
-      }),
-      LEGACY_SEAL_EVERY_MS,
       LONG_MS,
     ),
     // Every organisation's marks of work held to what its own rows say (4D2e D6).

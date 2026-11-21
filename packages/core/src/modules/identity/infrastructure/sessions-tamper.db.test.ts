@@ -37,7 +37,6 @@ import {
 import {
   createSessions,
   endSessionsOf,
-  LAST_USE_ALARM_FROM,
   lockSessionsOf,
   sessionEndedEvent,
   sessionRotatedEvent,
@@ -829,13 +828,9 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
   const platform = createPlatformChain({ keys, ids });
   const IDLE_MS = TIMEOUTS.idleSeconds * 1000;
 
-  /** Sessions on a clock of the test's own, so moving it on touches no other test. */
-  /** From when a last use whose MAC doesn't hold raises the alarm: before it, only a warning (the rollout's grace). */
-  const ALARMED = new Date(LAST_USE_ALARM_FROM.getTime() + 60_000);
-
-  /** Sessions on a clock of the test's own (from the alarm's start unless told), so moving it touches no other test. */
-  function onOwnClock(start: Date = ALARMED): { clock: FixedClock; at: ReturnType<typeof sessions> } {
-    const own = new FixedClock(start);
+  /** Sessions on a clock of the test's own, from where the file's stands, so moving it touches no other test. */
+  function onOwnClock(): { clock: FixedClock; at: ReturnType<typeof sessions> } {
+    const own = new FixedClock(clock.now());
     return {
       clock: own,
       at: createSessions({ ids, clock: own, timeouts: TIMEOUTS, keys, logger: testLogger(capture) }),
@@ -881,20 +876,19 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
     expect(alarms()).toEqual([]);
   });
 
-  it('before the alarm starts, a last use the app did not write still ends the session, with a warning, not the alarm', async () => {
-    // As the release before this one leaves a row: its last use moved on with no MAC made again.
-    const { clock: own, at } = onOwnClock(new Date(LAST_USE_ALARM_FROM.getTime() - 2 * IDLE_MS));
+  it('a live session whose last use was moved on with no MAC made again, as the release before 0111 would, ends with the alarm: no grace (S208)', async () => {
+    const { clock: own, at } = onOwnClock();
     const { userId, sessionId, cookie } = await opened(at);
     own.advanceBy(IDLE_MS / 2);
     await asOwner('update identity.sessions set last_seen_at = $2 where id = $1', [sessionId, own.now()]);
 
     expect(await at.holder(app, cookie)).toBeUndefined();
     expect(await useIn(at, cookie)).toBeUndefined();
-    expect(capture.lines().filter((line) => line.event === 'identity.session_last_use_mismatch')).toEqual([
-      expect.objectContaining({ level: 'warn', rowId: sessionId, userId }),
-      expect.objectContaining({ level: 'warn', rowId: sessionId }),
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'session', reason: 'last_use', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'last_use', rowId: sessionId }),
     ]);
-    expect(alarms()).toEqual([]);
+    expect(capture.lines().filter((line) => line.level === 'warn')).toEqual([]);
     expect(await rowOf(sessionId)).toBeUndefined();
   });
 
@@ -985,7 +979,7 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
     expect(alarms()).toEqual([]);
   });
 
-  it('a session whose last use has no MAC, from the release before, is ended at its next use, with a warning', async () => {
+  it('a session whose last use has no MAC, as the release before 0111 left it, is ended at its next use, with the alarm (S208)', async () => {
     const { at } = onOwnClock();
     const { userId, sessionId, cookie } = await opened(at);
     await asOwner('update identity.sessions set last_use_mac = null, last_use_mac_key_version = null where id = $1', [
@@ -994,11 +988,11 @@ describe(`SEC-DB-16 R-15 the owner can't bring back an idle session, nor one fro
 
     expect(await at.holder(app, cookie)).toBeUndefined();
     expect(await useIn(at, cookie)).toBeUndefined();
-    expect(capture.lines().filter((line) => line.event === 'identity.session_last_use_unsealed')).toEqual([
-      expect.objectContaining({ level: 'warn', rowId: sessionId, userId }),
-      expect.objectContaining({ level: 'warn', rowId: sessionId }),
+    expect(alarms()).toEqual([
+      expect.objectContaining({ level: 'error', check: 'session', reason: 'last_use', rowId: sessionId, userId }),
+      expect.objectContaining({ check: 'session', reason: 'last_use', rowId: sessionId }),
     ]);
-    expect(alarms()).toEqual([]);
+    expect(capture.lines().filter((line) => line.level === 'warn')).toEqual([]);
     expect(await rowOf(sessionId)).toBeUndefined();
   });
 

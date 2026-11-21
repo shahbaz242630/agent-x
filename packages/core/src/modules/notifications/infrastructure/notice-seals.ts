@@ -47,7 +47,7 @@ export interface NoticeSeal {
 
 /**
  * How a notice's seal reads: as the app made it, or not its own. One with none is not its own either: the notices
- * queued before seals were sealed once, as the first release with them started (apps/api/src/notice-legacy.ts).
+ * queued before seals were sealed once, as the first release with them started (S206 V4; the pass deleted S208).
  */
 export type SealJudged = 'sound' | 'tampered';
 
