@@ -763,6 +763,24 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
     expect(lines('audit.integrity_failed').length).toBeGreaterThan(0);
   });
 
+  /** The organisation's slot rows as the owner saves them, and the chain's newest place now. */
+  async function slotsAsTheyAre(w: World) {
+    const owner = await tamperAsOwner(database, ORDER_SLOTS, w.org);
+    try {
+      const rows = await owner.query<{ id: string }>('select id from spend_requests.order_slots where org_id = $1', [
+        w.org,
+      ]);
+      const saved = await Promise.all(rows.map(({ id }) => owner.saveRow(id)));
+      const [top] = await owner.query<{ seq: string }>(
+        'select max(seq)::text as seq from audit.events where org_id = $1',
+        [w.org],
+      );
+      return { saved, before: top?.seq ?? '0' };
+    } finally {
+      await owner.end();
+    }
+  }
+
   /**
    * The order-slot variant: an order asked, ended (its slots let go), asked again and paid, a write after it. The paid
    * Tx A walks past the slots' `order_slot.held`, raising F beyond. Then, `rewrite` given, the owner moves those events to
@@ -783,22 +801,7 @@ describe('SEC-DB-20 TR-3 a stop rewritten in place below the frontier, its hash 
         clock.now(),
       ),
     );
-    const owner = await tamperAsOwner(database, ORDER_SLOTS, w.org);
-    let saved: Awaited<ReturnType<typeof owner.saveRow>>[] = [];
-    let before = '0';
-    try {
-      const rows = await owner.query<{ id: string }>('select id from spend_requests.order_slots where org_id = $1', [
-        w.org,
-      ]);
-      saved = await Promise.all(rows.map(({ id }) => owner.saveRow(id)));
-      const [top] = await owner.query<{ seq: string }>(
-        'select max(seq)::text as seq from audit.events where org_id = $1',
-        [w.org],
-      );
-      before = top?.seq ?? '0';
-    } finally {
-      await owner.end();
-    }
+    const { saved, before } = await slotsAsTheyAre(w);
     const paid = await ask(acting, w, { amount: ALLOWED(), orderReference: 'ORD-77' });
     await signed(w, (tx) =>
       createAuditTrail({ keys, ids }).record(tx, w.org, {
