@@ -20,7 +20,13 @@ import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { checkStatesWith, createDigestLog } from '../../audit/index.ts';
-import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
+import {
+  changeHandoffPause,
+  createPlatformChain,
+  handoffPauseOf,
+  type PlatformControlsTables,
+  type PlatformTransaction,
+} from '../../platform-controls/index.ts';
 import {
   createSessions,
   sessionEndedEvent,
@@ -43,7 +49,9 @@ const keys = createKeyProvider(
   ),
 );
 const ids = new SequentialIds(0x5208_0000);
-const clock = new FixedClock(new Date('2026-11-21T09:00:00Z'));
+// Behind the database's clock, and never past it (each test moves it an hour): signed ends with a time to come decide
+// nothing (SIGNED_END, sessions.ts).
+const clock = new FixedClock(new Date('2026-01-01T09:00:00Z'));
 const TIMEOUTS = { idleSeconds: 1800, absoluteSeconds: 43_200 };
 const PLATFORM = { kind: 'platform' } as const;
 const platform = createPlatformChain({ keys, ids });
@@ -156,6 +164,7 @@ const headBack = (kept: unknown) =>
 
 /** The owner cuts the platform chain's end off past `to` (a head row it kept) and puts that head back: every seal true. */
 async function cutBackTo(to: { seq: bigint; kept: unknown }): Promise<void> {
+  await asOwner('delete from platform_controls.operator_signatures where seq > $1::bigint', [to.seq.toString()]);
   await asOwner('delete from platform_controls.audit_events where seq > $1::bigint', [to.seq.toString()]);
   await headBack(to.kept);
 }
@@ -470,6 +479,126 @@ describe(`AT13h, S208: a cut platform chain signs everyone out once, signed, ins
         [JSON.stringify(record?.kept)],
       );
       await asOwner('delete from identity.sessions where id = $1', [old.sessionId]);
+    }
+  });
+
+  it('the hand-off pause cut off with the chain stays held through the answer and the writes after it: no hand-offs', async () => {
+    const operator = createDatabase<PlatformControlsTables>(
+      { ...database.connection('operator'), maxConnections: 1 },
+      testLogger(),
+    );
+    const digest = await newDigest();
+    const pauseNow = async () =>
+      (
+        await app
+          .transaction()
+          .execute((tx) =>
+            handoffPauseOf(tx as unknown as PlatformTransaction, 'share', { keys, logger: testLogger(), digest }),
+          )
+      ).outcome;
+    const move = (paused: boolean) =>
+      operator.transaction().execute((tx) =>
+        changeHandoffPause(
+          tx,
+          { chain: platform, keys, logger: testLogger() },
+          {
+            paused,
+            reason: 'INC-2026/0208',
+            actor: { type: 'system', id: 'operator' },
+            release: 'r-test',
+            run: null,
+          },
+        ),
+      );
+    checkStatesWith(digest);
+    try {
+      await move(false);
+      expect(await pauseNow()).toBe('running');
+      const resumed = await headRow();
+      const [resume] = await asOwner(
+        'select seq::text as seq, id::text as id from platform_controls.audit_events where seq = $1::bigint',
+        [resumed.seq.toString()],
+      );
+      await move(true);
+      expect(await pauseNow()).toBe('paused');
+      const someone = await signedIn();
+      expect(await copy(digest).use(app, someone.cookie)).toBeDefined();
+      const paused = (await headRow()).seq;
+      // The owner cuts the pause off with the chain's end and points the row back at the resume.
+      await cutBackTo(resumed);
+      await asOwner(
+        'update platform_controls.handoff_pause set paused = false, event_seq = $1::bigint, event_id = $2::uuid',
+        [resume?.seq, resume?.id],
+      );
+      expect(await pauseNow()).toBe('tampered');
+
+      // Found and answered; people sign in again and sign out, writing on this copy past the pause's old place.
+      expect(await copy(digest).use(app, someone.cookie)).toBeUndefined();
+      expect(answers()).toHaveLength(1);
+      for (const _ of [1, 2, 3]) {
+        clock.advanceBy(1000);
+        await signOut((await signedIn()).cookie);
+      }
+      expect((await headRow()).seq).toBeGreaterThan(paused + 1n);
+      expect(await pauseNow()).toBe('tampered');
+      // The sessions' reads still let the next sign-in in, held to the answer and raised by those writes.
+      const next = await signedIn();
+      expect(await copy(digest).use(app, next.cookie)).toBeDefined();
+      expect(digest.heads(PLATFORM)?.accepted?.seen?.seq).toBe((await headRow()).seq);
+    } finally {
+      checkStatesWith(undefined);
+      await operator.destroy();
+    }
+  });
+
+  it('a record of every end planted past the head, or with a time to come, decides nothing; one planted inside the chain is the alarm', async () => {
+    const someone = await signedIn();
+    const at = copy(await newDigest());
+    const head = await headRow();
+    const planted = (seq: bigint, when: string) =>
+      asOwner(
+        `insert into platform_controls.audit_events
+           (seq, id, recorded_at, actor_type, actor_id, action, details, prev_hash, hash, mac, mac_key_version)
+         values ($1::bigint, gen_random_uuid(), pg_catalog.now(), 'system', 'api', $2, $3, $4, $4, $4, 1)`,
+        [seq.toString(), SESSIONS_ALL_ENDED, JSON.stringify({ at: when }), Buffer.alloc(32, 7)],
+      );
+    const ends = { logger: testLogger(capture), signedEnds: createSignedEnds(keys) };
+    const endsAt = () =>
+      app
+        .transaction()
+        .execute((tx) => sessionsEndedAt(tx as unknown as Kysely<IdentityTables>, someone.userId, ends, clock.now()));
+    // Past the head, now: in no walk, so nothing.
+    await planted(head.seq + 100n, new Date(clock.now().getTime() + 60 * 60 * 1000).toISOString());
+    try {
+      expect(await at.holder(app, someone.cookie)).toBe(someone.userId);
+      // Only the earlier tests' answers, all before this sign-in: never the planted time, which would make it stale.
+      const ended = await endsAt();
+      expect(ended).toMatchObject({ kind: 'read' });
+      expect(ended.kind === 'read' ? (ended.endedAt?.getTime() ?? 0) : Infinity).toBeLessThan(clock.now().getTime());
+    } finally {
+      await asOwner('delete from platform_controls.audit_events where seq = $1::bigint', [
+        (head.seq + 100n).toString(),
+      ]);
+    }
+    // Inside the chain, in the head's own event's place, with a time to come: the session read ignores the time, and
+    // the sign-in's check of the chain finds the event, the alarm.
+    const [kept] = await asOwner(
+      'select pg_catalog.row_to_json(e) as kept from platform_controls.audit_events e where e.seq = $1::bigint',
+      [head.seq.toString()],
+    );
+    await asOwner('delete from platform_controls.audit_events where seq = $1::bigint', [head.seq.toString()]);
+    await planted(head.seq, '2100-01-01T00:00:00.000Z');
+    try {
+      // (A copy that saw the head finds it cut; one that holds no head reads the record, and ignores its time.)
+      expect(await copy(await newDigest(), false).holder(app, someone.cookie)).toBe(someone.userId);
+      expect(await endsAt()).toEqual({ kind: 'tampered' });
+      expect(alarms()).toEqual([expect.objectContaining({ check: 'platform_chain' })]);
+    } finally {
+      await asOwner('delete from platform_controls.audit_events where seq = $1::bigint', [head.seq.toString()]);
+      await asOwner(
+        'insert into platform_controls.audit_events select * from pg_catalog.json_populate_record(null::platform_controls.audit_events, $1::json)',
+        [JSON.stringify(kept?.kept)],
+      );
     }
   });
 

@@ -75,13 +75,35 @@ export interface PlatformEventsMatching {
    * found elsewhere costs no trip of its own; an expression that reads nothing (null) matches no event.
    */
   readonly factsFrom?: Readonly<Record<string, Expression<string | null>>>;
+  /**
+   * Only events at or below the chain's head (AT13h, S208): a row planted past it by the database's owner is in no
+   * walk and no stretch's check, so it must decide nothing.
+   */
+  readonly belowHead?: boolean;
+  /**
+   * A time fact, by name, no later than the database's now and the two minutes the app's clock and the database's may
+   * differ by (AT13h, S208): a time to come, which only a planted row holds, decides nothing.
+   */
+  readonly notAhead?: string;
 }
 
 /** The condition on an event's details that `matching` asks for. */
-const matches = ({ action, facts, oneOf = {}, noneOf = {}, factsFrom = {} }: PlatformEventsMatching) =>
+const matches = ({
+  action,
+  facts,
+  oneOf = {},
+  noneOf = {},
+  factsFrom = {},
+  belowHead = false,
+  notAhead,
+}: PlatformEventsMatching) =>
   sql.join(
     [
       sql`action = ${action}`,
+      ...(belowHead ? [sql`seq <= (select h.seq from platform_controls.audit_head h limit 1)`] : []),
+      ...(notAhead === undefined
+        ? []
+        : [sql`(${fact(notAhead)})::timestamptz <= pg_catalog.now() + interval '2 minutes'`]),
       ...Object.entries(facts).map(([name, value]) => sql`${fact(name)} = ${value}`),
       ...Object.entries(factsFrom).map(([name, value]) => sql`${fact(name)} = ${value}`),
       sql`details::jsonb @> ${JSON.stringify(facts)}::jsonb`,

@@ -265,6 +265,14 @@ export {
 /** How far before a sign-in the platform chain is checked for ends: the app's clock and the database's may differ. */
 const CLOCKS_DIFFER_MS = 2 * 60 * 1000;
 
+/**
+ * How a person's or everyone's signed end read by its index decides (AT13h, S208): only at or below the platform
+ * chain's head, and only with a time no later than the database's now and those two minutes. A row the owner planted
+ * past the head (in no walk, no stretch's check) or with a time to come would otherwise refuse every sign-in and
+ * session for good with no alarm; one planted inside the chain breaks the chain's check, which raises it.
+ */
+const SIGNED_END = { belowHead: true, notAhead: 'at' } as const;
+
 /** What a sign-in finds of the person's ends (sessionsEndedAt). */
 export type SessionsEnded =
   /** The latest end believed, or null for none. */
@@ -305,9 +313,11 @@ export async function sessionsEndedAt(
   const person = userId.toLowerCase();
   // The platform chain's tables are reached in the same transaction: they belong to no organisation.
   const platform = tx as unknown as PlatformTransaction;
-  const signed = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: { person } }]);
+  const signed = latestPlatformTimeOfRead(platform, 'at', [
+    { action: SESSIONS_ENDED, facts: { person }, ...SIGNED_END },
+  ]);
   // Every session's end at once (AT13h): everyone's, never the column's to agree with.
-  const everyone = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {} }]);
+  const everyone = latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END }]);
   const row = await tx
     .selectFrom('identity.users')
     .select([
@@ -393,20 +403,22 @@ const signedEndsOfRow = (db: Kysely<IdentityTables>, seenAt: bigint | undefined)
     sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ROTATED, {}, { record, person, retired })})`.as(
       'rotated_away',
     ),
-    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person } }])})`.as(
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ENDED, facts: {}, factsFrom: { person }, ...SIGNED_END }])})`.as(
       'all_ended_at',
     ),
     // Its place too, for the digest (AT13c), which keeps places: by the same index, the person's few such ends.
     sql<
       bigint | null
-    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person } })})`.as(
+    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: {}, factsFrom: { person }, ...SIGNED_END })})`.as(
       'all_ended_seq',
     ),
     // Every session's end at once (AT13h), its time and place: by 0057's by-action index, a few such ends ever.
-    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {} }])})`.as(
+    sql<Date | null>`(${latestPlatformTimeOfRead(platform, 'at', [{ action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END }])})`.as(
       'everyone_ended_at',
     ),
-    sql<bigint | null>`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {} })})`.as(
+    sql<
+      bigint | null
+    >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END })})`.as(
       'everyone_ended_seq',
     ),
     // The platform chain's head, held to the highest seen (AT13h, the header).
@@ -464,10 +476,14 @@ async function endsNow(db: Kysely<IdentityTables>, row: EndsRead): Promise<EndsR
       sql<boolean>`exists (${platformEventWithRead(platform, SESSION_ROTATED, { record, person, retired })})`.as(
         'rotated_away',
       ),
-      sql<bigint | null>`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: { person } })})`.as(
+      sql<
+        bigint | null
+      >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ENDED, facts: { person }, ...SIGNED_END })})`.as(
         'all_ended_seq',
       ),
-      sql<bigint | null>`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {} })})`.as(
+      sql<
+        bigint | null
+      >`(${latestPlatformSeqRead(platform, { action: SESSIONS_ALL_ENDED, facts: {}, ...SIGNED_END })})`.as(
         'everyone_ended_seq',
       ),
     ])

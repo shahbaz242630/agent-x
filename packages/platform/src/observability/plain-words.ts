@@ -1100,7 +1100,7 @@ export const PLAIN_WORDS = {
   'identity.sessions_all_ended': {
     happened: 'The sign-in records were found cut back by someone with direct access to the database.',
     broke: 'Everyone on the console was signed out once and can sign in again with their passkey.',
-    next: 'An operator should find who changed the records and follow the incident runbook.',
+    next: 'An operator should find who changed the records. If it comes again at each restart, record a rebase.',
   },
   'identity.sessions_all_end_failed': {
     happened: 'The sign-in records were found cut back, but signing everyone out once could not be saved.',

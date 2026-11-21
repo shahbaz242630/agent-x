@@ -1089,6 +1089,26 @@ describe('AT13h: the chain cut back below a write this process committed, before
     expect(alarms()).toEqual([]);
   });
 
+  it('writes on the chain as cut, past the head seen, raise nothing: still refused, never hidden (S208)', async () => {
+    const { id, written } = await writtenThenCut();
+    const trail = createAuditTrail({ keys, ids: new SequentialIds(0xd00), digest });
+    for (const step of [1, 2, 3]) {
+      await withTenant(app, org, (tx) =>
+        trail.record(tx, org, {
+          actor: { type: 'user', id: USER },
+          action: 'probe.stepped',
+          subject: { type: 'probe', id: USER, version: step },
+          details: { step },
+        }),
+      );
+    }
+    // The chain grown from the cut past the place written: the head seen is not moved onto it.
+    expect((await headNow()).seq).toBeGreaterThan(written.seq);
+    expect(seenNow()).toEqual(written);
+    expect(await heldCheck(id)).toEqual({ outcome: 'tampered', sign: 'log' });
+    expect(alarms()).toEqual([tamperedAt(id, written.seq)]);
+  });
+
   it('a write raises the head seen once it commits: cut back below it, refused at decision time, the alarm at the write', async () => {
     const { id, written } = await writtenThenCut();
     expect(seenNow()).toEqual(written);

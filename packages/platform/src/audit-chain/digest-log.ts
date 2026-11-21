@@ -149,6 +149,28 @@ export interface HeadWatch {
   accept(to: HeadSeen): void;
 }
 
+/**
+ * Whether the chain, as a write found it under its head's lock, still runs through `at` (AT13h): no head to hold to, or
+ * the event at its place (read at or below the head locked) with its hash. A write on a chain cut back below a head
+ * this process holds raises nothing from it: the write goes on from the cut, and raising it would hide the cut.
+ */
+export const heldThrough = (at: HeadSeen | undefined, hashThere: unknown): boolean =>
+  at === undefined || (hashThere instanceof Buffer && hashThere.equals(at.hash));
+
+/**
+ * What a write committed raises (AT13h): the head seen, and the head taken with it, where the chain ran through both;
+ * only the head taken, where it ran through that alone (a cut answered); nothing where it ran through neither.
+ */
+export function raiseWritten(
+  watch: HeadWatch,
+  head: HeadSeen,
+  held: { readonly seen: boolean; readonly accepted: boolean },
+): void {
+  if (!held.accepted) return;
+  if (held.seen) watch.saw(head);
+  else watch.accepted?.saw(head);
+}
+
 /** Whether two heads are the same: the same place, with the same hash. */
 const sameHead = (one: HeadSeen, other: HeadSeen): boolean => one.seq === other.seq && one.hash.equals(other.hash);
 
@@ -1386,7 +1408,9 @@ export function createDigestLog({
   /** A head a read found, or a write moved to, raising where the chain was taken as it stands, as raiseHead does the seen. */
   const raiseAccepted = (name: string, chain: Chain, { seq, hash }: HeadSeen, asked: number): void => {
     const held = accepted.get(name);
-    if (held === undefined || held.seq >= seq || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
+    // Never from a watch asked before the read that found the cut: it may have read the chain before the cut.
+    if (held === undefined || held.seq >= seq || asked < held.at) return;
+    if (anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
     accepted.set(name, { ...held, seq, hash: Buffer.from(hash) });
   };
 

@@ -35,7 +35,10 @@
 // cut back (platformCutBack): that session is refused, the pause read as
 // tampered (paused), with the alarm. Raised by those reads, from a transaction that hasn't gone to record
 // here, and by each event recorded here once its transaction commits, unless
-// anything that could undo part of it was sent after (afterCommit). Kept in the
+// anything that could undo part of it was sent after (afterCommit), and only where
+// the head's lock showed the chain still ran through the head held to (heldThrough,
+// read in the lock's own statement): a write on a chain cut back raises nothing, or
+// it would hide the cut (the hand-off pause read running again, S208). Kept in the
 // signed states' digest (statesDigest), in memory: no trip and no file.
 import {
   type AnchorPoint,
@@ -60,6 +63,8 @@ import {
   headHeldTo,
   headIsSealed,
   type HeadWatch,
+  heldThrough,
+  raiseWritten,
   LAST_COUNTED,
   operatorSignature,
   passStep,
@@ -354,8 +359,27 @@ export function platformEventSealed(keys: KeyProvider, row: Readonly<Record<stri
   return sealed !== undefined && content !== undefined && entryIsSealed(keys, CHAIN, { ...sealed, content });
 }
 
+/**
+ * What a record was held to (AT13h): the heads its watch gave, and once the head is locked, whether the chain still ran
+ * through each (heldThrough), which is all its commit raises (raiseWritten).
+ */
+interface WriteHold {
+  readonly seen: PlatformHead | undefined;
+  readonly accepted: PlatformHead | undefined;
+  held: { readonly seen: boolean; readonly accepted: boolean };
+}
+
 /** Recording's steps over the platform-controls tables, for one event. */
-function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: string, keys: KeyProvider): ChainWriter {
+function writerFor(
+  tx: PlatformTransaction,
+  event: PlatformEvent,
+  details: string,
+  keys: KeyProvider,
+  hold: WriteHold,
+): ChainWriter {
+  /** The hash of the event at `at`'s place at or below the head locked: in the lock's own statement, no trip. */
+  const hashAt = (at: PlatformHead | undefined) =>
+    sql`(select e.hash from platform_controls.audit_events e where e.seq = ${at?.seq ?? null}::bigint and e.seq <= l.seq)`;
   return {
     async lockHead() {
       // The clock in the outer select, which reads a row only once the inner one has locked it.
@@ -364,10 +388,16 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
           select h.seq, h.hash, h.mac, h.mac_key_version from platform_controls.audit_head h
           for no key update
         )
-        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now from locked l
+        select l.*, pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp()) as now,
+               ${hashAt(hold.seen)} as seen_hash, ${hashAt(hold.accepted)} as taken_hash
+        from locked l
       `.execute(tx);
       const [row, ...others] = rows;
       if (row === undefined) return undefined;
+      hold.held = {
+        seen: heldThrough(hold.seen, row.seen_hash),
+        accepted: heldThrough(hold.accepted, row.taken_hash),
+      };
       // A second head row means someone went round the app: no head can be trusted.
       return { head: others.length > 0 ? undefined : headFields(row), now: clockOf(row) };
     },
@@ -686,13 +716,19 @@ export function createPlatformChain({
     // AT13h, the header: given before the write, so anything that could undo it, sent from here on, keeps it unraised.
     const moved: { head?: { readonly seq: bigint; readonly hash: Buffer } } = {};
     const watch = platformHeadWatch();
+    // Nothing raised unless the head's lock shows the chain ran through what this process holds it to.
+    const hold: WriteHold = {
+      seen: watch?.seen,
+      accepted: watch?.accepted?.seen,
+      held: { seen: false, accepted: false },
+    };
     if (watch !== undefined) {
       await afterCommit(tx, () => {
-        if (moved.head !== undefined) watch.saw(moved.head);
+        if (moved.head !== undefined) raiseWritten(watch, moved.head, hold.held);
       });
     }
     await boundHeadWait(tx);
-    const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details, keys), {
+    const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details, keys, hold), {
       nextId: () => ids.next(),
       content: platformEventContent(event, details),
     });
