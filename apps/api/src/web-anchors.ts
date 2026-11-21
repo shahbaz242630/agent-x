@@ -5,6 +5,8 @@
 // digest's own `read`: the newest snapshot and the deltas after it, then only the files named since), the anchors
 // first, as their rebases decide which of the digest's lines are passed over (digest-log.ts). It never writes either,
 // never takes the lease, and never checks a chain: the jobs copy alone walks, anchors and records.
+// A jobs copy that doesn't lead runs the same read (job-list.ts, `anchors_follow`, TR-1 A): it keeps all that its digest
+// holds through a lease lost, so it must still learn of rebases, and of what the copy leading walked meanwhile.
 //
 // Lag: a copy's digest is at most a run (plus a read) behind the jobs copy's. A fact is a place a walk read, sealed, so
 // a lagging copy holds fewer true facts, never a false one: it can only miss a rollback the jobs copy would catch, never

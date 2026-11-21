@@ -49,6 +49,11 @@ export const PLAIN_WORDS = {
     broke: 'Its jobs were stopped part way; each picks up where it was once a copy leads again.',
     next: 'Nothing, if another copy took over or it comes back within minutes. If not, check the database.',
   },
+  'jobs.lease_taken_early': {
+    happened: 'The right to run the background jobs was taken from this copy before its time ran out.',
+    broke: 'Its jobs stopped. No copy can take it that early, so the job lease row was likely changed outside the app.',
+    next: 'Treat it as tampering: check who changed the job lease row. See the runbook.',
+  },
   'jobs.lease_renew_failed': {
     happened: 'The database did not answer when this copy tried to keep the right to run the background jobs.',
     broke: 'Nothing yet. If this goes on for a minute, this copy stops its jobs until it can reach the database.',

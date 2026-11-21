@@ -30,9 +30,12 @@
 // facts and coverage, until walks read it again from its first event. The digest learns of rebases from the anchors'
 // log, which reads them first. A walk's facts are dated when it began, so a walk a rebase lands during counts as before.
 //
-// Said only while the anchors' log holds the chain's shard (PL-65 PR3; a shard let go may hold a rebase not read again),
-// and only while this process leads (`leading`): one that has lost the lease reads the store no more, so it forgets all
-// it holds and reads it again whole when it leads again.
+// Said only while the anchors' log holds the chain's shard (PL-65 PR3; a shard let go may hold a rebase not read again).
+// Whether this process leads the jobs decides only what it writes (`writes`: a walk recorded, a delta or a snapshot
+// written), never what it says (TR-1 A). A copy that loses the lease keeps every fact, coverage and head it holds, and
+// goes on reading the store as a web copy does (job-list.ts), so it learns of rebases and of the leader's walks; when
+// it leads again it writes what it held back. Forgetting at a lease lost was a hole: the owner, taking the lease row
+// for a moment, made the copy forget the heads it had seen above the anchor, and a cut back to below them passed.
 //
 // What it holds is bounded (`mostBytes`), and one organisation's growth never stops another's. Past it, a chain gives
 // way: the objects that grow with use first (`GROWING_SUBJECTS`: a payment's requests, instructions, transactions; the
@@ -84,7 +87,8 @@
 // holds, never an object missing. Raised by the reads themselves, from what is committed, asked before the statement as
 // `latest` is; in memory, with no trip and no file. A rebase after the read that saw it sets it aside, as it does the
 // facts. Where the digest covers the chain (a head a walk read, from the store: about its last anchor, or past it), that
-// is held to as well, so a restart keeps the chain held that far; what this process saw above it goes with the process.
+// is held to as well, so a restart keeps the chain held that far; what this process saw above it goes with the process,
+// never with its lease (TR-1 A: a lease taken from it, even for a moment, leaves every head it saw held to).
 // So a sanctioned repair that leaves the chain below, or other than, a head a copy saw or a walk covered (rows taken
 // away or replaced, though the anchor holds) is followed by a rebase (the operator's `chain-rebase --after-restore`),
 // which sets every copy's heads and coverage aside within one read of the anchors.
@@ -201,8 +205,8 @@ export interface StateDigest {
   /** The newest signed place known for the object on the chain; nothing where it knows none, or can't say now. */
   latest(chain: Chain, type: string, id: string): bigint | undefined;
   /**
-   * What a read of the chain holds its head to (AT13f, the header); none where the digest can't say now (a copy that
-   * doesn't lead, or the chain's shard let go). A head read below `seen`, or another event at its place, is the chain
+   * What a read of the chain holds its head to (AT13f, the header); none where the digest can't say now (the chain's
+   * shard let go). A copy that doesn't lead says it as one that does (TR-1 A). A head read below `seen`, or another event at its place, is the chain
    * cut back past the app.
    */
   heads(chain: Chain): HeadWatch | undefined;
@@ -627,7 +631,7 @@ export function createDigestLog({
   now,
   epoch,
   anchors,
-  leading,
+  writes,
   alertAfterMs,
   mostBytes,
   mostFileBytes = mostBytes,
@@ -642,8 +646,11 @@ export function createDigestLog({
   readonly epoch: number;
   /** The anchors' log, for its rebases and its shards held; none where the anchors are in memory alone. */
   readonly anchors?: DigestAnchors | undefined;
-  /** Whether this process leads the jobs now: none, always. */
-  readonly leading?: (() => boolean) | undefined;
+  /**
+   * Whether this process may write now: it leads the jobs (none, always). Only a walk's record, a delta and a snapshot
+   * wait for it; every read and answer goes on regardless (TR-1 A), what was held back written once it leads again.
+   */
+  readonly writes?: (() => boolean) | undefined;
   /** How long reads or writes may fail before that is the alert, not just a warning. */
   readonly alertAfterMs: number;
   /** What it may hold, in bytes. */
@@ -746,25 +753,8 @@ export function createDigestLog({
     chains.delete(name);
   };
 
-  /** All held forgotten: a process that no longer leads, which reads the store again whole when it does. */
-  const forget = (): void => {
-    chains.clear();
-    heads.clear();
-    accepted.clear();
-    heldBytes = 0;
-    namesRead.clear();
-    deltasFrom = undefined;
-    lastSnapshotAt = undefined;
-    changedSinceSnapshot = false;
-    if (store !== undefined) state = 'unread';
-  };
-
-  /** Whether this process may say anything: it leads, or nothing says otherwise. Forgets all held when it doesn't. */
-  const speaks = (): boolean => {
-    if (leading === undefined || leading()) return true;
-    if (chains.size > 0 || state === 'read') forget();
-    return false;
-  };
+  /** Whether this process may write: it leads, or nothing says otherwise. Never forgets anything (TR-1 A). */
+  const writing = (): boolean => writes === undefined || writes();
 
   /** The chain held, set aside whole where it was rebased after its oldest fact. */
   const chainOf = (name: string): ChainState | undefined => {
@@ -1154,8 +1144,9 @@ export function createDigestLog({
     }
   };
 
+  // Read whether or not this process leads: a copy following reads what the leader writes, as a web copy does (TR-1 A).
   const readOnce = async (): Promise<void> => {
-    if (store === undefined || !speaks()) return;
+    if (store === undefined) return;
     try {
       if (state === 'read') {
         await readDeltas(store, deltasFrom === undefined ? undefined : deltasFrom - LAG_MS);
@@ -1243,7 +1234,8 @@ export function createDigestLog({
   }
 
   const flushOnce = async (): Promise<void> => {
-    if (store === undefined) return;
+    // Only the leader writes; what moved waits, kept, until this process leads again (TR-1 A).
+    if (store === undefined || !writing()) return;
     const at = now().getTime();
     if ((pending.size > 0 || pendingStretches.size > 0) && !(await deltaWritten(store, at))) return;
     // A snapshot only after a whole read: one made from less would stand for the whole at the next start.
@@ -1364,7 +1356,7 @@ export function createDigestLog({
    * log knows, which may have found the chain as it was. Past what they may take, the one raised longest ago goes.
    */
   const raiseHead = (name: string, chain: Chain, { seq, hash }: HeadSeen, asked: number): void => {
-    if (seq < 1n || !speaks()) return;
+    if (seq < 1n) return;
     const held = headOf(name, chain);
     if ((held !== undefined && held.seq >= seq) || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
     if (held === undefined) heldBytes += HEAD_BYTES;
@@ -1416,8 +1408,7 @@ export function createDigestLog({
 
   /** The chain taken as it stands at `to` over the head seen `over` (AT13h): only while that is still the head seen. */
   const acceptAt = (name: string, chain: Chain, over: HeadSeen | undefined, to: HeadSeen, asked: number): void => {
-    if (over === undefined || to.seq < 1n || !speaks() || anchors?.rebasedAfter(chain, new Date(asked)) === true)
-      return;
+    if (over === undefined || to.seq < 1n || anchors?.rebasedAfter(chain, new Date(asked)) === true) return;
     const seen = seenOf(name, chain);
     if (seen === undefined || !sameHead(seen, over)) return;
     if (!accepted.has(name)) heldBytes += HEAD_BYTES;
@@ -1431,7 +1422,7 @@ export function createDigestLog({
 
   return Object.freeze({
     heads(chain: Chain): HeadWatch | undefined {
-      if (!speaks() || anchors?.holds(chain) === false) return undefined;
+      if (anchors?.holds(chain) === false) return undefined;
       const name = chainName(chain);
       const asked = now().getTime();
       const seen = seenOf(name, chain);
@@ -1457,7 +1448,7 @@ export function createDigestLog({
       });
     },
     latest(chain: Chain, type: string, id: string): bigint | undefined {
-      if (!speaks() || anchors?.holds(chain) === false) return undefined;
+      if (anchors?.holds(chain) === false) return undefined;
       const held = chainOf(chainName(chain));
       if (held === undefined) return undefined;
       const [high, low] = fingerprintOf(subjectKey(type, id));
@@ -1469,7 +1460,7 @@ export function createDigestLog({
       return place === 0 ? undefined : BigInt(place);
     },
     covers(chain: Chain, seq: bigint): boolean {
-      if (!speaks() || state !== 'read' || anchors?.holds(chain) === false) return false;
+      if (state !== 'read' || anchors?.holds(chain) === false) return false;
       if (seq === 0n) return true;
       const name = chainName(chain);
       const held = chainOf(name);
@@ -1480,11 +1471,10 @@ export function createDigestLog({
       return held.covered !== undefined && held.covered.seq >= seq;
     },
     coverage(chain: Chain): CheckedPoint | undefined {
-      if (!speaks()) return undefined;
       return chainOf(chainName(chain))?.covered;
     },
     owed(chain: Chain, seq: bigint): boolean {
-      if (!speaks() || state !== 'read' || seq === 0n) return false;
+      if (state !== 'read' || seq === 0n) return false;
       const name = chainName(chain);
       const held = chainOf(name);
       if (held === undefined) return true;
@@ -1492,7 +1482,8 @@ export function createDigestLog({
       return held.gaveWay !== 2 && (held.covered === undefined || held.covered.seq < seq);
     },
     record(chain: Chain, seen: SignedSeen, began: Date, stretch?: Stretch): void {
-      if (!speaks()) return;
+      // A walk recorded only by the leader, whose walks alone are written (TR-1 A).
+      if (!writing()) return;
       const name = chainName(chain);
       const at = began.getTime();
       // Dated before the chain's newest rebase: it read the chain as it was, which nothing goes on from.

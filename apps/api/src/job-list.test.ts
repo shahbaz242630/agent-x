@@ -55,6 +55,7 @@ const leadership: Leadership = {
   start: () => Promise.resolve(),
   leading: () => true,
   onlyWhileLeading: (work) => work,
+  onlyWhileNotLeading: (work) => work,
   stop: () => Promise.resolve(),
 };
 
