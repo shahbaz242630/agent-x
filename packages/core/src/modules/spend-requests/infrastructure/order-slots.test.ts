@@ -149,7 +149,7 @@ describe("a payment's failure letting go of its slots", () => {
     const { states, mismatch } = statesWatching();
     await expect(
       heldSlotsLetGo(null as never, states, ORG, undefined, {
-        at: new Date(),
+        at: new Date('2026-10-08T08:00:00Z'),
         change: { actor: { type: 'system', id: 'api' }, action: 'order_slot.released', details: {} },
       }),
     ).resolves.toBeUndefined();
