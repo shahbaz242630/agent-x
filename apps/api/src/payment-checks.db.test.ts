@@ -39,6 +39,7 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { asARun } from './background.ts';
+import type { Gate } from './fair-lanes.ts';
 import { createHandoff, HEARTBEAT_STALE_MS, handoffDatabaseGate, UNKNOWN_AFTER_MS } from './handoff.ts';
 import { createRailHealth, type RailHealth } from './rail-health.ts';
 import { ALLOWED, handoffWorld, type HandoffWorldTables, HOLDS_AFTER, SMALL } from './handoff-world.helper.test.ts';
@@ -1035,6 +1036,54 @@ describe('failures logged, the run going on', () => {
 
     expect(lines('payment_check.list_failed')).toEqual([expect.objectContaining({ orgId: 'not-a-uuid' })]);
     expect(await transactionOf(w, request.id)).toMatchObject({ status: 'SUCCEEDED' });
+  });
+
+  it('SEC-TEN-09 refuses a payment its page names under the wrong organisation: never moved, said; it settles under its own', async () => {
+    const first = await ready();
+    const second = await ready();
+    const theirs = await ask(second.acting, second.w, { amount: ALLOWED() });
+    await handoffOf(second.w).run();
+    clock.advanceBy(2 * STEP);
+    const inner = handoffDatabaseGate(6);
+    // The second organisation's page as its own read gives it (kept, and nothing checked), then given as the first's.
+    let page: unknown[] | undefined;
+    const gate: Gate = {
+      run: async <T>(key: string, work: () => Promise<T>, ahead?: boolean): Promise<T> => {
+        const done = await inner.run(key, work, ahead);
+        if (!Array.isArray(done)) return done;
+        if (key === second.w.org) {
+          if (done.length > 0) page ??= done;
+          return [] as T;
+        }
+        return (page ?? done) as T;
+      },
+    };
+    const misnamed = (list: string) =>
+      createPaymentChecks({
+        list: () => Promise.resolve([list]),
+        database: app,
+        outbox: createOutbox({ ids, clock, keys }),
+        rail: second.w.rail,
+        keys,
+        ids,
+        clock,
+        logger: testLogger(capture),
+        health: createRailHealth({ clock, logger: testLogger(capture) }),
+        databaseGate: gate,
+      });
+
+    await misnamed(second.w.org).run();
+    expect(page).toHaveLength(1);
+    await misnamed(first.w.org).run();
+
+    const { id } = await transactionOf(second.w, theirs.id);
+    expect(await transactionOf(second.w, theirs.id)).toMatchObject({ status: 'PROCESSING' });
+    expect(await holdingsOf(second.w, theirs.id)).toEqual(HOLDS_AFTER.PROCESSING);
+    expect(lines('payment_check.failed')).toEqual([expect.objectContaining({ orgId: first.w.org, transactionId: id })]);
+
+    // The positive control: under its own organisation the bank's word settles it.
+    await checksOf(second.w).run();
+    expect(await transactionOf(second.w, theirs.id)).toMatchObject({ status: 'SUCCEEDED' });
   });
 });
 

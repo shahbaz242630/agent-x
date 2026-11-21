@@ -194,7 +194,7 @@ beforeEach(() => {
   });
 });
 
-describe("an agent's month total, signed (GM-1a)", () => {
+describe("an agent's month total, signed (GM-1a, SEC-LIM-02)", () => {
   it("is made by the month's first decision and added to by each one holding capacity, each sealed", async () => {
     const { w, acting, max } = await ready();
     expect(await heldIn(w)).toBe('none');
